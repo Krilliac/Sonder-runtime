@@ -282,6 +282,19 @@ class RestrictedRun:
         """
         return self.current_tools(policy) == self.tools
 
+    def current_secret_globs(self) -> tuple[str, ...] | None:
+        """The globs captured at admission plus every glob the files hold now; None when they cannot be read.
+
+        Read again at every dispatch and every observation filter, so a glob
+        the operator adds mid-turn applies at once; one removed mid-turn keeps
+        applying until the turn ends.
+        """
+        try:
+            current = tuple(_grants.grant_set(_mtp.load()).secret_globs)
+        except Exception:  # noqa: BLE001 - unreadable globs: the caller refuses or withholds
+            return None
+        return tuple(dict.fromkeys(self.secret_globs + current))
+
     def allowlist(self, requested: Any) -> frozenset[str]:
         """The caller's allowlist (when it gave one) narrowed to the granted tools."""
         if requested is None:
@@ -350,8 +363,16 @@ class RestrictedRun:
                 values.append((key, value.strip()))
         return iter(values)
 
-    def path_refusal(self, tool_name: str, scoped_args: Mapping[str, Any]) -> str:
-        """A refusal when a path argument leaves the project or names a secret, else ``""``."""
+    def path_refusal(
+        self, tool_name: str, scoped_args: Mapping[str, Any], globs: tuple[str, ...] | None = None,
+    ) -> str:
+        """A refusal when a path argument leaves the project or names a secret, else ``""``.
+
+        ``globs`` defaults to :meth:`current_secret_globs`.
+        """
+        globs = self.current_secret_globs() if globs is None else globs
+        if globs is None:
+            return _refusal("tool '%s': the restricted secret path globs could not be read." % tool_name)
         if not self.project_root:
             return _refusal("restricted model '%s' has no bound project root." % self.model)
         values = self._path_values(scoped_args)
@@ -364,7 +385,7 @@ class RestrictedRun:
                     "tool '%s': %s %r is outside the project root of restricted model '%s'."
                     % (tool_name, key, value, self.model)
                 )
-            matched = _rules.secret_glob_match(relative, self.secret_globs)
+            matched = _rules.secret_glob_match(relative, globs)
             if matched:
                 return _refusal(
                     "tool '%s': %s %r matches the restricted secret path glob %r; restricted model "
@@ -380,7 +401,8 @@ class RestrictedRun:
 
         A tool is dispatched only while the files still grant it
         (:meth:`current_tools`, decided again at every dispatch), so revoking
-        it mid-turn refuses its next call.  ``scope_args`` is the host's own project scoping
+        it mid-turn refuses its next call; the secret globs are read again at
+        every dispatch too (:meth:`current_secret_globs`).  ``scope_args`` is the host's own project scoping
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
@@ -401,15 +423,18 @@ class RestrictedRun:
                     return _refusal(
                         "tool '%s': restricted model '%s' may not set %s." % (tool_name, self.model, key)
                     )
+            globs = self.current_secret_globs()
+            if globs is None:
+                return _refusal("tool '%s': the restricted secret path globs could not be read." % tool_name)
             pattern = args.get("glob")
             if isinstance(pattern, str) and pattern.strip():
-                matched = _rules.secret_glob_match(pattern.strip(), self.secret_globs)
+                matched = _rules.secret_glob_match(pattern.strip(), globs)
                 if matched:
                     return _refusal(
                         "tool '%s': glob %r selects files matching the restricted secret path glob %r."
                         % (tool_name, pattern, matched)
                     )
-            refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root))
+            refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root), globs)
             if refused:
                 return refused
             return str(inner(tool_name, args) or "") if inner is not None else ""
@@ -418,7 +443,7 @@ class RestrictedRun:
 
     # -- observation filter -------------------------------------------------
 
-    def _secret_or_outside(self, base: str, path_text: str) -> bool:
+    def _secret_or_outside(self, base: str, path_text: str, globs: tuple[str, ...]) -> bool:
         """Whether a result row's path is outside the project or names a secret.
 
         Both the spelled path and its ``realpath`` are checked: a junction or
@@ -436,11 +461,11 @@ class RestrictedRun:
                 return True
             if relative == ".." or relative.startswith("../"):
                 return True
-            if _rules.secret_glob_match(relative, self.secret_globs):
+            if _rules.secret_glob_match(relative, globs):
                 return True
         return False
 
-    def _row_names_secret(self, base: str, rest: str) -> bool:
+    def _row_names_secret(self, base: str, rest: str, globs: tuple[str, ...]) -> bool:
         """Whether a ``path:line:col`` result row names a secret path (or does not parse).
 
         Every prefix followed by ``:<line>:<col>`` is a candidate path, so a
@@ -449,7 +474,7 @@ class RestrictedRun:
         candidates = [rest[:found.start()] for found in _ROW.finditer(rest) if found.start() > 0]
         if not candidates:
             return True
-        return any(self._secret_or_outside(base, candidate) for candidate in candidates)
+        return any(self._secret_or_outside(base, candidate, globs) for candidate in candidates)
 
     def observation_filter(self, tool_name: str, scoped_args: Mapping[str, Any]) -> Callable[[Any], Any]:
         """The dispatcher applies this before anything (the activity record included) sees the result.
@@ -466,7 +491,7 @@ class RestrictedRun:
 
         return apply
 
-    def _tree_entry_withheld(self, base: str, line: str) -> bool:
+    def _tree_entry_withheld(self, base: str, line: str, globs: tuple[str, ...]) -> bool:
         """Whether a ``directory_tree`` line is withheld: it does not parse, or it or a parent names a secret."""
         entry = _TREE_ENTRY.match(line)
         if entry is None:
@@ -483,10 +508,10 @@ class RestrictedRun:
         # The entry itself and every directory above it: nothing is listed
         # from inside a directory that matches a glob.
         return any(
-            self._secret_or_outside(base, os.path.join(*parts[:end])) for end in range(1, len(parts) + 1)
+            self._secret_or_outside(base, os.path.join(*parts[:end]), globs) for end in range(1, len(parts) + 1)
         )
 
-    def _filter_tree(self, scoped_args: Mapping[str, Any], text: str) -> str:
+    def _filter_tree(self, scoped_args: Mapping[str, Any], text: str, globs: tuple[str, ...]) -> str:
         raw = (scoped_args.get("path") or scoped_args.get("root")) if isinstance(scoped_args, Mapping) else ""
         if not self.project_root:
             return _refusal("tool '%s': the tree root is unknown, so its result is withheld." % _TREE_TOOL)
@@ -495,7 +520,7 @@ class RestrictedRun:
         kept = lines[:1] if lines and lines[0].startswith("directory tree: ") else []
         withheld = 0
         for line in lines[len(kept):]:
-            if _TREE_TRUNCATED.match(line) or not self._tree_entry_withheld(base, line):
+            if _TREE_TRUNCATED.match(line) or not self._tree_entry_withheld(base, line, globs):
                 kept.append(line)
             else:
                 withheld += 1
@@ -506,14 +531,24 @@ class RestrictedRun:
         return "\n".join(kept)
 
     def filter_observation(self, tool_name: str, scoped_args: Mapping[str, Any], observation: Any) -> Any:
-        """Withhold content-search lines and tree entries that name a secret path (or do not parse)."""
+        """Withhold content-search lines and tree entries that name a secret path (or do not parse).
+
+        The globs are read again now (:meth:`current_secret_globs`); when they
+        cannot be read the whole result is withheld.
+        """
         if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)
         if text.lstrip().startswith("ERROR"):
             return observation
+        globs = self.current_secret_globs()
+        if globs is None:
+            return _refusal(
+                "tool '%s': the restricted secret path globs could not be read, so its result is withheld."
+                % tool_name
+            )
         if tool_name == _TREE_TOOL:
-            return self._filter_tree(scoped_args, text)
+            return self._filter_tree(scoped_args, text, globs)
         key = "root" if tool_name == "text_search" else "path"
         base = str(scoped_args.get(key) or self.project_root) if isinstance(scoped_args, Mapping) else ""
         if not base:
@@ -550,9 +585,9 @@ class RestrictedRun:
             rest = line[2:]
             if section == "errors":
                 path_text, separator, _detail = rest.partition(": ")
-                secret = not separator or self._secret_or_outside(base, path_text)
+                secret = not separator or self._secret_or_outside(base, path_text, globs)
             else:
-                secret = self._row_names_secret(base, rest)
+                secret = self._row_names_secret(base, rest, globs)
             if secret:
                 withheld += 1
                 continue

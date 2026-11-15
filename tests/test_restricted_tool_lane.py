@@ -632,6 +632,45 @@ def test_a_tool_granted_later_does_not_join_a_running_turn(catalog, overlay, pro
     assert check("file_read_range", {"path": "src/app.py"}) == ""
 
 
+def test_a_secret_glob_added_mid_turn_applies_at_the_next_dispatch_and_filter(catalog, overlay, project):
+    overlay()
+    (project / "vault.kdbx").write_text("needle TOPSECRET\n", encoding="utf-8")
+    run = _run()
+    run.project_root = str(project)
+    check = run.tool_policy(None, lambda tool_name, args, root: args)
+    tree = "\n".join(["directory tree: %s" % project, "  [D] src", "  [F] vault.kdbx (17 bytes)"])
+    search = "\n".join([
+        "matches for 'needle':",
+        "  vault.kdbx:1:1: needle TOPSECRET",
+        "  src/app.py:1:5: def needle():",
+    ])
+    assert check("file_read_range", {"path": "vault.kdbx"}) == ""
+    assert "vault.kdbx" in run.filter_observation("directory_tree", {"path": str(project)}, tree)
+    overlay(restricted_secret_path_globs=["*.kdbx"])  # the operator adds a glob mid-turn
+    refused = check("file_read_range", {"path": "vault.kdbx"})
+    assert "HOST POLICY" in refused and "*.kdbx" in refused, refused
+    assert "HOST POLICY" in check("text_search", {"query": "needle", "glob": "*.kdbx"})
+    filtered_tree = run.filter_observation("directory_tree", {"path": str(project)}, tree)
+    assert "vault.kdbx" not in filtered_tree and "  [D] src" in filtered_tree.split("\n"), filtered_tree
+    filtered = run.filter_observation("text_search", {"root": str(project)}, search)
+    assert "TOPSECRET" not in filtered and "  src/app.py:1:5: def needle():" in filtered.split("\n"), filtered
+    # Control: an ordinary file is still read, and the glob captured at admission still applies.
+    assert check("file_read_range", {"path": "src/app.py"}) == ""
+    assert "HOST POLICY" in check("file_read_range", {"path": ".env"})
+
+
+def test_the_filter_withholds_everything_when_the_current_globs_cannot_be_read(catalog, overlay, project, monkeypatch):
+    overlay()
+    run = _run()
+    run.project_root = str(project)
+    search = "\n".join(["matches for 'needle':", "  src/app.py:1:5: def needle():"])
+    assert "app.py" in run.filter_observation("text_search", {"root": str(project)}, search)
+    monkeypatch.setattr(lane._grants, "grant_set", lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")))
+    assert "app.py" not in run.observation_filter("text_search", {"root": str(project)})(search)
+    check = run.tool_policy(None, lambda tool_name, args, root: args)
+    assert "HOST POLICY" in check("file_read_range", {"path": "src/app.py"})
+
+
 def test_the_permit_needs_the_runs_lane_in_the_grant(catalog, overlay):
     overlay(lanes=["agent"])
     with pytest.raises(server.ModelCallError):

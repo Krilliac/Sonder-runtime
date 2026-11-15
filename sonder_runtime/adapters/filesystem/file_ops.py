@@ -26,6 +26,7 @@ from bisect import bisect_left
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
+import sonder_runtime.adapters.filesystem.operator_only_paths as _operator_only
 import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
@@ -546,7 +547,34 @@ def _git_metadata_component(path: Path) -> str:
     return ""
 
 
+def _policy_file_refusal(path: Path, *, holding: bool) -> PermissionError | None:
+    """The refusal for changing a model tool policy file (``operator_only_paths``), or None.
+
+    Given before any developer token is honoured.  ``holding`` also refuses a
+    directory that holds one (a recursive delete).  A spelling with no
+    ordinary form cannot be compared, so it is refused.
+    """
+    try:
+        spelled = _protection_spelling(path)
+        files = _operator_only.locate(RUNTIME_PACKAGE_DATA_DIR, _resolve_best_effort)
+        blocked = _operator_only.is_policy_file(spelled, files) or (
+            holding and _operator_only.holds_policy_file(spelled, files)
+        )
+    except (OSError, ValueError):
+        blocked = True
+    if not blocked:
+        return None
+    return PermissionError(
+        "refusing to mutate protected Sonder control-plane path %s: the model tool policy "
+        "files change only from the attended operator console, with or without a developer token"
+        % path
+    )
+
+
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
+    refusal = _policy_file_refusal(path, holding=False)
+    if refusal is not None:
+        raise refusal
     if developer_authorized:
         return
     if _git_metadata_component(path) or _git_metadata_component(_resolve_best_effort(path)):
@@ -862,6 +890,9 @@ def _require_safe_recursive_delete(
     bypass: bool,
     developer_authorized: bool,
 ) -> None:
+    refusal = _policy_file_refusal(resolved, holding=True)
+    if refusal is not None:
+        raise refusal
     if developer_authorized:
         return
     _require_no_reparse_components(requested)

@@ -21,6 +21,7 @@ import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import git_program_guard
+from sonder_runtime.adapters import protected_write_scope
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -341,17 +342,46 @@ def _protected_change_refusal(operation, root, targets, *, timeout, live_only=Tr
     file tools' guard to each path (in the live runtime checkout only, unless
     ``live_only`` is False).
     """
+    run, top, refused = _change_check_runner(operation, root, timeout=timeout, live_only=live_only)
+    if run is None:
+        return refused
+    reason = git_change_targets.refusal(operation, root, run, targets, top=top)
+    return {"ok": False, "error": reason} if reason else None
+
+
+def _change_check_runner(operation, root, *, timeout, live_only):
+    """``(run, top, refused)`` for the protected-path checks.
+
+    ``run`` is None when no check applies (``live_only`` outside the live
+    runtime checkout; ``refused`` is then None too) or when the hardened
+    runner cannot be built (``refused`` is the refusal).
+    """
     timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
     # ``rev-parse --show-toplevel`` runs no hook or driver, so it needs no overrides.
     top = git_change_targets.toplevel(_git_change_runner(root, timeout=timeout, hardened=False))
     if live_only and not git_change_targets.is_live_checkout(top):
-        return None
+        return None, top, None
     try:
-        run = _git_change_runner(root, timeout=timeout, hardened=live_only)
+        return _git_change_runner(root, timeout=timeout, hardened=live_only), top, None
     except ValueError as exc:
-        return {"ok": False, "error": "refusing %s: %s" % (operation, exc)}
-    reason = git_change_targets.refusal(operation, root, run, targets, top=top)
-    return {"ok": False, "error": reason} if reason else None
+        return None, top, {"ok": False, "error": "refusing %s: %s" % (operation, exc)}
+
+
+def _planned_git_arguments(operation, root, plan, *, timeout):
+    """``(refused, arguments)`` for ``git_checkout`` and ``git_branch`` with a base.
+
+    In the live runtime checkout ``arguments`` are the plan's
+    (``git_change_targets.checkout_plan`` / ``branch_plan``): the exact
+    command whose writes were checked, run instead of the caller's spelling.
+    Elsewhere both are None and the caller runs its own command.
+    """
+    run, top, refused = _change_check_runner(operation, root, timeout=timeout, live_only=True)
+    if run is None:
+        return refused, None
+    reason, made = git_change_targets.planned(operation, root, run, plan, top=top)
+    if reason:
+        return {"ok": False, "error": reason}, None
+    return None, list(made.arguments)
 
 
 def _run_git(root, args, *, timeout=10):
@@ -651,6 +681,9 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
     if not info:
         return {"ok": False, "error": "unknown linter: %s" % tool, "tool": tool}
     if fix and info.get("fix"):
+        refused = protected_write_scope.scope_refusal("lint_run fix", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "fix"}
         cmd = list(info["fix"])
     else:
         cmd = list(info["check"])
@@ -676,6 +709,10 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
     cmd_template = _FORMATTERS.get(tool)
     if not cmd_template:
         return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
+    if not check_only:
+        refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
     cmd = list(cmd_template)
     if check_only:
         if tool in ("ruff", "black"):
@@ -918,12 +955,12 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_root
     if checkout:
         cmd = ["checkout", "-b", name]
         if base:
-            refused = _protected_change_refusal(
-                "git_branch", root, lambda run: git_change_targets.checkout_targets(run, base), timeout=timeout,
+            refused, planned = _planned_git_arguments(
+                "git_branch", root, lambda run: git_change_targets.branch_plan(run, name, base), timeout=timeout,
             )
             if refused:
                 return refused
-            cmd.append(base)
+            cmd = planned or cmd + [base]
     else:
         cmd = ["branch", name]
         if base:
@@ -936,12 +973,12 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
-    refused = _protected_change_refusal(
-        "git_checkout", root, lambda run: git_change_targets.checkout_targets(run, ref), timeout=timeout,
+    refused, planned = _planned_git_arguments(
+        "git_checkout", root, lambda run: git_change_targets.checkout_plan(run, ref), timeout=timeout,
     )
     if refused:
         return refused
-    return _run_git(root, ["checkout", ref], timeout=timeout)
+    return _run_git(root, planned or ["checkout", ref], timeout=timeout)
 
 
 @_guarded_git_mutation("git_stash")
@@ -1169,6 +1206,10 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
         staged.append((path, content, new_content))
 
     if not dry_run and staged:
+        refused = protected_write_scope.files_refusal("rename_symbol", root, [path for path, _old, _new in staged])
+        if refused:
+            return {"ok": False, "error": refused, "dry_run": dry_run, "old_name": old_name,
+                    "new_name": new_name, "files_changed": 0}
         try:
             _apply_staged_rewrites(staged)
         except OSError as exc:

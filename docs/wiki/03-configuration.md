@@ -480,23 +480,50 @@ The model lists live in two JSON files, not in Python:
   profile that matches no model, an unknown key, a duplicate `id`, a bad name
   or glob or a file over 1 MiB makes the overlay invalid.
 
-Protected from the file tools. Both files are control-plane state for every
-tool that changes files, from an agent turn or MCP, without a developer token:
-`file_write`, `file_edit`, `file_copy`/`file_move`, `file_delete`, batch writes
-and the patch tools refuse them (the overlay with its `.lock` and `.tmp-`
-siblings, and the whole package data directory holding the shipped file);
-`fetch_artifact` refuses a destination, staging file or provenance sidecar
-there; `apply_patch` lists every path a patch would write (`git apply
---numstat`, both names of a rename) and refuses the patch when any is
-protected; and in the live runtime checkout (a repository holding the
-workspace root, the package data directory, the overlay or the Sonder home)
-`git_checkout`, `git_branch` with a base, `git_stash` push/pop, `git_merge` and
-`git_cherry_pick` refuse when the paths they would change include a protected
-one (a list git cannot produce refuses too). Other names for the same file
-count: a Windows `\\?\` spelling is compared in its ordinary form (a namespace
-with no ordinary form, such as `\\.\` or `GLOBALROOT`, counts as protected), a
-UNC spelling of a local folder and a hard link are compared by file identity,
-and no file tool writes in place to a file that has more than one hard link.
+Protected from the file tools. Both files are control-plane state, and these
+tools refuse to change them (the overlay with its `.lock` and `.tmp-`
+siblings; the shipped file and, without a developer token, the whole package
+data directory holding it):
+
+- `file_write`, `file_edit`, `file_copy`/`file_move`, `file_delete`, batch
+  writes and the patch tools, from an agent turn or MCP. A developer token
+  does not open the two policy files (or a recursive delete of a folder that
+  holds one): only the attended `/runtime tools` editor writes the overlay,
+  and nothing at run time writes the shipped file. The token still opens the
+  rest of the package data directory and the other control-plane state.
+- `fetch_artifact`: a destination, staging file or provenance sidecar there.
+- `apply_patch`: it lists every path a patch would write (`git apply
+  --numstat`, both names of a rename) and refuses the patch when any is
+  protected.
+- `rename_symbol`: every file it would rewrite gets the file tools' check, and
+  one protected file refuses the whole rename (the preview still runs).
+- `format_code` and `lint_run` with `fix`: the formatter is not run when its
+  path (or the root) is or holds a protected place (the workspace root, the
+  package data directory, Sonder's own code directories, the overlay, the
+  Sonder home's control files) or lies inside one, or when a symlink or
+  junction under it leads to one. A check-only run is unchanged.
+- In the live runtime checkout (a repository holding the workspace root, the
+  package data directory, the overlay or the Sonder home): `git_checkout`,
+  `git_branch` with a base, `git_stash` push/pop, `git_merge` and
+  `git_cherry_pick` refuse when the paths they would change include a
+  protected one (a list git cannot produce refuses too). There `git_checkout`
+  and `git_branch` resolve the ref once and run exactly what was checked: a
+  local branch is switched to, any other commit (a tag, a SHA, `:/<message>`,
+  a remote-tracking ref) is checked out detached at its id, and anything else
+  is a pathspec that must match a tracked path. git's guesses are off, so a
+  name that exists only as `<remote>/<name>` does not create a branch and
+  `A...B` is not read as a merge base.
+
+Other names for the same file count: a Windows `\\?\` spelling is compared in
+its ordinary form (a namespace with no ordinary form, such as `\\.\` or
+`GLOBALROOT`, counts as protected), a UNC spelling of a local folder and a hard
+link are compared by file identity, and no file tool writes in place to a file
+that has more than one hard link without a developer token.
+
+Not covered: the tools that run programs (`build_run`, `test_run`,
+`dependency_add`/`remove`/`update`, `build_clean`, `run_code` and the rest)
+can change any file their program writes; they are execution-risk tools
+(`permission_modes.risk_of`), gated as such, not by these path checks.
 
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
@@ -557,7 +584,10 @@ counted. Tree walks never follow a symlink, junction or other reparse point.
 The grant is decided again during the turn: at every model call the files must
 still grant every tool the turn was opened with (revoking any one stops the
 next call), and at every dispatch the tool must still be granted. A tool
-granted after the turn opened does not join it.
+granted after the turn opened does not join it. The secret globs are read
+again at every dispatch and every result filter, so a glob added mid-turn
+applies to the next call (one removed mid-turn applies until the turn ends);
+globs that cannot be read refuse the call and withhold the result.
 
 At the console:
 

@@ -553,4 +553,3 @@ def describe(config: ModelToolConfig | None = None) -> list[str]:
     lines.append("model tool policy (overlay): %s %s" % (config.overlay_path or "(unknown)", overlay_state))
     lines.extend("  ERROR: %s" % error for error in config.errors)
     return lines
-

@@ -347,6 +347,214 @@ def test_git_stash_of_ordinary_changes_still_works(checkout):
     assert (checkout.repo / "hello.txt").read_text(encoding="utf-8") == "edited\n"
 
 
+def _head(files):
+    branch = _git(files.repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    return branch, _git(files.repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _history_with_an_old_floor(files):
+    """master: a commit that dropped the floor (branch ``side`` stays there), then one that restored it."""
+    repo = files.repo
+    good = files.shipped.read_bytes()
+    files.shipped.write_text('{"version": 1, "model_profiles": []}\n', encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "drop the floor")
+    _git(repo, "branch", "side")
+    files.shipped.write_bytes(good)
+    _git(repo, "commit", "-q", "-am", "restore the floor")
+    (repo / "hello.txt").write_text("plain\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "plain edit")
+
+
+@pytest.mark.parametrize("spelling", [":/drop the floor", "master...side"])
+def test_git_checkout_resolves_a_ref_exactly_as_it_runs_it(checkout, spelling):
+    """A commit named by message or as a merge base is checked like any other commit."""
+    _history_with_an_old_floor(checkout)
+    before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
+    head = _head(checkout)
+    _refused(harness_tools.git_checkout(str(checkout.repo), spelling))
+    _unchanged(checkout, before)
+    assert _head(checkout) == head
+    _refused(harness_tools.git_branch(str(checkout.repo), "mine", base=spelling))
+    _unchanged(checkout, before)
+    assert _head(checkout) == head
+    assert _git(checkout.repo, "show-ref", "--verify", "--quiet", "refs/heads/mine", check=False).returncode != 0
+    # Control: a commit named by message that changes only an ordinary file is checked out.
+    result = harness_tools.git_checkout(str(checkout.repo), ":/restore the floor")
+    assert result["ok"] is True, result
+    assert (checkout.repo / "hello.txt").read_text(encoding="utf-8") == "hello\n"
+    _unchanged(checkout, before)
+
+
+def test_git_checkout_never_guesses_a_branch_from_a_remote_tracking_ref(checkout):
+    """``git checkout evil`` with only ``origin/evil`` would create ``evil`` there (checkout.guess)."""
+    repo = checkout.repo
+    sha = _evil_branch(checkout)
+    plain = _plain_branch(checkout)
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "update-ref", "refs/remotes/origin/evil", sha)
+    _git(repo, "update-ref", "refs/remotes/origin/plain-remote", plain)
+    _git(repo, "branch", "-D", "evil")
+    before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
+    _refused(harness_tools.git_checkout(str(repo), "evil"))
+    _unchanged(checkout, before)
+    assert _head(checkout)[0] == "master"
+    assert _git(repo, "show-ref", "--verify", "--quiet", "refs/heads/evil", check=False).returncode != 0
+    _refused(harness_tools.git_branch(str(repo), "mine", base="origin/evil"))
+    _unchanged(checkout, before)
+    # Control: a branch from a remote-tracking ref that changes only an ordinary file works.
+    result = harness_tools.git_branch(str(repo), "mine2", base="origin/plain-remote")
+    assert result["ok"] is True, result
+    assert _head(checkout) == ("mine2", plain)
+    _unchanged(checkout, before)
+
+
+def test_git_checkout_of_a_local_branch_still_switches_to_it(checkout):
+    plain = _plain_branch(checkout)
+    result = harness_tools.git_checkout(str(checkout.repo), "plain")
+    assert result["ok"] is True, result
+    assert _head(checkout) == ("plain", plain)
+
+
+@pytest.mark.parametrize("which", ["shipped", "overlay"])
+def test_rename_symbol_cannot_change_a_policy_file(checkout, which):
+    target = _targets(checkout)[which]
+    target.write_text(json.dumps({"version": 1, "model_profiles": [
+        {"id": "operator-deny", "match": {"names": ["helper-model"], "prefixes": ["astra-cyber-"]},
+         "tools": [], "lanes": []},
+    ]}) + "\n", encoding="utf-8")
+    (checkout.project / "mod.py").write_text("astra = 1\nhelper = 2\n", encoding="utf-8")
+    before = target.read_bytes()
+    glob = target.relative_to(checkout.repo).parent.as_posix() + "/*.json"
+    for old in ("astra", "helper"):
+        result = harness_tools.rename_symbol(str(checkout.repo), old, "zzzz", glob=glob, dry_run=False)
+        assert result["ok"] is False and "protected" in result["error"], result
+        assert target.read_bytes() == before
+    # A rename that also reaches an ordinary file is refused as a whole.
+    result = harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob="**/*", dry_run=False)
+    assert result["ok"] is False, result
+    assert (checkout.project / "mod.py").read_text(encoding="utf-8") == "astra = 1\nhelper = 2\n"
+    # The preview still works, and an ordinary rename is applied.
+    assert harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob=glob)["ok"] is True
+    result = harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob="proj/*.py", dry_run=False)
+    assert result["ok"] is True and result["files_changed"] == 1, result
+    assert (checkout.project / "mod.py").read_text(encoding="utf-8") == "zzzz = 1\nhelper = 2\n"
+
+
+@pytest.fixture
+def no_child(monkeypatch):
+    calls = []
+
+    def run(cmd, *, cwd, timeout=None, **kwargs):
+        calls.append((list(cmd), Path(cwd)))
+        return {"ok": True, "returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(harness_tools, "_run", run)
+    return calls
+
+
+@pytest.mark.parametrize("call", [
+    lambda root, path: harness_tools.format_code(root, tool="ruff", path=path),
+    lambda root, path: harness_tools.lint_run(root, tool="ruff", path=path, fix=True),
+], ids=["format_code", "lint_run_fix"])
+def test_formatters_and_lint_fixes_do_not_run_over_a_policy_file(checkout, no_child, call):
+    root = str(checkout.repo)
+    for path in ("pkg/data/model_tool_policy.json", "pkg/data", "pkg", "state", "", "."):
+        result = call(root, path)
+        assert result.get("ok") is False and "protected" in str(result.get("error", "")), (path, result)
+    assert no_child == []
+    # Control: an ordinary project directory inside the checkout is formatted.
+    assert call(root, "proj").get("ok") is True
+    assert len(no_child) == 1
+
+
+def test_a_lint_check_without_fix_still_runs_over_a_policy_file(checkout, no_child):
+    result = harness_tools.lint_run(str(checkout.repo), tool="ruff", path="pkg/data", fix=False)
+    assert result.get("ok") is True and len(no_child) == 1
+
+
+def test_a_formatter_does_not_follow_a_link_into_a_protected_directory(checkout, no_child, tmp_path):
+    outside = tmp_path / "user_project"
+    outside.mkdir()
+    link = outside / "data_link"
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(checkout.data)],
+                           check=True, capture_output=True)
+        else:
+            link.symlink_to(checkout.data, target_is_directory=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("cannot create a directory link here")
+    result = harness_tools.format_code(str(outside), tool="ruff")
+    assert result.get("ok") is False and "protected" in str(result.get("error", "")), result
+    assert no_child == []
+    link.rmdir() if sys.platform == "win32" else link.unlink()
+    assert harness_tools.format_code(str(outside), tool="ruff").get("ok") is True
+
+
+# ---- a developer token does not open the policy files ---------------------------------
+
+def _developer_writes(files, target):
+    """Every general file tool, with a developer token, aimed at ``target``."""
+    scratch = files.project / "forged.json"
+    scratch.write_text(FORGED, encoding="utf-8")
+    return {
+        "write": lambda: file_ops.write_file(str(target), FORGED, mode="overwrite", developer_authorized=True),
+        "append": lambda: file_ops.write_file(str(target), FORGED, mode="append", developer_authorized=True),
+        "edit": lambda: file_ops.edit_file(str(target), '"version"', '"version_x"', developer_authorized=True),
+        "copy_onto": lambda: file_ops.copy_file(str(scratch), str(target), overwrite=True, developer_authorized=True),
+        "move_onto": lambda: file_ops.move_file(str(scratch), str(target), overwrite=True, developer_authorized=True),
+        "move_away": lambda: file_ops.move_file(
+            str(target), str(files.project / "moved.json"), developer_authorized=True,
+        ),
+        "delete": lambda: file_ops.delete_path(
+            str(target), dry_run=False, confirm="DELETE %s" % target.resolve(), developer_authorized=True,
+        ),
+        "delete_folder": lambda: file_ops.delete_path(
+            str(target.parent), recursive=True, dry_run=False,
+            confirm="DELETE %s" % target.parent.resolve(), developer_authorized=True,
+        ),
+    }
+
+
+@pytest.mark.parametrize("which", ["shipped", "overlay", "overlay_lock", "overlay_temp"])
+@pytest.mark.parametrize("operation", [
+    "write", "append", "edit", "copy_onto", "move_onto", "move_away", "delete", "delete_folder",
+])
+def test_a_developer_token_does_not_open_the_policy_files(policy_files, which, operation):
+    targets = dict(_targets(policy_files))
+    targets["overlay_lock"] = policy_files.overlay.with_name(policy_files.overlay.name + ".lock")
+    targets["overlay_temp"] = policy_files.overlay.with_name(policy_files.overlay.name + ".tmp-0123456789abcdef")
+    target = targets[which]
+    if not target.exists():
+        target.write_text('{"version": 1}\n', encoding="utf-8")
+    snapshot = {path: path.read_bytes() for path in target.parent.iterdir() if path.is_file()}
+    with pytest.raises(PermissionError, match=PROTECTED):
+        _developer_writes(policy_files, target)[operation]()
+    assert {path: path.read_bytes() for path in target.parent.iterdir() if path.is_file()} == snapshot
+    assert not (policy_files.project / "moved.json").exists()
+
+
+def test_a_developer_token_does_not_open_a_hard_link_to_a_policy_file(policy_files):
+    link = policy_files.project / "innocent.json"
+    os.link(policy_files.overlay, link)
+    before = policy_files.overlay.read_bytes()
+    with pytest.raises(PermissionError, match=PROTECTED):
+        file_ops.write_file(str(link), FORGED, mode="overwrite", developer_authorized=True)
+    assert policy_files.overlay.read_bytes() == before
+
+
+def test_a_developer_token_still_writes_ordinary_files(policy_files):
+    """Control: the developer token keeps opening every other path, protected code included."""
+    plain = policy_files.overlay.with_name("plain.json")
+    file_ops.write_file(str(plain), "{}\n", developer_authorized=True)
+    assert plain.read_text(encoding="utf-8") == "{}\n"
+    beside = policy_files.data / "other.json"
+    file_ops.write_file(str(beside), "{}\n", developer_authorized=True)
+    assert beside.read_text(encoding="utf-8") == "{}\n"
+    with pytest.raises(PermissionError, match=PROTECTED):
+        file_ops.write_file(str(beside), "[]\n", mode="overwrite")
+
+
 def test_git_tools_outside_the_live_checkout_keep_their_behaviour(tmp_path, monkeypatch):
     """A user's repository holds no control-plane location: its git tools are unchanged."""
     monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))

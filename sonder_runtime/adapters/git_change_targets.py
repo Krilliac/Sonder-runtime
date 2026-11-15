@@ -21,6 +21,11 @@ before the operation runs:
   tools keep their behaviour, so a user's repository whose tracked test
   certificate changes between branches still switches.  In the live checkout
   a list git cannot produce refuses the operation.
+* ``git_checkout`` and ``git_branch`` with a base, in the live checkout, do
+  not run the caller's spelling of the ref: :func:`checkout_plan` and
+  :func:`branch_plan` resolve it once (with nothing appended to the caller's
+  text, and with git's remote-branch guess and ``A...B`` merge-base reading
+  off) and return the exact arguments to run, so what is checked is what runs.
 
 Each path is checked both under the working root and under the repository's
 top level (git resolves patch paths against one or the other depending on
@@ -35,7 +40,9 @@ state and may be called from any thread.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
@@ -44,6 +51,7 @@ from sonder_runtime.platform import paths as runtime_paths
 
 Runner = Callable[[Sequence[str], bytes], tuple[int, bytes]]
 _NAME_ONLY = ("--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv")
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 class TargetsUnknown(Exception):
@@ -129,14 +137,104 @@ def _listed_raw(run: Runner, arguments: Sequence[str], stdin: bytes) -> list[str
     return records
 
 
-def checkout_targets(run: Runner, ref: str) -> list[str]:
-    """What ``git checkout <ref>`` writes: the tree difference for a commit, else the pathspec's index paths."""
-    commit = _revision(run, ref)
-    if commit:
-        return _listed(run, ["diff", *_NAME_ONLY, "HEAD", commit, "--"])
+@dataclass(frozen=True)
+class Plan:
+    """The git arguments an operation will run, and every path that run writes.
+
+    In the live checkout the git tools run :attr:`arguments` instead of the
+    caller's spelling, so git cannot read the ref in a way the check did not.
+    """
+
+    arguments: tuple[str, ...]
+    targets: tuple[str, ...]
+
+
+def _object_id(run: Runner, arguments: Sequence[str]) -> str:
+    """The object id ``arguments`` print, ``""`` when git names none; a git failure is :class:`TargetsUnknown`."""
+    try:
+        code, output = run(list(arguments), b"")
+    except Exception as exc:  # noqa: BLE001 - a resolution that cannot run refuses
+        raise TargetsUnknown("git %s failed (%s)" % (arguments[0], type(exc).__name__)) from exc
+    text = output.decode("ascii", "replace").strip()
+    return text if code == 0 and _OBJECT_ID.fullmatch(text) else ""
+
+
+def _local_branch(run: Runner, name: str) -> str:
+    """The commit of the local branch ``name`` exactly (no other ref kind), or ``""``."""
+    return _object_id(run, ["show-ref", "--verify", "--hash", "--", "refs/heads/" + name])
+
+
+def _remote_branch(run: Runner, name: str) -> str:
+    return _object_id(run, ["show-ref", "--verify", "--hash", "--", "refs/remotes/" + name])
+
+
+def _commit_of(run: Runner, ref: str) -> str:
+    """The commit ``ref`` names, read with nothing appended to it, or ``""``.
+
+    ``rev-parse --verify`` resolves the caller's text alone (``:/<message>``
+    keeps its whole message); only the object id it printed is peeled.  A
+    ref that names a tree or a blob is :class:`TargetsUnknown`.
+    """
+    named = _object_id(run, ["rev-parse", "--verify", "--quiet", "--end-of-options", ref])
+    if not named:
+        return ""
+    commit = _object_id(run, ["rev-parse", "--verify", "--quiet", named + "^{commit}"])
+    if not commit:
+        raise TargetsUnknown("%r names an object that is not a commit" % (ref,))
+    return commit
+
+
+def _tree_change(run: Runner, commit: str) -> tuple[str, ...]:
+    return tuple(_listed(run, ["diff", *_NAME_ONLY, "HEAD", commit, "--"]))
+
+
+def checkout_plan(run: Runner, ref: str) -> Plan:
+    """How ``git_checkout`` runs ``ref`` in the live checkout, and what that writes.
+
+    * a local branch: switch to it (``checkout --no-guess <name> --``);
+    * any other commit (a tag, a SHA, ``:/<message>``, a remote-tracking ref):
+      detach at that commit's id (``checkout --detach <id> --``), which is what
+      ``git checkout`` does for those anyway;
+    * otherwise a pathspec: restore its index paths (``checkout -- <ref>``).
+
+    git's own guesses are off: a name that is only ``<remote>/<name>`` is not
+    turned into a new branch, and ``A...B`` is not read as a merge base.  A
+    pathspec that matches no tracked path is :class:`TargetsUnknown`.
+    """
     if not ref or ref.startswith("-"):
         raise TargetsUnknown("%r is neither a commit nor a path" % (ref,))
-    return _listed(run, ["ls-files", "-z", "--", ref])
+    branch = _local_branch(run, ref)
+    if branch:
+        return Plan(("checkout", "--no-guess", ref, "--"), _tree_change(run, branch))
+    commit = _commit_of(run, ref)
+    if commit:
+        return Plan(("checkout", "--detach", commit, "--"), _tree_change(run, commit))
+    paths = tuple(_listed(run, ["ls-files", "-z", "--", ref]))
+    if not paths:
+        raise TargetsUnknown("%r names no commit and no tracked path" % (ref,))
+    return Plan(("checkout", "--", ref), paths)
+
+
+def branch_plan(run: Runner, name: str, base: str) -> Plan:
+    """How ``git_branch`` creates and checks out ``name`` at ``base`` in the live checkout.
+
+    ``base`` is resolved once (:func:`_commit_of`); the branch starts at that
+    commit's id, or at the full name of the local or remote-tracking branch
+    ``base`` spells when that is the same commit (so upstream tracking is kept).
+    """
+    if not name or name.startswith("-"):
+        raise TargetsUnknown("%r is not a branch name" % (name,))
+    if not base or base.startswith("-"):
+        raise TargetsUnknown("%r does not name a commit" % (base,))
+    commit = _commit_of(run, base)
+    if not commit:
+        raise TargetsUnknown("%r does not name a commit" % (base,))
+    start = commit
+    for prefix, resolve in (("refs/heads/", _local_branch), ("refs/remotes/", _remote_branch)):
+        if resolve(run, base) == commit:
+            start = prefix + base
+            break
+    return Plan(("checkout", "-b", name, start), _tree_change(run, commit))
 
 
 def merge_targets(run: Runner, branch: str) -> list[str]:
@@ -214,10 +312,35 @@ def refusal(
     try:
         paths = targets(run)
     except TargetsUnknown as exc:
-        return (
-            "refusing %s: the paths it would change could not be listed (%s), so it cannot be "
-            "checked against the protected Sonder control-plane paths" % (operation, exc)
-        )
+        return _unlisted(operation, exc)
+    return _blocked(operation, root, top, paths)
+
+
+def planned(
+    operation: str, root: Path, run: Runner, plan: Callable[[Runner], Plan], *, top: Path | None,
+) -> tuple[str, Plan | None]:
+    """``("", plan)`` when the planned run writes no protected path, else ``(why, None)``.
+
+    Like :func:`refusal`, for an operation whose arguments come from its
+    plan (:func:`checkout_plan`, :func:`branch_plan`); the caller runs
+    ``plan.arguments`` and nothing else.
+    """
+    try:
+        made = plan(run)
+    except TargetsUnknown as exc:
+        return _unlisted(operation, exc), None
+    reason = _blocked(operation, root, top, made.targets)
+    return (reason, None) if reason else ("", made)
+
+
+def _unlisted(operation: str, exc: TargetsUnknown) -> str:
+    return (
+        "refusing %s: the paths it would change could not be listed (%s), so it cannot be "
+        "checked against the protected Sonder control-plane paths" % (operation, exc)
+    )
+
+
+def _blocked(operation: str, root: Path, top: Path | None, paths: Iterable[str]) -> str:
     blocked = protected_target(Path(root), top, paths)
     if blocked:
         return (
@@ -228,6 +351,7 @@ def refusal(
 
 
 __all__ = [
-    "Runner", "TargetsUnknown", "checkout_targets", "cherry_pick_targets", "is_live_checkout",
-    "merge_targets", "patch_targets", "protected_target", "refusal", "stash_targets", "toplevel",
+    "Plan", "Runner", "TargetsUnknown", "branch_plan", "checkout_plan", "cherry_pick_targets",
+    "is_live_checkout", "merge_targets", "patch_targets", "planned", "protected_target", "refusal",
+    "stash_targets", "toplevel",
 ]
