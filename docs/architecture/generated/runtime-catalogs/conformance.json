@@ -1773,6 +1773,61 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "category": {
+            "type": "string"
+          },
+          "claim_id": {
+            "type": "string"
+          },
+          "claim_text": {
+            "maxLength": 8192,
+            "type": "string"
+          },
+          "claims_json": {
+            "maxLength": 60000,
+            "type": "string"
+          },
+          "entry_point": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "guard": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "line_end": {
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbols": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "type": "object"
+      },
+      "name": "claim_check",
+      "surfaces": {
+        "cli": "claim_check",
+        "client": "claim_check",
+        "mcp": "claim_check",
+        "openai": "claim_check"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "controller_job_id": {
             "maxLength": 128,
             "minLength": 1,
