@@ -373,6 +373,20 @@ def load_sdk():
         ) from None
 
 
+_SDK_LOGGERS = ("anthropic", "anthropic._base_client", "httpx2")
+
+
+def pin_sdk_logging() -> None:
+    """Hold the SDK's loggers at WARNING whatever ``ANTHROPIC_LOG`` says.
+
+    ``ANTHROPIC_LOG=debug`` makes the SDK log request bodies (prompt text) and
+    add a root stderr handler; the SDK applies it when it is imported.  Pinning
+    the logger levels keeps those records from ever being created.
+    """
+    for name in _SDK_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def sdk_installed() -> bool:
     """Whether the SDK can be found, without importing it."""
     try:
@@ -702,7 +716,9 @@ class AnthropicGateway:
         # Explicit api_key and base_url make the SDK ignore ANTHROPIC_API_KEY,
         # ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL and credential discovery.
         # max_retries=0: the SDK's own retry loop would silently re-send billed work.
-        client = load_sdk().Anthropic(
+        sdk = load_sdk()
+        pin_sdk_logging()
+        client = sdk.Anthropic(
             api_key=key, base_url=settings.base_url, timeout=settings.timeout_seconds,
             max_retries=0,
         )

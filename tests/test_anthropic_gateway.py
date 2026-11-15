@@ -1060,3 +1060,90 @@ def test_a_429_on_key_one_blocks_new_calls_with_a_message_naming_the_slot(ledger
     with pytest.raises(AnthropicRateLimited, match="key slot 1"):
         gateway.generate(_request(), _context())
     assert sdk.keys_used == [KEY_1]
+
+
+# -- stream-path reservation release, SDK logging pin, client verification ----------------------------
+
+
+def _near_cap_gateway(sdk, ledger):
+    # opus 5.5 worst case for max_tokens 1000 is about $0.022, which fills a $0.02 cap
+    # while the reservation is held.
+    return _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+
+
+def _admitted_after(gateway, sdk):
+    before = len(sdk.calls)
+    gateway.generate(_request(options={"num_predict": 1000}), _context())
+    return len(sdk.calls) == before + 1
+
+
+def test_a_completed_stream_releases_its_reservation(ledger):
+    sdk = FakeSdk(lambda k, p: _message(text="hello world"))
+    gateway = _near_cap_gateway(sdk, ledger)
+    list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    assert ledger._inflight == {}
+    assert _admitted_after(gateway, sdk)
+
+
+def test_a_stream_that_fails_midway_releases_its_reservation(ledger):
+    sdk = FakeSdk(lambda k, p: _message(
+        text="hello world", plan={"fail": FakeApiError(500, "stream broke")}))
+    gateway = _near_cap_gateway(sdk, ledger)
+    with pytest.raises(DependencyUnavailable):
+        list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    assert ledger._inflight == {}
+    sdk.behave = lambda k, p: _message()
+    assert _admitted_after(gateway, sdk)
+
+
+def _fake_sdk_module(monkeypatch, **client_attrs):
+    class Anthropic:
+        def __init__(self, **kwargs):
+            self.api_key, self.auth_token = kwargs["api_key"], None
+            self.base_url = kwargs["base_url"] + "/"
+            self._custom_headers = {}
+            self.messages = SimpleNamespace(create=lambda **params: _message())
+            for name, value in client_attrs.items():
+                setattr(self, name, value)
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=Anthropic))
+
+
+def test_a_client_that_carries_an_auth_token_is_refused_before_any_send(ledger, monkeypatch):
+    _fake_sdk_module(monkeypatch, auth_token="token-from-environment")
+    gateway = AnthropicGateway(
+        _settings(), spend_ledger=ledger, request_admission=HostModelRequestAdmission(),
+    )
+    with pytest.raises(DependencyUnavailable, match="did not take the configured endpoint"):
+        gateway.generate(_request(), _context())
+    assert ledger.snapshot()["calls"] == 0
+
+
+def test_a_client_with_the_wrong_base_url_or_key_is_refused(ledger, monkeypatch):
+    for attrs in ({"base_url": "http://attacker.invalid:9/"}, {"api_key": "someone-elses-key"}):
+        _fake_sdk_module(monkeypatch, **attrs)
+        gateway = AnthropicGateway(
+            _settings(), spend_ledger=ledger, request_admission=HostModelRequestAdmission(),
+        )
+        with pytest.raises(DependencyUnavailable, match="did not take"):
+            gateway.generate(_request(), _context())
+
+
+def test_sdk_loggers_are_pinned_to_warning_whatever_anthropic_log_says(ledger, monkeypatch):
+    names = ("anthropic", "anthropic._base_client", "httpx2")
+    saved = {name: logging.getLogger(name).level for name in names}
+    try:
+        for name in names:
+            logging.getLogger(name).setLevel(logging.DEBUG)  # what ANTHROPIC_LOG=debug does
+        monkeypatch.setenv("ANTHROPIC_LOG", "debug")
+        _fake_sdk_module(monkeypatch)
+        gateway = AnthropicGateway(
+            _settings(), spend_ledger=ledger, request_admission=HostModelRequestAdmission(),
+        )
+        gateway.generate(_request(), _context())
+        for name in names:
+            assert logging.getLogger(name).level == logging.WARNING
+            assert not logging.getLogger(name).isEnabledFor(logging.DEBUG)
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)

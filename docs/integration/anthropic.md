@@ -57,6 +57,10 @@ environments); errors keep no reference to the SDK exception. Only the key
 *slot* (1 or 2) that served a call is recorded. One SDK client is kept per key
 slot and closed by `AnthropicGateway.close()`.
 
+The SDK's own logging is pinned to WARNING when the client is built, whatever
+`ANTHROPIC_LOG` says: `ANTHROPIC_LOG=debug` would otherwise write request
+bodies (prompt text) to the `anthropic` logger and a stderr handler.
+
 ## 3. Enable cloud and bind a tier
 
 ```powershell
