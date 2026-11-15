@@ -44,6 +44,7 @@ Known limits (also true of the code this replaces):
 from __future__ import annotations
 
 import enum
+import functools
 import os
 import signal
 import subprocess
@@ -175,6 +176,7 @@ class _WindowsJob:
         self._lock = threading.Lock()
 
     @staticmethod
+    @functools.lru_cache(maxsize=1)
     def _kernel32():
         import ctypes
         import ctypes.wintypes as wt
@@ -198,6 +200,44 @@ class _WindowsJob:
         kernel32.CloseHandle.restype = wt.BOOL
         return kernel32
 
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _extended_limit_type():
+        import ctypes
+        import ctypes.wintypes as wt
+
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wt.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wt.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wt.DWORD),
+                ("SchedulingClass", wt.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount",
+                "OtherOperationCount", "ReadTransferCount",
+                "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimit),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        return ExtendedLimit
+
     @classmethod
     def create_for(cls, proc: subprocess.Popen) -> _WindowsJob | None:
         """Create a job holding *proc*; ``None`` when that is not possible."""
@@ -208,39 +248,10 @@ class _WindowsJob:
             return None
         try:
             import ctypes
-            import ctypes.wintypes as wt
 
             kernel32 = cls._kernel32()
 
-            class BasicLimit(ctypes.Structure):
-                _fields_ = [
-                    ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                    ("PerJobUserTimeLimit", ctypes.c_longlong),
-                    ("LimitFlags", wt.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wt.DWORD),
-                    ("Affinity", ctypes.c_size_t),
-                    ("PriorityClass", wt.DWORD),
-                    ("SchedulingClass", wt.DWORD),
-                ]
-
-            class IoCounters(ctypes.Structure):
-                _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                    "ReadOperationCount", "WriteOperationCount",
-                    "OtherOperationCount", "ReadTransferCount",
-                    "WriteTransferCount", "OtherTransferCount",
-                )]
-
-            class ExtendedLimit(ctypes.Structure):
-                _fields_ = [
-                    ("BasicLimitInformation", BasicLimit),
-                    ("IoInfo", IoCounters),
-                    ("ProcessMemoryLimit", ctypes.c_size_t),
-                    ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                    ("PeakJobMemoryUsed", ctypes.c_size_t),
-                ]
+            ExtendedLimit = cls._extended_limit_type()
 
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
@@ -299,6 +310,24 @@ class _WindowsJob:
                 return bool(self._kernel32().TerminateJobObject(self._handle, 1))
             except (AttributeError, OSError, TypeError, ValueError):
                 return False
+
+    def release(self) -> None:
+        """Close the handle but let whatever is still in the job keep running."""
+        with self._lock:
+            handle = self._handle
+            if handle is None:
+                return
+            try:
+                import ctypes
+
+                info = self._extended_limit_type()()  # all limit flags cleared
+                self._kernel32().SetInformationJobObject(
+                    handle, self._EXTENDED_LIMIT_CLASS,
+                    ctypes.byref(info), ctypes.sizeof(info),
+                )
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+        self.close()
 
     def close(self) -> None:
         with self._lock:
@@ -479,10 +508,21 @@ class ProcessTree:
             )
 
     def close(self) -> None:
-        """Release the Windows Job Object handle (which ends anything left in it)."""
+        """Release the Windows Job Object handle, which ends anything left in it."""
         with self._lock:
             if self._job is not None:
                 self._job.close()
+
+    def release(self) -> None:
+        """Stop owning the tree and leave surviving descendants running.
+
+        For callers that deliberately let a finished command's background
+        processes live on.  Windows: drops kill-on-close, then closes the
+        handle.  POSIX: nothing to release.
+        """
+        with self._lock:
+            if self._job is not None:
+                self._job.release()
 
     def __enter__(self) -> Self:
         return self

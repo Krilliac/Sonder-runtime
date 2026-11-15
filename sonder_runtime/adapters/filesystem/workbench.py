@@ -26,6 +26,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import sonder_runtime.adapters.git_discovery as git_discovery
+import sonder_runtime.adapters.process_tree as process_tree
 from sonder_runtime.platform import logging as runtime_logging
 from sonder_runtime.platform import paths as runtime_paths
 
@@ -762,10 +763,10 @@ def _write_stdin(pipe, payload):
             pass
 
 
-def _abandon_child(proc, threads):
+def _abandon_child(proc, threads, tree=None):
     """Kill and reap ``proc`` and close its pipes after a failed I/O setup."""
     try:
-        _terminate_process_tree(proc)
+        _terminate_process_tree(proc, tree)
     except OSError:
         pass
     try:
@@ -780,9 +781,21 @@ def _abandon_child(proc, threads):
             pass
     for thread in threads:
         thread.join(timeout=2)
+    if tree is not None:
+        tree.close()
 
 
-def _terminate_process_tree(proc):
+def _terminate_process_tree(proc, tree=None):
+    """Tear down ``proc``'s tree: the tree adapter for a real child, else legacy.
+
+    ``tree`` is the adapter handle taken right after launch (it holds the
+    Windows Job Object).  The legacy branch only serves test doubles.
+    """
+    if tree is None and process_tree.is_real_popen(proc):
+        tree = process_tree.ProcessTree.adopt(proc)
+    if tree is not None:
+        tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
+        return
     if proc.poll() is not None:
         return
     if os.name == "nt":
@@ -915,12 +928,6 @@ def run_program(
     command = [executable, *args]
     started = time.time()
     timed_out = False
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        )
     proc = subprocess.Popen(
         command,
         cwd=str(working),
@@ -928,8 +935,11 @@ def run_program(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
-        creationflags=creationflags,
-        start_new_session=os.name != "nt",
+        # Own process group (POSIX session / Windows group) so the whole tree
+        # can be torn down; see process_tree.
+        **process_tree.group_popen_kwargs(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        ),
         # Only run_script's sealed exact-handoff descriptor is ever passed.
         pass_fds=tuple(_pass_fds),
         # Strip control-plane secrets before handing the environment to a
@@ -938,6 +948,10 @@ def run_program(
         # SONDER_API_KEY and the approval/bypass gates -- exactly what the
         # code_runner lane was hardened against and this lane was not.
         env=_run_program_environment(),
+    )
+    tree = (
+        process_tree.ProcessTree.owning(proc)
+        if process_tree.is_real_popen(proc) else None
     )
     stdout_bytes = bytearray()
     stderr_bytes = bytearray()
@@ -967,17 +981,21 @@ def run_program(
         # The child is already running, detached into its own process group.
         # If the owned-thread factory refuses a reader or the writer, nothing
         # would ever wait on, time out, or kill it: reap it here instead.
-        _abandon_child(proc, started_threads)
+        _abandon_child(proc, started_threads, tree)
         raise
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _terminate_process_tree(proc)
+        _terminate_process_tree(proc, tree)
         proc.wait(timeout=10)
     writer.join(timeout=2)
     for thread in readers:
         thread.join(timeout=2)
+    if tree is not None:
+        # A timeout already removed the tree; after a normal exit anything the
+        # program left running keeps running, as it always has.
+        tree.release()
     stdout_truncated = stdout_state["bytes"] > output_limit
     stderr_truncated = stderr_state["bytes"] > output_limit
     stdout = bytes(stdout_bytes).decode("utf-8", errors="replace")
