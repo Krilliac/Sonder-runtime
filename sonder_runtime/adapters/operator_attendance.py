@@ -1,15 +1,22 @@
 """Which tool, if any, a person at the console typed for the call running now.
 
 The live runtime checkout (``live_checkout``) may be changed by a git or patch
-tool only when the operator typed that very tool at the console.  The
-console's ``/<tool>`` dispatcher wraps the handler in :func:`attended` while a
-person is present; nothing else sets it.
+tool, and ``runtime_source_stash pop`` may write into it, only when the
+operator typed that very tool at the console.  The console wraps the handler
+in :func:`attended` while a person is present: the ``/<tool>`` dispatcher
+(``repl._run_catalogued``) and the console commands that front one such tool
+(``repl._console_attendance``, e.g. ``/stash``).  Nothing else sets it.
 
-The signal is bound to one tool name, not a flag: a person who types
-``/agent`` runs the model loop in the same thread, and every git call the model
-makes there must still read as unattended.  A worker thread starts with an
-empty context (no ``copy_context`` is used), so work handed to another thread
-is unattended, which is the safe default.
+The signal is bound to one tool name, not a flag, and that binding is what
+makes it safe.  A person who types ``/agent`` runs the model loop in the same
+thread, and every git call the model makes there must still read as
+unattended; it does, because the signal names ``agent``.  The context does
+follow work handed on from inside an attended call: ``asyncio`` tasks and
+``asyncio.to_thread`` copy it, and so does a ``threading.Thread`` started
+while Python 3.14's ``thread_inherit_context`` flag is on.  Such work still
+holds only the one tool name the operator typed, so it can do no more than
+that tool's own call; a thread started with the flag off (the default on the
+standard build) begins with an empty context and is unattended.
 
 State: one ``ContextVar`` holding a tool name or ``None``; per thread / task,
 never shared, nothing to lock.

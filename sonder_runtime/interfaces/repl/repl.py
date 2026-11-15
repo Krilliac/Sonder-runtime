@@ -1001,6 +1001,22 @@ def _mode_command(argument):
         return server.permission_mode(mode=wanted, explain=explain)
 
 
+# Console commands that front a tool asking for the operator's attendance
+# (``operator_attendance``): typing the command is typing that tool.
+_ATTENDED_CONSOLE_COMMANDS = {
+    "/stash": "runtime_source_stash",
+    "/runtime-stash": "runtime_source_stash",
+}
+
+
+def _console_attendance(cmd):
+    """The attendance for console command ``cmd``: its tool when a person is present, else nothing."""
+    tool = _ATTENDED_CONSOLE_COMMANDS.get(cmd)
+    if tool is None or not _console_has_operator():
+        return nullcontext()
+    return operator_attendance.attended(tool)
+
+
 def _run_catalogued(line, cmd):
     """Run any registered MCP tool typed as /<tool_name>, or explain the miss.
 
@@ -4536,11 +4552,14 @@ def main(*, machine_output=False):
                         # consults this flag only for ``deploy`` and ``rollback``).
                         # With a piped stdin the gate refused rather than asked,
                         # nobody said yes, and this is False -- which is the whole
-                        # point.
-                        _emit(server.control_command(
-                            line, session=session_id, project=project,
-                            operator_approved=_console_has_operator(),
-                        ))
+                        # point.  ``/stash pop`` writes into the live runtime checkout,
+                        # which asks for the operator typing that tool (``/stash`` fronts
+                        # ``runtime_source_stash``; ``_console_attendance``).
+                        with _console_attendance(cmd):
+                            _emit(server.control_command(
+                                line, session=session_id, project=project,
+                                operator_approved=_console_has_operator(),
+                            ))
                     elif cmd in ("/weather", "/forecast"):
                         _emit(server.control_command(
                             line, session=session_id, project=project,
