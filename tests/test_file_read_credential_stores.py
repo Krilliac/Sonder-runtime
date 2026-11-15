@@ -226,3 +226,127 @@ def test_extra_token_stores_are_classified_secrets_for_mutation(name):
 @pytest.mark.parametrize("name", ["id_ed25519.pub", "npmrc.md", "service.json", "config.json"])
 def test_near_miss_names_are_not_classified_secrets(name):
     assert not file_ops._is_secret_path(Path("proj") / name), name
+
+
+# Review-cycle additions: more stores, Windows locations, and a root set inside
+# the store's parents.
+MORE_CREDENTIAL_PATHS = [
+    "terraform.d/credentials.tfrc.json",
+    ".cargo/credentials.toml",
+    ".cargo/credentials",
+    ".gem/credentials",
+    ".m2/settings.xml",
+    ".m2/settings-security.xml",
+    ".config/glab-cli/config.yml",
+    "AppData/Roaming/gcloud/credentials.db",
+    "AppData/Roaming/GitHub CLI/hosts.yml",
+]
+
+
+@pytest.mark.parametrize("relative", MORE_CREDENTIAL_PATHS)
+@pytest.mark.parametrize("prefix", ["", "nested/project/"])
+def test_more_stores_refused_top_level_nested_and_mixed_case(workspace, relative, prefix):
+    for candidate in (prefix + relative, _mixed(prefix + relative)):
+        _plant(workspace, candidate)
+        with pytest.raises(PermissionError, match="credential store"):
+            file_ops.read_file(candidate)
+
+
+@pytest.mark.parametrize("relative", [
+    "gcloud/notes.md",
+    "gcloud/main.py",
+    "Roaming/other/hosts.yml",
+    "AppData/Roaming/Code/settings.json",
+    "GitHub CLI/readme.md",
+    "hosts.yml",
+    "settings.xml",
+    ".m2/pom.xml",
+    ".cargo/config.toml",
+    ".gem/specs.txt",
+    ".config/glab-cli/aliases.yml",
+    "credentials.tfrc.md",
+    "NuGet.Config",
+])
+def test_more_near_misses_stay_readable(workspace, relative):
+    _plant(workspace, relative)
+    assert file_ops.read_file(relative)["text"] == "CREDENTIAL-MATERIAL"
+
+
+@pytest.mark.parametrize("raw", [
+    "C:\\Users\\u\\AppData\\Roaming\\gcloud\\credentials.db",
+    "C:/Users/u/AppData/Roaming/gcloud/credentials.db",
+    "C:\\Users\\u\\APPDATA\\ROAMING\\GCLOUD\\access_tokens.db",
+    "C:\\Users\\u\\AppData\\Roaming\\GitHub CLI\\hosts.yml",
+    "C:/Users/u/AppData/Roaming/GitHub CLI/hosts.yml",
+    "C:/Users/u/appdata/roaming/github cli/HOSTS.YML",
+])
+def test_windows_locations_with_both_separators_and_mixed_case(raw):
+    from pathlib import PureWindowsPath
+    assert file_ops._credential_part(PureWindowsPath(raw).parts[1:]), raw
+
+
+@pytest.mark.parametrize("raw", [
+    "C:\\Users\\u\\gcloud\\credentials.db",
+    "C:/Users/u/AppData/Roaming/Code/hosts.yml",
+    "C:/work/gcloud/readme.md",
+])
+def test_windows_lookalikes_are_not_refused(raw):
+    from pathlib import PureWindowsPath
+    assert not file_ops._credential_part(PureWindowsPath(raw).parts[1:]), raw
+
+
+@pytest.mark.parametrize("root_suffix, member", [
+    (".config", "gcloud/credentials.db"),
+    (".config/gh", "hosts.yml"),
+    (".config", "gh/hosts.yml"),
+    (".docker", "config.json"),
+    ("AppData/Roaming/GitHub CLI", "hosts.yml"),
+    ("AppData/Roaming", "gcloud/credentials.db"),
+])
+def test_root_set_in_the_stores_parents_does_not_unlock_it(
+    workspace, tmp_path, monkeypatch, root_suffix, member,
+):
+    root = tmp_path / "elsewhere" / root_suffix
+    target = root / member
+    target.parent.mkdir(parents=True)
+    target.write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(root))
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(str(target))
+    assert file_ops.credential_read_component(target)
+
+
+def test_a_root_naming_the_store_or_the_exact_file_still_unlocks_it(
+    workspace, tmp_path, monkeypatch,
+):
+    store = tmp_path / "home2" / ".config" / "gcloud"
+    store.mkdir(parents=True)
+    (store / "credentials.db").write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(store))
+    assert not file_ops.credential_read_component(store / "credentials.db")
+    hosts = tmp_path / "home3" / ".config" / "gh" / "hosts.yml"
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(hosts))
+    assert not file_ops.credential_read_component(hosts)
+
+
+@pytest.mark.parametrize("relative", [
+    ".config/gcloud/credentials.db", ".config/gh/hosts.yml", ".gcloud/access_tokens.db",
+])
+def test_repository_read_resolver_refuses_full_path_credential_stores(workspace, relative):
+    _plant(workspace, relative)
+    with pytest.raises(PermissionError, match="secret or control state"):
+        file_ops.resolve_repository_read_path(relative)
+
+
+def test_repository_read_resolver_refuses_a_root_inside_the_store_parents(
+    workspace, tmp_path, monkeypatch,
+):
+    root = tmp_path / "elsewhere" / ".config"
+    target = root / "gcloud" / "credentials.db"
+    target.parent.mkdir(parents=True)
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(root))
+    with pytest.raises(PermissionError, match="secret or control state"):
+        file_ops.resolve_repository_read_path(str(target))

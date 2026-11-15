@@ -351,3 +351,31 @@ def test_archive_extract_is_self_validating_for_agent_bookkeeping(workspace):
     mutations = [{"tool": "archive_extract", "path": server._agent_normalized_path(args["destination"])}]
     observation = json.dumps({"ok": True, "validation_passed": True})
     assert server._agent_validation_covers("archive_extract", args, mutations, observation)
+
+
+@pytest.mark.parametrize("member", [
+    ".npmrc", "kubeconfig", ".htpasswd", "pkg/.npmrc", "vault/passwords.kdbx",
+    ".config/gcloud/credentials.db", ".config/gh/hosts.yml",
+])
+def test_tarball_with_token_store_names_extracts_but_reads_stay_refused(workspace, member):
+    # Policy: ordinary repositories ship .npmrc, so extraction is not refused
+    # for the token-store names added to the read guard; reading them still is.
+    _tar(workspace / "repo.tar", [("README.md", b"hi"), (member, b"TOKEN-MATERIAL")])
+
+    listed = archive_tools.list_archive("repo.tar")
+    extracted = archive_tools.extract_archive("repo.tar", "output")
+
+    assert listed["valid"] is True
+    assert extracted["validation_passed"] is True
+    assert (workspace / "output" / member).read_bytes() == b"TOKEN-MATERIAL"
+    assert file_ops.read_file("output/README.md")["text"] == "hi"
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file("output/" + member)
+
+
+@pytest.mark.parametrize("name", [".env", "id_rsa", ".netrc", ".pgpass", "key.pem"])
+def test_extraction_still_refuses_what_it_refused_before(workspace, name):
+    _zip(workspace / "bad.zip", [(name, b"SECRET")])
+    data = archive_tools.list_archive("bad.zip")
+    assert data["valid"] is False
+    assert "sensitive" in data["errors"][0]

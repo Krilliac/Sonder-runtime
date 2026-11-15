@@ -365,3 +365,72 @@ def test_archive_create_is_self_validating_for_agent_bookkeeping(project):
     assert server._agent_validation_covers(
         "archive_create", args, mutations, observation,
     )
+
+
+@pytest.mark.parametrize("member", [
+    ".config/gcloud/credentials.db",
+    ".config/gh/hosts.yml",
+    "AppData/Roaming/gcloud/credentials.db",
+    "AppData/Roaming/GitHub CLI/hosts.yml",
+    "vault/passwords.kdbx",
+    ".npmrc",
+    "kubeconfig",
+    ".cargo/credentials.toml",
+])
+def test_create_refuses_full_path_credential_stores(project, member):
+    target = project / "tree" / member
+    target.parent.mkdir(parents=True)
+    target.write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    with pytest.raises(PermissionError):
+        _create(project, ["tree"], "denied.zip")
+    assert not (project / "denied.zip").exists()
+
+
+@pytest.mark.parametrize("root_suffix, member", [
+    (".config", "gcloud/credentials.db"),
+    (".config/gh", "hosts.yml"),
+    ("AppData/Roaming", "gcloud/credentials.db"),
+    ("AppData/Roaming/GitHub CLI", "hosts.yml"),
+])
+def test_archive_rooted_inside_store_parents_cannot_launder_it(
+    project, root_suffix, member,
+):
+    # Archive the store from a root set at its parent: members would be named
+    # "gcloud/credentials.db" / "hosts.yml" with no credential directory left,
+    # so a later extract + read would return the secret.
+    root = project / root_suffix
+    target = root / member
+    target.parent.mkdir(parents=True)
+    target.write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    first = member.split("/")[0]
+    with pytest.raises(PermissionError):
+        _create(root, [first], "out.zip")
+    assert not list(project.rglob("out.zip"))
+
+
+def test_a_directory_inside_the_store_cannot_be_archived_either(project):
+    store = project / "home" / ".config" / "gcloud"
+    store.mkdir(parents=True)
+    (store / "credentials.db").write_text("CREDENTIAL-MATERIAL", encoding="utf-8")
+    with pytest.raises(PermissionError):
+        _create(store, ["credentials.db"], "out.zip")
+    assert not list(project.rglob("out.zip"))
+
+
+@pytest.mark.parametrize("root_suffix, relative", [
+    (".config", "gcloud/credentials.db"),
+    (".config/gh", "hosts.yml"),
+    ("AppData/Roaming", "gcloud/x.db"),
+    ("AppData/Roaming/GitHub CLI", "hosts.yml"),
+    ("", ".config/gcloud/credentials.db"),
+    ("", "vault/passwords.kdbx"),
+])
+def test_member_classifier_uses_the_roots_trailing_directories(project, root_suffix, relative):
+    # The archive layer's own check, independent of the resolver guards.
+    root = project / root_suffix
+    assert archive_create._sensitive_relative(Path(relative), root)
+
+
+def test_member_classifier_leaves_ordinary_members_alone(project):
+    assert not archive_create._sensitive_relative(Path("src/app.py"), project / "gcloud")
+    assert not archive_create._sensitive_relative(Path("gcloud/notes.md"), project)

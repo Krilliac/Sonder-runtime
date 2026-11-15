@@ -203,10 +203,14 @@ def _portable_member_path(raw_name: str, *, is_directory: bool, max_depth: int) 
     sensitive_directories = {
         str(name).casefold()
         for name in getattr(file_ops, "SENSITIVE_READ_DIRECTORIES", ())
+        if str(name).casefold() not in file_ops.EXTRACT_TOLERATED_DIRECTORIES
     }
     if any(part.casefold() in sensitive_directories for part in parts):
         raise ArchiveRejected("archive entry targets a sensitive directory: %s" % normalized)
-    if file_ops._is_secret_path(candidate):
+    if file_ops._is_secret_path(candidate) and not (
+        candidate.name.casefold() in file_ops.EXTRACT_TOLERATED_FILES
+        or candidate.suffix.casefold() in file_ops.EXTRACT_TOLERATED_SUFFIXES
+    ):
         raise ArchiveRejected("archive entry targets a sensitive file: %s" % normalized)
     control_files = {
         str(name).casefold() for name in getattr(file_ops, "CONTROL_CONFIG_FILES", ())
