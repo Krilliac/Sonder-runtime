@@ -39,10 +39,17 @@ GOOD = {"name": "ada", "age": 36}
 
 
 def _capture(monkeypatch, reply):
-    """Answer every model request with `reply`, keeping the posted payloads."""
+    """Answer every model request with `reply`, keeping the posted payloads.
+
+    The /api/show metadata probe is answered empty and not recorded: whether it
+    runs depends on the module's metadata cache (warm or cold from earlier tests),
+    so counting it made the request counts below depend on test order.
+    """
     seen = {"payloads": []}
 
     def fake_post(path, payload, timeout=None, **_kwargs):
+        if path == "/api/show":
+            return {}
         seen["payloads"].append(payload)
         seen["payload"] = payload
         return {"message": {"content": reply}}
