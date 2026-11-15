@@ -26,7 +26,7 @@ also documented below in case the script is unavailable or a manual run is
 preferred.
 
 For the opt-in Windows foreground `ManagedRuntimeOwner`, provision a separate
-interpreter closure with `-ManagedRuntime` (Windows CPython 3.12):
+interpreter closure with `-ManagedRuntime` (Windows CPython 3.12 or 3.14):
 
 ```powershell
 powershell -NoProfile -File packaging\install_workstation_local.ps1 -ManagedRuntime -SkipModelAlias

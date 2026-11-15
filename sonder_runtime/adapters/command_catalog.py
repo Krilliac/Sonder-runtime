@@ -176,6 +176,7 @@ CATEGORIES = {
 # Explicit placements that the prefix rules would get wrong.
 _CATEGORY_BY_TOOL = {
     "tool_help": "agents",
+    "claim_check": "dev",
     "file_check": "dev",
     "sonder": "chat",
     "offload": "chat",
@@ -413,6 +414,9 @@ _DANGEROUS = frozenset({
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
     "playbook_read",
+    # Reads files the repository read guard allows and writes nothing
+    # (bootstrap/claim_check_agent_tools.py; tests/test_claim_check_tool.py).
+    "claim_check",
     "computer_use_status",
     "task_list", "task_show", "checklist_show", "admin_status",
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",

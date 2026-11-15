@@ -65,6 +65,7 @@ from sonder_runtime.platform.memory_replication_config import (
     memory_replication_errors,
 )
 from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
+from sonder_runtime.platform.claim_check_config import ClaimCheckConfig, claim_check_errors
 from sonder_runtime.platform.playbooks_config import PlaybooksConfig, playbooks_errors
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
@@ -662,6 +663,7 @@ class SonderConfig:
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
+    claim_check: ClaimCheckConfig = field(default_factory=ClaimCheckConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
     security_eval: SecurityEvalConfig = field(default_factory=SecurityEvalConfig)
 
@@ -688,6 +690,7 @@ class SonderConfig:
             "backup",
             "spanda",
             "playbooks",
+            "claim_check",
         ):
             value = getattr(self, section)
             out[section] = {
@@ -997,6 +1000,7 @@ _SECTION_TYPES = {
     "backup": BackupConfig,
     "spanda": SpandaConfig,
     "playbooks": PlaybooksConfig,
+    "claim_check": ClaimCheckConfig,
 }
 
 
@@ -1833,6 +1837,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(control_state_rehearsal_errors(config))
     errors.extend(spanda_errors(config))
     errors.extend(playbooks_errors(config))
+    errors.extend(claim_check_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
         errors.append(

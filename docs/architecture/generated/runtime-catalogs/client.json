@@ -1,5 +1,5 @@
 {
-  "digest": "fc5a541830a0d0758a50d81a83979619af9fe7d7413306f426bdfef81c0b099c",
+  "digest": "b97b8806401a20f9fa34c3d703917d8effcd24a68da3eb31becb1e825032cd99",
   "events": [
     {
       "name": "approval.denied",
@@ -1178,6 +1178,7 @@
       "build_job",
       "build_job_result",
       "build_model",
+      "claim_check",
       "compute_artifact_fetch",
       "compute_cancel",
       "compute_status",
@@ -1301,6 +1302,11 @@
         "name": "build_model",
         "schema_available": true,
         "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
+      },
+      {
+        "name": "claim_check",
+        "schema_available": true,
+        "summary": "Check a model's code claim against the repository, read-only"
       },
       {
         "name": "compute_artifact_fetch",
@@ -2172,6 +2178,60 @@
         "type": "object"
       },
       "name": "build_model"
+    },
+    {
+      "description": "Check a model's code claim against the repository, read-only",
+      "effects": [
+        "read_files"
+      ],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "claim_id": {
+            "type": "string"
+          },
+          "claim_text": {
+            "maxLength": 8192,
+            "type": "string"
+          },
+          "claims_json": {
+            "maxLength": 60000,
+            "type": "string"
+          },
+          "entry_point": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "guard": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "line_end": {
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbols": {
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "type": "object"
+      },
+      "name": "claim_check"
     },
     {
       "description": "Fetch one small digest-verified compute artifact through the authenticated transport",

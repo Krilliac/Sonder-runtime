@@ -301,6 +301,12 @@
       "summary": "Update one checklist item by 1-based index or id prefix."
     },
     {
+      "category": "dev",
+      "name": "/claim_check",
+      "risk": "safe",
+      "summary": "Check a model's code claim against the repository, read-only: is the cited file, line and are the named symbols real, and is a guard of the claimed category nearby (verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which says nothing about whether the claim is true; keep = nothing contradicts the citation)."
+    },
+    {
       "category": "basic",
       "name": "/clear",
       "risk": "safe",
@@ -2149,6 +2155,10 @@
     {
       "name": "build_model",
       "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
+    },
+    {
+      "name": "claim_check",
+      "summary": "Check a model's code claim against the repository, read-only"
     },
     {
       "name": "compute_artifact_fetch",

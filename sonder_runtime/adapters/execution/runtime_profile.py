@@ -19,7 +19,7 @@ from hashlib import sha256
 from importlib import metadata
 from pathlib import Path
 
-from ...application.ports.runtime_owner import OwnerRefused, canonical
+from ...application.ports.runtime_owner import MANAGED_PYTHON_LABEL, MANAGED_PYTHON_MINORS, OwnerRefused, canonical
 from ..filesystem.atomic_json import write_json_atomic
 
 PROFILE_NAME = "sonder-managed-runtime.json"
@@ -122,8 +122,8 @@ def _site_summary(site: Path) -> tuple[int, int]:
 
 def _profile_state(root: Path, *, source: Path, base: Path, executable: Path) -> dict:
     root = _absolute_real_root(root)
-    if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 12):
-        raise OwnerRefused("managed runtime profile requires CPython 3.12")
+    if sys.implementation.name != "cpython" or sys.version_info[:2] not in MANAGED_PYTHON_MINORS:
+        raise OwnerRefused(f"managed runtime profile requires CPython {MANAGED_PYTHON_LABEL}")
     base, executable = Path(base).resolve(), Path(executable).resolve()
     if executable.parent != base:
         raise OwnerRefused("managed runtime base Python identity is unsupported")
@@ -201,8 +201,8 @@ def main(argv=None) -> int:
     parser.add_argument("action", choices=("seal", "verify"))
     args = parser.parse_args(argv)
     if (sys.platform != "win32" or sys.implementation.name != "cpython"
-            or sys.version_info[:2] != (3, 12) or sys.prefix == sys.base_prefix):
-        parser.error("managed runtime profile requires a Windows CPython 3.12 venv")
+            or sys.version_info[:2] not in MANAGED_PYTHON_MINORS or sys.prefix == sys.base_prefix):
+        parser.error(f"managed runtime profile requires a Windows CPython {MANAGED_PYTHON_LABEL} venv")
     source = Path(__file__).resolve().parents[3]
     kwargs = {"source": source, "root": Path(sys.prefix), "base": Path(sys.base_prefix),
               "executable": Path(sys._base_executable)}

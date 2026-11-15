@@ -254,6 +254,36 @@ def _check_openrouter() -> CheckResult | None:
         return CheckResult("openrouter", False, False, str(exc)[:240])
 
 
+def _check_anthropic() -> CheckResult | None:
+    """Configuration-only note for a bound Anthropic provider.
+
+    Never contacts Anthropic and never names a key's value: it reports the
+    cloud opt-in, which key slots are set, and that the optional SDK is present.
+    """
+    try:
+        from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+
+        if "anthropic" not in provider_bindings_from_env().bound_providers:
+            return None
+        from sonder_runtime.adapters.inference.anthropic_gateway import (
+            check_endpoint_policy,
+            config_from_env,
+            load_sdk,
+        )
+
+        settings = config_from_env()
+        check_endpoint_policy(settings)
+        load_sdk()
+        return CheckResult(
+            "anthropic", True, False,
+            "hosted provider configured, key slot(s) %s, daily cap $%s (not probed)" % (
+                "+".join(str(slot) for slot, _key in settings.key_slots), settings.daily_usd,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - preflight never blocks on a hosted provider
+        return CheckResult("anthropic", False, False, str(exc)[:240])
+
+
 def run_preflight(
     config: SonderConfig,
     *,
@@ -280,4 +310,7 @@ def run_preflight(
     router = _check_openrouter()
     if router is not None:
         checks.append(router)
+    claude = _check_anthropic()
+    if claude is not None:
+        checks.append(claude)
     return PreflightReport(checks=tuple(checks))
