@@ -132,7 +132,7 @@ class _ManagedPool(_NativePool):
                         raise ThreadOwnershipRefused("worker initialization cleanup unresolved")
         options.arguments["initializer"] = initialize
         options.arguments["initargs"] = ()
-        super().__init__(**options.arguments)
+        super().__init__(*options.args, **options.kwargs)
 
     def submit(self, fn, /, *args, **kwargs):
         owner = self._owner
