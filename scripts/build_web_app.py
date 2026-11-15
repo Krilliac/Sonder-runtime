@@ -40,6 +40,7 @@ RELEASES_DIR = "releases"
 BASE_HREF = "/app/"
 _CHUNK = 1 << 20
 _CDN_MARKERS = ("gstatic.com", "unpkg")
+_LOCAL_CANVASKIT = re.compile(r'"useLocalCanvasKit"\s*:\s*true')
 _INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc\s*=)[^>]*>", re.IGNORECASE)
 
 
@@ -115,14 +116,21 @@ def inspect_output(out: Path) -> None:
         raise BuildError("the build produced no index.html")
     if _INLINE_SCRIPT.search(index.read_text(encoding="utf-8", errors="replace")):
         raise BuildError("index.html has an inline <script>; the CSP forbids it")
-    for name in ("index.html", "flutter_bootstrap.js"):
-        path = out / name
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for marker in _CDN_MARKERS:
-            if marker in text:
-                raise BuildError(f"{name} references {marker}; build with --no-web-resources-cdn")
+    html = index.read_text(encoding="utf-8", errors="replace")
+    for marker in _CDN_MARKERS:
+        if marker in html:
+            raise BuildError(f"index.html references {marker}; the CSP only allows this origin")
+    bootstrap = out / "flutter_bootstrap.js"
+    if not bootstrap.is_file():
+        raise BuildError("the build produced no flutter_bootstrap.js")
+    text = bootstrap.read_text(encoding="utf-8", errors="replace")
+    # The loader keeps a gstatic CanvasKit URL as dead code; what matters is
+    # that this build is configured to load its own CanvasKit.
+    if _LOCAL_CANVASKIT.search(text) is None:
+        raise BuildError("flutter_bootstrap.js does not set useLocalCanvasKit; "
+                         "build with --no-web-resources-cdn")
+    if "unpkg" in text:
+        raise BuildError("flutter_bootstrap.js references unpkg")
 
 
 def hash_file(path: Path) -> tuple[str, int]:

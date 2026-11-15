@@ -35,7 +35,7 @@ elif args[:2] == ["build", "web"]:
     (out / "canvaskit").mkdir(parents=True)
     index = os.environ.get("FAKE_INDEX", '<html><script src="flutter_bootstrap.js" async></script></html>')
     (out / "index.html").write_text(index, encoding="utf-8")
-    (out / "flutter_bootstrap.js").write_text(os.environ.get("FAKE_BOOT", "// boot"), encoding="utf-8")
+    (out / "flutter_bootstrap.js").write_text(os.environ.get("FAKE_BOOT", '{"useLocalCanvasKit":true}'), encoding="utf-8")
     (out / "main.dart.js").write_text("// app", encoding="utf-8")
     (out / "canvaskit" / "canvaskit.wasm").write_bytes(b"\\x00asm\\x01\\x00\\x00\\x00")
 '''
@@ -130,7 +130,8 @@ def test_dirty_tree_is_refused_unless_allowed_and_recorded(tmp_path, repos, fake
 
 @pytest.mark.parametrize("env_name,value,message", [
     ("FAKE_INDEX", "<html><script>alert(1)</script></html>", "inline"),
-    ("FAKE_BOOT", "fetch('https://fonts.gstatic.com/x')", "gstatic.com"),
+    ("FAKE_INDEX", '<script src="https://unpkg.com/x.js"></script>', "unpkg"),
+    ("FAKE_BOOT", '{"useLocalCanvasKit":false}', "useLocalCanvasKit"),
 ])
 def test_bad_output_is_refused_and_leaves_nothing(tmp_path, repos, fake_flutter, monkeypatch,
                                                   capsys, env_name, value, message):
