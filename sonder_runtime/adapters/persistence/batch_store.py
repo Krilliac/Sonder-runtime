@@ -185,7 +185,8 @@ def resume_job(job_id: str, *, include_failed: bool, max_active: int) -> JobReco
         status = JobStatus(_fetch(conn, job_id)["status"])
         if not (status in _RESUMABLE or (status is JobStatus.COMPLETED and include_failed)):
             raise Conflict("a job in status %s cannot be resumed" % status.value)
-        _capacity(conn, max_active)
+        if status not in ACTIVE_JOB_STATUSES:  # a paused job already counts toward the cap
+            _capacity(conn, max_active)
         _enqueue(conn, job_id, now, {"retry_failed": bool(include_failed)})
         return _record(_fetch(conn, job_id))
 

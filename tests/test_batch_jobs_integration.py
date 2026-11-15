@@ -206,3 +206,36 @@ def test_cancel_forwards_to_the_job_and_a_cancelled_job_dispatches_nothing_more(
     started = harness.tool("batch_job_start", job_id=job_id)
     assert started["ok"] is False and started["error"]["code"] == "CONFLICT"
     assert harness.calls == []
+
+
+def test_a_paused_job_resumes_at_the_active_cap_because_it_already_counts(harness):
+    job_id = harness.create(two_stages(), items=1, start=False)["job"]["job_id"]
+    batch_store.start_job(job_id, max_active=1)
+    with fanout_store._write_transaction() as conn:
+        conn.execute("UPDATE batch_jobs SET status='paused',pause_reason='consecutive_failures' WHERE id=?", (job_id,))
+    record = batch_store.resume_job(job_id, include_failed=False, max_active=1)
+    assert record.status is JobStatus.QUEUED
+
+
+def test_a_step_retried_after_failing_without_a_model_call_carries_the_rendered_prompt(harness):
+    from sonder_runtime.domain.common.errors import IntegrityFailure
+
+    executor = harness.service.executor()
+    real = executor.read_answer
+
+    def unreadable(_state):
+        raise IntegrityFailure("sealed batch data is unavailable")
+
+    executor.read_answer = unreadable
+    job_id = harness.create(two_stages(), items=1, start=True)["job"]["job_id"]
+    harness.wait()
+    assert len(harness.calls) == 1
+    assert harness.tool("batch_job_status", job_id=job_id)["job"]["progress"]["failed"] == 1
+
+    executor.read_answer = real
+    assert harness.tool("batch_job_resume", job_id=job_id, include_failed=True)["ok"] is True
+    harness.wait()
+    assert len(harness.calls) == 2
+    retried = harness.calls[1]
+    assert retried.prompt.startswith("R2 ") and "answer to" in retried.prompt
+    assert harness.tool("batch_job_status", job_id=job_id)["job"]["progress"]["answered"] == 2

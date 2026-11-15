@@ -73,11 +73,14 @@ class FanoutStepExecutor:
             "batch_job_id": request.job.id,
         }
 
-    def _create(self, request: StepRequest, system: str, prompt: str) -> str:
+    def _seal(self, system: str, prompt: str) -> str:
         try:
-            sealed = self._vault.encrypt_prompt(fanout_execution.seal_envelope(system, prompt))
+            return self._vault.encrypt_prompt(fanout_execution.seal_envelope(system, prompt))
         except self._vault.PromptVaultError as exc:
             raise IntegrityFailure("could not seal batch data") from exc
+
+    def _create(self, request: StepRequest, system: str, prompt: str) -> str:
+        sealed = self._seal(system, prompt)
         run = fanout_store.create_run(
             _MARKER, [request.stage.model], request_owner=request.job.request_owner,
             request_role=request.job.request_role, scope="local", cloud_opt_in=False,
@@ -92,6 +95,9 @@ class FanoutStepExecutor:
         if prior is None or not prior.run_id:
             return self._create(request, system, prompt)
         if prior.status in _RETRYABLE:
+            if prompt:
+                # The prior attempt may have failed before any model call (sealed empty); carry the fresh render.
+                fanout_store.replace_execution_prompt_ciphertext(prior.run_id, self._seal(system, prompt))
             # Local rows only, so an unknown attempt is replayed without a metered-cost risk.
             resumed = fanout_store.resume_run(
                 prior.run_id, include_failed=prior.status is StepStatus.FAILED, retry_unknown=True,

@@ -449,6 +449,18 @@ def get_run(run_id: str) -> dict | None:
     finally: conn.close()
 
 
+def replace_execution_prompt_ciphertext(run_id: str, ciphertext: str) -> bool:
+    """Swap the sealed prompt of a run that is not executing (a batch step retried with a fresh render)."""
+    sealed = str(ciphertext or "")
+    if len(sealed) > 64_000:
+        raise ValueError("fanout sealed prompt exceeds 64000 characters")
+    with _write_transaction() as conn:
+        return conn.execute(
+            "UPDATE fanout_runs SET execution_prompt_ciphertext=?,updated_ts=? WHERE id=? AND status<>'running'",
+            (sealed, time.time(), str(run_id)),
+        ).rowcount == 1
+
+
 def execution_prompt_ciphertext(run_id: str) -> str | None:
     """Return the sealed prompt only to the server-side execution worker."""
     conn = _connect()
