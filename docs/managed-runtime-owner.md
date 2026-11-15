@@ -10,7 +10,7 @@ Existing paths are refused. The private path inventory contains the exact owned 
 Managed launches use a required-new private copy of the Sonder Python package,
 root compatibility modules, migrations and seed data. They never use the live
 checkout as cwd or import path. A bounded canonical manifest covers this copy,
-the resolved Windows CPython 3.12 executable/runtime files, standard library,
+the resolved Windows CPython (3.12 or 3.14) executable/runtime files, standard library,
 DLL directory and the current isolated environment's site-packages. Unknown
 runtime path configurations, reparse entries, more than 50,000 files, more than
 4 GiB of external/payload files, or a manifest larger than 32 MiB are refused.
@@ -21,7 +21,7 @@ installer with `-ManagedRuntime` and use
 `ManagedRuntimeOwner.workstation_local(path, writable_roots=live_roots)`.
 It provisions `venv-managed` from the exact `requirements-runtime.txt` pins,
 including Windows pywin32, and seals a host-selected profile tied to the
-current CPython 3.12 base executable, requirements file, venv configuration
+current CPython (3.12 or 3.14) base executable, requirements file, venv configuration
 and installed distribution inventory. A caller may instead explicitly supply
 an absolute `runtime_venv=` pointing to such an installed profile. The owner
 rejects relative/reparse paths and a profile overlapping live model-writable

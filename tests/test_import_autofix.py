@@ -218,7 +218,12 @@ def test_grounded_random_choice_breakout_case():
 
 
 def test_grounded_typing_annotation_breakout_case():
-    buggy = "def f(x: List[int]) -> int:\n    return sum(x)\nprint(f([1, 2, 3]))"
+    # PEP 649 (3.14) evaluates annotations lazily, so the annotation alone no
+    # longer raises; the module-level alias forces eager evaluation everywhere.
+    buggy = (
+        "y = List[int]\n"
+        "def f(x: List[int]) -> int:\n    return sum(x)\nprint(f([1, 2, 3]))"
+    )
     ok, out = grounding.run_code(buggy)
     assert ok is False
     assert "NameError" in out
