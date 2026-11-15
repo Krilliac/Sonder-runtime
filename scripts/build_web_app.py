@@ -146,6 +146,22 @@ def hash_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def strip_hidden(out: Path) -> list[str]:
+    """Remove dotfiles (``.last_build_id``, ``.gitkeep``): the server never serves them."""
+    removed: list[str] = []
+    for directory, dirnames, names in os.walk(out, topdown=True):
+        for name in list(dirnames):
+            if name.startswith("."):
+                dirnames.remove(name)
+                shutil.rmtree(Path(directory) / name)
+                removed.append(name)
+        for name in names:
+            if name.startswith("."):
+                (Path(directory) / name).unlink()
+                removed.append(name)
+    return removed
+
+
 def write_manifest(out: Path, *, commit: str, dirty: bool, flutter_version: str) -> dict:
     files: dict[str, dict[str, object]] = {}
     for directory, dirnames, names in os.walk(out):
@@ -233,6 +249,7 @@ def build(args: argparse.Namespace, env: dict[str, str]) -> Path:
         _run([flutter, "build", "web", "--release", "--no-web-resources-cdn", "--csp",
               "--base-href", BASE_HREF, "-O", "4", "--no-source-maps", "-o", str(staging)], app_dir)
         inspect_output(staging)
+        strip_hidden(staging)
         write_manifest(staging, commit=commit, dirty=dirty, flutter_version=version)
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
         release = publish(web_app_dir, staging, f"{commit[:9]}-{stamp}")

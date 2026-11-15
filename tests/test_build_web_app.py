@@ -37,6 +37,8 @@ elif args[:2] == ["build", "web"]:
     (out / "index.html").write_text(index, encoding="utf-8")
     (out / "flutter_bootstrap.js").write_text(os.environ.get("FAKE_BOOT", '{"useLocalCanvasKit":true}'), encoding="utf-8")
     (out / "main.dart.js").write_text("// app", encoding="utf-8")
+    (out / ".last_build_id").write_text("x", encoding="utf-8")
+    (out / "canvaskit" / ".gitkeep").write_text("", encoding="utf-8")
     (out / "canvaskit" / "canvaskit.wasm").write_bytes(b"\\x00asm\\x01\\x00\\x00\\x00")
 '''
 
@@ -94,6 +96,8 @@ def test_publishes_a_verifiable_release(tmp_path, repos, fake_flutter):
     assert {"index.html", "main.dart.js", "flutter_bootstrap.js",
             "canvaskit/canvaskit.wasm"} <= set(manifest["files"])
     assert "sonder-web-manifest.json" not in manifest["files"]
+    assert not any(part.startswith(".") for rel in manifest["files"] for part in rel.split("/"))
+    assert not (release / ".last_build_id").exists()
     assert not list(out.glob("staging-*"))
     web_app.clear_cache()
     assert web_app.load_bundle(out).ok  # the server accepts what the script wrote
