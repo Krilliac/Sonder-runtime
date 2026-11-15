@@ -14,8 +14,7 @@ import time
 
 import pytest
 
-from sonder_runtime.adapters import process_liveness
-from sonder_runtime.adapters import process_tree
+from sonder_runtime.adapters import process_liveness, process_tree
 from sonder_runtime.platform.process import CancellationToken
 
 _IS_LINUX = sys.platform.startswith("linux")
