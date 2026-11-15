@@ -286,17 +286,32 @@ def _bounded_probe(argv, timeout=5, output_limit=MAX_PROBE_OUTPUT_BYTES):
     )
 
 
-def _inspect_image_policy(runtime_path, runtime_prefix, image):
+# Docker names the image-ID field `.Id`; Podman's inspect template data uses `.ID`.
+_INSPECT_ID_FIELD = {"docker": "Id", "podman": "ID"}
+
+
+def _stderr_excerpt(text, limit=200):
+    """Return a short, control-character-free excerpt of engine stderr."""
+    cleaned = _CONTROL_RE.sub(" ", str(text or "")).strip()
+    return cleaned[:limit]
+
+
+def _inspect_image_policy(runtime_name, runtime_path, runtime_prefix, image):
     """Return immutable image ID after rejecting any OCI-declared volume."""
+    id_field = _INSPECT_ID_FIELD.get(runtime_name)
+    if id_field is None:
+        raise ValueError("runtime must be detected Docker or Podman")
     result = _bounded_probe([
         runtime_path, *runtime_prefix, "image", "inspect", "--format",
-        '{"id":{{json .Id}},"volumes":{{json .Config.Volumes}}}', image,
+        '{"id":{{json .%s}},"volumes":{{json .Config.Volumes}}}' % id_field, image,
     ])
     if result is None:
         raise ValueError("container image inspection exceeded a safety bound")
     if result.returncode != 0:
+        excerpt = _stderr_excerpt(result.stderr)
         raise ValueError(
-            "container image inspection failed; the image must already be installed"
+            "container image inspection failed (exit %s); the image must already "
+            "be installed%s" % (result.returncode, ": " + excerpt if excerpt else "")
         )
     try:
         metadata = json.loads((result.stdout or "").strip())
@@ -612,6 +627,9 @@ def build_runtime_argv(
             raise ValueError("Podman invocation is not pinned to a verified local connection")
     image = _validate_image(image)
     command = _parse_argv(command)
+    if "=" in command[0]:
+        # env would treat a leading NAME=VALUE as an environment assignment.
+        raise ValueError("command program cannot contain '=' (env would read it as an assignment)")
     project = resolve_project(project)
     memory_mb, _effective_total_mb, memory_args = _memory_policy(
         runtime_name, memory_mb
@@ -648,10 +666,10 @@ def build_runtime_argv(
         "--user=65534:65534", "--workdir=/workspace",
         "--mount", mount,
         "--entrypoint=/usr/bin/env", image,
-        "-i", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "-i", "--", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME=/build/home" if build_scratch_mb is not None else "HOME=/tmp",
         "TMPDIR=/build/tmp" if build_scratch_mb is not None else "TMPDIR=/tmp",
-        "LANG=C.UTF-8", "--",
+        "LANG=C.UTF-8",
     ]
     argv.extend(command)
     return argv, container_name
@@ -855,7 +873,7 @@ def run_isolated(
         raise ValueError("stdin exceeds %d bytes" % MAX_STDIN_BYTES)
     command = _parse_argv(argv_json)
     image = _validate_image(image)
-    image = _inspect_image_policy(runtime_path, runtime_prefix, image)
+    image = _inspect_image_policy(runtime_name, runtime_path, runtime_prefix, image)
     resolved_project = resolve_project(project)
     argv, name = build_runtime_argv(
         runtime_name, runtime_path, runtime_prefix,
