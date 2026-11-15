@@ -121,9 +121,12 @@ of the model — an uncensored or "abliterated" model changes what it will
 - **Credential stores are denied by default, even inside a root.** The direct
   read tools (`file_read`, `file_read_range`, `data_inspect`, `image_inspect`,
   and the source of `file_copy`/`file_move`) refuse `.ssh`, `.aws`, `.azure`,
-  `.gnupg`, `.kube`, `.docker/config.json`, `.git/config`, `.netrc`,
-  `.git-credentials`, `.pgpass`, OpenSSH key files (`id_rsa`, `id_ed25519`,
-  ...) and `.env*` -- regardless of a developer token or `SONDER_FILE_BYPASS`.
+  `.gcloud`, `.config/gcloud`, `.gnupg`, `.kube`, `.docker/config.json`,
+  `.git/config`, `.config/gh/hosts.yml`, `.netrc`, `.git-credentials`,
+  `.pgpass`, `.npmrc`, `.pypirc`, `kubeconfig`, `.terraformrc`/`terraform.rc`,
+  `.boto`, `.s3cfg`, `.htpasswd`, `.vault-token`, `*.kdbx`, GCP key files
+  (`service-account.json`, `application_default_credentials.json`), OpenSSH
+  key files (`id_rsa`, `id_ed25519`, ...) and `.env*` -- regardless of a developer token or `SONDER_FILE_BYPASS`.
   The only way to read one is a root that names it: add the store directory
   itself (`~/.ssh`) or the exact file (`/proj/.env`) to `file_roots.local` or
   `SONDER_FILE_ROOTS` (a one-shot `/approve` of a call whose `extra_roots`

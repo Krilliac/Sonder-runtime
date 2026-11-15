@@ -70,8 +70,10 @@ SECRET_FILES = {
     # OpenSSH private keys carry no secret suffix.
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
-SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
-SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube"}
+SECRET_SUFFIXES = {".key", ".kdbx", ".p12", ".pem", ".pfx"}
+SENSITIVE_READ_DIRECTORIES = {
+    ".git", ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
+}
 # Credential stores the direct read tools (file_read, file_read_range,
 # data_inspect, image_inspect, file_copy/move sources) deny by default even
 # inside an allowed root, and even with a developer token or bypass: a key
@@ -80,13 +82,29 @@ SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube
 # directory itself (``~/.ssh``), a path inside it, or the exact file
 # (``/proj/.env``) listed in ``file_roots.local`` or ``SONDER_FILE_ROOTS``.
 # See ``credential_read_component``.
-CREDENTIAL_READ_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".gnupg", ".kube"})
+CREDENTIAL_READ_DIRECTORIES = frozenset({
+    ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
+})
 CREDENTIAL_READ_FILES = frozenset({
     ".netrc", "_netrc", ".git-credentials", ".pgpass",
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+    # Package-registry / tool tokens and cluster credentials, by well-known name.
+    ".npmrc", ".pypirc", "kubeconfig", ".terraformrc", "terraform.rc",
+    ".boto", ".s3cfg", ".htpasswd", ".vault-token",
+    # GCP service-account key files and application-default credentials.
+    "service-account.json", "service_account.json", "serviceaccount.json",
+    "application_default_credentials.json",
 })
+# Credential stores recognised by extension (password databases).
+CREDENTIAL_READ_SUFFIXES = frozenset({".kdbx"})
 # (directory, file) pairs whose file is a credential store only in context.
 CREDENTIAL_READ_PAIRS = frozenset({(".docker", "config.json"), (".git", "config")})
+# Consecutive (directory, directory) pairs that are a credential store as a
+# whole (``~/.config/gcloud`` holds credentials.db and access_tokens.db), and
+# (directory, directory, file) triples for a single token file in a shared
+# directory (``~/.config/gh/hosts.yml``; ``gh/config.yml`` stays readable).
+CREDENTIAL_READ_DIRECTORY_PAIRS = frozenset({(".config", "gcloud")})
+CREDENTIAL_READ_TRIPLES = frozenset({(".config", "gh", "hosts.yml")})
 # Sonder's own first-party package below the install root. The mutation guard
 # used to recognize Sonder modules only by ``parent == root``, which was true
 # when every module sat directly in the install directory. The SPEC-3 Phase 5
@@ -550,7 +568,15 @@ def _credential_part(parts) -> str:
             return part
         if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_PAIRS:
             return "%s/%s" % (part, lowered[index + 1])
-        if index == last and (part in CREDENTIAL_READ_FILES or _is_env_file(part)):
+        if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_DIRECTORY_PAIRS:
+            return "%s/%s" % (part, lowered[index + 1])
+        if index + 1 < last and (part, lowered[index + 1], lowered[index + 2]) in CREDENTIAL_READ_TRIPLES:
+            return "%s/%s/%s" % (part, lowered[index + 1], lowered[index + 2])
+        if index == last and (
+            part in CREDENTIAL_READ_FILES
+            or _is_env_file(part)
+            or Path(part).suffix in CREDENTIAL_READ_SUFFIXES
+        ):
             return part
     return ""
 

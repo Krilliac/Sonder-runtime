@@ -128,3 +128,101 @@ def test_openssh_key_names_are_classified_secrets_for_mutation(workspace):
     _plant(workspace, "deploy/id_ed25519")
     with pytest.raises(PermissionError, match="mutate protected"):
         file_ops.write_file("deploy/id_ed25519", "x", mode="overwrite")
+
+
+# Token stores added by the secret-path coverage change. Each entry names one
+# rule so a mutation (removing it from file_ops) fails exactly its own tests.
+EXTRA_CREDENTIAL_PATHS = [
+    ".npmrc",
+    ".pypirc",
+    "kubeconfig",
+    ".kube/config",
+    "service-account.json",
+    "service_account.json",
+    "serviceaccount.json",
+    "application_default_credentials.json",
+    ".terraformrc",
+    "terraform.rc",
+    ".boto",
+    ".s3cfg",
+    ".htpasswd",
+    ".vault-token",
+    "vault/passwords.kdbx",
+    ".config/gh/hosts.yml",
+    ".config/gcloud/credentials.db",
+    ".config/gcloud/legacy_credentials/me/adc.json",
+    ".gcloud/access_tokens.db",
+    ".azure/msal_token_cache.json",
+    ".azure/accessTokens.json",
+    ".ssh/id_ed25519",
+    ".ssh/id_ecdsa",
+    ".ssh/id_dsa",
+]
+
+
+def _mixed(relative: str) -> str:
+    return "/".join(
+        "".join(c.upper() if i % 2 else c for i, c in enumerate(part))
+        for part in relative.split("/")
+    )
+
+
+@pytest.mark.parametrize("relative", EXTRA_CREDENTIAL_PATHS)
+@pytest.mark.parametrize("prefix", ["", "nested/project/"])
+def test_extra_token_stores_refused_top_level_and_nested(workspace, relative, prefix):
+    _plant(workspace, prefix + relative)
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(prefix + relative)
+
+
+@pytest.mark.parametrize("relative", EXTRA_CREDENTIAL_PATHS)
+def test_extra_token_stores_refused_in_mixed_case(workspace, relative):
+    # The rules lower-case every component, so case never unlocks a store.
+    mixed = _mixed(relative)
+    _plant(workspace, mixed)
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(mixed)
+
+
+@pytest.mark.parametrize("relative", EXTRA_CREDENTIAL_PATHS)
+def test_extra_token_store_refusal_names_the_file(workspace, relative):
+    target = _plant(workspace, relative)
+    with pytest.raises(PermissionError) as info:
+        file_ops.read_file(relative)
+    assert str(relative) in str(info.value) or target.name in str(info.value)
+    assert "is a credential store" in str(info.value)
+
+
+@pytest.mark.parametrize("relative", [
+    "npmrc.md",
+    "kube-config-guide.md",
+    "service.json",
+    "config.json",
+    "terraform.md",
+    "notes.kdbx.md",
+    "gh/config.yml",
+    ".config/gh/config.yml",
+    ".config/other/credentials.db",
+    "hosts.yml",
+    "docs/gcloud.md",
+    "id_ed25519.pub",
+    ".ssh-notes.md",
+])
+def test_near_miss_names_stay_readable(workspace, relative):
+    _plant(workspace, relative)
+    assert file_ops.read_file(relative)["text"] == "CREDENTIAL-MATERIAL"
+
+
+@pytest.mark.parametrize("name", [
+    ".npmrc", ".pypirc", "kubeconfig", "service-account.json", ".terraformrc",
+    "terraform.rc", ".boto", ".s3cfg", ".htpasswd", ".vault-token", "vault.kdbx",
+    "id_ed25519", "id_ecdsa", "id_dsa",
+])
+def test_extra_token_stores_are_classified_secrets_for_mutation(name):
+    assert file_ops._is_secret_path(Path("proj") / name), name
+    assert file_ops._is_secret_path(Path("proj") / name.upper()), name
+
+
+@pytest.mark.parametrize("name", ["id_ed25519.pub", "npmrc.md", "service.json", "config.json"])
+def test_near_miss_names_are_not_classified_secrets(name):
+    assert not file_ops._is_secret_path(Path("proj") / name), name
