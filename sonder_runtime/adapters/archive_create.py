@@ -355,7 +355,11 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def _sensitive_relative(relative: Path) -> bool:
+def _sensitive_relative(relative: Path, root: Path | None = None) -> bool:
+    if file_ops.credential_path_component(
+        root if root is not None else Path(), relative.parts,
+    ):
+        return True
     directory_names = {
         str(name).casefold() for name in file_ops.SENSITIVE_READ_DIRECTORIES
     }
@@ -375,10 +379,12 @@ def _relative_path(path: Path, root: Path) -> Path:
     except ValueError as exc:
         raise PermissionError("archive input is outside the selected project root") from exc
     if relative == Path("."):
+        if _sensitive_relative(Path("."), root):
+            raise PermissionError("archive input is sensitive or control state: %s" % root)
         return relative
     if len(relative.parts) > HARD_MAX_DEPTH or len(relative.as_posix()) > HARD_MAX_PATH_CHARS:
         raise ArchiveCreateRejected("archive input path exceeds hard path limits: %s" % relative)
-    if _sensitive_relative(relative):
+    if _sensitive_relative(relative, root):
         raise PermissionError("archive input is sensitive or control state: %s" % relative)
     return relative
 
