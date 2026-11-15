@@ -853,18 +853,40 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset, keep_emp
     (``do_refactor`` -> ``ensemble_answer``) and keeping only names that are
     actually registered MCP tools, so ``_open_db`` and friends drop out.
     """
+    # Fail closed: an empty map reads as "this chain fronts no tool", which the
+    # gates answer with "allowed" for everything.
     try:
         with open(_source_path(path), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
-    except (OSError, SyntaxError):
-        return {}
+    except (OSError, SyntaxError) as exc:
+        raise CatalogUnavailable(
+            "the %s dispatch source could not be parsed: %s" % (path, exc)
+        ) from exc
     functions = {
         node.name: node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     scope = functions.get(function)
     if scope is None:
-        return {}
+        raise CatalogUnavailable("%s has no function %s" % (path, function))
+    for node in ast.walk(scope):
+        if not (
+            isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+            and node.left.id == "cmd" and node.comparators
+        ):
+            continue
+        comparator = node.comparators[0]
+        literal = isinstance(comparator, ast.Constant) or (
+            isinstance(comparator, (ast.Tuple, ast.List, ast.Set))
+            and all(isinstance(item, ast.Constant) for item in comparator.elts)
+        )
+        if not literal:
+            # ``_branch_names`` reads only literals, so this branch would be
+            # silently ungated; refuse to build a map that omits it.
+            raise CatalogUnavailable(
+                "%s.%s compares cmd to a non-literal (%s); the gate cannot "
+                "enumerate it" % (path, function, ast.unparse(node))
+            )
 
     def _called_tools(node, depth: int, seen: set) -> set:
         found: set = set()

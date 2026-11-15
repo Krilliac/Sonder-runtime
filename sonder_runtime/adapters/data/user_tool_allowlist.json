@@ -29,7 +29,7 @@
   "untooled_commands": [
     {
       "name": "/help",
-      "why": "Static help text. Reads no host file, process, window or secret."
+      "why": "Lists command names and one-line summaries generated from the live command catalog. Shows no host path, file content, process or secret."
     },
     {
       "name": "/trace",

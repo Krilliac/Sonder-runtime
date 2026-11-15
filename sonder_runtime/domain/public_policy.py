@@ -29,6 +29,7 @@ KEY_NAME = "name"
 KEY_WHY = "why"
 
 REFUSAL_TEMPLATE = "tool '%s' is not available to this account role"
+COMMAND_REFUSAL_TEMPLATE = "command '%s' is not available to this account role"
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,8 @@ class ToolRefused:
 
     @property
     def reason(self) -> str:
-        return REFUSAL_TEMPLATE % self.tool
+        template = COMMAND_REFUSAL_TEMPLATE if self.tool.startswith("/") else REFUSAL_TEMPLATE
+        return template % self.tool
 
 
 ToolDecision = Union[ToolAllowed, ToolRefused]
