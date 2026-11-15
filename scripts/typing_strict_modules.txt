@@ -300,6 +300,7 @@ sonder_runtime/application/skills/composition.py
 sonder_runtime/application/skills/registry.py
 sonder_runtime/application/strategy/__init__.py
 sonder_runtime/application/strategy/codegen_result.py
+sonder_runtime/application/structured_output.py
 sonder_runtime/application/subagents/__init__.py
 sonder_runtime/application/subagents/checkpoint_provenance.py
 sonder_runtime/application/tasks/__init__.py
@@ -390,6 +391,7 @@ sonder_runtime/domain/fleet_intent.py
 sonder_runtime/domain/fleet_pressure.py
 sonder_runtime/domain/host_tools/__init__.py
 sonder_runtime/domain/host_tools/registry.py
+sonder_runtime/domain/json_reply.py
 sonder_runtime/domain/login_output.py
 sonder_runtime/domain/memory/__init__.py
 sonder_runtime/domain/memory/retention_gate.py
