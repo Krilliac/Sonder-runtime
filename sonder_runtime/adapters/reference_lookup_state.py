@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from sonder_runtime.adapters.reference_index import ReferenceIndex
 from sonder_runtime.domain.reference_lookup.applies import AppliesRule
-from sonder_runtime.domain.reference_lookup.models import IndexState
+from sonder_runtime.domain.reference_lookup.models import IndexState, LibrarySource, SchemaCompat
 from sonder_runtime.domain.reference_lookup.sanitize import one_line, sanitize
 from sonder_runtime.platform import reference_library_config as _config
 
@@ -37,6 +37,10 @@ class LookupStatus:
     names: tuple[str, ...]
     prefixes: tuple[str, ...]
     last_error: str
+    schema_version: int = 1
+    schema_compat: SchemaCompat = SchemaCompat.LEGACY
+    library: tuple[LibrarySource, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     @property
     def readable(self) -> bool:
@@ -79,14 +83,18 @@ def status(rule: AppliesRule) -> LookupStatus:
         found = index().status()
         state, passages, sources = found.state, found.passages, found.sources
         built_at, detail = found.built_at, found.detail
+        schema, compat = found.schema_version, found.schema_compat
+        library, warnings = found.library, found.warnings
     except Exception as exc:  # noqa: BLE001
         path, source, state, passages, sources, built_at = "", "", IndexState.ERROR, 0, (), ""
+        schema, compat, library, warnings = 1, SchemaCompat.LEGACY, (), ()
         detail = sanitize(f"{type(exc).__name__}: {exc}")
     return LookupStatus(
         kill_switch_off=kill_switch_off(), policy_enabled=rule.enabled, index_path=path,
         path_source=source, state=state, passages=passages, sources=sources, built_at=built_at,
         detail=detail, names=tuple(sorted(rule.names)), prefixes=rule.prefixes,
-        last_error=last_error(),
+        last_error=last_error(), schema_version=schema, schema_compat=compat, library=library,
+        warnings=warnings,
     )
 
 
@@ -101,8 +109,12 @@ def status_line(rule: AppliesRule) -> str:
         automatic = (f"names={', '.join(s.names) or '-'} prefixes={', '.join(s.prefixes) or '-'} "
                      "(runtime system prompt not sent on lookup turns)")
     if s.readable:
-        sources = ", ".join(f"{name}:{count}" for name, count in s.sources) or "-"
-        index_text = f"readable=yes passages={s.passages} sources={sources} built={s.built_at or '-'}"
+        listed = [(entry.source, entry.passages) for entry in s.library] or list(s.sources)
+        sources = ", ".join(f"{name}:{count}" for name, count in listed) or "-"
+        index_text = (f"readable=yes schema={s.schema_version} passages={s.passages} "
+                      f"sources={sources} built={s.built_at or '-'}")
+        if s.warnings:
+            index_text += f" warnings={len(s.warnings)} ({s.warnings[0]})"
     else:
         index_text = f"readable=no ({s.state.value}{': ' + s.detail if s.detail else ''})"
     return one_line(

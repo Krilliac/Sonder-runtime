@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -33,6 +34,7 @@ from sonder_runtime.domain.reference_lookup.models import (
     ReferenceIndexError,
     TermStats,
 )
+from sonder_runtime.domain.reference_lookup.library_meta import parse_library_meta
 from sonder_runtime.domain.reference_lookup.sanitize import sanitize
 from sonder_runtime.domain.reference_lookup.selection import priority_rows
 from sonder_runtime.domain.reference_lookup.terms import MAX_QUERY_TERMS, quoted
@@ -53,6 +55,7 @@ _TITLE_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages WHERE passages MATCH ? "
               f"ORDER BY rank LIMIT {TITLE_TOPUP_LIMIT}")
 
 _CacheKey = tuple[str, int, int]
+_logger = logging.getLogger("sonder.reference_lookup")
 
 
 def classify_error(exc: BaseException) -> IndexState:
@@ -132,6 +135,8 @@ class ReferenceIndex:
             if self._cached is not None and self._cached[0] == key:
                 return self._cached[1]
         status = self._probe(path_text)
+        for warning in status.warnings:   # once per validation: the result is cached below
+            _logger.warning("reference index %s: %s", path_text, warning)
         if status.state is not IndexState.ERROR:   # a transient error is not remembered
             with self._lock:
                 self._cached = (key, status)
@@ -233,5 +238,8 @@ class ReferenceIndex:
             sources = tuple(sorted((str(k), int(v)) for k, v in by_source.items()))
         except (TypeError, ValueError, AttributeError):
             return wrong("meta summary has unreadable counts")
+        library = parse_library_meta(meta.get("schema_version"), meta.get("sources"))
         return IndexStatus(IndexState.READY, path_text, passages=passages, sources=sources,
-                           built_at=sanitize(_text(meta.get("built_at"))))
+                           built_at=sanitize(_text(meta.get("built_at"))),
+                           schema_version=library.schema_version, schema_compat=library.compat,
+                           library=library.library, warnings=library.warnings)
