@@ -1053,17 +1053,47 @@ class RuntimeLifecycle:
             bucket.updated = now
             return bucket.tokens >= 1.0
 
-    def record_auth_failure(self, peer: str, reason: str) -> None:
+    def _refilled_auth_bucket(self, peer: str) -> _TokenBucket:
+        """Caller holds ``_auth_lock``."""
+        bucket = self._auth_buckets.setdefault(peer, _TokenBucket())
+        now = time.monotonic()
+        bucket.tokens = min(
+            _AUTH_BUCKET_CAPACITY,
+            bucket.tokens
+            + (now - bucket.updated) * _AUTH_BUCKET_REFILL_PER_SECOND,
+        )
+        bucket.updated = now
+        return bucket
+
+    def reserve_auth_attempt(self, peer: str) -> bool:
+        """Atomically spend one token before a credential check runs.
+
+        Check and consume are one locked step, so concurrent attempts from
+        one address cannot all pass the check while queued behind a slow
+        verify.  Pair with :meth:`refund_auth_attempt` on success.
+        """
         with self._auth_lock:
-            bucket = self._auth_buckets.setdefault(peer, _TokenBucket())
-            now = time.monotonic()
-            bucket.tokens = min(
-                _AUTH_BUCKET_CAPACITY,
-                bucket.tokens
-                + (now - bucket.updated) * _AUTH_BUCKET_REFILL_PER_SECOND,
-            )
-            bucket.updated = now
-            bucket.tokens = max(0.0, bucket.tokens - 1.0)
+            bucket = self._refilled_auth_bucket(peer)
+            if bucket.tokens < 1.0:
+                return False
+            bucket.tokens -= 1.0
+            if len(self._auth_buckets) > 4096:
+                for key in list(self._auth_buckets)[:2048]:
+                    del self._auth_buckets[key]
+            return True
+
+    def refund_auth_attempt(self, peer: str) -> None:
+        with self._auth_lock:
+            bucket = self._auth_buckets.get(peer)
+            if bucket is not None:
+                bucket.tokens = min(float(_AUTH_BUCKET_CAPACITY), bucket.tokens + 1.0)
+
+    def record_auth_failure(self, peer: str, reason: str, *, charge: bool = True) -> None:
+        """Count a failure; ``charge=False`` when a reservation already paid."""
+        with self._auth_lock:
+            bucket = self._refilled_auth_bucket(peer)
+            if charge:
+                bucket.tokens = max(0.0, bucket.tokens - 1.0)
             if len(self._auth_buckets) > 4096:
                 # Bound memory under address-spraying.
                 for key in list(self._auth_buckets)[:2048]:
