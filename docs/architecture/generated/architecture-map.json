@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 439,
+      "file_count": 440,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -434,6 +434,7 @@
         "sonder_runtime/adapters/security/powershell_ast.py",
         "sonder_runtime/adapters/security/powershell_gate.py",
         "sonder_runtime/adapters/security/recovery_evidence.py",
+        "sonder_runtime/adapters/security/role_tool_policy.py",
         "sonder_runtime/adapters/security/unsafe_lab.py",
         "sonder_runtime/adapters/semantic_tier.py",
         "sonder_runtime/adapters/session_atif_export.py",
@@ -990,7 +991,7 @@
       ]
     },
     {
-      "file_count": 305,
+      "file_count": 306,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1218,6 +1219,7 @@
         "sonder_runtime/domain/protocol/events.py",
         "sonder_runtime/domain/protocol/subsystem_protocols.py",
         "sonder_runtime/domain/provider_override_policy.py",
+        "sonder_runtime/domain/public_policy.py",
         "sonder_runtime/domain/query_limits.py",
         "sonder_runtime/domain/reasoning_continuation.py",
         "sonder_runtime/domain/recipe.py",

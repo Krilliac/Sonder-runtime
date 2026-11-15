@@ -220,15 +220,19 @@ def test_a_caller_without_developer_authority_is_refused_before_the_app(monkeypa
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app",
                         lambda: pytest.fail("a refused chat command built the app"))
     for line in ("/build model", "/fix-build game"):
-        assert ts._handle_slash(line, context=USER) == (
-            "refused %s: developer or admin authority is required" % line.split()[0])
+        # The role tool gate refuses a user-role account before the facade's
+        # own developer check is reached.
+        assert ts._handle_slash(line, context=USER).startswith(
+            "refused %s: " % line.split()[0])
     # /test and /digest carry their routes' admin guard: a test run executes
     # the project's code and a digest reads files under the roots.
     for line in ("/test", "/test pytest", "/test result " + JOB, "/digest a.log",
                  "/crash triage core.1", "/profile trace.json"):
-        for context in (USER, DEVELOPER):
-            assert ts._handle_slash(line, context=context) == (
-                "refused %s: admin authority is required" % line.split()[0])
+        assert ts._handle_slash(line, context=DEVELOPER) == (
+            "refused %s: admin authority is required" % line.split()[0])
+        # A user-role account is stopped earlier, by the role tool gate.
+        assert ts._handle_slash(line, context=USER).startswith(
+            "refused %s: " % line.split()[0])
 
 
 def test_test_runs_as_the_account_principal_through_the_gateway(monkeypatch):
