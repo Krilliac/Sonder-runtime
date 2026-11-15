@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from uuid import uuid4
 
-from .ports.compaction import (
+from ..ports.compaction import (
     CompactionEngine,
     CompactionEvent,
     CompactionRequest,
@@ -21,7 +21,7 @@ from .ports.compaction import (
     SessionHistoryEvent,
     validate_compaction_result,
 )
-from .compaction_retention import (
+from ..compaction_retention import (
     SUMMARY_SCHEMA_VERSION, critical_retention_problems, summarized_modality,
 )
 

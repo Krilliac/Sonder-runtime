@@ -473,3 +473,10 @@ def test_store_migrations_are_required_in_desktop_payload():
     assert "migrations" in package.ALLOWED_DIRS
     assert required <= package.REQUIRED_FILES
     assert all(package._included(Path(item)) for item in required)
+
+
+def test_compaction_engine_module_is_shipped_in_the_payload():
+    engine = "sonder_runtime/application/compaction/engine.py"
+    assert engine in package.REQUIRED_FILES
+    assert package._included(Path(engine))
+    assert engine in {path.relative_to(package.ROOT).as_posix() for path in package._tracked_files()}

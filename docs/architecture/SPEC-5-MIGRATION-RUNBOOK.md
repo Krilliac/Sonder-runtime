@@ -177,6 +177,3 @@ python -m pytest tests/production/test_release_hardening.py -v
   as root modules are absorbed into the package.
 - Container isolation and hardware-qualified training tests require live
   infrastructure and are gated by environment variables.
-- The `__init__.py` relative import workaround: the architecture checker's
-  `resolve_relative()` miscounts levels for `__init__.py` files. Use
-  absolute imports in `__init__.py` re-export files.
