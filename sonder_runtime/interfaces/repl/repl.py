@@ -18,13 +18,14 @@ import signal
 import sys
 import threading
 import time
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 
 from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.application import foreground_turns
 from sonder_runtime.domain.model_catalog import untagged as _model_name_untagged
 from sonder_runtime.domain.runtime_model_configuration import OPTIONAL_LOCAL_TIERS
 from sonder_runtime.adapters import creation_workspace
+from sonder_runtime.adapters import operator_attendance
 from sonder_runtime.adapters.filesystem import file_ops
 from sonder_runtime.platform import paths as server_paths
 from sonder_runtime.platform import private_files
@@ -1037,8 +1038,15 @@ def _run_catalogued(line, cmd):
             may_run, refusal = _permission_gate(tool, powershell_gate.powershell_arguments(tool, kwargs))
             if not may_run:
                 return refusal
+            # A person at the console typed exactly this tool: that is the
+            # attendance the live runtime checkout asks for (bound to the
+            # tool name, so a model loop this call starts is not attended).
+            attendance = (
+                operator_attendance.attended(tool) if _console_has_operator() else nullcontext()
+            )
             try:
-                return str(handler(**kwargs))
+                with attendance:
+                    return str(handler(**kwargs))
             except TypeError as exc:
                 return "%s: %s\n%s" % (
                     cmd, exc, command_catalog.help_command(cmd),

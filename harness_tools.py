@@ -20,6 +20,7 @@ from pathlib import Path
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
+from sonder_runtime.adapters import live_checkout
 from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters import protected_write_scope
 from sonder_runtime.adapters.git_mutation_guard import (
@@ -261,9 +262,15 @@ def _git():
     return shutil.which("git") or "git"
 
 
+_GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
 def _git_env():
     env = _child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git must work on the tree that was checked, not one the environment names.
+    for name in _GIT_LOCATION_VARIABLES:
+        env.pop(name, None)
     return env
 
 
@@ -335,53 +342,31 @@ def _git_change_runner(root, *, timeout, hardened):
     return run
 
 
-def _protected_change_refusal(operation, root, targets, *, timeout, live_only=True):
-    """``{"ok": False, "error": ...}`` when ``operation`` would change protected control-plane files, else None.
+def _live_refusal(operation, root):
+    """``{"ok": False, "error": ...}`` when ``operation`` may not change the live runtime checkout at ``root``, else None.
 
-    ``git_change_targets`` lists what the operation writes and applies the
-    file tools' guard to each path (in the live runtime checkout only, unless
-    ``live_only`` is False).
+    Decided from paths and the operator-attendance signal alone: no git child
+    runs (``live_checkout.refusal``).
     """
-    run, top, refused = _change_check_runner(operation, root, timeout=timeout, live_only=live_only)
-    if run is None:
-        return refused
-    reason = git_change_targets.refusal(operation, root, run, targets, top=top)
-    return {"ok": False, "error": reason} if reason else None
+    refused = live_checkout.refusal(operation, Path(root))
+    return refused.as_result() if refused is not None else None
 
 
-def _change_check_runner(operation, root, *, timeout, live_only):
-    """``(run, top, refused)`` for the protected-path checks.
+def _patch_refusal(operation, root, patch_text, *, timeout):
+    """``{"ok": False, "error": ...}`` when the patch would write a protected control-plane path, else None.
 
-    ``run`` is None when no check applies (``live_only`` outside the live
-    runtime checkout; ``refused`` is then None too) or when the hardened
-    runner cannot be built (``refused`` is the refusal).
+    ``git apply --numstat`` lists every path the patch writes; each gets the
+    file tools' guard, in any repository (``git_change_targets.patch_refusal``).
     """
     timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
-    # ``rev-parse --show-toplevel`` runs no hook or driver, so it needs no overrides.
-    top = git_change_targets.toplevel(_git_change_runner(root, timeout=timeout, hardened=False))
-    if live_only and not git_change_targets.is_live_checkout(top):
-        return None, top, None
+    run = _git_change_runner(root, timeout=timeout, hardened=False)
+    top = git_change_targets.toplevel(run)
     try:
-        return _git_change_runner(root, timeout=timeout, hardened=live_only), top, None
-    except ValueError as exc:
-        return None, top, {"ok": False, "error": "refusing %s: %s" % (operation, exc)}
-
-
-def _planned_git_arguments(operation, root, plan, *, timeout):
-    """``(refused, arguments)`` for ``git_checkout`` and ``git_branch`` with a base.
-
-    In the live runtime checkout ``arguments`` are the plan's
-    (``git_change_targets.checkout_plan`` / ``branch_plan``): the exact
-    command whose writes were checked, run instead of the caller's spelling.
-    Elsewhere both are None and the caller runs its own command.
-    """
-    run, top, refused = _change_check_runner(operation, root, timeout=timeout, live_only=True)
-    if run is None:
-        return refused, None
-    reason, made = git_change_targets.planned(operation, root, run, plan, top=top)
-    if reason:
-        return {"ok": False, "error": reason}, None
-    return None, list(made.arguments)
+        paths = git_change_targets.patch_targets(run, patch_text)
+    except git_change_targets.TargetsUnknown as exc:
+        return {"ok": False, "error": git_change_targets.unlisted_refusal(operation, exc)}
+    reason = git_change_targets.patch_refusal(operation, root, top, paths)
+    return {"ok": False, "error": reason} if reason else None
 
 
 def _run_git(root, args, *, timeout=10):
@@ -681,6 +666,9 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
     if not info:
         return {"ok": False, "error": "unknown linter: %s" % tool, "tool": tool}
     if fix and info.get("fix"):
+        live = _live_refusal("lint_run", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "fix"}
         refused = protected_write_scope.scope_refusal("lint_run fix", root, root / path if path else root)
         if refused:
             return {"ok": False, "error": refused, "tool": tool, "mode": "fix"}
@@ -710,6 +698,9 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
     if not cmd_template:
         return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
     if not check_only:
+        live = _live_refusal("format_code", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "format"}
         refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
         if refused:
             return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
@@ -952,19 +943,15 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_root
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "branch name is required"}
+    refused = _live_refusal("git_branch", root)
+    if refused:
+        return refused
     if checkout:
         cmd = ["checkout", "-b", name]
-        if base:
-            refused, planned = _planned_git_arguments(
-                "git_branch", root, lambda run: git_change_targets.branch_plan(run, name, base), timeout=timeout,
-            )
-            if refused:
-                return refused
-            cmd = planned or cmd + [base]
     else:
         cmd = ["branch", name]
-        if base:
-            cmd.append(base)
+    if base:
+        cmd.append(base)
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -973,12 +960,10 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
-    refused, planned = _planned_git_arguments(
-        "git_checkout", root, lambda run: git_change_targets.checkout_plan(run, ref), timeout=timeout,
-    )
+    refused = _live_refusal("git_checkout", root)
     if refused:
         return refused
-    return _run_git(root, planned or ["checkout", ref], timeout=timeout)
+    return _run_git(root, ["checkout", ref], timeout=timeout)
 
 
 @_guarded_git_mutation("git_stash")
@@ -998,13 +983,10 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
         cmd = ["stash", "drop"]
     else:
         return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
-    refused = _protected_change_refusal(
-        "git_stash " + action, root,
-        lambda run: git_change_targets.stash_targets(run, action, include_untracked=bool(include_untracked)),
-        timeout=timeout,
-    )
-    if refused:
-        return refused
+    if action in ("push", "pop"):
+        refused = _live_refusal("git_stash", root)
+        if refused:
+            return refused
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -1033,9 +1015,7 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roo
     if message:
         cmd.extend(["-m", message])
     cmd.append(branch)
-    refused = _protected_change_refusal(
-        "git_merge", root, lambda run: git_change_targets.merge_targets(run, branch), timeout=timeout,
-    )
+    refused = _live_refusal("git_merge", root)
     if refused:
         return refused
     return _run_git(root, cmd, timeout=timeout)
@@ -1050,9 +1030,7 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
             return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
     except json.JSONDecodeError:
         return {"ok": False, "error": "invalid JSON"}
-    refused = _protected_change_refusal(
-        "git_cherry_pick", root, lambda run: git_change_targets.cherry_pick_targets(run, commits), timeout=timeout,
-    )
+    refused = _live_refusal("git_cherry_pick", root)
     if refused:
         return refused
     return _run_git(root, ["cherry-pick"] + commits, timeout=timeout)
@@ -1300,11 +1278,11 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
     if not patch_text:
         return {"ok": False, "error": "patch_text is required"}
     if not check_only:
+        refused = _live_refusal("apply_patch", root)
+        if refused:
+            return refused
         # Every path the patch writes, in any repository, gets the file tools' guard.
-        refused = _protected_change_refusal(
-            "apply_patch", root, lambda run: git_change_targets.patch_targets(run, patch_text),
-            timeout=timeout, live_only=False,
-        )
+        refused = _patch_refusal("apply_patch", root, patch_text, timeout=timeout)
         if refused:
             return refused
     cmd = [_git(), "apply"]

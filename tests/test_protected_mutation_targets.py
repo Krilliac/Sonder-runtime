@@ -32,6 +32,7 @@ import pytest
 import harness_tools
 import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 from sonder_runtime.adapters import model_tool_policy as mtp
+from sonder_runtime.adapters.operator_attendance import attended
 from sonder_runtime.adapters.filesystem import file_ops
 
 from tests.support.policy_checkout import (
@@ -182,6 +183,12 @@ def _patch(relative, old, new):
 
 @pytest.mark.parametrize("which", ["shipped", "overlay"])
 def test_apply_patch_refuses_a_patch_that_changes_a_policy_file(checkout, which):
+    """Even the operator's own ``/apply_patch`` is checked path by path (the attended call is not unchecked)."""
+    with attended("apply_patch"):
+        _apply_patch_refuses_a_policy_file(checkout, which)
+
+
+def _apply_patch_refuses_a_policy_file(checkout, which):
     target = _targets(checkout)[which]
     relative = target.relative_to(checkout.repo).as_posix()
     first_line = target.read_text(encoding="utf-8").splitlines()[0]
@@ -200,6 +207,11 @@ def test_apply_patch_refuses_a_patch_that_changes_a_policy_file(checkout, which)
 
 
 def test_apply_patch_refuses_a_rename_onto_and_a_creation_of_a_protected_path(checkout):
+    with attended("apply_patch"):
+        _apply_patch_refuses_a_rename_and_a_creation(checkout)
+
+
+def _apply_patch_refuses_a_rename_and_a_creation(checkout):
     checkout.shipped.unlink()
     rename = (
         "diff --git a/hello.txt b/pkg/data/model_tool_policy.json\n"
@@ -235,6 +247,7 @@ def _refused(result):
 
 @pytest.mark.parametrize("operation", ["checkout", "branch", "merge", "cherry_pick"])
 def test_git_tools_refuse_to_change_a_policy_file_in_the_live_checkout(checkout, operation):
+    """Unattended, no git tool rewrites the live checkout, whatever the change brings in."""
     sha = _evil_branch(checkout)
     plain = _plain_branch(checkout)
     before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
@@ -249,11 +262,11 @@ def test_git_tools_refuse_to_change_a_policy_file_in_the_live_checkout(checkout,
         "cherry_pick": (lambda: harness_tools.git_cherry_pick(root, json.dumps([sha])),
                         lambda: harness_tools.git_cherry_pick(root, json.dumps([plain]))),
     }
-    refuse, control = calls[operation]
+    refuse, harmless = calls[operation]
     _refused(refuse())
+    _refused(harmless())
     _unchanged(checkout, before)
-    assert control()["ok"] is True
-    _unchanged(checkout, before)
+    assert _head(checkout)[0] == "master"
 
 
 def test_git_checkout_of_a_policy_file_path_is_refused(checkout):
@@ -263,7 +276,7 @@ def test_git_checkout_of_a_policy_file_path_is_refused(checkout):
     before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
     _refused(harness_tools.git_checkout(str(checkout.repo), checkout.shipped.relative_to(checkout.repo).as_posix()))
     _unchanged(checkout, before)
-    assert harness_tools.git_checkout(str(checkout.repo), "hello.txt")["ok"] is True
+    _refused(harness_tools.git_checkout(str(checkout.repo), "hello.txt"))
 
 
 @pytest.mark.parametrize("action", ["pop", "push"])
@@ -277,10 +290,11 @@ def test_git_stash_refuses_to_change_a_policy_file_in_the_live_checkout(checkout
     assert harness_tools.git_stash(str(checkout.repo), action="list")["ok"] is True
 
 
-def test_git_stash_of_ordinary_changes_still_works(checkout):
+def test_git_stash_of_ordinary_changes_works_for_the_operator(checkout):
     (checkout.repo / "hello.txt").write_text("edited\n", encoding="utf-8")
-    assert harness_tools.git_stash(str(checkout.repo), action="push", include_untracked=False)["ok"] is True
-    assert harness_tools.git_stash(str(checkout.repo), action="pop")["ok"] is True
+    with attended("git_stash"):
+        assert harness_tools.git_stash(str(checkout.repo), action="push", include_untracked=False)["ok"] is True
+        assert harness_tools.git_stash(str(checkout.repo), action="pop")["ok"] is True
     assert (checkout.repo / "hello.txt").read_text(encoding="utf-8") == "edited\n"
 
 
@@ -289,65 +303,10 @@ def _head(files):
     return branch, _git(files.repo, "rev-parse", "HEAD").stdout.strip()
 
 
-def _history_with_an_old_floor(files):
-    """master: a commit that dropped the floor (branch ``side`` stays there), then one that restored it."""
-    repo = files.repo
-    good = files.shipped.read_bytes()
-    files.shipped.write_text('{"version": 1, "model_profiles": []}\n', encoding="utf-8")
-    _git(repo, "commit", "-q", "-am", "drop the floor")
-    _git(repo, "branch", "side")
-    files.shipped.write_bytes(good)
-    _git(repo, "commit", "-q", "-am", "restore the floor")
-    (repo / "hello.txt").write_text("plain\n", encoding="utf-8")
-    _git(repo, "commit", "-q", "-am", "plain edit")
-
-
-@pytest.mark.parametrize("spelling", [":/drop the floor", "master...side"])
-def test_git_checkout_resolves_a_ref_exactly_as_it_runs_it(checkout, spelling):
-    """A commit named by message or as a merge base is checked like any other commit."""
-    _history_with_an_old_floor(checkout)
-    before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
-    head = _head(checkout)
-    _refused(harness_tools.git_checkout(str(checkout.repo), spelling))
-    _unchanged(checkout, before)
-    assert _head(checkout) == head
-    _refused(harness_tools.git_branch(str(checkout.repo), "mine", base=spelling))
-    _unchanged(checkout, before)
-    assert _head(checkout) == head
-    assert _git(checkout.repo, "show-ref", "--verify", "--quiet", "refs/heads/mine", check=False).returncode != 0
-    # Control: a commit named by message that changes only an ordinary file is checked out.
-    result = harness_tools.git_checkout(str(checkout.repo), ":/restore the floor")
-    assert result["ok"] is True, result
-    assert (checkout.repo / "hello.txt").read_text(encoding="utf-8") == "hello\n"
-    _unchanged(checkout, before)
-
-
-def test_git_checkout_never_guesses_a_branch_from_a_remote_tracking_ref(checkout):
-    """``git checkout evil`` with only ``origin/evil`` would create ``evil`` there (checkout.guess)."""
-    repo = checkout.repo
-    sha = _evil_branch(checkout)
+def test_git_checkout_of_a_local_branch_switches_to_it_for_the_operator(checkout):
     plain = _plain_branch(checkout)
-    _git(repo, "remote", "add", "origin", str(repo))
-    _git(repo, "update-ref", "refs/remotes/origin/evil", sha)
-    _git(repo, "update-ref", "refs/remotes/origin/plain-remote", plain)
-    _git(repo, "branch", "-D", "evil")
-    before = (checkout.shipped.read_bytes(), checkout.overlay.read_bytes())
-    _refused(harness_tools.git_checkout(str(repo), "evil"))
-    _unchanged(checkout, before)
-    assert _head(checkout)[0] == "master"
-    assert _git(repo, "show-ref", "--verify", "--quiet", "refs/heads/evil", check=False).returncode != 0
-    _refused(harness_tools.git_branch(str(repo), "mine", base="origin/evil"))
-    _unchanged(checkout, before)
-    # Control: a branch from a remote-tracking ref that changes only an ordinary file works.
-    result = harness_tools.git_branch(str(repo), "mine2", base="origin/plain-remote")
-    assert result["ok"] is True, result
-    assert _head(checkout) == ("mine2", plain)
-    _unchanged(checkout, before)
-
-
-def test_git_checkout_of_a_local_branch_still_switches_to_it(checkout):
-    plain = _plain_branch(checkout)
-    result = harness_tools.git_checkout(str(checkout.repo), "plain")
+    with attended("git_checkout"):
+        result = harness_tools.git_checkout(str(checkout.repo), "plain")
     assert result["ok"] is True, result
     assert _head(checkout) == ("plain", plain)
 
@@ -389,18 +348,22 @@ def no_child(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("call", [
-    lambda root, path: harness_tools.format_code(root, tool="ruff", path=path),
-    lambda root, path: harness_tools.lint_run(root, tool="ruff", path=path, fix=True),
+@pytest.mark.parametrize("call, tool", [
+    (lambda root, path: harness_tools.format_code(root, tool="ruff", path=path), "format_code"),
+    (lambda root, path: harness_tools.lint_run(root, tool="ruff", path=path, fix=True), "lint_run"),
 ], ids=["format_code", "lint_run_fix"])
-def test_formatters_and_lint_fixes_do_not_run_over_a_policy_file(checkout, no_child, call):
+def test_formatters_and_lint_fixes_do_not_run_over_a_policy_file(checkout, no_child, call, tool):
     root = str(checkout.repo)
     for path in ("pkg/data/model_tool_policy.json", "pkg/data", "pkg", "state", "", "."):
         result = call(root, path)
         assert result.get("ok") is False and "protected" in str(result.get("error", "")), (path, result)
     assert no_child == []
-    # Control: an ordinary project directory inside the checkout is formatted.
-    assert call(root, "proj").get("ok") is True
+    # Unattended, even an ordinary project directory in the live checkout is not formatted ...
+    assert call(root, "proj").get("ok") is False
+    assert no_child == []
+    # ... control: for the operator at the console it is.
+    with attended(tool):
+        assert call(root, "proj").get("ok") is True
     assert len(no_child) == 1
 
 
