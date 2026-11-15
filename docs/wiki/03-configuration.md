@@ -675,7 +675,12 @@ same names as the deny list above, taken from its default prefixes: the
 attempt of the turn; with model thinking off where the model's route accepts
 that, and asked once more as an ordinary call when that reply comes back empty
 or refused); only the first eight identifiers in a question (event
-ids, technique ids, hex values) get title priority. Passages are handed to the
+ids, technique ids, hex values) get title priority; "T1110" there finds the
+parent technique's page, not its sub-techniques'. A chosen passage whose title
+opens with an ATT&CK id (an emulation test or detection rule titled
+"T1003.001 ...") is followed by the passage of every other source whose title
+opens with the same id, so the ATT&CK page sits next to the pages that quote
+it (one title query per such id). Passages are handed to the
 model only when the best of them is close enough to the question: it must hold
 at least a fifth of the query's search words, each word weighted by how
 rare it is in the library (terms without a space only: a multi-word phrase the model
@@ -787,10 +792,13 @@ model name. A `sonder-inference` binding therefore sends the request to
 `SONDER_INFERENCE_BASE_URL` and cannot silently enter the Ollama pool.
 
 The supported provider values are `sonder-inference`, `openai_compatible`,
-`ollama`, and `openrouter`. Loopback OpenAI-compatible endpoints remain local; remote
+`ollama`, `openrouter`, and `anthropic`. Loopback OpenAI-compatible endpoints remain local; remote
 endpoints require the operation's cloud consent and the provider's transport
 policy. OpenRouter requires `SONDER_ALLOW_CLOUD=1`, an API key, and the
-operation's cloud consent. Autopilot
+operation's cloud consent. Anthropic requires the same, with
+`SONDER_ANTHROPIC_API_KEY` (optional `SONDER_ANTHROPIC_API_KEY_2`), the optional
+`anthropic` SDK, and a local daily cap `SONDER_ANTHROPIC_DAILY_USD` (default 10);
+see `docs/integration/anthropic.md`. Autopilot
 and other local-only routes refuse a hosted binding rather than silently
 changing providers. Ollama-bound tiers retain the existing request payload
 and route behavior byte-for-byte.
