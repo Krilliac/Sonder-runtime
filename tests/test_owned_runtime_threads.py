@@ -313,3 +313,14 @@ def test_capacity_is_reserved_at_start_not_creation():
     second.start()
     second.join(2)
     assert owner.close(timeout=1).clean
+
+
+def test_pool_forwards_positional_and_keyword_options_on_this_interpreter():
+    owner = OwnedRuntimeThreads(cleanup=lambda: True)
+    pool = owner.pool(2, "bump-")
+    try:
+        assert pool._max_workers == 2
+        assert pool.submit(lambda: current_thread().name).result(2).startswith("bump-")
+    finally:
+        pool.shutdown(wait=True)
+    assert owner.close(timeout=1).clean

@@ -15,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from ...application.compute_fabric.artifact_spool import PrivateDirectoryAnchor
-from ...application.ports.runtime_owner import OwnerRefused, canonical
+from ...application.ports.runtime_owner import MANAGED_PYTHON_LABEL, MANAGED_PYTHON_MINORS, OwnerRefused, canonical
 from ..filesystem.atomic_json import write_json_atomic
 
 # The existing supported size/count envelope remains unchanged. Preflight
@@ -211,7 +211,14 @@ def compile_bytecode(entries, *, limit=None):
                     return None, {}
                 table[str(path)] = pyc
                 digests[str(path)] = sha256(source).hexdigest()
-    return marshal.dumps(table), digests
+    # Version 2 makes the container encoding deterministic: it writes no
+    # reference flags and no interned flag. Version 4 emits both from object
+    # identity and refcounts, so identical calls in one process can differ
+    # (seen on 3.14; not on 3.12 in tests). The table is still not
+    # byte-reproducible: importlib marshals each pyc value at its default
+    # version, so on 3.14 a value can vary with what the process has already
+    # imported, and values always differ across interpreter versions.
+    return marshal.dumps(table, 2), digests
 
 
 def _require_compiled_from(digests, rows, site_root, dependencies):
@@ -299,8 +306,8 @@ class RuntimePayload:
         self.digest = sha256(canonical(self.manifest)).hexdigest()
 
     def _create(self, writable_roots, *, runtime_venv=None):
-        if os.name != "nt" or sys.version_info[:2] != (3, 12):
-            raise OwnerRefused("managed artifact profile requires Windows CPython 3.12")
+        if os.name != "nt" or sys.version_info[:2] not in MANAGED_PYTHON_MINORS:
+            raise OwnerRefused(f"managed artifact profile requires Windows CPython {MANAGED_PYTHON_LABEL}")
         source, base, executable, dependencies, profile_roots = _runtime_layout(runtime_venv)
         if executable.parent != base or any(base.glob("*._pth")):
             raise OwnerRefused("unknown Python runtime path configuration")
@@ -370,7 +377,7 @@ class RuntimePayload:
                 "paths": [str(self.path), str(base / "Lib"), str(base / "DLLs"),
                           *(str(path) for path in site_paths)],
                 "dll_paths": dll_paths, "source": str(source), "roots": roots,
-                "files": rows, "python": [3, 12],
+                "files": rows, "python": list(sys.version_info[:2]),
                 "profile": str(runtime_venv) if runtime_venv else "",
             }
             if len(canonical(self.manifest)) > MAX_MANIFEST:
@@ -409,7 +416,7 @@ class RuntimePayload:
         value = self.manifest
         if expected is not None and self.digest != expected:
             raise OwnerRefused("runtime artifact digest changed")
-        if value["schema"] != 2 or value["python"] != [3, 12] or value["payload"] != str(self.path):
+        if value["schema"] != 2 or value["python"] != list(sys.version_info[:2]) or tuple(value["python"]) not in MANAGED_PYTHON_MINORS or value["payload"] != str(self.path):
             raise OwnerRefused("runtime artifact profile changed")
         disjoint((value["source"], *value["paths"], *value["dll_paths"], value["executable"],
                   *((value["profile"],) if value["profile"] else ())), tuple(writable_roots))

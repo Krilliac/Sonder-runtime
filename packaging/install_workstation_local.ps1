@@ -34,7 +34,7 @@
   the target is a real virtual environment (see DESCRIPTION).
 
 .PARAMETER ManagedRuntime
-  Also provision <repo>\venv-managed, a separate Windows CPython 3.12 venv
+  Also provision <repo>\venv-managed, a separate Windows CPython 3.12 or 3.14 venv
   containing only the pinned runtime dependency install. Seal its interpreter
   identity and installed package set for ManagedRuntimeOwner.workstation_local.
   Reruns verify the seal; -Force deliberately recreates both environments.
@@ -156,9 +156,9 @@ if ($LASTEXITCODE -ne 0) {
   throw "Python 3.11+ is required; $py reports: $versionText"
 }
 if ($ManagedRuntime) {
-  & $py @pyArgs -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) and sys.implementation.name == 'cpython' else 1)"
+  & $py @pyArgs -c "import sys; sys.exit(0 if sys.version_info[:2] in ((3, 12), (3, 14)) and sys.implementation.name == 'cpython' else 1)"
   if ($LASTEXITCODE -ne 0) {
-    throw "managed runtime requires Windows CPython 3.12; $py reports: $versionText"
+    throw "managed runtime requires Windows CPython 3.12 or 3.14; $py reports: $versionText"
   }
 }
 Write-Host "[sonder] using $versionText ($py $($pyArgs -join ' '))"

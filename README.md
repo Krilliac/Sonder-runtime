@@ -54,7 +54,7 @@ Website: <https://sondercore.si>
 
 ## Requirements
 
-- Python 3.11 or later (CI uses 3.12).
+- Python 3.11 or later (CI uses 3.14; 3.12 is still supported for one release).
 - Ollama, installed and running.
 - One generative local model. `setup_alias.py` pulls a base model, exposes it
   as `sonder:latest`, and also tries to pull the `nomic-embed-text` embedding
