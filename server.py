@@ -1661,7 +1661,7 @@ def _model_prompt_identity(model):
         before = _ollama_model_tag_metadata(model)
         if before is None:
             raise ValueError("selected Ollama tag lacks a stable digest/revision")
-        details = _post("/api/show", {"name": model}, timeout=30)
+        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         info = details.get("model_info") if isinstance(details, dict) else {}
         info = info if isinstance(info, dict) else {}
         tokenizer_value = info.get("tokenizer.ggml.model")
@@ -23478,7 +23478,7 @@ def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
     if not selected or _is_cloud_model_name(selected):
         return False
     try:
-        details = _post("/api/show", {"name": selected}, timeout=30)
+        details = _post("/api/show", {"model": selected, "name": selected}, timeout=30)
     except ModelCallError:
         return False
     return isinstance(details, dict) and wanted in _fanout_capabilities(details)
@@ -24467,7 +24467,7 @@ def _fanout_synthesis_model(selector):
         # the selected *local* model only, after the loopback guard, rather
         # than treating absent tag metadata as proof it cannot generate.
         try:
-            details = _post("/api/show", {"name": model}, timeout=30)
+            details = _post("/api/show", {"model": model, "name": model}, timeout=30)
         except ModelCallError as exc:
             raise ModelCallError(
                 "configuration", "could not verify synth_model generative capability"
