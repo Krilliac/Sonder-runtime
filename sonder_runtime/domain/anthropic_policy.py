@@ -29,6 +29,11 @@ MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _DATED_SUFFIX = re.compile(r"-\d{8}\Z")
 _PER_MILLION = Decimal(1_000_000)
 _MICRO = Decimal("0.000001")
+# Pinning US-only inference (usage.inference_geo == "us") bills 1.1x:
+# claude-api/shared/platform-availability.md line 80 ("`"us"` ... 1.1x price")
+# and shared/google-cloud-anthropic-managed.md line 72 ("same 1.1x multiplier
+# as on the Claude API").
+US_GEO_MULTIPLIER = Decimal("1.1")
 
 
 class AnthropicPolicyError(ValueError):
@@ -89,12 +94,16 @@ def price_for(model: str) -> ModelPrice | None:
 
 def usage_cost_usd(
     model: str, *, input_tokens: int, output_tokens: int,
-    cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0, cache_write_tokens: int = 0, us_only: bool = False,
 ) -> Decimal:
     """Cost of one response from its token usage, rounded up to a micro-dollar.
 
     ``input_tokens`` is the uncached remainder, as the API reports it; the
-    cache counts are separate fields.  Raises for an unpriced model.
+    cache counts are separate fields.  ``us_only`` applies the documented 1.1x
+    US-only inference multiplier.  ``cache_write_tokens`` are priced as
+    5-minute writes (1.25x input); if ``cache_control`` with ``ttl: "1h"`` is
+    ever sent, those writes cost 2x input (prompt-caching.md "Economics") and
+    this function must price them separately.  Raises for an unpriced model.
     """
     price = price_for(model)
     if price is None:
@@ -113,6 +122,8 @@ def usage_cost_usd(
         Decimal(input_tokens) * rates[0] + Decimal(output_tokens) * rates[1]
         + Decimal(cache_read_tokens) * rates[2] + Decimal(cache_write_tokens) * rates[3]
     ) / _PER_MILLION
+    if us_only:
+        total *= US_GEO_MULTIPLIER
     return total.quantize(_MICRO, rounding="ROUND_UP")
 
 

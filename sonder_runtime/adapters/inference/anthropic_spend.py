@@ -77,6 +77,9 @@ class SpendLedger:
         self._thread_lock = threading.Lock()
         # Spend that could not be persisted, by day: still counted in-process.
         self._unpersisted: dict[str, Decimal] = {}
+        # Worst-case cost of calls in flight in this process, by reservation token.
+        self._inflight: dict[int, Decimal] = {}
+        self._next_token = 1
 
     @property
     def path(self) -> Path:
@@ -107,14 +110,39 @@ class SpendLedger:
         entry = document["days"].get(day)
         return entry if isinstance(entry, dict) else {}
 
-    def today_usd(self) -> Decimal:
-        """Spend recorded for the current UTC day (persisted plus unpersisted)."""
+    def _today_locked(self) -> Decimal:
+        """Today's spend; the caller holds ``_thread_lock``."""
         day = utc_day(self._clock())
         path = self.path
+        with file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+            stored = _decimal(self._day_entry(self._read(path), day).get("usd", "0"))
+        return stored + self._unpersisted.get(day, Decimal(0))
+
+    def today_usd(self) -> Decimal:
+        """Spend recorded for the current UTC day (persisted plus unpersisted)."""
         with self._thread_lock:
-            with file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-                stored = _decimal(self._day_entry(self._read(path), day).get("usd", "0"))
-            return stored + self._unpersisted.get(day, Decimal(0))
+            return self._today_locked()
+
+    def try_reserve(self, amount: Decimal, cap: Decimal) -> tuple[int | None, Decimal, Decimal]:
+        """Atomically refuse at the cap, else hold ``amount`` for a call in flight.
+
+        Returns ``(token, spent_today, inflight)``; ``token`` is ``None`` when
+        spend plus the reservations already held has reached ``cap``.  Release
+        the token with :meth:`release` once the call's real cost is recorded.
+        """
+        with self._thread_lock:
+            spent = self._today_locked()
+            inflight = sum(self._inflight.values(), Decimal(0))
+            if spent + inflight >= cap:
+                return None, spent, inflight
+            token = self._next_token
+            self._next_token += 1
+            self._inflight[token] = amount
+            return token, spent, inflight
+
+    def release(self, token: int) -> None:
+        with self._thread_lock:
+            self._inflight.pop(token, None)
 
     def snapshot(self) -> dict[str, object]:
         """Today's content-free totals for status surfaces."""

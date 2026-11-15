@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
+import time
 import traceback
 from decimal import Decimal
 from types import SimpleNamespace
@@ -72,7 +74,8 @@ class APITimeoutError(Exception):
 
 
 def _message(text="hello from claude", *, model="claude-opus-5-5", input_tokens=12,
-             output_tokens=5, cache_read=0, cache_write=0, stop_reason="end_turn"):
+             output_tokens=5, cache_read=0, cache_write=0, stop_reason="end_turn",
+             inference_geo=None, plan=None):
     return SimpleNamespace(
         content=[SimpleNamespace(type="thinking", thinking="hidden"),
                  SimpleNamespace(type="text", text=text)],
@@ -80,7 +83,9 @@ def _message(text="hello from claude", *, model="claude-opus-5-5", input_tokens=
         usage=SimpleNamespace(
             input_tokens=input_tokens, output_tokens=output_tokens,
             cache_read_input_tokens=cache_read, cache_creation_input_tokens=cache_write,
+            inference_geo=inference_geo,
         ),
+        plan=plan,
     )
 
 
@@ -90,23 +95,30 @@ class FakeSdk:
     def __init__(self, behave=None):
         self.behave = behave or (lambda key, params: _message())
         self.calls: list[dict] = []
-        self.timeouts: list[float] = []
+        self.builds: list[float] = []  # one entry per client built
+        self.call_timeouts: list[float] = []
+        self.closed = 0
 
     def factory(self, key, timeout):
         sdk = self
-        self.timeouts.append(timeout)
+        self.builds.append(timeout)
 
         class Messages:
             def create(self, **params):
+                sdk.call_timeouts.append(params.pop("timeout", None))
                 sdk.calls.append({"key": key, "params": params, "stream": False})
                 return sdk.behave(key, params)
 
             def stream(self, **params):
+                sdk.call_timeouts.append(params.pop("timeout", None))
                 sdk.calls.append({"key": key, "params": params, "stream": True})
                 outcome = sdk.behave(key, params)  # raises here for connect-time errors
                 return _FakeStream(outcome)
 
-        return SimpleNamespace(messages=Messages())
+        def close():
+            sdk.closed += 1
+
+        return SimpleNamespace(messages=Messages(), close=close)
 
     @property
     def keys_used(self):
@@ -125,11 +137,24 @@ class _FakeStream:
 
     @property
     def text_stream(self):
+        plan = self._message.plan or {}
         for block in self._message.content:
             if block.type == "text":
-                for piece in (block.text[:5], block.text[5:]):
+                for index, piece in enumerate((block.text[:5], block.text[5:])):
+                    if index == 1:
+                        if plan.get("gate") is not None:
+                            plan["gate"].wait(5)
+                        if plan.get("fail") is not None:
+                            raise plan["fail"]
                     if piece:
                         yield piece
+
+    @property
+    def current_message_snapshot(self):
+        plan = self._message.plan or {}
+        if plan.get("before_start"):
+            raise AssertionError  # the SDK asserts before message_start
+        return self._message
 
     def get_final_message(self):
         return self._message
@@ -414,10 +439,16 @@ def test_missing_sdk_is_a_typed_actionable_error_before_any_spend_or_send(ledger
 def test_default_client_is_the_official_sdk_with_its_own_retries_disabled(ledger, monkeypatch):
     built = []
 
+    calls = []
+
     class Anthropic:
         def __init__(self, **kwargs):
             built.append(kwargs)
-            self.messages = SimpleNamespace(create=lambda **params: _message())
+            self.api_key, self.auth_token = kwargs["api_key"], None
+            self.base_url = kwargs["base_url"] + "/"
+            self._custom_headers = {"X-From-Env": "1"}
+            self.messages = SimpleNamespace(
+                create=lambda **params: calls.append(params) or _message())
 
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=Anthropic))
     gateway = AnthropicGateway(
@@ -427,7 +458,10 @@ def test_default_client_is_the_official_sdk_with_its_own_retries_disabled(ledger
     (kwargs,) = built
     assert kwargs["api_key"] == KEY_1
     assert kwargs["max_retries"] == 0  # the SDK must not silently re-send billed work
-    assert 0 < kwargs["timeout"] <= 30  # bounded by the operation deadline
+    assert kwargs["base_url"] == "https://api.anthropic.com"  # never the SDK's env-derived URL
+    assert kwargs["timeout"] == 300.0
+    assert 0 < calls[0]["timeout"] <= 30  # per-call, bounded by the operation deadline
+    assert gateway._clients[1][2]._custom_headers == {}  # ANTHROPIC_CUSTOM_HEADERS is dropped
 
 
 # -- accounting and the daily cap ---------------------------------------------------
@@ -710,3 +744,319 @@ def test_credit_exhaustion_rule_matches_only_the_documented_message():
     assert not rule(400, "credit card declined")
     assert not rule(500, CREDIT_MESSAGE)
     assert not rule(401, CREDIT_MESSAGE)
+
+
+# -- endpoint and credential hijack through the SDK's own environment reading ------------------
+
+HOSTILE_ENV = {
+    "ANTHROPIC_BASE_URL": "http://attacker.invalid:9",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-api-key: attacker-key\nX-Evil: 1",
+    "ANTHROPIC_AUTH_TOKEN": "attacker-token",
+    "ANTHROPIC_API_KEY": "attacker-api-key",
+}
+
+
+def test_real_sdk_client_ignores_every_anthropic_environment_variable(ledger, monkeypatch):
+    anthropic = pytest.importorskip("anthropic", reason="the optional anthropic SDK is not installed")
+    for name, value in HOSTILE_ENV.items():
+        monkeypatch.setenv(name, value)
+    settings = _settings()
+    gateway = AnthropicGateway(
+        settings, spend_ledger=ledger, request_admission=HostModelRequestAdmission(),
+    )
+    client = gateway._client(1, KEY_1, settings)
+    assert str(client.base_url).rstrip("/") == "https://api.anthropic.com"
+    assert client.api_key == KEY_1 and client.auth_token is None
+    headers = {name.lower(): value for name, value in client.default_headers.items()}
+    assert headers["x-api-key"] == KEY_1
+    assert "x-evil" not in headers and "authorization" not in headers
+    assert "attacker" not in json.dumps(headers, default=str)
+    assert client.max_retries == 0
+    # The request the SDK would actually put on the wire.
+    request = client._build_request(anthropic._base_client.FinalRequestOptions.construct(
+        method="post", url="/v1/messages", json_data={}))
+    assert request.url.host == "api.anthropic.com" and request.url.scheme == "https"
+    assert request.headers["x-api-key"] == KEY_1
+    assert "x-evil" not in request.headers
+    # A configured override is honoured (it is validated to be https).
+    proxied = _settings(base_url="https://proxy.example.test/claude")
+    other = AnthropicGateway(
+        proxied, spend_ledger=ledger, request_admission=HostModelRequestAdmission(),
+    )._client(1, KEY_1, proxied)
+    assert str(other.base_url).startswith("https://proxy.example.test/claude")
+    gateway.close()
+
+
+def test_the_sdk_environment_is_scrubbed_in_the_test_process():
+    import os
+
+    for name in HOSTILE_ENV:
+        assert name not in os.environ
+    import conftest
+
+    assert set(HOSTILE_ENV) <= set(conftest._ANTHROPIC_SDK_VARIABLES)
+    assert "SONDER_ANTHROPIC_BASE_URL" in conftest._LIVE_PROVIDER_VARIABLES
+
+
+@pytest.mark.parametrize("value", [
+    "http://api.anthropic.com", "https://user:pw@api.anthropic.com", "https://a.test/?x=1",
+    "https://a.test/#f", "ftp://a.test", "api.anthropic.com", "https://",
+])
+def test_base_url_override_must_be_plain_https(value):
+    with pytest.raises(InvalidInput):
+        config_from_env({"SONDER_ANTHROPIC_BASE_URL": value})
+    assert config_from_env({}).base_url == "https://api.anthropic.com"
+    assert config_from_env(
+        {"SONDER_ANTHROPIC_BASE_URL": "https://a.test:8443/x/"}).base_url == "https://a.test:8443/x"
+
+
+def test_work_narration_knows_the_anthropic_base_url_variable():
+    from sonder_runtime.adapters.observability.work_narration_facts import _ENV_BY_PROVIDER
+
+    assert _ENV_BY_PROVIDER["anthropic"] == "SONDER_ANTHROPIC_BASE_URL"
+
+
+# -- unfinished streams still bill what they consumed -----------------------------------------
+
+
+def _wait_for(predicate, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _partial_cost():
+    # opus 5.5: 100 input + 7 output tokens
+    return anthropic_policy.usage_cost_usd("claude-opus-5-5", input_tokens=100, output_tokens=7)
+
+
+def test_an_abandoned_stream_records_the_usage_it_had_consumed(ledger):
+    gate = threading.Event()
+    sdk = FakeSdk(lambda k, p: _message(
+        text="hello world", input_tokens=100, output_tokens=7, plan={"gate": gate}))
+    gateway = _gateway(sdk, ledger)
+    stream = gateway.stream(_request(), _context())
+    assert next(stream).text == "hello"
+    stream.close()          # the consumer walks away mid-stream
+    gate.set()              # the SDK stream then yields again and finds the stop flag
+    assert _wait_for(lambda: ledger.snapshot()["calls"] == 1)
+    assert Decimal(ledger.snapshot()["usd"]) == _partial_cost()
+    assert ledger.snapshot()["calls"] == 1  # recorded exactly once
+
+
+@pytest.mark.parametrize("error, expected", [
+    (FakeApiError(500, "stream broke"), DependencyUnavailable),
+    (APITimeoutError("read timeout"), DeadlineExceeded),
+], ids=["mid_stream_error", "timeout_after_message_start"])
+def test_a_stream_that_fails_after_message_start_records_partial_usage(ledger, error, expected):
+    sdk = FakeSdk(lambda k, p: _message(
+        text="hello world", input_tokens=100, output_tokens=7, plan={"fail": error}))
+    with pytest.raises(expected):
+        list(_gateway(sdk, ledger).stream(_request(), _context()))
+    assert ledger.snapshot()["calls"] == 1
+    assert Decimal(ledger.snapshot()["usd"]) == _partial_cost()
+
+
+def test_a_stream_that_fails_before_message_start_records_nothing(ledger):
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": APITimeoutError("t"), "before_start": True}))
+    with pytest.raises(DeadlineExceeded):
+        list(_gateway(sdk, ledger).stream(_request(), _context()))
+    assert ledger.snapshot()["calls"] == 0
+
+
+def test_a_completed_stream_is_recorded_once_not_twice(ledger):
+    sdk = FakeSdk(lambda k, p: _message(text="hello world", input_tokens=100, output_tokens=7))
+    list(_gateway(sdk, ledger).stream(_request(), _context()))
+    assert ledger.snapshot()["calls"] == 1
+    assert Decimal(ledger.snapshot()["usd"]) == _partial_cost()
+
+
+# -- no failover once a chunk has reached the consumer ---------------------------------------------
+
+
+@pytest.mark.parametrize("error", [
+    FakeApiError(401, "expired mid-stream"), FakeApiError(400, CREDIT_MESSAGE),
+], ids=["401", "credit"])
+def test_no_failover_after_a_chunk_was_delivered(ledger, error):
+    def behave(key, params):
+        plan = {"fail": error} if key == KEY_1 else None
+        return _message(text="hello world", plan=plan)
+
+    sdk = FakeSdk(behave)
+    received = []
+    with pytest.raises((Forbidden, AnthropicCreditsExhausted)):
+        for chunk in _gateway(sdk, ledger).stream(_request(), _context()):
+            received.append(chunk.text)
+    assert received == ["hello"]       # the consumer already has text from key 1
+    assert sdk.keys_used == [KEY_1]    # key 2 is never tried: it would replay billed work
+
+
+# -- error chain carries no SDK exception -------------------------------------------------------------
+
+
+def _chain(error):
+    seen = []
+    while error is not None and error not in seen:
+        seen.append(error)
+        error = error.__cause__ or error.__context__
+    return seen
+
+
+def test_mapped_errors_have_no_cause_or_context_with_the_fake_sdk(ledger):
+    class Leaky(FakeApiError):
+        def __init__(self):
+            super().__init__(500, "boom")
+            self.response.request = SimpleNamespace(headers={"x-api-key": KEY_1})
+
+    for factory_error in (Leaky(), FakeApiError(401, "bad"), APITimeoutError("t")):
+        sdk = FakeSdk(lambda k, p, e=factory_error: (_ for _ in ()).throw(e))
+        with pytest.raises(SonderError) as caught:
+            _gateway(sdk, ledger).generate(_request(), _context())
+        assert _chain(caught.value) == [caught.value]
+    with pytest.raises(SonderError) as caught:
+        list(_gateway(FakeSdk(lambda k, p: (_ for _ in ()).throw(Leaky())), ledger).stream(
+            _request(), _context()))
+    assert _chain(caught.value) == [caught.value]
+
+
+def test_mapped_errors_have_no_sdk_exception_in_their_chain_with_the_real_sdk(ledger):
+    anthropic = pytest.importorskip("anthropic", reason="the optional anthropic SDK is not installed")
+    httpx = pytest.importorskip("httpx2", reason="httpx2 comes with the anthropic SDK")
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages",
+                            headers={"x-api-key": KEY_1})
+    response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+
+    def behave(key, params):
+        raise anthropic.AuthenticationError("bad key", response=response, body=None)
+
+    with pytest.raises(Forbidden) as caught:
+        _gateway(FakeSdk(behave), ledger, _settings(api_key_2="")).generate(_request(), _context())
+    assert _chain(caught.value) == [caught.value]
+    assert KEY_1 not in "".join(traceback.format_exception(caught.value))
+
+
+# -- concurrency: in-flight calls count against the cap --------------------------------------------------
+
+
+def test_concurrent_calls_near_the_cap_cannot_both_be_admitted(ledger):
+    entered, release = threading.Event(), threading.Event()
+
+    def behave(key, params):
+        entered.set()
+        release.wait(5)
+        return _message()
+
+    sdk = FakeSdk(behave)
+    # opus 5.5 worst case for max_tokens 1000 is about $0.022: one call passes the
+    # check under a $0.02 cap, but its reservation then fills the cap.
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+    outcome = {}
+
+    def first():
+        outcome["first"] = gateway.generate(_request(options={"num_predict": 1000}), _context())
+
+    worker = threading.Thread(target=first)
+    worker.start()
+    assert entered.wait(5)
+    with pytest.raises(AnthropicDailyCapReached, match="in flight"):
+        gateway.generate(_request(options={"num_predict": 1000}), _context())
+    assert len(sdk.calls) == 1
+    release.set()
+    worker.join(5)
+    assert outcome["first"].text == "hello from claude"
+    # The reservation is gone and the real (tiny) cost counts: the next call is fine.
+    gateway.generate(_request(), _context())
+    assert len(sdk.calls) == 2
+
+
+def test_reservation_is_released_after_a_failed_call(ledger):
+    sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(FakeApiError(500, "x")))
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.02")))
+    for _ in range(3):
+        with pytest.raises(DependencyUnavailable):
+            gateway.generate(_request(options={"num_predict": 1000}), _context())
+    assert len(sdk.calls) == 3
+    assert ledger._inflight == {}
+
+
+# -- pricing multiplier and client reuse --------------------------------------------------------------------
+
+
+def test_us_only_inference_is_priced_at_the_documented_multiplier(ledger):
+    sdk = FakeSdk(lambda k, p: _message(input_tokens=1_000, output_tokens=1_000, inference_geo="us"))
+    gateway = _gateway(sdk, ledger)
+    gateway.generate(_request(), _context())
+    assert gateway.last_usage["cost_usd"] == Decimal("0.0264")  # 0.024 * 1.1
+    sdk = FakeSdk(lambda k, p: _message(input_tokens=1_000, output_tokens=1_000, inference_geo="global"))
+    other = _gateway(sdk, SpendLedger(ledger.path.with_name("other.json")))
+    other.generate(_request(), _context())
+    assert other.last_usage["cost_usd"] == Decimal("0.024")
+
+
+def test_one_sdk_client_is_reused_per_key_slot_and_closed_on_close(ledger):
+    sdk = FakeSdk(_fail_key_one(FakeApiError(401, "bad")))
+    gateway = _gateway(sdk, ledger)
+    for _ in range(3):
+        gateway.generate(_request(), _context())
+    assert len(sdk.builds) == 2           # one client for slot 1, one for slot 2
+    gateway.close()
+    assert sdk.closed == 2
+    gateway.generate(_request(), _context())
+    assert len(sdk.builds) == 4           # rebuilt lazily after close
+    assert sdk.call_timeouts[0] is not None  # the per-call deadline rides on the request
+
+
+def test_a_changed_key_rebuilds_that_slots_client(ledger):
+    sdk = FakeSdk()
+    env = {"SONDER_ALLOW_CLOUD": "1", "SONDER_ANTHROPIC_API_KEY": KEY_1}
+    gateway = AnthropicGateway(env=env, client_factory=sdk.factory, spend_ledger=ledger,
+                               request_admission=HostModelRequestAdmission())
+    gateway.generate(_request(), _context())
+    gateway.generate(_request(), _context())
+    assert len(sdk.builds) == 1
+    env["SONDER_ANTHROPIC_API_KEY"] = KEY_2
+    gateway.generate(_request(), _context())
+    assert len(sdk.builds) == 2 and sdk.keys_used[-1] == KEY_2
+    assert sdk.closed == 1
+
+
+# -- the 429 cool-down is per key slot ------------------------------------------------------------------------
+
+
+def test_a_429_on_key_two_does_not_cool_down_key_one_or_trigger_failover(ledger):
+    clock = [10.0]
+    state = {"key1_ok": False}
+
+    def behave(key, params):
+        if key == KEY_1 and not state["key1_ok"]:
+            raise FakeApiError(401, "bad")
+        if key == KEY_2:
+            raise FakeApiError(429, "slow", {"retry-after": "30"})
+        return _message()
+
+    sdk = FakeSdk(behave)
+    gateway = _gateway(sdk, ledger, monotonic=lambda: clock[0])
+    with pytest.raises(AnthropicRateLimited):      # key 1 -> 401 -> key 2 -> 429
+        gateway.generate(_request(), _context())
+    assert sdk.keys_used == [KEY_1, KEY_2]
+    assert set(gateway._cooldown_until) == {2}
+    # Key 1 is refused again; failover into the cooled-down key 2 is not attempted.
+    with pytest.raises(Forbidden):
+        gateway.generate(_request(), _context())
+    assert sdk.keys_used == [KEY_1, KEY_2, KEY_1]
+    state["key1_ok"] = True
+    assert gateway.generate(_request(), _context()).text == "hello from claude"  # key 1 not blocked
+
+
+def test_a_429_on_key_one_blocks_new_calls_with_a_message_naming_the_slot(ledger):
+    clock = [10.0]
+    sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(FakeApiError(429, "s", {"retry-after": "30"})))
+    gateway = _gateway(sdk, ledger, monotonic=lambda: clock[0])
+    with pytest.raises(AnthropicRateLimited):
+        gateway.generate(_request(), _context())
+    with pytest.raises(AnthropicRateLimited, match="key slot 1"):
+        gateway.generate(_request(), _context())
+    assert sdk.keys_used == [KEY_1]

@@ -14,10 +14,19 @@ import-time failure of the runtime.
   ``SONDER_ANTHROPIC_API_KEY_2``, read per call from the process environment.
   Plain ``ANTHROPIC_API_KEY`` is deliberately NOT read: Claude Code and the
   SDK's own client use that name, and an operator's coding-assistant key must
-  never be spent by this runtime by accident.  A key reaches only the SDK client
-  built for that call; it never appears in a log line, error, status document,
+  never be spent by this runtime by accident.  The SDK client is built with an
+  explicit ``api_key`` and ``base_url`` (``https://api.anthropic.com``, or the
+  validated https ``SONDER_ANTHROPIC_BASE_URL``).  An explicit key makes the SDK
+  ignore ``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN`` and the profile and
+  credential-file discovery; an explicit base URL makes it ignore
+  ``ANTHROPIC_BASE_URL``; the headers the SDK constructor would merge from
+  ``ANTHROPIC_CUSTOM_HEADERS`` (which could even replace ``x-api-key``) are
+  cleared after construction, and the client is verified (base URL, key, no
+  auth token, no extra headers) before first use.  A key is therefore sent only
+  to that endpoint.  It never appears in a log line, error, status document,
   telemetry label, evidence record or export (only the key *slot*, 1 or 2, is
-  ever recorded).
+  ever recorded), and a mapped error keeps no reference to the SDK exception,
+  whose request headers hold the key.
 * **Key failover.** Key 1 is used first.  The call fails over to key 2 once,
   and only when key 1 was refused with an authentication error (HTTP 401) or a
   credit-exhausted error (HTTP 400 whose message says the credit balance is too
@@ -43,8 +52,14 @@ import-time failure of the runtime.
   ``SONDER_ANTHROPIC_DAILY_USD`` (default 10) new calls are refused with
   :class:`AnthropicDailyCapReached`.  A call already in flight is never cut off.
 * **Errors.** 401, credit exhaustion (400/402), 429 (``retry-after`` becomes a
-  local cool-down), 529 overloaded and 5xx map onto the domain taxonomy with
-  actionable text.
+  local cool-down for that key slot only), 529 overloaded and 5xx map onto the
+  domain taxonomy with actionable text.
+* **Unfinished streams are billed.**  A stream that is abandoned, times out or
+  fails after ``message_start`` records the usage in the SDK's message snapshot.
+* **Concurrency.**  Before each send the gateway reserves a worst-case cost
+  (``max_tokens`` of output plus the prompt's byte length as input tokens) in
+  the ledger, so calls in flight count against the cap; the reservation is
+  released when the call ends.  Reservations are per process.
 
 Thread affinity: any thread; per-call state lives on the stack.  The cool-down
 is guarded by a lock.  Nothing here probes the paid API automatically.
@@ -54,6 +69,7 @@ from __future__ import annotations
 import contextvars
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import queue
@@ -65,6 +81,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
+from urllib.parse import urlsplit, urlunsplit
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -134,6 +151,8 @@ ENV_TIER_MODELS = "SONDER_ANTHROPIC_TIER_MODELS"
 ENV_MAX_TOKENS = "SONDER_ANTHROPIC_MAX_TOKENS"
 ENV_DAILY_USD = "SONDER_ANTHROPIC_DAILY_USD"
 ENV_TIMEOUT = "SONDER_ANTHROPIC_TIMEOUT_SECONDS"
+ENV_BASE_URL = "SONDER_ANTHROPIC_BASE_URL"
+DEFAULT_BASE_URL = "https://api.anthropic.com"
 ENV_ALLOW_CLOUD = "SONDER_ALLOW_CLOUD"
 _KEY_ENV_BY_SLOT = {1: ENV_API_KEY, 2: ENV_API_KEY_2}
 CREDITS_URL = "https://platform.claude.com/settings/billing"
@@ -142,7 +161,7 @@ CAPABILITIES = frozenset({GATEWAY_CAPABILITY_CHAT, GATEWAY_CAPABILITY_FIXED_ENDP
 STATUS_KEYS = (
     "provider", "state", "healthy", "detail", "capabilities", "cloud_enabled",
     "configured", "key_slots", "sdk_installed", "default_model", "tier_models",
-    "max_tokens_ceiling", "daily_cap_usd", "spent_today_usd", "day_utc",
+    "base_url", "max_tokens_ceiling", "daily_cap_usd", "spent_today_usd", "day_utc",
     "calls_today", "key_slot_calls_today", "cap_reached",
 )
 # Options a Claude model either rejects or has no wire field for; dropping them
@@ -188,6 +207,24 @@ def _bounded(text: object) -> str:
 
 def _usd(value: Decimal) -> str:
     return "$%s" % value.quantize(Decimal("0.0001"), rounding="ROUND_UP")
+
+
+def normalize_base_url(value: object) -> str:
+    """``https://host[:port][/path]``: no plain http, userinfo, query or fragment."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        parts.port  # noqa: B018 - validates the port
+    except ValueError as exc:
+        raise InvalidInput("%s is not a valid URL" % ENV_BASE_URL) from exc
+    if (parts.scheme != "https" or not host or parts.username or parts.password
+            or parts.query or parts.fragment):
+        raise InvalidInput(
+            "%s must be https://host[:port][/path] without credentials, query or fragment"
+            % ENV_BASE_URL
+        )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _parse_tier_models(raw: str) -> dict[str, str]:
@@ -260,8 +297,10 @@ class AnthropicSettings:
     daily_usd: Decimal = DEFAULT_DAILY_USD
     cloud_enabled: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    base_url: str = DEFAULT_BASE_URL
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
         try:
             validate_model_id(self.model, ENV_MODEL)
         except AnthropicPolicyError as exc:
@@ -297,6 +336,7 @@ def config_from_env(env: Mapping[str, str] | None = None) -> AnthropicSettings:
         daily_usd=_daily_cap(source),
         cloud_enabled=cloud_opted_in(source),
         timeout_seconds=_float_env(source, ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS),
+        base_url=str(source.get(ENV_BASE_URL, "") or "").strip() or DEFAULT_BASE_URL,
     )
 
 
@@ -385,6 +425,7 @@ class _Prepared:
     settings: AnthropicSettings
     model: str
     params: dict
+    reservation: int
 
 
 class AnthropicGateway:
@@ -409,7 +450,8 @@ class AnthropicGateway:
             raise TypeError("request admission must be host-owned")
         self._monotonic = monotonic
         self._lock = threading.Lock()
-        self._cooldown_until = 0.0
+        self._cooldown_until: dict[int, float] = {}
+        self._clients: dict[int, tuple[str, str, object]] = {}
         self.last_usage: Mapping[str, object] | None = None
 
     # -- configuration & consent ------------------------------------------
@@ -469,30 +511,43 @@ class AnthropicGateway:
 
     # -- cool-down and spend cap --------------------------------------------
 
-    def _start_cooldown(self, retry_after: float | None) -> None:
+    def _start_cooldown(self, slot: int, retry_after: float | None) -> None:
         if retry_after is None or retry_after <= 0:
             return
         with self._lock:
-            self._cooldown_until = max(self._cooldown_until, self._monotonic() + retry_after)
+            self._cooldown_until[slot] = max(
+                self._cooldown_until.get(slot, 0.0), self._monotonic() + retry_after,
+            )
 
-    def _check_cooldown(self) -> None:
+    def _cooldown_remaining(self, slot: int) -> float:
         with self._lock:
-            remaining = self._cooldown_until - self._monotonic()
+            return self._cooldown_until.get(slot, 0.0) - self._monotonic()
+
+    def _check_cooldown(self, slot: int) -> None:
+        remaining = self._cooldown_remaining(slot)
         if remaining > 0:
             raise AnthropicRateLimited(
-                "Anthropic asked this key to wait (retry-after); not sending for "
-                "another %.0fs" % remaining, retry_after=remaining,
+                "Anthropic asked API key slot %d to wait (retry-after); not sending "
+                "for another %.0fs" % (slot, remaining), retry_after=remaining,
             )
 
-    def _check_daily_cap(self, settings: AnthropicSettings) -> None:
-        spent = self._ledger.today_usd()
-        if spent >= settings.daily_usd:
+    def _reserve(self, settings: AnthropicSettings, model: str, params: dict) -> int:
+        """Refuse at the cap; else reserve this call's worst-case cost in the ledger."""
+        sized = {name: params[name] for name in ("system", "messages") if name in params}
+        prompt_bytes = len(json.dumps(sized).encode("utf-8"))  # a token is at least a byte
+        worst = usage_cost_usd(
+            model, input_tokens=prompt_bytes, output_tokens=int(params["max_tokens"]), us_only=True,
+        )
+        token, spent, inflight = self._ledger.try_reserve(worst, settings.daily_usd)
+        if token is None:
             raise AnthropicDailyCapReached(
-                "Anthropic daily spend cap reached: %s spent today (UTC) of the %s cap "
+                "Anthropic daily spend cap reached: %s spent today (UTC)%s of the %s cap "
                 "(%s); new calls resume after 00:00 UTC, or raise the cap"
-                % (_usd(spent), _usd(settings.daily_usd), ENV_DAILY_USD),
+                % (_usd(spent), (" plus up to %s in flight" % _usd(inflight)) if inflight else "",
+                   _usd(settings.daily_usd), ENV_DAILY_USD),
                 cap_usd=settings.daily_usd, spent_usd=spent,
             )
+        return token
 
     # -- request building --------------------------------------------------
 
@@ -565,9 +620,8 @@ class AnthropicGateway:
         params = self.build_params(request, settings, model)
         if self._client_factory is None:
             load_sdk()  # a missing SDK fails here, before any admission or spend check
-        self._check_cooldown()
-        self._check_daily_cap(settings)
-        return _Prepared(settings, model, params)
+        self._check_cooldown(settings.key_slots[0][0])
+        return _Prepared(settings, model, params, self._reserve(settings, model, params))
 
     # -- errors --------------------------------------------------------------
 
@@ -621,7 +675,7 @@ class AnthropicGateway:
             error = DeadlineExceeded("Anthropic timed out the request (HTTP 408)%s" % suffix)
         elif status == 429:
             retry_after = _retry_after_seconds(exc)
-            self._start_cooldown(retry_after)
+            self._start_cooldown(slot, retry_after)
             wait = (" retry after %.0fs" % retry_after) if retry_after is not None else " retry later"
             error = AnthropicRateLimited(
                 "Anthropic is rate limiting this key (HTTP 429)%s;%s" % (suffix, wait),
@@ -642,11 +696,60 @@ class AnthropicGateway:
 
     # -- one physical call ----------------------------------------------------
 
-    def _client(self, key: str, timeout: float):
+    def _build_client(self, key: str, settings: AnthropicSettings):
         if self._client_factory is not None:
-            return self._client_factory(key, timeout)
+            return self._client_factory(key, settings.timeout_seconds)
+        # Explicit api_key and base_url make the SDK ignore ANTHROPIC_API_KEY,
+        # ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL and credential discovery.
         # max_retries=0: the SDK's own retry loop would silently re-send billed work.
-        return load_sdk().Anthropic(api_key=key, timeout=timeout, max_retries=0)
+        client = load_sdk().Anthropic(
+            api_key=key, base_url=settings.base_url, timeout=settings.timeout_seconds,
+            max_retries=0,
+        )
+        # The constructor also merges ANTHROPIC_CUSTOM_HEADERS, and those headers
+        # override the auth headers; no environment-supplied header may be sent.
+        if not hasattr(client, "_custom_headers"):
+            raise AnthropicSdkMissing(
+                "the installed 'anthropic' package is not a supported version "
+                "(pip install -r requirements-anthropic.txt)"
+            )
+        client._custom_headers = {}
+        if (str(client.base_url).rstrip("/") != settings.base_url.rstrip("/")
+                or client.api_key != key or getattr(client, "auth_token", None) is not None):
+            raise DependencyUnavailable(
+                "the Anthropic SDK client did not take the configured endpoint and key; "
+                "refusing to send"
+            )
+        return client
+
+    def _client(self, slot: int, key: str, settings: AnthropicSettings):
+        """One SDK client per key slot, rebuilt only if its key or endpoint changed."""
+        with self._lock:
+            cached = self._clients.get(slot)
+            if cached is not None and cached[0] == key and cached[1] == settings.base_url:
+                return cached[2]
+        client = self._build_client(key, settings)
+        with self._lock:
+            stale = self._clients.get(slot)
+            self._clients[slot] = (key, settings.base_url, client)
+        self._close_client(stale[2] if stale else None)
+        return client
+
+    @staticmethod
+    def _close_client(client: object) -> None:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - closing is best effort
+                logger.debug("anthropic: closing an SDK client failed", exc_info=False)
+
+    def close(self) -> None:
+        """Close the cached SDK clients (idempotent; the gateway stays usable)."""
+        with self._lock:
+            clients, self._clients = list(self._clients.values()), {}
+        for _key, _url, client in clients:
+            self._close_client(client)
 
     def _admit(self) -> None:
         admission = self._request_admission.try_acquire()
@@ -670,6 +773,8 @@ class AnthropicGateway:
             "model": served if isinstance(served, str) and MODEL_ID.match(served) else model,
             "text": text,
             "stop_reason": stop_reason if isinstance(stop_reason, str) else None,
+            "inference_geo": getattr(usage, "inference_geo", None) if isinstance(
+                getattr(usage, "inference_geo", None), str) else None,
             "usage": None if usage is None else {
                 "input_tokens": _count(getattr(usage, "input_tokens", None)),
                 "output_tokens": _count(getattr(usage, "output_tokens", None)),
@@ -692,6 +797,7 @@ class AnthropicGateway:
             model, input_tokens=counts["input_tokens"], output_tokens=counts["output_tokens"],
             cache_read_tokens=counts["cache_read_input_tokens"],
             cache_write_tokens=counts["cache_creation_input_tokens"],
+            us_only=data.get("inference_geo") == "us",
         )
         if usage is None:
             logger.warning("anthropic: response carried no usage; spend recorded as zero")
@@ -713,6 +819,24 @@ class AnthropicGateway:
         data["cached_tokens"] = counts["cache_read_input_tokens"]
         record_usage(facts)
 
+    def _account_partial(self, stream: object, model: str, slot: int) -> None:
+        """Bill what an unfinished stream already consumed; never raises.
+
+        After ``message_start`` the SDK's message snapshot carries the input
+        tokens and the output produced so far, which Anthropic bills even when
+        this side abandons the stream, times out or loses the connection.
+        """
+        try:
+            snapshot = stream.current_message_snapshot  # raises before message_start
+        except Exception:  # noqa: BLE001 - nothing was started, so nothing was billed
+            return
+        try:
+            data = self._normalize(snapshot, model)
+            data["partial"] = True
+            self._account(data, model, slot)
+        except Exception as exc:  # noqa: BLE001 - never mask the stream's own failure
+            logger.error("anthropic: could not account an unfinished stream (%s)", type(exc).__name__)
+
     def _attempt(
         self, settings: AnthropicSettings, slot: int, key: str, model: str, params: dict,
         context: OperationContext, timeout: float, sink, stop,
@@ -721,20 +845,33 @@ class AnthropicGateway:
         self._admit()
 
         def send() -> dict:
+            failure: Exception | None = None
+            final = None
             try:
-                client = self._client(key, timeout)
+                client = self._client(slot, key, settings)
                 if sink is None:
-                    final = client.messages.create(**params)
+                    final = client.messages.create(timeout=timeout, **params)
                 else:
-                    with client.messages.stream(**params) as stream:
-                        for piece in stream.text_stream:
-                            if stop is not None and stop.is_set():
-                                raise Cancelled("Anthropic stream abandoned by its consumer")
-                            if piece:
-                                sink(GenerationChunk(text=piece))
-                        final = stream.get_final_message()
-            except Exception as exc:  # noqa: BLE001 - mapped; the SDK exception is dropped
-                raise self._map_error(exc, slot, settings) from None
+                    with client.messages.stream(timeout=timeout, **params) as stream:
+                        try:
+                            for piece in stream.text_stream:
+                                if stop is not None and stop.is_set():
+                                    raise Cancelled("Anthropic stream abandoned by its consumer")
+                                if piece:
+                                    sink(GenerationChunk(text=piece))
+                            final = stream.get_final_message()
+                        except BaseException:
+                            self._account_partial(stream, model, slot)
+                            raise
+            except Exception as exc:  # noqa: BLE001 - mapped below, outside this handler
+                failure = exc
+            if failure is not None:
+                # Mapped outside the except block so the domain error has neither
+                # __cause__ nor __context__: the SDK exception references the
+                # request, whose headers hold the key.
+                error = self._map_error(failure, slot, settings)
+                failure = None
+                raise error
             data = self._normalize(final, model)
             self._account(data, model, slot)
             return data
@@ -763,7 +900,8 @@ class AnthropicGateway:
                 )
             except SonderError as error:
                 if (getattr(error, _FAILOVER_FLAG, False) and not delivered
-                        and position + 1 < len(slots)):
+                        and position + 1 < len(slots)
+                        and self._cooldown_remaining(slots[position + 1][0]) <= 0):
                     logger.warning(
                         "anthropic: key slot %d refused (%s); failing over to slot %d",
                         slot, type(error).__name__, slots[position + 1][0],
@@ -790,9 +928,12 @@ class AnthropicGateway:
 
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         prepared = self._prepare(request, context)
-        timeout = self._call_timeout(prepared.settings, context)
-        started = time.monotonic()
-        data = self._invoke(prepared.settings, prepared.model, prepared.params, context, timeout)
+        try:
+            timeout = self._call_timeout(prepared.settings, context)
+            started = time.monotonic()
+            data = self._invoke(prepared.settings, prepared.model, prepared.params, context, timeout)
+        finally:
+            self._ledger.release(prepared.reservation)
         self._check_liveness(context, phase="during model call")
         return self._finish(data, request, prepared.model, started)
 
@@ -806,7 +947,11 @@ class AnthropicGateway:
         mapping, accounting); the consumer abandoning the iterator stops it.
         """
         prepared = self._prepare(request, context)
-        timeout = self._call_timeout(prepared.settings, context)
+        try:
+            timeout = self._call_timeout(prepared.settings, context)
+        except BaseException:
+            self._ledger.release(prepared.reservation)
+            raise
         events: queue.Queue = queue.Queue(maxsize=_STREAM_BUFFER_CHUNKS)
         stop = threading.Event()
         finished = threading.Event()
@@ -834,6 +979,8 @@ class AnthropicGateway:
             except BaseException as exc:  # noqa: BLE001 - re-raised on the consumer thread
                 terminal.append(("error", exc))
             finally:
+                # Released once the worker has accounted the call (or its partial usage).
+                self._ledger.release(prepared.reservation)
                 finished.set()
                 try:
                     events.put_nowait(None)  # wake an idle consumer, never wait
@@ -845,7 +992,11 @@ class AnthropicGateway:
             target=contextvars.copy_context().run, args=(worker,),
             name="anthropic-stream", daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            self._ledger.release(prepared.reservation)
+            raise
         try:
             while True:
                 self._check_liveness(context, phase="during model stream")
@@ -915,6 +1066,7 @@ class AnthropicGateway:
                 sdk_installed=sdk_installed() or self._client_factory is not None,
                 default_model=settings.model,
                 tier_models={tier: settings.model_for_tier(tier) for tier in PROVIDER_TIERS},
+                base_url=settings.base_url,
                 max_tokens_ceiling=settings.max_tokens_ceiling,
                 daily_cap_usd=str(settings.daily_usd),
             )

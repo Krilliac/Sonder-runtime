@@ -44,10 +44,18 @@ environment at call time. **`ANTHROPIC_API_KEY` is deliberately not read**: Clau
 Code and the SDK's own default client use that name, and a coding-assistant key
 must never be spent by this runtime by accident.
 
-A key reaches only the SDK client built for that call. It never appears in a
-log line, error, status document, telemetry label, evidence record or export
-(both names are in the logging redaction list and are stripped from child-process
-environments); only the key *slot* (1 or 2) that served a call is recorded.
+The SDK client is built with an explicit key and an explicit base URL
+(`https://api.anthropic.com`, or `SONDER_ANTHROPIC_BASE_URL`, which must be
+https with no credentials, query or fragment). That makes the SDK ignore
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` (Claude
+Code sets the last one), and Sonder clears the headers the SDK would otherwise
+merge from `ANTHROPIC_CUSTOM_HEADERS` and verifies the client before first use,
+so a key is only ever sent to that endpoint. The key never appears in a log
+line, error, status document, telemetry label, evidence record or export (both
+names are in the logging redaction list and are stripped from child-process
+environments); errors keep no reference to the SDK exception. Only the key
+*slot* (1 or 2) that served a call is recorded. One SDK client is kept per key
+slot and closed by `AnthropicGateway.close()`.
 
 ## 3. Enable cloud and bind a tier
 
@@ -72,6 +80,7 @@ vision) or `SONDER_MODEL_BACKEND=anthropic`.
 | `SONDER_ANTHROPIC_MAX_TOKENS` | `16000` | Ceiling for `max_tokens` (a request's `num_predict` is clamped to it). |
 | `SONDER_ANTHROPIC_DAILY_USD` | `10` | Local daily spend cap in USD (`0` refuses every call). |
 | `SONDER_ANTHROPIC_TIMEOUT_SECONDS` | `300` | Per-call timeout, further bounded by the operation deadline. |
+| `SONDER_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Optional endpoint override; https only. |
 
 An explicit `model` request option wins over the tier map. Only models in the
 price table (`domain/anthropic_policy.py`, copied from the Claude API skill's
@@ -86,7 +95,8 @@ only when key 1 was refused with an authentication error (HTTP 401) or a
 credit-exhausted error (HTTP 400 whose message says the credit balance is too
 low, or HTTP 402). A refused call was not charged, so this is not a retry of
 billed work. Every other error (429, 5xx, 529, other 4xx) stays single-attempt
-and never touches key 2. Which slot served each call is shown in
+and never touches key 2. A 429 starts a cool-down for the key slot that was
+rate limited, not for the other one. Which slot served each call is shown in
 `python -m sonder_runtime anthropic status` and in the usage log line.
 
 ## 6. Daily spend cap
@@ -96,8 +106,13 @@ the Sonder state home (`anthropic-spend.json`, per UTC day), so the total
 survives restarts and is shared by every process on that home. Once today's
 total reaches `SONDER_ANTHROPIC_DAILY_USD`, new calls are refused with an error
 that names the cap and today's spend, until 00:00 UTC or until you raise the cap.
-A call already in flight is never cut off, so the day's spend can exceed the
-cap by at most the calls that were in flight when it was crossed. A ledger that
+A call already in flight is never cut off. Before each send the gateway
+reserves a worst-case cost (`max_tokens` of output plus the prompt's byte length
+as input) that counts against the cap until the call finishes, so concurrent
+calls cannot all pass a check made just under the cap; reservations are per
+process. A stream that is abandoned, times out or fails after it started is
+billed for the usage it had already consumed. Responses pinned to US-only
+inference (`usage.inference_geo` of `us`) are priced at the documented 1.1x. A ledger that
 cannot be read fails closed (calls are refused) rather than resetting to zero.
 
 ## 7. What it carries
