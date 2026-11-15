@@ -41,6 +41,17 @@ _LIVE_PROVIDER_VARIABLES = (
     "SONDER_OPENROUTER_PROVIDER",
     "SONDER_OPENROUTER_PROVIDER_ORDER",
     "SONDER_OPENROUTER_TIER_PROVIDER",
+    "SONDER_LIVE_ANTHROPIC",
+    "SONDER_ANTHROPIC_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY_2",
+    "SONDER_ANTHROPIC_MODEL",
+    "SONDER_ANTHROPIC_BASE_URL",
+)
+_ANTHROPIC_SDK_VARIABLES = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
 )
 _CAPTURED_LIVE_PROVIDER_ENV = {
     name: os.environ[name]
@@ -78,6 +89,10 @@ def _clear_ambient_deployment_variables() -> None:
     # A hosted-provider key outside the SONDER_ namespace: tests must never
     # see (or send) an operator's real key.
     os.environ.pop("OPENROUTER_API_KEY", None)
+    # The Anthropic SDK reads these itself: a base URL or custom header from the
+    # operator's (or Claude Code's) environment must never reach a test client.
+    for _anthropic_variable in _ANTHROPIC_SDK_VARIABLES:
+        os.environ.pop(_anthropic_variable, None)
 
 
 _clear_ambient_deployment_variables()

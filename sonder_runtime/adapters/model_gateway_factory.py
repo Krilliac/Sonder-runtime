@@ -28,7 +28,8 @@ def build_model_gateway(
     Ollama remains the default. OpenAI-compatible aliases opt into the packaged
     transport, whose own consent boundary remains authoritative. Sonder
     Inference aliases select ``SonderInferenceGateway``; ``openrouter`` selects
-    the hosted ``OpenRouterGateway`` (cloud consent enforced per call; it is
+    the hosted ``OpenRouterGateway`` and ``anthropic`` the hosted
+    ``AnthropicGateway`` (cloud consent enforced per call; each is
     constructed only when a binding names it). Unknown names and
     incomplete factory maps fail closed rather than changing transport.
 
@@ -53,6 +54,7 @@ def build_model_gateway(
         raise InvalidInput(str(exc)) from exc
 
     if provider_factories is None:
+        from .inference.anthropic_gateway import AnthropicGateway
         from .inference.openai_compat_gateway import OpenAICompatibleGateway
         from .inference.openrouter_gateway import OpenRouterGateway
         from .inference.sonder_inference_gateway import SonderInferenceGateway
@@ -66,6 +68,7 @@ def build_model_gateway(
             "openai_compatible": OpenAICompatibleGateway,
             "sonder_inference": SonderInferenceGateway,
             "openrouter": OpenRouterGateway,
+            "anthropic": AnthropicGateway,
         }
     else:
         factories = dict(provider_factories)

@@ -19,6 +19,7 @@ Commands:
     control-state-rehearsal  collect disposable provider evidence without promotion
     eval-history  inspect or explicitly record precomputed evaluation evidence
     openrouter    list OpenRouter models / account credits, map a tier to a model
+    anthropic     Anthropic provider status: key slots, SDK, today's spend vs cap
 """
 from __future__ import annotations
 
@@ -2108,6 +2109,9 @@ def build_parser() -> argparse.ArgumentParser:
     from sonder_runtime.bootstrap.openrouter_cli import add_parser as add_openrouter_parser
 
     add_openrouter_parser(sub)
+    from sonder_runtime.bootstrap.anthropic_cli import add_parser as add_anthropic_parser
+
+    add_anthropic_parser(sub)
     return parser
 
 

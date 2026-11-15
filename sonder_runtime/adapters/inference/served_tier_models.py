@@ -58,6 +58,14 @@ def served_prompt_model(
         except Exception:
             return model
         return str(served or "").strip() or model
+    if provider == "anthropic":
+        try:
+            from .anthropic_gateway import config_from_env as anthropic_config
+
+            served = anthropic_config(env).model_for_tier(str(tier or ""))
+        except Exception:
+            return model
+        return str(served or "").strip() or model
     if provider != "sonder_inference":
         return model
     try:
@@ -98,6 +106,16 @@ def served_tier_models(tiers: Mapping[str, str], env: Mapping[str, str] | None =
                 routed = router.model_for_tier(name)
                 if routed:
                     served[name] = "%s (openrouter)" % routed
+        claude_tiers = [
+            name for name, provider in bindings.tier_providers.items()
+            if provider == "anthropic"
+        ]
+        if claude_tiers:
+            from .anthropic_gateway import config_from_env as anthropic_config
+
+            claude = anthropic_config(env)
+            for name in claude_tiers:
+                served[name] = "%s (anthropic)" % claude.model_for_tier(name)
     except Exception:
         served = dict(tiers)
     observed = _OBSERVED.get()
