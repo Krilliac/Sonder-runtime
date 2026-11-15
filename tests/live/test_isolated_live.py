@@ -1,5 +1,8 @@
 """Opt-in live checks of the isolated runner against a real Docker/Podman engine.
 
+The root conftest scrubs every SONDER_* variable at import, so it captures these
+first and the ``live_isolated_environment`` fixture restores them per test.
+
 Skipped unless ``SONDER_ISOLATED_LIVE=1``, ``SONDER_ISOLATED_RUNTIME`` (docker or
 podman) and ``SONDER_ISOLATED_ROOTS`` (a directory the engine can bind-mount)
 are all set; the skip reason names the one that is missing. The image must
@@ -25,25 +28,24 @@ import pytest
 
 from sonder_runtime.adapters.execution import isolated_runner as ir
 
-IMAGE = os.environ.get("SONDER_ISOLATED_IMAGE", "").strip() or "docker.io/library/alpine:3.22"
+DEFAULT_IMAGE = "docker.io/library/alpine:3.22"
 
 
-def _missing_gate():
-    if os.environ.get("SONDER_ISOLATED_LIVE") != "1":
-        return "SONDER_ISOLATED_LIVE=1 is not set"
+@pytest.fixture(autouse=True)
+def _live_gate(live_isolated_environment):
+    """Skip unless every opt-in variable (restored by conftest) is present."""
+    if live_isolated_environment.get("SONDER_ISOLATED_LIVE") != "1":
+        pytest.skip("live isolated-runner test: SONDER_ISOLATED_LIVE=1 is not set")
     for name in (ir.RUNTIME_ENV, ir.ROOTS_ENV):
-        if not os.environ.get(name, "").strip():
-            return "%s is not set" % name
-    return ""
+        if not live_isolated_environment.get(name, "").strip():
+            pytest.skip("live isolated-runner test: %s is not set" % name)
 
 
-_MISSING = _missing_gate()
-pytestmark = pytest.mark.skipif(
-    bool(_MISSING), reason="live isolated-runner test: " + _MISSING
-)
+def _image():
+    return os.environ.get("SONDER_ISOLATED_IMAGE", "").strip() or DEFAULT_IMAGE
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def project():
     root = ir.authorized_roots()[0]
     path = root / ("sonder-live-" + uuid.uuid4().hex[:12])
@@ -61,7 +63,7 @@ def project():
 
 def _run(project, script, **kwargs):
     return ir.run_isolated(
-        IMAGE, json.dumps(["/bin/sh", "-c", script]), project, **kwargs
+        _image(), json.dumps(["/bin/sh", "-c", script]), project, **kwargs
     )
 
 
