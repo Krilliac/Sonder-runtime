@@ -1227,6 +1227,8 @@ def cmd_serve(args) -> int:
         capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
         status_page_size=config.ollama.worker_status_page_size,
     )
+    from sonder_runtime.adapters.inference import gpu_admission
+    gpu_admission.configure_typed_gpu_admission(config.gpu_admission)
     from sonder_runtime.adapters.inference import ollama_vision
     ollama_vision.configure_typed_request_timeout(
         config.ollama.request_timeout_seconds,
@@ -1511,6 +1513,8 @@ def cmd_mcp(args) -> int:
             capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
             status_page_size=config.ollama.worker_status_page_size,
         )
+        from sonder_runtime.adapters.inference import gpu_admission
+        gpu_admission.configure_typed_gpu_admission(config.gpu_admission)
         # Do not reset typed worker configuration after the application binds
         # its pool: that would erase the shared compatibility pool reference.
         owned_application = default_app(config=config)

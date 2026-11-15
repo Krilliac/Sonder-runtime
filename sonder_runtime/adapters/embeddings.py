@@ -1,5 +1,6 @@
 """Local Ollama embeddings + vector helpers. Stdlib only. Soft-fails to None."""
 import array
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import sonder_runtime.adapters.embedding_cache as embed_cache
-from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.inference import gpu_admission, ollama_endpoint
 
 # A dedicated embedding endpoint lets the embedder live on another Ollama host
 # (for example a LAN node) while chat stays on the local primary. Without it,
@@ -225,7 +226,9 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
         except ValueError:
             return ""
         try:
-            with ollama_endpoint.open_url(
+            with gpu_admission.process_service().admit(
+                "/api/tags", None, origin=selected_base, deadline=time.monotonic() + timeout,
+            ), ollama_endpoint.open_url(
                 "%s/api/tags" % selected_base, timeout=timeout,
             ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -530,6 +533,26 @@ def _embed_on_cpu() -> bool:
     return os.environ.get("SONDER_EMBED_ON_CPU", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+@contextmanager
+def _admitted_embeddings_response(body, base, timeout):
+    """Open one ``/api/embeddings`` response inside its GPU admission.
+
+    Embeddings queue on their own slot (a long chat does not stall recall) and
+    follow the model's pinned ``num_ctx`` like every other local request.
+    """
+    deadline = time.monotonic() + float(timeout)
+    with gpu_admission.process_service().admit(
+        "/api/embeddings", body, origin=base, deadline=deadline,
+    ) as ticket:
+        req = urllib.request.Request(
+            "%s/api/embeddings" % base,
+            data=ticket.body(json.dumps(body).encode("utf-8")),
+            headers={"Content-Type": "application/json"},
+        )
+        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+            yield resp
+
+
 def embed(text, timeout=30, base=None, model=None):
     """Embed *text*; soft-fails to None.
 
@@ -675,14 +698,8 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
         keep_alive = _keep_alive()
         if keep_alive is not None:
             body["keep_alive"] = keep_alive
-        payload = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            "%s/api/embeddings" % selected_base,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
         try:
-            with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+            with _admitted_embeddings_response(body, selected_base, timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 vector = data.get("embedding") if isinstance(data, dict) else None
                 revision_after = (

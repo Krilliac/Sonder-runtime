@@ -14,7 +14,9 @@ import urllib.request
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
+import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
 from sonder_runtime.adapters.inference.ollama_endpoint import open_url
+from sonder_runtime.domain.gpu_admission import CtxPolicy
 from sonder_runtime.application.routing.backend_conformance import (
     PROTOCOL_CASES,
     run_protocol_probes,
@@ -71,8 +73,12 @@ class OllamaConformanceProbe:
             headers={"Content-Type": "application/json"} if body is not None else {},
             method="POST" if body is not None else "GET",
         )
-        with open_url(request, timeout=min(timeout, remaining),
-                      allow_remote=False) as response:
+        # The evidence is bound to the window sent, so this battery never accepts
+        # a rewritten num_ctx: a loaded model at another window makes it wait.
+        with gpu_admission.process_service().admit(
+            path, payload, origin=self.base_url, deadline=time.monotonic() + remaining,
+            ctx_policy=CtxPolicy.EXACT,
+        ), open_url(request, timeout=min(timeout, remaining), allow_remote=False) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError("Ollama response exceeds size bound")

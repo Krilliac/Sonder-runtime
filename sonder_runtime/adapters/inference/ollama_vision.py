@@ -4,14 +4,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 import urllib.request
 
 from ...application.context import OperationContext
 from ...application.ports.model_target import ModelTargetResolver
 from ...application.ports.vision_gateway import VisionRequest, VisionResponse, require_vision_text
-from ...domain.common.errors import Cancelled, DeadlineExceeded, DependencyUnavailable, Forbidden
+from ...domain.common.errors import (
+    Cancelled, Conflict, DeadlineExceeded, DependencyUnavailable, Forbidden,
+)
 from ..provider_bindings import provider_bindings_from_env
 from . import ollama_endpoint
+from . import gpu_admission
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +117,19 @@ class OllamaVisionGateway:
 
     @staticmethod
     def _post(url: str, payload: dict, timeout: float | None) -> dict:
-        request = urllib.request.Request(
-            url, data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
         limit = RESPONSE_BODY_LIMIT
+        budget = timeout or _configured_request_timeout
         try:
-            with ollama_endpoint.open_url(request, timeout=timeout or _configured_request_timeout) as response:
-                raw = _read_bounded(response, limit)
+            with gpu_admission.process_service().admit(
+                "/api/chat", payload, origin=url.removesuffix("/api/chat"),
+                deadline=time.monotonic() + budget,
+            ) as ticket:
+                request = urllib.request.Request(
+                    url, data=json.dumps(ticket.payload, separators=(",", ":")).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with ollama_endpoint.open_url(request, timeout=budget) as response:
+                    raw = _read_bounded(response, limit)
             if len(raw) > limit:
                 raise DependencyUnavailable(
                     "local Ollama vision response exceeds %d bytes" % limit
@@ -128,6 +137,8 @@ class OllamaVisionGateway:
             return json.loads(raw.decode("utf-8"))
         except DependencyUnavailable:
             raise
+        except gpu_admission.GpuAdmissionRefused as refused:
+            raise Conflict(refused.detail) from refused
         except Exception as exc:
             logger.warning(
                 f"Ollama vision request failed: url={url!r}, "
