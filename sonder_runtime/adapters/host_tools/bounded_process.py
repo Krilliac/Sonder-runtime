@@ -5,8 +5,9 @@ the legacy ``toolchain_status`` wrapper).  It is deliberately not a command
 runner: callers pass only argv built from host-owned constants.
 
 Bounds: no shell, stdin closed, a shared stdout+stderr character budget, a
-wall-clock timeout, and whole process-tree termination (POSIX process group
-or Windows ``taskkill /T``) when either bound is exceeded.
+wall-clock timeout, and whole process-tree termination when either bound is
+exceeded.  Teardown, and the sweep of descendants that outlive a probe which
+exited normally, belong to :mod:`sonder_runtime.adapters.process_tree`.
 
 Working directory: unless a caller passes ``cwd``, the child starts in a
 neutral, administrator-owned directory (``/`` on POSIX, ``%SystemRoot%`` on
@@ -30,12 +31,15 @@ import time
 from typing import Mapping, Sequence
 
 import sonder_runtime.adapters.process_termination as process_termination
+import sonder_runtime.adapters.process_tree as process_tree
 import sonder_runtime.platform.logging as runtime_logging
 import sonder_runtime.platform.runtime_threads as runtime_threads
 
 OUTCOMES = ("ok", "error", "timeout", "output_limit", "start_failed")
 _POLL_SECONDS = 0.02
 _READ_CHUNK = 1024
+_TREE_GRACE_SECONDS = 0.2
+_TREE_KILL_WAIT_SECONDS = 2.0
 
 
 def neutral_cwd(os_module=os) -> str | None:
@@ -100,6 +104,14 @@ def run_bounded(
     except (OSError, ValueError):
         return BoundedRun("start_failed", "", None, int((time.monotonic() - started) * 1000))
 
+    # Test doubles and simulated ``os`` modules keep the legacy teardown path:
+    # only a real child of the real ``os`` is ever signalled by process group.
+    tree = (
+        process_tree.ProcessTree.owning(proc)
+        if os_module is os and process_tree.is_real_popen(proc)
+        else None
+    )
+
     chunks: list[str] = []
     size = 0
     lock = threading.Lock()
@@ -130,6 +142,9 @@ def run_bounded(
                 pass
 
     def terminate():
+        if tree is not None:
+            tree.terminate(grace_seconds=_TREE_GRACE_SECONDS, kill_wait_seconds=_TREE_KILL_WAIT_SECONDS)
+            return
         process_termination.terminate_process_tree(
             proc,
             os_module=os_module,
@@ -172,8 +187,14 @@ def run_bounded(
                 proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 pass
+        # A probe that exited normally can still have left descendants (they
+        # also keep the pipes open, stalling the readers); remove them first.
+        if tree is not None and proc.poll() is not None and tree.has_survivors():
+            terminate()
         for reader in readers:
             reader.join(timeout=1)
+        if tree is not None:
+            tree.close()
     if overflow.is_set():
         outcome = "output_limit"
     exit_code = proc.returncode

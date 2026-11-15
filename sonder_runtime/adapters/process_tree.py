@@ -62,6 +62,15 @@ DEFAULT_KILL_WAIT_SECONDS = 5.0
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
+# Captured at import so a test that monkeypatches ``subprocess.Popen`` cannot
+# make a double look like a real child (and so a fake pid reach ``killpg``).
+_REAL_POPEN = subprocess.Popen
+
+
+def is_real_popen(proc: object) -> bool:
+    """True only for a genuine ``subprocess.Popen`` instance."""
+    return isinstance(proc, _REAL_POPEN)
+
 
 class TreeState(enum.Enum):
     """Why :meth:`ProcessTree.wait` returned."""
@@ -337,7 +346,23 @@ class ProcessTree:
             raise ValueError("argv must be non-empty")
         kwargs = dict(popen_kwargs)
         kwargs.update(group_popen_kwargs(int(kwargs.pop("creationflags", 0) or 0)))
-        proc = subprocess.Popen(list(argv), **kwargs)
+        return cls.owning(_REAL_POPEN(list(argv), **kwargs))
+
+    @classmethod
+    def owning(cls, proc: subprocess.Popen) -> ProcessTree:
+        """Wrap a real ``Popen`` the caller just started with ``group_popen_kwargs()``.
+
+        For callers that must keep their own ``Popen`` call (custom pipes,
+        injected launchers) but still want this module's teardown.  Call it
+        straight after ``Popen`` returns: POSIX records the child as its own
+        group leader (true because of ``start_new_session``) so descendants
+        of a root that has since exited are still found; Windows creates the
+        Job Object while the process handle is still open.  Anything that is
+        not a real ``subprocess.Popen`` is refused so a test double's fake pid
+        can never be turned into a ``killpg`` target.
+        """
+        if not is_real_popen(proc):
+            raise TypeError("owning() needs a subprocess.Popen")
         if os.name == "nt":
             return cls(proc, group_id=None, job=_WindowsJob.create_for(proc))
         return cls(proc, group_id=proc.pid, job=None)
@@ -416,7 +441,7 @@ class ProcessTree:
             return TreeResult(
                 state, result.returncode, result.escalated, False, result.complete,
             )
-        if not sweep_on_exit or not self._has_survivors():
+        if not sweep_on_exit or not self.has_survivors():
             return TreeResult(
                 TreeState.EXITED, self._proc.returncode, False, False,
                 self._tree_empty(),
@@ -474,7 +499,8 @@ class ProcessTree:
             return False
         return True
 
-    def _has_survivors(self) -> bool:
+    def has_survivors(self) -> bool:
+        """True while a descendant of the root is still alive."""
         if os.name == "nt":
             if self._job is None:
                 return False
@@ -626,6 +652,7 @@ __all__ = [
     "TreeResult",
     "TreeState",
     "group_popen_kwargs",
+    "is_real_popen",
     "live_group_members",
     "terminate_tree",
 ]
