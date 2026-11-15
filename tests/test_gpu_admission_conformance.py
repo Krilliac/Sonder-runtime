@@ -9,6 +9,7 @@ import pytest
 from sonder_runtime.adapters.inference import capability_refresh, ollama_conformance
 from sonder_runtime.adapters.inference import gpu_admission as adapter
 from sonder_runtime.adapters.inference.capability_evidence import load_production_evidence
+from sonder_runtime.domain.gpu_admission import RefusalReason, Refused
 from sonder_runtime.domain.routing.backend_conformance import (
     BackendCapability, BackendConformanceRecord, BackendIdentity, ProbeResult,
 )
@@ -67,6 +68,74 @@ def test_a_ctx_pin_conflict_during_refresh_keeps_the_previous_evidence(tmp_path,
     assert stored == previous, "an admission refusal replaced the earlier evidence"
     assert not stored.failed
     assert fake.chat_bodies == [] and fake.reloads == 0 and fake.loaded[MODEL] == 8192
+
+
+def _is_protocol_case(payload):
+    return "tools" in (payload or {}) or "format" in (payload or {})
+
+
+class RefuseChats:
+    """Admits every request except the chats ``refuse(payload)`` picks; a protocol
+    case is a chat with tools or a schema, the plain chat has neither."""
+
+    def __init__(self, reason, refuse):
+        self.reason = reason
+        self.refuse = refuse
+        self.refused = 0
+
+    @contextlib.contextmanager
+    def admit(self, path, payload, **_kwargs):
+        if path == "/api/chat" and self.refuse(payload):
+            self.refused += 1
+            raise adapter.GpuAdmissionRefused(Refused(self.reason, "test", retry_after_seconds=2.0))
+        yield adapter.passthrough_ticket(payload)
+
+
+def _refresh_over_previous_evidence(tmp_path, monkeypatch, admission):
+    fake = ConformanceOllama()
+    monkeypatch.setattr(ollama_conformance.gpu_admission, "process_service", lambda: admission)
+    monkeypatch.setattr(ollama_conformance, "open_url", fake.open_url)
+    monkeypatch.setattr(capability_refresh, "configured_local_models", lambda _home: (MODEL,))
+    identity = BackendIdentity("ollama", MODEL, DIGEST, "Q8_0", "0.0-test", "b" * 64,
+                               "c" * 64, 4096, "fixture")
+    previous = BackendConformanceRecord(
+        "ollama", MODEL, time.time() - 60,
+        (ProbeResult(BackendCapability.CHAT, True, "plain_chat_passed"),
+         ProbeResult(BackendCapability.STRUCTURED, True, "live_protocol_passed")),
+        probe_version=3, synthetic=False, identity=identity)
+    load_production_evidence(tmp_path).save(previous)
+    result = capability_refresh.refresh_capabilities(
+        origin=ORIGIN, home=tmp_path, timeout_seconds=30, context_tokens=4096)
+    return fake, result, previous
+
+
+@pytest.mark.parametrize("reason", [
+    RefusalReason.QUEUE_TIMEOUT, RefusalReason.HOST_RAM_FLOOR, RefusalReason.PROBE_BUSY,
+])
+def test_a_refusal_after_the_plain_chat_still_defers_and_keeps_the_previous_evidence(
+        tmp_path, monkeypatch, reason):
+    admission = RefuseChats(reason, _is_protocol_case)
+    fake, result, previous = _refresh_over_previous_evidence(tmp_path, monkeypatch, admission)
+
+    assert len(fake.chat_bodies) == 1, "the plain chat should have been admitted and sent"
+    assert admission.refused == 1, "the battery kept going after a refusal"
+    outcome = result["models"][0]
+    assert outcome["status"] == "deferred"
+    assert outcome["reason"] == reason.value
+    assert outcome["retry_after_seconds"] == 2.0
+    assert load_production_evidence(tmp_path).load("ollama", MODEL) == previous
+
+
+def test_a_refused_plain_chat_alone_defers_without_running_the_protocol_cases(
+        tmp_path, monkeypatch):
+    admission = RefuseChats(RefusalReason.QUEUE_TIMEOUT,
+                            lambda payload: not _is_protocol_case(payload))
+    fake, result, previous = _refresh_over_previous_evidence(tmp_path, monkeypatch, admission)
+
+    assert admission.refused == 1
+    assert fake.chat_bodies == [], "protocol cases ran after the plain chat was refused"
+    assert result["models"][0]["status"] == "deferred"
+    assert load_production_evidence(tmp_path).load("ollama", MODEL) == previous
 
 
 def test_the_battery_raises_an_admission_refusal_instead_of_recording_a_failure(

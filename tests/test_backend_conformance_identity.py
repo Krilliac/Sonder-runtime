@@ -174,6 +174,52 @@ def test_live_protocol_cases_validate_transcript_shape_and_leave_unsupported_unk
         run_protocol_probes(LiveProtocol(), identity=identity(), synthetic=False)
 
 
+class _NotMeasured(Exception):
+    """Stands in for an adapter's "the case never ran" error (an admission refusal)."""
+
+
+class _ProtocolRaising:
+    def __init__(self, failures):
+        self.failures = failures
+        self.cases = []
+
+    def run_case(self, capability, *, model, timeout_seconds):
+        self.cases.append(capability)
+        failure = self.failures.get(capability)
+        if failure is not None:
+            raise failure
+        return None
+
+
+def test_a_propagated_exception_aborts_the_battery_instead_of_failing_the_case():
+    provider = _ProtocolRaising({BackendCapability.TOOL_NATIVE: _NotMeasured("refused")})
+    with pytest.raises(_NotMeasured):
+        run_protocol_probes(provider, identity=identity(), now=100, propagate=(_NotMeasured,))
+    assert provider.cases[-1] is BackendCapability.TOOL_NATIVE, "the battery ran on past it"
+
+
+def test_other_exceptions_still_become_failed_cases_when_propagate_is_set():
+    provider = _ProtocolRaising({
+        BackendCapability.STRUCTURED: RuntimeError("transport broke"),
+        BackendCapability.TOOL_NATIVE: _NotMeasured("only propagated when named"),
+    })
+    result = run_protocol_probes(provider, identity=identity(), now=100,
+                                 propagate=(LookupError,))
+    reasons = {probe.capability: probe.reason_code for probe in result.results}
+    assert reasons[BackendCapability.STRUCTURED] == "live_protocol_error"
+    assert reasons[BackendCapability.TOOL_NATIVE] == "live_protocol_error"
+    assert {BackendCapability.STRUCTURED, BackendCapability.TOOL_NATIVE} <= result.failed
+
+
+@pytest.mark.parametrize("propagate", [
+    [_NotMeasured], (_NotMeasured, "x"), (int,), _NotMeasured, (_NotMeasured(),),
+])
+def test_propagate_must_be_a_tuple_of_exception_types(propagate):
+    with pytest.raises(TypeError, match="propagate must be a tuple of exception types"):
+        run_protocol_probes(_ProtocolRaising({}), identity=identity(), now=100,
+                            propagate=propagate)
+
+
 def test_router_rejects_name_only_record_and_allows_identity_bound_role(tmp_path):
     evidence = RecentCapabilityEvidence(tmp_path / "capabilities.json", max_age_seconds=30)
     model = CapabilityProfile("model:latest", frozenset({Capability.EDIT}), backend="local")
