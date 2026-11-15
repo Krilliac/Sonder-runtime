@@ -40,6 +40,10 @@ from sonder_runtime.domain.reference_lookup.terms import MAX_QUERY_TERMS, quoted
 REQUIRED_COLUMNS = frozenset({"title", "heading", "body", "source", "url", "path", "doc"})
 BUSY_TIMEOUT_SECONDS = 5.0
 TITLE_TOPUP_LIMIT = 50
+# Title rows read by ``best_title_rows`` before keeping the best one per source.
+# An ATT&CK identifier is in the titles of about 80 to 140 passages of the
+# expanded library (one source splits a page into many passages).
+TITLE_SCAN_LIMIT = 500
 
 _SEARCH_COLUMNS = ("title, heading, body, source, url, path, doc, "
                    "bm25(passages, 4.0, 2.0, 1.0) AS rank, rowid")
@@ -51,6 +55,8 @@ _SEARCH_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages "
                "WHERE passages MATCH ? ORDER BY rank LIMIT ?")
 _TITLE_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages WHERE passages MATCH ? "
               f"ORDER BY rank LIMIT {TITLE_TOPUP_LIMIT}")
+_TITLE_SCAN_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages WHERE passages MATCH ? "
+                   f"ORDER BY rank LIMIT {TITLE_SCAN_LIMIT}")
 
 _CacheKey = tuple[str, int, int]
 
@@ -71,6 +77,11 @@ def classify_error(exc: BaseException) -> IndexState:
 
 def _text(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _title_phrase(ident: str) -> str:
+    """An FTS5 MATCH expression for ident as a quoted phrase in the title column."""
+    return 'title : "' + ident.replace('"', '""') + '"'
 
 
 def _row(values: Sequence[object]) -> RankedRow:
@@ -152,13 +163,34 @@ class ReferenceIndex:
                 rows = [_row(r) for r in conn.execute(_SEARCH_SQL, (match, limit))]
                 if idents:
                     def fetch(ident: str) -> list[RankedRow]:
-                        phrase = 'title : "' + ident.replace('"', '""') + '"'
-                        return [_row(r) for r in conn.execute(_TITLE_SQL, (phrase,))]
+                        return [_row(r) for r in conn.execute(_TITLE_SQL, (_title_phrase(ident),))]
 
                     rows = priority_rows(rows, idents, fetch) + rows
         except (sqlite3.Error, OSError, ValueError) as exc:
             raise ReferenceIndexError(classify_error(exc), sanitize(exc)) from None
         return tuple(rows)
+
+    def best_title_rows(self, ident: str) -> tuple[RankedRow, ...]:
+        """The best row of each source whose title holds ident as a phrase, best first.
+
+        Read-only, one query of at most ``TITLE_SCAN_LIMIT`` rows; a source
+        whose best title row is not among them is left out.  Raises
+        ReferenceIndexError when the index is unusable or the query fails.
+        """
+        status = self.status()
+        if not status.ready:
+            raise ReferenceIndexError(status.state, status.detail)
+        if not isinstance(ident, str) or not ident.strip():
+            return ()
+        best: dict[str, RankedRow] = {}
+        try:
+            with self.connect() as conn:
+                for values in conn.execute(_TITLE_SCAN_SQL, (_title_phrase(ident),)):
+                    row = _row(values)
+                    best.setdefault(row.source, row)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            raise ReferenceIndexError(classify_error(exc), sanitize(exc)) from None
+        return tuple(best.values())
 
     def term_stats(self, terms: Sequence[str], rowids: Sequence[int]) -> TermStats:
         """How common each term is, and which of ``terms`` each of ``rowids`` holds.
