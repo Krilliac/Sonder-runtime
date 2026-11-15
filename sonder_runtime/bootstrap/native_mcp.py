@@ -60,10 +60,10 @@ _AGENT_ASSIST_TOOLS = (
         "claim_check", "Check a model's code claim against the repository, read-only",
         {"type": "object", "properties": {
             "root": _PATH, "file": {"type": "string"}, "line": _INT, "line_end": _INT,
-            "symbols": {"type": "string"}, "category": {"type": "string"},
+            "symbols": {"type": "string", "maxLength": 1024}, "category": {"type": "string"},
             "guard": {"type": "string"}, "entry_point": {"type": "string"},
-            "claim_text": {"type": "string"}, "claim_id": {"type": "string"},
-            "claims_json": {"type": "string"},
+            "claim_text": {"type": "string", "maxLength": 8192}, "claim_id": {"type": "string"},
+            "claims_json": {"type": "string", "maxLength": 60_000},
         }, "required": ["root"], "additionalProperties": False},
         effects=frozenset({ToolEffect.READ_FILES}),
     ),

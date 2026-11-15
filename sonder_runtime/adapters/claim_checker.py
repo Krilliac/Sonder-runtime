@@ -50,9 +50,12 @@ class ClaimChecker:
     def __init__(self, root: str | os.PathLike[str], config: ClaimCheckConfig | None = None,
                  read_guard: Callable[[str], bool] | None = None):
         """``read_guard(real_path) -> bool`` lets the host refuse files it must not expose
-        (credentials, control state); a refused file is neither checked nor searched."""
+        (credentials, control state); a refused file is neither checked nor searched.
+        The answer is cached per real path for the life of the checker, so the guard
+        runs at most once per distinct file however many claims are checked."""
         self._config = config or ClaimCheckConfig()
         self._read_guard = read_guard
+        self._verdicts: dict[str, bool] = {}
         self._root = Path(os.path.realpath(root))
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
@@ -80,7 +83,14 @@ class ClaimChecker:
         return str(real), None
 
     def _allowed(self, real: str) -> bool:
-        return self._read_guard is None or bool(self._read_guard(real))
+        """Whether the host lets this file be read; each real path is asked at most once."""
+        if self._read_guard is None:
+            return True
+        verdict = self._verdicts.get(real)
+        if verdict is None:
+            verdict = bool(self._read_guard(real))
+            self._verdicts[real] = verdict
+        return verdict
 
     def _read(self, real: str) -> str | None:
         """File text, or None when too large, binary or unreadable. Cached up to a budget."""

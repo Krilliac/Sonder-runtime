@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -347,8 +348,8 @@ def test_caller_search_does_not_follow_a_file_symlink_out_of_the_root(repo, tmp_
     claim = Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS)
     report = ClaimChecker(repo, cfg, read_guard=guard).check(claim)
     assert report.guards == ()
-    root = os.path.realpath(repo)
-    assert all(os.path.realpath(p).startswith(root) for p in seen)
+    root = Path(os.path.realpath(repo))
+    assert all(Path(os.path.realpath(p)).is_relative_to(root) for p in seen)
     assert not any(p.endswith("Out.cs") for p in seen)
 
 
@@ -387,3 +388,50 @@ def test_caller_search_works_without_os_path_isjunction(repo, monkeypatch):
     report = ClaimChecker(repo, cfg).check(
         Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS))
     assert any(g.path == "src/Caller.cs" for g in report.guards)
+
+
+def test_read_guard_cost_is_bounded_by_distinct_files_not_claims_times_files(repo):
+    calls = []
+
+    def guard(path):
+        calls.append(path)
+        return True
+
+    for index in range(40):
+        (repo / "src" / f"Extra{index}.cs").write_text(
+            f"class Extra{index} {{ void Run(Pump p) {{ p.Fill(null, {index}); }} }}\n",
+            newline="\n")
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    checker = ClaimChecker(repo, cfg, read_guard=guard)
+    claims = [Claim(file="src/Pump.cs", line_start=line, symbols=("Fill",), category=DOS)
+              for line in (7, 9, 24, 28, 29)]
+    reports = [checker.check(claim) for claim in claims]
+    distinct = {Path(path) for path in calls}
+    assert len(distinct) == len(calls)  # no path is asked twice, however many claims
+    candidates = {p for p in (repo / "src").glob("*.cs")}
+    assert len(calls) <= len(candidates)
+    assert reports[0].guards == checker.check(claims[0]).guards  # cached answers change nothing
+    assert len(calls) <= len(candidates)
+
+
+def test_read_guard_refusal_is_cached_and_the_file_is_never_read(repo, monkeypatch):
+    seen = []
+    real_read = ClaimChecker._read
+
+    def read(self, real):
+        seen.append(os.path.basename(real))
+        return real_read(self, real)
+
+    asked = []
+
+    def guard(path):
+        asked.append(os.path.basename(path))
+        return os.path.basename(path) != "Caller.cs"
+
+    monkeypatch.setattr(ClaimChecker, "_read", read)
+    cfg = replace(ClaimCheckConfig(), guard_window_lines=0)
+    checker = ClaimChecker(repo, cfg, read_guard=guard)
+    for _ in range(3):
+        checker.check(Claim(file="src/Pump.cs", line_start=7, symbols=("Fill",), category=DOS))
+    assert asked.count("Caller.cs") == 1
+    assert "Caller.cs" not in seen

@@ -169,3 +169,85 @@ def test_native_handler_returns_the_same_json(repo):
     assert json.loads(out["output"])["summary"]["verdicts"]["reject"] == 1
     failed = tool.native_claim_check({"root": str(repo)}, root_guard=allow_all)
     assert failed["isError"] is True and failed["error"] == "tool_refused"
+
+
+def _frame_for(result, limit_bytes=None):
+    """The bytes the stdio transport writes for this native tool result."""
+    from sonder_runtime.interfaces.mcp.transport import StdioMcpTransport
+
+    standard = StdioMcpTransport._standard_tool_result(result)
+    encoded = json.dumps({"jsonrpc": "2.0", "id": 1, "result": standard},
+                         separators=(",", ":"), ensure_ascii=True)
+    return len(encoded.encode("utf-8"))
+
+
+def test_large_native_batch_fits_the_transport_frame_and_reports_the_cut(tmp_path):
+    from sonder_runtime.interfaces.mcp.transport import McpTransportLimits
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    count = 600
+    for index in range(count):
+        (root / f"f{index}.cs").write_text(PUMP, newline="\n")
+    claims = [{"id": f"claim-\u00e9\u4e2d-{index}", "file": f"f{index}.cs", "line": 99}
+              for index in range(count)]
+    result = tool.native_claim_check(
+        {"root": str(root), "claims_json": json.dumps(claims)},
+        root_guard=allow_all, file_guard=allow_all)
+    limit = McpTransportLimits().max_frame_bytes
+    frame = _frame_for(result)
+    assert frame <= limit
+    assert frame > limit * 0.9  # the cut keeps as much as fits, not a token amount
+    out = json.loads(result["output"])
+    omitted = out["summary"]["omitted_reports"]
+    assert 0 < omitted < count and len(out["reports"]) == count - omitted
+    assert out["summary"]["total"] == count and result["isError"] is False
+
+
+def test_small_native_batch_is_not_truncated(repo):
+    result = tool.native_claim_check({"root": str(repo), "file": "P.cs", "line": 99},
+                                     root_guard=allow_all, file_guard=allow_all)
+    out = json.loads(result["output"])
+    assert "omitted_reports" not in out["summary"] and len(out["reports"]) == 1
+
+
+def test_native_cut_honours_an_explicit_frame_limit(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    count = 50
+    for index in range(count):
+        (root / f"f{index}.cs").write_text(PUMP, newline="\n")
+    claims = [{"file": f"f{index}.cs", "line": 99} for index in range(count)]
+    result = tool.native_claim_check(
+        {"root": str(root), "claims_json": json.dumps(claims)},
+        root_guard=allow_all, file_guard=allow_all, max_frame_bytes=20_000)
+    assert _frame_for(result) <= 20_000
+    assert json.loads(result["output"])["summary"]["omitted_reports"] > 0
+
+
+def test_read_policy_snapshot_resolves_the_control_plane_once_and_still_refuses(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.filesystem import file_ops
+
+    (tmp_path / "ok.cs").write_text("x\n")
+    (tmp_path / "sonder.env").write_text("KEY=1\n")
+    inventories = []
+    real = file_ops.live_control_plane_inventory
+
+    def counting(*args, **kwargs):
+        inventories.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(file_ops, "live_control_plane_inventory", counting)
+    ok = str(tmp_path / "ok.cs")
+    for _ in range(5):
+        file_ops.resolve_repository_read_path(ok, extra_roots=str(tmp_path))
+    unscoped = len(inventories)
+    inventories.clear()
+    with file_ops.read_policy_snapshot():
+        for _ in range(5):
+            file_ops.resolve_repository_read_path(ok, extra_roots=str(tmp_path))
+        with pytest.raises(PermissionError):
+            file_ops.resolve_repository_read_path(
+                str(tmp_path / "sonder.env"), extra_roots=str(tmp_path))
+    assert unscoped >= 5 and len(inventories) <= 2
+    assert file_ops._POLICY_SNAPSHOT.get() is None

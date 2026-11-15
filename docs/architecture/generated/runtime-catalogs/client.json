@@ -1,5 +1,5 @@
 {
-  "digest": "7510d9173e9dcc7d076631083a625b08c651ccfd9adbb3c50391ce494129fa8b",
+  "digest": "cb3ca7d1de20a6ed1498311ec416eb850c5a72384bb4fb42fc5e74929e79e746",
   "events": [
     {
       "name": "approval.denied",
@@ -2195,9 +2195,11 @@
             "type": "string"
           },
           "claim_text": {
+            "maxLength": 8192,
             "type": "string"
           },
           "claims_json": {
+            "maxLength": 60000,
             "type": "string"
           },
           "entry_point": {
@@ -2220,6 +2222,7 @@
             "type": "string"
           },
           "symbols": {
+            "maxLength": 1024,
             "type": "string"
           }
         },

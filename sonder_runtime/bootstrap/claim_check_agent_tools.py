@@ -12,6 +12,7 @@ neither checked nor quoted back as evidence.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -19,10 +20,15 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ..adapters.claim_checker import ClaimChecker, claim_from_mapping
-from ..domain.claim_check import ClaimError
+from ..domain.claim_check import ClaimError, ClaimReport
+from ..interfaces.mcp.transport import McpTransportLimits
 from ..platform.claim_check_config import ClaimCheckConfig
 
 MAX_OUTPUT_CHARS = 200_000
+# Room kept inside a native frame for the JSON-RPC envelope around the tool result
+# ({"jsonrpc","id","result"}); request ids are short in practice.
+_FRAME_ENVELOPE_BYTES = 1_024
+_ITEM_SEPARATOR = ", "  # json.dumps' default item separator between array elements
 _VERDICTS = ("reject", "flag", "keep")
 
 
@@ -77,35 +83,35 @@ def _claims_from_arguments(arguments: Mapping) -> list[dict]:
     return raw
 
 
-def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = None,
-                    root_guard: Callable[[str], str] | None = None,
-                    file_guard: Callable[[str], str] | None = None) -> dict:
-    """Check one claim or a batch; returns a JSON-serializable dict, never raises."""
+def _check_reports(arguments: Mapping, config: ClaimCheckConfig | None,
+                   root_guard: Callable[[str], str] | None,
+                   file_guard: Callable[[str], str] | None) -> tuple[dict | None, list[ClaimReport]]:
+    """Run the checks: ``(error, [])`` on a refused request, else ``(None, reports)``."""
     if not isinstance(arguments, Mapping):
-        return _error("invalid_arguments", "arguments must be an object")
+        return _error("invalid_arguments", "arguments must be an object"), []
     root = arguments.get("root")
     if not isinstance(root, str) or not root.strip():
-        return _error("invalid_arguments", "root (the repository root) is required")
+        return _error("invalid_arguments", "root (the repository root) is required"), []
     try:
         rows = _claims_from_arguments(arguments)
     except ValueError as exc:
-        return _error("invalid_arguments", str(exc))
+        return _error("invalid_arguments", str(exc)), []
     config = config or _default_config()
     if not rows:
-        return _error("invalid_arguments", "claims_json holds no claims")
+        return _error("invalid_arguments", "claims_json holds no claims"), []
     if len(rows) > config.max_batch_claims:
         return _error("too_many_claims",
-                      "at most max_batch_claims=%d claims per call" % config.max_batch_claims)
+                      "at most max_batch_claims=%d claims per call" % config.max_batch_claims), []
     try:
         claims = [claim_from_mapping(row) for row in rows]
     except ClaimError as exc:
-        return _error("invalid_claim", str(exc))
+        return _error("invalid_claim", str(exc)), []
     try:
         resolved = (root_guard or _default_root_guard)(root.strip())
         if not os.path.isdir(resolved):
             raise ValueError("the repository root is not a directory")
     except (OSError, ValueError, PermissionError) as exc:
-        return _error("root_refused", str(exc))
+        return _error("root_refused", str(exc)), []
     guard_for_files = file_guard or _default_file_guard(str(resolved))
 
     def read_guard(path: str) -> bool:
@@ -115,32 +121,83 @@ def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = Non
         except (OSError, ValueError, PermissionError):
             return False
 
-    reports = ClaimChecker(resolved, config, read_guard=read_guard).check_many(claims)
+    try:
+        with _read_policy_scope(file_guard is None):
+            return None, ClaimChecker(resolved, config, read_guard=read_guard).check_many(claims)
+    except (OSError, ValueError, PermissionError) as exc:
+        return _error("root_refused", str(exc)), []
+
+
+def _read_policy_scope(default_guard: bool):
+    """The default guard re-derives the control-plane inventory per call; resolve it once.
+
+    A host-supplied guard owns its own cost and is left alone."""
+    if not default_guard:
+        return contextlib.nullcontext()
+    from ..adapters.filesystem.file_ops import read_policy_snapshot
+    return read_policy_snapshot()
+
+
+def _assemble(reports: list[ClaimReport], body: list[dict]) -> dict:
     verdicts = {name: 0 for name in _VERDICTS}
     duplicates = 0
     for report in reports:
         verdicts[report.verdict.value] += 1
         duplicates += bool(report.duplicate_of)
-    body = _fit_reports(reports)
-    omitted = len(reports) - len(body)
     out = {"ok": True, "reports": body,
            "summary": {"total": len(reports), "duplicates": duplicates, "verdicts": verdicts}}
+    omitted = len(reports) - len(body)
     if omitted:
         out["summary"]["omitted_reports"] = omitted
     return out
 
 
-def _fit_reports(reports) -> list[dict]:
-    """Leading reports whose JSON array fits MAX_OUTPUT_CHARS; each is serialized once."""
+def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = None,
+                    root_guard: Callable[[str], str] | None = None,
+                    file_guard: Callable[[str], str] | None = None) -> dict:
+    """Check one claim or a batch; returns a JSON-serializable dict, never raises."""
+    error, reports = _check_reports(arguments, config, root_guard, file_guard)
+    if error is not None:
+        return error
+    return _assemble(reports, _fit_reports(reports, MAX_OUTPUT_CHARS - 2, len))  # "[" and "]"
+
+
+def _fit_reports(reports, budget: int, cost: Callable[[str], int]) -> list[dict]:
+    """Leading reports whose cost fits ``budget``; each is serialized once.
+
+    ``cost(text)`` is what the JSON text of one report (or the ", " separator) adds to
+    the final output; costs are additive, so the prefix is found in one pass."""
     body: list[dict] = []
-    used = 2  # "[" and "]"
+    used = 0
+    separator = cost(_ITEM_SEPARATOR)
     for report in reports:
         row = report.to_dict()
-        used += len(json.dumps(row, ensure_ascii=False)) + (2 if body else 0)  # ", " separator
-        if used > MAX_OUTPUT_CHARS:
+        used += cost(json.dumps(row, ensure_ascii=False)) + (separator if body else 0)
+        if used > budget:
             break
         body.append(row)
     return body
+
+
+def _wire_cost(text: str) -> int:
+    """Bytes ``text`` adds to a native frame, where the tool output is embedded twice.
+
+    Once as the ``output`` string of ``structuredContent`` and once more inside the
+    ``text`` item, whose JSON is escaped a second time; the frame is ASCII-escaped."""
+    ascii_once = len(json.dumps(text)) - 2
+    escaped = json.dumps(text, ensure_ascii=False)[1:-1]
+    return ascii_once + len(json.dumps(escaped)) - 2
+
+
+def native_frame_bytes(result: Mapping) -> int:
+    """Encoded size of a native tool result as the standard MCP transport writes it,
+    without the JSON-RPC envelope (``_FRAME_ENVELOPE_BYTES`` covers that)."""
+    standard = {
+        "content": [{"type": "text",
+                     "text": json.dumps(result, ensure_ascii=False, separators=(",", ":"))}],
+        "structuredContent": result,
+    }
+    return len(json.dumps(standard, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
 
 
 def _within_roots(roots) -> Callable[[str], str]:
@@ -154,17 +211,31 @@ def _within_roots(roots) -> Callable[[str], str]:
     return guard
 
 
-def native_claim_check(arguments: Mapping, roots=None, *, config: ClaimCheckConfig | None = None,
-                       root_guard=None, file_guard=None) -> dict:
-    """Native transport handler, entered after its schema and permission gate."""
-    if roots is not None and root_guard is None:
-        root_guard = _within_roots(roots)
-    result = run_claim_check(arguments, config=config, root_guard=root_guard,
-                             file_guard=file_guard)
+def _native_result(result: dict) -> dict:
     failed = not result["ok"]
     return {"output": json.dumps(result, ensure_ascii=False), "isError": failed,
             "error": "tool_refused" if failed else None,
             "evidence": {"tool": "claim_check"}}
+
+
+def native_claim_check(arguments: Mapping, roots=None, *, config: ClaimCheckConfig | None = None,
+                       root_guard=None, file_guard=None,
+                       max_frame_bytes: int | None = None) -> dict:
+    """Native transport handler, entered after its schema and permission gate.
+
+    The reports are cut so the whole encoded response frame stays within
+    ``max_frame_bytes`` (default: the transport's limit); the cut is reported as
+    ``summary.omitted_reports``."""
+    if roots is not None and root_guard is None:
+        root_guard = _within_roots(roots)
+    error, reports = _check_reports(arguments, config, root_guard, file_guard)
+    if error is not None:
+        return _native_result(error)
+    limit = McpTransportLimits().max_frame_bytes if max_frame_bytes is None else max_frame_bytes
+    # Overhead of everything but the reports; omitted_reports is counted at its maximum.
+    fixed = native_frame_bytes(_native_result(_assemble(reports, [])))
+    budget = limit - _FRAME_ENVELOPE_BYTES - fixed
+    return _native_result(_assemble(reports, _fit_reports(reports, budget, _wire_cost)))
 
 
 def register(mcp, record, project_root=None, *, config_provider=None, root_guard=None,

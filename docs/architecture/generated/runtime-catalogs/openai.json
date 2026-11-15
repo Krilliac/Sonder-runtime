@@ -597,9 +597,11 @@
               "type": "string"
             },
             "claim_text": {
+              "maxLength": 8192,
               "type": "string"
             },
             "claims_json": {
+              "maxLength": 60000,
               "type": "string"
             },
             "entry_point": {
@@ -622,6 +624,7 @@
               "type": "string"
             },
             "symbols": {
+              "maxLength": 1024,
               "type": "string"
             }
           },

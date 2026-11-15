@@ -9,7 +9,7 @@ text alone:
    through `..`, symlinks or junctions), the cited line exists, and each named
    symbol appears at or near that line.
 2. Is a guard of the claimed category visible nearby? Guard shapes are length or
-   count bounds, `Math.Min`/`Clamp`, null checks, validation `throw`/`return`,
+   count bounds, `Math.Min`/`Clamp`, null checks, validation calls and `throw`,
    authorization calls, path containment, rate limits, timeouts, locks and
    output encoding. They are searched within a window of the cited lines and
    around direct callers found by a word search of the named symbols (and the
@@ -22,7 +22,7 @@ Every check returns `pass`, `fail` or `not_checkable` with evidence
 (`file:line` and the line text). The verdict is `reject` when a citation check
 failed, `flag` when a guard-shaped line was found nearby, and `keep` otherwise.
 `flag` carries no signal about whether the claim is true: on a private labelled
-set of 943 security claims it fired on 64% of confirmed and 52% of refuted
+set of 941 security claims it fired on 64% of confirmed and 52% of refuted
 claims. `reject` catches only bad citations: 0 of 53 confirmed claims were
 rejected and 17 of 888 refuted claims (about 2%). Files that are binary,
 unreadable or over `max_file_bytes` are `not_checkable` and never rejected. A
@@ -60,7 +60,7 @@ The `[claim_check]` section holds every window and limit: `symbol_window_lines`,
   elsewhere makes the claim false. Most refuted claims in practice are of that
   kind. A `flag` (a guard-shaped line was found nearby) is not evidence for or
   against the claim: it fired on 64% of confirmed and 52% of refuted claims in
-  the private set of 943, so do not rank, discard or accept claims by it.
+  the private set of 941, so do not rank, discard or accept claims by it.
 - A `reject` is reliable but rare: it caught 17 of 888 refuted claims (about 2%)
   and none of the 53 confirmed ones. Most refuted claims pass the citation checks.
 - The guard shapes are regular expressions over text, not a parser. Comment
