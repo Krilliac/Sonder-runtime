@@ -68,15 +68,41 @@ def test_an_unload_is_admitted_while_a_slot_is_held_and_clears_the_pin(tmp_path)
         thread.join(5)
 
 
-def test_the_exact_policy_never_serves_a_probe_at_another_window(tmp_path):
+def _pin_8192_with_the_model_loaded(tmp_path):
+    """A service whose store pins MODEL at 8192 while /api/ps reports it loaded at 8192."""
     fake = FakeOllama()
-    service = make_service(tmp_path, fake)
-    _chat(service, 8192)
     fake.loaded[MODEL] = 8192
-    with service.admit("/api/chat", chat_body(4096), origin=ORIGIN,
-                       ctx_policy=domain.CtxPolicy.EXACT) as ticket:
-        assert ticket.served_num_ctx != 8192 or ticket.rewritten is False
-        assert (ticket.payload["options"]["num_ctx"]) == 4096
+    service = make_service(tmp_path, fake, max_queue_wait_seconds=1)
+    _chat(service, 8192)
+    assert service._the_store().get_pin(ORIGIN, adapter.model_key(MODEL)).num_ctx == 8192
+    assert fake.loaded[MODEL] == 8192
+    return fake, service
+
+
+def test_the_exact_policy_never_serves_a_probe_at_another_window(tmp_path):
+    fake, service = _pin_8192_with_the_model_loaded(tmp_path)
+    with pytest.raises(adapter.GpuAdmissionRefused) as caught:
+        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN,
+                           ctx_policy=domain.CtxPolicy.EXACT):
+            pytest.fail("admitted at another window")
+    assert caught.value.refusal.reason is domain.RefusalReason.CTX_PIN_CONFLICT
+    assert fake.chat_bodies == []
+    assert fake.loaded[MODEL] == 8192 and fake.reloads == 0
+
+
+def test_the_conformance_probe_waits_on_a_pinned_window_instead_of_reloading(
+        tmp_path, monkeypatch):
+    from sonder_runtime.adapters.inference import ollama_conformance
+    fake, service = _pin_8192_with_the_model_loaded(tmp_path)
+    monkeypatch.setattr(ollama_conformance.gpu_admission, "process_service", lambda: service)
+    monkeypatch.setattr(ollama_conformance, "open_url", fake.open_url)
+    probe = ollama_conformance.OllamaConformanceProbe(ORIGIN, MODEL, context_tokens=4096)
+    probe._deadline = time.monotonic() + 30.0
+    payload = chat_body(4096)
+    with pytest.raises(adapter.GpuAdmissionRefused) as caught:
+        probe._request("/api/chat", payload, timeout=5.0)
+    assert caught.value.refusal.reason is domain.RefusalReason.CTX_PIN_CONFLICT
+    assert fake.chat_bodies == [] and fake.reloads == 0 and fake.loaded[MODEL] == 8192
 
 
 def test_refusal_is_a_non_transient_admission_error_and_not_retryable():
