@@ -6,8 +6,9 @@ model that can run ``git_checkout``, ``git_branch`` with a base, ``git_merge``,
 ``git_cherry_pick``, ``git_stash``, ``apply_patch`` or ``format_code`` there
 can swap the shipped model tool policy for another commit's, however the ref
 is spelled (a branch named like a commit id, a local branch named
-``refs/remotes/...``).  The rule is not "check the ref"; it is "no such tool
-runs in the live checkout unless the console operator typed it":
+``refs/remotes/...``); ``git_commit`` and ``git_tag`` move its branch and
+refs.  The rule is not "check the ref"; it is "no such tool runs in the live
+checkout unless the console operator typed it":
 
 * ``operator_attendance`` is a context variable bound to one tool name, set
   only by the console's ``/<tool>`` dispatcher while a person is present;
@@ -231,6 +232,76 @@ def test_the_live_checkout_is_refused_before_any_git_runs(checkout, monkeypatch,
         ["rev-parse", "--path-format=absolute", "--show-toplevel"],
     ], calls
     assert len(calls) > 2
+
+
+# ---- git_commit and git_tag: refs and HEAD of the live checkout ----------------------------
+#
+# These two once skipped the live refusal: a commit in the live checkout, or
+# in a worktree whose HEAD follows the live branch, moved live master, and a
+# tag could be added to or deleted from the live repository.
+
+def _tags(files):
+    return set(git(files.repo, "tag", "--list").stdout.split())
+
+
+def _worktree_on_the_live_branch(files, tmp_path):
+    """A registered worktree that has checked out the live branch too (git allows it when told to)."""
+    worktree = tmp_path / "wt_master"
+    git(files.repo, "worktree", "add", "-q", "--detach", str(worktree), "master")
+    git(worktree, "checkout", "-q", "--ignore-other-worktrees", "master")
+    git(worktree, "config", "user.email", "test@test.invalid")
+    git(worktree, "config", "user.name", "Test")
+    return worktree
+
+
+@pytest.mark.parametrize("where", ["live_checkout", "worktree_on_the_live_branch"])
+def test_an_unattended_commit_cannot_move_the_live_branch(checkout, tmp_path, where):
+    root = checkout.repo if where == "live_checkout" else _worktree_on_the_live_branch(checkout, tmp_path)
+    head = _head(checkout)
+    (root / "hello.txt").write_text("edited\n", encoding="utf-8")
+    _refused(harness_tools.git_commit(str(root), message="edit", all_tracked=True))
+    assert _head(checkout) == head and _branch(checkout) == "master"
+    # The refusal comes before ``git add``: nothing was staged either.
+    assert git(root, "diff", "--cached", "--name-only").stdout.strip() == ""
+
+
+@pytest.mark.parametrize("action", ["create", "annotated", "delete"])
+@pytest.mark.parametrize("where", ["live_checkout", "worktree_on_the_live_branch"])
+def test_an_unattended_tag_change_in_the_live_checkout_is_refused(checkout, tmp_path, where, action):
+    git(checkout.repo, "tag", "existing")
+    root = checkout.repo if where == "live_checkout" else _worktree_on_the_live_branch(checkout, tmp_path)
+    if action == "delete":
+        result = harness_tools.git_tag(str(root), name="existing", delete=True)
+    else:
+        result = harness_tools.git_tag(str(root), name="new", message="m" if action == "annotated" else "")
+    _refused(result)
+    assert _tags(checkout) == {"existing"}
+
+
+def test_commit_and_tag_still_work_in_a_worktree_on_its_own_branch(checkout, tmp_path):
+    worktree = tmp_path / "wt_feature"
+    git(checkout.repo, "worktree", "add", "-q", "-b", "feature", str(worktree))
+    head = _head(checkout)
+    (worktree / "hello.txt").write_text("feature\n", encoding="utf-8")
+    assert harness_tools.git_commit(str(worktree), message="feature", all_tracked=True)["ok"] is True
+    assert git(worktree, "log", "-1", "--format=%s").stdout.strip() == "feature"
+    assert harness_tools.git_tag(str(worktree), name="feature-tag")["ok"] is True
+    assert "feature-tag" in _tags(checkout)
+    assert _head(checkout) == head and _branch(checkout) == "master"
+
+
+def test_an_attended_commit_and_tag_work_in_the_live_checkout(checkout):
+    from sonder_runtime.adapters import operator_attendance as attendance
+
+    root = str(checkout.repo)
+    (checkout.repo / "hello.txt").write_text("edited\n", encoding="utf-8")
+    with attendance.attended("git_commit"):
+        assert harness_tools.git_commit(root, message="edit", all_tracked=True)["ok"] is True
+        _refused(harness_tools.git_tag(root, name="v1"))
+    with attendance.attended("git_tag"):
+        assert harness_tools.git_tag(root, name="v1")["ok"] is True
+    assert _hello(checkout) == "edited\n" and "v1" in _tags(checkout)
+    assert git(checkout.repo, "log", "-1", "--format=%s").stdout.strip() == "edit"
 
 
 # ---- the operator at the console is not locked out --------------------------------------

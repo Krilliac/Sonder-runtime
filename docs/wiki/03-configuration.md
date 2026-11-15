@@ -515,8 +515,9 @@ The live runtime checkout. The checkout Sonder runs from (the repository
 holding the workspace root, the package data directory, the overlay or the
 Sonder home) is never changed by a model. Production is fast-forwarded from
 origin/main and self-modification has its own reviewed pipeline, so in that
-checkout `git_checkout`, `git_branch`, `git_stash` push and pop, `git_merge`,
-`git_cherry_pick`, `apply_patch` (without `check_only`), `format_code` and
+checkout `git_checkout`, `git_branch`, `git_commit`, `git_tag`, `git_stash`
+push, pop and drop, `git_merge`, `git_cherry_pick`, `apply_patch` (without
+`check_only`), `format_code` and
 `lint_run` with `fix` refuse unless the operator typed that very tool at the
 console (`/git_checkout ...`) with a person present. The rule does not try to
 predict what a call would write or which commit a ref names: it looks at the

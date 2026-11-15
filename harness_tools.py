@@ -939,7 +939,9 @@ def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout
             paths = []
     except json.JSONDecodeError:
         paths = []
-
+    refused = _live_refusal("git_commit", root)
+    if refused:
+        return refused
     if paths:
         add_result = _run_git(root, ["add", "--"] + paths, timeout=timeout)
         if not add_result["ok"]:
@@ -1044,6 +1046,9 @@ def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "tag name is required"}
+    refused = _live_refusal("git_tag", root)
+    if refused:
+        return refused
     if delete:
         cmd = ["tag", "-d", name]
     elif message:
