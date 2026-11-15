@@ -17858,6 +17858,12 @@
     },
     {
       "default": null,
+      "field": "health_alerts",
+      "section": "root",
+      "type": "HealthAlertsConfig"
+    },
+    {
+      "default": null,
       "field": "membership",
       "section": "root",
       "type": "MembershipConfig"
@@ -17943,6 +17949,12 @@
     {
       "default": "[redacted]",
       "field": "control_state_rehearsal_key",
+      "section": "secrets",
+      "type": "str"
+    },
+    {
+      "default": "[redacted]",
+      "field": "health_alert_ntfy_url",
       "section": "secrets",
       "type": "str"
     },
@@ -18642,6 +18654,60 @@
       "type": "bool"
     },
     {
+      "default": true,
+      "field": "toast",
+      "section": "health_alerts",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": false,
+      "field": "ntfy",
+      "section": "health_alerts",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 21600,
+      "field": "rate_limit_seconds",
+      "section": "health_alerts",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": [],
+      "field": "watched_jobs",
+      "section": "health_alerts",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": 26.0,
+      "field": "default_window_hours",
+      "section": "health_alerts",
+      "type": "<class 'float'>"
+    },
+    {
+      "default": [],
+      "field": "known_off",
+      "section": "health_alerts",
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": false,
+      "field": "include_warn",
+      "section": "health_alerts",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": "",
+      "field": "state_file",
+      "section": "health_alerts",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 10.0,
+      "field": "timeout_seconds",
+      "section": "health_alerts",
+      "type": "<class 'float'>"
+    },
+    {
       "default": "static",
       "field": "mode",
       "section": "membership",
@@ -19257,13 +19323,13 @@
   "counts": {
     "capabilities": 231,
     "commands": 349,
-    "configuration": 251,
+    "configuration": 262,
     "events": 43,
     "native_tools": 68,
     "schemas": 4,
     "tools": 231
   },
-  "digest": "eb80ce52fe97dba417bde1eaf003072ece56804d9a89fe3ae0d6a89f4bb6ad62",
+  "digest": "b9af86f6c038530a067d9f7c8a9f43dbc23c519813cf3f0ee8b610c930ad98cc",
   "events": [
     {
       "name": "session.started",
@@ -49093,7 +49159,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "65a2633389a8a1b8ca437fc6bde03e3aa575d732c48cbf72873b733ae80394e0",
+    "sonder_runtime/platform/config.py": "8455895a9060a70e639466a2e8013474f920bfd5b1bc8fb3f68bea02bfb823f9",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
