@@ -159,7 +159,10 @@ Tiers can optionally be routed to hosted models through
 [OpenRouter](docs/integration/openrouter.md): off by default, it needs
 `OPENROUTER_API_KEY`, the explicit `SONDER_ALLOW_CLOUD=1` opt-in and a tier
 binding, and sends privacy-first routing preferences (no prompt logging,
-zero data retention) unless overridden.
+zero data retention) unless overridden. Claude models can likewise be bound
+through the [Anthropic provider](docs/integration/anthropic.md): the same
+opt-in, `SONDER_ANTHROPIC_API_KEY` (plus an optional second key), and a
+`SONDER_ANTHROPIC_DAILY_USD` spend cap.
 
 ## Security model
 

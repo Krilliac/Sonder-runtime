@@ -171,7 +171,7 @@ def bind_helper_context(context: OperationContext) -> Iterator[None]:
 # rung bound to one gets the same hosted-data boundary as a ``cloud-*`` tier:
 # only request-scoped instructions, never the disk-backed local profile,
 # emotion vectors, goal, or recalled memory/lessons.
-HOSTED_PROVIDERS = frozenset({"openrouter"})
+HOSTED_PROVIDERS = frozenset({"openrouter", "anthropic"})
 
 
 def is_hosted(provider: object) -> bool:

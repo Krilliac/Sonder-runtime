@@ -204,6 +204,8 @@
         "sonder_runtime/adapters/host_tools/snapshot_store.py",
         "sonder_runtime/adapters/host_tools/windows.py",
         "sonder_runtime/adapters/inference/__init__.py",
+        "sonder_runtime/adapters/inference/anthropic_gateway.py",
+        "sonder_runtime/adapters/inference/anthropic_spend.py",
         "sonder_runtime/adapters/inference/capability_evidence.py",
         "sonder_runtime/adapters/inference/capability_refresh.py",
         "sonder_runtime/adapters/inference/external_membership.py",
@@ -906,11 +908,12 @@
       ]
     },
     {
-      "file_count": 78,
+      "file_count": 79,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/agent_help_tools.py",
+        "sonder_runtime/bootstrap/anthropic_cli.py",
         "sonder_runtime/bootstrap/app.py",
         "sonder_runtime/bootstrap/app_control.py",
         "sonder_runtime/bootstrap/app_control_http.py",
@@ -1015,6 +1018,7 @@
         "sonder_runtime/domain/agents/tool_help.py",
         "sonder_runtime/domain/agents/tool_naming.py",
         "sonder_runtime/domain/agents/verification_reach.py",
+        "sonder_runtime/domain/anthropic_policy.py",
         "sonder_runtime/domain/approval.py",
         "sonder_runtime/domain/approvals_limit.py",
         "sonder_runtime/domain/artifact_mobility_label.py",

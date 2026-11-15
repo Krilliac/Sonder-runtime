@@ -48,6 +48,8 @@ SECRET_ENV_VARS = (
     "SONDER_OPENAI_API_KEY",
     "SONDER_INFERENCE_API_KEY",
     "OPENROUTER_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY_2",
 )
 
 _unsafe_child_secret_name = unsafe_child_secret_name
