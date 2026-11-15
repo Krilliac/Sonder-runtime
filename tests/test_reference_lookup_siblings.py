@@ -35,6 +35,9 @@ def _row(doc, title, source, rank, body=None):
     ('S0002 Mimikatz', 's0002'), ('G0016 APT29', 'g0016'),
     ('DET0455 Abuse of PowerShell', 'det0455'), ('AN1234 Analytic', 'an1234'),
     ('T0821 Modify Controller Tasking', 't0821'),
+    ('T0855 Unauthorized Command Message', 't0855'), ('S1040 Rclone', 's1040'), ('G1001 HEXANE', 'g1001'),
+    ('M0800 Authorization Enforcement', 'm0800'),
+    ('M365 Defender: suspicious inbox rule', None), ('M365', None), ('S12 x', None), ('G123 x', None),
     ('LSASS Memory Dump (T1003.001)', None),       # names it, does not open with it
     ('4625(F): An account failed to log on.', None),
     ('CWE-79: Improper Neutralization', None),
@@ -204,3 +207,38 @@ def test_a_failing_title_query_keeps_the_plain_ranking(quoting):
     failing = lookup.retrieve(QUESTION, None, 5, 100000, index=_RaisingTitles(quoting))
     assert failing.applied and failing.reason is lookup.LookupReason.APPLIED
     assert _sources(failing) == _sources(plain)
+
+
+# ---------------------------------------------------------------------------
+# best_title_rows when a sub-technique outranks the parent page of its own source
+# ---------------------------------------------------------------------------
+
+_PARENT = 'T1003 OS Credential Dumping: an overview of how adversaries obtain account material'
+_SUB = 'T1003.001 LSASS Memory'
+_SUB_ROWS = [
+    (_SUB, '', 'T1003 T1003 T1003 lsass', 'attack', '', 'attack/bundle.json', 1),
+    ('T1003.002 SAM', '', 'T1003 T1003 sam', 'attack', '', 'attack/bundle.json', 2),
+    (_PARENT, '', 'Adversaries may attempt to dump credentials. ' * 8, 'attack', '', 'attack/bundle.json', 3),
+    ('T1003.001 - LSASS Memory', '', 'T1003 test', 'atomic', '', 'atomic/T1003.001.md', 4),
+    ('T1003.003 - NTDS', '', 'T1003 test', 'atomic', '', 'atomic/T1003.003.md', 5),
+    ('Rule about T1003', '', 'T1003 body', 'rules', '', 'rules/a.toml', 6),
+]
+
+
+def test_best_title_rows_picks_the_parent_page_when_a_sub_technique_outranks_it(tmp_path):
+    index = ReferenceIndex(create_index(tmp_path / 'sub.sqlite', _SUB_ROWS))
+    import sqlite3
+    with sqlite3.connect(index.path) as conn:    # the fixture must reproduce the ranking the bug needs
+        first = conn.execute("SELECT title FROM passages WHERE passages MATCH 'title : \"t1003\"' "
+                             "AND source = 'attack' ORDER BY bm25(passages, 4.0, 2.0, 1.0) LIMIT 1").fetchone()
+    assert first[0].startswith('T1003.00')
+    rows = index.best_title_rows('t1003')
+    assert [(r.source, r.title) for r in rows] == [('attack', _PARENT)]
+    assert index.best_title_rows('T1003')[0].title == _PARENT          # the id is case-insensitive
+
+
+def test_with_siblings_over_the_real_title_query_adds_the_parent_page(tmp_path):
+    index = ReferenceIndex(create_index(tmp_path / 'sub.sqlite', _SUB_ROWS))
+    seed = _row(90, 'T1003 - OS Credential Dumping', 'atomic', -50.0)
+    out = selection.with_siblings([seed], 1, index.best_title_rows)
+    assert [(r.source, r.title) for r in out[:2]] == [('atomic', seed.title), ('attack', _PARENT)]

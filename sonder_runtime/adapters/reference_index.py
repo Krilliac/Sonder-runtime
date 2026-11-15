@@ -34,15 +34,19 @@ from sonder_runtime.domain.reference_lookup.models import (
     TermStats,
 )
 from sonder_runtime.domain.reference_lookup.sanitize import sanitize
-from sonder_runtime.domain.reference_lookup.selection import priority_rows
+from sonder_runtime.domain.reference_lookup.selection import lead_identifier, priority_rows
 from sonder_runtime.domain.reference_lookup.terms import MAX_QUERY_TERMS, quoted
 
 REQUIRED_COLUMNS = frozenset({"title", "heading", "body", "source", "url", "path", "doc"})
 BUSY_TIMEOUT_SECONDS = 5.0
 TITLE_TOPUP_LIMIT = 50
 # Title rows read by ``best_title_rows`` before keeping the best one per source.
-# An ATT&CK identifier is in the titles of about 80 to 140 passages of the
-# expanded library (one source splits a page into many passages).
+# The phrase "t1003" also matches every "T1003.00x" sub-technique title, and one
+# source splits a page into many passages, so the count per phrase is large:
+# measured on the expanded library, 555 (t1685), 485 (t1218), 352 (t1546), 299
+# (t1003).  A phrase with more matches than this limit loses its worst-ranked
+# rows from the scan: a source whose only exact-id row ranks below the limit
+# contributes no sibling.
 TITLE_SCAN_LIMIT = 500
 
 _SEARCH_COLUMNS = ("title, heading, body, source, url, path, doc, "
@@ -171,7 +175,7 @@ class ReferenceIndex:
         return tuple(rows)
 
     def best_title_rows(self, ident: str) -> tuple[RankedRow, ...]:
-        """The best row of each source whose title holds ident as a phrase, best first.
+        """The best row of each source whose title opens with exactly ident, best first.
 
         Read-only, one query of at most ``TITLE_SCAN_LIMIT`` rows; a source
         whose best title row is not among them is left out.  Raises
@@ -182,12 +186,16 @@ class ReferenceIndex:
             raise ReferenceIndexError(status.state, status.detail)
         if not isinstance(ident, str) or not ident.strip():
             return ()
+        wanted = ident.strip().lower()
         best: dict[str, RankedRow] = {}
         try:
             with self.connect() as conn:
                 for values in conn.execute(_TITLE_SCAN_SQL, (_title_phrase(ident),)):
                     row = _row(values)
-                    best.setdefault(row.source, row)
+                    # The phrase also matches sub-technique titles ("T1003.001"): only a
+                    # title that opens with exactly this id is the page being asked for.
+                    if lead_identifier(row.title) == wanted:
+                        best.setdefault(row.source, row)
         except (sqlite3.Error, OSError, ValueError) as exc:
             raise ReferenceIndexError(classify_error(exc), sanitize(exc)) from None
         return tuple(best.values())

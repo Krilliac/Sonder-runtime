@@ -26,9 +26,12 @@ def candidate_limit(k: int) -> int:
     return max(k * CANDIDATE_FACTOR, CANDIDATE_FLOOR)
 
 
-# An ATT&CK-style identifier (technique, sub-technique, mitigation, group, software,
-# detection, analytic) opening a title: the grammar of ``terms.IDENTIFIER_RE``.
-_LEAD_ID_RE = re.compile(r'\s*((?:DET|AN|[TMSG])\d{3,4}(?:\.\d{3})?)(?![A-Za-z0-9]|\.\d)', re.IGNORECASE)
+# An ATT&CK-style identifier opening a title.  The shapes are real ATT&CK ones: a
+# technique or ICS technique (T + 4 digits, optional .nnn), a mitigation (M + 4
+# digits: M1xxx, ICS M08xx/M09xx), software (S + 4 digits), a group (G + 4 digits),
+# a detection or analytic (DET/AN + 3 or 4 digits).  "M365 Defender ..." is a product, not an id.
+_LEAD_ID_RE = re.compile(
+    r'\s*((?:(?:DET|AN)\d{3,4}|[TMSG][01]\d{3})(?:\.\d{3})?)(?![A-Za-z0-9]|\.\d)', re.IGNORECASE)
 
 
 def title_has(title: str | None, ident: str) -> bool:

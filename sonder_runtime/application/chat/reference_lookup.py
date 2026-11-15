@@ -193,7 +193,7 @@ def add_siblings(index: object, rows: Sequence[RankedRow], k: int) -> Sequence[R
     def siblings(ident: str) -> Sequence[RankedRow]:
         try:
             return tuple(fetch(ident))
-        except Exception:  # noqa: BLE001  # a help only: without it the plain ranking stands
+        except ReferenceIndexError:  # a help only: without it the plain ranking stands
             return ()
 
     return with_siblings(rows, k, siblings)
