@@ -16,6 +16,14 @@ MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 4_000_000
 MAX_HUNKS = 4096
 MAX_PATCH_LINES = 100_000
+_DRIVE_COMPONENT = re.compile(r"^[A-Za-z]:")
+# Windows reserved device names (the superscript digits are devices too). Kept
+# here rather than imported: the sibling lists are private to other layers.
+_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {"COM" + d for d in "0123456789" + chr(0xB9) + chr(0xB2) + chr(0xB3)}
+    | {"LPT" + d for d in "0123456789" + chr(0xB9) + chr(0xB2) + chr(0xB3)}
+)
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
 
 
@@ -34,6 +42,8 @@ def _sha(data: bytes) -> str:
 def _patch_path(value: str, *, prefix: str) -> str | None:
     if value == "/dev/null":
         return None
+    if chr(0) in value:
+        raise ValueError("patch paths must not contain NUL")
     # Timestamps and quoted paths are deliberately outside this narrow grammar.
     if not value or value != value.strip() or "\t" in value or "\\" in value:
         raise ValueError("patch paths must be unquoted relative POSIX paths")
@@ -46,6 +56,10 @@ def _patch_path(value: str, *, prefix: str) -> str | None:
         parts = parts[1:]
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise PermissionError("patch path contains an empty, dot, or parent component")
+    if any(_DRIVE_COMPONENT.match(part) for part in parts):
+        raise PermissionError("patch path contains a drive-letter component")
+    if any(part.split(".", 1)[0].rstrip(". ").upper() in _DEVICE_NAMES for part in parts):
+        raise PermissionError("patch path contains a Windows reserved device name")
     return "/".join(parts)
 
 
@@ -219,6 +233,7 @@ def _stage(path: Path, data: bytes, mode: int | None) -> Path:
 
 def text_patch(root: str, patch: str, *, apply: bool = False,
                extra_roots: str = "", developer_authorized: bool = False) -> dict:
+    file_ops._reject_network_path(root)
     requested_root = Path(root).expanduser()
     if not requested_root.is_absolute():
         requested_root = file_ops.workspace_root() / requested_root
