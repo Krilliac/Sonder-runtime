@@ -19,15 +19,18 @@ _FILE_CLAIM_RE = re.compile(
     r"(?:\s+(?:the|a|an|this|that))?\s+(?:file|script|document)\b",
     re.IGNORECASE,
 )
+# Path-like runs are bounded ({1,255}): an unbounded class that contains "."
+# followed by "\." backtracks quadratically when the search restarts at every
+# offset of a long dotted or slashed token (31 s for "x/" * 20000).
 _FILE_CLAIM_PATH_RE = re.compile(
     r"\b(?:saved|created|wrote|written|generated)\b[^\n.!?]{0,120}"
-    r"(?:[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12}|file|script|document)\b",
+    r"(?:[A-Za-z0-9_./\\-]{1,255}\.[A-Za-z0-9]{1,12}|file|script|document)\b",
     re.IGNORECASE,
 )
 _PASSIVE_FILE_CLAIM_RE = re.compile(
-    r"\b(?:[A-Za-z0-9_.`'\"/\\-]+\s+)?(?:file|script|document)\b\s+"
+    r"\b(?:[A-Za-z0-9_.`'\"/\\-]{1,255}\s+)?(?:file|script|document)\b\s+"
     r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b"
-    r"|\b[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12}\b\s+"
+    r"|\b[A-Za-z0-9_./\\-]{1,255}\.[A-Za-z0-9]{1,12}\b\s+"
     r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b",
     re.IGNORECASE,
 )
