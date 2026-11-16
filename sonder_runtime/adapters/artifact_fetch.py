@@ -940,6 +940,11 @@ def fetch_artifact(
         str(dest), extra_roots=extra_roots, bypass=bypass,
     )
     part = _part_path(resolved)
+    # The destination, the staging file and the provenance sidecar are all
+    # written (or replaced, or deleted) below; none may be protected
+    # control-plane state, under any name (the file tools' shared guard).
+    for target in (resolved, part, _provenance_path(resolved)):
+        file_ops._require_mutation_access(target, False)
 
     if resolved.exists() and not overwrite:
         prior = read_provenance(resolved)

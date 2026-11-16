@@ -26,6 +26,8 @@ from bisect import bisect_left
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
+import sonder_runtime.adapters.filesystem.operator_only_paths as _operator_only
+import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 from sonder_runtime.adapters.filesystem.intent_executor import (
@@ -152,6 +154,10 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # privileges at the next run -- the same hole the root-level clause closes.
 FIRST_PARTY_CODE_DIRS = ("scripts", "migrations")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
+# Package data the runtime loads as policy (model_tool_policy.json holds the
+# tool-lane floor). It replaced Python constants that the ``.py`` clause below
+# protected, so it keeps that protection whatever its suffix.
+RUNTIME_PACKAGE_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # Launchers and scripts a host shell runs directly.
 EXECUTABLE_SCRIPT_SUFFIXES = frozenset({".py", ".cmd", ".bat", ".ps1", ".psm1", ".sh"})
 # Repository metadata a later git command executes from (hooks, config with
@@ -506,6 +512,17 @@ def _is_base_secret_path(path: Path) -> bool:
     )
 
 
+def _protection_spelling(path: Path) -> Path:
+    """The resolved, ordinary spelling the protection checks compare (``path_aliases.normal_spelling``).
+
+    Raises ``ValueError`` or ``OSError`` for a spelling with no ordinary form;
+    the callers below then treat the path as protected.
+    """
+    if _path_aliases.win32_alias_component(path):
+        raise ValueError("path uses another spelling of a Windows file name")
+    return _path_aliases.normal_spelling(_resolve_best_effort(path))
+
+
 _POLICY_SNAPSHOT: contextvars.ContextVar[tuple | None] = contextvars.ContextVar(
     "sonder_read_policy_snapshot", default=None,
 )
@@ -546,7 +563,10 @@ def _current_control_inventory():
 
 
 def _is_sensitive_control_path(path: Path) -> bool:
-    path = _resolve_best_effort(path)
+    try:
+        path = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True  # a namespace with no ordinary spelling cannot be judged by name
     name = path.name.lower()
     return (
         path in _current_control_paths()
@@ -562,9 +582,49 @@ def _is_sensitive_control_path(path: Path) -> bool:
     )
 
 
+def _alias_anchor_directories() -> set[Path]:
+    """Directories an alias is mapped back through (``path_aliases.local_equivalent``)."""
+    anchors = {path.parent for path in _control_plane_paths()}
+    anchors.update({_resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR), _resolve_best_effort(workspace_root())})
+    return anchors
+
+
+def _identity_protected_files() -> set[Path]:
+    """The exact protected files a hard link or a UNC alias is compared with by identity."""
+    files = set(_control_plane_paths())
+    try:
+        files.update(entry for entry in _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR).iterdir() if entry.is_file())
+    except OSError:
+        pass
+    return files
+
+
 def _is_protected_mutation_path(path: Path) -> bool:
-    path = _resolve_best_effort(path)
+    """Whether ``path`` is protected control-plane state, under any of its names.
+
+    Decided by name first.  A path a name check can miss (a UNC spelling, or a
+    file with several hard links; ``path_aliases.may_alias``) is mapped back
+    to its ordinary name through a known directory and compared by file
+    identity with the exact protected files.
+    """
+    try:
+        path = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True  # a namespace with no ordinary spelling cannot be judged by name
+    if _is_protected_by_name(path):
+        return True
+    if not _path_aliases.may_alias(path):
+        return False
+    local = _path_aliases.local_equivalent(path, _alias_anchor_directories())
+    if local is not None and local != path and _is_protected_by_name(local):
+        return True
+    return _path_aliases.same_file_as_any(path, _identity_protected_files())
+
+
+def _is_protected_by_name(path: Path) -> bool:
     if _is_sensitive_control_path(path):
+        return True
+    if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
     suffix = path.suffix.lower()
     if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:
@@ -595,7 +655,34 @@ def _git_metadata_component(path: Path) -> str:
     return ""
 
 
+def _policy_file_refusal(path: Path, *, holding: bool) -> PermissionError | None:
+    """The refusal for changing a model tool policy file (``operator_only_paths``), or None.
+
+    Given before any developer token is honoured.  ``holding`` also refuses a
+    directory that holds one (a recursive delete).  A spelling with no
+    ordinary form cannot be compared, so it is refused.
+    """
+    try:
+        spelled = _protection_spelling(path)
+        files = _operator_only.locate(RUNTIME_PACKAGE_DATA_DIR, _resolve_best_effort)
+        blocked = _operator_only.is_policy_file(spelled, files) or (
+            holding and _operator_only.holds_policy_file(spelled, files)
+        )
+    except (OSError, ValueError):
+        blocked = True
+    if not blocked:
+        return None
+    return PermissionError(
+        "refusing to mutate protected Sonder control-plane path %s: the model tool policy "
+        "files change only from the attended operator console, with or without a developer token"
+        % path
+    )
+
+
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
+    refusal = _policy_file_refusal(path, holding=False)
+    if refusal is not None:
+        raise refusal
     if developer_authorized:
         return
     if _git_metadata_component(path) or _git_metadata_component(_resolve_best_effort(path)):
@@ -613,6 +700,16 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
         raise PermissionError(
             "refusing to mutate protected Sonder control-plane path %s "
             "without an authenticated developer token" % path
+        )
+    links = _path_aliases.hard_link_count(_resolve_best_effort(path))
+    if links > 1:
+        # An in-place write through one name changes the file under every
+        # name, and the others can be anywhere on the volume (a protected
+        # file included), so a hard-linked target is never written here.
+        raise PermissionError(
+            "refusing to mutate %s: it is a hard link (%d names for one file), so "
+            "the change would reach every other name; remove the extra names or "
+            "use an authenticated developer token" % (path, links)
         )
 
 
@@ -667,6 +764,12 @@ def _credential_part(parts) -> str:
         ):
             return part
     return ""
+
+
+# Public names for the two path predicates, for callers outside this module (the security-eval
+# repo reader). The private names stay: this module and existing callers use them.
+is_secret_path = _is_secret_path
+credential_part = _credential_part
 
 
 def credential_read_component(path: Path) -> str:
@@ -849,6 +952,7 @@ def resolve_repository_read_path(
     if not isinstance(path, str) or not path.strip():
         raise ValueError("repository path must be a non-empty path")
     raw = path.strip()
+    _require_plain_name_spelling(raw)
     if _foreign_absolute(raw):
         # e.g. a Windows drive/UNC path reaching a POSIX host: Path() would
         # rebase it under the workspace and pass containment. Reject it as an
@@ -937,6 +1041,9 @@ def _require_safe_recursive_delete(
     bypass: bool,
     developer_authorized: bool,
 ) -> None:
+    refusal = _policy_file_refusal(resolved, holding=True)
+    if refusal is not None:
+        raise refusal
     if developer_authorized:
         return
     _require_no_reparse_components(requested)
@@ -1020,6 +1127,58 @@ def _delete_tree_guarded(path: Path) -> None:
             raise PermissionError("could not safely delete tree entry: %s" % child) from exc
 
 
+def _delete_tree_developer(root: Path) -> None:
+    """Remove the tree under ``root`` for a developer token, never following a link.
+
+    A symlink or junction is removed itself and not entered, so a link to a
+    policy folder deletes the link and nothing behind it.  Every regular file
+    is compared, by name and by file identity, with the model tool policy
+    files before anything is removed, so a hard link to one refuses the
+    whole delete rather than half of it.
+    """
+    files = _operator_only.locate(RUNTIME_PACKAGE_DATA_DIR, _resolve_best_effort)
+    pending = [root]
+    entries: list[tuple[Path, bool, bool]] = []  # (path, is_link, is_directory), parents before children
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as scanned:
+                listed = list(scanned)
+        except OSError as exc:
+            raise PermissionError("could not safely traverse delete tree: %s" % current) from exc
+        for entry in listed:
+            child = Path(entry.path)
+            link = entry.is_symlink() or _is_reparse_point(child)
+            directory = not link and entry.is_dir(follow_symlinks=False)
+            entries.append((child, link, directory))
+            if directory:
+                pending.append(child)
+            elif not link:
+                try:
+                    blocked = _operator_only.is_policy_file(_protection_spelling(child), files)
+                except (OSError, ValueError):
+                    blocked = True
+                if blocked:
+                    raise PermissionError(
+                        "refusing to delete a tree holding a model tool policy file (%s); "
+                        "those files change only from the attended operator console" % child
+                    )
+    for child, link, directory in reversed(entries):
+        try:
+            if link:
+                # A directory link (a junction, or a directory symlink on Windows) is removed with rmdir.
+                if os.name == "nt" and child.is_dir():
+                    os.rmdir(child)
+                else:
+                    os.unlink(child)
+            elif directory:
+                os.rmdir(child)
+            else:
+                os.unlink(child)
+        except OSError as exc:
+            raise PermissionError("could not safely delete tree entry: %s" % child) from exc
+
+
 def _delete_intent_roots(target: Path, *, extra_roots: str, bypass: bool) -> list[Path]:
     """Authorized roots a descriptor-relative delete may walk from.
 
@@ -1072,9 +1231,24 @@ def _delete_through_intent(
         ) from exc
 
 
+def _require_plain_name_spelling(path: str) -> None:
+    """Refuse a caller's raw text that Windows reads as another name (``x.``, ``x ``, ``x::$DATA``).
+
+    ``Path.resolve`` trims those before any comparison, so the protected-path
+    checks would see an ordinary name; the raw text is what must be refused.
+    """
+    alias = _path_aliases.win32_alias_component(path)
+    if alias:
+        raise PermissionError(
+            "refusing path with a Windows alias component (%r): a trailing dot or space or a ':' "
+            "names the same file as its trimmed spelling" % alias
+        )
+
+
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
     if not (path or "").strip():
         raise ValueError("empty path")
+    _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
@@ -2072,6 +2246,10 @@ def _batch_preflight(
                     raise ValueError("duplicate batch target by file identity")
                 if metadata.st_ino:
                     seen_existing_identities.add(identity)
+                if metadata.st_nlink > 1:
+                    raise PermissionError(
+                        "batch target is a hard link (%d names for one file)" % metadata.st_nlink
+                    )
             if mode == "create" and exists:
                 raise FileExistsError("file exists; use mode=overwrite")
             if mode == "overwrite" and not exists:
@@ -2498,11 +2676,7 @@ def delete_path(
         # Windows has no stdlib dir_fd primitives; its guarantee is the
         # reparse-point checks, not check/use race resistance.
         if developer_authorized:
-            for child in sorted(p.rglob("*"), reverse=True):
-                if child.is_file() or child.is_symlink():
-                    child.unlink()
-                elif child.is_dir():
-                    child.rmdir()
+            _delete_tree_developer(p)
         else:
             _delete_tree_guarded(p)
         p.rmdir()

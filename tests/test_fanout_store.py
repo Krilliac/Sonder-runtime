@@ -759,3 +759,94 @@ def test_redactor_covers_quoted_json_and_spaced_credentials():
 
     assert "supersecret123" not in run["prompt"]
     assert "secret value here" not in run["prompt"]
+
+
+def _answer_one(run, **fields):
+    assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
+    claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
+    return store.record_result(run["id"], claim["model"], "worker", "answered", answer="ok", **fields)
+
+
+def test_record_result_round_trips_tokens_and_served_model():
+    run = store.create_run("question", ["m:1"])
+    row = _answer_one(run, tokens_in=10, tokens_out=5, token_source="provider", served_model="m:1")
+
+    assert (row["tokens_in"], row["tokens_out"]) == (10, 5)
+    assert (row["token_source"], row["served_model"]) == ("provider", "m:1")
+    stored = store.list_results(run["id"])[0]
+    assert stored["tokens_in"] == 10 and stored["served_model"] == "m:1"
+    assert store.list_results(run["id"], include_answers=False)[0]["tokens_out"] == 5
+
+
+def test_rows_without_reported_tokens_are_unknown_not_zero():
+    run = store.create_run("question", ["m:1"])
+    row = _answer_one(run)
+
+    assert row["tokens_in"] is None and row["tokens_out"] is None
+    assert row["token_source"] == "" and row["served_model"] == ""
+
+
+def test_legacy_database_gains_nullable_token_columns(isolated):
+    legacy = sqlite3.connect(isolated)
+    legacy.executescript("""
+        CREATE TABLE fanout_runs (id TEXT PRIMARY KEY, prompt TEXT NOT NULL, prompt_sha256 TEXT NOT NULL,
+            models_json TEXT NOT NULL, status TEXT NOT NULL, created_ts REAL NOT NULL, updated_ts REAL NOT NULL);
+        CREATE TABLE fanout_results (run_id TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+            answer TEXT NOT NULL DEFAULT '', updated_ts REAL NOT NULL, PRIMARY KEY(run_id, model));
+        INSERT INTO fanout_runs VALUES('fan-old','p','','[\"m\"]','completed',1,1);
+        INSERT INTO fanout_results VALUES('fan-old','m','answered','old answer',1);
+    """)
+    legacy.commit()
+    legacy.close()
+    store.reset_schema_cache_for_tests()
+
+    row = store.list_results("fan-old")[0]
+
+    assert row["answer"] == "old answer"
+    assert row["tokens_in"] is None and row["tokens_out"] is None and row["served_model"] == ""
+
+
+def _child_run(job_id, key="item-1", stage="s1"):
+    return store.create_run("question", ["m:1"], batch_job_id=job_id, batch_item_key=key, batch_stage=stage)
+
+
+def _job_row(job_id, status):
+    now = time.time()
+    with store._write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO batch_jobs(id,status,spec_json,created_ts,updated_ts) VALUES(?,?,?,?,?)",
+            (job_id, status, "{}", now, now),
+        )
+
+
+def _age(run_id, days):
+    old = time.time() - days * 86_400
+    with store._write_transaction() as conn:
+        conn.execute("UPDATE fanout_runs SET updated_ts=?, created_ts=? WHERE id=?", (old, old, run_id))
+
+
+def test_recent_run_summaries_leave_out_batch_child_runs():
+    plain = store.create_run("question", ["m:1"])
+    child = _child_run("job-x")
+
+    ids = {row["run_id"] for row in store.recent_run_summaries()}
+
+    assert plain["id"] in ids and child["id"] not in ids
+    assert child["id"] not in {row["id"] for row in store.list_runs()}
+
+
+def test_prune_keeps_child_runs_of_a_running_job_and_removes_unowned_old_runs():
+    _job_row("job-live", "running")
+    kept = _child_run("job-live")
+    plain = store.create_run("question", ["m:1"])
+    for run in (kept, plain):
+        assert store.claim_run(run["id"], "worker", owner_pid=os.getpid())
+        claim = store.claim_next_result(run["id"], "worker", owner_pid=os.getpid())
+        store.record_result(run["id"], claim["model"], "worker", "answered", answer="ok")
+        _age(run["id"], 30)
+
+    pruned = store.prune(ttl_seconds=7 * 86_400)
+
+    assert pruned["runs"] == 1
+    assert store.get_run(kept["id"]) is not None
+    assert store.get_run(plain["id"]) is None

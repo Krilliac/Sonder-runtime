@@ -25,6 +25,7 @@ from sonder_runtime.adapters import runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as guard
 from sonder_runtime.application.chat import provider_bridge
 from tests.support.tool_lane import (
+    FLOOR,
     ALLOWED,
     BLOCKED,
     DENIED,
@@ -317,7 +318,7 @@ def test_projected_local_code_model_matches_the_runtime_configuration(monkeypatc
     else:
         monkeypatch.setenv("SONDER_CODE_LOCAL", configured)
         env = {"SONDER_CODE_LOCAL": configured}
-    runtime = RuntimeModelConfiguration.from_environment(env)
+    runtime = RuntimeModelConfiguration.from_environment(env, floor=FLOOR)
     assert guard.projected_local_code_model(runtime.stable_alias) == runtime.local_code_model
 
 

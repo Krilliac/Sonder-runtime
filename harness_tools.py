@@ -19,11 +19,15 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
+from sonder_runtime.adapters import git_change_targets
+from sonder_runtime.adapters import live_checkout
 from sonder_runtime.adapters import git_program_guard
+from sonder_runtime.adapters import protected_write_scope
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
 )
+import git_tools
 import sonder_logging
 import sonder_paths
 import unsafe_lab
@@ -31,6 +35,8 @@ import unsafe_lab
 MAX_OUTPUT = 256_000
 MAX_TIMEOUT = 120
 DEFAULT_TIMEOUT = 30
+# The ``guard`` of a ``git_stash`` refusal that would take the runtime recovery stash.
+RECOVERY_STASH_GUARD = "runtime_recovery_stash"
 
 
 def _bounded_int(value, default, minimum, maximum):
@@ -259,9 +265,27 @@ def _git():
     return shutil.which("git") or "git"
 
 
+# Variables that make git use another repository, index or object store than
+# the tree that was checked, or inject config entries (``-c`` by environment).
+_GIT_LOCATION_VARIABLES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+})
+_GIT_LOCATION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def _is_git_location_variable(name):
+    upper = name.upper()  # Windows environment names are case-insensitive
+    return upper in _GIT_LOCATION_VARIABLES or upper.startswith(_GIT_LOCATION_PREFIXES)
+
+
 def _git_env():
     env = _child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git must work on the tree that was checked, not one the environment names.
+    for name in [key for key in env if _is_git_location_variable(key)]:
+        del env[name]
     return env
 
 
@@ -311,6 +335,53 @@ def _git_probe_at(root, relative, arguments, *, timeout, env):
         "stdout": proc.stdout.decode("utf-8", errors="surrogateescape"),
         "stderr": proc.stderr.decode("utf-8", errors="replace"),
     }
+
+
+def _git_change_runner(root, *, timeout, hardened):
+    """A runner for ``git_change_targets``: git in ``root``, output untrimmed.
+
+    ``hardened`` adds the same driver/hook overrides as ``_run_git`` (raising
+    ``ValueError`` when they cannot be read); ``apply_patch`` runs a bare
+    ``git apply`` and lists its paths the same way.
+    """
+    env = _git_env()
+    overrides = _neutralized_git_arguments(root, timeout=timeout, env=env) if hardened else []
+
+    def run(arguments, stdin_bytes=b""):
+        proc = subprocess.run(
+            [_git(), *overrides, *arguments], cwd=str(root), timeout=timeout,
+            capture_output=True, input=stdin_bytes, env=env,
+        )
+        return proc.returncode, proc.stdout
+
+    return run
+
+
+def _live_refusal(operation, root):
+    """``{"ok": False, "error": ...}`` when ``operation`` may not change the live runtime checkout at ``root``, else None.
+
+    Decided from paths, git's ``rev-parse`` answer when they find nothing, and
+    the operator-attendance signal (``live_checkout.refusal``).
+    """
+    refused = live_checkout.refusal(operation, Path(root))
+    return refused.as_result() if refused is not None else None
+
+
+def _patch_refusal(operation, root, patch_text, *, timeout):
+    """``{"ok": False, "error": ...}`` when the patch would write a protected control-plane path, else None.
+
+    ``git apply --numstat`` lists every path the patch writes; each gets the
+    file tools' guard, in any repository (``git_change_targets.patch_refusal``).
+    """
+    timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
+    run = _git_change_runner(root, timeout=timeout, hardened=False)
+    top = git_change_targets.toplevel(run)
+    try:
+        paths = git_change_targets.patch_targets(run, patch_text)
+    except git_change_targets.TargetsUnknown as exc:
+        return {"ok": False, "error": git_change_targets.unlisted_refusal(operation, exc)}
+    reason = git_change_targets.patch_refusal(operation, root, top, paths)
+    return {"ok": False, "error": reason} if reason else None
 
 
 def _run_git(root, args, *, timeout=10):
@@ -610,6 +681,12 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
     if not info:
         return {"ok": False, "error": "unknown linter: %s" % tool, "tool": tool}
     if fix and info.get("fix"):
+        live = _live_refusal("lint_run", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "fix"}
+        refused = protected_write_scope.scope_refusal("lint_run fix", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "fix"}
         cmd = list(info["fix"])
     else:
         cmd = list(info["check"])
@@ -635,6 +712,13 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
     cmd_template = _FORMATTERS.get(tool)
     if not cmd_template:
         return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
+    if not check_only:
+        live = _live_refusal("format_code", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "format"}
+        refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
     cmd = list(cmd_template)
     if check_only:
         if tool in ("ruff", "black"):
@@ -855,7 +939,9 @@ def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout
             paths = []
     except json.JSONDecodeError:
         paths = []
-
+    refused = _live_refusal("git_commit", root)
+    if refused:
+        return refused
     if paths:
         add_result = _run_git(root, ["add", "--"] + paths, timeout=timeout)
         if not add_result["ok"]:
@@ -874,14 +960,15 @@ def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_root
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "branch name is required"}
+    refused = _live_refusal("git_branch", root)
+    if refused:
+        return refused
     if checkout:
         cmd = ["checkout", "-b", name]
-        if base:
-            cmd.append(base)
     else:
         cmd = ["branch", name]
-        if base:
-            cmd.append(base)
+    if base:
+        cmd.append(base)
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -890,6 +977,9 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
+    refused = _live_refusal("git_checkout", root)
+    if refused:
+        return refused
     return _run_git(root, ["checkout", ref], timeout=timeout)
 
 
@@ -910,7 +1000,45 @@ def git_stash(root=".", action="push", message="", include_untracked=True, timeo
         cmd = ["stash", "drop"]
     else:
         return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
+    if action in ("push", "pop", "drop"):
+        refused = _live_refusal("git_stash", root)
+        if refused:
+            return refused
+    if action in ("pop", "drop"):
+        refused = _recovery_stash_refusal(action, root, timeout=timeout)
+        if refused:
+            return refused
     return _run_git(root, cmd, timeout=timeout)
+
+
+def _recovery_stash_refusal(action, root, *, timeout):
+    """``{"ok": False, ...}`` when ``git stash <action>`` would take the runtime recovery stash, else None.
+
+    ``pop`` and ``drop`` act on ``stash@{0}``.  When that is a stash
+    ``runtime_source_stash save`` recorded (in any worktree, since the stash
+    list is shared), only ``runtime_source_stash pop`` may take it: it applies
+    by commit id, needs the operator at the console and keeps its ledger in
+    step.  Refused whoever is at the console, and refused when git cannot
+    answer (a timeout, or configuration it cannot read).  The check and the
+    git run are two steps.
+    """
+    probe_timeout = _bounded_int(timeout, 10, 1, git_tools.MAX_TIMEOUT)
+    try:
+        commit = git_tools.recorded_recovery_stash_at(root, timeout=probe_timeout)
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return {
+            "ok": False,
+            "error": "refusing git stash %s: could not check for the runtime recovery stash: %s" % (action, exc),
+            "guard": RECOVERY_STASH_GUARD,
+        }
+    if not commit:
+        return None
+    return {
+        "ok": False,
+        "error": "refusing git stash %s: stash@{0} (%s) is the runtime recovery stash; restore it with "
+                 "runtime_source_stash action=pop at the console" % (action, commit),
+        "guard": RECOVERY_STASH_GUARD,
+    }
 
 
 @_guarded_git_mutation("git_tag")
@@ -918,6 +1046,9 @@ def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "tag name is required"}
+    refused = _live_refusal("git_tag", root)
+    if refused:
+        return refused
     if delete:
         cmd = ["tag", "-d", name]
     elif message:
@@ -938,6 +1069,9 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roo
     if message:
         cmd.extend(["-m", message])
     cmd.append(branch)
+    refused = _live_refusal("git_merge", root)
+    if refused:
+        return refused
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -950,6 +1084,9 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
             return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
     except json.JSONDecodeError:
         return {"ok": False, "error": "invalid JSON"}
+    refused = _live_refusal("git_cherry_pick", root)
+    if refused:
+        return refused
     return _run_git(root, ["cherry-pick"] + commits, timeout=timeout)
 
 
@@ -1101,6 +1238,10 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
         staged.append((path, content, new_content))
 
     if not dry_run and staged:
+        refused = protected_write_scope.files_refusal("rename_symbol", root, [path for path, _old, _new in staged])
+        if refused:
+            return {"ok": False, "error": refused, "dry_run": dry_run, "old_name": old_name,
+                    "new_name": new_name, "files_changed": 0}
         try:
             _apply_staged_rewrites(staged)
         except OSError as exc:
@@ -1190,6 +1331,14 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
     root = _resolve_root(root, extra_roots)
     if not patch_text:
         return {"ok": False, "error": "patch_text is required"}
+    if not check_only:
+        refused = _live_refusal("apply_patch", root)
+        if refused:
+            return refused
+        # Every path the patch writes, in any repository, gets the file tools' guard.
+        refused = _patch_refusal("apply_patch", root, patch_text, timeout=timeout)
+        if refused:
+            return refused
     cmd = [_git(), "apply"]
     if check_only:
         cmd.append("--check")
