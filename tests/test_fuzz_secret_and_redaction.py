@@ -950,3 +950,81 @@ def test_url_userinfo_scan_is_linear(text) -> None:
     t0 = time.perf_counter()
     redact_text(text)
     assert time.perf_counter() - t0 < HARD_LIMIT_S
+
+
+# --- hand-written scanners against the regexes they replaced ----------------
+# ``_sub_url_userinfo`` and ``_sub_pem`` scan by hand so the unanchored
+# ``.sub`` calls (CodeQL py/polynomial-redos) are gone. The compiled patterns
+# stay in the module as the reference here.
+
+
+def _reference_url_userinfo(module, text: str) -> str:
+    def replace(m):
+        run = m.group(1)
+        if module._older_scheme_start(m.string, m.start(), run):
+            return run + "://" + REDACTED
+        return m.group(0)
+
+    return module._URL_USERINFO.sub(replace, text)
+
+
+_PEM_HEAD = "-----BEGIN PRIVATE KEY-----"
+_DIFF_PIECES = (
+    "a", "Z", "1", "_", "\u00e9", "\u212a", "\u017f", "+", ".", "-", "://", ":", "@", "/", " ", "\n", "\t",
+    "u", "pw", "?password=x", "http", "s3", "-----BEGIN ", "-----END ", "-----", "PRIVATE KEY", "RSA ", "RSA",
+    "BEGIN ", "END ", "PRIVATE", " KEY", "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "X", "body",
+)
+
+
+@BOTH_COPIES
+def test_hand_scanners_match_the_regexes_they_replaced(module, redact) -> None:
+    rng = random.Random(SEED ^ 0x5CA9)
+    url_changed = pem_changed = 0
+    cases = 30_000
+    for _ in range(cases):
+        text = "".join(rng.choice(_DIFF_PIECES) for _ in range(rng.randint(0, 22)))
+        if rng.random() < 0.5:  # splice a well-formed URL and PEM block into the noise
+            url = "".join(rng.choice(_DIFF_PIECES[:9]) for _ in range(rng.randint(1, 5))) + "://u:p@h"
+            pem = _PEM_HEAD + "k" + "-----END PRIVATE KEY-----"
+            cut = rng.randint(0, len(text))
+            text = text[:cut] + rng.choice((url, pem)) + text[cut:]
+        want_url = _reference_url_userinfo(module, text)
+        got_url = module._sub_url_userinfo(text)
+        assert got_url == want_url, f"seed={SEED} url {text!r}: {got_url!r} != {want_url!r}"
+        url_changed += want_url != text
+        want_pem = module._PEM.sub(REDACTED, text)
+        got_pem = module._sub_pem(text)
+        assert got_pem == want_pem, f"seed={SEED} pem {text!r}: {got_pem!r} != {want_pem!r}"
+        pem_changed += want_pem != text
+    assert url_changed > 500 and pem_changed > 500  # the oracle saw real matches
+
+
+def _best_of_3(fn, text: str) -> float:
+    best = float("inf")
+    for _ in range(3):
+        t0 = time.perf_counter()
+        fn(text)
+        best = min(best, time.perf_counter() - t0)
+    return best
+
+
+_GROWTH_SHAPES = {
+    "plus-run": ("_sub_url_userinfo", lambda n: "+" * n),
+    "plus-run-userinfo": ("_sub_url_userinfo", lambda n: "+" * n + "://u:" + "x" * n),
+    "repeated-userinfo": ("_sub_url_userinfo", lambda n: "a://a:" * n),
+    "repeated-begin": ("_sub_pem", lambda n: _PEM_HEAD * n),
+    "repeated-begin-then-end": ("_sub_pem", lambda n: _PEM_HEAD * n + "-----END PRIVATE KEY-----"),
+    "begin-end-pairs-with-noise": ("_sub_pem", lambda n: (_PEM_HEAD + "-----END X-----") * n),
+}
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("shape", sorted(_GROWTH_SHAPES))
+def test_hand_scanners_grow_linearly(module, redact, shape) -> None:
+    name, build = _GROWTH_SHAPES[shape]
+    fn = getattr(module, name)
+    small, large = 5_000, 20_000
+    assert _best_of_3(fn, build(small)) < 0.5  # small input is fast
+    t_small = max(_best_of_3(fn, build(small)), 0.005)  # floor: below 5 ms is timer noise
+    t_large = _best_of_3(fn, build(large))
+    assert t_large / t_small < 8, f"{shape}: t(4N)/t(N) = {t_large / t_small:.1f}"

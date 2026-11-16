@@ -102,22 +102,45 @@ def _older_scheme_start(text, start, run):
     )
 
 
+_SCHEME_RUN = re.compile(r"(?i)[a-z0-9+.-]+")
+_USERINFO_NAME = re.compile(r"[^/@\s:]+")
+_USERINFO_SECRET = re.compile(r"[^/@\s]+")
+
+
 def _sub_url_userinfo(text):
     """Redact URL userinfo where the older anchor matched, in linear time.
 
-    The older match started at some letter inside the same scheme run, so it
-    ended at the same ``@`` and kept the run before it; keeping the whole run
-    gives the same text. A match skipped here holds no other candidate: the
-    userinfo cannot contain ``://``.
+    Scans scheme runs by hand instead of ``_URL_USERINFO.sub``: the run is a
+    maximal ``[a-z0-9+.-]`` run (the pattern's lookbehind), ``://`` must follow
+    it directly, then a maximal userinfo name, ``:``, a maximal secret and
+    ``@``. None of those pieces can backtrack into a shorter one, so one pass
+    over the text suffices. The older match started at some letter inside the
+    same scheme run, so it ended at the same ``@`` and kept the run before it;
+    keeping the whole run gives the same text. A match skipped here holds no
+    other candidate: the userinfo cannot contain ``://``.
     """
-
-    def replace(m):
-        run = m.group(1)
-        if _older_scheme_start(m.string, m.start(), run):
-            return run + "://" + REDACTED
-        return m.group(0)
-
-    return _URL_USERINFO.sub(replace, text)
+    out = []
+    copied = pos = 0
+    while True:
+        run = _SCHEME_RUN.search(text, pos)
+        if run is None:
+            break
+        pos = run.end()
+        if not text.startswith("://", pos):
+            continue
+        name = _USERINFO_NAME.match(text, pos + 3)
+        if name is None or not text.startswith(":", name.end()):
+            continue
+        secret = _USERINFO_SECRET.match(text, name.end() + 1)
+        if secret is None or not text.startswith("@", secret.end()):
+            continue
+        pos = secret.end() + 1
+        if _older_scheme_start(text, run.start(), run.group()):
+            out.append(text[copied:run.start()])
+            out.append(run.group() + "://" + REDACTED)
+            copied = pos
+    out.append(text[copied:])
+    return "".join(out)
 
 
 _PATTERNS: tuple[re.Pattern, ...] = (
@@ -158,25 +181,61 @@ _PATTERNS: tuple[re.Pattern, ...] = (
 # idempotence for that text only: a second call redacts further.
 _MAX_PASSES = 8
 
-# Every END marker, including one that shares its leading dashes with the
-# marker or header before it: the match consumes only ``-----END `` and looks
-# ahead for the rest, so ``finditer`` still reports the overlapping ones.
-_PEM_END = re.compile(r"-----END (?=([A-Z ]*PRIVATE KEY-----))")
+_PEM_BEGIN_MARK = "-----BEGIN "
+_PEM_END_MARK = "-----END "
+_PEM_LABEL = re.compile(r"[A-Z ]*")
+_PEM_KEY = "PRIVATE KEY"
+
+
+def _pem_marker_end(text, start):
+    """End of ``[A-Z ]*PRIVATE KEY-----`` at ``start``, or -1.
+
+    The label run stops at the first ``-``, so it is maximal and must itself
+    end in ``PRIVATE KEY`` right before the five dashes.
+    """
+    label = _PEM_LABEL.match(text, start).end()
+    if (
+        label - start >= len(_PEM_KEY)
+        and text.startswith(_PEM_KEY, label - len(_PEM_KEY))
+        and text.startswith("-----", label)
+    ):
+        return label + 5
+    return -1
 
 
 def _sub_pem(text):
     """Same result as ``_PEM.sub(REDACTED, text)``, in linear time.
 
-    Every ``_PEM`` match ends at the end of an END marker, so nothing after
-    the last END marker can be part of a match, and cutting the text there
-    changes no match before it (the pattern has no lookahead).
+    Scans by hand: each BEGIN header takes the first END marker at or after
+    its end (the lazy ``.*?``), and the scan resumes after that marker. A
+    header with no END marker after it ends the scan, because every later
+    header ends further on and would find none either.
     """
-    limit = 0
-    for m in _PEM_END.finditer(text):
-        limit = m.end(1)
-    if not limit:
-        return text
-    return _PEM.sub(REDACTED, text[:limit]) + text[limit:]
+    out = []
+    copied = pos = 0
+    while True:
+        begin = text.find(_PEM_BEGIN_MARK, pos)
+        if begin < 0:
+            break
+        header_end = _pem_marker_end(text, begin + len(_PEM_BEGIN_MARK))
+        if header_end < 0:
+            pos = begin + 1
+            continue
+        end = -1
+        probe = header_end
+        while end < 0:
+            marker = text.find(_PEM_END_MARK, probe)
+            if marker < 0:
+                break
+            end = _pem_marker_end(text, marker + len(_PEM_END_MARK))
+            probe = marker + 1
+        if end < 0:
+            break
+        out.append(text[copied:begin])
+        out.append(REDACTED)
+        copied = pos = end
+    out.append(text[copied:])
+    return "".join(out)
 
 
 def _apply_patterns(text):

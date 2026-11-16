@@ -38,7 +38,6 @@ def test_platform_patterns_are_byte_identical_to_domain_patterns():
     domain = [(p.pattern, p.flags) for p in redaction.PATTERNS]
     platform = [(p.pattern, p.flags) for p in platform_logging._PATTERNS]
     assert domain == platform
-    assert redaction._PEM_END.pattern == platform_logging._PEM_END.pattern
     assert redaction._MAX_PASSES == platform_logging._MAX_PASSES
     # The PEM block is bound by name in both copies, not by tuple position:
     # the same pattern, once, at the same place in each tuple.
