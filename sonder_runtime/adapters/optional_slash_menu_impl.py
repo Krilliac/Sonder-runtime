@@ -174,7 +174,7 @@ class MenuState:
 
     def __init__(self, completer=None, limit: int = MAX_ROWS, buffer: str = "",
                  hint_provider=None, argument_completer=None, frame: str = "",
-                 frame_style: str = ""):
+                 frame_style: str = "", styles=None):
         self.completer = completer or _default_completer
         self.hint_provider = hint_provider or _default_argument_hint
         # Argument candidates are deliberately opt-in. Most commands accept
@@ -190,6 +190,14 @@ class MenuState:
         # separate from ``frame`` so escape codes never become part of the
         # prompt/title geometry or the accepted user input.
         self.frame_style = str(frame_style or "")
+        # Tints for parts of the composer: ``edge`` (the frame itself),
+        # ``marker`` (the prompt mark), ``row`` and ``selected`` (the command
+        # palette).  Terminal-only like ``frame_style``: they never enter the
+        # geometry or the accepted input, and the text being typed is never
+        # inside one, so it keeps the terminal's own colour.
+        self.styles = {
+            str(name): str(value or "") for name, value in dict(styles or {}).items()
+        }
         self.limit = max(1, int(limit))
         self.buffer = str(buffer or "")
         self.cursor = len(self.buffer)
@@ -1028,30 +1036,39 @@ def _frame_chars(stream) -> dict[str, str]:
 
 
 def _framed_input_lines(frame: str, buffer: str, width: int, stream,
-                        footer_hint: str = "") -> tuple[str, list[str], str]:
+                        footer_hint: str = "",
+                        styles=None) -> tuple[str, list[str], str]:
     """Build a compact composer title, full-width editable rows, and footer.
 
     The content buffer itself is never shortened. Only the fixed title/footer
-    labels are clipped to make a reliable terminal rectangle.
+    labels are clipped to make a reliable terminal rectangle.  ``styles`` may
+    tint the frame (``edge``) and the prompt mark (``marker``); the title and
+    the typed text stay outside every tinted span, and the cells drawn are
+    the same with or without it.
     """
+    styles = styles or {}
+    edge, marker = str(styles.get("edge") or ""), str(styles.get("marker") or "")
     outer = max(8, int(width) - 1)
     # Reserve a small prompt marker inside the active chat surface.
     inner = max(1, outer - 5)
     clean_frame = _ANSI_ESCAPE_RE.sub("", str(frame or "")).strip()
     chars = _frame_chars(stream)
     title = _clip_cells(" " + clean_frame + " ", max(0, outer - 4))
-    top = (chars["tl"] + chars["h"] + title
-           + chars["h"] * max(0, outer - 3 - _display_width(title))
-           + chars["tr"])
+    top = (_styled_frame(chars["tl"] + chars["h"], edge) + title
+           + _styled_frame(chars["h"] * max(0, outer - 3 - _display_width(title))
+                           + chars["tr"], edge))
     text = str(buffer or "")
     content = _wrap_cells(text, inner)
-    rows = [chars["v"] + " > " + _pad_cells(line, inner) + chars["v"] for line in content]
+    left = _styled_frame(chars["v"], edge) + " " + _styled_frame(">", marker) + " "
+    right = _styled_frame(chars["v"], edge)
+    rows = [left + _pad_cells(line, inner) + right for line in content]
     footer_text = str(footer_hint or " Enter send %s Up/Down history %s Ctrl+L clear " % (
         chars["dot"], chars["dot"],
     ))
-    footer = (chars["bl"] + chars["h"]
-              + _pad_cells(footer_text, max(0, outer - 4), chars["h"])
-              + chars["h"] + chars["br"])
+    footer = _styled_frame(
+        chars["bl"] + chars["h"]
+        + _pad_cells(footer_text, max(0, outer - 4), chars["h"])
+        + chars["h"] + chars["br"], edge)
     return top, rows, footer
 
 
@@ -1133,11 +1150,28 @@ def _clear_raw_input(state: MenuState, stream) -> None:
     stream.flush()
 
 
+_SGR_RESET = "\x1b[0m"
+
+
 def _styled_frame(text: str, style: str) -> str:
-    """Apply optional terminal-only styling without changing frame geometry."""
+    """Apply optional terminal-only styling without changing frame geometry.
+
+    A span tinted inside ``text`` ends with a reset; ``style`` is applied
+    again after each one, so a whole-row style survives the tinted parts.
+    """
     if not style:
         return text
-    return style + text + "\x1b[0m"
+    return style + text.replace(_SGR_RESET, _SGR_RESET + style) + _SGR_RESET
+
+
+def _styled_menu_rows(rows: list, state: MenuState) -> list:
+    """Tint the palette: the picked row stands out, the others stay quiet."""
+    picked = state.styles.get("selected", "")
+    other = state.styles.get("row", "")
+    if not (picked or other):
+        return list(rows)
+    return [_styled_frame(row, picked if row.startswith(">") else other)
+            for row in rows]
 
 
 def _paint(state: MenuState, prompt: str, stream) -> None:
@@ -1154,7 +1188,7 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     if framed:
         top, all_lines, footer = _framed_input_lines(
             state.frame, state.buffer, cols, stream,
-            footer_hint=_composer_footer(state, stream))
+            footer_hint=_composer_footer(state, stream), styles=state.styles)
         cursor_row, cursor_col = _framed_cursor_cell(
             state.buffer, state.cursor, cols, len(all_lines))
         lines, start = _visible_input_lines(
@@ -1184,12 +1218,13 @@ def _paint(state: MenuState, prompt: str, stream) -> None:
     # Command choices belong immediately above the composer, like a chat
     # autocomplete panel. Keeping them below the box made the footer read as
     # a separator instead of the bottom edge of the active input surface.
-    prefix = ("\n".join(rows) + "\n") if framed and rows else ""
+    drawn_rows = _styled_menu_rows(rows, state)
+    prefix = ("\n".join(drawn_rows) + "\n") if framed and rows else ""
     parts = [_cursor_to_input_start(state), CSI + "0J", prefix, body]
     state._drawn_input_rows = input_rows
     state._drawn_cursor_row = cursor_from_start + (len(rows) if framed else 0)
     if rows and not framed:
-        parts.append("\n" + "\n".join(rows))
+        parts.append("\n" + "\n".join(drawn_rows))
     up = (input_rows - 1 - cursor_from_start) if framed else (
         len(rows) + input_rows - 1 - cursor_from_start)
     if up:
@@ -1207,7 +1242,7 @@ def _finish(state: MenuState, prompt: str, stream) -> None:
     if state.frame:
         top, lines, footer = _framed_input_lines(
             state.frame, state.buffer, cols, stream,
-            footer_hint=_composer_footer(state, stream))
+            footer_hint=_composer_footer(state, stream), styles=state.styles)
         rendered = "\n".join(_styled_frame(row, state.frame_style) for row in (
             [top] + lines + [footer]
         ))
@@ -1241,12 +1276,12 @@ def _set_bracketed_paste(stream, on: bool) -> None:
 
 def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
                    frame_style: str = "", argument_completer=None,
-                   mode_cycle=None, refresh_frame=None) -> str:
+                   mode_cycle=None, refresh_frame=None, styles=None) -> str:
     msvcrt = _msvcrt()
     stream = sys.stdout
     state = MenuState(
         completer=completer, frame=frame, frame_style=frame_style,
-        argument_completer=argument_completer,
+        argument_completer=argument_completer, styles=styles,
     )
     recalled = HistoryCursor(history)
     kbhit = getattr(msvcrt, "kbhit", None) or (lambda: False)
@@ -1355,7 +1390,7 @@ def _read_line_raw(prompt: str, completer=None, history=None, frame: str = "",
 def read_line(prompt: str = "", *, enabled: bool = True, history=None,
               frame: str = "", frame_style: str = "", argument_completer=None,
               fallback_prompt: str | None = None, mode_cycle=None,
-              refresh_frame=None) -> str:
+              refresh_frame=None, styles=None) -> str:
     """Read one line, showing a live command menu while it starts with ``/``.
 
     Falls back to builtin :func:`input` whenever the menu cannot or should not
@@ -1367,6 +1402,9 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
     Shift+Tab calls ``mode_cycle()`` (default :func:`cycle_permission_mode`)
     and then, when given, ``refresh_frame()`` for the new composer title, and
     keeps editing the same line.
+
+    ``styles`` tints the frame, the prompt mark and the palette rows (see
+    :class:`MenuState`); it changes no cell, no key and no accepted text.
     """
     fallback = prompt if fallback_prompt is None else str(fallback_prompt)
     if not enabled or not available():
@@ -1376,7 +1414,7 @@ def read_line(prompt: str = "", *, enabled: bool = True, history=None,
                               frame_style=frame_style,
                               argument_completer=argument_completer,
                               mode_cycle=mode_cycle,
-                              refresh_frame=refresh_frame)
+                              refresh_frame=refresh_frame, styles=styles)
     except KeyboardInterrupt:
         raise
     except EOFError:

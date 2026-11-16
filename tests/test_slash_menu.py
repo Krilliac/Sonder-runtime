@@ -114,6 +114,60 @@ def test_framed_style_is_terminal_only_and_does_not_change_frame_geometry():
     assert slash_menu._ANSI_ESCAPE_RE.sub("", styled) == "| input |"
 
 
+class _Utf8Stream:
+    encoding = "utf-8"
+
+
+_TINTS = {
+    "edge": "\x1b[90m", "marker": "\x1b[94;1m",
+    "row": "\x1b[90m", "selected": "\x1b[94;1m",
+}
+
+
+def test_composer_tints_change_no_cell_and_never_wrap_the_typed_text():
+    frame, text = "code · m · manual", "hold on, what is RAII?"
+    plain = slash_menu._framed_input_lines(frame, text, 60, _Utf8Stream())
+    tinted = slash_menu._framed_input_lines(frame, text, 60, _Utf8Stream(), styles=_TINTS)
+    strip = lambda value: slash_menu._ANSI_ESCAPE_RE.sub("", value)  # noqa: E731
+
+    # The same cells with or without the tints.
+    assert strip(tinted[0]) == plain[0]
+    assert [strip(row) for row in tinted[1]] == plain[1]
+    assert strip(tinted[2]) == plain[2]
+    assert plain[0].startswith("╭─ code · m · manual ") and plain[0].endswith("╮")
+
+    # The title and the typed text sit outside every tinted span; the frame
+    # is quiet and the prompt mark takes the accent.
+    edge, mark, reset = _TINTS["edge"], _TINTS["marker"], "\x1b[0m"
+    assert tinted[0].startswith(edge + "╭─" + reset + " code · m · manual " + edge + "─")
+    row = tinted[1][0]
+    assert row.startswith(edge + "│" + reset + " " + mark + ">" + reset + " hold on, what is RAII?")
+    assert row.endswith(" " + edge + "│" + reset)
+    assert tinted[2].startswith(edge + "╰─") and tinted[2].endswith("╯" + reset)
+
+    # No tints given: exactly the rows as before.
+    assert slash_menu._framed_input_lines(frame, text, 60, _Utf8Stream(), styles={}) == plain
+
+
+def test_a_whole_row_style_survives_the_tinted_parts():
+    styled = slash_menu._styled_frame("\x1b[90m│\x1b[0m input", "\x1b[48;5;24m")
+    assert styled == "\x1b[48;5;24m\x1b[90m│\x1b[0m\x1b[48;5;24m input\x1b[0m"
+
+
+def test_palette_rows_are_tinted_by_role_and_keep_their_text():
+    state = slash_menu.MenuState(styles=_TINTS)
+    rows = ["> /model  switch the model", "  /mode   set the mode", "  hint text"]
+    drawn = slash_menu._styled_menu_rows(rows, state)
+    assert drawn == [
+        "\x1b[94;1m> /model  switch the model\x1b[0m",
+        "\x1b[90m  /mode   set the mode\x1b[0m",
+        "\x1b[90m  hint text\x1b[0m",
+    ]
+    assert [slash_menu._ANSI_ESCAPE_RE.sub("", row) for row in drawn] == rows
+    # Without tints the rows are passed through untouched.
+    assert slash_menu._styled_menu_rows(rows, slash_menu.MenuState()) == rows
+
+
 def test_terminal_size_prefers_the_visible_windows_console(monkeypatch):
     monkeypatch.setattr(slash_menu, "_windows_console_size", lambda: (144, 42))
     assert slash_menu._terminal_size() == (144, 42)

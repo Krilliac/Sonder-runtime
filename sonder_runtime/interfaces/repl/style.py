@@ -1,8 +1,8 @@
 """Terminal style foundation for the interactive REPL.
 
 Everything the REPL draws as chrome -- banner, status line, live line, turn
-header and footer, notices, tables and wrapped prose -- is built here from
-three small vocabularies:
+header and footer, tool calls, notices, tables, wrapped prose and the
+Markdown of an answer -- is built here from three small vocabularies:
 
 * capabilities (:func:`caps`), detected once from the environment and the
   output stream, and injectable for tests;
@@ -30,9 +30,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
     "Caps", "caps", "set_caps", "reset_caps",
-    "ROLES", "GLYPHS", "s", "g", "link", "strip_ansi", "cell_width",
+    "ROLES", "GLYPHS", "s", "sgr", "g", "link", "strip_ansi", "cell_width",
     "cols", "rule", "wrap", "table", "safe_text", "truncate",
-    "NOTICE_KINDS", "notice", "turn_header",
+    "NOTICE_KINDS", "notice", "turn_header", "tool_call", "markdown",
     "StatusState", "status_line", "LiveState", "live_line",
     "FooterState", "footer", "BannerState", "banner", "about_lines",
     "mode_roles", "compact_count", "duration_label",
@@ -173,6 +173,10 @@ def detect_caps(
         color = "none"
     elif colorterm in ("truecolor", "24bit"):
         color = "truecolor"
+    elif platform == "nt" and env.get("WT_SESSION"):
+        # Windows Terminal draws 24-bit colour and does not set COLORTERM.
+        # The palette still waits for a known theme (see ``Caps.palette``).
+        color = "truecolor"
     elif term.endswith("256color"):
         color = "256"
     else:
@@ -187,7 +191,7 @@ def detect_caps(
     if explicit in ("unicode", "ascii"):
         glyphs = explicit
     elif (plain or dumb or ambiguous_wide
-          or not _encodes(stream, "".join(_UNICODE_GLYPHS.values()))
+          or not _encodes(stream, "".join(_UNICODE_ALL.values()))
           or (platform == "nt" and (not vt_ok or not (
               env.get("WT_SESSION") or env.get("TERM_PROGRAM"))))):
         glyphs = "ascii"
@@ -262,25 +266,30 @@ def _c(c: Optional[Caps]) -> Caps:
 ROLES = ("text", "muted", "accent", "info", "success", "warning", "danger",
          "strong", "reverse")
 
+# The accent is Iris, the blue-violet of the app (app/lib/theme.dart): bright
+# blue where the terminal has 16 colours, which leaves cyan for ``info``.
 _SGR16 = {
-    "text": "39", "muted": "2", "accent": "36", "info": "34",
+    "text": "39", "muted": "2", "accent": "94", "info": "36",
     "success": "32", "warning": "33", "danger": "31",
     "strong": "1", "reverse": "7",
 }
-# 256-colour cells and truecolor values, (dark, light).  Every value reaches
-# 4.5:1 against its theme background (#1e1e1e / #ffffff); tests compute it.
-# The spec's light accent cell 30 measured 4.36:1, so it is 23 here.
+# 256-colour cells and truecolor values, (dark, light).  The truecolor values
+# are the app's text tones for the same roles (muted, accentText, info, ok,
+# warn, danger in app/lib/theme.dart), so a turn reads the same in the
+# terminal and the app; a test compares the two files.  Every value reaches
+# 4.5:1 against its theme background (#1e1e1e and #000000 / #ffffff); tests
+# compute it.
 _C256 = {
-    "muted": (245, 242), "accent": (80, 23), "info": (111, 25),
+    "muted": (245, 242), "accent": (147, 62), "info": (117, 24),
     "success": (114, 28), "warning": (221, 130), "danger": (210, 124),
 }
 _TRUE = {
-    "muted": ((138, 150, 160), (96, 106, 116)),
-    "accent": ((99, 214, 200), (0, 128, 120)),
-    "info": ((127, 184, 240), (30, 90, 170)),
-    "success": ((121, 211, 148), (20, 120, 50)),
-    "warning": ((240, 195, 106), (150, 95, 0)),
-    "danger": ((242, 123, 123), (180, 30, 30)),
+    "muted": ((158, 154, 146), (102, 99, 93)),
+    "accent": ((182, 176, 250), (77, 69, 181)),
+    "info": ((116, 194, 230), (27, 101, 132)),
+    "success": ((127, 207, 150), (25, 107, 60)),
+    "warning": ((237, 191, 102), (131, 85, 0)),
+    "danger": ((242, 127, 123), (181, 45, 45)),
 }
 _RESET = "\x1b[0m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -312,6 +321,16 @@ def s(text: Any, *roles: str, c: Optional[Caps] = None) -> str:
             raise ValueError("unknown style role: %r" % role)
     start = "\x1b[%sm" % ";".join(_sgr(r, c) for r in roles)
     return start + value.replace(_RESET, _RESET + start) + _RESET
+
+
+def sgr(*roles: str, c: Optional[Caps] = None) -> str:
+    """The escape that opens ``roles``, or ``""`` when colour is off.
+
+    For a caller that draws its own cells and only needs the tint (the raw
+    composer's frame); whatever it opens must be closed with a reset.
+    """
+    painted = s("\x00", *roles, c=c)
+    return painted.split("\x00", 1)[0] if painted != "\x00" else ""
 
 
 def mode_roles(mode: str, elevated: bool = False) -> tuple:
@@ -359,13 +378,22 @@ _ASCII_GLYPHS = {
     "refused": "x", "warn": "!", "ask": "?", "tool": "-", "skip": "-",
     "note": "*", "up": "Up",
 }
-GLYPHS = {"unicode": dict(_UNICODE_GLYPHS), "ascii": dict(_ASCII_GLYPHS)}
+# Layout glyphs only the terminal draws: the corner under a tool call, a
+# list bullet and a quote bar, as (unicode, ascii).  They are not status
+# vocabulary, so they stay out of the two tables above, which the app's
+# status_vocab.dart mirrors token for token.
+_LAYOUT_GLYPHS = {
+    "result": ("└", "+-"), "bullet": ("•", "-"), "quote": ("│", "|"),
+}
+_UNICODE_ALL = dict(_UNICODE_GLYPHS, **{k: v[0] for k, v in _LAYOUT_GLYPHS.items()})
+_ASCII_ALL = dict(_ASCII_GLYPHS, **{k: v[1] for k, v in _LAYOUT_GLYPHS.items()})
+GLYPHS = {"unicode": dict(_UNICODE_ALL), "ascii": dict(_ASCII_ALL)}
 
 
 def g(name: str, c: Optional[Caps] = None) -> str:
     """A glyph token in the active glyph set."""
     c = _c(c)
-    table_ = _ASCII_GLYPHS if c.glyphs == "ascii" else _UNICODE_GLYPHS
+    table_ = _ASCII_ALL if c.glyphs == "ascii" else _UNICODE_ALL
     return table_[name]
 
 
@@ -763,16 +791,212 @@ def notice(kind: str, title: Any, detail: Any = None, hint: Any = None,
 
 def turn_header(kind: str = "answer", width: Optional[int] = None,
                 c: Optional[Caps] = None) -> str:
-    """``◈ answer ───`` (accent) or ``✗ error ───`` (danger), to min(width - 1, 100)."""
+    """The line that opens Sonder's turn: ``◈ Sonder`` (accent) or ``✗ error`` (danger).
+
+    A speaker label, as in a chat transcript.  The prompt glyph marks the
+    person's turns and this label marks Sonder's, so no rule is drawn
+    between them.  Any other ``kind`` is shown as the label itself.
+    """
     c = _c(c)
     width = cols() if width is None else max(20, int(width))
     if kind == "error":
         label, role = "%s error" % g("fail", c), "danger"
     else:
-        label, role = "%s %s" % (g("mark", c), kind or "answer"), "accent"
-    fill = min(width - 1, RULE_MAX) - cell_width(label) - 1
+        name = "Sonder" if not kind or kind == "answer" else _clean(kind)
+        label, role = "%s %s" % (g("mark", c), name), "accent"
+    return s(truncate(label, width - 1, c), role, "strong", c=c)
+
+
+# ---------------------------------------------------------------------------
+# Tool calls (spec 2.6)
+# ---------------------------------------------------------------------------
+
+def tool_call(title: Any, ok: bool = True, elapsed_ms: Any = None,
+              width: Optional[int] = None, c: Optional[Caps] = None) -> list:
+    """One tool call: the call, then its result on a dim line underneath.
+
+    ``  ▸ Read File src/a.py`` / ``    └ ✓ ok · 12ms``.  The status glyph
+    always carries its word (``✓ ok``, ``✗ failed``), so a failed call reads
+    without colour.  Returns two lines that fit ``width - 1`` cells.
+    """
+    c = _c(c)
+    width = cols() if width is None else max(20, int(width))
+    limit = width - 1
+    name = " ".join(safe_text(title or "").split()) or "tool"
+    call = "  %s %s" % (s(g("tool", c), "muted", c=c), truncate(name, max(1, limit - 4), c))
+    if ok:
+        status = s("%s ok" % g("ok", c), "success", c=c)
+    else:
+        status = s("%s failed" % g("fail", c), "danger", "strong", c=c)
+    parts = [status]
+    if elapsed_ms:
+        parts.append(s(duration_label(elapsed_ms), "muted", c=c))
+    result = "    %s %s" % (s(g("result", c), "muted", c=c), _join(parts, c))
+    return [call.rstrip(), truncate(result, limit, c).rstrip()]
+
+
+# ---------------------------------------------------------------------------
+# Markdown (answers)
+# ---------------------------------------------------------------------------
+
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?$")
+_MD_BULLET = re.compile(r"^(\s{0,3})([-*+])\s+(.*)$")
+_MD_NUMBER = re.compile(r"^(\s{0,3})(\d{1,3}[.)])\s+(.*)$")
+_MD_QUOTE = re.compile(r"^>\s?(.*)$")
+_MD_RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}$")
+_MD_BOLD = re.compile(r"\*\*[^*]+\*\*")
+_MD_TICKS = re.compile(r"`+")
+
+
+def _paint_words(text: str, roles: tuple, c: Caps) -> str:
+    """Paint each word on its own, so a wrapped span never carries a style
+    across a line break."""
+    if not roles:
+        return text
+    return " ".join(s(word, *roles, c=c) if word else word for word in text.split(" "))
+
+
+def _md_spans(text: str) -> list:
+    """The inline spans of one line, as ``(start, end, kind, content)``.
+
+    A code span opened by a run of N backticks closes at the next run of
+    exactly N, and its content is kept verbatim (CommonMark: one space is
+    dropped from each side when both are there).  A run with no closer of
+    its own length is plain text.  Bold is ``**...**``; the span that
+    starts first wins.  Every step moves forward over runs found once, and a
+    length that has no closer left is remembered, so a long pathological
+    line stays linear (no backtracking regex is involved).
+    """
+    runs = [(m.start(), m.end()) for m in _MD_TICKS.finditer(text)]
+    by_length: dict = {}
+    for index, (start, end) in enumerate(runs):
+        by_length.setdefault(end - start, []).append(index)
+    cursor = {length: 0 for length in by_length}
+    spans = []
+    pos = 0
+    run = 0
+    bold = None
+    bold_done = False
+    while True:
+        # The next code span that starts at or after pos.
+        code = None
+        while run < len(runs):
+            start, end = runs[run]
+            if start < pos:
+                run += 1
+                continue
+            length = end - start
+            indexes = by_length[length]
+            at = cursor[length]
+            while at < len(indexes) and indexes[at] <= run:
+                at += 1
+            cursor[length] = at
+            if at < len(indexes):
+                close = runs[indexes[at]]
+                code = (start, close[1], run, text[end:close[0]])
+                break
+            run += 1
+        if not bold_done and (bold is None or bold.start() < pos):
+            bold = _MD_BOLD.search(text, pos)
+            bold_done = bold is None
+        if code is None and bold is None:
+            return spans
+        if bold is not None and (code is None or bold.start() < code[0]):
+            spans.append((bold.start(), bold.end(), "bold", bold.group()[2:-2]))
+            pos = bold.end()
+        else:
+            body = code[3]
+            if len(body) > 2 and body[0] == " " and body[-1] == " " and body.strip(" "):
+                body = body[1:-1]
+            spans.append((code[0], code[1], "code", body))
+            pos = code[1]
+
+
+def _md_inline(text: str, c: Caps, base: tuple = ()) -> str:
+    """Inline code and bold as styles; their markers are not drawn."""
+    out = []
+    last = 0
+    for start, end, kind, body in _md_spans(text):
+        out.append(_paint_words(text[last:start], base, c))
+        roles = ("info",) if kind == "code" else base + ("strong",)
+        out.append(_paint_words(body, roles, c))
+        last = end
+    out.append(_paint_words(text[last:], base, c))
+    return "".join(out)
+
+
+def _code_rule(language: str, width: int, c: Caps) -> str:
+    """The rule that opens or closes a code block; the opener names the language."""
     glyph = "-" if c.ambiguous_wide else g("rule", c)
-    return s(label, role, "strong", c=c) + " " + s(glyph * max(0, fill), role, c=c)
+    width = max(8, int(width))
+    label = " ".join(safe_text(language).split())
+    if not label:
+        return s(glyph * width, "muted", c=c)
+    label = truncate(label, width - 6, c)
+    fill = width - cell_width(label) - 4
+    return (s(glyph * 2, "muted", c=c) + " " + s(label, "info", c=c) + " "
+            + s(glyph * fill, "muted", c=c))
+
+
+def markdown(text: Any, width: int, indent: str = "", c: Optional[Caps] = None) -> list:
+    """Wrap an answer like :func:`wrap`, drawing its Markdown when colour is on.
+
+    Headings, list markers, quotes, rules, inline code and bold are styled,
+    and a fenced block sits between two rules, the first naming its
+    language.  The markers that only ask for a style (``#``, ``**``,
+    backticks, the fence) are not drawn; code itself is never recoloured or
+    rewrapped.  Without colour, or in plain mode, the text comes back
+    exactly as :func:`wrap` returns it, so ``NO_COLOR``, dumb terminals and
+    screen readers keep the source text.  Pipe tables and indented lines
+    stay verbatim either way.
+    """
+    c = _c(c)
+    width = max(1, int(width))
+    if c.color == "none" or c.plain:
+        return wrap(text, width, indent=indent, c=c)
+    bar = max(8, min(width, RULE_MAX) - cell_width(indent))
+    out = []
+    fenced = False
+    for raw in str(text).split("\n"):
+        line = raw.rstrip()
+        if _FENCE.match(line):
+            fenced = not fenced
+            language = line.strip()[3:] if fenced else ""
+            out.append(indent + _code_rule(language, bar, c))
+            continue
+        if fenced or _verbatim(line):
+            out.append(line)
+            continue
+        if not line:
+            out.append("")
+            continue
+        if _MD_RULE.match(line):
+            out.append(indent + _code_rule("", bar, c))
+            continue
+        heading = _MD_HEADING.match(line)
+        if heading:
+            roles = ("accent", "strong") if len(heading.group(1)) <= 2 else ("strong",)
+            out.extend(wrap(_md_inline(heading.group(2), c, roles), width,
+                            indent=indent, c=c))
+            continue
+        quote = _MD_QUOTE.match(line)
+        if quote:
+            # Only the bar is quiet: quoted text is still text to read, and
+            # a muted last line would run into the muted footer under it.
+            lead = indent + s(g("quote", c), "muted", c=c) + " "
+            out.extend(wrap(_md_inline(quote.group(1), c), width,
+                            indent=lead, c=c))
+            continue
+        item = _MD_BULLET.match(line) or _MD_NUMBER.match(line)
+        if item:
+            pad, marker, body = item.groups()
+            shown = g("bullet", c) if marker in ("-", "*", "+") else marker
+            lead = indent + pad + s(shown, "accent", c=c) + " "
+            hang = indent + pad + " " * (cell_width(shown) + 1)
+            out.extend(wrap(_md_inline(body, c), width, indent=lead, hanging=hang, c=c))
+            continue
+        out.extend(wrap(_md_inline(line, c), width, indent=indent, c=c))
+    return [line.rstrip() for line in out]
 
 
 # ---------------------------------------------------------------------------
@@ -1014,6 +1238,10 @@ class BannerState:
     mode: str = "manual"
     endpoint: str = "http://127.0.0.1:11435"
     live: bool = False
+    # Shown when the caller knows them: the build's version label beside the
+    # name, and the working directory on a line of its own.
+    version: str = ""
+    cwd: str = ""
     mode_cycle_key: bool = False
     behind: int = 0
     restart_required: bool = False
@@ -1069,7 +1297,8 @@ def _display_endpoint(endpoint: str, keep_scheme: bool) -> str:
 
 def _identity_line(st: BannerState, width: int, c: Caps) -> str:
     limit = width - 1
-    mark = s("%s sonder" % g("mark", c), "accent", "strong", c=c)
+    name = s("%s sonder" % g("mark", c), "accent", "strong", c=c)
+    version = _clean(st.version)
     mode = s(_clean(st.mode) or "unknown", *mode_roles(st.mode), c=c)
     persona = s(_clean(st.persona), "info", c=c) if st.persona else ""
     model_text = _clean(st.model) or "unknown model"
@@ -1085,8 +1314,9 @@ def _identity_line(st: BannerState, width: int, c: Caps) -> str:
         return s("%s not listening" % shown, "warning", c=c)
 
     def build(model: Optional[str], with_tier: bool, with_persona: bool,
-              keep_scheme: bool, short_endpoint: bool, with_endpoint: bool = True) -> str:
-        parts = [mark]
+              keep_scheme: bool, short_endpoint: bool, with_endpoint: bool = True,
+              with_version: bool = False) -> str:
+        parts = [name + (" " + s(version, "muted", c=c) if with_version and version else "")]
         if with_persona and persona:
             parts.append(persona)
         if model is not None:
@@ -1099,8 +1329,12 @@ def _identity_line(st: BannerState, width: int, c: Caps) -> str:
             parts.append(endpoint(keep_scheme, short_endpoint))
         return _join(parts, c)
 
+    # A narrow terminal gives up the URL scheme first, then the version.
     attempts = [
-        dict(model=model_text, with_tier=True, with_persona=True, keep_scheme=True, short_endpoint=False),
+        dict(model=model_text, with_tier=True, with_persona=True, keep_scheme=True, short_endpoint=False,
+             with_version=True),
+        dict(model=model_text, with_tier=True, with_persona=True, keep_scheme=False, short_endpoint=False,
+             with_version=True),
         dict(model=model_text, with_tier=True, with_persona=True, keep_scheme=False, short_endpoint=False),
         dict(model=model_text, with_tier=True, with_persona=False, keep_scheme=False, short_endpoint=False),
         dict(model=model_text, with_tier=False, with_persona=False, keep_scheme=False, short_endpoint=False),
@@ -1131,6 +1365,24 @@ def _identity_line(st: BannerState, width: int, c: Caps) -> str:
     return truncate(line, limit, c)
 
 
+def _cwd_line(st: BannerState, width: int, c: Caps) -> str:
+    """``  cwd ~/code/engine``: the folder file commands start from.
+
+    A path too long for the row keeps its end, the part that names where
+    you are.
+    """
+    label = "  cwd"
+    path = _clean(st.cwd)
+    room = max(4, width - 1 - cell_width(label) - 1)
+    if cell_width(path) > room:
+        dots = g("ellipsis", c)
+        keep = max(1, room - cell_width(dots))
+        while path and cell_width(path) > keep:
+            path = path[1:]
+        path = dots + path
+    return s(label, "muted", c=c) + " " + s(path, "text", c=c)
+
+
 def _hint_line(st: BannerState, width: int, c: Caps) -> str:
     items = ["/help commands",
              "Shift+Tab mode" if st.mode_cycle_key else "/mode to switch",
@@ -1155,17 +1407,21 @@ def _flag_line(glyph_role: str, text: str, text_role: str, width: int, c: Caps,
 def banner(state: Any, width: int, c: Optional[Caps] = None) -> str:
     """The startup banner (spec 2.5), one design on every platform.
 
-    Line 1 is identity: mark, persona, model (tier), mode, endpoint coloured
-    by liveness.  Line 2 is a muted hint.  Optional warning lines follow
-    only when they call for action (behind > 0, restart required, queued
-    startup notices, elevation, strict).  There is no rule.  Returns the
-    lines joined by newlines, no trailing newline; every line fits
-    ``width - 1`` cells.
+    Line 1 is identity: mark, name and version, persona, model (tier), mode,
+    endpoint coloured by liveness.  The working directory follows on its
+    own line when the caller gives one, then a muted hint.  Optional
+    warning lines follow only when they call for action (behind > 0,
+    restart required, queued startup notices, elevation, strict).  There is
+    no rule.  Returns the lines joined by newlines, no trailing newline;
+    every line fits ``width - 1`` cells.
     """
     c = _c(c)
     st = _coerce(state, BannerState)
     width = max(20, int(width))
-    lines = [_identity_line(st, width, c), _hint_line(st, width, c)]
+    lines = [_identity_line(st, width, c)]
+    if _clean(st.cwd):
+        lines.append(_cwd_line(st, width, c))
+    lines.append(_hint_line(st, width, c))
     if st.elevated:
         reason = _clean(st.elevated_reason)
         text = "ELEVATED" + (" %s %s" % (g("sep", c), reason) if reason else "")
@@ -1188,6 +1444,29 @@ def banner(state: Any, width: int, c: Optional[Caps] = None) -> str:
     return "\n".join(line.rstrip() for line in lines)
 
 
+def _terminal_words(c: Caps) -> str:
+    """What was detected about the terminal, and which palette that gives.
+
+    A terminal whose background is not known is drawn with its own 16
+    colours; the row says so and names the switch, because nothing else on
+    screen explains why the accent is the terminal's blue.
+    """
+    sep = _sep(c)
+    if c.color == "none":
+        words = "no colour"
+    else:
+        words = {"16": "16 colours", "256": "256 colours",
+                 "truecolor": "24-bit colour"}[c.color]
+        if c.palette != "16":
+            words += "%s%s theme%sapp palette" % (sep, c.theme, sep)
+        elif c.color != "16":
+            words += ("%stheme unknown, so the terminal's own 16 colours"
+                      "%sSONDER_THEME=dark or light uses the app palette" % (sep, sep))
+    if c.glyphs == "ascii":
+        words += sep + "ASCII glyphs"
+    return words
+
+
 def about_lines(state: Any, width: Optional[int] = None, c: Optional[Caps] = None) -> list:
     """Full provenance for ``/about``: identity, endpoint, mode, source, update."""
     c = _c(c)
@@ -1200,7 +1479,12 @@ def about_lines(state: Any, width: Optional[int] = None, c: Optional[Caps] = Non
     def at(commit: str, when: str) -> str:
         return short(commit) + (" @ %s" % _clean(when) if when else "")
 
-    rows = [
+    rows = []
+    if _clean(st.version):
+        rows.append(("version", _clean(st.version)))
+    if _clean(st.cwd):
+        rows.append(("cwd", _clean(st.cwd)))
+    rows += [
         ("persona", _clean(st.persona) or "(none)"),
         ("model", "%s (%s)" % (_clean(st.model) or "unknown", _clean(st.tier) or "?")),
         ("project", _clean(st.project) or "(none)"),
@@ -1225,6 +1509,7 @@ def about_lines(state: Any, width: Optional[int] = None, c: Optional[Caps] = Non
     state_word = _clean(st.update_state) or "unknown"
     rows.append(("update", "%s%sbehind %d%s/updatecheck%s/update" % (
         state_word, _sep(c), max(0, int(st.behind or 0)), _sep(c), _sep(c))))
+    rows.append(("terminal", _terminal_words(c)))
     label_w = max(cell_width(r[0]) for r in rows)
     out = [s("%s sonder" % g("mark", c), "accent", "strong", c=c)]
     for label, value in rows:

@@ -65,27 +65,21 @@ class PermissionModeChip extends StatelessWidget {
                   child: Center(
                     widthFactor: 1,
                     child: Container(
-                      height: 28,
-                      padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
+                      height: 30,
+                      padding: const EdgeInsets.fromLTRB(
+                          SonderSpace.md, 0, SonderSpace.sm, 0),
                       decoration: BoxDecoration(
+                        color: tokens.sunken,
                         borderRadius: BorderRadius.circular(SonderRadius.pill),
-                        border: Border.all(color: tokens.hairlineStrong),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              color: tone,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
+                          // The icon and the word name the mode; the tone
+                          // only repeats what they say.
                           Icon(permissionModeIcon(state.mode),
-                              size: 13, color: tone),
-                          const SizedBox(width: 5),
+                              size: 14, color: tone),
+                          const SizedBox(width: SonderSpace.sm),
                           Flexible(
                             child: Text(modeLabel,
                                 maxLines: 1,
@@ -97,17 +91,19 @@ class PermissionModeChip extends StatelessWidget {
                           ),
                           if (busy)
                             Padding(
-                              padding: const EdgeInsets.only(left: 6, right: 2),
+                              padding: const EdgeInsets.only(
+                                  left: SonderSpace.sm, right: SonderSpace.xxs),
                               child: SizedBox(
-                                width: 11,
-                                height: 11,
+                                width: SonderSpace.md,
+                                height: SonderSpace.md,
                                 child: CircularProgressIndicator(
                                     strokeWidth: 2, color: tokens.text2),
                               ),
                             )
                           else if (readOnly)
                             Padding(
-                              padding: const EdgeInsets.only(left: 4, right: 2),
+                              padding: const EdgeInsets.only(
+                                  left: SonderSpace.xs, right: SonderSpace.xxs),
                               child: Icon(Icons.lock_outline,
                                   size: 13, color: tokens.muted),
                             )
@@ -124,7 +120,7 @@ class PermissionModeChip extends StatelessWidget {
           ),
         ),
         if (state.elevated) ...[
-          const SizedBox(width: 6),
+          const SizedBox(width: SonderSpace.tight),
           ElevatedBadge(reason: state.elevationReason),
         ],
       ],
@@ -149,11 +145,11 @@ class OfflineModeChip extends StatelessWidget {
         label: 'Autonomy mode unknown: server unreachable',
         child: Container(
           key: const Key('permission-mode-chip-offline'),
-          height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.md),
           decoration: BoxDecoration(
+            color: tokens.sunken,
             borderRadius: BorderRadius.circular(SonderRadius.pill),
-            border: Border.all(color: tokens.hairline),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Text('– mode offline', style: tokens.mono(12, color: tokens.muted)),
@@ -187,7 +183,7 @@ class ElevatedBadge extends StatelessWidget {
         child: Container(
           key: const Key('permission-elevated-badge'),
           height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.sm),
           decoration: BoxDecoration(
             color: tokens.dangerDim,
             borderRadius: BorderRadius.circular(SonderRadius.control),
@@ -197,7 +193,7 @@ class ElevatedBadge extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(Icons.shield_outlined, size: 13, color: tokens.danger),
-              const SizedBox(width: 4),
+              const SizedBox(width: SonderSpace.xs),
               Text(
                 'ADMIN',
                 style: tokens
@@ -224,7 +220,7 @@ class PermissionModeDialog extends StatelessWidget {
     return AlertDialog(
       key: const Key('permission-mode-picker'),
       title: const Text('Autonomy mode'),
-      contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+      contentPadding: const EdgeInsets.fromLTRB(0, SonderSpace.md, 0, 0),
       content: SizedBox(
         width: 420,
         child: SingleChildScrollView(
@@ -242,17 +238,17 @@ class PermissionModeDialog extends StatelessWidget {
                         ? cs.primary.withValues(alpha: 0.10)
                         : null,
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 10),
+                        horizontal: SonderSpace.xl, vertical: SonderSpace.snug),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Padding(
-                          padding: const EdgeInsets.only(top: 2),
+                          padding: const EdgeInsets.only(top: SonderSpace.xxs),
                           child: Icon(permissionModeIcon(option.name),
                               size: 16,
                               color: permissionModeColor(cs, option.name)),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: SonderSpace.snug),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -276,7 +272,7 @@ class PermissionModeDialog extends StatelessWidget {
                         ),
                         if (isModeRaise(state.mode, option.name))
                           Padding(
-                            padding: const EdgeInsets.only(left: 8, top: 2),
+                            padding: const EdgeInsets.only(left: SonderSpace.sm, top: SonderSpace.xxs),
                             child: Text('asks to confirm',
                                 style: TextStyle(
                                     fontSize: 11, color: cs.onSurfaceVariant)),
@@ -289,7 +285,7 @@ class PermissionModeDialog extends StatelessWidget {
                 ),
               const Divider(height: 20),
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                padding: const EdgeInsets.fromLTRB(SonderSpace.xl, 0, SonderSpace.xl, SonderSpace.sm),
                 child: Text(
                   state.elevated
                       ? 'Privilege: elevated — a separate switch. No mode '

@@ -254,11 +254,29 @@ void main() {
     await Settings.saveThemeMode('system');
     expect(prefs.getString('sonder_theme_mode'), 'system');
     expect(prefs.getBool('sonder_dark_mode'), isTrue);
+    // An unknown value falls back to the default: follow the platform.
     await Settings.saveThemeMode('neon');
-    expect(prefs.getString('sonder_theme_mode'), 'dark');
+    expect(prefs.getString('sonder_theme_mode'), 'system');
     // Nothing else is written.
     expect(prefs.getKeys(),
         {'sonder_server_url', 'sonder_theme_mode', 'sonder_dark_mode'});
+  });
+
+  test('a new install follows the system theme; a stored choice wins',
+      () async {
+    expect(Settings().themeMode, 'system');
+    SharedPreferences.setMockInitialValues({});
+    expect((await Settings.load()).themeMode, 'system');
+    // The boolean older builds wrote is a choice someone made.
+    SharedPreferences.setMockInitialValues({'sonder_dark_mode': true});
+    expect((await Settings.load()).themeMode, 'dark');
+    SharedPreferences.setMockInitialValues({'sonder_dark_mode': false});
+    expect((await Settings.load()).themeMode, 'light');
+    SharedPreferences.setMockInitialValues(
+        {'sonder_theme_mode': 'light', 'sonder_dark_mode': true});
+    expect((await Settings.load()).themeMode, 'light');
+    SharedPreferences.setMockInitialValues({'sonder_theme_mode': 'neon'});
+    expect((await Settings.load()).themeMode, 'system');
   });
 
   test('a fresh session is stored only for the saved server', () async {

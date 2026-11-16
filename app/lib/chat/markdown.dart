@@ -41,8 +41,12 @@ class ConversationContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final theme = Theme.of(context);
+    // Reading text: 16/26, the size and leading of the chat apps people
+    // already read all day.
     final body =
-        theme.textTheme.bodyMedium?.copyWith(color: color ?? tokens.text);
+        theme.textTheme.bodyLarge?.copyWith(color: color ?? tokens.text);
+    TextStyle? heading(TextStyle? base) =>
+        base?.copyWith(fontWeight: FontWeight.w600, color: tokens.text);
     return MarkdownBody(
       data: content,
       selectable: true,
@@ -57,41 +61,48 @@ class ConversationContent extends StatelessWidget {
       styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
         p: body,
         strong: body?.copyWith(fontWeight: FontWeight.w600),
-        h1: theme.textTheme.titleLarge,
-        h2: theme.textTheme.titleMedium,
-        h3: theme.textTheme.titleSmall,
-        h4: theme.textTheme.titleSmall,
+        h1: heading(theme.textTheme.headlineSmall),
+        h1Padding: const EdgeInsets.only(top: SonderSpace.sm),
+        h2: heading(theme.textTheme.titleLarge),
+        h2Padding: const EdgeInsets.only(top: SonderSpace.sm),
+        h3: heading(theme.textTheme.titleMedium),
+        h3Padding: const EdgeInsets.only(top: SonderSpace.xs),
+        h4: heading(theme.textTheme.titleSmall),
+        em: body?.copyWith(fontStyle: FontStyle.italic),
+        listBullet: body?.copyWith(color: tokens.text2),
         a: body?.copyWith(
             color: tokens.accentText,
             decoration: TextDecoration.underline,
             decorationColor: tokens.accentText.withValues(alpha: 0.5)),
         // Inline code only; blocks are drawn by [CodeBlockView].
         code: tokens
-            .mono(13, color: tokens.text)
-            .copyWith(backgroundColor: tokens.raised),
+            .mono(14, color: tokens.text, height: 26)
+            .copyWith(backgroundColor: tokens.bubble),
         // The frame around every fenced block; the header, body and scroll
         // live inside it.
         codeblockDecoration: BoxDecoration(
             color: tokens.panel,
-            borderRadius: BorderRadius.circular(SonderRadius.row),
+            borderRadius: BorderRadius.circular(SonderRadius.menu),
             border: Border.all(color: tokens.hairline)),
+        blockquote: body?.copyWith(color: tokens.text2),
         blockquoteDecoration: BoxDecoration(
             border: Border(
-                left: BorderSide(color: tokens.hairlineStrong, width: 2))),
+                left: BorderSide(color: tokens.hairlineStrong, width: 3))),
         blockquotePadding: const EdgeInsets.fromLTRB(
-            SonderSpace.md, SonderSpace.xxs, 0, SonderSpace.xxs),
+            SonderSpace.lg, SonderSpace.xxs, 0, SonderSpace.xxs),
         horizontalRuleDecoration: BoxDecoration(
             border: Border(top: BorderSide(color: tokens.hairline))),
         tableHead: body?.copyWith(fontWeight: FontWeight.w600),
+        tableHeadAlign: TextAlign.left,
         tableBody: body,
         tableBorder: TableBorder.all(
           color: tokens.hairline,
           borderRadius: BorderRadius.circular(SonderRadius.row),
         ),
-        tableHeadCellsDecoration: BoxDecoration(color: tokens.raised),
+        tableHeadCellsDecoration: BoxDecoration(color: tokens.sunken),
         tableCellsPadding: const EdgeInsets.symmetric(
             horizontal: SonderSpace.md, vertical: SonderSpace.sm),
-        blockSpacing: SonderSpace.md,
+        blockSpacing: SonderSpace.lg,
         // The marker column holds "10." at any text size.
         listIndent: MediaQuery.textScalerOf(context).scale(SonderSpace.xxl),
       ),
@@ -206,18 +217,24 @@ class _CodeBlockViewState extends State<CodeBlockView> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
-                height: 40,
-                padding: const EdgeInsets.only(left: SonderSpace.lg, right: 96),
+                height: SonderSpace.x4,
+                // Room on the right for the copy control: two 48px targets.
+                padding: const EdgeInsets.only(
+                    left: SonderSpace.lg, right: SonderSpace.x5 + SonderSpace.x5),
                 alignment: Alignment.centerLeft,
+                // The header bar: one tone below the code, inside the
+                // frame's top corners.
                 decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: tokens.hairline)),
+                  color: tokens.sunken,
+                  borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(SonderRadius.menu - 1)),
                 ),
                 child: ExcludeSemantics(
                   child: Text(label,
                       key: const Key('code-block-language'),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: tokens.mono(11.5, color: tokens.muted)),
+                      style: tokens.mono(12, color: tokens.text2)),
                 ),
               ),
               Scrollbar(

@@ -139,11 +139,20 @@ class ReplSession:
 
 
 def normalize(lines):
-    """Mask what legitimately varies between runs: seconds and durations."""
+    """Mask what legitimately varies between runs and machines.
+
+    Seconds and durations; the working directory the banner and ``/about``
+    name (each checkout has its own, and a long one is cut to the width);
+    and the version label beside the name, so a new version number is not a
+    golden change.  (A label of a different length can still move a narrow
+    banner row to its next shorter form; that is a real layout change.)
+    """
     out = []
     for line in lines:
         line = re.sub(r"\b\d+(?:\.\d+)?(?:ms|s)\b", "<t>", line)
         line = re.sub(r"\b\d+m \d{2}s\b", "<t>", line)
+        line = re.sub(r"^(\s+cwd\s+)\S.*$", r"\1<cwd>", line)
+        line = re.sub(r"^(\S sonder) \d[\w.+-]*", r"\1 <version>", line)
         out.append(line)
     return out
 

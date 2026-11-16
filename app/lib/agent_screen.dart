@@ -956,7 +956,8 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
             prefixIconConstraints:
                 const BoxConstraints(minWidth: 40, minHeight: 40),
             contentPadding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.sm, vertical: 13),
+                horizontal: SonderSpace.sm,
+                vertical: SonderSpace.md + SonderSpace.hair),
             suffixIcon: _search.text.isEmpty
                 ? null
                 : IconButton(

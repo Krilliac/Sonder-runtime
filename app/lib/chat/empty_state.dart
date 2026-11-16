@@ -31,8 +31,8 @@ const chatSuggestions = <ChatSuggestion>[
       prompt: '/stats'),
 ];
 
-/// The empty conversation: a calm welcome, the connection line and starter
-/// prompts. The connection line is driven by the same state as the rail
+/// The empty conversation: the mark, a greeting, the connection line and
+/// a few starter prompts above the composer. The connection line is driven by the same state as the rail
 /// (P0-3): `Connecting…` (muted), `Connected to X` (ok), or the failure
 /// with its word plus Retry and Settings.
 class ChatEmptyState extends StatelessWidget {
@@ -70,13 +70,15 @@ class ChatEmptyState extends StatelessWidget {
                   key: const Key('chat-empty-state'),
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const SonderMark(size: 44),
-                    const SizedBox(height: SonderSpace.xl),
+                    const SonderMark(size: SonderSpace.x5),
+                    const SizedBox(height: SonderSpace.xxl),
                     Semantics(
                       header: true,
                       child: Text('What should we work on?',
                           textAlign: TextAlign.center,
-                          style: text.headlineSmall),
+                          style: narrow
+                              ? text.headlineSmall
+                              : text.headlineMedium),
                     ),
                     const SizedBox(height: SonderSpace.md),
                     ValueListenableBuilder<ConnectionStatus>(
@@ -91,7 +93,7 @@ class ChatEmptyState extends StatelessWidget {
                     Wrap(
                       alignment: WrapAlignment.center,
                       spacing: SonderSpace.sm,
-                      runSpacing: SonderSpace.xs,
+                      runSpacing: SonderSpace.sm,
                       children: [
                         for (final s in chatSuggestions)
                           _Suggestion(suggestion: s, onQuick: onQuick),
@@ -229,7 +231,7 @@ class _Suggestion extends StatelessWidget {
       tooltip: suggestion.prompt,
       backgroundColor: tokens.panel,
       padding: const EdgeInsets.symmetric(
-          horizontal: SonderSpace.xs, vertical: SonderSpace.xs),
+          horizontal: SonderSpace.sm, vertical: SonderSpace.sm),
       onPressed: () => onQuick(suggestion.text),
     );
   }

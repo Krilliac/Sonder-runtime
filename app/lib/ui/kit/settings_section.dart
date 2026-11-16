@@ -75,7 +75,7 @@ class SettingsSection extends StatelessWidget {
                           ),
                         if (description != null)
                           Padding(
-                            padding: const EdgeInsets.only(top: 2),
+                            padding: const EdgeInsets.only(top: SonderSpace.xxs),
                             child: Text(description!, style: text.bodySmall),
                           ),
                       ],
@@ -167,7 +167,7 @@ class SettingRow extends StatelessWidget {
         ]),
         if (description != null)
           Padding(
-            padding: const EdgeInsets.only(top: 2),
+            padding: const EdgeInsets.only(top: SonderSpace.xxs),
             child: Text(description!, style: text.bodySmall),
           ),
       ],
@@ -177,7 +177,7 @@ class SettingRow extends StatelessWidget {
       final leadingWidget = leading == null
           ? null
           : Padding(
-              padding: const EdgeInsets.only(right: SonderSpace.md, top: 1),
+              padding: const EdgeInsets.only(right: SonderSpace.md, top: SonderSpace.hair),
               child: IconTheme.merge(
                 data: IconThemeData(size: 20, color: tokens.text2),
                 child: leading!,
@@ -193,7 +193,7 @@ class SettingRow extends StatelessWidget {
             ]),
             const SizedBox(height: SonderSpace.sm),
             Padding(
-              padding: EdgeInsets.only(left: leading == null ? 0 : 32),
+              padding: EdgeInsets.only(left: leading == null ? 0 : SonderSpace.x3),
               child: trailing!,
             ),
           ],
@@ -324,7 +324,7 @@ class ValueRow extends StatelessWidget {
                 style: text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
             if (description != null)
               Padding(
-                padding: const EdgeInsets.only(top: 2),
+                padding: const EdgeInsets.only(top: SonderSpace.xxs),
                 child: Text(description!, style: text.bodySmall),
               ),
           ],

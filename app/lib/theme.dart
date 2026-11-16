@@ -1,28 +1,26 @@
 import 'package:flutter/material.dart';
 
-/// The visual language shared by the chat, system, and settings surfaces:
-/// "quiet instrument".
+/// The visual language shared by every surface: a familiar chat product on
+/// warm-grey neutrals with one restrained accent.
 ///
-/// The transcript is the object; chrome is hairlines, one accent and a glyph
-/// gutter. Keeping every token in one place makes a restyle safe: screens
-/// consume [SonderTokens] and Material roles instead of inventing slightly
-/// different panel colours and radii. The local-first teal remains the
-/// product signal; the neutral surfaces keep long model responses easy to
-/// scan. Dark is the primary theme and light mirrors it token for token.
+/// The conversation is the object. Hierarchy comes from surface tone (a
+/// sunken sidebar, a raised composer, a soft user bubble) rather than from
+/// rules and boxes, and the accent, Iris, is drawn from the Sonder mark and
+/// kept for the things a person acts on: send, links, focus and selection.
+/// Keeping every token in one place makes a restyle safe: screens consume
+/// [SonderTokens] and Material roles instead of inventing slightly different
+/// panel colours and radii. Light and dark are both first-class and mirror
+/// each other token for token.
 abstract final class SonderTheme {
-  static const signal = Color(0xFF63D6C8);
-  static const darkCanvas = Color(0xFF0B1117);
-  static const lightCanvas = Color(0xFFF4F7F8);
-  static const darkPanel = Color(0xFF0F171E);
-  static const darkBorder = Color(0xFF1F2C36);
-  static const lightBorder = Color(0xFFDCE5E8);
+  /// Iris, the seed of the Material roles the tokens do not name.
+  static const seed = Color(0xFF5B54C8);
 
   /// The UI face. Bundled under `fonts/` (OFL); every text style names it so
   /// no surface falls back to the platform default by accident.
   static const sans = 'IBM Plex Sans';
 
-  /// The transcript, code, status and terminal face. Tabular figures are
-  /// applied where numbers line up in columns.
+  /// The code, status and terminal face. Tabular figures are applied where
+  /// numbers line up in columns.
   static const mono = 'IBM Plex Mono';
 
   /// The bundled symbol subset (`assets/fonts/SonderSymbols.ttf`) holding the
@@ -40,7 +38,7 @@ abstract final class SonderTheme {
     final dark = brightness == Brightness.dark;
     final tokens = dark ? SonderTokens.dark : SonderTokens.light;
     final seeded = ColorScheme.fromSeed(
-      seedColor: signal,
+      seedColor: seed,
       brightness: brightness,
     );
     // The seeded scheme supplies the roles the tokens do not name; the
@@ -50,23 +48,37 @@ abstract final class SonderTheme {
       onPrimary: tokens.onAccent,
       primaryContainer: tokens.accentDim,
       onPrimaryContainer: tokens.text,
+      secondary: tokens.accent,
+      onSecondary: tokens.onAccent,
+      secondaryContainer: tokens.raised,
+      onSecondaryContainer: tokens.text,
       surface: tokens.canvas,
       onSurface: tokens.text,
       onSurfaceVariant: tokens.text2,
-      surfaceContainerLowest: tokens.canvas,
+      surfaceContainerLowest: tokens.sunken,
       surfaceContainerLow: tokens.panel,
       surfaceContainer: tokens.panel,
       surfaceContainerHigh: tokens.raised,
       surfaceContainerHighest: tokens.raised,
+      surfaceTint: Colors.transparent,
       outline: tokens.muted,
       outlineVariant: tokens.hairline,
       error: tokens.danger,
       onError: tokens.onAccent,
       errorContainer: tokens.dangerDim,
       onErrorContainer: tokens.text,
-      shadow: Colors.transparent,
+      shadow: tokens.shadow,
+      scrim: tokens.scrim,
     );
     final text = _textTheme(tokens);
+    OutlineInputBorder field(Color color, {double width = 1}) =>
+        OutlineInputBorder(
+          borderRadius: BorderRadius.circular(SonderRadius.row),
+          borderSide: BorderSide(color: color, width: width),
+        );
+    final control = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(SonderRadius.row),
+    );
 
     return ThemeData(
       useMaterial3: true,
@@ -88,19 +100,22 @@ abstract final class SonderTheme {
         TargetPlatform.linux: SonderPageTransitionsBuilder(),
         TargetPlatform.fuchsia: SonderPageTransitionsBuilder(),
       }),
-      hoverColor: tokens.raised.withValues(alpha: dark ? 0.7 : 0.9),
+      hoverColor: tokens.raised.withValues(alpha: 0.7),
       focusColor: tokens.accentDim,
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: tokens.accentText,
+        selectionColor: tokens.accentDim,
+        selectionHandleColor: tokens.accent,
+      ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: SegmentedButton.styleFrom(
           foregroundColor: tokens.text2,
           selectedForegroundColor: tokens.text,
-          selectedBackgroundColor: tokens.accentDim,
+          selectedBackgroundColor: tokens.raised,
           side: BorderSide(color: tokens.hairlineStrong),
           textStyle: text.labelLarge,
           minimumSize: const Size(0, 36),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
+          shape: control,
         ),
       ),
       sliderTheme: SliderThemeData(
@@ -108,18 +123,21 @@ abstract final class SonderTheme {
         inactiveTrackColor: tokens.hairlineStrong,
         thumbColor: tokens.accent,
         overlayColor: tokens.accentDim,
-        valueIndicatorColor: tokens.raised,
-        valueIndicatorTextStyle: text.labelLarge?.copyWith(color: tokens.text),
+        valueIndicatorColor: tokens.text,
+        valueIndicatorTextStyle:
+            text.labelLarge?.copyWith(color: tokens.canvas),
         trackHeight: 4,
       ),
+      // Bars share the canvas: the sidebar's tone, not a rule, separates
+      // the frame from the page.
       appBarTheme: AppBarTheme(
         backgroundColor: tokens.canvas,
         foregroundColor: tokens.text,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
         toolbarHeight: 48,
-        shape: Border(bottom: BorderSide(color: tokens.hairline)),
         titleTextStyle: text.titleMedium,
         iconTheme: IconThemeData(color: tokens.text2, size: 20),
         actionsIconTheme: IconThemeData(color: tokens.text2, size: 20),
@@ -130,7 +148,7 @@ abstract final class SonderTheme {
         color: tokens.panel,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.sheet),
+          borderRadius: BorderRadius.circular(SonderRadius.card),
           side: BorderSide(color: tokens.hairline),
         ),
       ),
@@ -139,58 +157,54 @@ abstract final class SonderTheme {
         fillColor: tokens.panel,
         hintStyle: text.bodyMedium?.copyWith(color: tokens.muted),
         contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 10,
+          horizontal: SonderSpace.md,
+          vertical: SonderSpace.md,
         ),
         // Field boundaries are control boundaries: hairlineStrong keeps them
-        // at 3:1 or better against both the canvas and the fill (WCAG 1.4.11).
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.hairlineStrong),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.hairlineStrong),
-        ),
-        disabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.hairline),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          borderSide: BorderSide(color: tokens.accentText, width: 1.5),
-        ),
+        // at 3:1 or better against every surface (WCAG 1.4.11).
+        border: field(tokens.hairlineStrong),
+        enabledBorder: field(tokens.hairlineStrong),
+        disabledBorder: field(tokens.hairline),
+        focusedBorder: field(tokens.accentText, width: 1.5),
+        errorBorder: field(tokens.danger),
+        focusedErrorBorder: field(tokens.danger, width: 1.5),
       ),
       chipTheme: ChipThemeData(
-        backgroundColor: Colors.transparent,
-        selectedColor: tokens.accentDim,
+        backgroundColor: tokens.panel,
+        selectedColor: tokens.raised,
         labelStyle: text.labelLarge?.copyWith(color: tokens.text),
-        side: BorderSide(color: tokens.hairlineStrong),
+        side: BorderSide(color: tokens.hairline),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(SonderRadius.pill),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        padding: const EdgeInsets.symmetric(
+            horizontal: SonderSpace.sm, vertical: SonderSpace.xs),
       ),
       listTileTheme: ListTileThemeData(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-        ),
+        shape: control,
         selectedTileColor: tokens.raised,
         selectedColor: tokens.text,
         iconColor: tokens.text2,
         textColor: tokens.text,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-        minVerticalPadding: 8,
+        contentPadding: const EdgeInsets.symmetric(horizontal: SonderSpace.md),
+        minVerticalPadding: SonderSpace.sm,
+      ),
+      drawerTheme: DrawerThemeData(
+        backgroundColor: tokens.sunken,
+        surfaceTintColor: Colors.transparent,
+        scrimColor: tokens.scrim,
+        elevation: 0,
+        shape: const RoundedRectangleBorder(),
       ),
       navigationDrawerTheme: NavigationDrawerThemeData(
-        backgroundColor: tokens.panel,
+        backgroundColor: tokens.sunken,
         surfaceTintColor: Colors.transparent,
         indicatorColor: tokens.raised,
       ),
       navigationRailTheme: NavigationRailThemeData(
-        backgroundColor: tokens.panel,
+        backgroundColor: tokens.sunken,
         indicatorColor: tokens.raised,
-        selectedIconTheme: IconThemeData(color: tokens.accentText, size: 20),
+        selectedIconTheme: IconThemeData(color: tokens.text, size: 20),
         unselectedIconTheme: IconThemeData(color: tokens.text2, size: 20),
         selectedLabelTextStyle: text.labelMedium?.copyWith(color: tokens.text),
         unselectedLabelTextStyle:
@@ -199,38 +213,55 @@ abstract final class SonderTheme {
       dialogTheme: DialogThemeData(
         backgroundColor: tokens.panel,
         surfaceTintColor: Colors.transparent,
+        elevation: 12,
+        shadowColor: tokens.shadow,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(SonderRadius.sheet),
           side: BorderSide(color: tokens.hairline),
         ),
-        titleTextStyle: text.titleMedium,
+        titleTextStyle: text.titleLarge,
         contentTextStyle: text.bodyMedium,
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: tokens.panel,
+        surfaceTintColor: Colors.transparent,
+        modalBarrierColor: tokens.scrim,
+        dragHandleColor: tokens.hairlineStrong,
+        shape: const RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(SonderRadius.sheet)),
+        ),
       ),
       popupMenuTheme: PopupMenuThemeData(
         color: tokens.panel,
         surfaceTintColor: Colors.transparent,
+        elevation: 8,
+        shadowColor: tokens.shadow,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
+          borderRadius: BorderRadius.circular(SonderRadius.menu),
           side: BorderSide(color: tokens.hairline),
         ),
         textStyle: text.bodyMedium,
       ),
+      // Toasts and tooltips invert the surface, so they read as a layer
+      // above the page on either theme without a border.
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
-        backgroundColor: tokens.raised,
-        contentTextStyle: text.bodyMedium?.copyWith(color: tokens.text),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
-          side: BorderSide(color: tokens.hairlineStrong),
-        ),
+        backgroundColor: tokens.text,
+        contentTextStyle: text.bodyMedium?.copyWith(color: tokens.canvas),
+        actionTextColor: tokens.canvas,
+        closeIconColor: tokens.canvas,
+        elevation: 6,
+        shape: control,
       ),
       tooltipTheme: TooltipThemeData(
         decoration: BoxDecoration(
-          color: tokens.raised,
+          color: tokens.text,
           borderRadius: BorderRadius.circular(SonderRadius.control),
-          border: Border.all(color: tokens.hairlineStrong),
         ),
-        textStyle: text.bodySmall?.copyWith(color: tokens.text),
+        padding: const EdgeInsets.symmetric(
+            horizontal: SonderSpace.sm, vertical: SonderSpace.xs),
+        textStyle: text.bodySmall?.copyWith(color: tokens.canvas),
         waitDuration: const Duration(milliseconds: 400),
       ),
       progressIndicatorTheme: ProgressIndicatorThemeData(
@@ -243,7 +274,7 @@ abstract final class SonderTheme {
         thumbColor: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.selected)
               ? tokens.onAccent
-              : tokens.text2,
+              : tokens.panel,
         ),
         trackColor: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.selected)
@@ -257,23 +288,19 @@ abstract final class SonderTheme {
           backgroundColor: tokens.accent,
           foregroundColor: tokens.onAccent,
           minimumSize: const Size(0, 36),
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.lg),
           textStyle: text.labelLarge,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
+          shape: control,
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: tokens.text,
           minimumSize: const Size(0, 36),
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.lg),
           side: BorderSide(color: tokens.hairlineStrong),
           textStyle: text.labelLarge,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
+          shape: control,
         ),
       ),
       textButtonTheme: TextButtonThemeData(
@@ -281,17 +308,13 @@ abstract final class SonderTheme {
           foregroundColor: tokens.text2,
           minimumSize: const Size(0, 36),
           textStyle: text.labelLarge,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
+          shape: control,
         ),
       ),
       iconButtonTheme: IconButtonThemeData(
         style: IconButton.styleFrom(
           foregroundColor: tokens.text2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(SonderRadius.row),
-          ),
+          shape: control,
         ),
       ),
       floatingActionButtonTheme: FloatingActionButtonThemeData(
@@ -302,7 +325,7 @@ abstract final class SonderTheme {
         hoverElevation: 0,
         highlightElevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(SonderRadius.row),
+          borderRadius: BorderRadius.circular(SonderRadius.card),
         ),
       ),
       expansionTileTheme: ExpansionTileThemeData(
@@ -328,44 +351,73 @@ abstract final class SonderTheme {
       );
     }
 
+    // One family, three weights. Reading text is 16/26; everything that is
+    // chrome is smaller and quieter than the conversation it frames.
     return TextTheme(
+      headlineMedium: style(28, 36, FontWeight.w500, spacing: -0.4),
       headlineSmall: style(22, 28, FontWeight.w600, spacing: -0.2),
       titleLarge: style(20, 26, FontWeight.w600, spacing: -0.2),
       titleMedium: style(16, 24, FontWeight.w500),
       titleSmall: style(14, 20, FontWeight.w500),
-      bodyLarge: style(16, 24, FontWeight.w400),
+      bodyLarge: style(16, 26, FontWeight.w400),
       bodyMedium: style(14, 22, FontWeight.w400),
       bodySmall: style(12, 18, FontWeight.w400, color: tokens.text2),
       labelLarge: style(13, 18, FontWeight.w500),
       labelMedium: style(12, 16, FontWeight.w500, color: tokens.text2),
-      labelSmall:
-          style(11, 16, FontWeight.w600, color: tokens.muted, spacing: 0.88),
+      labelSmall: style(12, 16, FontWeight.w500, color: tokens.muted),
     );
   }
 }
 
-/// The corner radii, by role: controls 4, rows and code 8, sheets and cards
-/// 12, pills.
+/// The corner radii, by role. Softer than a dashboard's: small controls 8,
+/// rows, fields and buttons 10, menus 12, cards 16, sheets, dialogs and the
+/// user bubble 20, the composer 26, and pills.
 abstract final class SonderRadius {
-  static const control = 4.0;
-  static const row = 8.0;
-  static const sheet = 12.0;
-  static const card = 12.0;
+  static const control = 8.0;
+  static const row = 10.0;
+  static const menu = 12.0;
+  static const card = 16.0;
+  static const sheet = 20.0;
+  static const bubble = 20.0;
+  static const composer = 26.0;
   static const pill = 999.0;
+}
+
+/// The mark's own colours: the brand gradient and the navy tile under it.
+/// They belong to the mark (`ui/sonder_mark.dart` is their only reader), not
+/// to the interface, and they live here so this file stays the one place a
+/// colour value is written.
+abstract final class SonderMarkColors {
+  static const gradient = [
+    Color(0xFFB56CF7),
+    Color(0xFF8A85FB),
+    Color(0xFF4FA6FF),
+  ];
+  static const tileTop = Color(0xFF16173D);
+  static const tileBottom = Color(0xFF0B0C22);
 }
 
 /// The spacing scale: a 4-point grid. Layout gaps and padding come from here
 /// rather than one-off literals (7, 9, 11...), so rhythm stays consistent.
+///
+/// [tight] and [snug] are half steps for the inside of dense controls only (a
+/// glyph beside its label in a chip, the inset of a compact row); layout gaps
+/// use the 4-point steps. [hair] is a one-pixel optical nudge, never a gap.
 abstract final class SonderSpace {
+  static const hair = 1.0;
   static const xxs = 2.0;
   static const xs = 4.0;
+  static const tight = 6.0;
   static const sm = 8.0;
+  static const snug = 10.0;
   static const md = 12.0;
   static const lg = 16.0;
   static const xl = 20.0;
   static const xxl = 24.0;
   static const x3 = 32.0;
   static const x4 = 40.0;
+  static const x5 = 48.0;
+  static const x6 = 64.0;
 }
 
 /// Motion: short, purposeful, and never decorative. Entrances decelerate,
@@ -381,8 +433,8 @@ abstract final class SonderMotion {
   /// Panels, category switches, expanding sections.
   static const medium = Duration(milliseconds: 220);
 
-  /// Page transitions and larger layout moves.
-  static const slow = Duration(milliseconds: 320);
+  /// Page transitions and larger layout moves: the longest step.
+  static const slow = Duration(milliseconds: 250);
 
   /// Material 3 emphasized decelerate: things arriving.
   static const enter = Cubic(0.05, 0.7, 0.1, 1.0);
@@ -398,6 +450,14 @@ abstract final class SonderMotion {
       MediaQuery.maybeDisableAnimationsOf(context) == true
           ? Duration.zero
           : duration;
+
+  /// How a popup menu opens: on [medium] in place of Material's own 300 ms,
+  /// and at once when the platform requests reduced motion. Every
+  /// `PopupMenuButton` passes it as `popUpAnimationStyle`.
+  static AnimationStyle menu(BuildContext context) =>
+      MediaQuery.maybeDisableAnimationsOf(context) == true
+          ? AnimationStyle.noAnimation
+          : const AnimationStyle(duration: medium, reverseDuration: medium);
 }
 
 /// Route transition shared by every pushed page: a short fade-through with a
@@ -446,13 +506,23 @@ class SonderPageTransitionsBuilder extends PageTransitionsBuilder {
 
 /// The colour tokens of one theme. Read them with `SonderTokens.of(context)`.
 ///
-/// Semantic tones carry meaning together with a label or a glyph, never
-/// alone; [SonderTokens.auto] is the one mode colour that is not also a
-/// risk tone, which is why it has its own name.
+/// Five surfaces carry the hierarchy by tone: [sunken] (the sidebar, code
+/// and raw-output wells) sits below [canvas] (the page); [panel] (cards,
+/// fields, menus, the composer) sits above it; [raised] is the hover and
+/// selection fill on any of them; [bubble] is the user's turn. Semantic
+/// tones carry meaning together with a label or a glyph, never alone;
+/// [SonderTokens.auto] is the one mode colour that is not also a risk tone,
+/// which is why it has its own name.
 class SonderTokens extends ThemeExtension<SonderTokens> {
   final Color canvas;
+
+  /// One tone below the canvas: the sidebar, the drawer and wells.
+  final Color sunken;
   final Color panel;
   final Color raised;
+
+  /// The user's message bubble.
+  final Color bubble;
   final Color hairline;
   final Color hairlineStrong;
   final Color text;
@@ -474,10 +544,18 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
   final Color mutation;
   final Color execution;
 
+  /// The soft shadow under floating surfaces (composer, menus, dialogs).
+  final Color shadow;
+
+  /// The veil behind a drawer, sheet or dialog.
+  final Color scrim;
+
   const SonderTokens({
     required this.canvas,
+    required this.sunken,
     required this.panel,
     required this.raised,
+    required this.bubble,
     required this.hairline,
     required this.hairlineStrong,
     required this.text,
@@ -495,52 +573,62 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     required this.auto,
     required this.mutation,
     required this.execution,
+    required this.shadow,
+    required this.scrim,
   });
 
   static const dark = SonderTokens(
-    canvas: Color(0xFF0B1117),
-    panel: Color(0xFF0F171E),
-    raised: Color(0xFF141F28),
-    hairline: Color(0xFF1F2C36),
-    hairlineStrong: Color(0xFF5A6C7E),
-    text: Color(0xFFE7EDF2),
-    text2: Color(0xFFA5B2BD),
-    muted: Color(0xFF7F8E9A),
-    accent: Color(0xFF63D6C8),
-    accentText: Color(0xFF63D6C8),
-    onAccent: Color(0xFF062A27),
-    accentDim: Color(0x2463D6C8),
-    ok: Color(0xFF79D394),
-    info: Color(0xFF7FB8F0),
-    warn: Color(0xFFF0C36A),
-    danger: Color(0xFFF27B7B),
-    dangerDim: Color(0x24F27B7B),
-    auto: Color(0xFFD89CF6),
-    mutation: Color(0xFFF0A070),
-    execution: Color(0xFFC9A58E),
+    canvas: Color(0xFF1B1A18),
+    sunken: Color(0xFF151412),
+    panel: Color(0xFF242321),
+    raised: Color(0xFF32312D),
+    bubble: Color(0xFF2C2B28),
+    hairline: Color(0xFF34332F),
+    hairlineStrong: Color(0xFF807C74),
+    text: Color(0xFFECEAE4),
+    text2: Color(0xFFB8B4AB),
+    muted: Color(0xFF9E9A92),
+    accent: Color(0xFFABA4F7),
+    accentText: Color(0xFFB6B0FA),
+    onAccent: Color(0xFF17143A),
+    accentDim: Color(0x2EABA4F7),
+    ok: Color(0xFF7FCF96),
+    info: Color(0xFF74C2E6),
+    warn: Color(0xFFEDBF66),
+    danger: Color(0xFFF27F7B),
+    dangerDim: Color(0x2EF27F7B),
+    auto: Color(0xFFE59AD4),
+    mutation: Color(0xFFEFA070),
+    execution: Color(0xFFCDA88F),
+    shadow: Color(0x73000000),
+    scrim: Color(0x99000000),
   );
 
   static const light = SonderTokens(
-    canvas: Color(0xFFF4F7F8),
+    canvas: Color(0xFFF7F6F3),
+    sunken: Color(0xFFF0EEEA),
     panel: Color(0xFFFFFFFF),
-    raised: Color(0xFFEEF3F4),
-    hairline: Color(0xFFDCE5E8),
-    hairlineStrong: Color(0xFF7A8D98),
-    text: Color(0xFF0F1A21),
-    text2: Color(0xFF42525C),
-    muted: Color(0xFF5F6F7A),
-    accent: Color(0xFF1FA597),
-    accentText: Color(0xFF0A7B73),
-    onAccent: Color(0xFF062A27),
-    accentDim: Color(0x1F1FA597),
-    ok: Color(0xFF1F7A45),
-    info: Color(0xFF2F6FB3),
-    warn: Color(0xFF946000),
-    danger: Color(0xFFC23636),
-    dangerDim: Color(0x1FC23636),
-    auto: Color(0xFF7A4BB5),
-    mutation: Color(0xFFA4501F),
-    execution: Color(0xFF7A5A46),
+    raised: Color(0xFFE5E2DC),
+    bubble: Color(0xFFECE9E4),
+    hairline: Color(0xFFE0DDD6),
+    hairlineStrong: Color(0xFF827E77),
+    text: Color(0xFF1F1E1C),
+    text2: Color(0xFF514E49),
+    muted: Color(0xFF66635D),
+    accent: Color(0xFF5B54C8),
+    accentText: Color(0xFF4D45B5),
+    onAccent: Color(0xFFFFFFFF),
+    accentDim: Color(0x1F5B54C8),
+    ok: Color(0xFF196B3C),
+    info: Color(0xFF1B6584),
+    warn: Color(0xFF835500),
+    danger: Color(0xFFB52D2D),
+    dangerDim: Color(0x1FB52D2D),
+    auto: Color(0xFF913585),
+    mutation: Color(0xFF9A4514),
+    execution: Color(0xFF71523D),
+    shadow: Color(0x1F1F1E1C),
+    scrim: Color(0x521F1E1C),
   );
 
   /// The tokens of the ambient theme; the dark set when a caller sits
@@ -549,6 +637,17 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     return Theme.of(context).extension<SonderTokens>() ??
         (Theme.of(context).brightness == Brightness.dark ? dark : light);
   }
+
+  /// The lift under a floating surface: one wide, soft shadow, pulled in so
+  /// it reads as depth rather than as an outline.
+  List<BoxShadow> get lift => [
+        BoxShadow(
+          color: shadow,
+          blurRadius: SonderSpace.x3,
+          spreadRadius: -SonderSpace.md,
+          offset: const Offset(0, SonderSpace.md),
+        ),
+      ];
 
   /// A monospace style for figures, paths and code, with tabular numerals.
   TextStyle mono(
@@ -571,8 +670,10 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
   @override
   SonderTokens copyWith({
     Color? canvas,
+    Color? sunken,
     Color? panel,
     Color? raised,
+    Color? bubble,
     Color? hairline,
     Color? hairlineStrong,
     Color? text,
@@ -590,11 +691,15 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     Color? auto,
     Color? mutation,
     Color? execution,
+    Color? shadow,
+    Color? scrim,
   }) {
     return SonderTokens(
       canvas: canvas ?? this.canvas,
+      sunken: sunken ?? this.sunken,
       panel: panel ?? this.panel,
       raised: raised ?? this.raised,
+      bubble: bubble ?? this.bubble,
       hairline: hairline ?? this.hairline,
       hairlineStrong: hairlineStrong ?? this.hairlineStrong,
       text: text ?? this.text,
@@ -612,6 +717,8 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       auto: auto ?? this.auto,
       mutation: mutation ?? this.mutation,
       execution: execution ?? this.execution,
+      shadow: shadow ?? this.shadow,
+      scrim: scrim ?? this.scrim,
     );
   }
 
@@ -621,8 +728,10 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
     Color mix(Color a, Color b) => Color.lerp(a, b, t) ?? a;
     return SonderTokens(
       canvas: mix(canvas, other.canvas),
+      sunken: mix(sunken, other.sunken),
       panel: mix(panel, other.panel),
       raised: mix(raised, other.raised),
+      bubble: mix(bubble, other.bubble),
       hairline: mix(hairline, other.hairline),
       hairlineStrong: mix(hairlineStrong, other.hairlineStrong),
       text: mix(text, other.text),
@@ -640,6 +749,8 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       auto: mix(auto, other.auto),
       mutation: mix(mutation, other.mutation),
       execution: mix(execution, other.execution),
+      shadow: mix(shadow, other.shadow),
+      scrim: mix(scrim, other.scrim),
     );
   }
 }

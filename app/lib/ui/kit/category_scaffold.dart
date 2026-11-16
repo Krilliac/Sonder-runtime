@@ -67,10 +67,12 @@ class CategoryNavigator extends InheritedWidget {
       selectedId != oldWidget.selectedId;
 }
 
-/// A two-pane categorized surface in the manner of the Codex and Claude
-/// settings windows: a category rail on the left, one page at a time on the
-/// right. Below [wideBreakpoint] it becomes a list of categories that opens
-/// each page full width, with a back arrow to the list.
+/// A two-pane categorized surface, the settings layout people know from
+/// desktop chat apps: a category rail on the left, one page at a time on the
+/// right. The rail shares the page's surface; the selected category is a
+/// soft pill, and space rather than a wall separates the panes. Below
+/// [wideBreakpoint] it becomes a list of categories that opens each page
+/// full width, with a back arrow to the list.
 ///
 /// Selection is uncontrolled by default ([initialId]); pass [selectedId] and
 /// [onSelected] to control it from outside (deep links, persistence).
@@ -182,7 +184,6 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
   }
 
   Widget _wide(BuildContext context) {
-    final tokens = SonderTokens.of(context);
     return Scaffold(
       appBar: AppBar(
         leading: widget.leading,
@@ -194,13 +195,9 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
+          SizedBox(
             key: widget.navigationKey,
             width: widget.railWidth,
-            decoration: BoxDecoration(
-              color: tokens.panel,
-              border: Border(right: BorderSide(color: tokens.hairline)),
-            ),
             child: _rail(context),
           ),
           Expanded(
@@ -234,7 +231,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
         children.add(Padding(
           padding: const EdgeInsets.fromLTRB(
               SonderSpace.md, SonderSpace.lg, SonderSpace.md, SonderSpace.xs),
-          child: Text(c.group!.toUpperCase(), style: text.labelSmall),
+          child: Text(c.group!, style: text.labelSmall),
         ));
       }
       group = c.group;
@@ -256,7 +253,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
         if (widget.searchable)
           Padding(
             padding: const EdgeInsets.fromLTRB(
-                SonderSpace.md, SonderSpace.md, SonderSpace.md, SonderSpace.xs),
+                SonderSpace.md, SonderSpace.md, SonderSpace.sm, SonderSpace.xs),
             child: _SearchField(
               controller: _search,
               hint: widget.searchHint,
@@ -265,8 +262,8 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
           ),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.sm, vertical: SonderSpace.xs),
+            padding: const EdgeInsets.fromLTRB(
+                SonderSpace.md, SonderSpace.xs, SonderSpace.sm, SonderSpace.md),
             children: children,
           ),
         ),
@@ -317,7 +314,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
         rows.add(Padding(
           padding: const EdgeInsets.fromLTRB(
               SonderSpace.lg, SonderSpace.lg, SonderSpace.lg, SonderSpace.xs),
-          child: Text(c.group!.toUpperCase(), style: text.labelSmall),
+          child: Text(c.group!, style: text.labelSmall),
         ));
       }
       group = c.group;
@@ -472,58 +469,46 @@ class _RailItem extends StatelessWidget {
     required this.onTap,
   });
 
+  /// The row is a 48 px target; the pill drawn inside it is this much
+  /// shorter at the top and the bottom.
+  static const EdgeInsets _pillInset =
+      EdgeInsets.symmetric(vertical: SonderSpace.xs);
+
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
-      child: HoverSurface(
-        key: Key('category-${category.id}'),
-        selected: selected,
-        onTap: onTap,
-        child: Stack(children: [
-          Container(
-            constraints: const BoxConstraints(minHeight: 48),
-            alignment: Alignment.centerLeft,
-            padding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.md, vertical: SonderSpace.sm),
-            child: Row(children: [
-              Icon(category.icon,
-                  size: 18,
-                  color: selected ? tokens.accentText : tokens.text2),
-              const SizedBox(width: SonderSpace.md),
-              Expanded(
-                child: Text(
-                  category.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: text.bodyMedium?.copyWith(
-                    color: selected ? tokens.text : tokens.text2,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  ),
-                ),
-              ),
-              if (category.badge != null) ...[
-                const SizedBox(width: SonderSpace.sm),
-                category.badge!,
-              ],
-            ]),
-          ),
-          Positioned(
-            left: 0,
-            top: 8,
-            bottom: 8,
-            child: AnimatedContainer(
-              duration: SonderMotion.of(context, SonderMotion.fast),
-              curve: SonderMotion.standard,
-              width: selected ? 3 : 0,
-              decoration: BoxDecoration(
-                color: tokens.accent,
-                borderRadius: BorderRadius.circular(SonderRadius.pill),
+    return HoverSurface(
+      key: Key('category-${category.id}'),
+      selected: selected,
+      onTap: onTap,
+      inset: _pillInset,
+      child: Container(
+        constraints: BoxConstraints(
+            minHeight: SonderSpace.x5 - _pillInset.vertical),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(
+            horizontal: SonderSpace.md, vertical: SonderSpace.sm),
+        child: Row(children: [
+          Icon(category.icon,
+              size: 18,
+              color: selected ? tokens.accentText : tokens.text2),
+          const SizedBox(width: SonderSpace.md),
+          Expanded(
+            child: Text(
+              category.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: text.bodyMedium?.copyWith(
+                color: selected ? tokens.text : tokens.text2,
+                fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
               ),
             ),
           ),
+          if (category.badge != null) ...[
+            const SizedBox(width: SonderSpace.sm),
+            category.badge!,
+          ],
         ]),
       ),
     );
@@ -549,13 +534,13 @@ class _ListItem extends StatelessWidget {
             horizontal: SonderSpace.lg, vertical: SonderSpace.md),
         child: Row(children: [
           Container(
-            width: 36,
-            height: 36,
+            width: SonderSpace.x4,
+            height: SonderSpace.x4,
             decoration: BoxDecoration(
               color: tokens.raised,
               borderRadius: BorderRadius.circular(SonderRadius.row),
             ),
-            child: Icon(category.icon, size: 18, color: tokens.accentText),
+            child: Icon(category.icon, size: 18, color: tokens.text2),
           ),
           const SizedBox(width: SonderSpace.md),
           Expanded(
@@ -564,7 +549,7 @@ class _ListItem extends StatelessWidget {
               children: [
                 Text(category.label,
                     style: text.bodyMedium
-                        ?.copyWith(fontWeight: FontWeight.w600)),
+                        ?.copyWith(fontWeight: FontWeight.w500)),
                 if (category.description != null)
                   Text(category.description!,
                       maxLines: 2,

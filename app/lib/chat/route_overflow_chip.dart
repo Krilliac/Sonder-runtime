@@ -25,7 +25,7 @@ class RouteOverflowChip extends StatelessWidget {
       child: ExcludeSemantics(
         child: Container(
           key: const Key('route-overflow-chip'),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.sm, vertical: SonderSpace.xs),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(SonderRadius.control),
             border: Border.all(color: tokens.hairlineStrong),
@@ -35,7 +35,7 @@ class RouteOverflowChip extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(kind.label, style: tokens.mono(11, color: color)),
-              const SizedBox(width: 6),
+              const SizedBox(width: SonderSpace.tight),
               Flexible(
                 child: Text(
                   overflow.notice,
