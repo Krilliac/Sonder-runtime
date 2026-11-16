@@ -2113,6 +2113,7 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    "cloud_opt_in": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
     "runtime_source_stash": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
