@@ -40,6 +40,7 @@ import platform
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -224,6 +225,27 @@ def policy_from_config(config: GpuAdmissionConfig) -> GpuAdmissionPolicy:
     )
 
 
+def _origin_without_userinfo(origin: str) -> str:
+    """``origin`` with any userinfo removed: ``scheme://host[:port]``.
+
+    Admission keys, caches and logs every origin it sees, so credentials are
+    dropped here for every caller. An origin with no ``@`` is returned as is;
+    one that cannot be parsed becomes "" (never loopback, never readable).
+    """
+    if "@" not in origin:
+        return origin
+    try:
+        parts = urllib.parse.urlsplit(origin)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return ""
+    if not host or not parts.scheme:
+        return ""
+    if ":" in host:
+        host = "[%s]" % host
+    return "%s://%s%s" % (parts.scheme, host, "" if port is None else ":%d" % port)
+
+
 def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any] | None:
     """GET one control-plane document through the policy-enforcing transport."""
     ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
@@ -234,8 +256,10 @@ def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any
         if len(raw) > _READ_LIMIT:
             return None
         value = json.loads(raw.decode("utf-8"))
-    except Exception:  # a failed read means "unknown", never a failed request
-        logger.debug("gpu admission could not read %s%s", redact_url(origin), path, exc_info=True)
+    except Exception as exc:  # a failed read means "unknown", never a failed request
+        # No traceback: transport exception text can repeat the request URL.
+        logger.debug("gpu admission could not read %s%s: %s", redact_url(origin), path,
+                     type(exc).__name__)
         return None
     return value if isinstance(value, Mapping) else None
 
@@ -418,6 +442,7 @@ class GpuAdmission:
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
     ) -> Iterator[AdmissionTicket]:
         """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
+        origin = _origin_without_userinfo(origin)
         mode = self.config.mode
         if mode == "off":
             yield passthrough_ticket(payload)
@@ -472,6 +497,7 @@ class GpuAdmission:
         is thread-agnostic and idempotent: only its first call frees the slot,
         so a caller may hand it to whichever thread finishes the read.
         """
+        origin = _origin_without_userinfo(origin)
         if self.config.mode == "off" or not ollama_policy.is_loopback(origin):
             return _no_release
         wait = self.config.probe_wait_ms / 1000.0

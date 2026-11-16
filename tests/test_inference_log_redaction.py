@@ -260,6 +260,29 @@ def test_vision_post_through_real_admission_does_not_log_credentials(
     _assert_clean(caplog)
 
 
+def test_admission_drops_userinfo_for_every_caller(caplog, monkeypatch, tmp_path):
+    """A caller that hands admit() a credentialed origin directly leaks nothing."""
+    caplog.set_level(logging.DEBUG)
+    reading = HostMemoryReading(
+        available_physical_bytes=64 * 2**30, total_physical_bytes=64 * 2**30,
+        commit_limit_bytes=96 * 2**30, commit_available_bytes=64 * 2**30, commit_enforced=True,
+    )
+    service = gpu_admission.GpuAdmission(
+        GpuAdmissionConfig(mode="enforce", store_path=str(tmp_path / "gpu.sqlite3")),
+        host_reader=lambda: reading, memory_reader=lambda _key: None,
+        show_reader=lambda _origin, _model: None, background=lambda work: work(),
+    )
+    fake = _FakeAdmissionTransport()
+    monkeypatch.setattr(ollama_endpoint, "open_url", fake)
+    payload = {"model": "llava-local", "messages": [], "options": {"num_ctx": 4096}}
+    with service.admit("/api/chat", payload, origin="http://user:s3cret@127.0.0.1:11434"):
+        pass
+    assert fake.urls, "admission never read the control plane"
+    assert all(SECRET not in url for url in fake.urls), fake.urls
+    _assert_emitted(caplog, "gpu admission could not read")
+    _assert_clean(caplog)
+
+
 def test_openai_compat_generate_does_not_log_base_url_credentials(caplog):
     caplog.set_level(logging.DEBUG)
     gateway, cfg = _gateway(lambda url, payload, headers, timeout: {"ok": True})
