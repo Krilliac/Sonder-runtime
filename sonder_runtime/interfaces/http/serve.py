@@ -3302,13 +3302,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     parts = stripped.split(None, 1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
-    _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
+    _serve_logger.debug("_handle_slash: slash command received")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).
     from sonder_runtime.adapters.security.powershell_gate import slash_run_arguments
     run_args = slash_run_arguments(cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block)
     refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
-        _serve_logger.debug(f"_handle_slash: refused cmd={cmd!r}: {refusal!r}")
+        _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
     operation = _slash_system_operation(cmd, arg)
     if operation and context is not None:
