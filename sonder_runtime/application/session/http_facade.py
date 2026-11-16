@@ -217,7 +217,10 @@ class HttpSessionFacade:
         Reads every event through the redacting query engine (page by page, so
         no history window can hide turns), then projects user/assistant turns
         with the requested tier, answering model and failure codes.
-        ``format`` is ``md`` (default) or ``json``.
+        ``format`` is ``md`` (default) or ``json``.  Output stops at
+        ``transcript_max_bytes`` of JSON-escaped text (reason ``bytes``) or
+        after ``TRANSCRIPT_MAX_EVENTS`` events consumed (reason ``events``);
+        ``truncated_reason`` names which.
         """
         chosen = (format or "md").strip().lower()
         if chosen not in ("md", "json"):
@@ -226,7 +229,7 @@ class HttpSessionFacade:
             return self._error(400, "invalid_session_id")
         builder = TranscriptBuilder(self._transcript_max_bytes)
         cursor: str | None = None
-        scanned = 0
+        consumed = 0
         events_capped = False
         try:
             while not builder.full:
@@ -234,11 +237,11 @@ class HttpSessionFacade:
                                                 cursor=cursor)
                 for record in page.records:
                     builder.add(record)
-                scanned += page.scanned
+                consumed += len(page.records)
                 cursor = page.next_cursor
                 if cursor is None:
                     break
-                if scanned >= self.TRANSCRIPT_MAX_EVENTS:
+                if consumed >= self.TRANSCRIPT_MAX_EVENTS:
                     events_capped = True
                     break
         except QueryExportError:
@@ -246,18 +249,20 @@ class HttpSessionFacade:
         if builder.events_seen == 0 and not builder.messages:
             return self._error(404, "session_not_found")
         truncated = builder.truncated or events_capped
+        reason = builder.truncated_reason or ("events" if events_capped else "")
         body: dict[str, object] = {
             "schema": "sonder.http-session-transcript.v1",
             "session_id": session_id,
             "format": chosen,
             "message_count": len(builder.messages),
             "truncated": truncated,
+            "truncated_reason": reason,
         }
         if chosen == "json":
             body["messages"] = builder.messages
         else:
             body["markdown"] = render_markdown(
-                session_id, builder.messages, truncated=truncated,
+                session_id, builder.messages, truncated=truncated, reason=reason or "bytes",
                 max_bytes=self._transcript_max_bytes)
         return self._ok(body)
 

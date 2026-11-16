@@ -324,7 +324,8 @@ class _ThreadRowState extends State<ThreadRow> {
                         left: SonderSpace.md,
                         right: actionCount == 0
                             ? SonderSpace.md
-                            : SonderSpace.x4 * actionCount),
+                            : SonderSpace.x4 * actionCount +
+                                (showMore && showDelete ? SonderSpace.sm : 0)),
                     decoration:
                         BoxDecoration(color: background, borderRadius: radius),
                     foregroundDecoration: BoxDecoration(
@@ -392,6 +393,8 @@ class _ThreadRowState extends State<ThreadRow> {
                         },
                       ),
                     ),
+                  if (showMore && showDelete)
+                    const SizedBox(width: SonderSpace.sm),
                   if (showDelete)
                     IconButton(
                       tooltip: 'Delete chat',

@@ -9,7 +9,11 @@ A chat can be referred to three ways, all local to this machine:
 :func:`parse_session_ref` turns any of them into the id, or ``None`` when the
 text is not a well-formed reference.  Ids are validated strictly (no path
 characters, bounded length) so a normalised id is safe to put in a URL path or
-a store lookup.  Pure stdlib; no I/O.
+a store lookup.  Nothing is percent-decoded (``%61bc`` is invalid), matching
+the web app's route parser.  A link's host is not checked: the id is only ever
+looked up in this machine's own session store, so any host (or none) is fine;
+userinfo (``user@``) and ports outside 1-65535 are rejected as malformed.
+Pure stdlib; no I/O.
 """
 from __future__ import annotations
 
@@ -23,8 +27,10 @@ CHAT_CODE_PREFIX = "sonder:chat/"
 _ID = r"[A-Za-z0-9_.\-]{1,%d}" % SESSION_ID_MAX_LENGTH
 _ID_RE = re.compile(r"\A%s\Z" % _ID)
 _CODE_RE = re.compile(r"\Asonder:chat/(%s)\Z" % _ID)
-# Optional ``scheme://host[:port]``, optional ``/app``, then the hash route.
-_LINK_RE = re.compile(r"\A(?:https?://[^\s/#?]+)?(?:/app/?)?#/c/(%s)/?\Z" % _ID)
+# Optional ``scheme://host[:port]``, optional ``/app`` or ``/``, then the hash route.
+_LINK_RE = re.compile(
+    r"\A(?:(?i:https?)://(?:\[[0-9A-Fa-f:.]+\]|[^\s/#?@:\[\]]+)(?::(?P<port>[0-9]{1,5}))?)?"
+    r"(?:/app)?/?#/c/(?P<id>%s)/?\Z" % _ID)
 
 
 def is_valid_session_id(value: object) -> bool:
@@ -42,11 +48,16 @@ def parse_session_ref(text: object) -> str | None:
     candidate = text.strip()
     if not candidate or len(candidate) > SESSION_REF_MAX_LENGTH:
         return None
-    for pattern in (_CODE_RE, _LINK_RE):
-        match = pattern.match(candidate)
-        if match:
-            candidate = match.group(1)
-            break
+    code = _CODE_RE.match(candidate)
+    if code:
+        candidate = code.group(1)
+    else:
+        link = _LINK_RE.match(candidate)
+        if link:
+            port = link.group("port")
+            if port is not None and not 1 <= int(port) <= 65535:
+                return None
+            candidate = link.group("id")
     return candidate if is_valid_session_id(candidate) else None
 
 
