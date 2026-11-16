@@ -597,7 +597,7 @@ def test_markdown_styles_are_closed_on_every_line():
 
 def test_markdown_code_spans_close_on_the_same_number_of_backticks():
     c = _caps("16", "unknown", "unicode")
-    info = "[36m{}[0m"
+    info = "\x1b[36m{}\x1b[0m"
 
     def md(text):
         return S.markdown(text, 80, c=c)
@@ -616,7 +616,7 @@ def test_markdown_code_spans_close_on_the_same_number_of_backticks():
     assert md("``a`") == ["``a`"]
     assert md("`a``") == ["`a``"]
     # Bold and code still sit side by side.
-    assert md("**b** ``c`d``") == ["[1mb[0m " + info.format("c`d")]
+    assert md("**b** ``c`d``") == ["\x1b[1mb\x1b[0m " + info.format("c`d")]
 
 
 def test_markdown_inline_stays_linear_on_pathological_lines():
