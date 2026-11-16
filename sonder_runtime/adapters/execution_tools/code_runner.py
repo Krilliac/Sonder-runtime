@@ -20,10 +20,16 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from sonder_runtime.platform import logging as sonder_logging
 from sonder_runtime.platform import paths as sonder_paths
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.application.workflows import loop as workflow_loop
+
+try:  # POSIX only: RunLimits sets the child's rlimits through it
+    import resource as _resource
+except ImportError:
+    _resource = None
 
 
 SUPPORTED_LANGUAGES = {
@@ -129,6 +135,44 @@ MAX_OUTPUT_CHARS = 12000
 # discarded. 5 x MAX_OUTPUT_CHARS leaves room for utf-8's 4 bytes per char.
 DEFAULT_CAPTURE_BYTES = 5 * MAX_OUTPUT_CHARS
 _READ_CHUNK_BYTES = 65536
+_CREATE_SUSPENDED = 0x00000004
+# How often a run with an output kill threshold checks it while waiting.
+_OUTPUT_POLL_SECONDS = 0.05
+
+
+@dataclass(frozen=True)
+class RunLimits:
+    """Opt-in hardening for one run_code call (the chat run_code lane).
+
+    Immutable, so one instance may be shared across threads. Callers that
+    pass nothing keep today's behaviour exactly. With limits the child is
+    started suspended and placed in a Job Object capped at ``process_limit``
+    active processes and ``job_memory_bytes`` of committed memory before it
+    runs (Windows; the run is refused if the job cannot be configured), or
+    runs under RLIMIT_NPROC / RLIMIT_AS / RLIMIT_FSIZE (POSIX). Python runs
+    with -I when ``isolated_python``. Each output stream keeps at most
+    ``capture_bytes_per_stream`` bytes, and the tree is killed once the two
+    streams together pass ``kill_after_total_bytes``. This is not a sandbox:
+    there is no network or filesystem confinement beyond the temp cwd.
+    """
+
+    process_limit: int = 16
+    job_memory_bytes: int = 512 * 1024 * 1024
+    file_size_bytes: int = 64 * 1024 * 1024
+    isolated_python: bool = True
+    capture_bytes_per_stream: int = 64 * 1024
+    kill_after_total_bytes: int = 8 * 1024 * 1024
+
+    def __post_init__(self):
+        for name in (
+            "process_limit", "job_memory_bytes", "file_size_bytes",
+            "capture_bytes_per_stream", "kill_after_total_bytes",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError("RunLimits.%s must be a positive int" % name)
+        if type(self.isolated_python) is not bool:
+            raise ValueError("RunLimits.isolated_python must be a bool")
 DEFAULT_LOOP_ITERATIONS = 5
 MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
@@ -385,11 +429,15 @@ def _terminate_windows_descendants(root_pid):
         kernel32.CloseHandle(snapshot)
 
 
-def _attach_windows_job(proc, *, active_process_limit=None):
+def _attach_windows_job(proc, *, active_process_limit=None, job_memory_bytes=None):
     """Put a runner process in a kill-on-close Windows Job Object.
 
     ``active_process_limit`` additionally caps how many processes the job
-    may hold at once (JOB_OBJECT_LIMIT_ACTIVE_PROCESS).
+    may hold at once (JOB_OBJECT_LIMIT_ACTIVE_PROCESS) and
+    ``job_memory_bytes`` the memory all of them may commit together
+    (JOB_OBJECT_LIMIT_JOB_MEMORY). Returns None when any of it cannot be
+    set (SetInformationJobObject's result is checked), so a caller that
+    needs the limits can refuse to run.
     """
     if os.name != "nt":
         return None
@@ -450,6 +498,9 @@ def _attach_windows_job(proc, *, active_process_limit=None):
         if active_process_limit is not None:
             info.BasicLimitInformation.LimitFlags |= 0x0008  # ACTIVE_PROCESS
             info.BasicLimitInformation.ActiveProcessLimit = max(1, int(active_process_limit))
+        if job_memory_bytes is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x0200  # JOB_MEMORY
+            info.JobMemoryLimit = max(1, int(job_memory_bytes))
         kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
         kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
         if not kernel32.SetInformationJobObject(
@@ -622,7 +673,27 @@ class _StreamCapture:
         return head_text + marker + (tail_text[-room:] if room else "")
 
 
-def _drain_into(stream, capture):
+class _OutputBudget:
+    """Total bytes both pipes of one run wrote, against a kill threshold.
+
+    Shared by the two reader threads (hence the lock); ``exceeded`` tells
+    the runner thread to kill the tree.
+    """
+
+    def __init__(self, limit):
+        self._lock = threading.Lock()
+        self._limit = limit
+        self._total = 0
+        self.exceeded = threading.Event()
+
+    def add(self, count):
+        with self._lock:
+            self._total += count
+            if self._total > self._limit:
+                self.exceeded.set()
+
+
+def _drain_into(stream, capture, budget=None):
     read = getattr(stream, "read1", stream.read)
     try:
         while True:
@@ -630,6 +701,8 @@ def _drain_into(stream, capture):
             if not chunk:
                 return
             capture.feed(chunk)
+            if budget is not None:
+                budget.add(len(chunk))
     except (OSError, ValueError):
         return
 
@@ -647,8 +720,27 @@ def _feed_stdin(stream, data):
             pass
 
 
-def _collect_output(proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE_BYTES):
-    """Feed stdin, wait for exit and collect output: (stdout, stderr, timed_out).
+def _wait_watching_output(proc, deadline, budget):
+    """Wait for exit until ``deadline``; "output" once ``budget`` is exceeded."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if budget.exceeded.wait(max(0.0, min(_OUTPUT_POLL_SECONDS, remaining))):
+            return "output"
+        if proc.poll() is not None:
+            return None
+        if time.monotonic() >= deadline:
+            return "timeout"
+
+
+def _collect_output(
+    proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE_BYTES,
+    kill_after_bytes=None,
+):
+    """Feed stdin, wait for exit and collect output: (stdout, stderr, status).
+
+    ``status`` is None for a run that finished, "timeout", or "output" when
+    the streams together passed ``kill_after_bytes`` and the tree was killed
+    (only when a threshold is given; by default the excess is discarded).
 
     Replaces ``communicate()``, which held every byte a child printed until it
     exited: a snippet printing gigabytes exhausted host memory before
@@ -664,11 +756,12 @@ def _collect_output(proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE
     """
     deadline = time.monotonic() + timeout
     captures = (_StreamCapture(capture_bytes), _StreamCapture(capture_bytes))
+    budget = None if kill_after_bytes is None else _OutputBudget(kill_after_bytes)
     readers = []
     for stream, capture in zip((proc.stdout, proc.stderr), captures, strict=True):
         if stream is not None:
             reader = owned_runtime_thread(
-                target=_drain_into, args=(stream, capture),
+                target=_drain_into, args=(stream, capture, budget),
                 name="sonder-code-runner-reader", daemon=True,
             )
             reader.start()
@@ -678,18 +771,22 @@ def _collect_output(proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE
             target=_feed_stdin, args=(proc.stdin, input_bytes),
             name="sonder-code-runner-stdin", daemon=True,
         ).start()
-    timed_out = False
-    try:
-        # The child gets the whole timeout; only the pipe joins use the
-        # deadline, which starting the threads moved by microseconds.
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    if not timed_out:
+    status = None
+    if budget is not None:
+        status = _wait_watching_output(proc, deadline, budget)
+    else:
+        try:
+            # The child gets the whole timeout; only the pipe joins use the
+            # deadline, which starting the threads moved by microseconds.
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            status = "timeout"
+    if status is None:
         for reader, _stream in readers:
             reader.join(max(0.0, deadline - time.monotonic()))
-        timed_out = any(reader.is_alive() for reader, _stream in readers)
-    if timed_out:
+        if any(reader.is_alive() for reader, _stream in readers):
+            status = "timeout"
+    if status is not None:
         _terminate_process_tree(proc)
         # ``taskkill /T`` can report success before the process handle is
         # signalled.  Waiting on the direct handle first prevents the
@@ -712,7 +809,7 @@ def _collect_output(proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE
                 stream.close()
             except (OSError, ValueError):
                 pass
-    return captures[0].text(), captures[1].text(), timed_out
+    return captures[0].text(), captures[1].text(), status
 
 
 def _abort_process(proc):
@@ -743,7 +840,52 @@ def _release_job(proc):
         pass
 
 
-def _run_process(cmd, cwd, stdin, timeout, language):
+def _limited_windows_job(proc, limits):
+    """The Job Object for a RunLimits run, or None if it cannot be configured."""
+    return _attach_windows_job(
+        proc, active_process_limit=limits.process_limit,
+        job_memory_bytes=limits.job_memory_bytes,
+    )
+
+
+def _posix_limit_preexec(limits, resource_module=None):
+    """Build the preexec_fn that applies RunLimits' rlimits in the child.
+
+    Everything that can fail is resolved here, in the parent: a missing
+    RLIMIT_* raises OSError and the run is refused. The returned function
+    only calls getrlimit/setrlimit (C calls, no Python locks), which keeps
+    it safe to run between fork and exec in this multi-threaded server. A
+    hard limit already below the requested one is kept, since an
+    unprivileged process cannot raise it. RLIMIT_NPROC counts every process
+    of the user, not only this tree, so it is stricter on a busy account.
+    """
+    module = _resource if resource_module is None else resource_module
+    if module is None:
+        raise OSError("resource limits are not available on this platform")
+    plan = []
+    for name, value in (
+        ("RLIMIT_NPROC", limits.process_limit),
+        ("RLIMIT_AS", limits.job_memory_bytes),
+        ("RLIMIT_FSIZE", limits.file_size_bytes),
+    ):
+        which = getattr(module, name, None)
+        if which is None:
+            raise OSError("%s is not available on this platform" % name)
+        plan.append((which, value))
+    infinity = module.RLIM_INFINITY
+    getrlimit, setrlimit = module.getrlimit, module.setrlimit
+
+    def apply_limits():
+        for which, value in plan:
+            _soft, hard = getrlimit(which)
+            if hard != infinity:
+                value = min(value, hard)
+            setrlimit(which, (value, value))
+
+    return apply_limits
+
+
+def _run_process(cmd, cwd, stdin, timeout, language, limits=None):
     if language == "bash" and not sonder_paths.bash_executable():
         return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
     # Encode before anything is spawned: a failure here (an unpaired surrogate
@@ -773,8 +915,13 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             popen_kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NEW_PROCESS_GROUP", 0
             )
+            if limits is not None:
+                # Nothing runs until the job and its limits are in place.
+                popen_kwargs["creationflags"] |= _CREATE_SUSPENDED
         else:
             popen_kwargs["start_new_session"] = True
+            if limits is not None:
+                popen_kwargs["preexec_fn"] = _posix_limit_preexec(limits)
         proc = subprocess.Popen(
             cmd,
             **popen_kwargs,
@@ -784,19 +931,52 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             "missing", "executable not found: %s" % (cmd[0] if cmd else "(empty)")
         )
         return _error_result(language, cwd, timeout, missing)
+    except (OSError, subprocess.SubprocessError) as exc:
+        if limits is None:
+            raise
+        # Missing rlimit support, or the child's preexec_fn failed to set
+        # them: refuse rather than run without the limits.
+        return _error_result(
+            language, cwd, timeout, "could not apply run limits; refusing to run: %s" % exc,
+        )
+    collect = {}
+    if limits is not None:
+        collect = {
+            "capture_bytes": limits.capture_bytes_per_stream,
+            "kill_after_bytes": limits.kill_after_total_bytes,
+        }
     # Everything past the spawn owns a live child: any exception (including
     # KeyboardInterrupt) tears the tree down and reaps it before propagating,
     # and the job is closed exactly once on every path.
     try:
         proc._sonder_job_handle = None
-        proc._sonder_job_handle = _attach_windows_job(proc)
-        stdout, stderr, timed_out = _collect_output(proc, input_bytes, timeout)
+        if limits is not None and os.name == "nt":
+            proc._sonder_job_handle = _limited_windows_job(proc, limits)
+            if not proc._sonder_job_handle:
+                _abort_process(proc)
+                return _error_result(
+                    language, cwd, timeout,
+                    "could not apply run limits (Windows job object); refusing to run",
+                )
+            _resume_windows_process(proc)
+        else:
+            proc._sonder_job_handle = _attach_windows_job(proc)
+        stdout, stderr, status = _collect_output(proc, input_bytes, timeout, **collect)
     except BaseException:
         _abort_process(proc)
         raise
     finally:
         _release_job(proc)
-    if timed_out:
+    if status == "output":
+        return {
+            **_error_result(
+                language, cwd, timeout,
+                "output exceeded %d bytes; process killed" % limits.kill_after_total_bytes,
+            ),
+            "stdout": _trim_output(stdout),
+            "stderr": _trim_output(stderr),
+        }
+    if status == "timeout":
         timeout_exc = subprocess.TimeoutExpired(
             cmd, timeout,
             output=_decode_child_output(stdout),
@@ -1268,8 +1448,14 @@ def _clamp_delay(delay_seconds):
     return workflow_loop.clamp_delay(delay_seconds)
 
 
-def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=None):
+def run_code(
+    code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=None, *,
+    limits=None,
+):
     """Run a snippet and return a result dict.
+
+    ``limits`` (a RunLimits) opts into the hardened host run used by the
+    chat run_code lane; None keeps the existing behaviour.
 
     The caller receives:
       ok: process exited 0
@@ -1283,6 +1469,12 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
     language = normalize_language(language)
     timeout = _clamp_timeout(timeout)
     cfg = SUPPORTED_LANGUAGES[language]
+    if limits is not None and not isinstance(limits, RunLimits):
+        raise TypeError("limits must be a RunLimits")
+    if limits is not None and language in ("cpp", "csharp", "rust"):
+        # Their compile steps and launchers are not wired for limits; refuse
+        # rather than run a "limited" snippet without them.
+        raise ValueError("run limits are not supported for %s" % language)
 
     # Windows can retain a directory handle briefly after taskkill tears down
     # a timed-out descendant tree.  Cleanup must not turn a correctly reported
@@ -1304,7 +1496,11 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
         if language == "rust":
             return _run_rust(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
-        return _run_process(cmd, cwd, stdin, timeout, language)
+        if limits is None:
+            return _run_process(cmd, cwd, stdin, timeout, language)
+        if limits.isolated_python and language == "python":
+            cmd = [cmd[0], "-I", *cmd[1:]]
+        return _run_process(cmd, cwd, stdin, timeout, language, limits=limits)
 
 
 def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
