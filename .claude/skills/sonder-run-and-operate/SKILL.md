@@ -278,7 +278,10 @@ unless `--skip-backup` (testing only). Runbook:
   process after a successful update.
 - `/stash save` | `/stash save-untracked` | `/stash pop` manages a single
   fixed-message recovery stash so a dirty checkout can be parked, updated,
-  and restored. `pop` requires a clean tree and an existing recovery stash.
+  and restored. `pop` requires a clean tree, the operator at the console
+  (an unattended pop is refused) and a recovery stash that `save` recorded in
+  this checkout; only that recorded stash is popped, never one pushed with the
+  same message from another worktree.
 - Outside the REPL: `python safe_update.py --repo <checkout>` does
   `git stash push --include-untracked` → `fetch origin main` →
   `rebase origin/main` → `stash apply`. Exit 2 after a stash-apply conflict

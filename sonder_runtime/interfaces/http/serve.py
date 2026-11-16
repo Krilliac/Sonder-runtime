@@ -3195,6 +3195,13 @@ def _slash_system_operation(command, argument):
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
         return "runtime_policy_change"
+    # ``/runtime tools allow|revoke|deny|undeny`` would write the model tool
+    # overlay; server.control_command refuses it on this surface anyway (no
+    # console operator), and this keeps the role check from reading it as a read.
+    if command in ("/runtime", "/models") and action == "tools" and (
+        parts[1:] and parts[1].split()[0].lower() in ("allow", "revoke", "deny", "undeny")
+    ):
+        return "runtime_policy_change"
     if command in ("/runtime", "/models") and action == "overflow" and (
         parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")
     ):

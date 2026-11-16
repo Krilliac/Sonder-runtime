@@ -8,6 +8,7 @@ import command_router
 import git_tools
 import server
 import sonder_runtime.interfaces.http.serve as sonder_serve
+from sonder_runtime.adapters import operator_attendance
 import sonder_runtime.interfaces.repl.repl as sonder_repl
 
 
@@ -393,7 +394,7 @@ def test_runtime_stash_saves_tracked_edits_without_stashing_untracked(tmp_path):
     assert saved["after"]["stash_count"] == 1
     assert (repo / "tracked.txt").read_text(encoding="utf-8") == "first\n"
     assert (repo / "scratch.txt").exists()
-    with pytest.raises(PermissionError, match="requires a clean"):
+    with pytest.raises(PermissionError, match="requires a clean"), operator_attendance.attended("runtime_source_stash"):
         git_tools.runtime_stash(repo, "pop")
 
 
@@ -404,7 +405,8 @@ def test_runtime_stash_save_untracked_and_clean_only_pop(tmp_path):
 
     saved = git_tools.runtime_stash(repo, "save-untracked")
     assert saved["after"]["clean"] is True
-    restored = git_tools.runtime_stash(repo, "pop")
+    with operator_attendance.attended("runtime_source_stash"):
+        restored = git_tools.runtime_stash(repo, "pop")
 
     assert restored["changed"] is True
     assert restored["after"]["clean"] is False
@@ -420,7 +422,8 @@ def test_runtime_stash_pop_leaves_an_unrelated_newer_stash_untouched(tmp_path):
     (repo / "tracked.txt").write_text("unrelated\n", encoding="utf-8")
     _git(repo, "stash", "push", "--message", "manual checkpoint")
 
-    restored = git_tools.runtime_stash(repo, "pop")
+    with operator_attendance.attended("runtime_source_stash"):
+        restored = git_tools.runtime_stash(repo, "pop")
 
     assert restored["changed"] is True
     assert (repo / "tracked.txt").read_text(encoding="utf-8") == "recovery\n"

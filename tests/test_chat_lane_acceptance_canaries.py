@@ -48,6 +48,7 @@ from sonder_runtime.domain.routing.route_planner import RoutePlanner, RoutingReq
 from sonder_runtime.domain.runtime_policy import rules
 from sonder_runtime.domain.tools.descriptors import ExecutionClass, ToolEffect
 from sonder_runtime.interfaces.http import serve
+from tests.support.tool_lane import FLOOR
 
 
 def _provenance() -> ChatHandoffProvenance:
@@ -184,7 +185,7 @@ def test_chat_cannot_execute_a_mutating_tool_merely_because_it_is_registered():
 def test_one_model_bound_to_general_and_code_keeps_chat_and_work_lanes_distinct(
     monkeypatch,
 ):
-    policy = rules.default_policy({})
+    policy = rules.default_policy({}, floor=FLOOR)
     shared = policy["local_models"]["general"]
     assert policy["local_models"]["code"] == shared
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)

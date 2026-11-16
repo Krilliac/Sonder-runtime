@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import sonder_runtime.adapters.restricted_tool_lane as restricted_tool_lane
 from sonder_runtime.platform import paths
 
 INSPECTION_TOOLS = frozenset({
@@ -71,9 +72,11 @@ def route_file_request(host, prompt, mode, project, tier, *, state_home=None, pi
             return "Refused: creation directory was not established. %s" % result, tier
         scoped = str(destination)
     if pinned:
-        output = host.workbench_agent(
-            prompt=prompt, tier=tier, max_steps=12, allow_web=False, project=scoped, allow_location=False,
-        )
+        # A chat turn runs this workbench call, so it never opens a restricted lane.
+        with restricted_tool_lane.suppressed():
+            output = host.workbench_agent(
+                prompt=prompt, tier=tier, max_steps=12, allow_web=False, project=scoped, allow_location=False,
+            )
     else:
         output, tier = host._workbench_agent_escalating(
             prompt, tier, max_steps=12, allow_web=False, project=scoped, allow_location=False,
