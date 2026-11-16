@@ -21,10 +21,14 @@ void main() {
     ('light', SonderTokens.light),
   ]) {
     group('$name theme', () {
+      // Every tone something can be written on: the page, the sidebar and
+      // wells, cards and the composer, hover and selection, the user bubble.
       final surfaces = {
         'canvas': tokens.canvas,
+        'sunken': tokens.sunken,
         'panel': tokens.panel,
         'raised': tokens.raised,
+        'bubble': tokens.bubble,
       };
       final texts = {
         'text': tokens.text,
@@ -71,13 +75,13 @@ void main() {
       });
 
       test('control boundaries reach 3:1', () {
-        // Field outlines and chip/button sides use hairlineStrong; focus
-        // rings and the selected rail icon use accentText (the light fill
-        // accent #1FA597 is 2.8:1 on the canvas, fine for labelled fills
-        // only).
+        // Field outlines and button sides use hairlineStrong; focus rings
+        // use accentText; the send button and the switch are known by
+        // their accent fill.
         for (final boundary in {
           'hairlineStrong': tokens.hairlineStrong,
           'accentText': tokens.accentText,
+          'accent': tokens.accent,
         }.entries) {
           for (final bg in surfaces.entries) {
             expect(SonderContrast.ratio(boundary.value, bg.value),
@@ -85,6 +89,23 @@ void main() {
                 reason: '${boundary.key} on ${bg.key}');
           }
         }
+      });
+
+      test('surface tones step apart, so tone can carry the hierarchy', () {
+        // The sidebar and cards against the page; hover and selection
+        // against whatever they sit on; the user bubble against the page.
+        double step(Color a, Color b) => SonderContrast.ratio(a, b);
+        expect(step(tokens.canvas, tokens.sunken), greaterThanOrEqualTo(1.05));
+        expect(step(tokens.canvas, tokens.panel), greaterThanOrEqualTo(1.05));
+        expect(step(tokens.canvas, tokens.bubble), greaterThanOrEqualTo(1.1));
+        for (final base in [tokens.canvas, tokens.sunken, tokens.panel]) {
+          expect(step(tokens.raised, base), greaterThanOrEqualTo(1.1));
+        }
+      });
+
+      test('toasts and tooltips invert the surface legibly', () {
+        expect(SonderContrast.ratio(tokens.canvas, tokens.text),
+            greaterThanOrEqualTo(SonderContrast.text));
       });
 
       test('labels on filled buttons reach 4.5:1', () {
@@ -99,6 +120,31 @@ void main() {
       });
     });
   }
+
+  test('the accent is Iris, not the retired teal, in both themes', () {
+    // Hue is the claim: blue-violet, between 235 and 265 degrees.
+    for (final tokens in [SonderTokens.dark, SonderTokens.light]) {
+      for (final accent in [tokens.accent, tokens.accentText]) {
+        expect(HSLColor.fromColor(accent).hue, inInclusiveRange(235, 265));
+      }
+    }
+    expect(SonderTheme.light.colorScheme.primary, SonderTokens.light.accent);
+    expect(SonderTheme.dark.colorScheme.primary, SonderTokens.dark.accent);
+  });
+
+  test('the neutrals are warm grey: red over blue, and barely', () {
+    for (final tokens in [SonderTokens.dark, SonderTokens.light]) {
+      for (final surface in [
+        tokens.canvas,
+        tokens.sunken,
+        tokens.raised,
+        tokens.bubble,
+      ]) {
+        final warmth = (surface.r - surface.b) * 255;
+        expect(warmth, inInclusiveRange(1, 12), reason: '$surface');
+      }
+    }
+  });
 
   test('the theme wires field borders and the symbol fallback', () {
     for (final theme in [SonderTheme.dark, SonderTheme.light]) {
