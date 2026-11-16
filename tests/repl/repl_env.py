@@ -35,6 +35,9 @@ def base_env(home, fake_url, **extra):
         "LC_ALL": "C.UTF-8",
         "TERM": "xterm-256color",
         "SONDER_REPL_HISTORY": "0",
+        # The fake Ollama has no GPU or host memory worth gating; the real
+        # host's RAM must not decide whether a contract test runs.
+        "SONDER_GPU_ADMISSION": "off",
     }
     if os.name == "nt":
         # Path.home() uses USERPROFILE on Windows, not HOME. Keep both
