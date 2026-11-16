@@ -60,6 +60,8 @@ def dispatch_session_route(
                 max_events=integer("max_events", 1_000) or 1_000,
                 format=one("format"),
             )
+        if operation == "transcript":
+            return facade.transcript(session_id, format=one("format"))
         if operation == "replay":
             return facade.replay(session_id, max_events=integer("max_events"))
         if operation == "trajectory":
