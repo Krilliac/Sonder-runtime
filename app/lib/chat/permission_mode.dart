@@ -65,27 +65,21 @@ class PermissionModeChip extends StatelessWidget {
                   child: Center(
                     widthFactor: 1,
                     child: Container(
-                      height: 28,
-                      padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
+                      height: 30,
+                      padding: const EdgeInsets.fromLTRB(
+                          SonderSpace.md, 0, SonderSpace.sm, 0),
                       decoration: BoxDecoration(
+                        color: tokens.sunken,
                         borderRadius: BorderRadius.circular(SonderRadius.pill),
-                        border: Border.all(color: tokens.hairlineStrong),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              color: tone,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
+                          // The icon and the word name the mode; the tone
+                          // only repeats what they say.
                           Icon(permissionModeIcon(state.mode),
-                              size: 13, color: tone),
-                          const SizedBox(width: 5),
+                              size: 14, color: tone),
+                          const SizedBox(width: SonderSpace.sm),
                           Flexible(
                             child: Text(modeLabel,
                                 maxLines: 1,
@@ -97,17 +91,19 @@ class PermissionModeChip extends StatelessWidget {
                           ),
                           if (busy)
                             Padding(
-                              padding: const EdgeInsets.only(left: 6, right: 2),
+                              padding: const EdgeInsets.only(
+                                  left: SonderSpace.sm, right: SonderSpace.xxs),
                               child: SizedBox(
-                                width: 11,
-                                height: 11,
+                                width: SonderSpace.md,
+                                height: SonderSpace.md,
                                 child: CircularProgressIndicator(
                                     strokeWidth: 2, color: tokens.text2),
                               ),
                             )
                           else if (readOnly)
                             Padding(
-                              padding: const EdgeInsets.only(left: 4, right: 2),
+                              padding: const EdgeInsets.only(
+                                  left: SonderSpace.xs, right: SonderSpace.xxs),
                               child: Icon(Icons.lock_outline,
                                   size: 13, color: tokens.muted),
                             )
@@ -149,11 +145,11 @@ class OfflineModeChip extends StatelessWidget {
         label: 'Autonomy mode unknown: server unreachable',
         child: Container(
           key: const Key('permission-mode-chip-offline'),
-          height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.md),
           decoration: BoxDecoration(
+            color: tokens.sunken,
             borderRadius: BorderRadius.circular(SonderRadius.pill),
-            border: Border.all(color: tokens.hairline),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Text('– mode offline', style: tokens.mono(12, color: tokens.muted)),

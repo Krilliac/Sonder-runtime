@@ -273,7 +273,7 @@ void main() {
 
     // A bare slash is a browse: the popular shortlist, labelled by category.
     expect(find.byKey(const Key('command-palette')), findsOneWidget);
-    expect(inPalette(find.textContaining('QUICK')), findsOneWidget);
+    expect(inPalette(find.textContaining('Quick —')), findsOneWidget);
     expect(inPalette(find.text('/help')), findsOneWidget);
     expect(inPalette(find.text('List commands')), findsOneWidget);
     // Popular is a shortlist, not the whole catalog.
@@ -287,7 +287,7 @@ void main() {
     expect(find.byKey(const Key('command-palette')), findsOneWidget);
     expect(inPalette(find.text('/stats')), findsOneWidget);
     expect(inPalette(find.text('/help')), findsNothing);
-    expect(inPalette(find.textContaining('QUICK')), findsNothing);
+    expect(inPalette(find.textContaining('Quick —')), findsNothing);
 
     // Nothing starts with "/memory", so the looser pass matches summaries.
     await tester.enterText(find.byType(TextField), '/memory');

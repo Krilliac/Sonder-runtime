@@ -107,6 +107,10 @@ String? interceptLabel(String commandName) {
 /// box, whose footer opens the full browser ([onOpenCommands]).
 class ChatComposer extends StatelessWidget {
   final TextEditingController controller;
+
+  /// What the "+" menu at the start of the bar offers; empty leaves the
+  /// menu out.
+  final List<ComposerAction> actions;
   final FocusNode focusNode;
   final bool sending;
   final VoidCallback onSend;
@@ -148,6 +152,7 @@ class ChatComposer extends StatelessWidget {
     required this.onPalettePick,
     required this.onKey,
     required this.onOpenCommands,
+    this.actions = const <ComposerAction>[],
     this.modeChip,
     this.desktop = false,
     this.models = const <String>[],
@@ -165,7 +170,7 @@ class ChatComposer extends StatelessWidget {
       bottom: false,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
-            SonderSpace.md, SonderSpace.xs, SonderSpace.md, SonderSpace.sm),
+            SonderSpace.md, SonderSpace.sm, SonderSpace.md, SonderSpace.sm),
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: conversationWidth),
@@ -192,26 +197,31 @@ class ChatComposer extends StatelessWidget {
                           controller: controller,
                           focusNode: focusNode,
                           minLines: 1,
-                          maxLines: 6,
+                          maxLines: 8,
                           textInputAction: TextInputAction.send,
                           onSubmitted: (_) => onSend(),
-                          style: text.bodyMedium,
-                          decoration: const InputDecoration(
+                          style: text.bodyLarge,
+                          decoration: InputDecoration(
                             hintText: 'Ask Sonder…',
+                            hintStyle: text.bodyLarge?.copyWith(
+                                color: SonderTokens.of(context).muted),
                             filled: false,
-                            contentPadding: EdgeInsets.fromLTRB(SonderSpace.lg,
-                                SonderSpace.md, SonderSpace.lg, SonderSpace.xs),
+                            contentPadding: const EdgeInsets.fromLTRB(
+                                SonderSpace.xl,
+                                SonderSpace.lg,
+                                SonderSpace.xl,
+                                SonderSpace.xs),
                             border: InputBorder.none,
                             enabledBorder: InputBorder.none,
                             focusedBorder: InputBorder.none,
                           ),
                         ),
                       ),
-                      // The first pill lines up with the text above; Send
-                      // keeps the same visual inset on the right.
+                      // The bar sits inside the frame's rounded corners:
+                      // the first control and Send keep the same inset.
                       Padding(
-                        padding: const EdgeInsets.only(
-                            left: SonderSpace.lg, right: SonderSpace.sm),
+                        padding: const EdgeInsets.fromLTRB(SonderSpace.sm, 0,
+                            SonderSpace.sm, SonderSpace.xs),
                         child: _ControlStrip(composer: this),
                       ),
                     ],
@@ -226,7 +236,26 @@ class ChatComposer extends StatelessWidget {
   }
 }
 
-/// The composer's frame. Its border brightens while the box has focus.
+/// One entry of the composer's "+" menu: something the conversation can
+/// do besides sending text (browse commands, change the project, attach a
+/// server conversation).
+@immutable
+class ComposerAction {
+  final String id;
+  final IconData icon;
+  final String label;
+  final VoidCallback onSelected;
+
+  const ComposerAction({
+    required this.id,
+    required this.icon,
+    required this.label,
+    required this.onSelected,
+  });
+}
+
+/// The composer's frame: a large rounded surface lifted off the page by a
+/// soft shadow. Its edge darkens while the box has focus.
 class _ComposerSurface extends StatefulWidget {
   final FocusNode focusNode;
   final Widget child;
@@ -272,20 +301,19 @@ class _ComposerSurfaceState extends State<_ComposerSurface> {
       curve: SonderMotion.standard,
       decoration: BoxDecoration(
         color: tokens.panel,
-        borderRadius: BorderRadius.circular(SonderRadius.card),
+        borderRadius: BorderRadius.circular(SonderRadius.composer),
         border: Border.all(
-          color: focused
-              ? tokens.accentText.withValues(alpha: 0.7)
-              : tokens.hairlineStrong,
+          color: focused ? tokens.hairlineStrong : tokens.hairline,
         ),
+        boxShadow: tokens.lift,
       ),
       child: widget.child,
     );
   }
 }
 
-/// Mode, model and context on the left; the keyboard hint and Send/Stop on
-/// the right ([_StripLayout] gives each its width).
+/// The "+" menu, mode, model and context on the left; the keyboard hint
+/// and Send/Stop on the right ([_StripLayout] gives each its width).
 class _ControlStrip extends StatelessWidget {
   final ChatComposer composer;
   const _ControlStrip({required this.composer});
@@ -303,6 +331,11 @@ class _ControlStrip extends StatelessWidget {
         child: CustomMultiChildLayout(
           delegate: _StripLayout(),
           children: [
+            if (c.actions.isNotEmpty)
+              LayoutId(
+                id: _StripSlot.actions,
+                child: _ActionsMenu(actions: c.actions),
+              ),
             if (c.modeChip != null)
               LayoutId(id: _StripSlot.mode, child: c.modeChip!),
             if (onModelChanged != null && c.models.isNotEmpty)
@@ -339,12 +372,13 @@ class _ControlStrip extends StatelessWidget {
   }
 }
 
-enum _StripSlot { mode, model, ring, hint, send }
+enum _StripSlot { actions, mode, model, ring, hint, send }
 
-/// Lays the strip out in priority order: Send at the end; the mode chip at
-/// its natural width (it is the contract, and its label ellipsizes only
-/// when it must); the model picker in what the chip leaves; the ring when
-/// there is still room; the hint in whatever is left between them.
+/// Lays the strip out in priority order: Send at the end and the "+" menu
+/// at the start; the mode chip at its natural width (it is the contract,
+/// and its label ellipsizes only when it must); the model picker in what
+/// the chip leaves; the ring when there is still room; the hint in whatever
+/// is left between them.
 class _StripLayout extends MultiChildLayoutDelegate {
   static const _gap = SonderSpace.xs;
   static const _pickerMin = 96.0;
@@ -363,6 +397,13 @@ class _StripLayout extends MultiChildLayoutDelegate {
     final send = layout(_StripSlot.send, size.width);
     var left = 0.0;
     var room = size.width - send.width - _gap;
+
+    if (hasChild(_StripSlot.actions)) {
+      final menu = layout(_StripSlot.actions, room);
+      positionChild(_StripSlot.actions, Offset(left, centre(menu)));
+      left += menu.width;
+      room -= menu.width;
+    }
 
     final hasRing = hasChild(_StripSlot.ring);
     final hasModel = hasChild(_StripSlot.model);
@@ -434,6 +475,57 @@ class _KeyboardHint extends StatelessWidget {
   }
 }
 
+/// The "+" at the start of the bar: a menu of [ComposerAction]s.
+class _ActionsMenu extends StatelessWidget {
+  final List<ComposerAction> actions;
+  const _ActionsMenu({required this.actions});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    // The menu rises from the button, clear of the text being written.
+    final menuHeight =
+        actions.length * kMinInteractiveDimension + 2 * SonderSpace.sm;
+    return PopupMenuButton<ComposerAction>(
+      key: const Key('composer-actions'),
+      tooltip: 'More actions',
+      position: PopupMenuPosition.over,
+      offset: Offset(0, -menuHeight),
+      onSelected: (action) => action.onSelected(),
+      itemBuilder: (context) => [
+        for (final action in actions)
+          PopupMenuItem<ComposerAction>(
+            key: Key('composer-action-${action.id}'),
+            value: action,
+            child: Row(children: [
+              Icon(action.icon, size: 18, color: tokens.text2),
+              const SizedBox(width: SonderSpace.md),
+              Flexible(
+                child: Text(action.label, overflow: TextOverflow.ellipsis),
+              ),
+            ]),
+          ),
+      ],
+      // A 48 dp target around a 36 dp circle, like Send at the other end.
+      child: SizedBox.square(
+        dimension: SonderSpace.x5,
+        child: Center(
+          child: Container(
+            width: _controlSize,
+            height: _controlSize,
+            decoration:
+                BoxDecoration(color: tokens.sunken, shape: BoxShape.circle),
+            child: Icon(Icons.add_rounded, size: 20, color: tokens.text2),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The round controls at either end of the bar.
+const double _controlSize = 36;
+
 /// Send: an accent circle with an arrow, quiet while the box is empty.
 /// While a turn runs it is Stop.
 class _SendButton extends StatelessWidget {
@@ -461,8 +553,8 @@ class _SendButton extends StatelessWidget {
           tooltip: sending ? 'Stop' : 'Send',
           onPressed: sending ? onStop : (empty ? null : onSend),
           style: IconButton.styleFrom(
-            fixedSize: const Size(32, 32),
-            minimumSize: const Size(32, 32),
+            fixedSize: const Size.square(_controlSize),
+            minimumSize: const Size.square(_controlSize),
             padding: EdgeInsets.zero,
             tapTargetSize: MaterialTapTargetSize.padded,
             shape: const CircleBorder(),
@@ -476,7 +568,7 @@ class _SendButton extends StatelessWidget {
             child: Icon(
               sending ? Icons.stop_rounded : Icons.arrow_upward_rounded,
               key: ValueKey<bool>(sending),
-              size: 18,
+              size: 20,
             ),
           ),
         );
@@ -779,10 +871,12 @@ class CommandPalette extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: SonderSpace.sm),
       constraints: const BoxConstraints(maxHeight: 320),
       clipBehavior: Clip.antiAlias,
+      // A floating card, like the frame it opens from.
       decoration: BoxDecoration(
         color: tokens.panel,
         borderRadius: BorderRadius.circular(SonderRadius.card),
-        border: Border.all(color: tokens.hairlineStrong),
+        border: Border.all(color: tokens.hairline),
+        boxShadow: tokens.lift,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -823,13 +917,15 @@ class CommandPalette extends StatelessWidget {
         if (command == null) {
           final key = row.heading ?? '';
           final blurb = categories[key] ?? '';
+          // Catalog categories arrive lower-case; headings read as words.
+          final title = key.isEmpty
+              ? key
+              : '${key[0].toUpperCase()}${key.substring(1)}';
           return Padding(
             padding: const EdgeInsets.fromLTRB(SonderSpace.md, SonderSpace.sm,
                 SonderSpace.md, SonderSpace.xxs),
             child: Text(
-              blurb.isEmpty
-                  ? key.toUpperCase()
-                  : '${key.toUpperCase()} — $blurb',
+              blurb.isEmpty ? title : '$title — $blurb',
               style: text.labelSmall,
               overflow: TextOverflow.ellipsis,
             ),
