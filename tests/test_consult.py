@@ -158,8 +158,9 @@ def test_only_a_trailing_ensemble_footer_is_set_aside():
     assert consult_module._substance(quoted) == quoted
     synthesized = (
         "Merged answer.\n=== ENSEMBLE (2 models answered) ===\n"
-        "  code (m1) in 5ms\n  reasoning (m2): FAILED - timeout  synthesized by code (m1)"
+        "  code (m1) in 5ms\n  reasoning (m2): FAILED - timeout\n  synthesized by code (m1)"
     )
+    assert "\n  synthesized by " in synthesized
     assert consult_module._substance(synthesized) == "Merged answer."
     assert consult_module._substance("Plain answer, no footer.") == "Plain answer, no footer."
 
