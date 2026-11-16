@@ -28,6 +28,57 @@ void main() {
   // Real Plex metrics, so cell-width fitting behaves as in the app.
   setUpAll(loadGoldenFonts);
 
+  group('project', () {
+    testWidgets(
+        'the project dialog cancels, saves and submits cleanly: its field '
+        'stays valid while the dialog leaves', (tester) async {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend, size: const Size(1440, 900));
+      await tester.pump(const Duration(milliseconds: 100));
+      final control = find.byTooltip('Project: tap to change');
+      final field = find.widgetWithText(TextField, 'Project name');
+      Future<void> open() async {
+        await tester.tap(control);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(field, findsOneWidget);
+      }
+
+      // Every frame of the dialog's exit, not only the last one: the field
+      // is still drawn while the dialog fades.
+      Future<void> leave() async {
+        for (var i = 0; i < 25; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          expect(tester.takeException(), isNull, reason: 'exit frame $i');
+        }
+        expect(field, findsNothing);
+      }
+
+      await open();
+      await tester.enterText(field, 'discarded');
+      await tester.tap(find.text('Cancel'));
+      await leave();
+      expect(find.descendant(of: control, matching: find.text('discarded')),
+          findsNothing);
+
+      await open();
+      await tester.enterText(field, 'engine');
+      await tester.tap(find.text('Save'));
+      await leave();
+      expect(find.descendant(of: control, matching: find.text('engine')),
+          findsOneWidget);
+
+      // Enter in the field saves, like the button.
+      await open();
+      await tester.enterText(field, 'app-ui');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await leave();
+      expect(find.descendant(of: control, matching: find.text('app-ui')),
+          findsOneWidget);
+      await unmountChat(tester);
+    });
+  });
+
   group('connection state (P0-3)', () {
     testWidgets('an unreachable server is never "Connected"', (tester) async {
       final backend = FakeChatBackend()

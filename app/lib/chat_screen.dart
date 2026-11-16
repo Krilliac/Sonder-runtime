@@ -397,32 +397,10 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _editProject() async {
-    final controller = TextEditingController(text: _chat.project);
     final value = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Project'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Project name',
-            hintText: 'default, app-ui, engine...',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (context) => _ProjectDialog(initial: _chat.project),
     );
-    controller.dispose();
     if (value == null) return;
     await _chat.saveCurrentThread(project: value);
   }
@@ -693,6 +671,54 @@ class _ChatScreenState extends State<ChatScreen>
           ),
         );
       },
+    );
+  }
+}
+
+/// Names the conversation's project. The dialog owns its text controller:
+/// the field is still on screen while the dialog animates out, so the
+/// controller must outlive the pop that closes it.
+class _ProjectDialog extends StatefulWidget {
+  final String initial;
+  const _ProjectDialog({required this.initial});
+
+  @override
+  State<_ProjectDialog> createState() => _ProjectDialogState();
+}
+
+class _ProjectDialogState extends State<_ProjectDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Project'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Project name',
+          hintText: 'default, app-ui, engine...',
+        ),
+        onSubmitted: (value) => Navigator.of(context).pop(value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
