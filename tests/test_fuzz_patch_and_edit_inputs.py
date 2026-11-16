@@ -45,10 +45,13 @@ from sonder_runtime.adapters.filesystem import file_ops
 from sonder_runtime.domain.build.model import BuildDomainError
 from sonder_runtime.domain.build.repair import (
     CandidatePatch,
+    PatchHunk,
     include_checker,
     normalize_for_scan,
     parse_candidate_patch,
+    scan_added_lexings,
     scan_hostile_directives,
+    validate_patch,
 )
 from tests.test_build_hostile_scan import BENIGN, HOSTILE, SCOPE
 
@@ -1191,8 +1194,25 @@ _CONTEXT = [
 ]
 
 
-def _scan(text: str, raw_strings: bool = True) -> tuple[str, ...]:
-    return scan_hostile_directives(normalize_for_scan(text, raw_strings=raw_strings), include_ok=OK)
+def _scan(text: str, raw_strings: bool = True, trigraphs: bool = True,
+          digraphs: bool = True) -> tuple[str, ...]:
+    return scan_hostile_directives(
+        normalize_for_scan(text, raw_strings=raw_strings, trigraphs=trigraphs, digraphs=digraphs),
+        include_ok=OK)
+
+
+def _scan_every_lexing(text: str) -> tuple[str, ...]:
+    """What ``validate_patch`` sees: the union over every raw-string/trigraph/digraph lexing."""
+    return scan_added_lexings("", text, include_ok=OK)
+
+
+def _scan_cxx_lexings(text: str) -> tuple[str, ...]:
+    """Every trigraph/digraph reading, with C++ raw strings (``R"(`` masked) as the only string lexing."""
+    found: list[str] = []
+    for trigraphs in (True, False):
+        for digraphs in (True, False):
+            found.extend(_scan(text, True, trigraphs, digraphs))
+    return tuple(found)
 
 
 _IDENT_BEFORE_PAREN = re.compile(
@@ -1331,12 +1351,10 @@ def test_hostile_corpus_is_detected_when_planted_and_mutated():
         for _ in range(24):
             mutated, names = _mutate_code(rng, text)
             full = _in_context(rng, mutated)
-            for raw in (True, False):
-                outcome = run(_scan, full, raw)
-                assert outcome[0] == "ok", f"scan raised {outcome[1]!r} on {full!r} ({TAG})"
-                if not outcome[1]:
-                    misses.append((text, names, full))
-                    break
+            outcome = run(_scan_every_lexing, full)
+            assert outcome[0] == "ok", f"scan raised {outcome[1]!r} on {full!r} ({TAG})"
+            if not outcome[1]:
+                misses.append((text, names, full))
     assert not misses, "hostile text evaded detection after claimed-covered mutations ({}):\n{}".format(
         TAG, "\n".join("  {!r} via {} -> {!r}".format(*item) for item in misses[:12]))
     run.check("hostile scan")
@@ -1350,7 +1368,7 @@ def test_benign_corpus_stays_clean_under_mutation_in_context():
         for _ in range(24):
             mutated, names = _mutate_code(rng, text)
             full = _in_context(rng, mutated)
-            outcome = run(_scan, full)
+            outcome = run(_scan_cxx_lexings, full)
             assert outcome[0] == "ok", (full, outcome, TAG)
             if outcome[1]:
                 flagged.append((text, names, full, outcome[1]))
@@ -1385,7 +1403,7 @@ def test_normalize_for_scan_is_idempotent_and_total():
             outcome = run(normalize_for_scan, text, raw_strings=raw)
             assert outcome[0] == "ok", f"normalize_for_scan({text!r}) raised {outcome[1]!r} ({TAG})"
             once = outcome[1]
-            if re.search(r"\\[ \t]*\n", once) or "??" in once:
+            if re.search(r"\\[ \t\f\v]*\n", once) or "??" in once:
                 # normalize is a single pass: a splice that only appears once a comment between the
                 # backslash and the newline is removed (or stacked splices) survives into the output.
                 residual += 1
@@ -1509,7 +1527,7 @@ def test_text_patch_headers_never_resolve_unc_paths(tmp_path, request):
 @pytest.mark.parametrize("value", [
     "//host/share/x", "\\\\host\\share\\x", "\\\\?\\UNC\\host\\share\\x", "//?/UNC/host/share/x",
     "\\\\.\\pipe\\x", "  //host/share/x", "//./pipe/x", "/??/UNC/h/s/x", "\\??\\UNC\\h\\s\\x",
-    "/??/C:/x", "\\??\\C:\\x", "\\\\?\\C:\\x", "//?/C:/x",
+    "/??/C:/x", "\\??\\C:\\x", "\\\\?\\GLOBALROOT\\Device\\x", "//?/Volume{1234}/x", "\\\\?\\C:", "\\\\?\\\\C:\\x",
 ])
 def test_resolve_path_rejects_network_spellings_before_resolving(value, monkeypatch):
     real_resolve = Path.resolve
@@ -1625,3 +1643,230 @@ def test_patch_json_does_not_resolve_nt_namespace_paths(spelling, tmp_path, monk
     with pytest.raises(PermissionError):
         jp.patch_json(spelling, [{"op": "add", "path": "/z", "value": 1}])
     assert not seen, f"{spelling!r} reached Path.resolve: {seen!r} ({TAG})"
+
+
+# --- round 2 review: trigraph modes, raw header-names, literal-only __has_include ----------------
+
+_MATH_SOURCE = "float normalized_length(const Vec3& v) {\n    float l = lenght(v);\n    return l;\n}\n"
+
+
+def _validate_replacement(replacement: str) -> tuple[dict[str, str], tuple[str, ...]]:
+    patch = CandidatePatch(hunks=(PatchHunk("src/core/math.cpp", "lenght(v);", replacement),), model_id="fake")
+    return validate_patch(patch, scope=SCOPE, current={"src/core/math.cpp": _MATH_SOURCE})
+
+
+@pytest.mark.parametrize("replacement", [
+    # trigraphs ignored (gcc/clang/MSVC default): ``'??'`` is a character, ``'/*'`` opens a comment
+    # only in the trigraphs-applied reading, so the pragma below is live code.
+    "length(v);\n    int a = '??' + '/*';\n#pragma comment(lib, \"evil.lib\")\n    int b; // */\n",
+    # trigraphs applied: ``??/`` is a backslash, so ``"a??/" "/*"`` swallows the quote; the comment
+    # opener is live only in the trigraphs-ignored reading.
+    "length(v);\nconst char* s = \"a??/\" \"/*\";\n#pragma comment(lib,\"evil\")\n/* */\n",
+])
+def test_pragma_hidden_by_either_trigraph_reading_is_refused(replacement):
+    texts, reasons = _validate_replacement(replacement)
+    assert not texts, f"accepted under one trigraph reading ({TAG})"
+    assert any("#pragma comment is refused" in reason for reason in reasons), (reasons, TAG)
+
+
+@pytest.mark.parametrize("operand", ["<:/../etc/shadow.h>", "<%/../etc/shadow.h>", "</../etc/shadow.h>"])
+@pytest.mark.parametrize("macro", ["__has_include", "__has_include_next", "__has_embed"])
+def test_has_include_header_name_is_checked_as_written_and_digraph_normalised(macro, operand):
+    text = f"#if {macro}({operand})\n#endif\n"
+    assert _scan_every_lexing(text), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert not texts and any("__has_include/__has_embed" in reason for reason in reasons), (reasons, TAG)
+
+
+@pytest.mark.parametrize("operand", ["<:/../etc/shadow.h>", "<%/../etc/shadow.h>"])
+def test_digraph_lookalike_header_name_is_checked_as_written(operand):
+    """A compiler never digraph-translates a header-name, so ``<:/../x.h>`` names a path that escapes upward."""
+    text = f"#if __has_include({operand})\n#endif\n"
+    assert any("escaping upward" in reason for reason in _scan(text, digraphs=False)), text
+    assert any("escaping upward" in reason for reason in _scan_every_lexing(text)), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert not texts and any("escaping upward" in reason for reason in reasons), (reasons, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    '#define P "C:/Windows/win.ini"\n#if __has_include(P)\n#endif\n',
+    "#if __has_include(PATH)\n#endif\n",
+    "#if __has_include_next( NAME )\n#endif\n",
+    "#if __has_embed(FILE)\n#endif\n",
+    "#if __has_include(\n#endif\n",
+    "#if __has_include()\n#endif\n",
+    "#if __has_include(<>)\n#endif\n",
+    "#if __has_include((<vector>))\n#endif\n",
+])
+def test_has_include_with_a_computed_operand_is_refused(text):
+    assert any("__has_include/__has_embed" in reason for reason in _scan_every_lexing(text)), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert not texts and any("__has_include/__has_embed" in reason for reason in reasons), (reasons, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    "#if __has_include(<optional>)\n#endif\n",
+    '#if __has_include("detail/impl.inl")\n#endif\n',
+    "#if defined(__has_include) && __has_include( <vector> )\n#endif\n",
+    "#ifndef __has_include\n#define __has_include(x) 0\n#endif\n",
+    "# define __has_embed(x) 0\n",
+])
+def test_has_include_with_a_literal_header_name_stays_clean(text):
+    assert _scan_every_lexing(text) == (), text
+
+
+def test_gap_macro_indirection_is_not_detected():
+    """KNOWN GAP, pinned on purpose: a lexical scanner cannot follow macro expansion or token pasting.
+
+    ``#define A ".inc"`` + ``asm(A B)`` assembles ``.inc`` and ``B``, and ``#define CTOR constructor`` +
+    ``__attribute__((CTOR))`` names a constructor, yet neither the definition nor the use carries a
+    banned token. Closing this needs a preprocessor, not a scanner; the build sandbox and review are
+    the control. If this test starts failing, the scanner grew a macro model: update the docs.
+    """
+    assert _scan_every_lexing('#define A ".inc"\n#define B "lude \\"/etc/passwd\\""\nasm(A B);\n') == ()
+    assert _scan_every_lexing("#define CTOR constructor\nvoid f() __attribute__((CTOR));\n") == ()
+
+
+@pytest.mark.parametrize("opener", ["[[", "__has_include(<", "__has_include(\"", "__has_embed(<"])
+def test_scan_work_for_unterminated_bracket_and_header_openers_is_linear(opener):
+    text = opener * (640_000 // len(opener))
+    started = time.perf_counter()
+    reasons = scan_hostile_directives(text, include_ok=OK)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars of {opener!r} ({TAG})"
+    if opener != "[[":
+        assert reasons, "unterminated header-name operands must be refused"
+
+
+@pytest.mark.parametrize("opener", ["[[", "__has_include(<", "__has_include_next(<", "__has_embed(<"])
+def test_unterminated_bracket_and_header_openers_charge_the_work_budget(opener):
+    """Each opener walks up to 1026 / 4096 characters; the walk is charged, so a few thousand exhaust the budget.
+
+    A timing bound alone cannot show this (``str.find`` is fast); the refusal reason proves the charge.
+    """
+    reasons = scan_hostile_directives(opener * 2000, include_ok=OK)
+    assert any("work budget exceeded" in reason for reason in reasons), (reasons, TAG)
+
+
+# --- round 2 review: network paths are refused before any filesystem call --------------------------
+
+_NETWORK_SPELLINGS = [
+    "//evilhost/share/x.txt", "\\\\evilhost\\share\\x.txt", "\\\\?\\UNC\\evilhost\\share\\x.txt",
+    "//?/UNC/evilhost/share/x.txt", "\\\\.\\pipe\\x", "//./pipe/x", "\\??\\UNC\\evilhost\\share\\x",
+    "/??/UNC/evilhost/share/x", "\\\\?\\GLOBALROOT\\Device\\x", "//?/Volume{1234}/x", "\\\\?\\Volume{1234}\\x",
+    "  //evilhost/share/x.txt",
+]
+
+
+def _is_network_text(value) -> bool:
+    if not isinstance(value, (str, os.PathLike)):
+        return False
+    flat = os.fspath(value)
+    if not isinstance(flat, str):
+        return False
+    flat = flat.replace("/", "\\").strip()
+    if re.match(r"\\\\\?\\[A-Za-z]:\\", flat):
+        return False
+    return flat.startswith(("\\\\", "\\??\\"))
+
+
+@pytest.fixture
+def fs_spy(monkeypatch):
+    """Record (and block) every stat-family call that receives a network path."""
+    seen: list[str] = []
+
+    def wrap(owner, name):
+        real = getattr(owner, name)
+
+        def spy(*args, **kwargs):
+            target = args[0] if args else kwargs.get("path")
+            if _is_network_text(target):
+                seen.append(f"{owner.__name__}.{name}({os.fspath(target)!r})")
+                raise OSError("network access blocked by the test")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, spy)
+
+    for name in ("lstat", "stat", "is_symlink", "resolve", "exists", "is_file", "is_dir", "mkdir", "open"):
+        wrap(Path, name)
+    for name in ("lstat", "stat"):
+        wrap(os, name)
+    return seen
+
+
+def _network_entry_points(tmp_path, request, monkeypatch):
+    root = _build_json_world(tmp_path / "world")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    ops = [{"op": "add", "path": "/z", "value": 1}]
+    return {
+        "resolve_path": lambda p: file_ops.resolve_path(p),
+        "resolve_mutation_path": lambda p: file_ops.resolve_mutation_path(p),
+        "make_directory": lambda p: file_ops.make_directory(p),
+        "write_file": lambda p: file_ops.write_file(p, "x", mode="create"),
+        "edit_file": lambda p: file_ops.edit_file(p, "a", "b"),
+        "delete_path": lambda p: file_ops.delete_path(p),
+        "copy_file_source": lambda p: file_ops.copy_file(p, str(root / "copy.json")),
+        "copy_file_destination": lambda p: file_ops.copy_file(str(root / "data.json"), p),
+        "move_file_source": lambda p: file_ops.move_file(p, str(root / "moved.json")),
+        "batch_write_files": lambda p: file_ops.batch_write_files(
+            [{"path": p, "content": "x", "mode": "create"}]),
+        "requested_path": lambda p: file_ops._requested_path(p),
+        "batch_requested_path": lambda p: file_ops._batch_requested_path(p),
+        "patch_json": lambda p: jp.patch_json(p, ops),
+        "text_patch": lambda p: tp.text_patch(p, _CREATE, apply=False),
+    }
+
+
+@pytest.mark.parametrize("spelling", _NETWORK_SPELLINGS)
+def test_no_file_operation_touches_a_network_path_before_refusing_it(spelling, tmp_path, request, monkeypatch, fs_spy):
+    entries = _network_entry_points(tmp_path, request, monkeypatch)
+    for name, call in entries.items():
+        fs_spy.clear()
+        try:
+            call(spelling)  # the batch API reports a per-operation rejection instead of raising
+        except (PermissionError, ValueError, OSError, tp.TextPatchError, file_ops.BatchWriteError):
+            pass
+        assert not fs_spy, f"{name}({spelling!r}) touched the network path first: {fs_spy!r} ({TAG})"
+
+
+@pytest.mark.parametrize("value", ["\\\\?\\D:\\proj\\pyproject.toml", "//?/D:/proj/pyproject.toml",
+                                   "\\\\?\\c:\\x", "//?/z:/a/b.txt", "  \\\\?\\D:\\proj\\x"])
+def test_extended_length_local_paths_lose_their_prefix(value):
+    stripped = file_ops._reject_network_path(value)
+    assert re.fullmatch(r"[A-Za-z]:[\\/].*", stripped), stripped
+    assert "?" not in stripped
+
+
+@pytest.mark.parametrize("value", [
+    "\\\\?\\UNC\\h\\s\\x", "//?/UNC/h/s/x", "\\\\?\\GLOBALROOT\\Device\\x", "//?/GLOBALROOT/Device/x",
+    "\\\\?\\Volume{1234}\\x", "//?/Volume{1234}/x", "\\\\?\\D:", "\\\\?\\D\\x", "\\\\?\\\\D:\\x", "\\\\?\\1:\\x",
+    "\\\\.\\D:\\x", "//./D:/x", "\\??\\D:\\x", "/??/D:/x", "//host/share/x", "\\\\host\\share\\x",
+    "\\\\?/D:/x", "//?\\D:\\x",
+])
+def test_every_other_extended_or_device_spelling_is_still_refused(value):
+    with pytest.raises(PermissionError):
+        file_ops._reject_network_path(value)
+
+
+def test_plain_paths_pass_through_unchanged():
+    for value in ("a/b.txt", "C:\\x", "C:/x", " rel/x", "/abs/x", "./x"):
+        assert file_ops._reject_network_path(value) == value
+
+
+@pytest.mark.skipif(os.name != "nt", reason="extended-length paths are a Windows spelling")
+def test_extended_length_path_inside_the_workspace_resolves(tmp_path, monkeypatch, request):
+    root = _build_json_world(tmp_path / "world")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    target = root / "data.json"
+    resolved = file_ops.resolve_path("\\\\?\\" + str(target))
+    assert os.path.normcase(str(resolved)) == os.path.normcase(str(target.resolve()))
+    mutated = file_ops.resolve_mutation_path("//?/" + str(target).replace("\\", "/"))
+    assert os.path.normcase(str(mutated)) == os.path.normcase(str(target.resolve()))
+
+
+@pytest.mark.parametrize("name", ["CON:", "con:", "NUL:x", "COM1:", "LPT1:stream", "aux.txt:s", "PRN :"])
+def test_patch_path_refuses_device_names_with_a_colon_suffix(name):
+    with pytest.raises(PermissionError):
+        tp._patch_path("b/" + name, prefix="b/")

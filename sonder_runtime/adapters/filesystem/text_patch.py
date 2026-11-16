@@ -58,7 +58,8 @@ def _patch_path(value: str, *, prefix: str) -> str | None:
         raise PermissionError("patch path contains an empty, dot, or parent component")
     if any(_DRIVE_COMPONENT.match(part) for part in parts):
         raise PermissionError("patch path contains a drive-letter component")
-    if any(part.split(".", 1)[0].rstrip(". ").upper() in _DEVICE_NAMES for part in parts):
+    if any(part.split(".", 1)[0].split(":", 1)[0].rstrip(". ").upper() in _DEVICE_NAMES
+           for part in parts):
         raise PermissionError("patch path contains a Windows reserved device name")
     return "/".join(parts)
 
@@ -233,7 +234,7 @@ def _stage(path: Path, data: bytes, mode: int | None) -> Path:
 
 def text_patch(root: str, patch: str, *, apply: bool = False,
                extra_roots: str = "", developer_authorized: bool = False) -> dict:
-    file_ops._reject_network_path(root)
+    root = file_ops._reject_network_path(root)
     requested_root = Path(root).expanduser()
     if not requested_root.is_absolute():
         requested_root = file_ops.workspace_root() / requested_root
