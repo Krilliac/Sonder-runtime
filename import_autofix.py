@@ -11,6 +11,7 @@ generation asking the model to notice it forgot an import.
 Stdlib only. No model/GPU dependency, so both entry points are pure functions
 of (code, traceback_text) and are trivially unit-testable.
 """
+import ast
 import re
 
 # --- name -> (module, import statement) coverage -----------------------------
@@ -99,6 +100,59 @@ def detect_missing_import(traceback_text):
     return modname
 
 
+_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+_CODING_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
+
+
+def _insert_import(code, stmt):
+    """Insert `stmt` at the first legal import position of `code`.
+
+    That is after a shebang, an encoding line, the module docstring and any
+    `from __future__` imports: a `__future__` import that is not first (and a
+    docstring pushed out of first place) is a SyntaxError / silently lost
+    docstring, so a plain prepend broke exactly the modules that had them.
+    """
+    code = code or ""
+    lines = _LINE_RE.findall(code)
+    newline = "\r\n" if "\r\n" in code else "\n"
+    at = 0
+    for index in range(min(2, len(lines))):
+        raw = lines[index]
+        if (index == 0 and raw.startswith("#!")) or _CODING_RE.match(raw):
+            at = index + 1
+        else:
+            break
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree is not None:
+        body = tree.body
+        position = 0
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            at = max(at, body[0].end_lineno)
+            position = 1
+        for node in body[position:]:
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__" and node.level == 0:
+                at = max(at, node.end_lineno)
+            else:
+                break
+    head = "".join(lines[:at])
+    if head and not head.endswith(("\n", "\r")):
+        head += newline
+    candidate = head + stmt + newline + "".join(lines[at:])
+    if tree is not None:
+        try:
+            ast.parse(candidate)
+        except (SyntaxError, ValueError):
+            # The anchor shares its line with other code (`"""doc"""; x = 1`);
+            # there is no safe line boundary to insert at, so leave it alone.
+            return code
+    return candidate
+
+
 def fix_missing_imports(code, traceback_text):
     """code, traceback_text -> code with the missing stdlib import prepended.
 
@@ -111,7 +165,7 @@ def fix_missing_imports(code, traceback_text):
     modname, stmt = _classify(name)
     if stmt is None or _already_imported(code, modname, name):
         return code
-    return stmt + "\n" + (code or "")
+    return _insert_import(code, stmt)
 
 
 def _has_import(code, modname):
@@ -133,7 +187,7 @@ def fix_wrong_module_attrs(code, traceback_text):
         fixed = re.sub(r"\bpygame\.%s\b" % re.escape(attr), "math.%s" % attr, fixed)
         fixed = re.sub(r"\bpygame\.math\.%s\b" % re.escape(attr), "math.%s" % attr, fixed)
     if fixed != (code or "") and not _has_import(fixed, "math"):
-        fixed = "import math\n" + fixed
+        fixed = _insert_import(fixed, "import math")
     return fixed
 
 

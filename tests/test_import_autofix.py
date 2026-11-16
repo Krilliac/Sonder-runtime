@@ -247,3 +247,35 @@ def test_grounded_pygame_math_attr_case():
 
     ok2, out2 = grounding.run_code(fixed)
     assert ok2 is True, out2
+
+
+_NAME_ERROR = "NameError: name 'random' is not defined"
+
+
+def test_import_goes_after_future_imports_and_docstring_and_shebang():
+    code = '#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"""Doc."""\nfrom __future__ import annotations\n\nx = random.random()\n'
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    compile(fixed, "<t>", "exec")
+    assert fixed == '#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"""Doc."""\nfrom __future__ import annotations\nimport random\n\nx = random.random()\n'
+
+
+def test_import_keeps_docstring_first_and_survives_future_only_module():
+    doc = '"""Doc."""\nx = random.random()\n'
+    fixed = import_autofix.fix_missing_imports(doc, _NAME_ERROR)
+    assert fixed.startswith('"""Doc."""\nimport random\n')
+    fut = "from __future__ import annotations\nx = random.random()\n"
+    compile(import_autofix.fix_missing_imports(fut, _NAME_ERROR), "<t>", "exec")
+
+
+def test_import_preserves_crlf_and_plain_prepend():
+    assert import_autofix.fix_missing_imports("x = random.random()\n", _NAME_ERROR) == "import random\nx = random.random()\n"
+    crlf = '"""D."""\r\nx = random.random()\r\n'
+    assert import_autofix.fix_missing_imports(crlf, _NAME_ERROR) == '"""D."""\r\nimport random\r\nx = random.random()\r\n'
+
+
+def test_wrong_module_attr_fix_places_math_import_legally():
+    code = '"""Doc."""\nfrom __future__ import annotations\nimport pygame\ny = pygame.cos(1)\n'
+    fixed = import_autofix.fix_wrong_module_attrs(code, "AttributeError: module 'pygame' has no attribute 'cos'")
+    compile(fixed, "<t>", "exec")
+    assert fixed.index("import math") > fixed.index("from __future__")
+    assert "math.cos(1)" in fixed
