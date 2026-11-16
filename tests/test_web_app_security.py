@@ -438,7 +438,10 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
     stop = threading.Event()
 
     hold_at = {3, 10, 21} if schedule == "swap-mid-load" else set()
-    armed = [0]  # generation at which the next pointer read must hold its load
+    # Generation at which the next pointer read must hold its load. -1 = disarmed:
+    # with 0, a reader that read the pointer before the first swap began held at
+    # generation 0 too (seen on Linux CI, where readers start before the writer).
+    armed = [-1]
     held = [0]  # generation whose pointer a held load has read
     held_done: set[int] = set()
     # (generation the pointer was read at, release it named, swaps landed when the load
