@@ -47,7 +47,9 @@ MAX_CHARS = 280
 # Code spans and dotted identifiers are opaque to the sentence splitter:
 # "pathlib.Path" or "`a; b`" must not read as two sentences.
 _CODE_SPAN = re.compile(r"`[^`]*`")
-_SENTENCE_BREAK = re.compile(r"[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
+# The lookbehind starts a match only at the beginning of a punctuation run, so a
+# long run of dots is scanned once, not once per dot (quadratic).
+_SENTENCE_BREAK = re.compile(r"(?<![.!?])[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 # Clause-level joins only. A bare " and " between two nouns ("tests and lint")
 # is a list, not a second claim, so only the comma/semicolon-marked forms and
 # discourse connectives count.
