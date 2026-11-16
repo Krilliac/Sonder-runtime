@@ -839,3 +839,20 @@ def test_build_application_leaves_a_live_peers_fix_running(tmp_path, monkeypatch
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] in ALL_CUTS:
     _child(sys.argv[1], Path(sys.argv[2]), sys.argv[3] == "composed")
+
+
+def test_a_journaled_row_with_an_unsafe_rel_is_not_a_build_fix_edit(tmp_path):
+    """safe_rel refuses ``a:b.cpp``; a persisted intent naming it yields None, never an exception."""
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    before, after = sha("before\n"), sha("after\n")
+    good = _intent(root, "src/a.cpp", before, after)
+    assert edit_from_intent(good) is not None
+    forged = _intent(root, "src/a.cpp", before, after,
+                     idempotency_key=good.idempotency_key.replace("src/a.cpp", "a:b.cpp"))
+    assert "a:b.cpp" in forged.idempotency_key
+    assert edit_from_intent(forged) is None
+    assert BuildFixEditVerifier().verify(forged) is None
+    with pytest.raises(ValueError):
+        BuildFixEdit(job_id=JOB, candidate="attempt-1", rel="a:b.cpp", before_sha256=before,
+                     after_sha256=after, project_root=str(root))
