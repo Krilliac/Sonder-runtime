@@ -13,12 +13,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import DatasetRecordError
-from .records import LineRange, check_relative_path, parse_line_range
+from .records import LineRange, parse_line_range
 
 VERDICTS = ("CONFIRMED", "REFUTED", "UNCERTAIN")
 MAX_REASON_CHARS = 500
 MAX_TEXT_CHARS = 200_000
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 _LABEL_RE = re.compile(r"^[ \t>*_#-]*VERDICT[ \t*_]*[:=][ \t*_]*(CONFIRMED|REFUTED|UNCERTAIN)\b",
                        re.IGNORECASE | re.MULTILINE)
@@ -46,17 +45,33 @@ class ParsedHypothesis:
     severity: str
 
 
+def _strip_think(text: str) -> str:
+    """Drop each ``<think>...</think>`` block (any case); an unterminated ``<think>`` drops the rest.
+
+    One left-to-right pass: every position is examined a bounded number of times, so a run of
+    openers or closers cannot go quadratic.
+    """
+    lowered = text.lower()
+    parts: list[str] = []
+    position = 0
+    while True:
+        opener = lowered.find("<think>", position)
+        if opener < 0:
+            parts.append(text[position:])
+            break
+        parts.append(text[position:opener])
+        closer = lowered.find("</think>", opener + 7)
+        if closer < 0:
+            break
+        position = closer + 8
+    return "".join(parts)
+
+
 def _clean(text: str) -> str:
     if not isinstance(text, str):
         raise VerdictParseError("the reply is not text")
     text = text[:MAX_TEXT_CHARS]
-    if "</think>" in text.lower():
-        # Without a closer the lazy match cannot succeed, but it would rescan to the end from
-        # every opener (quadratic on a run of "<think>").
-        text = _THINK_RE.sub("", text)
-    start = text.lower().find("<think>")
-    if start >= 0:
-        text = text[:start]
+    text = _strip_think(text)
     if not text.strip():
         raise VerdictParseError("the reply is empty")
     return text
@@ -67,6 +82,19 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
 
 
 _MAX_FAILED_DECODES = 64
+_OBJECT_START = frozenset('"}')
+_ARRAY_START = frozenset('"-0123456789[{tfn]')
+_WHITESPACE = " \t\n\r"
+
+
+def _plausible(text: str, index: int, opener: str) -> bool:
+    """Whether the character after the opener (past JSON whitespace) can begin that value's content."""
+    following = index + 1
+    while following < len(text) and text[following] in _WHITESPACE:
+        following += 1
+    if following >= len(text):
+        return False
+    return text[following] in (_OBJECT_START if opener == "{" else _ARRAY_START)
 
 
 def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
@@ -74,6 +102,9 @@ def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     index = text.find(opener)
     failures = 0
     while index >= 0:
+        if not _plausible(text, index, opener):
+            index = text.find(opener, index + 1)
+            continue
         try:
             value, end = _DECODER.raw_decode(text, index)
         except (ValueError, RecursionError):
@@ -122,23 +153,13 @@ def parse_verdict(text: str) -> ParsedVerdict:
     raise VerdictParseError("the reply holds no verdict")
 
 
-def _safe_file(value: object) -> str:
-    """A model-named file as a plain relative path, or ``""`` (the chunk's own file) when it is not one."""
-    if not isinstance(value, str):
-        return ""
-    try:
-        return check_relative_path(value.strip().replace("\\", "/"))
-    except DatasetRecordError:
-        return ""
-
-
 def _hypothesis(item: object) -> ParsedHypothesis | None:
     if not isinstance(item, dict):
         return None
     hypothesis = item.get("hypothesis")
     if not isinstance(hypothesis, str) or not hypothesis.strip():
         return None
-    file = _safe_file(item.get("file"))
+    file = item.get("file")
     lines = None
     if "lines" in item:
         try:
@@ -150,7 +171,8 @@ def _hypothesis(item: object) -> ParsedHypothesis | None:
         value = item.get(name)
         return value.strip()[:limit] if isinstance(value, str) else ""
 
-    return ParsedHypothesis(file=file, lines=lines, category=text("category", 64),
+    return ParsedHypothesis(file=file.strip().replace("\\", "/")[:1024] if isinstance(file, str) else "",
+                            lines=lines, category=text("category", 64),
                             hypothesis=hypothesis.strip()[:4000], severity=text("severity", 32))
 
 

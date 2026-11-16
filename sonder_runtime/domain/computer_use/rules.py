@@ -37,7 +37,7 @@ _KEY_ALIASES = {"return": "enter", "esc": "escape", "del": "delete", "control": 
 _ESCAPE_CHORDS = frozenset({
     ("alt", "tab"), ("alt", "shift", "tab"), ("ctrl", "escape"), ("alt", "escape"),
     ("alt", "ctrl", "delete"), ("ctrl", "shift", "escape"), ("alt", "space"),
-    ("alt", "ctrl", "tab"),
+    ("alt", "ctrl", "tab"), ("alt", "ctrl", "shift", "tab"),
 })
 
 # Words that, on the control being clicked, mean the click may not be undoable.

@@ -59,6 +59,7 @@ from sonder_runtime.domain.security_eval.records import (
     parse_line_range,
     parse_record,
 )
+from sonder_runtime.domain.security_eval.scoring import match_findings
 from sonder_runtime.domain.security_eval.verdict import (
     VERDICTS,
     ParsedHypothesis,
@@ -344,28 +345,24 @@ def test_parse_hypotheses_recovers_planted_array_in_random_context():
         assert [h.lines.as_text() for h in found] == [i["lines"] for i in items]
 
 
-def test_parse_hypotheses_accepted_files_are_plain_relative_paths():
-    """A hypothesis file the model chose must be a path ``check_relative_path`` accepts (or empty)."""
-    rng = _rng(7)
-    hostile = ("../../etc/passwd", "/etc/passwd", "C:\\Windows\\win.ini", "\\\\server\\share\\f", "a/../../b", "a\\..\\..\\b",
-               "f.txt:stream", "src/ok.c", "./src/ok.c", "a/b./c", "a\x00b")
-    run = _Run()
-    for _ in range(600):
-        name = rng.choice(hostile)
-        text = json.dumps([{"hypothesis": "h", "file": rng.choice((name, " %s " % name, name.upper()))}])
-        _returned, value = run.call(parse_hypotheses, (text,), (VerdictParseError,))
-        for item in (value or ()):
-            if item.file:
-                try:
-                    check_relative_path(item.file)
-                except DatasetRecordError as exc:
-                    run.failures.append("accepted file %r from %r is refused by check_relative_path (%s)" % (item.file, name, exc))
-    run.check("parse_hypotheses file paths", latency=False)
-
-
-def test_parse_hypotheses_dotdot_file_regression():
-    found = parse_hypotheses('[{"hypothesis": "h", "file": "../../etc/passwd"}]')
-    assert found[0].file == "" or _is_plain_relative(found[0].file), "file %r escapes the repo root" % found[0].file
+def test_hostile_hypothesis_paths_never_match_a_finding():
+    """The model's ``file`` is only string-compared, never opened, so it is not validated: a hostile
+    value must simply fail to equal the record's file. Blanking it would make it mean "the chunk's own
+    file" (runner.py passes ``unit.file`` as ``default_file``) and let it match, inflating eval scores."""
+    bs = chr(92)
+    record = HypothesisRecord(hid="h01", repo_root="repo", file="src/Reader.cs", lines=LineRange(10, 12), category="oob",
+                              hypothesis="h", label="TP", severity="high", stage="s", reason="")
+    hostile = ("../../etc/passwd", "../other/Thing.cs", "C:/elsewhere/x.cs", bs * 2 + "server" + bs + "share" + bs + "x",
+               "src/Reader.cs" + chr(0), "/etc/passwd", "a" + bs + ".." + bs + ".." + bs + "b")
+    for name in hostile:
+        text = json.dumps([{"hypothesis": "h", "file": name, "lines": "10-12"}])
+        findings = parse_hypotheses(text)
+        assert len(findings) == 1 and findings[0].file != "", "file %r was blanked" % (name,)
+        assert match_findings(findings, (record,), 0, "src/Reader.cs") == (), "hostile file %r matched" % (name,)
+    own = parse_hypotheses(json.dumps([{"hypothesis": "h", "file": "src/Reader.cs", "lines": "10-12"}]))
+    assert match_findings(own, (record,), 0, "src/Reader.cs") == (record,)
+    omitted = parse_hypotheses(json.dumps([{"hypothesis": "h", "lines": "10-12"}]))
+    assert match_findings(omitted, (record,), 0, "src/Reader.cs") == (record,)
 
 
 # --------------------------------------------------------------------------- security_eval.records
@@ -695,7 +692,7 @@ def test_substance_is_idempotent_and_total():
     seeds = tuple(_body(rng) + _footer(rng) for _ in range(6)) + ("plain text", "")
     for text in _fuzz_inputs(18, seeds, fragments):
         if text.count("=== ENSEMBLE (") > 1:
-            continue  # stacked footers are covered by the SUSPECT regression below
+            continue  # stacked footers are covered by the stacked-footer regression below
         returned, once = run.call(consult._substance, (text,), ())
         if returned is None:
             continue
@@ -708,17 +705,24 @@ def test_substance_is_idempotent_and_total():
 
 
 def test_substance_footer_with_trailing_whitespace_regression():
-    """SUSPECT: a footer followed by trailing whitespace survives, but the same text pre-stripped loses it."""
+    """A footer followed by trailing whitespace is stripped, the same as when the text is pre-stripped."""
     text = "answer\n=== ENSEMBLE (1 model answered) ===\n  code: 1ms\n"
     assert consult._substance(text) == consult._substance(text.strip()) == "answer"
 
 
 def test_substance_stacked_footers_are_stripped_to_a_fixpoint():
-    """SUSPECT: a footer-shaped tail before the real footer survives one pass, so a second pass changes the text."""
-    stacked = ("answer\n=== ENSEMBLE (1 model answered) ===\n  code: 1ms"
-               "\n=== ENSEMBLE (1 model answered) ===\n  code: 99ms")
+    """A footer-shaped tail before the real footer is peeled too, so a second pass changes nothing."""
+    stacked = "answer" + "".join("\n=== ENSEMBLE (1 model answered) ===\n  code: %dms" % n for n in range(12))
     once = consult._substance(stacked)
+    assert once == "answer"
     assert consult._substance(once) == once, "second pass changed %r to %r" % (once, consult._substance(once))
+
+
+def test_substance_strips_a_footer_shaped_block_the_answer_itself_ended_with():
+    """By design: the answer's own trailing footer-shaped block is indistinguishable from a real footer
+    and is stripped; _substance only feeds agreement and judge parsing, never the answers shown."""
+    text = "intro\n\n=== ENSEMBLE (2 models answered) ===\n  the answer quoted this block"
+    assert consult._substance(text) == "intro"
 
 
 # --------------------------------------------------------------------------- agents.decision_parsing
@@ -794,7 +798,7 @@ def test_extract_agent_json_hostile_blobs_stay_in_budget_and_typed():
 
 
 def test_extract_agent_json_deeply_nested_object_regression():
-    """SUSPECT: json.loads raises RecursionError (not JSONDecodeError) on deep nesting, which escapes as non-ValueError."""
+    """Deep nesting makes json.loads raise RecursionError; it must surface as a ValueError."""
     for text in ('{"a":' * 3000, "[" * 3000, '{"a":' * 3000 + "1" + "}" * 3000):
         try:
             extract_agent_json(text)
@@ -1097,7 +1101,7 @@ _CHORD_PARTS = ("ctrl", "Ctrl", "CONTROL", "alt", "shift", "win", "WIN", "window
 _DANGEROUS_CHORDS = ("win+r", "WIN+R", "Win + R", "meta+r", "super+e", "cmd+space", "windows+d", "w i n + r", "win", "ctrl+win+left",
                      "ctrl+alt+del", "ctrl+alt+delete", "alt+ctrl+del", "del+ctrl+alt", "ctrl+shift+esc", "ctrl+shift+escape",
                      "ctrl+esc", "alt+esc", "alt+tab", "alt+shift+tab", "shift+alt+tab", "TAB+ALT", "alt+space", "ctrl+s\nwin+r",
-                     "ctrl+\nwin+r", "ctrl+s+win+r", "ctrl+alt+tab")
+                     "ctrl+\nwin+r", "ctrl+s+win+r", "ctrl+alt+tab", "ctrl+alt+shift+tab", "shift+alt+ctrl+tab")
 
 
 def _chord_problem(raw: str, chord: tuple[str, ...]) -> str | None:
@@ -1225,14 +1229,44 @@ def test_parse_model_step_never_yields_an_action_outside_the_allowed_set():
 @pytest.mark.parametrize("field, value", [("scroll", "1e999"), ("scroll", "Infinity"), ("x", "1" + "0" * 400), ("y", "1" + "0" * 400),
                                           ("x", "1e999"), ("scroll", "1" + "0" * 400)])
 def test_build_action_refuses_non_finite_or_huge_numbers_from_a_model_step(field, value):
-    """SUSPECT: OverflowError (not ActionRefused) escapes for numbers that json.loads accepts, aborting the agent loop."""
+    """Numbers json.loads accepts but float()/int() cannot hold are refused, not raised as OverflowError."""
     reply = '{"action": "scroll", "x": 5, "y": 5, "label": "l", "%s": %s}' % (field, value)
     step = rules.parse_model_step(reply)
-    try:
+    with pytest.raises(rules.ActionRefused):
         rules.build_action(step["action"], x=step["x"], y=step["y"], coords="normalized", width=800, height=600,
                            text=step["text"], keys=step["keys"], scroll=step["scroll"], label=step["label"])
-    except rules.ActionRefused:
-        pass
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), 10**400, -(10**400)])
+def test_pixel_coordinates_refuse_non_finite_and_overflowing_numbers(bad):
+    """isfinite covers inf/nan; float() raising OverflowError covers 10**400. Both must be ActionRefused."""
+    with pytest.raises(rules.ActionRefused):
+        rules.to_pixels(bad, 5, "pixels", 800, 600)
+    with pytest.raises(rules.ActionRefused):
+        rules.to_pixels(5, bad, "pixels", 800, 600)
+    with pytest.raises(rules.ActionRefused):
+        rules.build_action("click", x=bad, y=5, coords="pixels", width=800, height=600, label="l")
+
+
+def test_scroll_refuses_non_finite_floats_and_oversized_numbers_each_by_its_own_check():
+    for bad in (float("inf"), float("-inf"), float("nan")):  # the isfinite check
+        with pytest.raises(rules.ActionRefused, match="integer"):
+            rules.build_action("scroll", x=5, y=5, coords="pixels", width=800, height=600, scroll=bad, label="l")
+    # 10**400 is an int: isfinite is skipped, int() succeeds and the notch cap refuses it.
+    with pytest.raises(rules.ActionRefused):
+        rules.build_action("scroll", x=5, y=5, coords="pixels", width=800, height=600, scroll=10**400, label="l")
+
+
+class _OverflowingInt:
+    """An object whose int() conversion raises OverflowError, the way int(float('inf')) does."""
+
+    def __int__(self):
+        raise OverflowError("too large")
+
+
+def test_scroll_overflow_error_from_int_conversion_is_refused():
+    with pytest.raises(rules.ActionRefused, match="integer"):
+        rules.build_action("scroll", x=5, y=5, coords="pixels", width=800, height=600, scroll=_OverflowingInt(), label="l")
 
 
 def test_parse_model_step_hostile_blobs_stay_in_budget_and_typed():
@@ -1240,11 +1274,9 @@ def test_parse_model_step_hostile_blobs_stay_in_budget_and_typed():
 
 
 def test_parse_model_step_deep_nesting_is_refused_not_crashed():
-    for text in ('{"a":' * 3000, "{" + "[" * 3000 + "}"):
-        try:
+    for text in ('{"a":' * 3000, "{" + "[" * 3000 + "}", '{"a":' + "[" * 3000 + "]" * 3000 + "}"):
+        with pytest.raises(rules.ActionRefused):
             rules.parse_model_step(text)
-        except rules.ActionRefused:
-            pass
 
 
 def test_parse_model_step_recovers_planted_object_in_random_context():
@@ -1365,30 +1397,67 @@ def test_parse_critique_hostile_blobs_stay_in_budget():
 
 
 def test_parse_critique_deep_nesting_returns_failure_shape_regression():
-    """SUSPECT: a deeply nested reply raises RecursionError out of the tolerant parser."""
+    """A deeply nested reply returns the failure shape instead of raising RecursionError."""
     for text in ('{"a":' * 3000, '{"score": 5, "x": ' + "[" * 3000):
         out = parse_critique(text)
-        assert out["score"] is None or 0 <= out["score"] <= 10
+        assert out["score"] is None and out["issues"] == [] and out["raw"] == text[:400]
 
 
 # --------------------------------------------------------------------------- verdict hostile blobs
 
+_THINK_BLOBS = {
+    "early-closer-then-openers": "<think></think>x" + "<think>" * BLOB,
+    "closed-blocks-then-opener": "<think>a</think>" * (BLOB // 16) + "<think>",
+    "closer-spam": "</think>" * (BLOB // 8) + "<think>",
+    "upper-case-openers": "<THINK></THINK>x" + "<THINK>" * BLOB,
+}
+
+
 def test_parse_verdict_hostile_blobs_stay_in_budget_and_typed():
-    _hostile_blob_test("parse_verdict", parse_verdict, (VerdictParseError,))
+    _hostile_blob_test("parse_verdict", parse_verdict, (VerdictParseError,), _THINK_BLOBS)
 
 
 def test_parse_hypotheses_hostile_blobs_stay_in_budget_and_typed():
-    _hostile_blob_test("parse_hypotheses", parse_hypotheses, (VerdictParseError,))
+    _hostile_blob_test("parse_hypotheses", parse_hypotheses, (VerdictParseError,), _THINK_BLOBS)
+
+
+def test_think_blocks_are_stripped_case_insensitively_and_unterminated_ones_drop_the_rest():
+    assert parse_verdict('<THINK>{"verdict": "REFUTED"}</Think>{"verdict": "CONFIRMED"}').verdict == "CONFIRMED"
+    assert parse_verdict('<think>a</think>{"verdict": "CONFIRMED"}<think>{"verdict": "REFUTED"}').verdict == "CONFIRMED"
+    assert parse_verdict('<think></think>{"verdict": "UNCERTAIN"}' + "<think>" * 5).verdict == "UNCERTAIN"
+    with pytest.raises(VerdictParseError):
+        parse_verdict('<think>{"verdict": "REFUTED"}')
+
+
+def test_scanner_skips_implausible_openers_without_spending_the_failure_cap():
+    code = "int f() {\n" + "  { count++; }\n" * 200 + "}\n"
+    assert parse_verdict(code + '{"verdict": "REFUTED", "reason": "guarded"}').verdict == "REFUTED"
+    assert parse_critique(code + '{"score": 7, "issues": []}')["score"] == 7
+    assert parse_hypotheses("[i] " * 200 + '[{"hypothesis": "h"}]')[0].hypothesis == "h"
+    # a truncated outer object still leaves the inner one findable
+    assert parse_verdict('{"result": {"verdict": "REFUTED"}').verdict == "REFUTED"
+    assert parse_critique('{"result": {"score": 4, "issues": []}')["score"] == 4
+
+
+def test_scanner_opener_runs_stay_in_budget():
+    for blob in ("{" * BLOB, "{ " * (BLOB // 2), '{"' * (BLOB // 2), "[" * BLOB, "[ " * (BLOB // 2)):
+        for fn in (parse_verdict, parse_hypotheses, parse_critique):
+            started = time.perf_counter()
+            try:
+                fn(blob)
+            except VerdictParseError:
+                pass
+            assert time.perf_counter() - started < BLOB_BUDGET, "%s took too long on %.12r" % (fn.__name__, blob)
 
 
 def test_parse_verdict_and_hypotheses_deep_nesting_regression():
-    """SUSPECT: deep JSON nesting raises RecursionError from json.raw_decode; only ValueError is caught by the scanner."""
-    for text in ('{"a":' * 3000, "[" * 3000, '{"verdict": "CONFIRMED"} ' + "[" * 3000):
+    """Deep JSON nesting raises RecursionError inside raw_decode; the scanner contains it."""
+    for text in ('{"a":' * 3000, "[" * 3000):
         for fn in (parse_verdict, parse_hypotheses):
-            try:
+            with pytest.raises(VerdictParseError):
                 fn(text)
-            except VerdictParseError:
-                pass
+    assert parse_verdict('{"verdict": "CONFIRMED"} ' + "[" * 3000).verdict == "CONFIRMED"
+    assert parse_hypotheses('[{"hypothesis": "h"}] ' + "[" * 3000)[0].hypothesis == "h"
 
 
 def test_consult_helpers_hostile_blobs_stay_in_budget():
