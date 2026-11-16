@@ -2150,6 +2150,8 @@ SYSTEM_OPERATION_TOOLS = {
     "memory_export": "workspace_execution",
     "memory_privacy_repair": "workspace_execution",
     "memory_quality_repair": "workspace_execution",
+    # A caller's judgement of a delegated run is the operator's review.
+    "record_outcome": "workspace_execution",
 }
 
 

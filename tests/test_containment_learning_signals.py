@@ -1,8 +1,9 @@
 """Containment: a model that can call `learn_from_example` / `record_outcome`.
 
-Boundary under test. Those two MCP tools are NOT in
-``_AGENT_SYSTEM_OPERATOR_TOOLS``; only the permission mode gates them, so a
-hostile or confused model can call both. Through them it must not be able to
+Boundary under test. ``learn_from_example`` is NOT in
+``_AGENT_SYSTEM_OPERATOR_TOOLS`` (only the permission mode gates it);
+``record_outcome`` IS, because the caller's judgement is the operator's
+review. Through the callable paths a model must not be able to
 
   1. forge execution-grounded evidence (``tests_passed`` / ``compiled`` /
      ``failed`` are priced for the runtime's own runner),
@@ -277,25 +278,25 @@ def test_agent_cannot_reach_runtime_only_writers(hidden, db, mode_sandbox, monke
 
 
 @pytest.mark.parametrize("extra", [
-    {"source": "machine"}, {"source": "self_curriculum"}, {"reward": 1.0},
+    {}, {"source": "machine"}, {"source": "self_curriculum"}, {"reward": 1.0},
     {"token": "x", "approval": "y"},
 ])
-def test_agent_dispatch_record_outcome_cannot_inject_source(
+def test_agent_dispatch_refuses_record_outcome_and_writes_nothing(
     extra, db, distiller, mode_sandbox,
 ):
-    """A model's extra arguments never choose provenance: unknown keywords are
-    refused outright; credential-shaped strings are dropped; the row that is
-    written (if any) is `caller`."""
+    """The caller's judgement is the operator's review: an agent model cannot
+    file one, whatever extra arguments it adds, so it cannot review its own
+    delegated work. The real dispatch refuses before any writer runs."""
     _seed_interaction(db, "I1")
+    usage_before = _usage(db, "I1")
     out = server._agent_dispatch(
         "record_outcome", {"interaction_id": "I1", "signal": "tests_passed", **extra},
     )
-    rows = _outcomes(db, "I1")
-    if "source" in extra or "reward" in extra:
-        assert out.startswith("ERROR: invalid arguments"), out
-        assert rows == []
-    else:
-        assert [r[1:] for r in rows] == [("tests_passed", 1.0, "caller")]
+    assert out.startswith("ERROR: HOST POLICY"), out
+    assert "record_outcome" in out
+    assert _outcomes(db) == []
+    assert _usage(db, "I1") == usage_before
+    assert distiller.prompts == []
 
 
 # --- 1b. spelling variants / unknown signals -------------------------------
@@ -422,11 +423,12 @@ def test_contradicting_caller_pass_over_runtime_failure_does_not_distill(db, dis
 def test_caller_signal_cannot_overwrite_runtime_lesson_usage_credit(db, distiller):
     """A caller's different signal leaves the runtime's credit alone.
 
-    ``lesson_usage`` is only updated when it has no outcome yet, a legacy NULL
-    source, or the same source, so a caller who knows the id of a
-    runtime-graded interaction cannot turn the lesson's -1.0/self_curriculum
-    into +1.0/caller or reset its ``losses_since_win``. The caller's evidence
-    still lands in ``outcomes``.
+    ``lesson_usage`` is rewritten only when the new writer's rank is at least
+    the stored one (exact runtime ``machine``/``self_curriculum`` 3 > ``caller``
+    2 > heuristic/unknown 1; a NULL row is always replaceable). A caller who
+    knows the id of a runtime-graded interaction therefore cannot turn the
+    lesson's -1.0/self_curriculum into +1.0/caller or reset its
+    ``losses_since_win``. The caller's evidence still lands in ``outcomes``.
     """
     _seed_interaction(db, "RT1")
     server.record_self_graded_outcome("RT1", "failed")
@@ -689,7 +691,7 @@ def test_operator_learning_tools_are_on_the_agent_deny_list_or_documented_gap():
     for tool in ("learn_preference", "memory_export", "memory_privacy_repair",
                  "memory_quality_repair", "self_heal_repair"):
         assert tool in deny, tool
-    assert "record_outcome" not in deny and "learn_from_example" not in deny
+    assert "record_outcome" in deny and "learn_from_example" not in deny
 
 
 @pytest.mark.parametrize("tool", list(_OPERATOR_LEARNING_TOOLS))
@@ -728,18 +730,32 @@ def test_agent_dispatch_refuses_operator_tools_even_in_auto_mode(tool, monkeypat
 
 
 @pytest.mark.parametrize("tool", ["loop", "workflow_run"])
-@pytest.mark.parametrize("spelling", ["exact", "upper", "padded"])
+@pytest.mark.parametrize("spelling", [
+    "exact", "padded_is_stripped_then_refused", "upper_is_unknown_name_lookup_is_exact",
+])
 def test_model_dispatch_cannot_invoke_loop(tool, spelling, monkeypatch, mode_sandbox):
     """The model-facing dispatcher refuses `loop` / `workflow_run`, so a model
-    cannot reach `_loop_dispatch` (and with it `learn_preference`)."""
+    cannot reach `_loop_dispatch` (and with it `learn_preference`).
+
+    Whitespace is stripped before lookup, so the padded spelling is the exact
+    name and gets the same HOST POLICY refusal; any other respelling (case) is
+    not the tool, so the name lookup, which is exact, answers `unknown tool`.
+    """
     called = []
     monkeypatch.setattr(server, tool, lambda *a, **k: called.append(tool) or "RAN")
     monkeypatch.setattr(server, "_loop_dispatch", lambda *a, **k: called.append("dispatch") or {})
-    name = {"exact": tool, "upper": tool.upper(), "padded": f"  {tool}" + chr(10)}[spelling]
+    name = {
+        "exact": tool,
+        "upper_is_unknown_name_lookup_is_exact": tool.upper(),
+        "padded_is_stripped_then_refused": f"  {tool}" + chr(10),
+    }[spelling]
     args = {"actions_json": '[{"type": "learn_preference", "text": "x"}]'}
     out = server._agent_dispatch(name, args)
     assert called == [], f"{name!r} reached the loop from the agent dispatcher"
-    assert isinstance(out, str) and out.startswith("ERROR"), out
+    if spelling.startswith("upper"):
+        assert out == "ERROR: unknown tool '%s'." % name, out
+    else:
+        assert out.startswith("ERROR: HOST POLICY"), out
 
 
 def _http_context(role):
@@ -811,6 +827,20 @@ def test_loop_dispatch_cannot_reach_memory_export():
 
 
 # --- lesson_usage write precedence: exact runtime > caller > heuristic ------
+
+def _set_usage_source(db_path, iid, lesson_id, source):
+    """Force a stored lesson_usage provenance (legacy NULL / unknown shapes)."""
+    conn = server._open_db()
+    try:
+        conn.execute(
+            "UPDATE lesson_usage SET outcome_signal=?, reward=?, outcome_source=? "
+            "WHERE interaction_id=? AND lesson_id=?",
+            ("failed" if source else None, -1.0 if source else None, source, iid, lesson_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def _attributed(db_path, iid, signal):
     """Write an `attributed` (heuristic) outcome the way the runtime does."""
@@ -891,3 +921,67 @@ def test_record_lesson_usage_outcome_follows_the_same_precedence(db):
     finally:
         conn.close()
     assert _usage(db, "P7") == [("L1", "failed", -1.0, "machine")]
+
+
+def test_sourceless_write_ranks_lowest_and_never_nulls_attributed_credit(db):
+    """A legacy sourceless write may fill a NULL row but never replace a stored
+    source, so it cannot turn an `attributed` row into an eviction-eligible NULL."""
+    _seed_interaction(db, "N1")
+    _attributed(db, "N1", "failed")
+    conn = server._open_db()
+    try:
+        n = memory_store._write_lesson_usage_outcome(conn, "N1", "tests_passed", 1.0, None)
+        conn.commit()
+    finally:
+        conn.close()
+    assert n == 0
+    assert _usage(db, "N1") == [("L1", "failed", -1.0, "attributed")]
+    assert memory_store._lesson_usage_source_rank(None) == 0
+    _seed_interaction(db, "N2")
+    conn = server._open_db()
+    try:
+        n = memory_store._write_lesson_usage_outcome(conn, "N2", "tests_passed", 1.0, None)
+        conn.commit()
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_stored_unknown_source_is_replaced_by_caller(db, distiller):
+    _seed_interaction(db, "U1")
+    _set_usage_source(db, "U1", "L1", "unknown")
+    assert _usage(db, "U1") == [("L1", "failed", -1.0, "unknown")]
+    out = server.record_outcome("U1", "accepted")
+    assert _usage(db, "U1") == [("L1", "accepted", rules.SIGNAL_REWARDS["accepted"], "caller")]
+    assert "Lesson credit unchanged" not in out
+
+
+def test_no_unchanged_clause_when_interaction_has_no_lesson_usage_rows(db, distiller):
+    _seed_interaction(db, "Z1", lessons=())
+    out = server.record_outcome("Z1", "accepted")
+    assert out.startswith("Recorded"), out
+    assert _usage(db, "Z1") == []
+    assert "Lesson credit unchanged" not in out
+
+
+def test_no_unchanged_clause_on_same_rank_rewrite(db, distiller):
+    _seed_interaction(db, "S1")
+    server.record_outcome("S1", "rejected")
+    out = server.record_outcome("S1", "accepted")
+    assert out.startswith("Recorded"), out
+    assert _usage(db, "S1") == [("L1", "accepted", rules.SIGNAL_REWARDS["accepted"], "caller")]
+    assert "Lesson credit unchanged" not in out
+
+
+def test_mixed_rows_caller_updates_the_null_row_and_clause_appears(db, distiller):
+    """L1 holds exact machine credit, L2 a legacy NULL: the caller write lands on
+    L2 only, and the clause reports that some credit was kept."""
+    _seed_interaction(db, "M1", lessons=("L1", "L2"))
+    server._record_outcome_signal("M1", "failed", source=rules.OUTCOME_SOURCE_MACHINE)
+    _set_usage_source(db, "M1", "L2", None)
+    out = server.record_outcome("M1", "accepted")
+    assert _usage(db, "M1") == [
+        ("L1", "failed", -1.0, "machine"),
+        ("L2", "accepted", rules.SIGNAL_REWARDS["accepted"], "caller"),
+    ]
+    assert "Lesson credit unchanged" in out

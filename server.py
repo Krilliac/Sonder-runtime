@@ -18264,6 +18264,8 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
+    # The caller's judgement is the operator's review; a model must not review its own work.
+    "record_outcome",
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",

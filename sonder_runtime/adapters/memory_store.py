@@ -1312,9 +1312,12 @@ _LESSON_USAGE_SOURCE_RANK = {
     memory_rules.OUTCOME_SOURCE_CALLER: 2,
 }
 _LESSON_USAGE_DEFAULT_RANK = 1  # attributed (heuristic) and unknown
+_LESSON_USAGE_NO_SOURCE_RANK = 0  # a sourceless write: may only fill a NULL row
 
 
 def _lesson_usage_source_rank(source):
+    if source is None:
+        return _LESSON_USAGE_NO_SOURCE_RANK
     return _LESSON_USAGE_SOURCE_RANK.get(source, _LESSON_USAGE_DEFAULT_RANK)
 
 
