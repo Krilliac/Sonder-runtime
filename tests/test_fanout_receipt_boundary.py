@@ -67,6 +67,8 @@ def test_receipt_counts_usage_skips_and_sorted_rows_without_the_prompt(monkeypat
     assert receipt["usage"] == {
         "answer_chars": 2, "stored_answer_chars": 2, "answer_chars_known_models": 1,
         "thinking_chars": 5, "models_with_observed_thinking": 1,
+        "tokens_in_provider": 0, "tokens_out_provider": 0, "tokens_in_estimated": 0,
+        "tokens_out_estimated": 0, "rows_with_estimated_tokens": 0, "rows_with_unknown_tokens": 1,
     }
     assert receipt["admission"] == {"fake": True}
     assert [row["model"] for row in receipt["answers"]] == ["a:7b"]

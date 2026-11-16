@@ -22,6 +22,8 @@ def test_limits_decode_with_clamps_and_conservative_defaults():
     assert admission.fanout_limits({}) == {
         "num_predict": 512, "timeout": 45, "cloud_workers": 2, "resident_before": [],
         "resident_snapshot_known": False, "plan_skipped": [], "selection_profile": "",
+        "temperature": 0.2, "num_ctx": 4096, "think": None, "sealed_answers": False,
+        "answer_max_chars": 64_000, "batch_job_id": "",
     }
     assert admission.fanout_limits({"limits_json": "not json"})["num_predict"] == 512
     limits = admission.fanout_limits({"limits_json": json.dumps({
@@ -32,6 +34,8 @@ def test_limits_decode_with_clamps_and_conservative_defaults():
     assert limits == {
         "num_predict": 4096, "timeout": 5, "cloud_workers": 2, "resident_before": ["a", "7"],
         "resident_snapshot_known": False, "plan_skipped": ["b"], "selection_profile": "healthy-chat",
+        "temperature": 0.2, "num_ctx": 4096, "think": None, "sealed_answers": False,
+        "answer_max_chars": 64_000, "batch_job_id": "",
     }
 
 
