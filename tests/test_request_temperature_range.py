@@ -193,6 +193,14 @@ def test_parallel_generate_run_refuses_before_any_model_call(monkeypatch, value)
     assert posted == []
 
 
+@pytest.mark.parametrize("value", [5.0, float("nan"), True])
+def test_parallel_generate_run_languages_refuses_before_any_model_call(monkeypatch, value):
+    posted = _fake_offload_transport(monkeypatch)
+    _error_text(server.parallel_generate_run_languages("write f", languages="python",
+                                                       temperature=value))
+    assert posted == []
+
+
 @pytest.mark.parametrize("value", [5, -1.0, float("nan")])
 def test_agent_dispatch_offload_refuses_without_a_model_call(monkeypatch, value):
     posted = _fake_offload_transport(monkeypatch)
@@ -218,3 +226,11 @@ def test_oversized_value_is_truncated_in_the_message():
         message = str(raised.value)
         assert message.endswith("...")
         assert len(message) < 200
+
+
+def test_int_too_large_to_repr_is_still_refused_as_invalid_input():
+    # repr() of an int over the 4300-digit conversion limit raises ValueError.
+    with pytest.raises(InvalidInput) as raised:
+        validate_request_temperature(10 ** 5000)
+    assert "temperature must be a finite number from 0 to 2" in str(raised.value)
+    assert len(str(raised.value)) < 200
