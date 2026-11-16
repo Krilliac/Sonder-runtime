@@ -29,7 +29,10 @@ def validate_request_temperature(value):
     finite = not isinstance(value, float) or math.isfinite(value)
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not finite or not TEMPERATURE_MIN <= value <= TEMPERATURE_MAX):
-        shown = repr(value)
+        try:
+            shown = repr(value)
+        except ValueError:  # an int past the str-conversion digit limit
+            shown = "<%s too large to show>" % type(value).__name__
         if len(shown) > _SHOWN_MAX:
             shown = shown[:_SHOWN_MAX - 3] + "..."
         raise InvalidInput(

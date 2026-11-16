@@ -7708,6 +7708,8 @@ def parallel_generate_run_languages(
     csharp. The model is asked for one fenced block per candidate in the requested
     language. All candidates are generated and tested in parallel.
     """
+    if bad := _temperature_guard.refusal(temperature, lambda e: _format_runtime_model_call_error_policy(e, **_ollama_error_endpoint())):
+        return bad
     _refresh_live_cloud_tiers()
     language_list = [
         grounding.normalize_language(x)
