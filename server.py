@@ -60,6 +60,7 @@ import sonder_runtime.application.session.transcript_export as session_transcrip
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
+from sonder_runtime.domain.session_ref import parse_session_ref
 import reflection
 import sonder_runtime.adapters.embeddings as embeddings
 import personas
@@ -16834,7 +16835,7 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         export_format = atif_export.normalize_session_export_format(format)
         if export_format is None:
             raise InvalidInput("unknown session_export format (use 'text' or 'atif')")
-    session_id = _resolve_session(session)
+    session_id = _resolve_session(parse_session_ref(session) or session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
     limit = _safe_limit_policy(limit, 50, 200)
