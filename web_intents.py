@@ -775,8 +775,16 @@ def _current_followup_topic(text: str, history) -> dict | None:
     return _topic(family, query, subject, fresh=True, inherited=True)
 
 
+_MAX_CLEANABLE_LOCATION = 512
+
+
 def _clean_location(value: str) -> str:
     location = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n?!.,;:")
+    if len(location) > _MAX_CLEANABLE_LOCATION:
+        # A real place is at most 120 characters once cleaned; anything this long is
+        # noise, and refusing it here keeps the fixpoint loop below linear-bounded
+        # (each pass is O(n) and removes at most a few characters).
+        return ""
     lowered = location.lower()
     # Strip to a fixpoint so a second call on the result is a no-op ("the the x").
     # Every pass either shortens the text (a trailing-time or "the " removal, or a
