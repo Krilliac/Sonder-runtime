@@ -19,7 +19,8 @@ from sonder_runtime.adapters.inference.openai_compat_gateway import (
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_target import ModelTarget
 from sonder_runtime.application.ports.vision_gateway import VisionRequest
-from sonder_runtime.domain.common.errors import DependencyUnavailable, Forbidden, SonderError
+from sonder_runtime.domain.common.errors import (DependencyUnavailable, Forbidden, InvalidInput,
+                                                  SonderError)
 from sonder_runtime.domain.gpu_admission import HostMemoryReading
 from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
 
@@ -50,19 +51,77 @@ def test_redact_url_strips_userinfo_query_fragment():
 
 
 @pytest.mark.parametrize(
-    "value",
+    "value, expected",
     [
-        "http://user:p/s3cret@127.0.0.1:11434/v1",
-        "http://user:p?s3cret@127.0.0.1:11434",
-        "http://user:p#s3cret@127.0.0.1:11434",
-        "http://s3cret@127.0.0.1:11434",
-        "http://user:a@b:s3cret@127.0.0.1:11434",
+        # An "@" after "/", "?" or "#" cannot be told from path or query text.
+        ("http://user:p/s3cret@127.0.0.1:11434/v1", "http://<redacted>"),
+        ("http://user:p?s3cret@127.0.0.1:11434", "http://<redacted>"),
+        ("http://user:p#s3cret@127.0.0.1:11434", "http://<redacted>"),
+        # Every "@" before the first delimiter: userinfo up to the last one is dropped.
+        ("http://s3cret@127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://user:a@b:s3cret@127.0.0.1:11434", "http://127.0.0.1:11434"),
     ],
 )
-def test_redact_url_drops_userinfo_with_unescaped_delimiters(value):
-    rendered = redact_url(value)
-    assert SECRET not in rendered and "user" not in rendered
-    assert rendered.startswith("http://127.0.0.1:11434") or rendered == "http://<redacted>"
+def test_redact_url_drops_userinfo_with_unescaped_delimiters(value, expected):
+    assert redact_url(value) == expected
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://u:s3cret@remote.example.com:bad",
+        "http://u:s3cret/@remote.example.com",
+        "http://u:s3cret@127.0.0.1:65536",
+        "http://u:s3cret@",
+    ],
+)
+def test_unparsable_credentialed_origin_is_never_loopback(origin):
+    from sonder_runtime.domain import ollama_policy
+
+    reduced = gpu_admission._origin_without_userinfo(origin)
+    assert SECRET not in reduced
+    assert ollama_policy.is_loopback(reduced) is False
+
+
+def test_admission_keeps_a_credentialed_loopback_origin_local():
+    from sonder_runtime.domain import ollama_policy
+
+    reduced = gpu_admission._origin_without_userinfo(" http://u:s3cret@127.0.0.1:11434 ")
+    assert reduced == "http://127.0.0.1:11434"
+    assert ollama_policy.is_loopback(reduced) is True
+
+
+def test_sonder_inference_invalid_base_url_message_has_no_credentials():
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import normalize_base_url
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    with pytest.raises(InvalidInput) as caught:
+        normalize_base_url("https://user:s3cret@127.0.0.1:bad")
+    assert SECRET not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://user:s3cret@127.0.0.1/v1", "http://user:s3cret@127.0.0.1:8080/v1", "https://s3cret@api.example.com/v1"],
+)
+def test_openai_compat_refuses_credentials_in_base_url_before_sending(base_url):
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    sent = []
+    gateway = OpenAICompatibleGateway(
+        OpenAICompatibleConfig(base_url=base_url, model="m"),
+        transport=lambda url, payload, headers, timeout: sent.append(url) or {"ok": True},
+    )
+    with pytest.raises(InvalidInput) as caught:
+        gateway._post("/embeddings", {}, OpenAICompatibleConfig(base_url=base_url, model="m"), 5.0)
+    assert sent == []
+    text = str(caught.value)
+    cause = caught.value.__cause__
+    while cause is not None:
+        text += " " + str(cause)
+        cause = cause.__cause__
+    assert SECRET not in text
 
 
 @pytest.mark.parametrize(
@@ -157,7 +216,8 @@ def test_vision_post_failure_does_not_log_credentials(caplog, monkeypatch):
 
 def _gateway(transport) -> tuple[OpenAICompatibleGateway, OpenAICompatibleConfig]:
     cfg = OpenAICompatibleConfig(
-        base_url="http://user:s3cret@127.0.0.1:8080/v1?api_key=s3cret",
+        # Credentials in the base URL are refused outright; the query still carries one.
+        base_url="http://127.0.0.1:8080/v1?api_key=s3cret",
         model="m",
     )
     return OpenAICompatibleGateway(cfg, transport=transport), cfg
@@ -214,7 +274,7 @@ def test_openai_compat_forbidden_messages_do_not_carry_credentials(base_url):
     with pytest.raises(Forbidden) as consent:
         gateway._enforce_consent(cfg, local_owner_context(correlation_id="redact"))
     assert SECRET not in str(consent.value)
-    with pytest.raises(Forbidden) as transport:
+    with pytest.raises((Forbidden, InvalidInput)) as transport:
         gateway._require_secure_transport(
             OpenAICompatibleConfig(base_url=base_url.replace("https", "http"), model="m")
         )

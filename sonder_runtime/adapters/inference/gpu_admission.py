@@ -225,22 +225,26 @@ def policy_from_config(config: GpuAdmissionConfig) -> GpuAdmissionPolicy:
     )
 
 
+_UNPARSABLE_ORIGIN = "http://<redacted>"
+
+
 def _origin_without_userinfo(origin: str) -> str:
     """``origin`` with any userinfo removed: ``scheme://host[:port]``.
 
     Admission keys, caches and logs every origin it sees, so credentials are
-    dropped here for every caller. An origin with no ``@`` is returned as is;
-    one that cannot be parsed becomes "" (never loopback, never readable).
+    dropped here for every caller. An origin with no ``@`` is returned as is.
+    One that cannot be parsed becomes ``_UNPARSABLE_ORIGIN``: never "", which
+    ``ollama_policy`` reads as the default loopback host.
     """
     if "@" not in origin:
         return origin
     try:
-        parts = urllib.parse.urlsplit(origin)
+        parts = urllib.parse.urlsplit(origin.strip())
         host, port = parts.hostname, parts.port
     except ValueError:
-        return ""
+        return _UNPARSABLE_ORIGIN
     if not host or not parts.scheme:
-        return ""
+        return _UNPARSABLE_ORIGIN
     if ":" in host:
         host = "[%s]" % host
     return "%s://%s%s" % (parts.scheme, host, "" if port is None else ":%d" % port)

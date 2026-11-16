@@ -284,6 +284,14 @@ class OpenAICompatibleGateway:
         consent is about where prompts go, not about sending them in clear.
         """
         parts = urlsplit(cfg.base_url)
+        if "@" in parts.netloc or "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]:
+            # urllib never sends URL userinfo as auth (the key goes in a header),
+            # and http.client's error for it repeats the password, so refuse it
+            # before any request is built.
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain credentials "
+                "(user:password@); set the API key instead"
+            )
         scheme = (parts.scheme or "").lower()
         if scheme == "https" or self._is_loopback(cfg.base_url):
             return

@@ -74,6 +74,7 @@ from ...application.ports.model_gateway import (
     require_model_text,
 )
 from ...application.ports.model_gateway_contract import Capability, CapabilityHealth
+from .log_safe import redact_url
 from ...domain.common.errors import (
     CapacityExceeded,
     DeadlineExceeded,
@@ -518,7 +519,9 @@ def normalize_base_url(value: str) -> str:
         host = parts.hostname
         port = parts.port
     except ValueError as exc:
-        raise InvalidInput("sonder-inference base URL %r is not a valid URL" % raw) from exc
+        raise InvalidInput(
+            "sonder-inference base URL %r is not a valid URL" % redact_url(raw)
+        ) from None
     if (parts.scheme not in ("http", "https") or not host
             or parts.username or parts.password or parts.query or parts.fragment):
         raise InvalidInput(
