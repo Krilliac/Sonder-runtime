@@ -71,14 +71,18 @@ def _substance(text):
     out = str(text or "")
     # Trailing whitespace goes before the match (the footer must end the text) but leading
     # whitespace stays until the end: the footer's own leading newline is part of the match.
-    # Stacked footers peel one per pass. Each pass that changes the text strictly shortens it,
-    # so the loop ends without a pass cap.
+    # A footer row cannot hold a newline, so only the LAST header can start a footer that runs to
+    # the end. Stacked footers peel from the right, one rfind and one anchored match each, on a
+    # moving end index (no slicing), so the total work stays linear in the text length.
+    end = len(out)
     while True:
-        stripped = _ENSEMBLE_FOOTER_RE.sub("", out.rstrip())
-        if stripped == out:
+        while end and out[end - 1].isspace():
+            end -= 1
+        start = out.rfind("\n=== ENSEMBLE (", 0, end)
+        if start < 0 or _ENSEMBLE_FOOTER_RE.match(out, start, end) is None:
             break
-        out = stripped
-    return out.strip()
+        end = start
+    return out[:end].strip()
 
 
 def _ask(ask_fn, prompt, tier):

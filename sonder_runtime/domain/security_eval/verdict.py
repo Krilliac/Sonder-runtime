@@ -21,6 +21,8 @@ MAX_TEXT_CHARS = 200_000
 _FENCE_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 _LABEL_RE = re.compile(r"^[ \t>*_#-]*VERDICT[ \t*_]*[:=][ \t*_]*(CONFIRMED|REFUTED|UNCERTAIN)\b",
                        re.IGNORECASE | re.MULTILINE)
+_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think>", re.IGNORECASE)
 _DECODER = json.JSONDecoder()
 
 
@@ -48,22 +50,23 @@ class ParsedHypothesis:
 def _strip_think(text: str) -> str:
     """Drop each ``<think>...</think>`` block (any case); an unterminated ``<think>`` drops the rest.
 
-    One left-to-right pass: every position is examined a bounded number of times, so a run of
-    openers or closers cannot go quadratic.
+    One left-to-right pass over the original text (case-insensitive searches, so indices stay
+    aligned even for characters whose lowercase form has a different length, such as U+0130):
+    every position is examined a bounded number of times, so a run of openers or closers cannot
+    go quadratic.
     """
-    lowered = text.lower()
     parts: list[str] = []
     position = 0
     while True:
-        opener = lowered.find("<think>", position)
-        if opener < 0:
+        opener = _THINK_OPEN.search(text, position)
+        if opener is None:
             parts.append(text[position:])
             break
-        parts.append(text[position:opener])
-        closer = lowered.find("</think>", opener + 7)
-        if closer < 0:
+        parts.append(text[position:opener.start()])
+        closer = _THINK_CLOSE.search(text, opener.end())
+        if closer is None:
             break
-        position = closer + 8
+        position = closer.end()
     return "".join(parts)
 
 
@@ -88,7 +91,10 @@ _WHITESPACE = " \t\n\r"
 
 
 def _plausible(text: str, index: int, opener: str) -> bool:
-    """Whether the character after the opener (past JSON whitespace) can begin that value's content."""
+    """Whether the character after the opener (past JSON whitespace) can begin that value's content.
+
+    Non-standard NaN/Infinity array starts are skipped, which fails closed.
+    """
     following = index + 1
     while following < len(text) and text[following] in _WHITESPACE:
         following += 1
