@@ -40,6 +40,20 @@ def _read_bounded(stream, limit: int) -> bytes:
     return b"".join(chunks)
 
 
+def _admission_origin(target: urllib.parse.SplitResult) -> str:
+    """``scheme://host[:port]`` for GPU admission, never carrying userinfo.
+
+    Raises ValueError for a URL with no host or an invalid port.
+    """
+    host = target.hostname
+    if not host:
+        raise ValueError("vision endpoint has no host")
+    if ":" in host:
+        host = "[%s]" % host
+    port = target.port
+    return "%s://%s%s" % (target.scheme, host, "" if port is None else ":%d" % port)
+
+
 def configure_typed_request_timeout(seconds: int | None) -> None:
     global _configured_request_timeout
     if seconds is not None:
@@ -124,7 +138,7 @@ class OllamaVisionGateway:
         try:
             target = urllib.parse.urlsplit(url)
             with gpu_admission.process_service().admit(
-                target.path, payload, origin="%s://%s" % (target.scheme, target.netloc),
+                target.path, payload, origin=_admission_origin(target),
                 deadline=time.monotonic() + budget,
             ) as ticket:
                 request = urllib.request.Request(
@@ -144,12 +158,12 @@ class OllamaVisionGateway:
             raise Conflict(refused.detail) from refused
         except Exception as exc:
             logger.warning(
-                f"Ollama vision request failed: url={redact_url(url)!r},"
+                f"Ollama vision request failed: url={redact_url(url)!r}, "
                 f"timeout={timeout}",
                 exc_info=True,
             )
             logger.error(
-                f"Ollama vision inference request failed, url={redact_url(url)!r},"
+                f"Ollama vision inference request failed, url={redact_url(url)!r}, "
                 f"timeout={timeout}",
                 exc_info=True,
             )

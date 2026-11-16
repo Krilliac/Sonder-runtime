@@ -273,7 +273,7 @@ class OpenAICompatibleGateway:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
             raise Forbidden(
                 "endpoint %r is non-loopback but this operation context does "
-                "not allow cloud" % cfg.base_url
+                "not allow cloud" % redact_url(cfg.base_url)
             )
 
     def _require_secure_transport(self, cfg: OpenAICompatibleConfig) -> None:
@@ -297,7 +297,7 @@ class OpenAICompatibleGateway:
             "OpenAI-compatible endpoint %s is not loopback and uses plaintext "
             "http; use an https:// base URL, or list its private network in %s "
             "to allow http to that private IP address"
-            % (parts.hostname or cfg.base_url, ENV_ALLOW_HTTP_NETWORKS)
+            % (parts.hostname or redact_url(cfg.base_url), ENV_ALLOW_HTTP_NETWORKS)
         )
 
     @staticmethod

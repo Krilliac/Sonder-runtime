@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterator, Mapping, NoReturn, Protocol, cast
 from sonder_runtime.adapters.inference.gpu_admission_store import (
     FULL, HELD, GpuAdmissionStore, StoreUnavailable,
 )
+from sonder_runtime.adapters.inference.log_safe import redact_url
 from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
@@ -234,7 +235,7 @@ def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any
             return None
         value = json.loads(raw.decode("utf-8"))
     except Exception:  # a failed read means "unknown", never a failed request
-        logger.debug("gpu admission could not read %s%s", origin, path, exc_info=True)
+        logger.debug("gpu admission could not read %s%s", redact_url(origin), path, exc_info=True)
         return None
     return value if isinstance(value, Mapping) else None
 
@@ -738,7 +739,7 @@ class GpuAdmission:
                           window_seconds=self._policy.repin_window_seconds)
             logger.warning(
                 "num_ctx repin: model=%s origin=%s requested=%d replaces the pinned window; "
-                "the model reloads once (%s)", key, origin, requested, plan.ctx.detail)
+                "the model reloads once (%s)", key, redact_url(origin), requested, plan.ctx.detail)
         elif action in (CtxAction.SERVE_PINNED, CtxAction.INHERIT_PINNED):
             if served is None:  # resolve_num_ctx serves a pin only with its window
                 _inconsistent_ctx_decision(plan.ctx)
@@ -756,7 +757,8 @@ class GpuAdmission:
                 if first:
                     logger.warning(
                         "num_ctx pinned: model=%s requested=%d is served at the loaded window "
-                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served, origin)
+                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served,
+                        redact_url(origin))
             else:
                 logger.debug("num_ctx inherited: model=%s request named no window; using pinned=%d",
                              key, served)
@@ -831,7 +833,7 @@ class GpuAdmission:
                 logger.error(
                     "num_ctx mismatch: model=%s origin=%s sent=%d effective=%d; the server runs "
                     "the model at a different window than was requested",
-                    entry.model_key, entry.origin, sent, row.context_length)
+                    entry.model_key, redact_url(entry.origin), sent, row.context_length)
                 if self._metrics is not None:
                     self._metrics.observe_num_ctx_mismatch()
         elif verdict is CtxCheck.UNVERIFIABLE:
@@ -843,7 +845,8 @@ class GpuAdmission:
             if first:
                 logger.info(
                     "num_ctx unverifiable: model=%s origin=%s; /api/ps reports no context_length, "
-                    "so the sent window %s cannot be compared", entry.model_key, entry.origin, sent)
+                    "so the sent window %s cannot be compared",
+                    entry.model_key, redact_url(entry.origin), sent)
 
     def _maybe_measure(self, entry: _Entry) -> None:
         if not ollama_policy.is_loopback(entry.origin) or self._store is None:
