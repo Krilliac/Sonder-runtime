@@ -69,7 +69,7 @@ _STRUCTURED_CALL_RE = re.compile(
     r"(?P<name>/?[A-Za-z][A-Za-z0-9_-]*)\s+"
     r"(?:tool|command)"
     r"(?:\s+(?:with|using|for)\s+(?P<arg>\S.*))?\s*$",
-    re.I,
+    re.IGNORECASE | re.ASCII,
 )
 
 
@@ -111,7 +111,7 @@ def _web_search_action(match):
         r"show|list|check|verify|validate|download|put|import|save|write|"
         r"copy|move|tell)\b",
         arg,
-        re.I,
+        re.IGNORECASE | re.ASCII,
     ):
         return None
     return ("/web_search %s" % arg).strip() if arg else None
@@ -128,7 +128,7 @@ def _weather_action(match):
         r"\b(?:and|then)\s+(?:tell|show|explain|describe|recommend|"
         r"suggest|say|summarize|search|fetch|open|run|check)\b",
         arg,
-        re.I,
+        re.IGNORECASE | re.ASCII,
     ):
         return None
     return ("/weather %s" % arg).strip()
@@ -150,7 +150,7 @@ def _test_runner_action(match):
 
 
 def _rule(pattern, action):
-    return (re.compile(pattern, re.I), action)
+    return (re.compile(pattern, re.IGNORECASE | re.ASCII), action)
 
 
 def _structured_catalog_match(value):
@@ -643,7 +643,7 @@ _RULES = [
 # summary-only stage. "delete task abc" names /task_delete; "clean up" names
 # nothing.
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[A-Za-z0-9]+")  # ASCII only: str.lower() folds U+212A to "k"
 
 # The three vocabularies are written as plain prose here and normalized into
 # _STOPWORDS / _OPENERS / _POLITE below, once _norm_token exists: they have to
@@ -737,7 +737,7 @@ def _norm_token(token):
 
 
 def _tokenize(text):
-    return [_norm_token(t) for t in _WORD.findall(str(text or "").lower())]
+    return [_norm_token(t.lower()) for t in _WORD.findall(str(text or ""))]
 
 
 def _word_set(raw):

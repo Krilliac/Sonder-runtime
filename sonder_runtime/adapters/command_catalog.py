@@ -1904,6 +1904,10 @@ def by_name(name: str) -> Optional[CatalogCommand]:
         return None
     if not wanted.startswith("/"):
         wanted = "/" + wanted
+    if not wanted.isascii():
+        # Command names and aliases are ASCII; str.lower() would fold U+212A
+        # (Kelvin sign) to "k" and resolve a non-ASCII head to a real command.
+        return None
     wanted = wanted.lower()
     for command in catalog():
         if wanted in (n.lower() for n in command.all_names):
