@@ -27,6 +27,10 @@ const double _inset = SonderSpace.sm;
 /// The icon slot: centred on the rail in both states.
 const double _slot = 24;
 
+/// A row's hit area is 48 px; the pill drawn for hover and selection is
+/// inset so rows read as a list rather than a stack of slabs.
+const EdgeInsets _pillInset = EdgeInsets.symmetric(vertical: SonderSpace.xs);
+
 /// A count or status shown beside a destination. It always carries words:
 /// [text] is drawn with the kind's glyph, [semantic] is what is heard.
 @immutable
@@ -89,9 +93,11 @@ class SidebarChatState {
       identityHashCode(threads), currentThreadId, runningThreadId, loading);
 }
 
-/// The app's persistent navigation: brand, New chat, Search, the four
-/// destinations with their badges, the conversation list grouped by date,
-/// and the connection footer.
+/// The app's persistent navigation, in the order people know from chat
+/// apps: brand, New chat, Search, then the conversations grouped by date
+/// under a "Chats" row that is also the way back to the conversation; the
+/// working destinations (Agents, Runtime, Settings) with their badges sit
+/// below the list, above the connection footer.
 ///
 /// On wide windows it sits beside the page and collapses to a 64 px icon
 /// rail ([expansion] runs 1 → 0); the layout is drawn at full width and
@@ -149,7 +155,7 @@ class ShellSidebar extends StatelessWidget {
     final tokens = SonderTokens.of(context);
     if (inDrawer) {
       return ColoredBox(
-        color: tokens.panel,
+        color: tokens.sunken,
         child: SafeArea(
           right: false,
           child: LayoutBuilder(
@@ -167,10 +173,8 @@ class ShellSidebar extends StatelessWidget {
         return Container(
           key: const Key('shell-sidebar'),
           width: width,
-          decoration: BoxDecoration(
-            color: tokens.panel,
-            border: Border(right: BorderSide(color: tokens.hairline)),
-          ),
+          // The frame is told from the page by tone alone.
+          color: tokens.sunken,
           child: ClipRect(
             child: OverflowBox(
               alignment: Alignment.topLeft,
@@ -209,7 +213,7 @@ class ShellSidebar extends StatelessWidget {
             const SizedBox(height: SonderSpace.xs),
             _NavItem(
               key: const Key('shell-new-chat'),
-              icon: const _NewChatIcon(),
+              icon: Icon(Icons.maps_ugc_outlined, size: 18, color: tokens.text),
               label: 'New chat',
               emphasis: true,
               tooltip: 'New chat (${keys.combo('N')})',
@@ -222,31 +226,25 @@ class ShellSidebar extends StatelessWidget {
               tooltip: 'Search chats (${keys.combo('P')})',
               onTap: onSearch,
             ),
-            const SizedBox(height: SonderSpace.md),
-            ValueListenableBuilder<Map<WorkspaceDestination, SidebarBadge>>(
-              valueListenable: badges,
-              builder: (context, badges, _) => Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final destination in WorkspaceDestination.values)
-                    _NavItem(
-                      key: Key('shell-destination-${destination.name}'),
-                      icon: Icon(destination.icon,
-                          size: 18,
-                          color: destination == current
-                              ? tokens.accentText
-                              : tokens.text2),
-                      label: destination.label,
-                      selected: destination == current,
-                      badge: badges[destination],
-                      tooltip: '${destination.label} '
-                          '(${keys.combo('${destinationNumber(destination)}')})',
-                      onTap: () => onDestination(destination),
-                    ),
-                ],
+            const SizedBox(height: SonderSpace.sm),
+            ValueListenableBuilder<SidebarChatState>(
+              valueListenable: chat,
+              builder: (context, state, _) => ValueListenableBuilder<
+                  Map<WorkspaceDestination, SidebarBadge>>(
+                valueListenable: badges,
+                builder: (context, badges, _) => _ChatsRow(
+                  selected: current == WorkspaceDestination.chat,
+                  // A reply still being written while another page is up.
+                  badge: badges[WorkspaceDestination.chat],
+                  tooltip: '${WorkspaceDestination.chat.label} '
+                      '(${keys.combo('${destinationNumber(WorkspaceDestination.chat)}')})',
+                  onTap: () => onDestination(WorkspaceDestination.chat),
+                  projects: _projectsOf(state.threads),
+                  projectFilter: projectFilter,
+                  onProjectFilter: onProjectFilter,
+                ),
               ),
             ),
-            const SizedBox(height: SonderSpace.md),
             Expanded(
               child: _Fade(
                 child: ValueListenableBuilder<SidebarChatState>(
@@ -257,14 +255,39 @@ class ShellSidebar extends StatelessWidget {
                     chatShown: current == WorkspaceDestination.chat,
                     now: now(),
                     projectFilter: projectFilter,
-                    onProjectFilter: onProjectFilter,
                     onOpenThread: onOpenThread,
                     onDeleteThread: onDeleteThread,
                   ),
                 ),
               ),
             ),
+            // The list scrolls under this edge; the rule marks where.
             Divider(height: 1, thickness: 1, color: tokens.hairline),
+            const SizedBox(height: SonderSpace.xs),
+            ValueListenableBuilder<Map<WorkspaceDestination, SidebarBadge>>(
+              valueListenable: badges,
+              builder: (context, badges, _) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final destination in WorkspaceDestination.values)
+                    if (destination != WorkspaceDestination.chat)
+                      _NavItem(
+                        key: Key('shell-destination-${destination.name}'),
+                        icon: Icon(destination.icon,
+                            size: 18,
+                            color: destination == current
+                                ? tokens.text
+                                : tokens.text2),
+                        label: destination.label,
+                        selected: destination == current,
+                        badge: badges[destination],
+                        tooltip: '${destination.label} '
+                            '(${keys.combo('${destinationNumber(destination)}')})',
+                        onTap: () => onDestination(destination),
+                      ),
+                ],
+              ),
+            ),
             _Footer(connection: connection, onConnection: onConnection),
           ],
         ),
@@ -272,6 +295,12 @@ class ShellSidebar extends StatelessWidget {
     );
   }
 }
+
+/// The projects [threads] span, sorted; an unnamed project is "default".
+List<String> _projectsOf(List<ChatThread> threads) => {
+      for (final t in threads) t.project.trim().isEmpty ? 'default' : t.project,
+    }.toList()
+      ..sort();
 
 /// The expansion state, read by every row: [t] runs 0 (rail) to 1 (full).
 class _Expansion extends InheritedWidget {
@@ -462,24 +491,9 @@ class _SidebarIcon extends StatelessWidget {
       );
 }
 
-class _NewChatIcon extends StatelessWidget {
-  const _NewChatIcon();
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return Container(
-      width: _slot,
-      height: _slot,
-      decoration: BoxDecoration(color: tokens.accent, shape: BoxShape.circle),
-      child: Icon(Icons.add, size: 16, color: tokens.onAccent),
-    );
-  }
-}
-
 /// One rail entry: an icon slot centred on the rail, a label and an
-/// optional badge that fade in as the sidebar expands. Selected entries get
-/// the raised surface and the accent edge, like the category rails.
+/// optional badge that fade in as the sidebar expands. The selected entry
+/// is a soft pill of the raised tone, as in the category rails.
 class _NavItem extends StatelessWidget {
   final Widget icon;
   final String label;
@@ -503,98 +517,124 @@ class _NavItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final e = _Expansion.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: _inset),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: SizedBox(
+          width: e.itemWidth(),
+          child: _NavSurface(
+            icon: icon,
+            label: label,
+            tooltip: tooltip,
+            onTap: onTap,
+            selected: selected,
+            emphasis: emphasis,
+            badge: badge,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The tappable body of a rail entry, as wide as its parent allows.
+class _NavSurface extends StatelessWidget {
+  final Widget icon;
+  final String label;
+  final String tooltip;
+  final VoidCallback onTap;
+  final bool selected;
+  final bool emphasis;
+  final SidebarBadge? badge;
+
+  /// Draw the selection only on the collapsed rail: expanded, something
+  /// else (the open conversation's row) already shows where the person is.
+  final bool quietWhenExpanded;
+
+  const _NavSurface({
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.onTap,
+    this.selected = false,
+    this.emphasis = false,
+    this.badge,
+    this.quietWhenExpanded = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final e = _Expansion.of(context);
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
     final badge = this.badge;
     final semantic = badge == null ? label : '$label, ${badge.semantic}';
     final labelStyle = text.bodyMedium?.copyWith(
-      color: selected || emphasis ? tokens.text : tokens.text2,
-      fontWeight: selected || emphasis ? FontWeight.w600 : FontWeight.w500,
+      color: tokens.text,
+      fontWeight: selected || emphasis ? FontWeight.w500 : FontWeight.w400,
     );
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(_inset, 1, _inset, 1),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: SizedBox(
-          width: e.itemWidth(),
-          child: Tooltip(
-            message: tooltip,
-            excludeFromSemantics: true,
-            // One node per entry, so its label and state are its own.
-            child: Semantics(
-              container: true,
-              child: HoverSurface(
-                selected: selected,
-                onTap: onTap,
-                semanticLabel: semantic,
-                child: ExcludeSemantics(
-                  child: SizedBox(
-                    height: _itemSize,
-                    child: Stack(clipBehavior: Clip.hardEdge, children: [
-                      // The content is laid out at the full row width and
-                      // clipped, so labels never re-wrap mid-animation.
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: e.fullWidth,
+    return Tooltip(
+      message: tooltip,
+      excludeFromSemantics: true,
+      // One node per entry, so its label and state are its own.
+      child: Semantics(
+        container: true,
+        child: HoverSurface(
+          selected: selected,
+          showSelected: !quietWhenExpanded || e.collapsed,
+          onTap: onTap,
+          semanticLabel: semantic,
+          inset: _pillInset,
+          child: ExcludeSemantics(
+            child: SizedBox(
+              height: _itemSize - _pillInset.vertical,
+              child: Stack(clipBehavior: Clip.hardEdge, children: [
+                // The content is laid out at the full row width and
+                // clipped, so labels never re-wrap mid-animation.
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: e.fullWidth,
+                  child: Row(children: [
+                    const SizedBox(width: SonderSpace.md),
+                    SizedBox(
+                      width: _slot,
+                      child: Center(child: icon),
+                    ),
+                    const SizedBox(width: SonderSpace.md),
+                    Expanded(
+                      child: _Fade(
                         child: Row(children: [
-                          const SizedBox(width: SonderSpace.md),
-                          SizedBox(
-                            width: _slot,
-                            child: Center(child: icon),
-                          ),
-                          const SizedBox(width: SonderSpace.md),
                           Expanded(
-                            child: _Fade(
-                              child: Row(children: [
-                                Expanded(
-                                  child: Text(label,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      softWrap: false,
-                                      style: labelStyle),
-                                ),
-                                if (badge != null) ...[
-                                  const SizedBox(width: SonderSpace.sm),
-                                  StatusPill(badge.kind,
-                                      word: badge.text, dense: true),
-                                ],
-                                const SizedBox(width: SonderSpace.md),
-                              ]),
-                            ),
+                            child: Text(label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
+                                style: labelStyle),
                           ),
+                          if (badge != null) ...[
+                            const SizedBox(width: SonderSpace.sm),
+                            StatusPill(badge.kind,
+                                word: badge.text, dense: true),
+                          ],
+                          const SizedBox(width: SonderSpace.md),
                         ]),
                       ),
-                      if (badge != null)
-                        Positioned(
-                          left: SonderSpace.md + _slot - SonderSpace.sm,
-                          top: SonderSpace.sm,
-                          child: Opacity(
-                            opacity: (1 - e.t * 2).clamp(0.0, 1.0),
-                            child: _MiniBadge(badge),
-                          ),
-                        ),
-                      // The accent edge of the selected entry.
-                      Positioned(
-                        left: 0,
-                        top: SonderSpace.md,
-                        bottom: SonderSpace.md,
-                        child: AnimatedContainer(
-                          duration: SonderMotion.of(context, SonderMotion.fast),
-                          curve: SonderMotion.standard,
-                          width: selected ? 3 : 0,
-                          decoration: BoxDecoration(
-                            color: tokens.accent,
-                            borderRadius:
-                                BorderRadius.circular(SonderRadius.pill),
-                          ),
-                        ),
-                      ),
-                    ]),
-                  ),
+                    ),
+                  ]),
                 ),
-              ),
+                if (badge != null)
+                  Positioned(
+                    left: SonderSpace.md + _slot - SonderSpace.sm,
+                    top: SonderSpace.xs,
+                    child: Opacity(
+                      opacity: (1 - e.t * 2).clamp(0.0, 1.0),
+                      child: _MiniBadge(badge),
+                    ),
+                  ),
+              ]),
             ),
           ),
         ),
@@ -618,7 +658,7 @@ class _MiniBadge extends StatelessWidget {
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.circular(SonderRadius.pill),
-        border: Border.all(color: tokens.panel, width: 2),
+        border: Border.all(color: tokens.sunken, width: 2),
       ),
       alignment: Alignment.center,
       child: Text(badge.mini,
@@ -634,7 +674,6 @@ class _ThreadSection extends StatelessWidget {
   final bool touch;
   final DateTime now;
   final String? projectFilter;
-  final ValueChanged<String?> onProjectFilter;
   final ValueChanged<ChatThread> onOpenThread;
   final ValueChanged<ChatThread> onDeleteThread;
 
@@ -644,7 +683,6 @@ class _ThreadSection extends StatelessWidget {
     required this.touch,
     required this.now,
     required this.projectFilter,
-    required this.onProjectFilter,
     required this.onOpenThread,
     required this.onDeleteThread,
   });
@@ -653,11 +691,7 @@ class _ThreadSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    final projects = {
-      for (final t in state.threads)
-        t.project.trim().isEmpty ? 'default' : t.project,
-    }.toList()
-      ..sort();
+    final projects = _projectsOf(state.threads);
     final filter = projects.contains(projectFilter) ? projectFilter : null;
     final shown = filter == null
         ? state.threads
@@ -665,13 +699,7 @@ class _ThreadSection extends StatelessWidget {
             for (final t in state.threads)
               if (t.project == filter) t,
           ];
-    final children = <Widget>[
-      _ChatsHeader(
-        projects: projects,
-        selected: filter,
-        onSelected: onProjectFilter,
-      ),
-    ];
+    final children = <Widget>[];
     if (state.loading) {
       children.add(const ThreadRowsSkeleton());
     } else if (shown.isEmpty) {
@@ -719,13 +747,83 @@ class _ThreadSection extends StatelessWidget {
   }
 }
 
-/// "CHATS", and a project filter when conversations span projects.
-class _ChatsHeader extends StatelessWidget {
+/// "Chats": the head of the conversation list and the Chat destination in
+/// one row. Expanded, it titles the list and carries the project filter
+/// when conversations span projects; on the rail it is the icon that
+/// returns to the conversation, and shows as selected there (expanded, the
+/// open conversation's own row carries the selection).
+class _ChatsRow extends StatelessWidget {
+  final bool selected;
+  final SidebarBadge? badge;
+  final String tooltip;
+  final VoidCallback onTap;
+  final List<String> projects;
+  final String? projectFilter;
+  final ValueChanged<String?> onProjectFilter;
+
+  const _ChatsRow({
+    required this.selected,
+    required this.badge,
+    required this.tooltip,
+    required this.onTap,
+    required this.projects,
+    required this.projectFilter,
+    required this.onProjectFilter,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final e = _Expansion.of(context);
+    final tokens = SonderTokens.of(context);
+    final filter = projects.contains(projectFilter) ? projectFilter : null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: _inset),
+      child: Row(children: [
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, box) => Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: lerpDouble(_itemSize, box.maxWidth, e.t),
+                child: KeyedSubtree(
+                  key: Key(
+                      'shell-destination-${WorkspaceDestination.chat.name}'),
+                  child: _NavSurface(
+                    icon: Icon(WorkspaceDestination.chat.icon,
+                        size: 18,
+                        color: selected ? tokens.text : tokens.text2),
+                    label: 'Chats',
+                    tooltip: tooltip,
+                    onTap: onTap,
+                    selected: selected,
+                    badge: badge,
+                    quietWhenExpanded: true,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (projects.length > 1)
+          _Fade(
+            child: _ProjectFilter(
+              projects: projects,
+              selected: filter,
+              onSelected: onProjectFilter,
+            ),
+          ),
+      ]),
+    );
+  }
+}
+
+/// Narrows the conversation list to one project.
+class _ProjectFilter extends StatelessWidget {
   final List<String> projects;
   final String? selected;
   final ValueChanged<String?> onSelected;
 
-  const _ChatsHeader({
+  const _ProjectFilter({
     required this.projects,
     required this.selected,
     required this.onSelected,
@@ -737,68 +835,49 @@ class _ChatsHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(_inset + SonderSpace.md, 0, _inset, 0),
-      child: SizedBox(
-        height: _itemSize,
-        child: Row(children: [
-          Expanded(
-            child: Semantics(
-              header: true,
-              child: Text('CHATS', style: text.labelSmall),
-            ),
-          ),
-          if (projects.length > 1)
-            PopupMenuButton<String>(
-              key: const Key('shell-project-filter'),
-              tooltip: 'Show chats from one project',
-              position: PopupMenuPosition.under,
-              onSelected: (value) => onSelected(value == _all ? null : value),
-              itemBuilder: (context) => [
-                for (final value in [_all, ...projects])
-                  PopupMenuItem<String>(
-                    value: value,
-                    child: Row(children: [
-                      SizedBox(
-                        width: 20,
-                        child: (value == _all
-                                ? selected == null
-                                : value == selected)
-                            ? Icon(Icons.check,
-                                size: 16, color: tokens.accentText)
-                            : null,
-                      ),
-                      const SizedBox(width: SonderSpace.sm),
-                      Flexible(
-                        child: Text(value == _all ? 'All projects' : value,
-                            overflow: TextOverflow.ellipsis),
-                      ),
-                    ]),
-                  ),
-              ],
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: _itemSize),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.folder_outlined,
-                      size: 14,
-                      color:
-                          selected == null ? tokens.muted : tokens.accentText),
-                  const SizedBox(width: SonderSpace.xs),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 132),
-                    child: Text(selected ?? 'All projects',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: text.labelMedium?.copyWith(
-                            color: selected == null
-                                ? tokens.text2
-                                : tokens.accentText)),
-                  ),
-                  Icon(Icons.expand_more, size: 16, color: tokens.muted),
-                  const SizedBox(width: SonderSpace.md),
-                ]),
+    return PopupMenuButton<String>(
+      key: const Key('shell-project-filter'),
+      tooltip: 'Show chats from one project',
+      position: PopupMenuPosition.under,
+      onSelected: (value) => onSelected(value == _all ? null : value),
+      itemBuilder: (context) => [
+        for (final value in [_all, ...projects])
+          PopupMenuItem<String>(
+            value: value,
+            child: Row(children: [
+              SizedBox(
+                width: SonderSpace.xl,
+                child: (value == _all ? selected == null : value == selected)
+                    ? Icon(Icons.check, size: 16, color: tokens.accentText)
+                    : null,
               ),
-            ),
+              const SizedBox(width: SonderSpace.sm),
+              Flexible(
+                child: Text(value == _all ? 'All projects' : value,
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ]),
+          ),
+      ],
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: _itemSize),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          const SizedBox(width: SonderSpace.sm),
+          Icon(Icons.folder_outlined,
+              size: 14,
+              color: selected == null ? tokens.muted : tokens.accentText),
+          const SizedBox(width: SonderSpace.xs),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 104),
+            child: Text(selected ?? 'All projects',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: text.labelMedium?.copyWith(
+                    color:
+                        selected == null ? tokens.text2 : tokens.accentText)),
+          ),
+          Icon(Icons.expand_more, size: 16, color: tokens.muted),
+          const SizedBox(width: SonderSpace.sm),
         ]),
       ),
     );
@@ -815,8 +894,7 @@ class _Footer extends StatelessWidget {
   Widget build(BuildContext context) {
     final e = _Expansion.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          _inset, SonderSpace.xs, _inset, SonderSpace.xs),
+      padding: const EdgeInsets.fromLTRB(_inset, 0, _inset, SonderSpace.xs),
       child: Align(
         alignment: Alignment.centerLeft,
         child: SizedBox(
@@ -834,6 +912,7 @@ class _Footer extends StatelessWidget {
                 child: HoverSurface(
                   key: const Key('shell-connection'),
                   onTap: onConnection,
+                  inset: _pillInset,
                   child: ClipRect(
                     child: OverflowBox(
                       alignment: Alignment.centerLeft,

@@ -166,7 +166,12 @@ class ThreadRow extends StatefulWidget {
 class _ThreadRowState extends State<ThreadRow> {
   bool _hover = false;
   bool _focused = false;
+  bool _ring = false;
   bool _revealed = false;
+
+  /// The row's hit area; the pill drawn inside it is inset by [_pillInset].
+  static const double _rowHeight = SonderSpace.x5;
+  static const double _pillInset = SonderSpace.xs;
 
   @override
   Widget build(BuildContext context) {
@@ -181,6 +186,7 @@ class _ThreadRowState extends State<ThreadRow> {
         : _hover
             ? tokens.raised.withValues(alpha: 0.6)
             : Colors.transparent;
+    final radius = BorderRadius.circular(SonderRadius.row);
     return Semantics(
       container: true,
       selected: widget.selected,
@@ -194,70 +200,96 @@ class _ThreadRowState extends State<ThreadRow> {
           canRequestFocus: false,
           skipTraversal: true,
           onFocusChange: (focused) => setState(() => _focused = focused),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 1),
-            child: Material(
+          // Delete is a full 48 px target laid over the row, so the pill
+          // can stay slim without shrinking what a finger has to hit.
+          child: Stack(children: [
+            Material(
               type: MaterialType.transparency,
               child: InkWell(
                 onTap: widget.onTap,
                 onLongPress: widget.touch && onDelete != null
                     ? () => setState(() => _revealed = true)
                     : null,
-                borderRadius: BorderRadius.circular(SonderRadius.row),
-                child: AnimatedContainer(
-                  duration: SonderMotion.of(context, SonderMotion.fast),
-                  curve: SonderMotion.standard,
-                  constraints: const BoxConstraints(minHeight: 48),
-                  padding: const EdgeInsets.only(left: SonderSpace.md),
-                  decoration: BoxDecoration(
-                    color: background,
-                    borderRadius: BorderRadius.circular(SonderRadius.row),
-                  ),
-                  child: Row(
-                    children: [
-                      if (widget.running) ...[
-                        Tooltip(
-                          message: 'Working',
-                          excludeFromSemantics: true,
-                          child: Semantics(
-                            label: StatusKind.running.word,
-                            child: Text(StatusKind.running.glyph,
-                                style: tokens.mono(12,
-                                    color: tokens.accentText,
-                                    weight: FontWeight.w600)),
-                          ),
-                        ),
-                        const SizedBox(width: SonderSpace.sm),
-                      ],
-                      Expanded(
-                        child: Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          softWrap: false,
-                          style: text.bodyMedium?.copyWith(
-                            color: widget.selected ? tokens.text : tokens.text2,
-                            fontWeight: widget.selected
-                                ? FontWeight.w500
-                                : FontWeight.w400,
-                          ),
-                        ),
+                borderRadius: radius,
+                // The pill is the hover, press and focus feedback.
+                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                onFocusChange: (focused) {
+                  final keyboard = FocusManager.instance.highlightMode ==
+                      FocusHighlightMode.traditional;
+                  final show = focused && keyboard;
+                  if (show != _ring) setState(() => _ring = show);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: _pillInset),
+                  child: AnimatedContainer(
+                    duration: SonderMotion.of(context, SonderMotion.fast),
+                    curve: SonderMotion.standard,
+                    constraints: const BoxConstraints(
+                        minHeight: _rowHeight - 2 * _pillInset),
+                    padding: EdgeInsets.only(
+                        left: SonderSpace.md,
+                        right: showDelete ? SonderSpace.x4 : SonderSpace.md),
+                    decoration:
+                        BoxDecoration(color: background, borderRadius: radius),
+                    foregroundDecoration: BoxDecoration(
+                      borderRadius: radius,
+                      border: Border.all(
+                        color: _ring ? tokens.accentText : Colors.transparent,
+                        width: 1.5,
                       ),
-                      if (showDelete)
-                        IconButton(
-                          tooltip: 'Delete chat',
-                          onPressed: onDelete,
-                          iconSize: 16,
-                          icon: Icon(Icons.close, color: tokens.muted),
-                        )
-                      else
-                        const SizedBox(width: SonderSpace.md),
-                    ],
+                    ),
+                    child: Row(
+                      children: [
+                        if (widget.running) ...[
+                          Tooltip(
+                            message: 'Working',
+                            excludeFromSemantics: true,
+                            child: Semantics(
+                              label: StatusKind.running.word,
+                              child: Text(StatusKind.running.glyph,
+                                  style: tokens.mono(12,
+                                      color: tokens.accentText,
+                                      weight: FontWeight.w600)),
+                            ),
+                          ),
+                          const SizedBox(width: SonderSpace.sm),
+                        ],
+                        Expanded(
+                          child: Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                            style: text.bodyMedium?.copyWith(
+                              color:
+                                  widget.selected ? tokens.text : tokens.text2,
+                              fontWeight: widget.selected
+                                  ? FontWeight.w500
+                                  : FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
+            if (showDelete)
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: IconButton(
+                    tooltip: 'Delete chat',
+                    onPressed: onDelete,
+                    iconSize: 16,
+                    icon: Icon(Icons.close, color: tokens.muted),
+                  ),
+                ),
+              ),
+          ]),
         ),
       ),
     );

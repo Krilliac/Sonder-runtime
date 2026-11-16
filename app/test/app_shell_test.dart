@@ -13,6 +13,7 @@ import 'package:sonder_runtime/main.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/shell/app_shell.dart';
 import 'package:sonder_runtime/shell/preferences.dart';
+import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/ui/kit.dart';
 import 'package:sonder_runtime/ui/sonder_mark.dart';
 import 'package:sonder_runtime/workspace_ui.dart';
@@ -193,6 +194,99 @@ void main() {
       await unmountChat(tester);
     });
 
+    testWidgets(
+        'sidebar order: New chat, Search, Chats and its history, then the '
+        'other destinations and the connection footer', (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock, pageBuilder: _standIns());
+      await _settle(tester);
+      double top(Finder finder) => tester.getTopLeft(finder).dy;
+      final rows = <(String, double)>[
+        ('brand', top(find.text('Sonder'))),
+        ('New chat', top(find.byKey(const Key('shell-new-chat')))),
+        ('Search', top(find.byKey(const Key('shell-search')))),
+        ('Chats', top(_destination(WorkspaceDestination.chat))),
+        ('Today', top(find.text('Today'))),
+        ('Older', top(find.text('Older'))),
+        ('Agents', top(_destination(WorkspaceDestination.agents))),
+        ('Runtime', top(_destination(WorkspaceDestination.runtime))),
+        ('Settings', top(_destination(WorkspaceDestination.settings))),
+        ('connection', top(find.byKey(const Key('shell-connection')))),
+      ];
+      for (var i = 1; i < rows.length; i++) {
+        expect(rows[i].$2, greaterThan(rows[i - 1].$2),
+            reason: '${rows[i].$1} sits below ${rows[i - 1].$1}');
+      }
+      // The frame is a tone below the page, with no wall between them.
+      const tokens = SonderTokens.dark;
+      final frame =
+          tester.widget<Container>(find.byKey(const Key('shell-sidebar')));
+      expect(frame.color, tokens.sunken);
+      expect(frame.decoration, isNull);
+      await unmountChat(tester);
+    });
+
+    testWidgets(
+        'the Chats row heads the history and is the Chat destination; '
+        'its selection is drawn only on the rail', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock, pageBuilder: _standIns());
+      await _settle(tester);
+      final row = find.descendant(
+          of: _destination(WorkspaceDestination.chat),
+          matching: find.byType(HoverSurface));
+      expect(find.descendant(of: row, matching: find.text('Chats')),
+          findsOneWidget);
+      // Chat is showing: the row says so, but the open conversation's own
+      // row carries the highlight while the sidebar is expanded.
+      expect(tester.getSemantics(row),
+          isSemantics(isSelected: true, isButton: true, label: 'Chats'));
+      expect(tester.widget<HoverSurface>(row).showSelected, isFalse);
+      expect(tester.widget<ThreadRow>(find.byKey(const ValueKey('a'))).selected,
+          isTrue);
+
+      // Another page: no conversation row stays highlighted, and the row
+      // brings the conversation back.
+      await tester.tap(_destination(WorkspaceDestination.agents));
+      await _settle(tester);
+      expect(tester.getSemantics(row), isSemantics(isSelected: false));
+      expect(tester.widget<ThreadRow>(find.byKey(const ValueKey('a'))).selected,
+          isFalse);
+      await tester.tap(_destination(WorkspaceDestination.chat));
+      await _settle(tester);
+      expect(find.text('Agents page'), findsNothing);
+
+      // Collapsed, the list is gone, so the icon shows the selection.
+      await tester.tap(find.byKey(const Key('shell-collapse')));
+      await _settle(tester);
+      expect(tester.widget<HoverSurface>(row).showSelected, isTrue);
+      handle.dispose();
+      await unmountChat(tester);
+    });
+
+    testWidgets('rows are 48 px targets that draw a slimmer pill',
+        (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock);
+      await _settle(tester);
+      for (final key in const [
+        Key('shell-new-chat'),
+        Key('shell-search'),
+        Key('shell-destination-settings'),
+      ]) {
+        final surface = find.descendant(
+            of: find.byKey(key), matching: find.byType(HoverSurface));
+        expect(tester.getSize(surface).height, 48, reason: '$key');
+        final pill = find.descendant(
+            of: surface, matching: find.byType(AnimatedContainer));
+        expect(tester.getSize(pill.first).height, 40, reason: '$key');
+      }
+      final thread = find.byKey(const ValueKey('a'));
+      expect(tester.getSize(thread).height, 48);
+      await unmountChat(tester);
+    });
+
     testWidgets('long titles stay on one line, ellipsized', (tester) async {
       await pumpShell(tester, FakeChatBackend(),
           size: _desk, prefs: _seed(), clock: _clock);
@@ -277,14 +371,14 @@ void main() {
       await tester.tap(_destination(WorkspaceDestination.runtime));
       await _settle(tester);
       expect(find.text('Runtime page'), findsOneWidget);
-      // The rail says a reply is being written, in words.
-      expect(find.bySemanticsLabel(RegExp(r'^Chat, a reply is working')),
+      // The Chats row says a reply is being written, in words.
+      expect(find.bySemanticsLabel(RegExp(r'^Chats, a reply is working')),
           findsOneWidget);
 
       backend.lastTurn.delta('finished.');
       backend.lastTurn.done('Three agents finished.');
       await _settle(tester);
-      expect(find.bySemanticsLabel(RegExp(r'^Chat, a reply')), findsNothing);
+      expect(find.bySemanticsLabel(RegExp(r'^Chats, a reply')), findsNothing);
 
       await tester.tap(_destination(WorkspaceDestination.chat));
       await _settle(tester);

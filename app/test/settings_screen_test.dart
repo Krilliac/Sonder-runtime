@@ -387,7 +387,7 @@ void main() {
         category: SettingsCategory.general);
     await tester.tap(find.byKey(const Key('settings-model')));
     await tester.pumpAndSettle();
-    expect(find.text('ROUTES'), findsOneWidget);
+    expect(find.text('Routes'), findsOneWidget);
     expect(find.byKey(const Key('settings-model-option-sonder')),
         findsOneWidget);
     expect(find.byKey(const Key('settings-model-option-qwen3:14b')),

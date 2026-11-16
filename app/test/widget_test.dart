@@ -160,7 +160,12 @@ void main() {
     // behind the mobile drawer gesture.
     expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
     expect(find.text('Sonder'), findsOneWidget);
-    expect(find.text('CHATS'), findsOneWidget);
+    // The history's heading is also the Chat destination.
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('shell-destination-chat')),
+            matching: find.text('Chats')),
+        findsOneWidget);
     expect(find.byKey(const Key('shell-menu')), findsNothing);
   });
 
