@@ -777,11 +777,17 @@ def _current_followup_topic(text: str, history) -> dict | None:
 
 def _clean_location(value: str) -> str:
     location = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n?!.,;:")
-    location = _TRAILING_TIME.sub("", location).strip(" \t\r\n?!.,;:")
     lowered = location.lower()
-    if lowered.startswith("the ") and lowered not in _LOCATION_PLACEHOLDERS:
-        location = location[4:].strip()
+    # Strip to a fixpoint so a second call on the result is a no-op ("the the x").
+    for _ in range(8):
+        previous = location
+        location = _TRAILING_TIME.sub("", location).strip(" \t\r\n?!.,;:")
         lowered = location.lower()
+        if lowered.startswith("the ") and lowered not in _LOCATION_PLACEHOLDERS:
+            location = location[4:].strip()
+            lowered = location.lower()
+        if location == previous:
+            break
     if (
         not 2 <= len(location) <= 120
         or lowered in _LOCATION_PLACEHOLDERS
