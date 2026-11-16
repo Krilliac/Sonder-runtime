@@ -1007,7 +1007,7 @@
       ]
     },
     {
-      "file_count": 310,
+      "file_count": 311,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1247,6 +1247,7 @@
         "sonder_runtime/domain/reference_lookup/__init__.py",
         "sonder_runtime/domain/reference_lookup/answer_check.py",
         "sonder_runtime/domain/reference_lookup/applies.py",
+        "sonder_runtime/domain/reference_lookup/library_meta.py",
         "sonder_runtime/domain/reference_lookup/models.py",
         "sonder_runtime/domain/reference_lookup/prompt.py",
         "sonder_runtime/domain/reference_lookup/relevance.py",
