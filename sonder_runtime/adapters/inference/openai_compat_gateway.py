@@ -348,8 +348,9 @@ class OpenAICompatibleGateway:
             "model": model,
             "messages": self._build_messages(request),
             "stream": False,
-            "temperature": float(options.get("temperature", 0.2)),
         }
+        if options.get("temperature") is not None:  # unset: the server's preset applies
+            payload["temperature"] = float(options["temperature"])
         try:
             template_kwargs = normalize_chat_template_options(options)
         except ChatTemplateOptionsError as exc:

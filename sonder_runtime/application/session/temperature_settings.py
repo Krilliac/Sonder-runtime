@@ -74,8 +74,14 @@ STORE = SessionTemperatureStore()
 USAGE = "usage: /temp [0-2|auto]  (shows the value with no argument)"
 
 
-def temp_command(arg: object, session: object, *, store: SessionTemperatureStore | None = None) -> str:
-    """Handle ``/temp``: show, set (``/temp 0.7``) or clear (``/temp auto``)."""
+def temp_command(arg: object, session: object, *, lane: object = None,
+                 store: SessionTemperatureStore | None = None) -> str:
+    """Handle ``/temp``: show, set (``/temp 0.7``) or clear (``/temp auto``).
+
+    ``lane`` is the value the calling surface uses when the session has none
+    (the serve route's ``SONDER_SERVE_TEMPERATURE``), so the bare form shows
+    what the next turn really sends.
+    """
     target = STORE if store is None else store
     text = str(arg if arg is not None else "").strip()
     key = session_key(session)
@@ -83,10 +89,15 @@ def temp_command(arg: object, session: object, *, store: SessionTemperatureStore
         value = target.get(key)
         if value is not None:
             return "temperature: %s (source: session)" % format_temperature(value)
+        lane_value = check_temperature(lane)
+        if lane_value is not None:
+            return ("temperature: %s (source: lane default; /temp sets this "
+                    "session's own). %s" % (format_temperature(lane_value), USAGE))
         return ("temperature: auto (source: preset; the model's own sampling "
                 "preset applies). " + USAGE)
     if key is None:
-        return "refused /temp: this turn has no conversation session to keep it on"
+        return ("refused /temp: this turn has no conversation session to keep it on "
+                "(pass a session id, e.g. session=\"main\")")
     try:
         value = parse_temperature_setting(text)
     except InvalidInput as error:
