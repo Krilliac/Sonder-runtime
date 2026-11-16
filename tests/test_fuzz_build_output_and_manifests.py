@@ -37,7 +37,6 @@ ELF builder below follows the System V gABI struct layouts.
 # called inside the same loop iteration, so late binding of the loop variable cannot occur.
 from __future__ import annotations
 
-import csv
 import json
 import os
 import random
@@ -47,6 +46,7 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -1299,7 +1299,7 @@ def test_fuzz_parse_schtasks_csv_error_contract():
         text = _mutate_text(rng, rng.choice(seeds), seeds)
         order = rng.choice(list(DateOrder))
         state, error = _run("parse_schtasks_csv", lambda t: parse_schtasks_csv(t, rng.choice(("Sonder", "A", "\\Sonder", "")), date_order=order),
-                            text, (TaskParseError, csv.Error), timings)   # csv.Error: see the BUG regression below
+                            text, (TaskParseError,), timings)
         if error is None:
             ok += 1
             assert state.last_result is None or isinstance(state.last_result, int)
@@ -1375,6 +1375,7 @@ def test_fuzz_clangd_uri_to_path_never_yields_nul_and_has_no_other_exception():
     pieces = ["file://", "file:///", "file:////", "host", "share", "%2e%2e", "%2E%2E", "..", "/", "%2f", "%5c", "%5C", "C:", "%3A",
               "a", "%00", "%", "%zz", "\\", "?q=1", "#f", "//", "x y", "%25", "%252e%252e"]
     unc_seen = []
+    unc_inputs = []
     for _ in range(6000):
         uri = rng.choice(("file://", "file:///", "file:////", "")) + "".join(rng.choice(pieces) for _ in range(rng.randint(0, 8)))
         path, error = _run("uri_to_path", uri_to_path, uri, (), timings)
@@ -1384,9 +1385,18 @@ def test_fuzz_clangd_uri_to_path_never_yields_nul_and_has_no_other_exception():
             _fail("uri_to_path", uri, "decoded a NUL into the path")
         if path.replace("\\", "/").startswith("//"):
             unc_seen.append(uri)
+        split = urlsplit(uri)
+        decoded = unquote(split.path)
+        drive_form = len(decoded) > 2 and decoded[0] == "/" and decoded[2] == ":"
+        if split.scheme == "file" and ((split.netloc and split.netloc.lower() != "localhost")
+                                       or (decoded.replace("\\", "/").startswith("//") and not drive_form)):
+            unc_inputs.append(uri)
+            if path != "":
+                _fail("uri_to_path", uri, "UNC/host-shaped URI was not refused: %r" % (path,))
     _check_timings("uri_to_path", timings)
     assert uri_to_path("http://x/a") == "" and uri_to_path("") == "" and uri_to_path(None) == ""   # type: ignore[arg-type]
-    assert unc_seen, "the generator never produced a UNC-shaped URI"
+    assert not unc_seen, "UNC-shaped path returned: %r" % (unc_seen[:3],)
+    assert unc_inputs, "the generator never produced a UNC-shaped URI"
 
 
 def test_clangd_uri_to_path_host_form_does_not_become_unc():
