@@ -518,7 +518,7 @@ def normalize_base_url(value: str) -> str:
         parts = urlsplit(raw)
         host = parts.hostname
         port = parts.port
-    except ValueError as exc:
+    except ValueError:
         raise InvalidInput(
             "sonder-inference base URL %r is not a valid URL" % redact_url(raw)
         ) from None
