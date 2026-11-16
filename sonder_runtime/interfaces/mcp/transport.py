@@ -253,11 +253,19 @@ class StdioMcpTransport:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise McpTransportError("MCP frame is not UTF-8") from exc
-        if len(raw.encode("utf-8")) > self._limits.max_frame_bytes:
+        try:
+            encoded_size = len(raw.encode("utf-8"))
+        except UnicodeEncodeError as exc:  # a lone surrogate in a text stream
+            raise McpTransportError("MCP frame is not UTF-8") from exc
+        if encoded_size > self._limits.max_frame_bytes:
             raise McpTransportError("MCP frame exceeds max_frame_bytes")
         try:
             value = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
+            # ValueError covers JSONDecodeError and an integer past the
+            # int-conversion digit limit; RecursionError is deep nesting.
+            # serve() handles only McpTransportError, so anything else from
+            # one short hostile line used to end the session.
             raise McpTransportError("invalid JSON-RPC frame") from exc
         if not isinstance(value, dict):
             raise McpTransportError("JSON-RPC frame must be an object")
