@@ -1171,3 +1171,14 @@ def test_forwarded_client_ip_ipv6_scope_id_cannot_inject_control_characters():
 def test_regression_forwarded_client_ip_scope_id_with_crlf():
     got = forwarded_client_ip("10.0.0.1", "fe80::1%a\r\nb", proxy_declared=True, trusted_networks=_NETS)
     assert "\r" not in got and "\n" not in got
+
+
+def test_forwarded_client_ip_legal_zone_id_hop_still_resolves_to_itself():
+    for hop in ("fe80::1%eth0", "fe80::1%12"):
+        got = forwarded_client_ip("10.0.0.1", hop, proxy_declared=True, trusted_networks=_NETS)
+        assert got == hop
+
+
+def test_parse_host_header_refuses_every_bracketed_host_with_a_zone_id():
+    for value in ("[fe80::1%eth0]", "[fe80::1%12]", "[fe80::1%25eth0]:80", "[::1%lo]", "[fe80::1%]"):
+        assert parse_host_header(value) is None

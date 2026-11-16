@@ -11,9 +11,11 @@ import pytest
 import sonder_runtime.interfaces.http.serve as ts
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_CREDENTIALED, HOST_TRUSTED, forwarded_client_ip, host_allowed, host_decision,
-    machine_host_names, parse_host_header,
+    machine_host_names, normalize_allowed_host, parse_host_header,
 )
-from sonder_runtime.platform.config import ConfigError, load_config, web_app_root
+from sonder_runtime.platform.config import (
+    ConfigError, _valid_allowed_host, load_config, web_app_root,
+)
 
 
 LOOPBACK_NETS = (ipaddress.ip_network("127.0.0.1/32"), ipaddress.ip_network("::1/128"))
@@ -338,3 +340,26 @@ def test_rotating_forwarded_for_from_loopback_does_not_escape_the_limiter(monkey
         handler.headers = {"X-Forwarded-For": "10.9.%d.1" % n}
         seen.append(handler._client_ip())
     assert seen == ["127.0.0.1"] * 5
+
+
+_ALLOWED_HOST_TABLE = (
+    "localhost", "sonder.example.org", "Sonder.Example.ORG", "example.org.", "a-b.example",
+    "-bad.example", "bad-.example", "a..b", "", " ", "bad host", "a b.example", "x" * 64 + ".example",
+    "10.0.0.5", "10.0.0.5:8080", "256.0.0.1:80", "[::1]", "[::1]:443", "[2001:db8::1]:8443",
+    "[10.0.0.1]", "::1", "[::1", "[::1]x", "[fe80::1%eth0]", "[fe80::1%eth0]:80", "[fe80::1%12]",
+    "aK.example", "K.example", "café.example",
+    "localhost:80", "localhost:", "localhost:0", "localhost:65535", "localhost:65536",
+    "localhost:²", "localhost:٣٣", "localhost:+80", "localhost:-1", "localhost:123456",
+    "localhost:80:81", "localhost :80", "host\r\n.example", 7, None, b"localhost",
+)
+
+
+@pytest.mark.parametrize("entry", _ALLOWED_HOST_TABLE, ids=repr)
+def test_config_allowed_host_validity_matches_the_host_parser_and_never_raises(entry):
+    try:
+        normalize_allowed_host(entry)
+    except ValueError:
+        accepted = False
+    else:
+        accepted = True
+    assert _valid_allowed_host(entry) is accepted
