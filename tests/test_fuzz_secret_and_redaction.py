@@ -603,3 +603,22 @@ def test_near_miss_mutations_never_raise_and_never_leak_when_detected(capsys) ->
         print(f"\n[near-miss seed={SEED}] kind/mutation: total, redact_text changed, scan found")
         for (kind, label), (total, red, scan) in sorted(observed.items()):
             print(f"  {kind:11s} {label:10s} {total:3d} {red:3d} {scan:3d}")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-postgres://u:p@h",
+        "1.https://u:p@h",
+        "x.http://u:p@h",
+        "(http://u:p@h)",
+        "HTTP://u:p@h",
+        "dsn=redis+tls://user:hunter2@cache",
+    ],
+)
+def test_regression_url_userinfo_after_scheme_run_punctuation_is_redacted(text):
+    # The linear scheme anchor must not skip a scheme that follows "-", "." or
+    # a digit: the old `\b` anchor redacted these, so missing one is a leak.
+    out = redact_text(text)
+    secret = text.split("://", 1)[1].split("@", 1)[0]
+    assert secret not in out, (text, out)

@@ -38,7 +38,7 @@ PATTERNS: tuple[re.Pattern, ...] = (
         r"[\"']?\s*[:=]\s*)"
         r"(\"[^\s\"',;}{]{4,}\"?|'[^\s\"',;}{]{4,}'?|[^\s\"',;}{]{4,})"
     ),
-    re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
+    re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+://)([^/@\s:]+:[^/@\s]+)@"),
     re.compile(
         r"(?i)([?&](?:access[-_]?token|api[-_]?key|auth[-_]?secret|"
         r"password|credential)=)([^&#\s]+)"
