@@ -197,7 +197,10 @@ def parse_schtasks_csv(
     ``date_order`` is the user's short-date order (read by the adapter);
     ``UNKNOWN`` accepts only dates that mean the same under every reading.
     """
-    rows = list(csv.DictReader(io.StringIO(text)))
+    try:
+        rows = list(csv.DictReader(io.StringIO(text)))
+    except csv.Error as exc:
+        raise TaskParseError("scheduler output is not valid CSV") from exc
     rows = [row for row in rows if row.get("TaskName") != "TaskName"]
     if not rows:
         raise TaskParseError("scheduler returned no rows")

@@ -516,8 +516,12 @@ def _usage_boost(stats):
     self-graded rows laundered the caller's judgement, and the ±0.01 cap is 37
     adjacent RRF ranks wide, so this is no bounded tiebreak.
 
-    The deciding population is the caller's wherever a caller has judged the
-    lesson; the runtime's own grade only speaks when nobody reviewed it. Both
+    Per interaction, exact runtime credit (``machine``, ``self_curriculum``)
+    outranks a caller judgement in ``lesson_usage``, and a caller judgement
+    outranks heuristic attribution; the caller's review still lands in
+    ``outcomes`` either way. Across interactions, the caller population still
+    decides wherever a caller has judged the lesson; the runtime's own grade
+    only speaks when nobody reviewed it. Both
     the magnitude and the certainty come from that one population -- weighting
     a caller mean by every scored row would let one judgement borrow the
     confidence of a hundred self-graded ones, which is the same blend moved
