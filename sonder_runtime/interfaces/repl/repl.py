@@ -3082,7 +3082,7 @@ def _run_train(n):
     for t in tasks:
         print("  %s %s" % (_paint("PRACTICE", "teal", "bold"), t["name"]))
         # Practice runs are single-turn and must not pollute the user's chat thread.
-        resp = server.sonder(t["prompt"], session="none")
+        resp = server.sonder(t["prompt"], session="none", temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False

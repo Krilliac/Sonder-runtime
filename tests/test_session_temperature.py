@@ -376,3 +376,169 @@ def test_session_temperature_without_a_session_is_a_400(monkeypatch):
         status, payload = _chat(port, model="sonder", session_temperature=0.5)
     assert status == 400
     assert answers == []
+
+
+# --- review follow-ups --------------------------------------------------------
+
+
+def test_temp_shows_the_lane_default_when_the_session_has_none():
+    store = SessionTemperatureStore()
+    assert temp_command("", "s1", lane=0.3, store=store).startswith(
+        "temperature: 0.3 (source: lane default"
+    )
+    store.set("s1", 0.9)
+    assert temp_command("", "s1", lane=0.3, store=store) == (
+        "temperature: 0.9 (source: session)"
+    )
+
+
+def test_http_slash_temp_shows_the_serve_lane(monkeypatch):
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0.3")
+    reply = ts._handle_slash(
+        "/temp", context={"mode": "local-open", "authorized": True},
+        storage_session="acct:lane",
+    )
+    assert reply.startswith("temperature: 0.3 (source: lane default")
+
+
+class _StopBeforeTheModel(Exception):
+    pass
+
+
+def _install_mcp_route_fakes(monkeypatch):
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.command_catalog, "console_tools", lambda: {})
+    monkeypatch.setattr(server, "_route_chat_web", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server._tool_lane_guard, "chat_target",
+        lambda *_a, **_k: ("local:latest", False, False, "general"),
+    )
+    monkeypatch.setattr(server, "_internal_generate_for_route", lambda *a, **k: None)
+
+    def stop(*_a, **_k):
+        raise _StopBeforeTheModel()
+
+    monkeypatch.setattr(server, "_open_db", stop)
+
+
+def test_mcp_temp_then_a_turn_on_that_session_uses_it(monkeypatch):
+    _install_mcp_route_fakes(monkeypatch)
+    assert server._sonder_impl_serialized("/temp 0.9", session="mcp-thread") == (
+        server._append_activity("temperature: 0.9 for this session")
+    )
+    with activity_tracker.response_span("sonder:test", "hello", surface="test"):
+        with pytest.raises(_StopBeforeTheModel):
+            server._sonder_impl_serialized("hello", session="mcp-thread", tier="general")
+        footer = activity_tracker.format_response()
+    assert "sampling: effective temperature=0.9 (source: session)" in footer
+
+
+def test_mcp_turn_without_session_or_number_is_auto(monkeypatch):
+    _install_mcp_route_fakes(monkeypatch)
+    with activity_tracker.response_span("sonder:test", "hello", surface="test"):
+        with pytest.raises(_StopBeforeTheModel):
+            server._sonder_impl_serialized("hello", tier="general")
+        footer = activity_tracker.format_response()
+    assert "sampling: effective temperature=auto (source: preset)" in footer
+
+
+def test_mcp_out_of_range_number_is_an_error_string_not_an_exception(monkeypatch):
+    _install_mcp_route_fakes(monkeypatch)
+    reply = server._sonder_impl_serialized("hello", temperature=2.5, tier="general")
+    assert reply.startswith("ERROR")
+    assert "from 0 to 2" in reply
+
+
+def test_mcp_without_a_session_explains_how_to_keep_a_temperature(monkeypatch):
+    monkeypatch.setattr(server.command_catalog, "console_tools", lambda: {})
+    reply = server.control_command("/temp 0.5", session="")
+    assert reply.startswith("refused /temp")
+    assert "session" in reply
+
+
+def test_field_is_stored_under_the_key_the_turn_reads(monkeypatch):
+    seen = []
+
+    def answer(*_args, **kwargs):
+        seen.append((kwargs.get("session"), temperature_settings.STORE.get(kwargs.get("session"))))
+        return "answer"
+
+    with _http_server(monkeypatch, []) as port:
+        monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
+        status, _ = _chat(port, model="sonder", session="gui-key", session_temperature=1.3)
+    assert status == 200
+    assert seen and seen[0][1] == 1.3
+
+
+def test_a_later_400_stores_nothing(monkeypatch):
+    with _http_server(monkeypatch, []) as port:
+        status, _ = _chat(
+            port, model="sonder", session="gui-3", session_temperature=0.9, history="bogus",
+        )
+    assert status == 400
+    assert _stored_values() == {}
+
+
+def test_user_role_may_use_temp_like_trace():
+    import json
+    from pathlib import Path
+
+    data = json.loads(Path(ts.__file__).resolve().parents[2].joinpath(
+        "adapters", "data", "user_tool_allowlist.json").read_text(encoding="utf-8"))
+    names = {entry["name"] for entry in data["untooled_commands"]}
+    assert {"/trace", "/temp"} <= names
+
+
+# --- review cycle 2 -----------------------------------------------------------
+
+
+def test_session_none_with_the_field_is_a_400_not_a_500(monkeypatch):
+    answers = []
+    with _http_server(monkeypatch, answers) as port:
+        status, payload = _chat(port, model="sonder", session="none", session_temperature=0.5)
+    assert status == 400
+    assert "session_temperature" in payload["error"]["message"]
+    assert answers == []
+
+
+def test_serve_answer_path_temp_shows_the_lane(monkeypatch):
+    monkeypatch.setattr(server.command_catalog, "console_tools", lambda: {})
+    reply = server.control_command("/temp", session="t-lane", temperature_lane=0.7)
+    assert reply.startswith("temperature: 0.7 (source: lane default")
+
+
+@pytest.mark.parametrize(("options", "sent"), [({}, None), ({"temperature": 0.4}, 0.4)])
+def test_openai_compatible_gateway_omits_temperature_on_auto(options, sent):
+    from sonder_runtime.adapters.inference.openai_compat_gateway import (
+        OpenAICompatibleConfig,
+        OpenAICompatibleGateway,
+    )
+
+    payloads = []
+
+    def transport(_url, payload, _headers, _timeout):
+        payloads.append(payload)
+        return {"model": "fixture", "choices": [{"message": {"content": "ok"}}]}
+
+    gateway = OpenAICompatibleGateway(
+        OpenAICompatibleConfig("http://127.0.0.1:8080", model="fixture"),
+        transport=transport,
+    )
+    gateway.generate(
+        ModelRequest("hello", "code", options=options),
+        local_owner_context(correlation_id="req_oai"),
+    )
+    assert payloads and payloads[0].get("temperature") == sent
+    assert ("temperature" in payloads[0]) == (sent is not None)
+
+
+@pytest.mark.parametrize("path", ["eval_retrieval.py", "curriculum_run.py"])
+def test_eval_and_practice_calls_pin_their_temperature(path):
+    # A/B and practice runs must not drift to the model preset.
+    from pathlib import Path
+
+    source = Path(server.__file__).with_name(path).read_text(encoding="utf-8")
+    assert "server.sonder(" in source
+    for line in source.splitlines():
+        if "server.sonder(" in line and not line.lstrip().startswith(("#", "*")):
+            assert "temperature=0.2" in line, line

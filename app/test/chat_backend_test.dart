@@ -138,42 +138,48 @@ void main() {
   });
 
   group('SessionTemperatureSync', () {
-    test('Auto and never changed sends nothing', () {
+    test('the first request sends the value, "auto" when Auto', () {
       final sync = SessionTemperatureSync();
-      expect(sync.next('s1', null), isNull);
-      expect(sync.next('s1', null), isNull);
+      expect(sync.pending('s1', null), 'auto');
+      expect(sync.pending('s2', 0.7), 0.7);
     });
 
-    test('a number is sent once, then absent while unchanged', () {
+    test('pending records nothing: an unconfirmed value is resent', () {
       final sync = SessionTemperatureSync();
-      expect(sync.next('s1', 0.7), 0.7);
-      expect(sync.next('s1', 0.7), isNull);
-      expect(sync.next('s1', 0.7), isNull);
-      expect(sync.next('s1', 1.1), 1.1);
-      expect(sync.next('s1', 1.1), isNull);
+      expect(sync.pending('s1', 0.7), 0.7);
+      expect(sync.pending('s1', 0.7), 0.7);
+      sync.confirm('s1', 0.7);
+      sync.forget('s1');
+      expect(sync.pending('s1', 0.7), 0.7);
     });
 
-    test('switching back to Auto sends "auto" once', () {
-      final sync = SessionTemperatureSync();
-      expect(sync.next('s1', 0.7), 0.7);
-      expect(sync.next('s1', null), 'auto');
-      expect(sync.next('s1', null), isNull);
-      expect(sync.next('s1', 0.2), 0.2);
+    test('after confirm an unchanged value is omitted', () {
+      final sync = SessionTemperatureSync()..confirm('s1', 0.7);
+      expect(sync.pending('s1', 0.7), isNull);
+      sync.confirm('s2', 'auto');
+      expect(sync.pending('s2', null), isNull);
     });
 
-    test('Auto first, then a number, is sent as a change', () {
-      final sync = SessionTemperatureSync();
-      expect(sync.next('s1', null), isNull);
-      expect(sync.next('s1', 0.4), 0.4);
+    test('a change after confirm is sent, "auto" when back to Auto', () {
+      final sync = SessionTemperatureSync()..confirm('s1', 0.7);
+      expect(sync.pending('s1', 1.1), 1.1);
+      sync.confirm('s1', 1.1);
+      expect(sync.pending('s1', 1.1), isNull);
+      expect(sync.pending('s1', null), 'auto');
     });
 
-    test('each session id is tracked on its own', () {
-      final sync = SessionTemperatureSync();
-      expect(sync.next('s1', 0.7), 0.7);
-      expect(sync.next('s2', 0.7), 0.7);
-      expect(sync.next('s1', 0.7), isNull);
-      expect(sync.next('s2', null), 'auto');
-      expect(sync.next('s1', 0.7), isNull);
+    test('reset makes every session resend; sessions are independent', () {
+      final sync = SessionTemperatureSync()
+        ..confirm('s1', 0.7)
+        ..confirm('s2', 0.7);
+      expect(sync.pending('s1', 0.7), isNull);
+      sync.forget('s2');
+      expect(sync.pending('s1', 0.7), isNull);
+      expect(sync.pending('s2', 0.7), 0.7);
+      sync.confirm('s2', 0.7);
+      sync.reset();
+      expect(sync.pending('s1', 0.7), 0.7);
+      expect(sync.pending('s2', 0.7), 0.7);
     });
   });
 

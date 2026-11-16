@@ -3625,7 +3625,7 @@ def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=No
 
 
 def control_command(prompt: str, history=None, session="", project="",
-                    operator_approved=False, autopilot_request_owner: str | None = None):
+                    operator_approved=False, autopilot_request_owner: str | None = None, temperature_lane=None):
     """Handle safe slash commands before a prompt reaches the model.
 
     Client layers have richer commands like /run that depend on their local last
@@ -3696,7 +3696,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/activity":
         return activity_status()
     if cmd == "/temp":
-        return _chat_temperature.temp_command(arg, session)
+        return _chat_temperature.temp_command(arg, session, lane=temperature_lane)  # lane: the serve route's default
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
     if cmd in ("/runtime", "/models"):
@@ -6686,7 +6686,10 @@ def _sonder_impl_serialized(
     )
 
     session_id = _resolve_session(session)
-    temperature = (resolved_temperature := _chat_temperature.resolve_turn_temperature(request=temperature, session=session)).value  # request > /temp > preset
+    try:  # request > /temp > preset; an out-of-range number is refused like any bad option
+        temperature = (resolved_temperature := _chat_temperature.resolve_turn_temperature(request=temperature, session=session)).value
+    except InvalidInput as error:
+        return _format_runtime_model_call_error_policy(ModelCallError("configuration", str(error)), **_ollama_error_endpoint())
     project_id = _resolve_project(project)
     explicit_context = bool(str(context_size or "").strip()) or int(num_ctx or 0) > 0
     if explicit_context:
@@ -6845,7 +6848,7 @@ def _sonder_impl_serialized(
 
     if trace:
         params = {
-            "temperature": temperature, "temperature_source": resolved_temperature.source,
+            "temperature": temperature, "sampling": resolved_temperature.describe(),
             "num_predict": num_predict,
             "num_ctx": num_ctx_eff,
             "num_ctx_native": _platform_native_context(
@@ -7042,7 +7045,7 @@ def _answer_with_history_impl(
     # intentionally retains its ergonomic slash/control commands.
     if not str(tier or "").strip():
         command = control_command(
-            prompt, history=history, session=session, project=project,
+            prompt, history=history, session=session, project=project, temperature_lane=_serve_lane_temperature(),
         )
         if command is not None:
             return _append_activity(command)
@@ -7289,7 +7292,7 @@ def _answer_with_history_impl(
         footer_iid = None
     if trace and trace_ctx is not None:
         params = {
-            "temperature": temperature, "temperature_source": resolved_temperature.source,
+            "temperature": temperature, "sampling": resolved_temperature.describe(),
             "num_predict": 1024,
             "num_ctx": req_ctx,
             "num_ctx_native": _platform_native_context(

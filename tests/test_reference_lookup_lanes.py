@@ -436,7 +436,7 @@ def test_ensemble_search_terms_requests_are_the_single_lanes_byte_for_byte(lane,
     monkeypatch.setattr(server, "_post", _reasoning_search_terms(lane))
 
     def search_terms_calls():
-        return [p for p in lane.payloads if p["options"]["temperature"] == 0.0]
+        return [p for p in lane.payloads if p["options"].get("temperature") == 0.0]  # chat turns on auto send none
 
     monkeypatch.setattr(server, "_THINKING_CAPABILITY_CACHE", {})
     _mcp_by_name(monkeypatch, LOOKUP_MODEL)
