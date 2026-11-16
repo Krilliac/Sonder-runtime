@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import time
 import types
 
 import pytest
@@ -64,6 +65,8 @@ class Models:
         self.synth = "Merged: event 4625 is a failed logon [1]."
         self.judge = "YES. They agree."
         self.expand_error = None
+        # Seconds a member answer takes, by model: the ensemble footer reports it.
+        self.delays = {}
 
     def __call__(self, model, system, temperature, num_predict, num_ctx, **_options):
         def gen(prompt, history=None, **_kwargs):
@@ -78,6 +81,7 @@ class Models:
                 return self.synth
             if JUDGE_MARK in prompt:
                 return self.judge
+            time.sleep(self.delays.get(model, 0))
             return self.replies[model]
 
         return gen
@@ -361,6 +365,57 @@ def test_consult_with_no_matching_member_is_what_it_was(models, retrievals, monk
     assert [models.kind(call) for call in with_feature] == ["member", "member", "judge"]
     assert TIMINGS.sub("", first) == TIMINGS.sub("", second)
     assert "Sources:" not in first
+
+
+def _verdict(out):
+    """The verdict section of a consult with no Sources block (it is the last one)."""
+    return out.split("\n\n")[-1]
+
+
+def test_consult_reads_the_judge_reply_through_the_ensemble_footer(models):
+    """The judge answers through ensemble_answer, whose reply ends in a timing footer.
+
+    The footer is provenance, not the verdict: a "YES" judge is a high-confidence
+    agreement, a "NO" judge a low-confidence disagreement, never the heuristic.
+    """
+    agreed = server.consult(QUESTION, tiers="plain,other")
+    models.judge = "NO. They differ."
+    disagreed = server.consult(QUESTION, tiers="plain,other")
+
+    assert _verdict(agreed) in ("✓ tiers agree", "[OK] tiers agree")
+    assert _verdict(disagreed).startswith(("⚠ tiers DISAGREE", "[WARNING] tiers DISAGREE"))
+    assert "low confidence" in _verdict(disagreed) and "heuristic" not in _verdict(disagreed)
+
+
+def test_consult_heuristic_verdict_ignores_the_members_elapsed_times(models):
+    """A malformed judge falls back to token overlap of the answers, not of their footers.
+
+    Each member's answer carries "in <N>ms"; when the two times differ (a loaded CI
+    runner), the old overlap flipped from agree to DISAGREE for the same answers.
+    """
+    models.judge = "Probably."  # neither YES nor NO: the overlap heuristic decides
+    same_times = server.consult(QUESTION, tiers="plain,other")
+    models.delays[PLAIN_MODEL] = 0.03
+    different_times = server.consult(QUESTION, tiers="plain,other")
+
+    # The provenance is still shown with each answer; only the verdict ignores it.
+    assert re.search(r"plain \(qwen2\.5:3b\) in [1-9]\d*ms", different_times)
+    assert "=== ENSEMBLE (1 model answered) ===" in different_times
+    # "It is a failed logon." vs "A logon failed.": Jaccard 3/5 = 0.6, at least 0.5.
+    for out in (same_times, different_times):
+        assert _verdict(out).startswith(("? tiers tentatively agree", "[?] tiers tentatively agree"))
+    (judge, _judge) = models.of("judge")
+    # The judge compares the answers, not the run's timings.
+    assert "ENSEMBLE" not in judge["prompt"] and not TIMINGS.search(judge["prompt"])
+
+
+def test_consult_recognises_the_multi_model_ensemble_footer(models):
+    """The plural header and the same-line "synthesized by" row, as server.py writes them."""
+    out = server.ensemble_answer(QUESTION, tiers="plain,other")
+
+    assert "=== ENSEMBLE (2 models answered) ===" in out
+    assert re.search(r"in \d+ms  synthesized by other \(llama3\.2:3b\)\Z", out)
+    assert consult_module._substance(out) == models.synth
 
 
 @pytest.mark.parametrize("bad", sorted(BAD_INDEXES))
