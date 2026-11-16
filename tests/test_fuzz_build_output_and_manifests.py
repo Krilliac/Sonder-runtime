@@ -1447,3 +1447,10 @@ def test_clangd_uri_to_path_malformed_bracket_netloc_returns_empty():
         with pytest.raises(ValueError):
             urlsplit(uri)
         assert uri_to_path(uri) == "", uri
+
+
+def test_clangd_nt_prefixes_mirror_the_executor_unc_prefixes():
+    """clangd mirrors executor's UNC/NT/device prefix list; the two must not drift apart."""
+    from sonder_runtime.adapters.build import clangd, executor
+
+    assert clangd._NT_PREFIXES == executor._UNC_PREFIXES
