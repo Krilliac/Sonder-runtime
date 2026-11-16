@@ -371,3 +371,14 @@ def test_the_read_verb_gate_does_not_disarm_named_mutations(turn, expected):
 
 def test_a_read_verb_still_reaches_a_read_only_command():
     assert cr.resolve("show the task progress") == "/task_progress"
+
+
+def test_structured_match_survives_an_unavailable_catalog(monkeypatch):
+    """With the catalog unavailable, "use the X tool" must not end the REPL loop."""
+    from sonder_runtime.adapters import command_catalog as real_catalog
+
+    def unavailable(_name):
+        raise real_catalog.CatalogUnavailable("simulated")
+
+    monkeypatch.setattr(real_catalog, "by_name", unavailable)
+    assert cr._structured_catalog_match("use the status tool") is None
