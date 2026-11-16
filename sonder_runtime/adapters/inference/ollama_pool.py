@@ -325,7 +325,6 @@ def validate_worker_origin(
     trusted_origins: tuple[str, ...] = (),
 ) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
-    logger.debug(f"validating worker origin={origin!r}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
     try:
@@ -342,6 +341,12 @@ def validate_worker_origin(
         raise ValueError(
             "worker endpoint must be an origin without a path, query, or fragment"
         )
+    # Logged only once the value is a bare origin: a password with an unencoded
+    # "/" parses as host and port with the rest in the path, rejected above.
+    logger.debug(
+        f"validating worker origin scheme={parsed.scheme!r}, host={parsed.hostname!r}, "
+        f"port={port!r}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}"
+    )
     if not _is_loopback(normalized):
         logger.debug(f"origin {normalized!r} is remote, checking policy")
         if not allow_remote:
@@ -372,7 +377,7 @@ def configure_typed_workers(
     capability_probe_batch_size: int | None = None,
     status_page_size: int | None = None,
 ) -> None:
-    logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
+    logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
     normalized = tuple(
         validate_worker_origin(
@@ -2713,8 +2718,18 @@ def configure_typed_pool(pool: OllamaWorkerPool) -> None:
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
-    logger.debug(f"from_environment: primary_origin={primary_origin!r}")
-    logger.info(f"building Ollama worker pool from environment, primary_origin={primary_origin!r}")
+    # An origin holding "@" may carry userinfo that urlsplit reads as a host and
+    # port (a password with an unencoded "/"), so it is never logged at all.
+    if "@" in str(primary_origin):
+        safe_primary = "<redacted>"
+    else:
+        try:
+            primary_parts = urlsplit(ollama_policy.normalize(primary_origin))
+            safe_primary = f"{primary_parts.scheme}://{primary_parts.hostname}:{primary_parts.port}"
+        except ValueError:
+            safe_primary = "<unparseable>"
+    logger.debug(f"from_environment: primary_origin={safe_primary!r}")
+    logger.info(f"building Ollama worker pool from environment, primary_origin={safe_primary!r}")
     env = os.environ if environment is None else environment
     with _configuration_lock:
         if environment is None and _configured_pool is not None:
