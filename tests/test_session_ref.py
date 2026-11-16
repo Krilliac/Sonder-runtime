@@ -23,6 +23,8 @@ SID = "chat-1794840126388000"
     "HTTP://Example.COM:65535/app/#/c/" + SID,
     "http://h/#/c/" + SID,
     "http://h:1/app#/c/" + SID,
+    "http://h/app/#/c/" + SID + "?x=1", "#/c/" + SID + "#y", "/app/#/c/" + SID + "/?x=1",
+    "sonder:chat/" + SID + "/", "SONDER:chat/" + SID,
 ])
 def test_all_forms_normalise_to_the_id(text):
     assert parse_session_ref(text) == SID
@@ -33,7 +35,7 @@ def test_all_forms_normalise_to_the_id(text):
     "../etc/passwd", "..", ".", "a/b", "a\\b", "chat-1/../x",
     "sonder:chat/../x", "sonder:chat/", "sonder:chat/a/b", "sonder:chat/" + SID + "/x",
     "http://h/app/#/c/", "http://h/app/#/c/a/b", "http://h/app/#/c/..%2f..",
-    "http://h/app/#/c/" + SID + "?x=1",
+    "sonder:chat/" + SID + "?x", "sonder:chat/" + SID + "//", "#/c/" + SID + "/x?y",
     "ftp://h/app/#/c/" + SID,
     "http://user@h/app/#/c/" + SID, "http://user:pw@h:80/app/#/c/" + SID,
     "http://h:0/app/#/c/" + SID, "http://h:65536/app/#/c/" + SID,

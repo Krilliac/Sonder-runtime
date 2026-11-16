@@ -23,7 +23,7 @@ from .fork import ForkBoundary
 from .query_export import QueryExportError, SessionQueryEngine
 from .trajectory import project_trajectory
 from .transcript_view import DEFAULT_MAX_BYTES as DEFAULT_TRANSCRIPT_MAX_BYTES
-from .transcript_view import TranscriptBuilder, render_markdown
+from .transcript_view import TranscriptBuilder, project_event, render_markdown
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +209,7 @@ class HttpSessionFacade:
                 return text
         return ""
 
-    TRANSCRIPT_MAX_EVENTS = 200_000
+    TRANSCRIPT_MAX_EVENTS = 50_000
 
     def transcript(self, session_id: str, *, format: str | None = None) -> HttpSessionResult:
         """Return the whole conversation from the event log, bounded and redacted.
@@ -219,7 +219,7 @@ class HttpSessionFacade:
         with the requested tier, answering model and failure codes.
         ``format`` is ``md`` (default) or ``json``.  Output stops at
         ``transcript_max_bytes`` of JSON-escaped text (reason ``bytes``) or
-        after ``TRANSCRIPT_MAX_EVENTS`` events consumed (reason ``events``);
+        after ``TRANSCRIPT_MAX_EVENTS`` rows scanned (reason ``events``);
         ``truncated_reason`` names which.
         """
         chosen = (format or "md").strip().lower()
@@ -227,27 +227,25 @@ class HttpSessionFacade:
             return self._error(400, "invalid_session_query")
         if not is_valid_session_id(session_id):
             return self._error(400, "invalid_session_id")
-        builder = TranscriptBuilder(self._transcript_max_bytes)
-        cursor: str | None = None
-        consumed = 0
-        events_capped = False
+        builder = TranscriptBuilder(self._transcript_max_bytes, markdown=chosen == "md")
+        consumed = last_seen = 0
         try:
-            while not builder.full:
-                page = self._query.query_events(session_id, page_size=self._max_page_size,
-                                                cursor=cursor)
-                for record in page.records:
+            end = self._query.last_sequence(session_id)  # snapshot end FIRST
+            if end == 0:
+                return self._error(404, "session_not_found")
+            for sequence, record in self._query.iter_records(
+                    session_id, end_sequence=end, max_events=self.TRANSCRIPT_MAX_EVENTS,
+                    project=project_event):
+                consumed += 1
+                last_seen = sequence
+                if record is not None:
                     builder.add(record)
-                consumed += len(page.records)
-                cursor = page.next_cursor
-                if cursor is None:
-                    break
-                if consumed >= self.TRANSCRIPT_MAX_EVENTS:
-                    events_capped = True
-                    break
+                    if builder.full:
+                        break
         except QueryExportError:
             return self._error(400, "invalid_session_query")
-        if builder.events_seen == 0 and not builder.messages:
-            return self._error(404, "session_not_found")
+        events_capped = (not builder.truncated and consumed >= self.TRANSCRIPT_MAX_EVENTS
+                         and last_seen < end)
         truncated = builder.truncated or events_capped
         reason = builder.truncated_reason or ("events" if events_capped else "")
         body: dict[str, object] = {

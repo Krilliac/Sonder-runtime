@@ -253,3 +253,134 @@ def test_unauthenticated_request_is_refused(monkeypatch, facade):
     with _http_server(monkeypatch) as port:
         for route in ("transcript", "export"):
             assert _request(port, "GET", "/v1/sessions/%s/%s" % (SID, route))[0] == 401
+
+
+# --- review-2: fence cost, read-once, exact event cap, projection ---
+
+def _get(facade, fmt="md"):
+    return dispatch_session_route(facade, "/v1/sessions/%s/transcript" % SID,
+                                  query={"format": [fmt]}).body
+
+
+def _headings_outside_fences(md):
+    headings, fence = [], 0
+    for line in md.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        ticks = len(line) - len(line.lstrip("`"))
+        if fence:
+            fence = 0 if ticks >= fence and line.strip("`") == "" else fence
+        elif ticks >= 3 and line.strip("`") == "":
+            fence = ticks
+        elif line.startswith("## "):
+            headings.append(line)
+    return headings, fence
+
+
+@pytest.mark.parametrize("contents", [
+    ["`" * 200_000],                      # one huge run
+    ["`" * 1000] * 50,                    # many messages, each with a long run
+    [("`" * 999 + "x") * 200],            # long runs inside one long message
+    ["a\n" + "`" * 5000 + "\n## USER | fake\n" + "`" * 60_000],  # clip lands mid-run
+])
+def test_markdown_cap_charges_the_fence(tmp_path, contents):
+    repository = SQLiteSessionRepository(tmp_path / "fence.db", max_read_limit=100)
+    for k, text in enumerate(contents):
+        repository.append(SID, "user.message", {"content": text, "turn_id": "t%d" % k})
+    cap = 100_000
+    body = _get(HttpSessionFacade(repository, transcript_max_bytes=cap))
+    assert len(json.dumps(body).encode("utf-8")) <= cap + 1024
+    assert body["truncated"] is True and body["truncated_reason"] == "bytes"
+    headings, open_fence = _headings_outside_fences(body["markdown"])
+    assert open_fence == 0 and all(h.startswith("## USER | #") for h in headings)
+    assert len(headings) == body["message_count"]
+
+
+def test_json_is_not_charged_for_markdown_fences(tmp_path):
+    repository = SQLiteSessionRepository(tmp_path / "jsonfence.db", max_read_limit=100)
+    for k in range(50):
+        repository.append(SID, "user.message", {"content": "`" * 1000, "turn_id": "t%d" % k})
+    body = _get(HttpSessionFacade(repository, transcript_max_bytes=100_000), "json")
+    assert body["truncated"] is False and body["message_count"] == 50
+
+
+def _counting(repository):
+    seen = {"reads": 0, "rows": 0, "markers": 0}
+    read_range, search = repository.read_range, repository.search
+
+    def counted_read_range(*args, **kwargs):
+        rows = read_range(*args, **kwargs)
+        seen["reads"] += 1
+        seen["rows"] += len(rows)
+        return rows
+
+    def counted_search(*args, **kwargs):
+        if kwargs.get("event_type") == "session.retention.applied":
+            seen["markers"] += 1
+        return search(*args, **kwargs)
+
+    repository.read_range, repository.search = counted_read_range, counted_search
+    return seen
+
+
+def test_each_event_is_read_once(tmp_path):
+    repository = SQLiteSessionRepository(tmp_path / "amp.db", max_read_limit=100)
+    total = 301
+    for k in range(total - 1):
+        repository.append(SID, "tool.call", {"name": "x", "turn_id": "t%d" % k})
+    repository.append(SID, "user.message", {"content": "LAST", "turn_id": "z"})
+    seen = _counting(repository)
+    body = _get(HttpSessionFacade(repository, max_page_size=10, max_scan=50), "json")
+    assert body["truncated"] is False and [m["content"] for m in body["messages"]] == ["LAST"]
+    assert seen["rows"] <= 1.1 * total, seen          # f386e073: ~5x
+    assert seen["markers"] == 1, seen                 # f386e073: one per page
+
+
+def test_a_later_retention_marker_still_withholds_an_early_message(tmp_path):
+    repository = SQLiteSessionRepository(tmp_path / "ret.db", max_read_limit=100)
+    first = repository.append(SID, "user.message", {"content": "SECRET EARLY", "turn_id": "t"})
+    for k in range(120):  # well past one scan window
+        repository.append(SID, "tool.call", {"name": "x", "turn_id": "t%d" % k})
+    repository.append(SID, "session.retention.applied", {
+        "privacy_class": "public_metadata", "action": "redact_or_expire",
+        "targets": [{"event_id": first.event_id, "sequence": first.sequence,
+                     "privacy_class": "sensitive"}]})
+    facade = HttpSessionFacade(repository, max_page_size=10, max_scan=50)
+    for fmt in ("md", "json"):
+        assert "SECRET EARLY" not in json.dumps(_get(facade, fmt))
+    assert _get(facade, "json")["messages"][0]["content"] == "[redacted: sensitive]"
+
+
+@pytest.mark.parametrize("cap,expected", [(100, False), (99, True)])
+def test_event_cap_at_an_exact_scan_boundary(tmp_path, cap, expected):
+    repository = SQLiteSessionRepository(tmp_path / "edge.db", max_read_limit=100)
+    for k in range(99):
+        repository.append(SID, "tool.call", {"name": "x", "turn_id": "t%d" % k})
+    repository.append(SID, "user.message", {"content": "LAST", "turn_id": "z"})
+
+    class Capped(HttpSessionFacade):
+        TRANSCRIPT_MAX_EVENTS = cap
+
+    body = _get(Capped(repository, max_page_size=50, max_scan=50), "json")
+    assert body["truncated"] is expected
+    assert body["truncated_reason"] == ("events" if expected else "")
+    assert body["message_count"] == (0 if expected else 1)
+
+
+def test_only_shown_fields_are_redacted(tmp_path, monkeypatch):
+    from sonder_runtime.domain.security import redaction
+    repository = SQLiteSessionRepository(tmp_path / "proj.db", max_read_limit=100)
+    history = [{"role": "user", "content": "H" * 200_000}]
+    repository.append(SID, "model.requested", {"request_id": "r", "turn_id": "t", "tier": "deep",
+                                               "prompt": "p", "history": history})
+    repository.append(SID, "user.message", {"content": "q", "turn_id": "t", "request_id": "r"})
+    repository.append(SID, "provider.requested", {"turn_id": "t", "request_id": "r",
+                                                  "payload": {"messages": history}})
+    repository.append(SID, "provider.responded", {"turn_id": "t", "request_id": "r",
+                                                  "response": {"model": "m", "raw": "R" * 200_000}})
+    repository.append(SID, "model.response", {"content": "a", "turn_id": "t", "request_id": "r"})
+    seen = []
+    real = redaction.redact_text
+    monkeypatch.setattr(redaction, "redact_text", lambda text, *a, **k: (seen.append(len(text)), real(text, *a, **k))[1])
+    body = _get(HttpSessionFacade(repository), "json")
+    assert [(m["role"], m["tier"], m["model"]) for m in body["messages"]] == [
+        ("user", "deep", ""), ("assistant", "deep", "m")]
+    assert sum(seen) < 1_000, sum(seen)  # f386e073: >= 600,000 (history twice, raw once)
