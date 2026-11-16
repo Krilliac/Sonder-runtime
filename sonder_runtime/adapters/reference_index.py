@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -33,6 +34,7 @@ from sonder_runtime.domain.reference_lookup.models import (
     ReferenceIndexError,
     TermStats,
 )
+from sonder_runtime.domain.reference_lookup.library_meta import parse_library_meta
 from sonder_runtime.domain.reference_lookup.sanitize import sanitize
 from sonder_runtime.domain.reference_lookup.selection import lead_identifier, priority_rows
 from sonder_runtime.domain.reference_lookup.terms import MAX_QUERY_TERMS, quoted
@@ -63,6 +65,7 @@ _TITLE_SCAN_SQL = (f"SELECT {_SEARCH_COLUMNS} FROM passages WHERE passages MATCH
                    f"ORDER BY rank LIMIT {TITLE_SCAN_LIMIT}")
 
 _CacheKey = tuple[str, int, int]
+_logger = logging.getLogger("sonder.reference_lookup")
 
 
 def classify_error(exc: BaseException) -> IndexState:
@@ -147,6 +150,8 @@ class ReferenceIndex:
             if self._cached is not None and self._cached[0] == key:
                 return self._cached[1]
         status = self._probe(path_text)
+        for warning in status.warnings:   # once per validation: the result is cached below
+            _logger.warning("reference index %s: %s", path_text, warning)
         if status.state is not IndexState.ERROR:   # a transient error is not remembered
             with self._lock:
                 self._cached = (key, status)
@@ -240,7 +245,7 @@ class ReferenceIndex:
         try:
             with self.connect() as conn:
                 return self._validate(conn, path_text)
-        except (sqlite3.Error, OSError, ValueError) as exc:
+        except (sqlite3.Error, OSError, ValueError, RecursionError) as exc:
             return IndexStatus(classify_error(exc), path_text, detail=sanitize(exc))
 
     @staticmethod
@@ -263,7 +268,7 @@ class ReferenceIndex:
         meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
         try:
             summary = json.loads(meta["summary"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, RecursionError):
             return wrong("meta has no readable summary row")
         if not isinstance(summary, dict):
             return wrong("meta summary is not an object")
@@ -273,5 +278,14 @@ class ReferenceIndex:
             sources = tuple(sorted((str(k), int(v)) for k, v in by_source.items()))
         except (TypeError, ValueError, AttributeError):
             return wrong("meta summary has unreadable counts")
+        try:
+            library = parse_library_meta(meta.get("schema_version"), meta.get("sources"))
+        except Exception as exc:  # noqa: BLE001  # optional metadata never makes the index unusable
+            return IndexStatus(IndexState.READY, path_text, passages=passages, sources=sources,
+                               built_at=sanitize(_text(meta.get("built_at"))),
+                               warnings=("meta library metadata could not be read: "
+                                         + sanitize(type(exc).__name__),))
         return IndexStatus(IndexState.READY, path_text, passages=passages, sources=sources,
-                           built_at=sanitize(_text(meta.get("built_at"))))
+                           built_at=sanitize(_text(meta.get("built_at"))),
+                           schema_version=library.schema_version, schema_compat=library.compat,
+                           library=library.library, warnings=library.warnings)

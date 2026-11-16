@@ -6,7 +6,7 @@ FTS5 string so user or model text can never add operators or column filters.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 MAX_QUERY_TERMS = 40
 MAX_MODEL_TERMS = 8
@@ -23,13 +23,18 @@ STOP_WORDS = frozenset(_STOP_TEXT.split())
 
 TERM_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]|[A-Za-z0-9]')
 
-EXPAND_PROMPT = (
-    'You are choosing search terms for a reference library of Windows security event pages, '
-    'MITRE ATT&CK techniques and Sigma detection rules. Do NOT answer the question below and do '
+_PROMPT_HEAD = 'You are choosing search terms for '
+# What a version 1 index (no subjects) is described as.
+_LIBRARY_DEFAULT = (
+    'a reference library of Windows security event pages, '
+    'MITRE ATT&CK techniques and Sigma detection rules')
+_PROMPT_TAIL = (
+    '. Do NOT answer the question below and do '
     'not guess identifiers. List up to 8 search terms on ONE line, separated by commas, nothing '
     'else: the key technical words in the question, the usual documentation wording for them '
     '(for example "disabled" for "turned off", "logon" for "signed in"), and any event '
     'IDs or technique IDs that the question itself mentions.\n\nQuestion: {question}')
+EXPAND_PROMPT = _PROMPT_HEAD + _LIBRARY_DEFAULT + _PROMPT_TAIL
 
 # Added to the search-terms request when the passages are for an answer: the same
 # short call also says whether the question is in the library's subjects at all.
@@ -38,6 +43,10 @@ _SCOPE_SECOND = (
     'Second line: RELATED if the question is about computers, networks, accounts, logs or '
     'security in any way, or UNRELATED if it is about something else entirely.')
 SCOPE_REQUEST = '\n\n' + _SCOPE_FIRST + ' ' + _SCOPE_SECOND
+# The same request for an index that names its subjects (the prompt lists them).
+_SCOPE_SECOND_SUBJECTS = (
+    'Second line: RELATED if the question is about any of these subjects, UNRELATED otherwise.')
+SCOPE_REQUEST_SUBJECTS = '\n\n' + _SCOPE_FIRST + ' ' + _SCOPE_SECOND_SUBJECTS
 
 IDENTIFIER_RE = re.compile(
     r'0x[0-9a-f]+|\b(?:DET|AN|[TMSG])\d{3,4}(?:\.\d{3})?\b|\d{3,}', re.IGNORECASE)
@@ -61,20 +70,100 @@ _EXPLAINED_VERDICT_RE = re.compile(
 # The request copied back, in any case, with or without its line label.
 _ECHO_RE = re.compile(
     '|'.join(r'\s+'.join(re.escape(word) for word in sentence.split())
-             for sentence in (_SCOPE_FIRST, _SCOPE_SECOND.split(': ', 1)[1])),
+             for sentence in (_SCOPE_FIRST, _SCOPE_SECOND.split(': ', 1)[1],
+                              _SCOPE_SECOND_SUBJECTS.split(': ', 1)[1])),
     re.IGNORECASE)
 
 
-def build_expand_prompt(question: str, *, scope: bool = False) -> str:
+# The most the subject list may take in the search-terms request.
+MAX_SUBJECT_LIST_CHARS = 2048
+_SUBJECT_TRAILING = '.;:,! \t'
+# The library clause of the request copied back ("... a reference library covering: ...").
+_COVERING_RE = re.compile(
+    r'(?:you[ \t]+are[ \t]+choosing[ \t]+search[ \t]+terms[ \t]+for[ \t]+)?(?:an?[ \t]+)?'
+    r'(?:reference[ \t]+library[ \t]+)?covering[ \t]*:[ \t]*', re.IGNORECASE)
+_MORE_RE = re.compile(r'and \d+ more', re.IGNORECASE)
+
+
+def _listed_subjects(subjects: Sequence[str]) -> tuple[list[str], int]:
+    """(the subjects that fit the list, how many were left out): trimmed, distinct, in order."""
+    names: list[str] = []
+    for name in subjects:
+        if isinstance(name, str):
+            name = name.strip().rstrip(_SUBJECT_TRAILING).strip()
+            if name and name not in names:
+                names.append(name)
+    shown: list[str] = []
+    used = 0
+    for name in names:
+        used += len(name) + (2 if shown else 0)
+        if shown and used > MAX_SUBJECT_LIST_CHARS:
+            break
+        shown.append(name)
+    return shown, len(names) - len(shown)
+
+
+def subject_list(subjects: Sequence[str]) -> str:
+    """The subjects as the request lists them ("a; b; and 3 more"), or '' when there are none.
+
+    Each subject loses trailing punctuation, repeats are dropped and the list
+    stops at ``MAX_SUBJECT_LIST_CHARS``.
+    """
+    shown, left_out = _listed_subjects(subjects)
+    if not shown:
+        return ''
+    return '; '.join(shown) + (f'; and {left_out} more' if left_out else '')
+
+
+def strip_subject_echo(content: str, subjects: Sequence[str]) -> str:
+    """The reply without the subject list or library clause of the request copied back.
+
+    The subjects come from a file the runtime did not write; a model that
+    repeats them must not turn them into search terms or a verdict.  The
+    whole list is removed (any case, any spacing), then the "covering:"
+    clause, then any line made only of subjects (two or more joined by ';',
+    or one left after a clause).  One subject alone on a line is kept: it may
+    be the model's own search term.
+    """
+    listing = subject_list(subjects)
+    if not listing or not isinstance(content, str):
+        return content
+    shown = {name.lower() for name in _listed_subjects(subjects)[0]}
+    whole = r'\s+'.join(re.escape(word) for word in listing.split())
+    lines = []
+    for line in re.sub(whole, ' ', content, flags=re.IGNORECASE).split('\n'):
+        clause = _COVERING_RE.search(line) is not None
+        line = _COVERING_RE.sub('', line)
+        segments = [part.strip(' \t' + _SUBJECT_TRAILING) for part in line.split(';')]
+        segments = [part for part in segments if part]
+        if segments and (len(segments) > 1 or clause) and all(
+                part.lower() in shown or _MORE_RE.fullmatch(part) for part in segments):
+            line = ''
+        lines.append(line)
+    return '\n'.join(lines)
+
+
+def build_expand_prompt(question: str, *, scope: bool = False,
+                        subjects: Sequence[str] = ()) -> str:
     """The user turn that asks the model for search terms (sent without a system prompt).
 
-    With ``scope`` the request also asks for the RELATED / UNRELATED line.
+    With ``subjects`` the library is described as covering them ("a reference
+    library covering: a; b") and the scope line asks about those subjects;
+    without, the prompt is the security-only text of a version 1 index.  The
+    subjects are inserted after the template is filled in, so braces in them
+    are plain text.  With ``scope`` the request also asks for the
+    RELATED / UNRELATED line.
     """
-    prompt = EXPAND_PROMPT.format(question=question)
-    return prompt + SCOPE_REQUEST if scope else prompt
+    listing = subject_list(subjects)
+    if not listing:
+        prompt = EXPAND_PROMPT.format(question=question)
+        return prompt + SCOPE_REQUEST if scope else prompt
+    prompt = (_PROMPT_HEAD + 'a reference library covering: ' + listing
+              + _PROMPT_TAIL.format(question=question))
+    return prompt + SCOPE_REQUEST_SUBJECTS if scope else prompt
 
 
-def split_scope(content: str) -> tuple[str, bool]:
+def split_scope(content: str, subjects: Sequence[str] = ()) -> tuple[str, bool]:
     """(the reply without its verdict, True when the verdict is UNRELATED).
 
     Models put the verdict on its own line, as the last item of the terms line
@@ -95,8 +184,10 @@ def split_scope(content: str) -> tuple[str, bool]:
 
     Whatever is read as a verdict is removed, so it never becomes a search
     term: a stray "Unrelated" would be searched for and, being rare in the
-    library, would count against every passage.
+    library, would count against every passage.  With ``subjects`` the list
+    of subjects the request carried is removed first, as is a "covering:" clause.
     """
+    content = strip_subject_echo(content, subjects)
     seen = set()
     lines = []
     for number, line in enumerate(_ECHO_RE.sub(' ', content).split('\n')):
