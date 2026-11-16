@@ -360,8 +360,10 @@ _HAS_IF_HEAD_RE = re.compile(r"\s*(?:#|%:)\s*(?:if|elif)\b")
 # an identifier, or a quote, backslash or other character that starts a token
 # this scan does not pair up. A pp-number and ``defined NAME``/``defined(NAME``
 # (its operand is never expanded) are not.
-_IF_WORD_RE = re.compile(r"\.?\d(?:[eEpP][+-]|'?[\w.])*|defined\b[ \t\f\v]*\(?[ \t\f\v]*(?:[^\W\d]\w*)?"
-                         r"|([^\W\d]\w*|[$\\'\"`@]|[^\x00-\x7f])")
+# ASCII digits only: Python's \d also matches Unicode Nd (U+0663, U+FF11), which C
+# compilers accept as identifier characters, so "\uff11LP" must be an identifier here.
+_IF_WORD_RE = re.compile(r"\.?[0-9](?:[eEpP][+-]|'?[\w.])*|defined\b[ \t\f\v]*\(?[ \t\f\v]*(?:[^\W0-9]\w*)?"
+                         r"|([^\W0-9]\w*|[$\\'\"`@]|[^\x00-\x7f])")
 _HAS_COMPUTED = "__has_include/__has_embed: computed operand (not a literal header-name)"
 _HEADER_NAME_LIMIT = 4096
 # Budget steps per token: its path check costs about what 500 plain characters do.
