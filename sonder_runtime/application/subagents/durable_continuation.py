@@ -21,7 +21,7 @@ from typing import Protocol
 from uuid import uuid4
 from ..ports.continuation_mutations import (
     ContinuationStorageFailure, ContinuationCommitAmbiguous, ContinuationCleanupRequired,
-    PreparedContinuationMutation, ContinuationMutationOutcome,
+    PreparedContinuationMutation, ContinuationMutationOutcome, prepare_call,
 )
 
 from ..context import OperationContext
@@ -196,11 +196,10 @@ class DurableContinuationService:
             # see a settled or genuinely orphaned intent.
             with self._lock:
                 if _settlement_timeout > 0:
-                    self._wait_for_storage_settlement(
-                        child_id, timeout=_settlement_timeout
+                    return self._mutate_after_predecessors(
+                        child_id, method, args, kwargs, timeout=_settlement_timeout
                     )
-                else:
-                    self._require_storage_settled(child_id)
+                self._require_storage_settled(child_id)
                 return getattr(self._repository, method)(*args, **kwargs)
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
@@ -208,6 +207,40 @@ class DurableContinuationService:
             if control is not None:
                 control._event.set()
             raise
+
+    def _mutate_after_predecessors(self, child_id, method, args, kwargs, *, timeout: float):
+        """Apply one mutation in durable order behind healthy earlier writers.
+
+        The in-process lock only orders writers in this process.  Another
+        process can retain its intent after the settlement check below and
+        before this mutation retains its own, then still be finishing its
+        receipt when this mutation's effect transaction takes the writer lock.
+        The repository then refuses this mutation as blocked by that earlier
+        intent (its own intent stays retained, with no effect).  Wait for the
+        predecessor's exact receipt and retry the *same* prepared identity, so
+        the retry never leaves an orphaned intent or applies the effect twice.
+        Ambiguity about this mutation itself, or a predecessor still without a
+        receipt at the deadline (a crashed writer), stays fail-closed.
+        """
+        deadline = monotonic() + max(0.0, timeout)
+        self._wait_for_storage_settlement(child_id, timeout=timeout)
+        prepared = prepare_call(method, *args, **kwargs)
+        while True:
+            try:
+                return self._repository.mutate(prepared).value
+            except ContinuationCommitAmbiguous as error:
+                blocking = error.prepared
+                if (
+                    blocking.operation_id == prepared.operation_id
+                    or blocking.child_id != child_id
+                ):
+                    raise
+                if self._repository.reconcile(blocking) is not None:
+                    continue
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise
+                sleep(min(0.01, remaining))
 
     def _require_storage_settled(self, child_id):
         if child_id in self._storage_failures:

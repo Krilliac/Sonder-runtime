@@ -188,6 +188,127 @@ def test_cancellation_waits_for_external_intent_receipt(tmp_path):
     service.close(1)
 
 
+def _is_cancelled_result(prepared) -> bool:
+    return prepared.kind == "update" and b'"status":"cancelled"' in prepared.payload
+
+
+def test_cancellation_waits_for_external_intent_retained_after_settlement_check(tmp_path):
+    """Regression for the CI flake of the service-boundary cancellation test.
+
+    The worker's settlement check runs before its own intent is retained.
+    Another process's ``request_cancel`` can retain its intent in exactly that
+    gap and still be finishing its receipt when the worker's effect
+    transaction takes the writer lock.  The earlier intent is a healthy,
+    ordered predecessor: the worker must wait for its receipt and then apply
+    its own retained cancellation result, not publish a storage ambiguity.
+    The interleaving is forced, so this does not depend on thread scheduling.
+    """
+    path = tmp_path / "cancel-gap.sqlite"
+    started = Event()
+
+    class PausedRepository(SQLiteDurableContinuationRepository):
+        """Pauses after its intent transaction, before its effect receipt."""
+
+        def __init__(self, db_path):
+            self.ready = Event()
+            self.release = Event()
+            self.enabled = False
+            self.calls = 0
+            super().__init__(db_path)
+
+        @contextmanager
+        def _connect(self):
+            with super()._connect() as connection:
+                yield connection
+            if self.enabled:
+                self.calls += 1
+                if self.calls == 1:
+                    self.ready.set()
+                    assert self.release.wait(5)
+
+    external = PausedRepository(path)
+    external.enabled = True
+    external_results = []
+
+    def external_cancel():
+        external_results.append(
+            external.request_cancel("child-cancel-gap", reason="later stop")
+        )
+
+    writer = Thread(target=external_cancel)
+
+    class GapRepository(SQLiteDurableContinuationRepository):
+        """Opens the external intent inside the worker's check-to-intent gap."""
+
+        def __init__(self, db_path):
+            self.first_attempt_done = Event()
+            self.first_blocked_by = []
+            self.cancel_attempts = 0
+            super().__init__(db_path)
+
+        def mutate(self, prepared):
+            if not _is_cancelled_result(prepared):
+                return super().mutate(prepared)
+            self.cancel_attempts += 1
+            if self.cancel_attempts > 1:
+                return super().mutate(prepared)
+            # The service has already run its settlement check and found
+            # nothing pending.  Retain the other writer's intent now, before
+            # this one, and hold it short of its receipt.
+            writer.start()
+            assert external.ready.wait(2)
+            try:
+                return super().mutate(prepared)
+            except ContinuationCommitAmbiguous as error:
+                self.first_blocked_by.append(error.prepared.operation_id)
+                raise
+            finally:
+                # Only now may the other writer finish its receipt.  Released
+                # here, not from the test thread, to keep the hand-off well
+                # inside the service's settlement grace.
+                self.first_attempt_done.set()
+                external.release.set()
+
+    repository = GapRepository(path)
+    service = DurableContinuationService(repository)
+
+    def wait_for_cancel(_state, _checkpoint, cancel):
+        started.set()
+        while not cancel.cancelled:
+            cancel.wait(.01)
+        return "must not publish"
+
+    handle = service.spawn(_request("child-cancel-gap"), _context("cancel-gap"), wait_for_cancel)
+    assert started.wait(1)
+    assert service.cancel("child-cancel-gap", reason="operator stop")
+    assert repository.first_attempt_done.wait(3)
+    writer.join(3)
+    assert not writer.is_alive()
+    assert external_results == [False]  # first reason wins
+    assert handle.result(3).status is SubagentStatus.CANCELLED
+    restored = SQLiteDurableContinuationRepository(path)
+    stored = restored.get("child-cancel-gap")
+    assert stored and stored.status is SubagentStatus.CANCELLED
+    assert stored.cancellation_reason == "operator stop"
+    intents = [
+        restored.read_mutation(operation_id)
+        for _position, operation_id in restored.mutation_ids("child-cancel-gap")[0]
+    ]
+    later = [
+        intent for intent in intents
+        if intent.kind == "request_cancel" and b'"later stop"' in intent.payload
+    ]
+    # The forced gap really happened: the worker's first write was refused
+    # because of the other writer's earlier, still-unreceipted intent.
+    assert len(later) == 1 and repository.first_blocked_by == [later[0].operation_id]
+    assert repository.cancel_attempts >= 2
+    # Nothing is left to reconcile, and the retry reused one operation
+    # identity rather than leaving an orphaned cancellation-result intent.
+    assert restored.unresolved_mutation("child-cancel-gap") is None
+    assert sum(_is_cancelled_result(intent) for intent in intents) == 1
+    assert service.close(1)
+
+
 def test_restart_recovery_requires_cleanup_and_storage_reconciliation(tmp_path):
     repository = SQLiteDurableContinuationRepository(tmp_path / "orphan.sqlite")
     repository.create(DurableChildSession(_request("child-orphan"), ChildSessionLineage("session-parent")))
