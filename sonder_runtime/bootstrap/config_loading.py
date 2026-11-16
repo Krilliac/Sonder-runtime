@@ -9,11 +9,12 @@ this module owns the bootstrap-facing diagnostic policy around that loader.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def load_config_or_none():
+def load_config_or_none() -> Any:
     """Return the production configuration when available, otherwise ``None``."""
     logger.debug("load_config_or_none: attempting config load")
     try:

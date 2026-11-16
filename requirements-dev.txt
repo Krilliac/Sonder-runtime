@@ -10,3 +10,6 @@ pexpect==4.9.0; sys_platform != "win32"
 pyte==0.8.2; sys_platform != "win32"
 # Exact pin: the lint gate's findings, and so its baseline, are version-specific.
 ruff==0.16.9
+# Exact pin: the typing ratchet's strict-module list is version-specific
+# (scripts/check_typing_ratchet.py); move it deliberately, with the lists.
+mypy==2.4.1

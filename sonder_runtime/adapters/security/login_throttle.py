@@ -13,6 +13,8 @@ import ipaddress
 import os
 import threading
 import time
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 from sonder_runtime.domain.login_throttle import (
     LoginDecision,
@@ -33,7 +35,10 @@ class LoginThrottled(PermissionError):
         self.retry_after_seconds = retry_after_seconds
 
 
-def _env_number(name: str, default, cast):
+_N = TypeVar("_N", int, float)
+
+
+def _env_number(name: str, default: _N, cast: Callable[[Any], _N]) -> _N:
     try:
         value = cast(os.environ.get(name, default))
     except (TypeError, ValueError):
@@ -70,7 +75,7 @@ def _backoff() -> UsernameBackoff:
 
 def _is_loopback(client: str | None) -> bool:
     try:
-        return bool(client) and ipaddress.ip_address(client).is_loopback
+        return bool(client) and ipaddress.ip_address(cast(str, client)).is_loopback
     except ValueError:
         return False
 

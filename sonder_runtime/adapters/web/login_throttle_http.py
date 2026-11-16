@@ -7,6 +7,8 @@ request ``Handler`` instance and every call runs on its request thread.
 """
 import logging
 import sqlite3
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import sonder_runtime.adapters.web.lifecycle as sonder_lifecycle
 from sonder_runtime.adapters.security.login_throttle import LoginThrottled
@@ -15,7 +17,7 @@ from sonder_runtime.adapters.security.login_throttle import LoginThrottled
 _serve_logger = logging.getLogger("sonder_runtime.interfaces.http.serve")
 
 
-def send_throttled(handler, retry_after=2):
+def send_throttled(handler: Any, retry_after: int = 2) -> None:
     handler._send_json_payload(
         sonder_lifecycle.error_envelope(
             "AUTH_RATE_LIMITED",
@@ -28,19 +30,20 @@ def send_throttled(handler, retry_after=2):
     )
 
 
-def _record_failure(handler, reason):
+def _record_failure(handler: Any, reason: str) -> None:
     # The reservation taken at admission already paid for this failure.
     sonder_lifecycle.get().record_auth_failure(
         handler._client_ip(), reason, charge=False
     )
 
 
-def _refund(handler):
+def _refund(handler: Any) -> None:
     sonder_lifecycle.get().refund_auth_attempt(handler._client_ip())
 
 
-def handle_register(handler, req, context, *, runtime, admin_auth,
-                    allow_registration, created_message):
+def handle_register(handler: Any, req: Mapping[str, Any], context: Mapping[str, Any], *,
+                    runtime: Any, admin_auth: Any, allow_registration: bool,
+                    created_message: Callable[[Any], str]) -> None:
     if handler._auth_reserve_refused():
         return
     conn = runtime._open_db()
@@ -79,7 +82,8 @@ def handle_register(handler, req, context, *, runtime, admin_auth,
         conn.close()
 
 
-def handle_login(handler, req, context, *, runtime, admin_auth):
+def handle_login(handler: Any, req: Mapping[str, Any], context: Mapping[str, Any], *,
+                 runtime: Any, admin_auth: Any) -> None:
     if context["mode"] in ("api-key", "both") and not context["api_key"]:
         handler._send_auth_error()
         return

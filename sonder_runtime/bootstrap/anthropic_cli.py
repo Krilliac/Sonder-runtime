@@ -9,14 +9,16 @@ and never touches the paid API.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+from typing import Any
 
 from ..adapters.inference.anthropic_gateway import PROVIDER_ID, AnthropicGateway
 from ..domain.common.errors import SonderError
 
 
-def format_status(entry: dict) -> str:
+def format_status(entry: dict[str, Any]) -> str:
     slots = entry.get("key_slots") or {}
     lines = [
         "Anthropic provider: %s" % (entry.get("state") or "unavailable"),
@@ -39,7 +41,7 @@ def format_status(entry: dict) -> str:
     return "\n".join(lines)
 
 
-def cmd_anthropic(args) -> int:
+def cmd_anthropic(args: argparse.Namespace) -> int:
     try:
         entry = dict(AnthropicGateway().provider_status()[PROVIDER_ID])
         print(json.dumps(entry, indent=2, sort_keys=True) if args.json else format_status(entry))
@@ -49,7 +51,7 @@ def cmd_anthropic(args) -> int:
     return 0
 
 
-def add_parser(sub) -> None:
+def add_parser(sub: Any) -> None:
     parser = sub.add_parser("anthropic", help="Anthropic provider status and today's spend")
     commands = parser.add_subparsers(dest="anthropic_command", required=True)
     status = commands.add_parser("status", help="configuration, key slots and spend vs cap (read-only)")

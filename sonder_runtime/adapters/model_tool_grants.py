@@ -25,7 +25,7 @@ the host's tool sets, one tuple replaced atomically.
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,10 +67,10 @@ class GrantSet:
 # ---- the host's tool facts ------------------------------------------------------
 
 # ``(key, (risk_of, operator, execution, dispatchable))`` for the loaded host.
-_HOST_CACHE: tuple[tuple, tuple] | None = None
+_HOST_CACHE: tuple[tuple[int, ...], tuple[Any, ...]] | None = None
 
 
-def _host_sets(host: Any) -> tuple:
+def _host_sets(host: Any) -> tuple[Any, ...]:
     global _HOST_CACHE
     dispatch = host._agent_dispatch
     key = (id(host), id(dispatch), id(host.permission_modes))
@@ -216,7 +216,7 @@ def deny_only_list(grants: GrantSet, floor: ToolLaneFloor, legacy_section: Any) 
 
 # ---- status -------------------------------------------------------------------
 
-def _entries_text(entries) -> str:
+def _entries_text(entries: Iterable[_mtp.Entry]) -> str:
     return ", ".join("%s (%s)" % (entry.value, entry.source.value) for entry in entries) or "-"
 
 
@@ -257,15 +257,15 @@ def describe_lines(
 def status_payload(
     config: _mtp.ModelToolConfig | None = None, legacy_section: Any = None,
     classify: Classifier | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """The same information as ``describe_lines`` as JSON-ready data (names only, no secrets)."""
     config = _mtp.load() if config is None else config
     grants = grant_set(config, classify)
 
-    def sourced(entries):
+    def sourced(entries: Iterable[_mtp.Entry]) -> list[dict[str, str]]:
         return [{"value": entry.value, "source": entry.source.value} for entry in entries]
 
-    profiles = []
+    profiles: list[dict[str, Any]] = []
     for profile in config.profiles:
         grant = grants.grant(profile.id)
         profiles.append({

@@ -63,7 +63,7 @@ class GuardedFileWindowSource:
     def __init__(
         self,
         *,
-        reader: Callable[..., tuple[list[str], dict, Path]] | None = None,
+        reader: Callable[..., tuple[list[str], dict[str, Any], Path]] | None = None,
         resolver: Callable[..., Path] | None = None,
     ) -> None:
         self._reader = reader or log_inspect.read_guarded_text_window

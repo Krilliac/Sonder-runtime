@@ -12,9 +12,10 @@ scored, never run, so the registrar hands it a text-only gateway (ServedTierGate
 from __future__ import annotations
 
 import itertools
-from typing import Any, Mapping
+from collections.abc import Callable
+from typing import Any, Mapping, cast
 
-from ...application.context import local_owner_context
+from ...application.context import OperationContext, local_owner_context
 from ...application.ports.model_gateway import ModelRequest, require_model_text
 from ...application.security_eval.ports import (
     SERVED_MODEL_SOURCE, TOKEN_MEASURED, TOKEN_UNVERIFIED, ModelCall)
@@ -46,16 +47,16 @@ class GatewayVerdictModel:
         self._timeout = float(item_timeout_seconds)
         self._checked = False
 
-    def _context(self):
+    def _context(self) -> OperationContext:
         return local_owner_context(
             correlation_id="security-eval-%d" % next(_COUNTER), source="mcp", cloud_allowed=False,
             remote_ollama_allowed=self._allow_remote, timeout_seconds=self._timeout)
 
-    def _resolver(self):
+    def _resolver(self) -> Callable[..., Any] | None:
         for candidate in (self._gateway, getattr(self._gateway, "gateway", None)):
             resolve = getattr(candidate, "resolve_route", None)
             if callable(resolve):
-                return resolve
+                return cast("Callable[..., Any]", resolve)
         return None
 
     def preflight(self) -> None:
@@ -96,6 +97,8 @@ class GatewayVerdictModel:
         telemetry = getattr(response, "telemetry", None)
         measured_in = getattr(telemetry, "prompt_tokens", None)
         measured_out = getattr(telemetry, "output_tokens", None)
+        tokens_in: int | None
+        tokens_out: int | None
         if isinstance(measured_in, int) and isinstance(measured_out, int):
             tokens_in, tokens_out, source = measured_in, measured_out, TOKEN_MEASURED
         else:

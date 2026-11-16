@@ -26,7 +26,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, TypeVar, cast
 
 from sonder_runtime.adapters.process_liveness import (
     PROCESS_DEAD, probe_process, process_identity,
@@ -39,6 +39,8 @@ SCHEMA_VERSION = "1"
 HELD = "held"
 WAITING = "waiting"
 FULL = "full"
+
+_T = TypeVar("_T")
 
 _SCHEMA = """
 CREATE TABLE gpu_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -137,7 +139,10 @@ class GpuAdmissionStore:
             raise StoreUnavailable("admission store must not be a symlink")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            return owned_sqlite_connect(str(self.path), timeout=self._busy)
+            # ``owned_sqlite_connect`` is unannotated in its module; both of its paths
+            # return a ``sqlite3.Connection`` (the owner's is a subclass).
+            return cast("Callable[..., sqlite3.Connection]", owned_sqlite_connect)(
+                str(self.path), timeout=self._busy)
         except RuntimeError as error:
             # The process owner refuses paths outside its namespace and
             # connections beyond its capacity; both leave the store unusable.
@@ -165,8 +170,8 @@ class GpuAdmissionStore:
                                        % SCHEMA_VERSION)
         self._checked = True
 
-    def _run(self, work: Callable[[sqlite3.Connection, float], object]):
-        connection = None
+    def _run(self, work: Callable[[sqlite3.Connection, float], _T]) -> _T:
+        connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
             self._begin(connection)
@@ -193,7 +198,7 @@ class GpuAdmissionStore:
                 pass
 
     @staticmethod
-    def _rollback(connection) -> None:
+    def _rollback(connection: sqlite3.Connection | None) -> None:
         if connection is not None:
             try:
                 connection.rollback()
@@ -233,7 +238,7 @@ class GpuAdmissionStore:
         when it is among the first ``slots - held`` waiters in service order
         (interactive before background, FIFO within a class).
         """
-        def work(connection, now):
+        def work(connection: sqlite3.Connection, now: float) -> str:
             self._reap(connection, now)
             row = connection.execute(
                 "SELECT state FROM gpu_leases WHERE ticket_id=?", (ticket_id,)).fetchone()
@@ -277,7 +282,7 @@ class GpuAdmissionStore:
 
     def holders(self, origin: str, model_key: str, *, exclude: str = "") -> int:
         """Held tickets (other than ``exclude``) using this model on this origin."""
-        def work(connection, now):
+        def work(connection: sqlite3.Connection, now: float) -> Any:
             self._reap(connection, now)
             return connection.execute(
                 "SELECT COUNT(*) FROM gpu_leases WHERE state=? AND origin=? AND model_key=? "
@@ -286,7 +291,7 @@ class GpuAdmissionStore:
         return int(self._run(work))
 
     def leases(self) -> tuple[LeaseRow, ...]:
-        def work(connection, now):
+        def work(connection: sqlite3.Connection, now: float) -> list[Any]:
             self._reap(connection, now)
             return connection.execute(
                 "SELECT ticket_id,pool,state,pid,origin,model_key FROM gpu_leases ORDER BY seq"
@@ -303,7 +308,7 @@ class GpuAdmissionStore:
 
     def set_pin(self, origin: str, model_key: str, num_ctx: int, *, repin: bool = False,
                 window_seconds: int = 600) -> None:
-        def work(connection, now):
+        def work(connection: sqlite3.Connection, now: float) -> None:
             row = connection.execute(
                 "SELECT repins,repin_window_start FROM gpu_pins WHERE origin=? AND model_key=?",
                 (origin, model_key)).fetchone()
@@ -344,7 +349,7 @@ class GpuAdmissionStore:
     def record_footprint(self, digest: str, num_ctx: int, working_set_bytes: int,
                          private_bytes: int) -> None:
         """Store the larger of the previous and the new measurement."""
-        def work(connection, now):
+        def work(connection: sqlite3.Connection, now: float) -> None:
             connection.execute(
                 "INSERT INTO gpu_footprints(digest,num_ctx,working_set,private_bytes,measured_at) "
                 "VALUES(?,?,?,?,?) ON CONFLICT(digest,num_ctx) DO UPDATE SET "

@@ -5,11 +5,12 @@ The ntfy push URL is secret-like and lives in ``Secrets.health_alert_ntfy_url``
 """
 import re
 from dataclasses import dataclass
+from typing import Any
 
 _HTTP_URL = re.compile(r"https?://[^\s/?#@]+(?:[/?#]\S*)?", re.IGNORECASE)
 
 
-def watched_job_entry_valid(entry, default_window_hours):
+def watched_job_entry_valid(entry: str, default_window_hours: float) -> bool:
     """Platform-side mirror of ``domain.health_alerts.parse_watched_task`` (a drift test pins them)."""
     text = entry.strip()
     name, sep, hours = text.rpartition("=") if "=" in text else (text, "", "")
@@ -44,9 +45,9 @@ class HealthAlertsConfig:
     timeout_seconds: float = 10.0
 
 
-def health_alerts_errors(config):
+def health_alerts_errors(config: Any) -> list[str]:
     c = config.health_alerts
-    errors = []
+    errors: list[str] = []
     for key in ("toast", "ntfy", "include_warn"):
         if type(getattr(c, key)) is not bool:
             errors.append(f"[health_alerts].{key} must be boolean")

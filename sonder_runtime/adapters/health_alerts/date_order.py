@@ -8,15 +8,18 @@ and the domain parser refuses ambiguous dates.
 """
 from __future__ import annotations
 
+import importlib
 import re
 from collections.abc import Callable
+from types import ModuleType
 
 from sonder_runtime.domain.health_alerts import DateOrder
 
+winreg: ModuleType | None
 try:  # pragma: no cover - import guard, exercised per platform
-    import winreg
+    winreg = importlib.import_module("winreg")
 except ImportError:  # pragma: no cover
-    winreg = None  # type: ignore[assignment]
+    winreg = None
 
 _INTERNATIONAL_KEY = r"Control Panel\International"
 _SHORT_DATE_VALUE = "sShortDate"

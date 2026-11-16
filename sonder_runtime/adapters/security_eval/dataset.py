@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from ...domain.security_eval.errors import DatasetError
 from ...domain.security_eval.records import HypothesisRecord, collect_records
@@ -12,7 +13,7 @@ from ...domain.security_eval.records import HypothesisRecord, collect_records
 @dataclass(frozen=True)
 class DatasetLoad:
     records: tuple[HypothesisRecord, ...]
-    invalid: tuple[dict, ...]
+    invalid: tuple[dict[str, Any], ...]
     sha256: str
     path: str
 

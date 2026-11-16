@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
 
-def dedupe_accelerators(records: list[dict]) -> list[dict]:
+
+def dedupe_accelerators(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop exact/stale duplicates while retaining distinct physical adapters."""
     result = []
     seen = set()

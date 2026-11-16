@@ -24,7 +24,7 @@ import re
 import subprocess
 import sys
 import threading
-from typing import Callable, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple, Protocol, cast
 
 from sonder_runtime.platform import host_memory
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
@@ -46,6 +46,16 @@ class Measurement(NamedTuple):
     private_bytes: int
 
 
+class _ProcessMemoryReading(Protocol):
+    """What ``measure_runner_for_blob`` reads from a process memory reading."""
+
+    @property
+    def working_set_bytes(self) -> int: ...
+
+    @property
+    def private_bytes(self) -> int: ...
+
+
 def blob_digest_from_text(text: str) -> str | None:
     """The 64-hex sha256 of the first blob path in ``text``, lowercase."""
     match = _BLOB.search(str(text or ""))
@@ -62,8 +72,8 @@ def weights_blob_from_modelfile(modelfile: str) -> str | None:
 
 
 def list_runner_processes(
-    names: Iterable[str], *, runner=subprocess.run, platform_name: str | None = None,
-    proc_root: str = "/proc",
+    names: Iterable[str], *, runner: Callable[..., Any] = subprocess.run,
+    platform_name: str | None = None, proc_root: str = "/proc",
 ) -> list[RunnerProcess]:
     """Processes named in ``names`` with their command lines; empty if unreadable."""
     wanted = {name.casefold() for name in names}
@@ -112,7 +122,7 @@ def list_runner_processes(
 def measure_runner_for_blob(
     blob_digest: str, names: Iterable[str], *,
     lister: Callable[[Iterable[str]], list[RunnerProcess]] = list_runner_processes,
-    reader: Callable[[int], object] = host_memory.process_memory,
+    reader: Callable[[int], _ProcessMemoryReading | None] = host_memory.process_memory,
 ) -> Measurement | None:
     """Memory of the runner whose ``--model`` is ``blob_digest``; the largest if several."""
     best: Measurement | None = None
@@ -140,7 +150,10 @@ class MeasurementScheduler:
 
     @staticmethod
     def _spawn(work: Callable[[], None]) -> None:
-        owned_runtime_thread(target=work, daemon=True, name="sonder-gpu-footprint").start()
+        # ``owned_runtime_thread`` is unannotated in its module and returns a thread.
+        cast("Callable[..., threading.Thread]", owned_runtime_thread)(
+            target=work, daemon=True, name="sonder-gpu-footprint",
+        ).start()
 
     @property
     def busy(self) -> bool:

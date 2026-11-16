@@ -62,3 +62,6 @@ examples/codegen-arena-shooter/FpsGame_Skeleton/
 # checkout they made an installed source checkout look modified, so the
 # guarded runtime updater refused to update it.
 /.sonder/
+
+# mypy
+.mypy_cache/
