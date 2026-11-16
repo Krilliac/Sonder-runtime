@@ -209,6 +209,7 @@ _CATEGORY_BY_TOOL = {
     "weather_lookup": "web",
     "openrouter_models": "web",
     "mesh_generate": "execution",
+    "security_eval": "data",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
     "local_service_probe": "system",

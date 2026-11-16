@@ -669,6 +669,12 @@ def _credential_part(parts) -> str:
     return ""
 
 
+# Public names for the two path predicates, for callers outside this module (the security-eval
+# repo reader). The private names stay: this module and existing callers use them.
+is_secret_path = _is_secret_path
+credential_part = _credential_part
+
+
 def credential_read_component(path: Path) -> str:
     """Why reading *path* would expose a credential store ("" if it would not).
 
