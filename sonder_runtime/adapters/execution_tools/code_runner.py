@@ -126,6 +126,9 @@ MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
+# Each run_project step gets the full timeout, so the step count bounds the
+# whole call: 16 x MAX_TIMEOUT.
+MAX_PROJECT_COMMANDS = 16
 RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
 # Lifecycle quota for detached /runwindow consoles.  ``timeout`` bounds only
 # the compile/launch step; these bound what keeps running afterwards: how
@@ -1284,6 +1287,11 @@ def _commands_from_json(commands_json):
         parsed = parsed["commands"]
     if not isinstance(parsed, list) or not parsed:
         raise ValueError("commands_json must be a non-empty list")
+    if len(parsed) > MAX_PROJECT_COMMANDS:
+        raise ValueError(
+            "commands_json may list at most %d commands (got %d)"
+            % (MAX_PROJECT_COMMANDS, len(parsed))
+        )
     commands = []
     for item in parsed:
         if isinstance(item, list):
