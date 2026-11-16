@@ -208,8 +208,9 @@ from sonder_runtime.application.context_health import (
     ContextMemorySnapshot,
 )
 from sonder_runtime.domain.common.errors import InvalidInput
-from sonder_runtime.domain.request_temperature import validate_request_temperature
 from sonder_runtime.domain.common.errors import SonderError as _SonderError
+from sonder_runtime.domain.request_temperature import validate_request_temperature
+from sonder_runtime.adapters import request_temperature_guard as _temperature_guard
 from sonder_runtime.adapters import prompt_store as _prompts
 from sonder_runtime.adapters.prompt_store import runtime_identity_block as _runtime_identity_block
 from sonder_runtime.domain.model_capabilities import (
@@ -5774,6 +5775,7 @@ def _file_schema_rejection(interaction_id):
 def _offload_impl(prompt, tier="fast", system="", temperature=0.2, num_predict=1024,
                   num_ctx=0, learn=True, timeout=TIMEOUT, cancel_check=None,
                   schema=None, session=None, fleet_synthesis=False):
+    _temperature_guard.require_valid_temperature(temperature)  # both learn paths, every caller
     with _tier_generation.scope(
         tier, graph=_APP_GRAPH, timeout=_bound_request_timeout(timeout, TIMEOUT),
         cancel_check=cancel_check,
@@ -7602,6 +7604,8 @@ def parallel_generate_run(
     each extracted code block, usually as assertions. This is meant for search:
     generate multiple attempts, compile them, execute them, and keep the winners.
     """
+    if bad := _temperature_guard.refusal(temperature, lambda e: _format_runtime_model_call_error_policy(e, **_ollama_error_endpoint())):
+        return bad
     _refresh_live_cloud_tiers()
     variants = max(1, min(int(variants or 1), 12))
     max_workers = max(1, min(int(max_workers or 1), 8, variants))

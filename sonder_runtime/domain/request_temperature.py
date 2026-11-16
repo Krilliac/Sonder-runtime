@@ -14,6 +14,7 @@ from .common.errors import InvalidInput
 
 TEMPERATURE_MIN = 0.0
 TEMPERATURE_MAX = 2.0
+_SHOWN_MAX = 80  # an oversized value is not echoed back in full
 
 
 def validate_request_temperature(value):
@@ -28,7 +29,10 @@ def validate_request_temperature(value):
     finite = not isinstance(value, float) or math.isfinite(value)
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or not finite or not TEMPERATURE_MIN <= value <= TEMPERATURE_MAX):
+        shown = repr(value)
+        if len(shown) > _SHOWN_MAX:
+            shown = shown[:_SHOWN_MAX - 3] + "..."
         raise InvalidInput(
-            "temperature must be a finite number from 0 to 2, got %r" % (value,)
+            "temperature must be a finite number from 0 to 2, got %s" % shown
         )
     return value

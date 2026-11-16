@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 466,
+      "file_count": 467,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -427,6 +427,7 @@
         "sonder_runtime/adapters/repo_repair_runner.py",
         "sonder_runtime/adapters/repository_errors.py",
         "sonder_runtime/adapters/reproducible_evaluation.py",
+        "sonder_runtime/adapters/request_temperature_guard.py",
         "sonder_runtime/adapters/resource_leases.py",
         "sonder_runtime/adapters/restricted_tool_lane.py",
         "sonder_runtime/adapters/runtime_capabilities.py",
