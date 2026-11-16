@@ -37,6 +37,7 @@ from ...domain.reference_lookup.selection import (
     candidate_limit,
     fit_passages,
     select_passages,
+    with_siblings,
 )
 from ...domain.reference_lookup.terms import (
     MAX_IDENTIFIERS,
@@ -76,6 +77,16 @@ class TermStatistics(Protocol):
     """
 
     def term_stats(self, terms: Sequence[str], rowids: Sequence[int]) -> TermStats: ...
+
+
+class TitleRows(Protocol):
+    """What the same-identifier siblings need from the index adapter.
+
+    Kept apart from ``ReferenceSearch``: an index that does not offer it is
+    searched as before, without siblings.
+    """
+
+    def best_title_rows(self, ident: str) -> tuple[RankedRow, ...]: ...
 
 
 class LookupReason(str, Enum):
@@ -168,6 +179,26 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
     return kept, dropped, [], unrelated
 
 
+def add_siblings(index: object, rows: Sequence[RankedRow], k: int) -> Sequence[RankedRow]:
+    """``rows`` with same-identifier pages of other sources placed after the identifier pages selected.
+
+    See ``selection.with_siblings``.  An index without ``best_title_rows`` gets
+    ``rows`` unchanged; a title query that fails adds nothing for that
+    identifier (the siblings are a help: the turn keeps the plain ranking).
+    """
+    fetch = getattr(index, "best_title_rows", None)
+    if not callable(fetch) or not rows or k <= 0:
+        return rows
+
+    def siblings(ident: str) -> Sequence[RankedRow]:
+        try:
+            return tuple(fetch(ident))
+        except ReferenceIndexError:  # a help only: without it the plain ranking stands
+            return ()
+
+    return with_siblings(rows, k, siblings)
+
+
 def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Passage]) -> float | None:
     """How much of the query's vocabulary the best of ``passages`` holds (0..1), or None.
 
@@ -217,7 +248,10 @@ def retrieve(
     prompt); ``None`` skips expansion.  A failed call searches with the
     question words alone and adds a warning.  Only the first
     ``MAX_IDENTIFIERS`` identifiers of the question get title priority (one
-    title query each).
+    title query each).  A selected passage whose title opens with an
+    ATT&CK-style identifier is then followed by the same identifier's page in
+    each other source (``add_siblings``: one title query per such identifier,
+    when the index offers ``best_title_rows``).
 
     ``min_coverage`` above 0 is the relevance floor for passages handed to a
     model on its own (``domain.reference_lookup.relevance``): when the best
@@ -255,7 +289,7 @@ def retrieve(
             except ReferenceIndexError as exc:
                 return _bare(LookupReason.INDEX_UNAVAILABLE, terms=terms, dropped=dropped,
                              warnings=warnings, state=exc.state, detail=exc.detail)
-        found = select_passages(rows, k)
+        found = select_passages(add_siblings(index, rows, k), k)
         passages = fit_passages(found, char_budget)
         if not found:
             warnings.append(NO_MATCH_WARNING)

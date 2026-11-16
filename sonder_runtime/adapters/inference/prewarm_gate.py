@@ -44,6 +44,11 @@ def run_as_prewarm(load: Callable[[], _T]) -> _T:
         _local.active = False
 
 
+def is_prewarm() -> bool:
+    """Whether this thread is running the speculative load right now."""
+    return bool(getattr(_local, "active", False))
+
+
 def await_prewarm(model: object, timeout: float) -> bool:
     """Wait at most ``timeout`` seconds for an in-flight prewarm of ``model``.
 

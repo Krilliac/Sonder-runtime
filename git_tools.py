@@ -623,37 +623,254 @@ def _resolve_diff_path(root, path, *, extra_roots):
     return relative.as_posix()
 
 
-def repo_diff(root=".", *, staged=False, path="", context=3,
-              timeout=DEFAULT_TIMEOUT, max_output=DEFAULT_OUTPUT_BYTES,
-              extra_roots="", bypass=False):
-    """Return a bounded working-tree or staged diff with optional path scope."""
-    root = _resolve_root(root, extra_roots=extra_roots, bypass=bypass)
-    top = _require_repository_root(root, timeout=timeout, max_output=max_output)
-    relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
-    context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
+_DIFF_PATHSPEC_CHUNK = 200
+_DIFF_STATUS_LETTERS = frozenset("ACDMTUXB")
+_DIFF_SECTION_MARKERS = ("diff --git ", "diff --cc ", "diff --combined ")
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+    "v": "\v", "\\": "\\", '"': '"',
+}
+
+
+def _valid_diff_status(status):
+    if len(status) == 1:
+        return status in _DIFF_STATUS_LETTERS
+    return status[:1] in ("R", "C") and status[1:].isdigit()
+
+
+def _diff_changed_paths(top, scope, *, staged, timeout):
+    """List the changed paths as groups; a rename or copy links both sides."""
     arguments = [
         "-c", "color.ui=false", "-c", "core.pager=cat",
         "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
-        "--no-textconv",
-        "--unified=%d" % context,
+        "--no-textconv", "-M", "-C", "--name-status", "-z",
     ]
     if staged is True:
         arguments.append("--cached")
     arguments.append("--")
-    if relative:
-        arguments.append(relative)
+    if scope:
+        arguments.append(scope)
     result = _checked_git(
-        top, arguments, timeout=timeout, max_output=max_output,
-        operation="diff",
+        top, arguments, timeout=timeout, max_output=MAX_OUTPUT_BYTES,
+        operation="diff path listing",
+    )
+    if result["truncated"]:
+        raise ValueError("diff changes too many paths to screen for secrets")
+    tokens = result["stdout"].split(chr(0))
+    if tokens and not tokens[-1]:
+        tokens.pop()
+    groups = []
+    index = 0
+    while index < len(tokens):
+        status = tokens[index]
+        if not _valid_diff_status(status):
+            raise ValueError("unparseable git diff path listing")
+        width = 2 if status[:1] in ("R", "C") else 1
+        group = tokens[index + 1:index + 1 + width]
+        if len(group) != width or not all(group):
+            raise ValueError("unparseable git diff path listing")
+        groups.append(group)
+        index += 1 + width
+    return groups
+
+
+def _screen_diff_paths(top, groups, *, extra_roots):
+    """Split changed paths into allowed and withheld with the shared predicate.
+
+    A group (rename or copy) is allowed only when every path in it is allowed,
+    so moving a secret to or from an ordinary name never exposes its contents.
+    A name that did not decode as UTF-8 is withheld: it cannot be matched
+    byte for byte against the patch headers.
+    """
+    allowed = set()
+    withheld = set()
+    with file_ops.read_policy_snapshot():
+        for group in groups:
+            ok = True
+            for name in group:
+                if "�" in name:
+                    ok = False
+                    continue
+                try:
+                    _resolve_diff_path(top, name, extra_roots=extra_roots)
+                except (PermissionError, ValueError, OSError):
+                    ok = False
+            (allowed if ok else withheld).update(group)
+    return allowed - withheld, withheld
+
+
+def _unquote_c_path(text, start):
+    """Parse one C-quoted git path at ``text[start]``; return (path, end)."""
+    if text[start:start + 1] != '"':
+        raise ValueError("not a quoted path")
+    out = bytearray()
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            return out.decode("utf-8"), index + 1
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(text):
+            break
+        char = text[index]
+        if char in "01234567":
+            digits = text[index:index + 3]
+            if len(digits) != 3 or any(d not in "01234567" for d in digits):
+                raise ValueError("bad octal escape")
+            value = int(digits, 8)
+            if value > 255:
+                raise ValueError("bad octal escape")
+            out.append(value)
+            index += 3
+        elif char in _C_ESCAPES:
+            out.extend(_C_ESCAPES[char].encode("ascii"))
+            index += 1
+        else:
+            raise ValueError("unknown escape")
+    raise ValueError("unterminated quoted path")
+
+
+def _section_path(header):
+    """Return the single path a ``diff --git``/``--cc`` header names, or None."""
+    try:
+        if header.startswith("diff --git "):
+            rest = header[len("diff --git "):]
+            if rest.startswith('"'):
+                first, end = _unquote_c_path(rest, 0)
+                if rest[end:end + 1] != " ":
+                    return None
+                second, end = _unquote_c_path(rest, end + 1)
+                if end != len(rest):
+                    return None
+            else:
+                length, odd = divmod(len(rest) - 5, 2)
+                if odd or length < 1:
+                    return None
+                first = rest[:2 + length]
+                second = rest[3 + length:]
+                if rest[2 + length:3 + length] != " ":
+                    return None
+            if not first.startswith("a/") or not second.startswith("b/"):
+                return None
+            return first[2:] if first[2:] == second[2:] else None
+        for marker in ("diff --cc ", "diff --combined "):
+            if header.startswith(marker):
+                rest = header[len(marker):]
+                if rest.startswith('"'):
+                    path, end = _unquote_c_path(rest, 0)
+                    return path if end == len(rest) else None
+                return rest or None
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _filter_diff_sections(text, allowed):
+    """Keep only patch sections whose exact path is in ``allowed``.
+
+    Returns ``(kept_text, dropped_paths, unparseable_count)``.  Anything that
+    cannot be parsed exactly is dropped (fail closed).
+    """
+    kept = []
+    dropped = []
+    unparseable = 0
+    sections = []
+    current = None
+    # Split on "\n" only. git ends patch lines with "\n", but str.splitlines also breaks on
+    # "\r", "\f", "\x1c"-"\x1e", "\x85", "\u2028" and "\u2029", which file content can carry,
+    # and that would let a hunk line start a forged section header.
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]] + ([pieces[-1]] if pieces[-1] else [])
+    for line in lines:
+        if line.startswith(_DIFF_SECTION_MARKERS):
+            current = [line]
+            sections.append(current)
+        elif current is None:
+            if line.strip():
+                unparseable += 1
+        else:
+            current.append(line)
+    for section in sections:
+        path = _section_path(section[0].rstrip("\r\n"))
+        if path is None:
+            unparseable += 1
+        elif path in allowed:
+            kept.extend(section)
+        else:
+            dropped.append(path)
+    return "".join(kept), dropped, unparseable
+
+
+def repo_diff(root=".", *, staged=False, path="", context=3,
+              timeout=DEFAULT_TIMEOUT, max_output=DEFAULT_OUTPUT_BYTES,
+              extra_roots="", bypass=False):
+    """Return a bounded working-tree or staged diff with optional path scope.
+
+    Changed paths are listed first and screened with the same secret/control
+    predicate that guards an explicit ``path``; only allowed paths reach the
+    real diff, every patch section is re-checked against the allowed set (a
+    pathspec also matches a directory's contents), and ``withheld`` reports
+    how many paths were left out.
+    """
+    root = _resolve_root(root, extra_roots=extra_roots, bypass=bypass)
+    top = _require_repository_root(root, timeout=timeout, max_output=max_output)
+    relative = _resolve_diff_path(top, path, extra_roots=extra_roots)
+    context = _bounded_int(context, 3, 0, MAX_DIFF_CONTEXT)
+    groups = _diff_changed_paths(top, relative, staged=staged, timeout=timeout)
+    allowed, withheld_names = _screen_diff_paths(
+        top, groups, extra_roots=extra_roots,
+    )
+    base = [
+        "-c", "color.ui=false", "-c", "core.pager=cat",
+        "--no-pager", "--literal-pathspecs", "diff", "--no-ext-diff",
+        "--no-textconv", "--no-renames",
+        "--unified=%d" % context,
+    ]
+    if staged is True:
+        base.append("--cached")
+    base.append("--")
+    pieces = []
+    elapsed_ms = 0
+    used = 0
+    truncated = False
+    unparseable = 0
+    surprise = set()
+    ordered = sorted(allowed)
+    # Never run a diff with an empty pathspec list: that means "everything".
+    for start in range(0, len(ordered), _DIFF_PATHSPEC_CHUNK):
+        remaining = max_output - used
+        if remaining <= 0:
+            truncated = True
+            break
+        part = _checked_git(
+            top, base + ordered[start:start + _DIFF_PATHSPEC_CHUNK],
+            timeout=timeout, max_output=remaining, operation="diff",
+        )
+        text, dropped, bad = _filter_diff_sections(part["stdout"], allowed)
+        pieces.append(text)
+        surprise.update(dropped)
+        unparseable += bad
+        elapsed_ms += part["elapsed_ms"]
+        used += part["output_bytes"]
+        if part["truncated"]:
+            truncated = True
+            break
+    withheld = (
+        len(withheld_names) + len(surprise - withheld_names) + unparseable
     )
     return {
         "root": str(top),
         "staged": staged is True,
         "path": relative,
         "context": context,
-        "diff": result["stdout"],
-        "elapsed_ms": result["elapsed_ms"],
-        "truncated": result["truncated"],
-        "output_bytes": result["output_bytes"],
-        "output_limit": result["output_limit"],
+        "diff": "".join(pieces),
+        "withheld": withheld,
+        "elapsed_ms": elapsed_ms,
+        "truncated": truncated,
+        "output_bytes": used,
+        "output_limit": max_output,
     }

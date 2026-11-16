@@ -505,5 +505,6 @@
   "server.py": 26942,
   "sonder_launcher.py": 2485,
   "sonder_runtime/interfaces/http/serve.py": 8360
- }
+ },
+ "server_shims": []
 }
