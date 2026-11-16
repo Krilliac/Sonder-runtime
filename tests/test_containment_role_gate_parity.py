@@ -318,7 +318,7 @@ def test_loop_precheck_treats_an_action_with_no_type_as_code_like_the_executor(a
     assert refusal.startswith("refused /loop")
 
 
-def test_loop_tool_itself_is_refused_for_user_so_the_precheck_gap_is_not_reachable(monkeypatch, auto_mode,  # noqa: F811
+def test_loop_tool_itself_is_refused_for_user(monkeypatch, auto_mode,  # noqa: F811
                                                                                    all_handlers_recorded):
     for line in ("/loop actions_json=[{}]", '/loop actions_json=[{"type":"code","code":"1"}]'):
         result = serve._dispatch_catalogued_tool(line, serve.ConversationState(), context=USER_CTX)
@@ -481,7 +481,11 @@ def test_asyncio_to_thread_keeps_the_role(user_caller):  # noqa: F811
 def test_gap_runtime_threads_helpers_do_not_carry_the_role(user_caller):  # noqa: F811
     """GAP: ``runtime_threads.Thread`` / ``ThreadPoolExecutor`` (what server.py's fan-out tools and
     interactive_lanes use) copy nothing. Only a tool outside the user allowlist reaches them (next test)."""
-    assert (_run_in_thread(lambda: runtime_threads.Thread and _probe()) != "") is INHERITS
+    out = []
+    thread = runtime_threads.Thread(target=lambda: out.append(_probe()))
+    thread.start()
+    thread.join(10)
+    assert (out[0] != "") is INHERITS
     pool = runtime_threads.ThreadPoolExecutor(max_workers=1)
     try:
         assert pool.submit(_probe).result(10) == ""
