@@ -1029,7 +1029,7 @@
       ]
     },
     {
-      "file_count": 320,
+      "file_count": 321,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1279,6 +1279,7 @@
         "sonder_runtime/domain/reference_lookup/terms.py",
         "sonder_runtime/domain/replication_ack.py",
         "sonder_runtime/domain/repository_languages.py",
+        "sonder_runtime/domain/request_temperature.py",
         "sonder_runtime/domain/request_timeout.py",
         "sonder_runtime/domain/resource_leases.py",
         "sonder_runtime/domain/retrieval_policy.py",
