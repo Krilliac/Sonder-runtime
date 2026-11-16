@@ -160,7 +160,18 @@ def _powershell_exe():
 
 
 def workspace_root():
-    return os.path.abspath(os.path.dirname(__file__))
+    """Sonder's checkout, the base for relative ``cwd`` values.
+
+    ``dirname(__file__)`` stopped naming the checkout when this module moved
+    into ``sonder_runtime/adapters/execution_tools``: ``resolve_cwd("tests")``
+    failed and ``cwd="."`` ran the child inside the runtime package. file_ops
+    owns the checkout-root rule (it fixed the same regression for itself), so
+    defer to it. Imported here, not at module level, to keep this module's
+    import light and free of cycles.
+    """
+    from sonder_runtime.adapters.filesystem import file_ops
+
+    return str(file_ops.workspace_root())
 
 
 def normalize_language(language):
