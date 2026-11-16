@@ -9,8 +9,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Longest turn the intent predicates scan; longer text is never routed to file tools.
-_MAX_INTENT_CHARS = 12_000
+# Longest turn classify_file_intent will route to file tools (the legacy chat limit).
+# Longer text gets no file tools, which fails closed.  suppresses_file_tools has no
+# such cap: a negation must be honoured however long the prompt is.
+_MAX_ROUTED_CHARS = 12_000
 
 _LOCAL_TARGET = re.compile(
     r"(?:\b(?:workspace|work\s+space|repo(?:sitory)?|codebase|project|"
@@ -27,9 +29,12 @@ _MUTATION = re.compile(
     r"delete|remove|run|execute|deploy|compile|test|fix|patch)\b(?![./\\])",
     re.IGNORECASE,
 )
+# A run of "then/also" needs no group of its own: each of those words is itself a
+# connector start, so the last one before the verb already matches.  Repeating the
+# group made every start rescan the whole run (quadratic on "then then then ...").
 _MUTATION_REQUEST = re.compile(
     r"(?:^(?:/delegate\s+)?(?:(?:please|can\s+you|could\s+you|would\s+you|will\s+you)\s+)*"
-    r"|(?:\b(?:and|then|also)\b|[,;])\s+(?:(?:then|also|please)\s+)*)" + _MUTATION.pattern,
+    r"|(?:\b(?:and|then|also)\b|[,;])\s+(?:please\s+)*)" + _MUTATION.pattern,
     re.IGNORECASE,
 )
 _MUTATION_TARGET = re.compile(
@@ -109,7 +114,7 @@ def suppresses_file_tools(text: str) -> bool:
     if not isinstance(text, str):
         return False
     value = text.strip()
-    if not value or len(value) > _MAX_INTENT_CHARS or not _LOCAL_TARGET.search(value):
+    if not value or not _LOCAL_TARGET.search(value):
         return False
     if _NO_TOOLS_OR_NEGATION.search(value):
         return True
@@ -128,7 +133,7 @@ def classify_file_intent(text: str) -> dict[str, Any] | None:
     if not isinstance(text, str):
         return None
     value = text.strip()
-    if not value or len(value) > _MAX_INTENT_CHARS or _NO_TOOLS_OR_NEGATION.search(value):
+    if not value or len(value) > _MAX_ROUTED_CHARS or _NO_TOOLS_OR_NEGATION.search(value):
         return None
 
     local_fact = bool(_LOCAL_FACT_QUESTION.match(value) and _LOCAL_TARGET.search(value))
