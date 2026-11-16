@@ -132,15 +132,6 @@ from ..model_request_admission import HostModelRequestAdmission, host_model_requ
 from ..provider_bindings import PROVIDER_TIERS
 from .anthropic_spend import SpendLedger
 
-# The two host helpers below are defined without annotations in their own modules;
-# these aliases state the contract this adapter relies on.  ``dispatch_provider``
-# returns exactly what ``send`` returned, and the owned thread is only started and joined.
-_dispatch_provider = cast(
-    "Callable[[str, str, dict[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]]",
-    dispatch_provider,
-)
-_owned_thread: Callable[..., Any] = owned_runtime_thread
-
 logger = logging.getLogger(__name__)
 
 PROVIDER_LABEL = "anthropic"
@@ -944,7 +935,12 @@ class AnthropicGateway:
             return data
 
         # Evidence capture commits the effective body (never the key) before send.
-        return _dispatch_provider(PROVIDER_LABEL, OPERATION, params, send)
+        # ``dispatch_provider`` is unannotated in its module; it returns exactly what
+        # ``send`` returned.  The cast is at the call so a rebind of the name is honoured.
+        return cast(
+            "Callable[[str, str, dict[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]]",
+            dispatch_provider,
+        )(PROVIDER_LABEL, OPERATION, params, send)
 
     def _invoke(
         self, settings: AnthropicSettings, model: str, params: dict[str, Any], context: OperationContext,
@@ -1061,7 +1057,9 @@ class AnthropicGateway:
                     pass  # the consumer discovers terminal state after drain
 
         started = time.monotonic()
-        thread = _owned_thread(
+        # ``owned_runtime_thread`` is unannotated in its module; both of its paths return
+        # a ``threading.Thread``.  The cast is at the call so a rebind of the name is honoured.
+        thread = cast("Callable[..., threading.Thread]", owned_runtime_thread)(
             target=contextvars.copy_context().run, args=(worker,),
             name="anthropic-stream", daemon=True,
         )

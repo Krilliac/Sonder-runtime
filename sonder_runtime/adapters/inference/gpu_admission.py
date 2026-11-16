@@ -43,7 +43,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping, NoReturn, Protocol, cast
 
 from sonder_runtime.adapters.inference.gpu_admission_store import (
     FULL, HELD, GpuAdmissionStore, StoreUnavailable,
@@ -71,10 +71,16 @@ _TAGS_CACHE_SECONDS = 30.0
 _REMEASURE_SECONDS = 600.0
 _READ_LIMIT = 4 * 1024 * 1024
 _BOUND_LOG_TUPLES = 4096
-_HELD_TICKET: contextvars.ContextVar = contextvars.ContextVar(
+_HELD_TICKET: contextvars.ContextVar[_Entry | None] = contextvars.ContextVar(
     "sonder_gpu_admission_held", default=None)
 
-PsReader = Callable[[str], "Mapping | None"]
+PsReader = Callable[[str], "Mapping[str, Any] | None"]
+
+
+class _CtxMismatchMetrics(Protocol):
+    """The one metrics call admission makes (``MetricsRegistry`` provides it)."""
+
+    def observe_num_ctx_mismatch(self) -> None: ...
 
 
 class GpuAdmissionRefused(ModelCallError):
@@ -105,7 +111,7 @@ class AdmissionTicket:
     """What the caller sends: ``payload`` is the (possibly rewritten) request."""
 
     lane: AdmissionLane | None
-    payload: Mapping | None
+    payload: Mapping[str, Any] | None
     requested_num_ctx: int | None = None
     served_num_ctx: int | None = None
     waited_seconds: float = 0.0
@@ -116,12 +122,25 @@ class AdmissionTicket:
         return json.dumps(self.payload).encode("utf-8") if self.rewritten else original
 
 
-def passthrough_ticket(payload: Mapping | None) -> AdmissionTicket:
+def passthrough_ticket(payload: Mapping[str, Any] | None) -> AdmissionTicket:
     return AdmissionTicket(None, payload)
 
 
 def _no_release() -> None:
     """The release of a probe that took no slot (off, observe, remote origin)."""
+
+
+def _inconsistent_ctx_decision(decision: policy.CtxDecision) -> NoReturn:
+    """Raise for a ``CtxDecision`` that ``policy.resolve_num_ctx`` never returns.
+
+    ``resolve_num_ctx`` is the only producer of the decisions admission acts on,
+    and it attaches a reason to every WAIT and REFUSE, a window to every
+    SERVE_PINNED and INHERIT_PINNED, and returns PIN_NEW and REPIN only for a
+    request that named a window. A decision that breaks this fails the request
+    (in enforce mode ``_enter`` releases the slot), as the attribute or type
+    error it would otherwise cause does.
+    """
+    raise RuntimeError("gpu admission: inconsistent num_ctx decision %r" % (decision,))
 
 
 @dataclasses.dataclass
@@ -204,7 +223,7 @@ def policy_from_config(config: GpuAdmissionConfig) -> GpuAdmissionPolicy:
     )
 
 
-def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping | None:
+def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any] | None:
     """GET one control-plane document through the policy-enforcing transport."""
     ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
     try:
@@ -248,9 +267,9 @@ class GpuAdmission:
         host_reader: Callable[[], HostMemoryReading | None] | None = None,
         ps_reader: PsReader | None = None,
         tags_reader: PsReader | None = None,
-        show_reader: Callable[[str, str], Mapping | None] | None = None,
+        show_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
         memory_reader: Callable[[str], tuple[int, int] | None] | None = None,
-        metrics=None,
+        metrics: _CtxMismatchMetrics | None = None,
         background: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -279,14 +298,14 @@ class GpuAdmission:
         self._background = background or self._spawn
         self._ps_cache: dict[str, tuple[float, dict[str, _PsRow]]] = {}
         self._tags_cache: dict[str, tuple[float, dict[str, _TagRow]]] = {}
-        self._pin_warned: set[tuple] = set()
+        self._pin_warned: set[tuple[str, str, int | None, int]] = set()
         self._ctx_checked: dict[tuple[str, str], float] = {}
-        self._mismatch_seen: set[tuple] = set()
+        self._mismatch_seen: set[tuple[str, str, int, int | None]] = set()
         self._unverifiable_seen: set[tuple[str, str]] = set()
         self._last_measured: dict[tuple[str, int], float] = {}
         self._store_errors_logged: set[str] = set()
-        self._counters = collections.Counter()
-        self._last_refusals: collections.deque = collections.deque(maxlen=8)
+        self._counters: collections.Counter[str] = collections.Counter()
+        self._last_refusals: collections.deque[tuple[str, str]] = collections.deque(maxlen=8)
         self._last_reading: HostMemoryReading | None = None
         self._pins_seen: dict[str, int] = {}
 
@@ -294,7 +313,9 @@ class GpuAdmission:
     @staticmethod
     def _spawn(work: Callable[[], None]) -> None:
         from sonder_runtime.platform.runtime_threads import Thread
-        Thread(target=work, daemon=True, name="sonder-gpu-admission").start()
+        # ``Thread`` is unannotated in its module; both of its paths return a thread.
+        cast("Callable[..., threading.Thread]", Thread)(
+            target=work, daemon=True, name="sonder-gpu-admission").start()
 
     @property
     def mode(self) -> str:
@@ -375,7 +396,7 @@ class GpuAdmission:
             self._tags_cache[origin] = (now, rows)
         return rows
 
-    def _show_modelfile(self, origin: str, model: str) -> Mapping | None:
+    def _show_modelfile(self, origin: str, model: str) -> Mapping[str, Any] | None:
         ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
         try:
             request = urllib.request.Request(
@@ -391,10 +412,10 @@ class GpuAdmission:
     # -- public API -------------------------------------------------------------
     @contextlib.contextmanager
     def admit(
-        self, path: str, payload: Mapping | None, *, origin: str,
+        self, path: str, payload: Mapping[str, Any] | None, *, origin: str,
         deadline: float | None = None, caller: str = "interactive",
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
-    ):
+    ) -> Iterator[AdmissionTicket]:
         """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
         mode = self.config.mode
         if mode == "off":
@@ -418,7 +439,9 @@ class GpuAdmission:
                 release()
             return
         key = model_key(body.get("model") if body is not None else None)
-        if not key or is_cloud_model_name(key):
+        # ``body is None`` already gives ``key == ""``; naming it lets the gated
+        # path below take a request body that is known to be present.
+        if body is None or not key or is_cloud_model_name(key):
             yield passthrough_ticket(payload)
             return
         if lane is AdmissionLane.UNLOAD:
@@ -472,7 +495,7 @@ class GpuAdmission:
         return release
 
     # -- LOAD / INFERENCE / EMBED lanes -------------------------------------------
-    def _refuse(self, refusal: Refused) -> None:
+    def _refuse(self, refusal: Refused) -> NoReturn:
         with self._lock:
             self._counters["refused"] += 1
             self._counters["refused_" + refusal.reason.value] += 1
@@ -484,7 +507,10 @@ class GpuAdmission:
         self._store_failed(error)
         self._refuse(Refused(RefusalReason.STORE_UNAVAILABLE, str(error), retry_after_seconds=5.0))
 
-    def _enter(self, lane, body, origin, key, deadline, caller, ctx_policy) -> _Entry:
+    def _enter(
+        self, lane: AdmissionLane, body: Mapping[str, Any], origin: str, key: str,
+        deadline: float | None, caller: str, ctx_policy: CtxPolicy | None,
+    ) -> _Entry:
         ticket = AdmissionTicket(lane, body, requested_num_ctx=policy.requested_num_ctx(body))
         entry = _Entry(ticket, lane=lane, origin=origin, model_key=key,
                        ticket_id=uuid.uuid4().hex,
@@ -507,7 +533,7 @@ class GpuAdmission:
         remaining = (deadline - self._clock()) if deadline is not None else 600.0
         return max(1.0, remaining) + self.config.lease_ttl_margin_seconds
 
-    def _take_slot(self, entry: _Entry, limit: float, deadline, caller: str) -> None:
+    def _take_slot(self, entry: _Entry, limit: float, deadline: float | None, caller: str) -> None:
         store = self._the_store()
         interval = self.config.poll_interval_ms / 1000.0
         slots = self.config.embed_slots if entry.pool == "embed" else self.config.gpu_slots
@@ -549,7 +575,10 @@ class GpuAdmission:
             entry.enqueued = False
             self._notify()
 
-    def _enforce(self, entry: _Entry, body, deadline, caller, ctx_policy) -> None:
+    def _enforce(
+        self, entry: _Entry, body: Mapping[str, Any], deadline: float | None, caller: str,
+        ctx_policy: CtxPolicy | None,
+    ) -> None:
         started = self._clock()
         limit = started + self.config.max_queue_wait_seconds
         if deadline is not None:
@@ -563,6 +592,8 @@ class GpuAdmission:
             wait_interval = None
             refusal = None
             if plan.ctx.action is CtxAction.REFUSE:
+                if plan.ctx.reason is None:  # resolve_num_ctx gives every REFUSE a reason
+                    _inconsistent_ctx_decision(plan.ctx)
                 refusal = Refused(plan.ctx.reason, plan.ctx.detail, retry_after_seconds=30.0)
             elif plan.ctx.action is CtxAction.WAIT:
                 wait_interval = self.config.poll_interval_ms / 1000.0
@@ -591,7 +622,10 @@ class GpuAdmission:
         with self._lock:
             self._counters["admitted"] += 1
 
-    def _observe(self, entry: _Entry, body, deadline, ctx_policy) -> None:
+    def _observe(
+        self, entry: _Entry, body: Mapping[str, Any], deadline: float | None,
+        ctx_policy: CtxPolicy | None,
+    ) -> None:
         local = ollama_policy.is_loopback(entry.origin)
         try:
             self._the_store()
@@ -606,6 +640,8 @@ class GpuAdmission:
             return
         entry.cold, entry.digest, entry.file_size = plan.cold, plan.digest, plan.file_size
         if plan.ctx.action in (CtxAction.REFUSE, CtxAction.WAIT):
+            if plan.ctx.reason is None:  # resolve_num_ctx gives every WAIT and REFUSE a reason
+                _inconsistent_ctx_decision(plan.ctx)
             logger.warning("gpu admission (observe): would refuse %s: %s",
                            plan.ctx.reason.value, plan.ctx.detail)
         elif plan.ctx.action in (CtxAction.SERVE_PINNED, CtxAction.INHERIT_PINNED):
@@ -618,7 +654,9 @@ class GpuAdmission:
             self._counters["observed"] += 1
 
     # -- decisions ---------------------------------------------------------------
-    def _plan(self, entry: _Entry, body, local: bool, ctx_policy) -> _Plan:
+    def _plan(
+        self, entry: _Entry, body: Mapping[str, Any], local: bool, ctx_policy: CtxPolicy | None,
+    ) -> _Plan:
         store = self._the_store()
         origin, key, lane = entry.origin, entry.model_key, entry.lane
         requested = policy.requested_num_ctx(body)
@@ -681,21 +719,29 @@ class GpuAdmission:
         return tuple("%s (%.1f GiB loaded)" % (row.name, row.size / gib)
                      for other, row in sorted(rows.items()) if other != key)[:8]
 
-    def _apply(self, entry: _Entry, plan: _Plan, body, store: GpuAdmissionStore) -> None:
+    def _apply(
+        self, entry: _Entry, plan: _Plan, body: Mapping[str, Any], store: GpuAdmissionStore,
+    ) -> None:
         ticket, origin, key = entry.ticket, entry.origin, entry.model_key
         entry.cold, entry.digest, entry.file_size = plan.cold, plan.digest, plan.file_size
         if plan.follow_effective is not None:
             store.set_pin(origin, key, plan.follow_effective)
         action, requested, served = plan.ctx.action, plan.requested, plan.ctx.num_ctx
         if action is CtxAction.PIN_NEW:
+            if requested is None:  # resolve_num_ctx pins only a window the request named
+                _inconsistent_ctx_decision(plan.ctx)
             store.set_pin(origin, key, requested)
         elif action is CtxAction.REPIN:
+            if requested is None:  # resolve_num_ctx repins only to a window the request named
+                _inconsistent_ctx_decision(plan.ctx)
             store.set_pin(origin, key, requested, repin=True,
                           window_seconds=self._policy.repin_window_seconds)
             logger.warning(
                 "num_ctx repin: model=%s origin=%s requested=%d replaces the pinned window; "
                 "the model reloads once (%s)", key, origin, requested, plan.ctx.detail)
         elif action in (CtxAction.SERVE_PINNED, CtxAction.INHERIT_PINNED):
+            if served is None:  # resolve_num_ctx serves a pin only with its window
+                _inconsistent_ctx_decision(plan.ctx)
             ticket.payload = self._with_num_ctx(body, served)
             ticket.rewritten = True
             ticket.served_num_ctx = served
@@ -720,7 +766,7 @@ class GpuAdmission:
             ticket.served_num_ctx = requested
 
     @staticmethod
-    def _with_num_ctx(body: Mapping, num_ctx: int) -> dict:
+    def _with_num_ctx(body: Mapping[str, Any], num_ctx: int) -> dict[str, Any]:
         rewritten = dict(body)
         options = dict(rewritten.get("options") or {})
         options["num_ctx"] = num_ctx
@@ -838,7 +884,7 @@ class GpuAdmission:
                     key, num_ctx, measured[0] / gib, measured[1] / gib)
 
     # -- status ----------------------------------------------------------------------
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         """Bounded, I/O-free state for ``pool.summary()`` and ``status()``."""
         with self._lock:
             counters = dict(self._counters)

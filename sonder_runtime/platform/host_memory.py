@@ -103,6 +103,12 @@ def _read_linux() -> HostMemory | None:
 
 
 def _read_windows() -> HostMemory | None:
+    # Only reached on win32 (the callers branch on ``sys.platform``). Elsewhere
+    # ``ctypes.WinDLL`` does not exist and the callers would map the
+    # AttributeError to ``None``; returning ``None`` here is the same result and
+    # tells the type checker which platform the body below belongs to.
+    if sys.platform != "win32":
+        return None
     import ctypes
     from ctypes import wintypes
 
@@ -144,6 +150,12 @@ def read_host_memory() -> HostMemory | None:
 
 
 def _process_memory_windows(pid: int) -> ProcessMemory | None:
+    # Only reached on win32 (the callers branch on ``sys.platform``). Elsewhere
+    # ``ctypes.WinDLL`` does not exist and the callers would map the
+    # AttributeError to ``None``; returning ``None`` here is the same result and
+    # tells the type checker which platform the body below belongs to.
+    if sys.platform != "win32":
+        return None
     import ctypes
     from ctypes import wintypes
 
