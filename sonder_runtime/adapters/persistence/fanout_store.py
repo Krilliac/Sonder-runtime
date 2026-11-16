@@ -29,6 +29,11 @@ MAX_ANSWER_CHARS = 64_000
 MAX_RAW_ANSWER_CHARS = 2_147_483_647
 MAX_THINKING_CHARS = 1_000_000
 MAX_ERROR_CHARS = 4_000
+# A sealed (vault-encrypted) answer is bounded by the batch answer cap
+# (1M characters, up to 4 UTF-8 bytes each) after base64 expansion.
+MAX_SEALED_ANSWER_CIPHERTEXT = 6_000_000
+MAX_TOKEN_COUNT = 1_000_000_000_000
+TOKEN_SOURCES = frozenset(("ollama", "provider", "estimated", "mixed"))
 MAX_EVENT_CHARS = 1_000
 MAX_MODELS = 128
 MAX_PROVIDER_RETRY_SECONDS = 3600
@@ -125,6 +130,23 @@ CREATE INDEX IF NOT EXISTS idx_fanout_events_run ON fanout_events(run_id, event_
 -- ``ts<?`` pruning and turns the hourly request-path cleanup into a table
 -- scan as fanout history grows.
 CREATE INDEX IF NOT EXISTS idx_fanout_events_retention ON fanout_events(ts, run_id);
+-- Durable batch jobs: a scheduler layer over single-model fanout child runs.
+-- Item inputs are vault-sealed; answers live only in the child fanout rows.
+CREATE TABLE IF NOT EXISTS batch_jobs (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', request_owner TEXT NOT NULL DEFAULT '',
+ request_role TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, pause_reason TEXT NOT NULL DEFAULT '',
+ spec_json TEXT NOT NULL, settings_json TEXT NOT NULL DEFAULT '{}',
+ cancel_requested INTEGER NOT NULL DEFAULT 0, owner_id TEXT NOT NULL DEFAULT '',
+ owner_pid INTEGER NOT NULL DEFAULT 0, owner_host TEXT NOT NULL DEFAULT '', lease_until REAL,
+ ttl_seconds INTEGER NOT NULL DEFAULT 0, segment_start_ts REAL,
+ created_ts REAL NOT NULL, updated_ts REAL NOT NULL, started_ts REAL, finished_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_batch_jobs_status ON batch_jobs(status, updated_ts);
+CREATE TABLE IF NOT EXISTS batch_items (
+ job_id TEXT NOT NULL, item_key TEXT NOT NULL, seq INTEGER NOT NULL,
+ fields_ciphertext TEXT NOT NULL, created_ts REAL NOT NULL,
+ PRIMARY KEY(job_id, item_key), FOREIGN KEY(job_id) REFERENCES batch_jobs(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS model_health (
  model TEXT PRIMARY KEY, model_class TEXT NOT NULL DEFAULT '', failure_count INTEGER NOT NULL DEFAULT 0,
  availability_failure_count INTEGER NOT NULL DEFAULT 0,
@@ -192,6 +214,16 @@ def _ensure_schema(path: str) -> None:
                     conn.execute(
                         "ALTER TABLE fanout_runs ADD COLUMN execution_prompt_ciphertext TEXT NOT NULL DEFAULT ''"
                     )
+                for column in ("batch_job_id", "batch_item_key", "batch_stage"):
+                    if column not in columns:
+                        # Empty means an ordinary fanout run, never a batch child.
+                        conn.execute(
+                            "ALTER TABLE fanout_runs ADD COLUMN %s TEXT NOT NULL DEFAULT ''" % column
+                        )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fanout_runs_batch "
+                    "ON fanout_runs(batch_job_id, batch_stage, batch_item_key)"
+                )
                 health_columns = {row[1] for row in conn.execute("PRAGMA table_info(model_health)")}
                 if "availability_failure_count" not in health_columns:
                     # ``failure_count`` historically included prompt/configuration
@@ -220,6 +252,12 @@ def _ensure_schema(path: str) -> None:
                     # NULL is intentional for legacy rows: old receipts did
                     # not carry enough metadata to classify a failure safely.
                     ("failure_class", "TEXT"),
+                    # NULL tokens mean a legacy or unreported row: unknown, never 0.
+                    ("tokens_in", "INTEGER"),
+                    ("tokens_out", "INTEGER"),
+                    ("token_source", "TEXT NOT NULL DEFAULT ''"),
+                    ("served_model", "TEXT NOT NULL DEFAULT ''"),
+                    ("answer_ciphertext", "TEXT NOT NULL DEFAULT ''"),
                 ):
                     if column not in result_columns:
                         conn.execute(
@@ -296,6 +334,7 @@ def _row(row) -> dict | None:
     if row is None: return None
     result = dict(row)
     result.pop("execution_prompt_ciphertext", None)
+    result.pop("answer_ciphertext", None)
     for key in ("cloud_opt_in", "cancel_requested"):
         if key in result: result[key] = bool(result[key])
     return result
@@ -369,7 +408,8 @@ def maybe_prune(now: float | None = None) -> dict | None:
 
 def create_run(prompt: str, models, *, request_owner: str = "", request_role: str = "",
                scope: str = "local", cloud_opt_in: bool = False, limits=None,
-               execution_prompt_ciphertext: str = "") -> dict:
+               execution_prompt_ciphertext: str = "", batch_job_id: str = "",
+               batch_item_key: str = "", batch_stage: str = "") -> dict:
     clean_models = []
     for value in models or ():
         name = _safe_text(value, 200).strip()
@@ -385,12 +425,14 @@ def create_run(prompt: str, models, *, request_owner: str = "", request_role: st
     now = time.time(); run_id = "fan-%s" % uuid.uuid4().hex[:16]
     maybe_prune(now)
     with _write_transaction() as conn:
-        conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+        conn.execute("""INSERT INTO fanout_runs(id,request_owner,request_role,prompt,prompt_sha256,models_json,execution_prompt_ciphertext,scope,cloud_opt_in,limits_json,status,created_ts,updated_ts,batch_job_id,batch_item_key,batch_stage)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)""",
                      (run_id, _safe_text(request_owner, 200), _safe_text(request_role, 80), _PROMPT_REDACTED,
                       "", _json(clean_models),
                       ciphertext, _safe_text(scope, 40),
-                      int(bool(cloud_opt_in)), _json(limits or {}), now, now))
+                      int(bool(cloud_opt_in)), _json(limits or {}), now, now,
+                      _safe_text(batch_job_id, 80), _safe_text(batch_item_key, 200),
+                      _safe_text(batch_stage, 80)))
         conn.executemany("INSERT INTO fanout_results(run_id,model,status,dispatch_state_known,updated_ts) VALUES(?,?,'pending',1,?)",
                          [(run_id, model, now) for model in clean_models])
         _event(conn, run_id, "created", "fanout receipt created for %d models" % len(clean_models), now)
@@ -407,6 +449,18 @@ def get_run(run_id: str) -> dict | None:
     finally: conn.close()
 
 
+def replace_execution_prompt_ciphertext(run_id: str, ciphertext: str) -> bool:
+    """Swap the sealed prompt of a run that is not executing (a batch step retried with a fresh render)."""
+    sealed = str(ciphertext or "")
+    if len(sealed) > 64_000:
+        raise ValueError("fanout sealed prompt exceeds 64000 characters")
+    with _write_transaction() as conn:
+        return conn.execute(
+            "UPDATE fanout_runs SET execution_prompt_ciphertext=?,updated_ts=? WHERE id=? AND status<>'running'",
+            (sealed, time.time(), str(run_id)),
+        ).rowcount == 1
+
+
 def execution_prompt_ciphertext(run_id: str) -> str | None:
     """Return the sealed prompt only to the server-side execution worker."""
     conn = _connect()
@@ -420,13 +474,26 @@ def execution_prompt_ciphertext(run_id: str) -> str | None:
         conn.close()
 
 
+def sealed_answer_ciphertext(run_id: str, model: str) -> str | None:
+    """Return one sealed answer only to the server-side batch reader."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT answer_ciphertext FROM fanout_results WHERE run_id=? AND model=?",
+            (str(run_id), str(model)),
+        ).fetchone()
+        return str(row["answer_ciphertext"] or "") if row else None
+    finally:
+        conn.close()
+
+
 def list_runs(*, include_finished: bool = True, limit: int = 20) -> list[dict]:
     limit = max(1, min(int(limit), 200))
     conn = _connect()
     try:
-        query = "SELECT * FROM fanout_runs"
+        query = "SELECT * FROM fanout_runs WHERE batch_job_id=''"
         if not include_finished:
-            query += " WHERE status NOT IN ('completed','cancelled','interrupted')"
+            query += " AND status NOT IN ('completed','cancelled','interrupted')"
         return [_row(r) for r in conn.execute(query + " ORDER BY updated_ts DESC LIMIT ?", (limit,))]
     finally: conn.close()
 
@@ -444,7 +511,9 @@ def recent_run_summaries(*, request_owner: str | None = None,
     """
     limit = max(1, min(int(limit), 100))
     reconcile_stale_runs()
-    clauses, values = [], []
+    # Batch child runs belong to their job: one job would otherwise flood the
+    # run history with a row per step.
+    clauses, values = ["runs.batch_job_id=''"], []
     if request_owner is not None:
         clauses.append("runs.request_owner=?")
         values.append(str(request_owner))
@@ -504,7 +573,7 @@ def recent_run_summaries(*, request_owner: str | None = None,
 def list_results(run_id: str, *, include_answers: bool = True) -> list[dict]:
     conn = _connect()
     try:
-        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,answer_chars,answer_truncated,answer_truncation_known,thinking_chars,done_reason,failure_class,retry_after_ts,started_ts,finished_ts,updated_ts"
+        columns = "*" if include_answers else "run_id,model,status,attempts,elapsed_ms,answer_chars,answer_truncated,answer_truncation_known,thinking_chars,done_reason,failure_class,retry_after_ts,started_ts,finished_ts,updated_ts,tokens_in,tokens_out,token_source,served_model"
         return [_row(r) for r in conn.execute("SELECT %s FROM fanout_results WHERE run_id=? ORDER BY model" % columns, (str(run_id),))]
     finally: conn.close()
 
@@ -648,6 +717,17 @@ def _safe_answer(value) -> tuple[str, bool]:
     return sanitized[:MAX_ANSWER_CHARS], len(sanitized) > MAX_ANSWER_CHARS
 
 
+def _token_count(value) -> int | None:
+    """One provider or estimated token count; ``None`` stays unknown, never 0."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return None if parsed < 0 else min(parsed, MAX_TOKEN_COUNT)
+
+
 def _done_reason(value) -> str:
     """Keep the durable receipt vocabulary small and non-content-bearing."""
     if not isinstance(value, str):
@@ -687,11 +767,21 @@ def retry_after_timestamp(seconds, *, now: float | None = None) -> float | None:
     )
 
 
-def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, failure_class: str | None = None, retry_after_ts: float | None = None, answer_chars: int | None = None, thinking_chars: int | None = None, done_reason: str = "") -> dict | None:
+def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer: str = "", error: str = "", elapsed_ms: int | None = None, failure_class: str | None = None, retry_after_ts: float | None = None, answer_chars: int | None = None, thinking_chars: int | None = None, done_reason: str = "", tokens_in: int | None = None, tokens_out: int | None = None, token_source: str = "", served_model: str = "", sealed_answer: str = "", sealed_truncated: bool = False) -> dict | None:
     if status not in ("answered", "failed", "skipped", "unknown"): raise ValueError("invalid fanout result status: %s" % status)
     now = time.time(); elapsed = None if elapsed_ms is None else max(0, min(int(elapsed_ms), 86_400_000))
     raw_answer = str(answer or "")
     safe_answer, answer_truncated = _safe_answer(raw_answer)
+    sealed = str(sealed_answer or "")
+    if len(sealed) > MAX_SEALED_ANSWER_CIPHERTEXT:
+        raise ValueError("fanout sealed answer exceeds %d characters" % MAX_SEALED_ANSWER_CIPHERTEXT)
+    if sealed:
+        # The vault token is the only copy: no plaintext preview remains to
+        # redact, and the truncation truth comes from the sealing side.
+        safe_answer, answer_truncated = "", bool(sealed_truncated)
+    source = str(token_source or "").strip().casefold()
+    persisted_token_source = source if source in TOKEN_SOURCES else ""
+    persisted_served_model = _safe_text(served_model, 200).strip()
     safe_error = _safe_text(error, MAX_ERROR_CHARS)
     # ``answer_chars`` measures the model's raw content before whitespace
     # normalization/redaction/storage bounds.  It is a scalar receipt metric,
@@ -706,7 +796,7 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
     # rows from bytes observed by the consumer. Truncated provider/storage
     # output is deliberately not sealed as a completed artifact.
     readiness_json = ""
-    if (status == "answered" and not answer_truncated
+    if (status == "answered" and not answer_truncated and not sealed
             and persisted_done_reason not in ("length", "max_tokens", "max_output_tokens")):
         readiness_json = encode_readiness(ArtifactReadiness.from_content(
             str(model), str(run_id), safe_answer,
@@ -736,12 +826,14 @@ def record_result(run_id: str, model: str, owner_id: str, status: str, *, answer
         if (run is None or run["cancel_requested"] or run["owner_id"] != owner_id
                 or run["status"] != "running" or run["lease_until"] is None
                 or run["lease_until"] < now): return None
-        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,readiness_json=?,failure_class=?,retry_after_ts=?,finished_ts=?,updated_ts=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
+        changed = conn.execute("""UPDATE fanout_results SET status=?,answer=?,error=?,elapsed_ms=?,answer_chars=?,answer_truncated=?,answer_truncation_known=1,thinking_chars=?,done_reason=?,readiness_json=?,failure_class=?,retry_after_ts=?,finished_ts=?,updated_ts=?,tokens_in=?,tokens_out=?,token_source=?,served_model=?,answer_ciphertext=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL
                                WHERE run_id=? AND model=? AND owner_id=? AND status='running'""",
                                 (status, safe_answer, safe_error, elapsed, persisted_answer_chars,
                                 int(answer_truncated), persisted_thinking_chars, persisted_done_reason, readiness_json,
                                 persisted_failure_class, persisted_retry_after_ts, now,
-                                now, str(run_id), str(model), str(owner_id))).rowcount
+                                now, _token_count(tokens_in), _token_count(tokens_out),
+                                persisted_token_source, persisted_served_model, sealed,
+                                str(run_id), str(model), str(owner_id))).rowcount
         if not changed: return None
         _event(conn, str(run_id), status, "%s: %s" % (model, error or status), now)
         _finish_if_done(conn, str(run_id), now)
@@ -800,7 +892,7 @@ def resume_run(run_id: str, *, include_failed: bool = False, retry_unknown: bool
         row = conn.execute("SELECT * FROM fanout_runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None or row["status"] not in TERMINAL_RUNS:
             return None
-        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',readiness_json='',error='',elapsed_ms=NULL,dispatch_started=0,dispatch_state_known=1,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
+        changed = conn.execute("UPDATE fanout_results SET status='pending',answer='',readiness_json='',error='',elapsed_ms=NULL,dispatch_started=0,dispatch_state_known=1,answer_chars=0,answer_truncated=0,answer_truncation_known=0,thinking_chars=0,done_reason='',failure_class=NULL,retry_after_ts=NULL,started_ts=NULL,finished_ts=NULL,tokens_in=NULL,tokens_out=NULL,token_source='',served_model='',answer_ciphertext='',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,updated_ts=? WHERE run_id=? AND status IN (%s)" % marks, (now, str(run_id), *statuses)).rowcount
         if not changed:
             return None
         conn.execute("UPDATE fanout_runs SET status='queued',cancel_requested=0,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=NULL,updated_ts=? WHERE id=?", (now, str(run_id)))
@@ -836,6 +928,15 @@ def reconcile_stale_runs(now: float | None = None) -> int:
                 message = "worker lease ended; explicit resume is required"
             conn.execute("UPDATE fanout_runs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, run["id"]))
             _event(conn, run["id"], "interrupted", message, current); changed += 1
+        # A batch job is leased like a run.  Its in-flight child run is retired
+        # above (``unknown``); the job itself waits for an explicit resume.  A
+        # queued job is only stale when this host's enqueuing process is gone.
+        for job in conn.execute("SELECT id,status,owner_pid,owner_host,lease_until FROM batch_jobs WHERE status IN ('queued','running')").fetchall():
+            gone = job["owner_host"] == host and not _process_pid_alive(job["owner_pid"])
+            expired = job["status"] == "running" and (job["lease_until"] is None or job["lease_until"] < current)
+            if gone or expired:
+                conn.execute("UPDATE batch_jobs SET status='interrupted',owner_id='',owner_pid=0,owner_host='',lease_until=NULL,finished_ts=?,updated_ts=? WHERE id=?", (current, current, job["id"]))
+                changed += 1
     # Reconciliation runs on every status/list read, which makes it the one
     # hook a long-lived read-mostly host reliably reaches.  It must run after
     # the transaction above: a just-interrupted run gets a fresh updated_ts
@@ -883,9 +984,17 @@ def prune(*, ttl_seconds: int = 7 * 86_400, event_ttl_seconds: int | None = None
             "DELETE FROM fanout_events WHERE ts<? AND run_id NOT IN "
             "(SELECT id FROM fanout_runs WHERE status NOT IN ('completed','cancelled','interrupted'))",
             (event_cutoff,)).rowcount
-        runs_deleted = conn.execute("DELETE FROM fanout_runs WHERE status IN ('completed','cancelled','interrupted') AND updated_ts<?", (cutoff,)).rowcount
+        # A batch child run lives and dies with its job: a long job's finished
+        # steps are its progress record.  Only runs whose job is gone (orphans)
+        # follow the ordinary retention rule.
+        # A terminal job past its own retention (``ttl_seconds`` 0 keeps it) goes
+        # together with every child run and its sealed items.
+        expired = "SELECT id FROM batch_jobs WHERE status IN ('completed','cancelled','interrupted') AND ttl_seconds>0 AND updated_ts+ttl_seconds<?"
+        conn.execute("DELETE FROM fanout_runs WHERE batch_job_id IN (%s)" % expired, (current,))
+        jobs_deleted = conn.execute("DELETE FROM batch_jobs WHERE id IN (%s)" % expired, (current,)).rowcount
+        runs_deleted = conn.execute("DELETE FROM fanout_runs WHERE status IN ('completed','cancelled','interrupted') AND updated_ts<? AND (batch_job_id='' OR batch_job_id NOT IN (SELECT id FROM batch_jobs))", (cutoff,)).rowcount
         health_deleted = conn.execute("DELETE FROM model_health WHERE updated_ts<? AND (disabled_until IS NULL OR disabled_until<?)", (cutoff, current)).rowcount
-    return {"runs": runs_deleted, "events": events_deleted, "health": health_deleted}
+    return {"runs": runs_deleted, "events": events_deleted, "health": health_deleted, "jobs": jobs_deleted}
 
 
 def reset_schema_cache_for_tests() -> None:
