@@ -1,0 +1,1479 @@
+"""Seeded mutation fuzzing of the patch/edit input parsers and their guards.
+
+Contract fuzzed (every input either succeeds or raises ONLY the documented
+typed error, within the time budget, and never breaks a security invariant):
+
+* ``text_patch._patch_path`` / ``_parse`` raise ``ValueError`` or
+  ``PermissionError``; the public ``text_patch`` raises those plus the
+  filesystem errors ``FileNotFoundError``/``FileExistsError`` and
+  ``TextPatchError``. No patch, whatever its path spelling, creates, modifies
+  or deletes anything outside its root, and a patch that raises leaves the
+  whole tree byte-identical (the module is documented all-or-nothing).
+* ``json_patch._pointer_tokens``, ``_array_index``, ``_loads_strict``,
+  ``_parse_operations`` and the public ``patch_json`` raise ``ValueError``
+  (``PermissionError``/``JsonPatchError`` for the guarded public entry). The
+  RFC 6901/6902 behaviour is checked against a small reference oracle.
+* ``repair.parse_candidate_patch`` raises ``BuildDomainError`` with code
+  ``FIX_SCOPE_REJECTED``; an accepted patch only names contained relative
+  files. ``scan_hostile_directives`` must still detect every hostile corpus
+  entry after the bypass mutations its docstrings claim (case, line splices,
+  comments, whitespace, string concatenation, macro indirection), must not
+  flag mutated benign code, and ``normalize_for_scan`` must be idempotent.
+
+Each input is timed (p99 under 50 ms, hard cap 2 s). The seed comes from
+``FUZZ_SEED`` (default below) and is printed in every failure message so a CI
+failure can be replayed with ``FUZZ_SEED=<n> pytest ...``.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import random
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+import pytest
+
+import sonder_runtime.adapters.filesystem.json_patch as jp
+import sonder_runtime.adapters.filesystem.text_patch as tp
+from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.domain.build.model import BuildDomainError
+from sonder_runtime.domain.build.repair import (
+    CandidatePatch,
+    include_checker,
+    normalize_for_scan,
+    parse_candidate_patch,
+    scan_hostile_directives,
+)
+from tests.test_build_hostile_scan import BENIGN, HOSTILE, SCOPE
+
+SEED = int(os.environ.get("FUZZ_SEED", "20261116"))
+TAG = f"FUZZ_SEED={SEED}"
+
+
+def _rng(name: str) -> random.Random:
+    return random.Random(f"{SEED}:{name}")
+
+
+class _Run:
+    """Run one input, time it, and return ('ok', value) or ('err', exception)."""
+
+    def __init__(self) -> None:
+        self.samples: list[float] = []
+
+    def __call__(self, fn, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return "ok", fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - the caller classifies every exception type
+            return "err", exc
+        finally:
+            self.samples.append(time.perf_counter() - started)
+
+    def check(self, label: str, p99_limit: float = 0.05) -> None:
+        samples = sorted(self.samples)
+        assert samples, label
+        p99 = samples[max(0, int(len(samples) * 0.99) - 1)]
+        assert p99 < p99_limit, f"{label}: p99 {p99 * 1000:.1f} ms over {p99_limit * 1000:.0f} ms ({TAG})"
+        assert samples[-1] < 2.0, f"{label}: max {samples[-1] * 1000:.1f} ms ({TAG})"
+
+
+def _expect_error(outcome, allowed: tuple, what: str) -> None:
+    kind, value = outcome
+    if kind == "err":
+        assert isinstance(value, allowed), f"{what} raised {type(value).__name__}: {value!r} ({TAG})"
+
+
+# ---------------------------------------------------------------------------
+# shared path spellings
+# ---------------------------------------------------------------------------
+
+# Spellings that must NEVER name a file outside the root (relative to a prefix).
+ESCAPES = [
+    "../x", "a/../../x", "a/./../..", "..", "a/b/../../../x", "./../x", "sub/../../x",
+    "/etc/passwd", "/x", "//srv/share/x", "C:/x", "C:\\x", "c:x", "\\\\srv\\share\\x",
+    "..\\x", "a\\..\\..\\x", "\\x", "a\\b", "C:",
+]
+SPELLINGS = ESCAPES + [
+    "x", "a.txt", "sub/b.txt", "./a.txt", "a//b", "a.txt/", "a.txt.", "a.txt ", " a.txt",
+    "a.txt::$DATA", "a.txt:s", "a:b", "b/C:/x", "%2e%2e/x", "%2E%2E%2Fx", "..%2Fx", "%5c..%5cx",
+    "\u2215x", "\u2024\u2024/x", "\uff0e\uff0e/x", "\uff0f", "a\u2215b", "\u202e", "\u0000x",
+    "CON", "nul.txt", "AUX", "com1", "SHADER~1.CPP", "~1/x", "a\tb", "a\nb", "a\rb",
+    "/dev/null", "dev/null", "b/b/a.txt", "a/a/a.txt", "a/", "b/", "", " ", ".", "./", "...", "..../x",
+    "x" * 300, "a/" * 100 + "x", "\U0001f600/x", "a?b", "a*b", "a<b", 'a"b', "a|b",
+]
+_ATOMS = ["..", ".", "a.txt", "sub", "b.txt", "x", "", "%2e%2e", "\u2215", "\uff0e\uff0e", "C:", "c:",
+          "\\\\srv\\share", "a.txt.", "a.txt ", "a.txt::$DATA", "~1", "NUL", "con", "..\\", "\x7f",
+          "SUB", "B.TXT", "a", "b"]
+
+
+def _random_spelling(rng: random.Random) -> str:
+    sep = rng.choice(["/", "/", "/", "\\", "//"])
+    parts = [rng.choice(_ATOMS) for _ in range(rng.randint(1, 4))]
+    value = sep.join(parts)
+    return rng.choice(["", "", "/", "//", "C:", "\\\\?\\", "./"]) + value
+
+
+_DRIVE_COMPONENT = re.compile(r"(^|/)[A-Za-z]:")
+
+
+def _contained_relative(path: str) -> bool:
+    """Independent oracle: a relative path that never climbs above its start.
+
+    A ``C:`` component *after* the git prefix is judged separately (see
+    ``test_patch_path_rejects_drive_letter_components``), so it is neutralised here.
+    """
+    path = _DRIVE_COMPONENT.sub(r"\1_", path)
+    if not path or "\\" in path or path.startswith("/"):
+        return False
+    win = PureWindowsPath(path)
+    if win.drive or win.root or PurePosixPath(path).is_absolute():
+        return False
+    depth = 0
+    for part in path.split("/"):
+        if part in ("", "."):
+            return False
+        if part == "..":
+            return False
+        depth += 1
+    return depth > 0
+
+
+# ---------------------------------------------------------------------------
+# text_patch: _patch_path and _parse
+# ---------------------------------------------------------------------------
+
+def test_patch_path_error_contract_and_escape_rejection():
+    rng = _rng("patch_path")
+    run = _Run()
+    values = list(SPELLINGS)
+    for _ in range(3000):
+        base = rng.choice(SPELLINGS + [_random_spelling(rng) for _ in range(4)])
+        values.append(rng.choice(["", "a/", "b/", "a/", "b/"]) + base)
+    for value in values:
+        for prefix in ("a", "b"):
+            outcome = run(tp._patch_path, value, prefix=prefix)
+            _expect_error(outcome, (ValueError, PermissionError), f"_patch_path({value!r})")
+            if outcome[0] == "ok":
+                result = outcome[1]
+                if value == "/dev/null":
+                    assert result is None
+                else:
+                    assert isinstance(result, str) and _contained_relative(result), (
+                        f"_patch_path({value!r}, {prefix!r}) accepted escaping/non-relative {result!r} ({TAG})")
+    # Known positives: an escape, with or without the git a/ b/ prefix and a
+    # benign tail, is always rejected.
+    for escape in ESCAPES:
+        for decor in ("", "a/", "b/", "a/a/", "b/b/"):
+            for tail in ("", "/y", "/../z"):
+                value = decor + escape + tail
+                if value == "/dev/null":
+                    continue
+                for prefix in ("a", "b"):
+                    kind, got = run(tp._patch_path, value, prefix=prefix)
+                    if kind == "ok":
+                        assert got is not None and _contained_relative(got), (
+                            f"escape spelling {value!r} accepted as {got!r} ({TAG})")
+    run.check("_patch_path")
+
+
+def test_patch_path_rejects_drive_letter_components():
+    """``b/C:/x`` is accepted as ``C:/x``; pathlib then maps it to ``<root>/x`` (same drive) so the
+    duplicate-target check and the reported path disagree with the file actually written."""
+    run = _Run()
+    leaks = []
+    for decor in ("a/", "b/"):
+        for drive in ("C:", "c:", "D:", "Z:"):
+            for tail in ("x", "x/y.txt", "../x", ""):
+                value = decor + drive + ("/" + tail if tail else "")
+                for prefix in ("a", "b"):
+                    outcome = run(tp._patch_path, value, prefix=prefix)
+                    _expect_error(outcome, (ValueError, PermissionError), f"_patch_path({value!r})")
+                    if outcome[0] == "ok" and _DRIVE_COMPONENT.search(outcome[1] or ""):
+                        leaks.append((value, prefix, outcome[1]))
+    assert not leaks, f"drive-letter components survive _patch_path ({TAG}): {leaks[:6]!r}"
+
+
+_MODIFY = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+_CREATE = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n"
+_MULTI = ("--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+          "@@ -5,0 +6 @@\n+tail\n--- /dev/null\n+++ b/sub/new.txt\n@@ -0,0 +1 @@\n+x\n"
+          "\\ No newline at end of file\n")
+_CRLF = "--- a/a.txt\r\n+++ b/a.txt\r\n@@ -1 +1 @@\r\n-one\r\n+uno\r\n"
+_PATCH_SEEDS = [_MODIFY, _CREATE, _MULTI, _CRLF]
+_BOUNDARY_NUMBERS = ("0", "1", "2", "4096", "65535", "2147483647", "2147483648", "9223372036854775808",
+                     "1" + "0" * 40, "-1", "+1", "00", "\u0661")
+_FRAGMENTS = ["--- ", "+++ ", "@@ ", " @@", "\\ No newline at end of file\n", "/dev/null", "../", "a/", "b/",
+              "\t", "\x00", "\r", "\r\n", "\n", "-", "+", " ", ",", "C:", "\\", "\u2215", "%2e%2e/", "\ud800"]
+
+
+def _mutate_patch(rng: random.Random, text: str) -> str:
+    op = rng.randrange(8)
+    if op == 0:
+        chars = list(text)
+        for _ in range(rng.randint(1, 6)):
+            if chars:
+                chars[rng.randrange(len(chars))] = rng.choice("@+- \\\n\r\t/.:~%0123456789ab")
+        return "".join(chars)
+    if op == 1:
+        return text[: rng.randrange(len(text) + 1)]
+    lines = text.splitlines(keepends=True) or [""]
+    index = rng.randrange(len(lines))
+    if op == 2:
+        return "".join(lines[:index] + [lines[index]] * rng.randint(2, 40) + lines[index:])
+    if op == 3:
+        return "".join(lines[:index] + lines[index + 1:])
+    if op == 4:
+        position = rng.randrange(len(text) + 1)
+        return text[:position] + rng.choice(_FRAGMENTS) + text[position:]
+    if op == 5:
+        return re.sub(r"\d+", lambda m: rng.choice(_BOUNDARY_NUMBERS) if rng.random() < 0.4 else m.group(0), text)
+    if op == 6:
+        header = [i for i, line in enumerate(lines) if line.startswith(("--- ", "+++ "))]
+        if header:
+            i = rng.choice(header)
+            lines[i] = lines[i][:4] + rng.choice(["a/", "b/", ""]) + rng.choice(SPELLINGS) + "\n"
+        return "".join(lines)
+    return text + rng.choice(_PATCH_SEEDS)
+
+
+def _check_parsed(files: list, label: str) -> None:
+    seen = set()
+    for item in files:
+        assert item["action"] in {"create", "modify"} and item["hunks"], (label, TAG)
+        assert _contained_relative(item["path"]), "{}: parsed path {!r} not contained ({})".format(label, item["path"], TAG)
+        key = os.path.normcase(item["path"]).casefold()
+        assert key not in seen, "{}: duplicate target {!r} accepted ({})".format(label, item["path"], TAG)
+        seen.add(key)
+        for old_start, old_count, new_start, new_count, body in item["hunks"]:
+            assert old_count == sum(tag != "+" for tag, _ in body), (label, TAG)
+            assert new_count == sum(tag != "-" for tag, _ in body), (label, TAG)
+            assert min(old_start, new_start) >= 0
+
+
+def test_parse_mutation_error_contract_and_structure():
+    rng = _rng("text_parse")
+    run = _Run()
+    accepted = 0
+    for _ in range(3000):
+        text = rng.choice(_PATCH_SEEDS)
+        for _step in range(rng.randint(1, 3)):
+            text = _mutate_patch(rng, text)
+        outcome = run(tp._parse, text)
+        _expect_error(outcome, (ValueError, PermissionError), f"_parse({text!r})")
+        if outcome[0] == "ok":
+            accepted += 1
+            _check_parsed(outcome[1], f"_parse({text!r})")
+    assert accepted >= 20, f"mutator never produced an accepted patch, so structure checks were vacuous ({TAG})"
+    for seed in _PATCH_SEEDS:  # the unmutated seeds are valid
+        assert run(tp._parse, seed)[0] == "ok", seed
+    run.check("_parse")
+
+
+def test_parse_rejects_planted_escape_headers():
+    rng = _rng("text_parse_plant")
+    run = _Run()
+    for escape in ESCAPES:
+        for decor in ("", "a/", "b/"):
+            path = decor + escape
+            if "\n" in path or "\r" in path:
+                continue
+            for template in (
+                "--- a/a.txt\n+++ %s\n@@ -1 +1 @@\n-one\n+x\n",
+                "--- %s\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+x\n",
+                "--- /dev/null\n+++ %s\n@@ -0,0 +1 @@\n+x\n",
+                "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+x\n--- %s\n+++ %s\n@@ -0,0 +1 @@\n+x\n",
+            ):
+                text = template.replace("%s", path)
+                prefix_text = rng.choice(["", _MODIFY.replace("a.txt", "keep.txt")]) if template.count("%s") == 1 else ""
+                outcome = run(tp._parse, prefix_text + text)
+                _expect_error(outcome, (ValueError, PermissionError), f"_parse planted {path!r}")
+                if outcome[0] == "ok":
+                    for item in outcome[1]:
+                        assert _contained_relative(item["path"]), (
+                            "planted {!r} parsed to {!r} ({})".format(path, item["path"], TAG))
+    run.check("_parse planted")
+
+
+def test_parse_limits_and_ten_thousand_line_inputs_stay_in_budget():
+    run = _Run()
+    body = "".join(f"+line {i}\n" for i in range(10_000))
+    big_create = "--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,10000 @@\n" + body
+    kind, files = run(tp._parse, big_create)
+    assert kind == "ok" and len(files[0]["hunks"][0][4]) == 10_000, (kind, files, TAG)
+    kind, files = run(tp._parse, "--- a/f\n+++ b/f\n@@ -1,10000 +1,10000 @@\n" + "".join(f" c{i}\n" for i in range(10_000)))
+    assert kind == "ok", (kind, files, TAG)
+    garbage = "".join(f"junk {i}\n" for i in range(10_000))
+    _expect_error(run(tp._parse, garbage), (ValueError,), "10k garbage lines")
+    assert run(tp._parse, garbage)[0] == "err"
+    sections = "".join(f"--- a/f{i}\n+++ b/f{i}\n@@ -1 +1 @@\n-a\n+b\n" for i in range(2000))
+    outcome = run(tp._parse, sections)
+    assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (outcome, TAG)  # > MAX_FILES
+    outcome = run(tp._parse, "\n" * (tp.MAX_PATCH_LINES + 1))
+    assert outcome[0] == "err" and isinstance(outcome[1], ValueError)
+    outcome = run(tp._parse, "-" * (tp.MAX_PATCH_BYTES + 1))
+    assert outcome[0] == "err" and isinstance(outcome[1], ValueError)
+    assert run(tp._parse, "")[0] == "err" and run(tp._parse, "x\x00y")[0] == "err"
+    hunks = "".join(f"@@ -{2 * i + 1} +{2 * i + 1} @@\n-a\n+b\n" for i in range(tp.MAX_HUNKS + 1))
+    outcome = run(tp._parse, "--- a/f\n+++ b/f\n" + hunks)
+    assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (outcome, TAG)
+    run.check("_parse limits")
+
+
+# ---------------------------------------------------------------------------
+# text_patch: public containment + atomicity
+# ---------------------------------------------------------------------------
+
+_DEVICE = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def _is_device_spelling(path: str) -> bool:
+    return any(part.split(".", 1)[0].strip().upper() in _DEVICE for part in re.split(r"[/\\]", path))
+
+
+def _snapshot(base: Path) -> dict[str, str | None]:
+    import hashlib
+    out: dict[str, str | None] = {}
+    for item in sorted(base.rglob("*")):
+        rel = item.relative_to(base).as_posix()
+        out[rel] = None if item.is_dir() else hashlib.sha256(item.read_bytes()).hexdigest()
+    return out
+
+
+def _build_world(base: Path) -> Path:
+    if base.exists():
+        shutil.rmtree(base)
+    root = base / "root"
+    (root / "sub").mkdir(parents=True)
+    (base / "sibling").mkdir()
+    (base / "root-evil").mkdir()
+    (base / "canary.txt").write_bytes(b"canary\n")
+    (base / "sibling" / "s.txt").write_bytes(b"sib\n")
+    (base / "root-evil" / "r.txt").write_bytes(b"one\ntwo\n")
+    (root / "a.txt").write_bytes(b"one\ntwo\n")
+    (root / "sub" / "b.txt").write_bytes(b"bee\n")
+    return root
+
+
+def _hostile_patch(rng: random.Random, spelling: str) -> str:
+    lower = spelling.lower()
+    new = rng.choice(["b/" + spelling, "b/" + spelling, spelling, "a/" + spelling])
+    lead = ""
+    if rng.random() < 0.5:  # a valid first section: atomicity must undo it if a later one fails
+        lead = "--- a/sub/b.txt\n+++ b/sub/b.txt\n@@ -1 +1 @@\n-bee\n+BEE\n"
+    if rng.random() < 0.4:
+        return lead + f"--- /dev/null\n+++ {new}\n@@ -0,0 +1 @@\n+created\n"
+    if "a.txt" in lower:
+        body = "@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
+    elif "b.txt" in lower:
+        body = "@@ -1 +1 @@\n-bee\n+BEE\n"
+    elif "r.txt" in lower or "s.txt" in lower:
+        body = "@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
+    else:
+        body = "@@ -1 +1 @@\n-canary\n+PWNED\n"
+    old = rng.choice(["a/" + spelling, spelling, new])
+    return lead + f"--- {old}\n+++ {new}\n{body}"
+
+
+def _enter_snapshot(request) -> None:
+    """Resolve the control-plane inventory once (documented ``read_policy_snapshot``).
+
+    Without it every guarded call re-derives ~1000 path resolutions (~150-500 ms), which
+    would make thousands of fuzz inputs impossible. All other checks still run per path.
+    """
+    scope = file_ops.read_policy_snapshot()
+    scope.__enter__()
+    request.addfinalizer(lambda: scope.__exit__(None, None, None))
+
+
+_PUBLIC_ERRORS = (ValueError, PermissionError, FileNotFoundError, FileExistsError, tp.TextPatchError)
+
+
+def test_text_patch_never_touches_anything_outside_root_and_is_atomic(tmp_path, request):
+    _enter_snapshot(request)
+    rng = _rng("text_patch_public")
+    run = _Run()
+    base = tmp_path / "world"
+    applied_ok = rejected = 0
+    spellings = list(SPELLINGS)
+    for _ in range(70):
+        spellings.append(rng.choice(["", "./", "sub/", "SUB/", "sub//", "a/"]) + rng.choice(
+            ["a.txt", "b.txt", "A.TXT", "a.txt/", "r.txt", "s.txt", "../root-evil/r.txt", "../sibling/s.txt",
+             "../canary.txt", "sub/../a.txt", "..%2fcanary.txt"]))
+        spellings.append(_random_spelling(rng))
+    for spelling in spellings:
+        if "\n" in spelling or "\r" in spelling:
+            continue
+        root = _build_world(base)
+        patch = _hostile_patch(rng, spelling)
+        before = _snapshot(base)
+        device = _is_device_spelling(spelling)
+        outcome = run(tp.text_patch, str(root), patch, apply=not device, extra_roots=str(root))
+        after = _snapshot(base)
+        label = f"text_patch(spelling={spelling!r}, patch={patch!r})"
+        _expect_error(outcome, _PUBLIC_ERRORS, label)
+        if outcome[0] == "err":
+            rejected += 1
+            assert after == before, f"{label} raised {outcome[1]!r} but changed the tree: {({k for k in set(before) | set(after) if before.get(k) != after.get(k)})} ({TAG})"
+            continue
+        applied_ok += 1
+        changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+        assert all(k.startswith("root/") for k in changed), f"{label} changed outside root: {changed} ({TAG})"
+        assert not any(".sonder-patch-" in k for k in after), f"{label} leaked a staging file ({TAG})"
+        if device:
+            assert not changed, (label, TAG)
+        for entry in outcome[1]["files"]:
+            assert _contained_relative(entry["path"]), (label, entry, TAG)
+    assert applied_ok >= 10 and rejected >= 60, (applied_ok, rejected, TAG)
+    # Staging + fsync + a rollback-capable transaction per call: 50 ms is not meaningful here.
+    run.check("text_patch public", p99_limit=0.4)
+
+
+def test_text_patch_atomic_when_a_later_section_fails(tmp_path, request):
+    _enter_snapshot(request)
+    rng = _rng("text_patch_atomic")
+    base = tmp_path / "world"
+    failing = [
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-WRONG\n+x\n",           # context mismatch
+        "--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+x\n",                         # create over existing
+        "--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-a\n+b\n",            # modify missing
+        "--- /dev/null\n+++ b/nodir/new.txt\n@@ -0,0 +1 @@\n+x\n",                # parent missing
+        "--- a/../canary.txt\n+++ b/../canary.txt\n@@ -1 +1 @@\n-canary\n+x\n",  # escape
+        "--- /dev/null\n+++ b/sub\n@@ -0,0 +1 @@\n+x\n",                           # create over a directory
+        "--- a/sub\n+++ b/sub\n@@ -1 +1 @@\n-a\n+b\n",                             # modify a directory
+    ]
+    valid = ["--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n",
+             "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+hello\n",
+             "--- a/sub/b.txt\n+++ b/sub/b.txt\n@@ -1 +1 @@\n-bee\n+BEE\n"]
+    for bad in failing:
+        for _ in range(8):
+            root = _build_world(base)
+            sections = rng.sample(valid, rng.randint(1, 2))
+            position = rng.randint(0, len(sections))
+            sections.insert(position, bad)
+            patch = "".join(sections)
+            before = _snapshot(base)
+            with pytest.raises(_PUBLIC_ERRORS):
+                tp.text_patch(str(root), patch, apply=True, extra_roots=str(root))
+            assert _snapshot(base) == before, f"partial write for {patch!r} ({TAG})"
+    # Control: the valid sections alone do commit (so the above is not vacuous).
+    root = _build_world(base)
+    result = tp.text_patch(str(root), "".join(valid), apply=True, extra_roots=str(root))
+    assert result["transaction"] == "committed"
+    assert (root / "a.txt").read_bytes() == b"one\nTWO\n" and (root / "created.txt").read_bytes() == b"hello\n"
+
+
+def test_text_patch_refuses_to_write_through_a_junction_or_symlink(tmp_path, request):
+    _enter_snapshot(request)
+    base = tmp_path / "world"
+    root = _build_world(base)
+    target = base / "sibling"
+    link = root / "link"
+    made = False
+    if os.name == "nt":
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True, text=True, check=False).returncode == 0
+    if not made:
+        try:
+            os.symlink(target, link, target_is_directory=True)
+            made = True
+        except (OSError, NotImplementedError):
+            made = False
+    if not made:
+        pytest.skip("cannot create a junction or symlink without elevation on this machine")
+    before = _snapshot(base / "sibling")
+    for patch in (
+        "--- a/link/s.txt\n+++ b/link/s.txt\n@@ -1 +1 @@\n-sib\n+PWNED\n",
+        "--- /dev/null\n+++ b/link/new.txt\n@@ -0,0 +1 @@\n+PWNED\n",
+    ):
+        for apply in (False, True):
+            with pytest.raises(_PUBLIC_ERRORS):
+                tp.text_patch(str(root), patch, apply=apply, extra_roots=str(root))
+    assert _snapshot(base / "sibling") == before, TAG
+    assert (target / "s.txt").read_bytes() == b"sib\n"
+
+
+# ---------------------------------------------------------------------------
+# json_patch: pointer / index oracles
+# ---------------------------------------------------------------------------
+
+def _ref_decode(pointer: str) -> list[str] | None:
+    """RFC 6901 section 4: split on '/', then ~1 -> '/', then ~0 -> '~'."""
+    if pointer == "":
+        return []
+    if not pointer.startswith("/"):
+        return None
+    out = []
+    for raw in pointer[1:].split("/"):
+        if re.search(r"~(?![01])", raw):
+            return None
+        out.append(raw.replace("~1", "/").replace("~0", "~"))
+    return out if len(out) <= jp.MAX_POINTER_SEGMENTS else None
+
+
+def _ref_encode(tokens: list[str]) -> str:
+    return "".join("/" + token.replace("~", "~0").replace("/", "~1") for token in tokens)
+
+
+def test_pointer_tokens_match_rfc6901_oracle_and_round_trip():
+    rng = _rng("pointer")
+    run = _Run()
+    alphabet = "ab01~/ \u00e9.\u2215%-"
+    for _ in range(4000):
+        tokens = ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 6))) for _ in range(rng.randint(0, 6))]
+        pointer = _ref_encode(tokens)
+        kind, got = run(jp._pointer_tokens, pointer, 0)
+        assert (kind, got) == ("ok", tokens), f"round trip of {tokens!r} via {pointer!r} gave {got!r} ({TAG})"
+    for _ in range(6000):
+        pointer = "".join(rng.choice("/~01a ") for _ in range(rng.randint(0, 14)))
+        want = _ref_decode(pointer)
+        outcome = run(jp._pointer_tokens, pointer, 3)
+        _expect_error(outcome, (ValueError,), f"_pointer_tokens({pointer!r})")
+        got = outcome[1] if outcome[0] == "ok" else None
+        assert got == want, f"_pointer_tokens({pointer!r}) = {got!r}, RFC oracle says {want!r} ({TAG})"
+    # RFC 6901 section 5 examples: "~01" is the literal "~1", never "/".
+    assert jp._pointer_tokens("/a~01b", 0) == ["a~1b"] and jp._pointer_tokens("/m~0n", 0) == ["m~n"]
+    assert jp._pointer_tokens("/a~1b", 0) == ["a/b"] and jp._pointer_tokens("", 0) == [""][:0]
+    for not_a_string in (None, 5, b"/a", ["a"], {"a": 1}):
+        assert run(jp._pointer_tokens, not_a_string, 0)[0] == "err"
+    assert run(jp._pointer_tokens, "/a" * jp.MAX_POINTER_SEGMENTS, 0)[0] == "ok"
+    assert run(jp._pointer_tokens, "/a" * (jp.MAX_POINTER_SEGMENTS + 1), 0)[0] == "err"
+    run.check("_pointer_tokens")
+
+
+def _ref_index(token: str, length: int, allow_end: bool, allow_dash: bool) -> int | None:
+    if token == "-":
+        return length if allow_dash else None
+    if not re.fullmatch(r"0|[1-9][0-9]*", token, re.ASCII):
+        return None
+    try:
+        number = int(token)
+    except ValueError:  # CPython's 4300-digit int() guard
+        return None
+    return number if number <= (length if allow_end else length - 1) else None
+
+
+def test_array_index_matches_oracle():
+    rng = _rng("array_index")
+    run = _Run()
+    fixed = ["0", "1", "2", "9", "10", "00", "01", "-0", "-1", "+1", "+0", " 1", "1 ", "1\n", "", "-", "--", "1.0", "1e1",
+             "0x1", "1_0", "\u0661", "\uff11", "\u00b2", "\u0967", "9" * 20, "9" * 5000, str(2 ** 63), str(2 ** 64),
+             "0" * 5000, "1" + "0" * 4299, "1" + "0" * 4300, "\x00", "1\x00", "NaN", "inf"]
+    tokens = list(fixed)
+    for _ in range(3000):
+        tokens.append("".join(rng.choice("0123456789-+_ .\u0661") for _ in range(rng.randint(0, 5))))
+    for token in tokens:
+        for length in (0, 1, 3):
+            for allow_end in (False, True):
+                for allow_dash in (False, True):
+                    outcome = run(jp._array_index, token, length, allow_end=allow_end, allow_dash=allow_dash)
+                    _expect_error(outcome, (ValueError,), f"_array_index({token[:40]!r})")
+                    want = _ref_index(token, length, allow_end, allow_dash)
+                    got = outcome[1] if outcome[0] == "ok" else None
+                    assert got == want, (
+                        f"_array_index({token[:40]!r}, {length}, end={allow_end}, dash={allow_dash}) = {got!r}, "
+                        f"oracle {want!r} ({TAG})")
+    for token in ("01", "-1", "+1", str(10 ** 30), "007"):
+        assert run(jp._array_index, token, 5, allow_end=True, allow_dash=True)[0] == "err", (token, TAG)
+    run.check("_array_index")
+
+
+# ---------------------------------------------------------------------------
+# json_patch: _loads_strict / _parse_operations
+# ---------------------------------------------------------------------------
+
+def _walk(value):
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        yield item
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+_JSON_SEEDS = [
+    '{"a": 1, "b": [true, null, 2.5, "x"], "c": {"d": "e"}}', "[1, 2, 3]", '[{"op":"add","path":"/a","value":1}]',
+    '{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}', '{"a": 1, "a": 2}', '{"x": {"y": 1, "y": 1}}',
+    '{"a": 1e999}', '[-1e999]', '{"a": 1E400}', '"str"', "7", "[]", "{}", '{"k": "\\ud800"}', '{"\\u0061": 1, "a": 2}',
+]
+
+
+def _mutate_json(rng: random.Random, text: str) -> str:
+    op = rng.randrange(6)
+    if op == 0:
+        chars = list(text)
+        for _ in range(rng.randint(1, 4)):
+            if chars:
+                chars[rng.randrange(len(chars))] = rng.choice('{}[]",:\\0123456789eE.-+nNtfIa \n\t\x00\u00e9')
+        return "".join(chars)
+    if op == 1:
+        return text[: rng.randrange(len(text) + 1)]
+    if op == 2:
+        position = rng.randrange(len(text) + 1)
+        return text[:position] + rng.choice(["NaN", "Infinity", "-Infinity", "1e999", ",", '"a":1,"a":2', "{", "[", "\\u0000", "//", "/*"]) + text[position:]
+    if op == 3:
+        return text * rng.randint(2, 3)
+    if op == 4:
+        return rng.choice(["", " ", "\ufeff", "\n"]) + text
+    return text.replace(":", ": ", 1)
+
+
+_OVERFLOW_LITERAL = re.compile(r"\d[eE][+-]?\d{3,}")
+
+
+def test_loads_strict_error_contract_and_strictness():
+    rng = _rng("loads_strict")
+    run = _Run()
+    for _ in range(4000):
+        text = rng.choice(_JSON_SEEDS)
+        for _step in range(rng.randint(0, 3)):
+            text = _mutate_json(rng, text)
+        outcome = run(jp._loads_strict, text, "doc")
+        _expect_error(outcome, (ValueError,), f"_loads_strict({text!r})")
+        if outcome[0] == "ok":
+            if _OVERFLOW_LITERAL.search(text):
+                continue  # pinned by test_loads_strict_rejects_exponent_overflow_to_infinity
+            for node in _walk(outcome[1]):
+                assert not (isinstance(node, float) and not math.isfinite(node)), (
+                    f"_loads_strict({text!r}) accepted non-finite number {node!r} ({TAG})")
+    for text in ('{"a":1,"a":2}', '{"x":{"y":1,"y":1}}', '[{"k":1,"k":1}]', "NaN", "[Infinity]", "-Infinity", '{"a":NaN}'):
+        outcome = run(jp._loads_strict, text, "doc")
+        assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (text, outcome, TAG)
+    for text in (b"x", 5, None):
+        assert run(jp._loads_strict, text, "doc")[0] == "err"
+    run.check("_loads_strict")
+
+
+def test_loads_strict_rejects_exponent_overflow_to_infinity():
+    # "non-finite JSON number is not allowed" is the documented contract; 1e999 parses to inf.
+    for text in ("[1e999]", '{"a": -1e999}', "[1E400]"):
+        outcome = _Run()(jp._loads_strict, text, "doc")
+        assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (
+            f"_loads_strict({text!r}) returned {outcome[1]!r} instead of rejecting a non-finite number")
+
+
+_OP_SEEDS = [
+    [{"op": "add", "path": "/a", "value": 1}],
+    [{"op": "remove", "path": "/a/b/0"}, {"op": "replace", "path": "/k", "value": {"x": [1, 2]}}],
+    [{"op": "test", "path": "/a~1b", "value": None}, {"op": "add", "path": "/l/-", "value": "v"}],
+    [{"op": "add", "path": "", "value": {"root": True}}],
+    [{"op": "replace", "path": "/~0~1", "value": [1.5, True, "\u00e9"]}],
+]
+
+
+def _mutate_ops(rng: random.Random, ops):
+    ops = copy.deepcopy(ops)
+    op = rng.randrange(9)
+    target = rng.choice(ops)
+    if op == 0:
+        target["path"] = rng.choice(["a", "/a~", "/a~2", "/~", "//", "/01", "/-1", " /a", "/a/ ", None, 5, ["a"], "/" + "a/" * 70])
+    elif op == 1:
+        target["op"] = rng.choice(["move", "copy", "ADD", "", None, 3, "add ", "Replace", "test\x00"])
+    elif op == 2:
+        target.pop(rng.choice(sorted(target)), None)
+    elif op == 3:
+        target[rng.choice(["from", "extra", "", "value2", "OP"])] = rng.choice([1, "x", None])
+    elif op == 4:
+        target["value"] = rng.choice([float("nan"), float("inf"), object(), {1, 2}, b"x", [[]] * 3, {"a": {"b": {}}}, 2 ** 70, -0.0])
+    elif op == 5:
+        ops = ops * rng.choice([1, 50, 101, 150])
+    elif op == 6:
+        ops = rng.choice([[], {}, None, "", "[]", 5, [5], [[]], [None], ["x"], [{}]])
+    elif op == 7:
+        target["path"] = "/" + "/".join(rng.choice(["a", "~0", "~1", "~01", "b", "0", "-"]) for _ in range(rng.randint(0, 6)))
+    else:
+        target["value"] = {"deep": ops_depth(rng.randint(1, 40))}
+    return ops
+
+
+def ops_depth(depth: int):
+    value: object = 1
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_parse_operations_error_contract_and_normal_form():
+    rng = _rng("parse_operations")
+    run = _Run()
+    accepted = 0
+    for _ in range(3500):
+        ops = _mutate_ops(rng, rng.choice(_OP_SEEDS))
+        if rng.random() < 0.6:
+            try:
+                arg = json.dumps(ops)
+            except (TypeError, ValueError):
+                arg = ops
+            if isinstance(arg, str) and rng.random() < 0.4:
+                arg = _mutate_json(rng, arg)
+        else:
+            arg = ops
+        outcome = run(jp._parse_operations, arg)
+        _expect_error(outcome, (ValueError,), "_parse_operations(%r)" % (arg if isinstance(arg, str) else repr(arg)[:200]))
+        if outcome[0] == "ok":
+            accepted += 1
+            normal = outcome[1]
+            assert 1 <= len(normal) <= jp.MAX_OPERATIONS
+            for op, tokens, _value in normal:
+                assert op in {"add", "remove", "replace", "test"} and all(isinstance(t, str) for t in tokens)
+                assert len(tokens) <= jp.MAX_POINTER_SEGMENTS
+    assert accepted >= 100, f"mutator rarely produced valid operations ({TAG})"
+    # Known positives for the exact-keys rule and the numeric limits.
+    bad_ops = [
+        [{"op": "add", "path": "/a"}], [{"op": "test", "path": "/a"}], [{"op": "replace", "path": "/a"}],
+        [{"op": "remove", "path": "/a", "value": 1}], [{"op": "add", "path": "/a", "value": 1, "from": "/b"}],
+        [{"op": "move", "from": "/a", "path": "/b"}], [{"op": "copy", "from": "/a", "path": "/b"}],
+        [{"op": "add", "path": "/a~", "value": 1}], [{"op": "add", "path": "a", "value": 1}], [],
+        [{"op": "add", "path": "/a", "value": 1}] * (jp.MAX_OPERATIONS + 1),
+    ]
+    for ops in bad_ops:
+        for arg in (ops, json.dumps(ops)):
+            outcome = run(jp._parse_operations, arg)
+            assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (arg if isinstance(arg, str) else ops, outcome, TAG)
+    assert run(jp._parse_operations, [{"op": "add", "path": "/a", "value": 1}] * jp.MAX_OPERATIONS)[0] == "ok"
+    run.check("_parse_operations")
+
+
+# ---------------------------------------------------------------------------
+# json_patch: differential against an RFC 6902 oracle (documented subset)
+# ---------------------------------------------------------------------------
+
+class _RefError(Exception):
+    pass
+
+
+def _tag(value):
+    if isinstance(value, bool):
+        return ("bool", value)
+    if value is None:
+        return ("null",)
+    if isinstance(value, (int, float)):
+        return ("num", value)
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, list):
+        return ("arr", tuple(_tag(item) for item in value))
+    return ("obj", tuple(sorted((key, _tag(item)) for key, item in value.items())))
+
+
+def _ref_get(doc, tokens):
+    for token in tokens:
+        if isinstance(doc, dict):
+            if token not in doc:
+                raise _RefError
+            doc = doc[token]
+        elif isinstance(doc, list):
+            index = _ref_index(token, len(doc), False, False)
+            if index is None:
+                raise _RefError
+            doc = doc[index]
+        else:
+            raise _RefError
+    return doc
+
+
+def _ref_apply(doc, ops):
+    doc = copy.deepcopy(doc)
+    for op, tokens, value in ops:
+        if op == "test":
+            if _tag(_ref_get(doc, tokens)) != _tag(value):
+                raise _RefError
+            continue
+        if not tokens:
+            if op == "remove" or not isinstance(value, (dict, list)):
+                raise _RefError
+            doc = copy.deepcopy(value)
+            continue
+        parent, last = _ref_get(doc, tokens[:-1]), tokens[-1]
+        value = copy.deepcopy(value)
+        if isinstance(parent, dict):
+            if op in ("remove", "replace") and last not in parent:
+                raise _RefError
+            if op == "remove":
+                del parent[last]
+            else:
+                parent[last] = value
+        elif isinstance(parent, list):
+            index = _ref_index(last, len(parent), op == "add", op == "add")
+            if index is None:
+                raise _RefError
+            if op == "add":
+                parent.insert(index, value)
+            elif op == "remove":
+                del parent[index]
+            else:
+                parent[index] = value
+        else:
+            raise _RefError
+    return doc
+
+
+def _random_doc(rng: random.Random, depth: int = 0):
+    kind = rng.randrange(6 if depth < 3 else 4)
+    if kind == 0:
+        return rng.choice([0, 1, -3, 1.5, 2 ** 40])
+    if kind == 1:
+        return rng.choice(["", "s", "a/b", "~", "\u00e9"])
+    if kind == 2:
+        return rng.choice([True, False, None])
+    if kind == 3:
+        return rng.randrange(4)
+    if kind == 4:
+        return [_random_doc(rng, depth + 1) for _ in range(rng.randint(0, 4))]
+    return {rng.choice(["a", "b", "a/b", "~x", "0", "01", "-", "", "k~1"]): _random_doc(rng, depth + 1) for _ in range(rng.randint(0, 4))}
+
+
+def _paths(doc, prefix=()):
+    yield list(prefix)
+    if isinstance(doc, dict):
+        for key, item in doc.items():
+            yield from _paths(item, prefix + (key,))
+    elif isinstance(doc, list):
+        for index, item in enumerate(doc):
+            yield from _paths(item, prefix + (str(index),))
+
+
+def test_apply_operations_matches_rfc6902_oracle():
+    rng = _rng("apply_oracle")
+    run = _Run()
+    agreed_ok = agreed_err = 0
+    for _ in range(2500):
+        doc = {"r": _random_doc(rng), "l": [1, [2, 3], {"a": 1}], "m": {"a": 1, "b/c": [True]}}
+        spec = []
+        for _ in range(rng.randint(1, 4)):
+            path = list(rng.choice(list(_paths(doc))))
+            roll = rng.random()
+            if path and roll < 0.12:
+                path[-1] = rng.choice(["-", "01", "-1", "+1", "99", "0", "x", "1"])
+            elif roll < 0.18:
+                path.append(rng.choice(["-", "0", "z", "~"]))
+            op = rng.choice(["add", "remove", "replace", "test"])
+            value = copy.deepcopy(rng.choice([_random_doc(rng), doc.get("m"), 1, True, None, 1.0, [], {}]))
+            if op == "test" and rng.random() < 0.5:
+                try:
+                    value = _ref_get(doc, path)
+                except _RefError:
+                    pass
+            entry = {"op": op, "path": _ref_encode(path)}
+            if op != "remove":
+                entry["value"] = value
+            spec.append(entry)
+        parsed = jp._parse_operations(json.dumps(spec))
+        try:
+            want = _tag(_ref_apply(doc, parsed))
+        except _RefError:
+            want = None
+        outcome = run(jp._apply_operations, copy.deepcopy(doc), parsed)
+        _expect_error(outcome, (ValueError,), f"_apply_operations({doc!r}, {spec!r})")
+        got = _tag(outcome[1]) if outcome[0] == "ok" else None
+        assert got == want, f"differential mismatch: doc={doc!r} ops={spec!r} impl={outcome[1]!r} oracle={want!r} ({TAG})"
+        agreed_ok += want is not None
+        agreed_err += want is None
+    assert agreed_ok >= 300 and agreed_err >= 300, (agreed_ok, agreed_err, TAG)
+    run.check("_apply_operations")
+
+
+# ---------------------------------------------------------------------------
+# json_patch: public patch_json containment + atomicity
+# ---------------------------------------------------------------------------
+
+_JSON_PATHS = [
+    "data.json", "./data.json", "sub/n.json", "DATA.JSON", "data.json.", "data.json ", "data.json::$DATA", "data.json:s",
+    "sub/../data.json", "../canary.json", "sub/../../canary.json", "..\\canary.json", "sub\\..\\..\\canary.json",
+    "../root-evil/x.json", "../rootx/x.json", "%2e%2e/canary.json", "..%2fcanary.json", "\u2025/canary.json",
+    "\u2215canary.json", "\uff0e\uff0e/canary.json", "/dev/null", "NUL", "CON", "C:canary.json",
+    "data.json\x00", "", " ", ".", "sub", "sub/", "x" * 400 + ".json",
+]
+
+
+def _build_json_world(base: Path) -> Path:
+    if base.exists():
+        shutil.rmtree(base)
+    root = base / "root"
+    (root / "sub").mkdir(parents=True)
+    (base / "rootx").mkdir()
+    (base / "root-evil").mkdir()
+    for path in (root / "data.json", base / "canary.json", base / "rootx" / "x.json", base / "root-evil" / "x.json",
+                 root / "sub" / "n.json"):
+        path.write_text(json.dumps({"a": {"b": [1, 2, 3]}, "k": "v", "n": None}), encoding="utf-8")
+    return root
+
+
+_JSON_OPS = [
+    [{"op": "add", "path": "/a/b/-", "value": 4}],
+    [{"op": "replace", "path": "/k", "value": "w"}, {"op": "remove", "path": "/n"}],
+    [{"op": "add", "path": "/new", "value": {"x": [1]}}, {"op": "test", "path": "/a/b/0", "value": 1}],
+    [{"op": "add", "path": "/ok", "value": 1}, {"op": "remove", "path": "/does/not/exist"}],        # fails after a change
+    [{"op": "add", "path": "/ok", "value": 1}, {"op": "test", "path": "/k", "value": "WRONG"}],      # fails after a change
+    [{"op": "add", "path": "/ok", "value": 1}, {"op": "add", "path": "/a/b/01", "value": 1}],
+    [{"op": "add", "path": "/ok", "value": 1}, {"op": "remove", "path": ""}],
+]
+_JSON_PUBLIC_ERRORS = (ValueError, PermissionError, FileNotFoundError, jp.JsonPatchError)
+
+
+def test_patch_json_never_touches_anything_outside_root_and_is_atomic(tmp_path, monkeypatch, request):
+    rng = _rng("patch_json_public")
+    run = _Run()
+    base = tmp_path / "world"
+    root = _build_json_world(base)
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    ok = rejected = 0
+    spellings = list(_JSON_PATHS) + ["data.json", "./data.json", "sub/n.json", "DATA.JSON", "sub//n.json", "SUB/N.JSON"] * 3
+    for name in ("canary.json", "rootx/x.json", "root-evil/x.json", "sub/n.json"):
+        spellings.append(str(base / name))
+        spellings.append(str(base / name).replace("\\", "/"))
+        spellings.append(str(root / ".." / name))
+    for _ in range(40):
+        spellings.append(rng.choice(["", "./", "sub/", "SUB/", "sub//"]) + rng.choice(
+            ["data.json", "n.json", "../canary.json", "../../canary.json", "DATA.json", "data.json/", ".\\data.json"]))
+    for spelling in spellings:
+        for mode in (rng.choice(["preview", "apply"]),):
+            root = _build_json_world(base)
+            ops = rng.choice(_JSON_OPS)
+            before = _snapshot(base)
+            outcome = run(jp.patch_json, spelling, ops, mode=mode)
+            after = _snapshot(base)
+            label = f"patch_json({spelling!r}, {mode})"
+            _expect_error(outcome, _JSON_PUBLIC_ERRORS, label)
+            changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+            if outcome[0] == "err":
+                rejected += 1
+                assert not changed, f"{label} raised {outcome[1]!r} but changed {changed} ({TAG})"
+                continue
+            ok += 1
+            resolved = Path(outcome[1]["path"]).resolve()
+            assert resolved.is_relative_to(root.resolve()), f"{label} resolved outside root: {resolved} ({TAG})"
+            assert all(k.startswith("root/") and k.endswith(".json") for k in changed), (label, changed, TAG)
+            assert (mode == "apply") or not changed, (label, changed, TAG)
+            assert not any(".sonder-json-patch-" in k for k in after), (label, TAG)
+            if mode == "apply":
+                written = json.loads(resolved.read_text(encoding="utf-8"))
+                assert _tag(written) == _tag(outcome[1]["document"]), (label, TAG)
+    assert ok >= 3 and rejected >= 40, (ok, rejected, TAG)
+    run.check("patch_json public", p99_limit=0.25)  # temp file + fsync + replace per apply
+
+
+def test_patch_json_failing_operation_leaves_bytes_identical(tmp_path, monkeypatch, request):
+    base = tmp_path / "world"
+    root = _build_json_world(base)
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    target = root / "data.json"
+    original = target.read_bytes()
+    failing = [ops for ops in _JSON_OPS[3:]]
+    for ops in failing:
+        for mode in ("preview", "apply"):
+            with pytest.raises(ValueError):
+                jp.patch_json("data.json", ops, mode=mode)
+            assert target.read_bytes() == original, (ops, mode, TAG)
+    jp.patch_json("data.json", _JSON_OPS[0], mode="apply")  # control: a valid patch really rewrites the file
+    assert target.read_bytes() != original
+    assert json.loads(target.read_text(encoding="utf-8"))["a"]["b"] == [1, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# deep nesting / time budgets (json)
+# ---------------------------------------------------------------------------
+
+def _nested_text(depth: int) -> str:
+    return "[" * depth + "]" * depth
+
+
+@pytest.mark.parametrize("depth", [65, 200, 800, 5000, 100_000])
+def test_deeply_nested_json_is_rejected_with_valueerror_not_recursionerror(depth, tmp_path, monkeypatch, request):
+    """Regression: json.loads raises RecursionError past ~1000 levels, escaping the ValueError contract."""
+    text = _nested_text(depth)
+    run = _Run()
+    failures = []
+    for name, call in (
+        ("_loads_strict", lambda: jp._loads_strict(text, "x")),
+        ("_parse_operations(str)", lambda: jp._parse_operations(text)),
+        ("_parse_operations(list)", lambda: jp._parse_operations(_deep_list(depth))),
+        ("parse_candidate_patch", lambda: parse_candidate_patch(text)),
+    ):
+        kind, value = run(call)
+        allowed = (BuildDomainError,) if name == "parse_candidate_patch" else (ValueError,)
+        if name == "_loads_strict" and kind == "ok":
+            continue  # depth is enforced by the callers; the parser itself may simply succeed
+        if not (kind == "err" and isinstance(value, allowed)):
+            failures.append(f"{name}: {kind} {type(value).__name__} {str(value)[:60]!r}")
+    base = tmp_path / "world"
+    root = _build_json_world(base)
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    (root / "deep.json").write_text(text, encoding="utf-8")
+    kind, value = run(jp.patch_json, "deep.json", [{"op": "add", "path": "/a", "value": 1}])
+    if not (kind == "err" and isinstance(value, ValueError)):
+        failures.append(f"patch_json: {kind} {type(value).__name__} {str(value)[:60]!r}")
+    assert not failures, f"depth {depth} escaped the typed-error contract ({TAG}): {failures}"
+    run.check("deep nesting")
+
+
+def _deep_list(depth: int):
+    value: list = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_json_ten_thousand_line_inputs_stay_in_budget(tmp_path, monkeypatch, request):
+    run = _Run()
+    big_text = json.dumps(list(range(9000)), indent=1)
+    assert big_text.count("\n") > 9000
+    kind, value = run(jp._loads_strict, big_text, "doc")
+    assert kind == "ok" and len(value) == 9000, (kind, TAG)
+    ops_text = json.dumps([{"op": "add", "path": "/a", "value": 1}] * 10_000, indent=1)
+    outcome = run(jp._parse_operations, ops_text)
+    assert outcome[0] == "err" and isinstance(outcome[1], ValueError), (outcome, TAG)
+    wide_ops = json.dumps([{"op": "add", "path": f"/k{i}", "value": list(range(50))} for i in range(100)], indent=1)
+    assert run(jp._parse_operations, wide_ops)[0] == "ok"
+    root = _build_json_world(tmp_path / "world")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    (root / "big.json").write_text(big_text, encoding="utf-8")
+    kind, report = run(jp.patch_json, "big.json", [{"op": "add", "path": "/-", "value": 9000}, {"op": "remove", "path": "/0"}])
+    assert kind == "ok" and report["document"][0] == 1 and report["document"][-1] == 9000, (kind, report, TAG)
+    for depth in (jp.MAX_JSON_DEPTH - 1, jp.MAX_JSON_DEPTH, jp.MAX_JSON_DEPTH + 1):
+        outcome = run(jp._parse_operations, [{"op": "add", "path": "/a", "value": _deep_list(depth - 3)}])
+        assert outcome[0] == ("ok" if depth <= jp.MAX_JSON_DEPTH else "err"), (depth, outcome, TAG)
+    run.check("json 10k lines")
+
+
+# ---------------------------------------------------------------------------
+# repair.parse_candidate_patch
+# ---------------------------------------------------------------------------
+
+_ANSWER = {"hunks": [{"file": "src/core/math.cpp", "anchor": "int x = 0;", "replace": "int x = 1;"},
+                     {"file": "include/spark/vec.h", "anchor": "a", "replace": ""}], "rationale": "fix the init"}
+
+
+def _same(patch: CandidatePatch, answer: dict) -> bool:
+    return (tuple((h.file_rel, h.anchor, h.replacement) for h in patch.hunks)
+            == tuple((h["file"], h["anchor"], h["replace"]) for h in answer["hunks"])
+            and patch.rationale == answer.get("rationale", ""))
+
+
+def _wrap(rng: random.Random, body: str) -> tuple[str, bool]:
+    """(text, expected_to_parse_to_the_same_object)."""
+    kind = rng.randrange(9)
+    if kind == 0:
+        return body, True
+    if kind == 1:
+        return rng.choice(["", " ", "\n", "\t\r\n"]) + body + rng.choice(["", " ", "\n\n"]), True
+    if kind == 2:
+        return "```json\n" + body + "\n```", True
+    if kind == 3:
+        return "```\n" + body + "\n```\n", True
+    if kind == 4:
+        return "Here is the fix:\n" + body, False
+    if kind == 5:
+        return body + "\nHope that helps!", False
+    if kind == 6:
+        return "Sure.\n```json\n" + body + "\n```\nDone.", False
+    if kind == 7:
+        return "```json\n" + body + "\n``` trailing", False
+    return rng.choice(["{", "[", "```", "json", "`"]) + body + rng.choice(["", "}", "]"]), False
+
+
+def test_parse_candidate_patch_wrappers_prose_and_error_contract():
+    rng = _rng("candidate_wrap")
+    run = _Run()
+    for _ in range(2500):
+        answer = copy.deepcopy(_ANSWER)
+        if rng.random() < 0.3:
+            answer.pop("rationale")
+        body = json.dumps(answer, indent=rng.choice([None, 1, 2]), ensure_ascii=rng.random() < 0.5)
+        text, expect_same = _wrap(rng, body)
+        outcome = run(parse_candidate_patch, text)
+        _expect_error(outcome, (BuildDomainError,), f"parse_candidate_patch({text[:300]!r})")
+        if outcome[0] == "err":
+            assert outcome[1].code == "FIX_SCOPE_REJECTED", (text[:200], outcome[1].code, TAG)
+            assert not expect_same, f"clean wrapper {text[:200]!r} was rejected: {outcome[1]!r} ({TAG})"
+        else:
+            # Whatever parsed must be the very same object, never a different/partial one.
+            assert _same(outcome[1], answer), f"wrapped answer {text[:200]!r} parsed to a different patch {outcome[1]!r} ({TAG})"
+    run.check("parse_candidate_patch wrappers")
+
+
+def _mutate_answer_text(rng: random.Random, text: str) -> str:
+    op = rng.randrange(5)
+    if op == 0:
+        chars = list(text)
+        for _ in range(rng.randint(1, 5)):
+            chars[rng.randrange(len(chars))] = rng.choice('{}[]",:\\`0 \n\x00\u00e9\ud800')
+        return "".join(chars)
+    if op == 1:
+        return text[: rng.randrange(len(text) + 1)]
+    if op == 2:
+        position = rng.randrange(len(text) + 1)
+        return text[:position] + rng.choice(['"file":"../x",', '"extra":1,', "```", "NaN", ",,", '"hunks":[],']) + text[position:]
+    if op == 3:
+        return text.replace('"file"', rng.choice(['"File"', '"path"', '"file "', '"fi\\u006ce"']), 1)
+    return text.replace("src/core/math.cpp", rng.choice(SPELLINGS).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n"), 1)
+
+
+def test_parse_candidate_patch_accepted_files_are_contained():
+    rng = _rng("candidate_files")
+    run = _Run()
+    accepted = 0
+    spellings = SPELLINGS + [_random_spelling(rng) for _ in range(300)]
+    for spelling in spellings:
+        for decor in ("", "./", "src/", "a/../"):
+            answer = {"hunks": [{"file": decor + spelling, "anchor": "x", "replace": "y"}], "rationale": ""}
+            for text in (json.dumps(answer), "```json\n" + json.dumps(answer) + "\n```"):
+                outcome = run(parse_candidate_patch, text)
+                _expect_error(outcome, (BuildDomainError,), "file=%r" % (decor + spelling))
+                if outcome[0] == "err":
+                    assert outcome[1].code == "FIX_SCOPE_REJECTED"
+                    continue
+                accepted += 1
+                for rel in outcome[1].files():
+                    assert _contained_relative(rel), f"accepted file {decor + spelling!r} -> {rel!r} is not contained ({TAG})"
+    for _ in range(3000):
+        text = _mutate_answer_text(rng, json.dumps(_ANSWER))
+        outcome = run(parse_candidate_patch, text)
+        _expect_error(outcome, (BuildDomainError,), f"parse_candidate_patch({text[:300]!r})")
+        if outcome[0] == "ok":
+            accepted += 1
+            assert 1 <= len(outcome[1].hunks) <= 8
+            for rel in outcome[1].files():
+                assert _contained_relative(rel), f"mutated answer {text[:200]!r} accepted file {rel!r} ({TAG})"
+    assert accepted >= 100, (accepted, TAG)
+    for escape in ESCAPES:
+        if re.fullmatch(r"[A-Za-z]:(?![/\\]).*", escape) or escape == "a\\b":
+            # "c:x" (drive-relative) is refused later by EditScope.allows, and "a\b" is just "a/b" to
+            # safe_rel: neither is an escape at this layer (the first is reported as a SUSPECT).
+            continue
+        answer = json.dumps({"hunks": [{"file": escape, "anchor": "x", "replace": "y"}]})
+        outcome = run(parse_candidate_patch, answer)
+        assert outcome[0] == "err" and outcome[1].code == "FIX_SCOPE_REJECTED", (escape, outcome, TAG)
+    run.check("parse_candidate_patch files")
+
+
+def test_parse_candidate_patch_big_inputs_stay_in_budget():
+    run = _Run()
+    lines = "\n".join(f' {{"file": "a{i}.cpp", "anchor": "x", "replace": "y"}},' for i in range(3000))
+    text = '{"hunks": [\n' + lines + '\n {"file": "z.cpp", "anchor": "x", "replace": "y"}]}'
+    outcome = run(parse_candidate_patch, text)
+    assert outcome[0] == "err" and outcome[1].code == "FIX_SCOPE_REJECTED", (outcome, TAG)
+    assert len(text) < 200_000
+    padded = json.dumps(_ANSWER, indent=1) + "\n" * 150_000
+    assert run(parse_candidate_patch, padded)[0] == "ok"
+    outcome = run(parse_candidate_patch, "x" * 200_001)
+    assert outcome[0] == "err" and outcome[1].code == "FIX_SCOPE_REJECTED"
+    outcome = run(parse_candidate_patch, "```json\n" + "\n" * 190_000 + "not json")
+    assert outcome[0] == "err" and outcome[1].code == "FIX_SCOPE_REJECTED"
+    outcome = run(parse_candidate_patch, "```" + " " * 190_000 + "x")
+    assert outcome[0] == "err" and outcome[1].code == "FIX_SCOPE_REJECTED"
+    run.check("parse_candidate_patch big")
+
+
+# ---------------------------------------------------------------------------
+# hostile-directive scan: positives under mutation
+# ---------------------------------------------------------------------------
+
+OK = include_checker(SCOPE, "src/core/math.cpp")
+_CONTEXT = [
+    "int add(int a, int b) { return a + b; }\n", "namespace spark {\n", "}\n", "#include <vector>\n",
+    '#include "detail/impl.inl"\n', "#define SPARK_VERSION 3\n", "// a comment\n", "/* block\n   comment */\n",
+    "target_link_libraries(game PRIVATE spark)\n", "set(CMAKE_CXX_STANDARD 20)\n", "add_executable(game main.cpp)\n",
+    "static_assert(sizeof(int) == 4);\n", "template <class T> struct Box { T v; };\n", 'const char* s = "hello world";\n',
+    "#pragma once\n", "if(WIN32)\n  add_definitions(-DUNICODE)\nendif()\n", "\n", "    int y = x * 2; // scale\n",
+    "enum class Mode { A, B };\n", "#if defined(_WIN32)\n#endif\n",
+]
+
+
+def _scan(text: str, raw_strings: bool = True) -> tuple[str, ...]:
+    return scan_hostile_directives(normalize_for_scan(text, raw_strings=raw_strings), include_ok=OK)
+
+
+_IDENT_BEFORE_PAREN = re.compile(
+    r"\b(_Pragma|__pragma|__asm__|__asm|asm|__has_include|__has_embed|__attribute__|__attribute|__declspec)(?=\()")
+_GAS_WORD = re.compile(r"(?<=\.)(incbin|include|file|section|pushsection|init_array|fini_array|ctors|dtors)\b", re.IGNORECASE)
+_PRAGMA_WORD = re.compile(r"\b(comment|lib|linker|user|include_alias|section|init_seg|code_seg|data_seg|const_seg|"
+                          r"bss_seg|alloc_text|detect_mismatch|poison)\b")
+
+
+def _code_ws(text: str) -> list[int]:
+    """Indexes of blanks that sit in code (not in a string/char literal or comment)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            j = i + 1
+            while j < n and text[j] != ch and text[j] not in "\r\n":
+                if text[j] == "\\":
+                    splice = re.compile(r"\\[ \t]*(?:\r\n|\n|\r)").match(text, j)
+                    j = splice.end() if splice else j + 2
+                else:
+                    j += 1
+            i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            # Blanks next to a backslash/newline are part of a splice, not free whitespace.
+            if ch in " \t" and text[i - 1:i] != "\\" and text[i + 1:i + 2] not in ("\n", "\r"):
+                out.append(i)
+            i += 1
+    return out
+
+
+def m_splice(rng: random.Random, text: str) -> str:
+    # Distinct positions of the ORIGINAL text and never right after a backslash: a splice stacked on
+    # another splice is the nested-splice shape, probed separately (see the report), not a plain bypass.
+    # Trigraphs are replaced in phase 1, before splicing, so "?\\\n?=" is not "??=": keep them whole.
+    spots = [i for i in range(len(text) + 1)
+             if text[i - 1:i] != "\\" and text[i:i + 1] != "\r" and text[i - 2:i] != "??" and text[i - 1:i + 1] not in ("??", "\r\n")]
+    for i in sorted(rng.sample(spots, min(len(spots), rng.randint(1, 4))), reverse=True):
+        text = text[:i] + rng.choice(["\\\n", "\\\n", "\\ \n", "\\\t\n"]) + text[i:]
+    return text
+
+
+def m_comment(rng: random.Random, text: str) -> str:
+    positions = [i for i in _code_ws(text)
+                 if text[i - 1:i] not in ("/", "*") and text[i + 1:i + 2] not in ("/", "*")]
+    for i in sorted(rng.sample(positions, min(len(positions), rng.randint(1, 3))), reverse=True):
+        text = text[:i] + rng.choice(["/**/", "/* c */", "/* x\n y */"]) + text[i + 1:]
+    if rng.random() < 0.5 and "\r" not in text:
+        text = re.sub(r"(?<!\\)(?<!\\ )(?<!\\\t)\n", " // trailing\n", text, count=1)
+    if rng.random() < 0.3:
+        text = "/* lead */ " + text
+    return text
+
+
+def m_ws(rng: random.Random, text: str) -> str:
+    for i in sorted(rng.sample(_code_ws(text), min(len(_code_ws(text)), 3)), reverse=True):
+        text = text[:i] + rng.choice(["\t", "  ", "\t \t", "   ", "\f", " \v "]) + text[i + 1:]
+    text = re.sub(r"^(\s*)#(?=\S)", lambda m: m.group(1) + "#" + rng.choice(["", " ", "\t", "  "]), text, flags=re.MULTILINE)
+    return _IDENT_BEFORE_PAREN.sub(lambda m: m.group(1) + rng.choice(["", " ", "\t", "  "]), text)
+
+
+def m_case(rng: random.Random, text: str) -> str:
+    def scramble(match):
+        return "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in match.group(0))
+    text = _GAS_WORD.sub(scramble, text)
+    return "\n".join(_PRAGMA_WORD.sub(scramble, line) if re.search(r"pragma", line) else line
+                     for line in text.split("\n"))
+
+
+def m_crlf(rng: random.Random, text: str) -> str:
+    return text.replace("\n", rng.choice(["\r\n", "\r"]))
+
+
+def m_concat(rng: random.Random, text: str) -> str:
+    # Judge the text the way the compiler lexes it (splices and comments gone), not its raw spelling.
+    seen = normalize_for_scan(text).lstrip()
+    if (seen.startswith("#") and not seen.startswith("#define")) or re.search(r"_Pragma|__pragma|__has_|%:|\?\?=", seen):
+        return text
+    spots = []
+    for match in re.finditer(r'"((?:[^"\\\n]|\\.)*)"', text):
+        for k in range(1, len(match.group(1))):
+            body = match.group(1)
+            if len(re.search(r"\\*$", body[:k]).group(0)) % 2 == 0:
+                spots.append(match.start(1) + k)
+    if not spots:
+        return text
+    i = rng.choice(spots)
+    return text[:i] + '"' + rng.choice([" ", "\n", " /*c*/ ", "\t", " \\\n "]) + '"' + text[i:]
+
+
+def m_macro(rng: random.Random, text: str) -> str:
+    body = text.rstrip("\n")
+    if "\n" in body or re.match(r"\s*(/\*.*?\*/\s*)*(#|%:|\?\?=)", body, re.DOTALL) or "\\" in body.replace('\\"', "").replace("\\\\", ""):
+        return text
+    if rng.random() < 0.5:
+        return "#define NOP(...) __VA_ARGS__\nNOP(" + body + ")\n"
+    return "#define PAYLOAD " + body + "\nPAYLOAD\n"
+
+
+MUTATIONS = {"splice": m_splice, "comment": m_comment, "ws": m_ws, "case": m_case,
+             "crlf": m_crlf, "concat": m_concat, "macro": m_macro}
+
+
+def _mutate_code(rng: random.Random, text: str) -> tuple[str, list[str]]:
+    names = rng.sample(sorted(MUTATIONS), rng.randint(1, 3))
+    for name in names:
+        text = MUTATIONS[name](rng, text)
+    return text, names
+
+
+def _in_context(rng: random.Random, core: str) -> str:
+    if not core.endswith(("\n", "\r")):
+        core += "\n"
+    before = "".join(rng.choice(_CONTEXT) for _ in range(rng.randint(0, 5)))
+    after = "".join(rng.choice(_CONTEXT) for _ in range(rng.randint(0, 5)))
+    return before + core + after
+
+
+def test_context_corpus_itself_is_clean():
+    assert _scan("".join(_CONTEXT)) == ()
+    for text in HOSTILE:
+        assert _scan(text), text
+
+
+def test_hostile_corpus_is_detected_when_planted_and_mutated():
+    rng = _rng("hostile_mutation")
+    run = _Run()
+    misses: list[tuple[str, list[str], str]] = []
+    for text in HOSTILE:
+        for _ in range(24):
+            mutated, names = _mutate_code(rng, text)
+            full = _in_context(rng, mutated)
+            for raw in (True, False):
+                outcome = run(_scan, full, raw)
+                assert outcome[0] == "ok", f"scan raised {outcome[1]!r} on {full!r} ({TAG})"
+                if not outcome[1]:
+                    misses.append((text, names, full))
+                    break
+    assert not misses, "hostile text evaded detection after claimed-covered mutations ({}):\n{}".format(
+        TAG, "\n".join("  {!r} via {} -> {!r}".format(*item) for item in misses[:12]))
+    run.check("hostile scan")
+
+
+def test_benign_corpus_stays_clean_under_mutation_in_context():
+    rng = _rng("benign_mutation")
+    run = _Run()
+    flagged = []
+    for text in BENIGN:
+        for _ in range(24):
+            mutated, names = _mutate_code(rng, text)
+            full = _in_context(rng, mutated)
+            outcome = run(_scan, full)
+            assert outcome[0] == "ok", (full, outcome, TAG)
+            if outcome[1]:
+                flagged.append((text, names, full, outcome[1]))
+    assert not flagged, "benign code flagged after semantics-preserving mutations ({}):\n{}".format(
+        TAG, "\n".join("  {!r} via {} -> {!r}: {}".format(*item) for item in flagged[:12]))
+    run.check("benign scan")
+
+
+_NORMALIZE_SEEDS = HOSTILE + BENIGN + [
+    "a??/\nb", "x ??= y", "%:%:%:", "R\"x(a\\\nb)x\" //c\n", "u8R\"(\n#include \"/etc/passwd\"\n)\"", "'\"' /* \" */ \"\n",
+    "1'000'000 '", "/* unterminated", "// c \\\n continued\n", "\\\n\\\n\\\n", "R\"(", "L'", "\"abc", "a \\ \n b", "#\\\n#\\\n",
+]
+
+
+def test_normalize_for_scan_is_idempotent_and_total():
+    rng = _rng("normalize")
+    run = _Run()
+    alphabet = "\\\n \t\r/*'\"#%:?=<>()R_ua1.-x"
+    bad = []
+    residual = 0
+    for _ in range(4000):
+        text = rng.choice(_NORMALIZE_SEEDS)
+        if rng.random() < 0.5:
+            text, _names = _mutate_code(rng, text)
+        if rng.random() < 0.5:
+            chars = list(text)
+            for _step in range(rng.randint(1, 6)):
+                if chars:
+                    chars[rng.randrange(len(chars))] = rng.choice(alphabet)
+            text = "".join(chars)
+        for raw in (True, False):
+            outcome = run(normalize_for_scan, text, raw_strings=raw)
+            assert outcome[0] == "ok", f"normalize_for_scan({text!r}) raised {outcome[1]!r} ({TAG})"
+            once = outcome[1]
+            if re.search(r"\\[ \t]*\n", once) or "??" in once:
+                # normalize is a single pass: a splice that only appears once a comment between the
+                # backslash and the newline is removed (or stacked splices) survives into the output.
+                residual += 1
+                continue
+            twice = normalize_for_scan(once, raw_strings=raw)
+            if twice != once:
+                bad.append((text, raw, once, twice))
+            canonical = text.replace("\r\n", "\n").replace("\r", "\n")
+            assert normalize_for_scan(canonical.replace("\n", "\r\n"), raw_strings=raw) == once, (text, TAG)
+    assert not bad, "normalize_for_scan is not idempotent ({}):\n{}".format(
+        TAG, "\n".join("  {!r} raw={} -> {!r} -> {!r}".format(*item) for item in bad[:8]))
+    assert residual < 4000, f"every input left a residual splice, so idempotence was never checked ({TAG})"
+    for value in (None, "", 0):
+        assert normalize_for_scan(value) == ""  # type: ignore[arg-type]
+    run.check("normalize_for_scan")
+
+
+def test_scan_and_normalize_stay_in_budget_on_ten_thousand_line_inputs():
+    run = _Run()
+    benign = "".join(rng_line for rng_line in (_CONTEXT[i % len(_CONTEXT)] for i in range(10_000)))
+    assert benign.count("\n") >= 10_000
+    outcome = run(_scan, benign)
+    assert outcome == ("ok", ()), (outcome[0], TAG)
+    hostile = benign + '#include "/etc/passwd"\n'
+    outcome = run(_scan, hostile)
+    assert outcome[0] == "ok" and outcome[1], TAG
+    # Adversarial shapes at the largest size a candidate can reach (8 hunks x 8000 chars = 64000).
+    units = {
+        "open_has_include": '__has_include("\n', "cxx_attr_open": "[[\n",
+        "quotes": '"\n', "adjacent_literals": '"a" ', "string_run_newlines": '"a"\n', "block_comments": "/*\n",
+        "raw_open": 'R"x(\n', "splices": "\\\n", "digraphs": "%:%:%:\n", "directives": "# define A 1\n",
+        "pp_numbers": "1'0'0'0 ", "open_declspec": "__declspec(\n", "attr_spaces": "__attribute__ ( (" + " " * 40 + "\n",
+    }
+    slow = []
+    for name, unit in units.items():
+        text = unit * min(10_000, 64_000 // len(unit))
+        outcome = run(_scan, text)
+        assert outcome[0] == "ok", f"{name} raised {outcome[1]!r} ({TAG})"
+        if run.samples[-1] >= 2.0:
+            slow.append(f"{name}: {run.samples[-1]:.2f}s on {len(text)} chars")
+    assert not slow, f"shapes over the 2 s ceiling ({TAG}): {slow}"
+    text = "#include" + " " * 60_000 + '"a.h"\n'
+    outcome = run(_scan, text)
+    assert outcome[0] == "ok" and run.samples[-1] < 2.0, (outcome, run.samples[-1], TAG)
+    for _ in range(3):
+        run(normalize_for_scan, benign)
+    # p99 is meaningless for this handful of giant inputs; only the 2 s ceiling applies.
+    assert max(run.samples) < 2.0, (max(run.samples), TAG)
+
+
+@pytest.mark.parametrize("opener", ["__attribute__((\n", "asm(\n"])
+def test_regression_unterminated_opener_scan_is_not_quadratic(opener):
+    """10000 unterminated openers: each one re-scans up to 4096 chars in ``_balanced``/the asm window.
+
+    ``_Pragma(\n`` x 10000 behaves the same (2-3 s). The asm form is only 50 kB, inside the 64 kB a
+    candidate can carry (8 hunks x 8000 chars).
+    """
+    text = opener * 10_000
+    started = time.perf_counter()
+    _scan(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars of unterminated attribute openers ({TAG})"
+
+
+def test_patch_json_does_not_resolve_unc_paths_before_the_root_check(tmp_path, monkeypatch, request):
+    """``//host/share/x.json`` reaches ``Path.resolve`` (an SMB connection) before any containment check."""
+    root = _build_json_world(tmp_path / "world")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    real_resolve = Path.resolve
+    seen: list[str] = []
+
+    def spy(self, *args, **kwargs):
+        text = str(self)
+        if text.startswith("\\\\") and not text.startswith("\\\\?\\"):
+            seen.append(text)
+            raise OSError("network lookup blocked by the test")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy)
+    for spelling in ("//fuzz-host.invalid/share/x.json", "\\\\fuzz-host.invalid\\share\\x.json"):
+        with pytest.raises((ValueError, PermissionError, OSError)):
+            jp.patch_json(spelling, [{"op": "add", "path": "/z", "value": 1}])
+    assert not seen, f"UNC path resolved (network access) before rejection: {seen!r} ({TAG})"
+
+
+@pytest.mark.parametrize("blank", ["\f", "\v"])
+def test_regression_splice_with_form_feed_or_vertical_tab_is_joined(blank):
+    """gcc and clang both accept a backslash, form feed/vertical tab, newline as a line splice."""
+    text = "#inc\\" + blank + "\nlude \"/etc/passwd\"\n"
+    assert _scan(text), f"splice with {blank!r} between backslash and newline hid #include ({TAG})"
