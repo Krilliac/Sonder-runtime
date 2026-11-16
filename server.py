@@ -208,6 +208,7 @@ from sonder_runtime.application.context_health import (
     ContextMemorySnapshot,
 )
 from sonder_runtime.domain.common.errors import InvalidInput
+from sonder_runtime.domain.request_temperature import validate_request_temperature
 from sonder_runtime.domain.common.errors import SonderError as _SonderError
 from sonder_runtime.adapters import prompt_store as _prompts
 from sonder_runtime.adapters.prompt_store import runtime_identity_block as _runtime_identity_block
@@ -1801,6 +1802,7 @@ def _make_generate(
     the decoder is not the same as verifying the result -- see
     `_require_schema_match`, which callers apply to the returned text.
     """
+    validate_request_temperature(temperature)
     cloud = bool(cloud or (_provider_bridge.active_rung() is None and _is_cloud_model_name(model)))
     if think is not None and not isinstance(think, bool):
         raise ValueError("think must be a boolean when supplied")
@@ -6631,6 +6633,7 @@ def _sonder_impl_serialized(
     location_consent opts in to approximate IP location for "my area" weather
     (None = env SONDER_LOCATION_CONSENT, default off).
     """
+    validate_request_temperature(temperature)  # before any route, capture or escalation
     _maybe_live_reload()
     # This layer runs beneath the HTTP/MCP routing guards.  Once the caller
     # explicitly selects a model or tier, control and web dispatch must not
@@ -6932,6 +6935,10 @@ def sonder(
             **_ollama_error_endpoint(),
         )
 
+    try:
+        validate_request_temperature(temperature)
+    except InvalidInput as error:
+        return render_model_error(ModelCallError("configuration", str(error)))
     # An explicitly selected target is a caller-owned routing contract.  Do
     # not reinterpret its prompt as a local control command before it reaches
     # that model; ``_answer_with_history_impl`` applies the same rule for the
