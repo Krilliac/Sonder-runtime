@@ -22,7 +22,7 @@ MAX_JSON_LINES = 200_000
 MAX_TEXT_CHARS = 16 * 1024 * 1024
 _PY_LOCATION = re.compile(r"^(?P<file>[^\s:][^:\n]*?\.py):(?P<line>\d+): ", re.MULTILINE)
 _GENERIC_LOCATION = re.compile(
-    r"(?P<file>[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
+    r"(?P<file>[A-Za-z0-9_./\\-]{1,300}\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
 _GO_OUTPUT_LOCATION = re.compile(r"^\s+(?P<file>[^\s:]+\.go):(?P<line>\d+): ?(?P<msg>.*)$")
 _JVM_LOCATION = re.compile(r"\((?P<file>[A-Za-z0-9_$]+\.(?:java|kt|groovy|scala)):(?P<line>\d+)\)")
 _TRX_LOCATION =re.compile(r"in (?P<file>[^\n]+?):line (?P<line>\d+)")

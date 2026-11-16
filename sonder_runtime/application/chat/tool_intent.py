@@ -9,12 +9,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Longest turn the intent predicates scan; longer text is never routed to file tools.
+_MAX_INTENT_CHARS = 12_000
 
 _LOCAL_TARGET = re.compile(
     r"(?:\b(?:workspace|work\s+space|repo(?:sitory)?|codebase|project|"
     r"folder|directory|file|files|scripts?|path|tree|module|package|README|LICENSE|Dockerfile|Makefile)\b|"
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]+\.(?:[A-Za-z]{2,10}|[ch])\b|"
-    r"\b(?:[\w.-]+[\\/])+[\w.-]+|\b[a-zA-Z_][\w.-]*_[\w.-]+\b))", re.IGNORECASE,
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]{1,128}\.(?:[A-Za-z]{2,10}|[ch])\b|"
+    r"\b(?:[\w.-]{1,128}[\\/]){1,32}[\w.-]{1,128}|\b[a-zA-Z_][\w.-]{0,127}_[\w.-]{1,128}\b))", re.IGNORECASE,
 )
 
 # Explicit mutation verbs.  These are intentionally separate from the broad
@@ -38,8 +40,8 @@ _MUTATION_TARGET = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_FILE = re.compile(
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]+[\\/])+[\w.-]+|"
-    r"\b[\w.-]+\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]{1,128}[\\/]){1,32}[\w.-]{1,128}|"
+    r"\b[\w.-]{1,128}\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
     re.IGNORECASE,
 )
 _INSPECTION = re.compile(
@@ -107,7 +109,7 @@ def suppresses_file_tools(text: str) -> bool:
     if not isinstance(text, str):
         return False
     value = text.strip()
-    if not value or not _LOCAL_TARGET.search(value):
+    if not value or len(value) > _MAX_INTENT_CHARS or not _LOCAL_TARGET.search(value):
         return False
     if _NO_TOOLS_OR_NEGATION.search(value):
         return True
@@ -126,7 +128,7 @@ def classify_file_intent(text: str) -> dict[str, Any] | None:
     if not isinstance(text, str):
         return None
     value = text.strip()
-    if not value or len(value) > 12_000 or _NO_TOOLS_OR_NEGATION.search(value):
+    if not value or len(value) > _MAX_INTENT_CHARS or _NO_TOOLS_OR_NEGATION.search(value):
         return None
 
     local_fact = bool(_LOCAL_FACT_QUESTION.match(value) and _LOCAL_TARGET.search(value))
