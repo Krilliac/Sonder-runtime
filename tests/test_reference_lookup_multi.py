@@ -409,6 +409,15 @@ def test_consult_heuristic_verdict_ignores_the_members_elapsed_times(models):
     assert "ENSEMBLE" not in judge["prompt"] and not TIMINGS.search(judge["prompt"])
 
 
+def test_consult_recognises_the_multi_model_ensemble_footer(models):
+    """The plural header and the same-line "synthesized by" row, as server.py writes them."""
+    out = server.ensemble_answer(QUESTION, tiers="plain,other")
+
+    assert "=== ENSEMBLE (2 models answered) ===" in out
+    assert re.search(r"in \d+ms  synthesized by other \(llama3\.2:3b\)\Z", out)
+    assert consult_module._substance(out) == models.synth
+
+
 @pytest.mark.parametrize("bad", sorted(BAD_INDEXES))
 def test_consult_bad_index_fails_open_with_a_visible_line(models, monkeypatch, tmp_path, bad):
     monkeypatch.setenv(config.ENV_INDEX, str(BAD_INDEXES[bad](tmp_path)))

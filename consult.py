@@ -17,8 +17,13 @@ _HEURISTIC_AGREEMENT_THRESHOLD = 0.5
 # :func:`_default_ask` -- ends every non-code answer with a provenance footer:
 # "=== ENSEMBLE (N model(s) answered) ===" and one indented row per model,
 # with its elapsed time.  It describes the run, not the answer.
+# At least one row, then the end: no trailing \s*, which overlapped the rows
+# and backtracked quadratically on long whitespace runs (``_ask`` strips its
+# input, and the server adds no trailing whitespace).
+# CRLF is deliberately not matched: ensemble_answer joins its footer with
+# "\n" and every consult path calls it in-process.
 _ENSEMBLE_FOOTER_RE = re.compile(
-    r"\n=== ENSEMBLE \(\d+ models? answered\) ===(?:\n  [^\n]*)*\s*\Z"
+    r"\n=== ENSEMBLE \(\d+ models? answered\) ===(?:\n  [^\n]*)+\Z"
 )
 
 

@@ -5,6 +5,10 @@ whether cloud is enabled in the environment; the N-tier cases exercise the
 local+local+cloud default and the "a tier failed but two answered" path.
 """
 
+import time
+
+import pytest
+
 import consult as consult_module
 import server
 
@@ -158,6 +162,36 @@ def test_only_a_trailing_ensemble_footer_is_set_aside():
     )
     assert consult_module._substance(synthesized) == "Merged answer."
     assert consult_module._substance("Plain answer, no footer.") == "Plain answer, no footer."
+
+
+def test_a_header_line_with_no_rows_is_part_of_the_answer():
+    """ensemble_answer always writes at least one row; a bare header is the answer's own text."""
+    header_only = "The log ends with\n=== ENSEMBLE (1 model answered) ==="
+    assert consult_module._substance(header_only) == header_only
+    assert consult_module._substance(header_only + "\n") == header_only
+
+
+_FOOTER = "\n=== ENSEMBLE (1 model answered) ===\n  plain (qwen2.5:3b) in 12ms"
+# A header echoed mid-answer, then a row of 50k spaces and 50k chars of "\n  "
+# lines: model output can carry long whitespace runs.  The first regex let a
+# trailing \s* overlap the rows, and took over 20 s on this.
+_WHITESPACE_AFTER_ECHOED_HEADER = (
+    "Answer.\n=== ENSEMBLE (1 model answered) ===\n  " + " " * 50_000
+    + "\n  " * 16_667 + "\nthe rest of the answer."
+)
+
+
+@pytest.mark.parametrize("footer", ["", _FOOTER], ids=["no-footer", "real-footer"])
+def test_footer_stripping_is_linear_on_whitespace_after_an_echoed_header(footer):
+    text = _WHITESPACE_AFTER_ECHOED_HEADER + footer
+
+    started = time.perf_counter()
+    stripped = consult_module._substance(text)
+    elapsed = time.perf_counter() - started
+
+    assert stripped == _WHITESPACE_AFTER_ECHOED_HEADER
+    # Linear time is a few milliseconds; the bound is loose for a loaded runner.
+    assert elapsed < 0.5, "footer stripping took %.2fs" % elapsed
 
 
 def test_three_tiers_all_agree_when_cloud_joins():
