@@ -546,9 +546,77 @@ def _decode_child_output(raw):
         return raw.decode(locale.getpreferredencoding(False), errors="replace")
 
 
+def _collect_output(proc, input_bytes, timeout):
+    """Feed stdin, wait for exit and collect output: (stdout, stderr, timeout_exc).
+
+    ``timeout_exc`` is None for a completed run; on timeout the process tree
+    has been torn down and the partial output is what it printed in time.
+    """
+    try:
+        stdout, stderr = proc.communicate(input=input_bytes, timeout=timeout)
+        return stdout, stderr, None
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(proc)
+        # ``taskkill /T`` can report success before the process handle is
+        # signalled.  Waiting on the direct handle first prevents the
+        # TemporaryDirectory owner from racing a still-live interpreter that
+        # has inherited the snippet directory or pipe handles.
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = exc.output, exc.stderr
+        return stdout, stderr, exc
+
+
+def _abort_process(proc):
+    """Tear down and reap ``proc``'s tree after a failure past the spawn."""
+    try:
+        _terminate_process_tree(proc)
+    except Exception:  # noqa: BLE001 - keep going: the job close below still kills the tree
+        logging.getLogger(__name__).warning("runner teardown failed", exc_info=True)
+    try:
+        proc.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _release_job(proc):
+    """Close ``proc``'s Job Object exactly once (kill-on-close ends the tree)."""
+    _close_windows_job(getattr(proc, "_sonder_job_handle", None))
+    try:
+        proc._sonder_job_handle = None
+    except AttributeError:
+        pass
+
+
 def _run_process(cmd, cwd, stdin, timeout, language):
     if language == "bash" and not sonder_paths.bash_executable():
         return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
+    # Encode before anything is spawned: a failure here (an unpaired surrogate
+    # cannot be utf-8) used to escape after the child and its job existed,
+    # leaving both live.
+    try:
+        input_bytes = (stdin or "").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return _error_result(
+            language, cwd, timeout, "stdin is not encodable as UTF-8: %s" % exc,
+        )
     try:
         popen_kwargs = {
             "cwd": cwd,
@@ -573,43 +641,30 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             cmd,
             **popen_kwargs,
         )
-        proc._sonder_job_handle = _attach_windows_job(proc)
     except FileNotFoundError:
         missing = SUPPORTED_LANGUAGES.get(language, {}).get(
             "missing", "executable not found: %s" % (cmd[0] if cmd else "(empty)")
         )
         return _error_result(language, cwd, timeout, missing)
+    # Everything past the spawn owns a live child: any exception (including
+    # KeyboardInterrupt) tears the tree down and reaps it before propagating,
+    # and the job is closed exactly once on every path.
     try:
-        stdout, stderr = proc.communicate(
-            input=(stdin or "").encode("utf-8"), timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(proc)
-        # ``taskkill /T`` can report success before the process handle is
-        # signalled.  Waiting on the direct handle first prevents the
-        # TemporaryDirectory owner from racing a still-live interpreter that
-        # has inherited the snippet directory or pipe handles.
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            stdout, stderr = proc.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = exc.output, exc.stderr
+        proc._sonder_job_handle = None
+        proc._sonder_job_handle = _attach_windows_job(proc)
+        stdout, stderr, timed_out = _collect_output(proc, input_bytes, timeout)
+    except BaseException:
+        _abort_process(proc)
+        raise
+    finally:
+        _release_job(proc)
+    if timed_out is not None:
         timeout_exc = subprocess.TimeoutExpired(
             cmd, timeout,
             output=_decode_child_output(stdout),
             stderr=_decode_child_output(stderr),
         )
-        _close_windows_job(getattr(proc, "_sonder_job_handle", None))
         return _timeout_result(language, cwd, timeout, timeout_exc)
-    finally:
-        if getattr(proc, "poll", lambda: proc.returncode)() is not None:
-            _close_windows_job(getattr(proc, "_sonder_job_handle", None))
     completed = subprocess.CompletedProcess(
         cmd, proc.returncode,
         _decode_child_output(stdout), _decode_child_output(stderr),
