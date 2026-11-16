@@ -969,30 +969,86 @@ def _terminate_process_tree(proc, tree=None):
 # ``-oc pipefail CODE``); ``program`` letters name the program to run
 # (``python -m``; option parsing ends there when ``ends_at_program``);
 # ``module`` letters take a perl module list, which perl pastes into
-# ``use MODULE ...;`` source; ``stdin`` letters make the interpreter read
-# program text from stdin; ``data_long`` options load a module specifier,
-# where a ``data:`` URL is inline source; ``commands`` are subcommands the
-# scan continues past; ``inline_commands`` take program text.
+# ``use MODULE ...;`` source. ``checks`` maps a value letter to a check of
+# its value and ``glued`` letters take only the rest of the bundle, never the
+# next argument; ``stdin`` letters make the interpreter read program text
+# from stdin; ``data_long`` options load a module specifier, where a
+# ``data:`` URL is inline source; ``commands`` are subcommands the scan
+# continues past; ``inline_commands`` take program text; with
+# ``remote_operands`` a ``data:``/``http(s):`` program operand is refused.
+# Long option names are compared with ``_`` folded into ``-`` (node does
+# that); an interpreter that does not fold rejects the spelling outright.
 def _inline_grammar(
-    inline="", flags="", value="", after="", program="", module="", stdin="",
-    inline_long=(), value_long=(), flags_long=(), data_long=(), plus=False,
-    ends_at_program=False, commands=(), inline_commands=(), stdin_commands=(),
+    inline="", flags="", value="", after="", program="", stdin="", glued="",
+    checks=None, inline_long=(), value_long=(), flags_long=(), data_long=(),
+    plus=False, ends_at_program=False, commands=(), inline_commands=(),
+    stdin_commands=(), remote_operands=False,
 ):
+    checks = dict(checks or {})
     return {
         "inline": frozenset(inline), "flags": frozenset(flags),
-        "value": frozenset(value + program + module), "after": frozenset(after),
-        "program": frozenset(program), "module": frozenset(module),
+        "value": frozenset(value + program + glued + "".join(checks)),
+        "after": frozenset(after), "program": frozenset(program),
+        "glued": frozenset(glued), "checks": checks,
         "stdin": frozenset(stdin), "inline_long": frozenset(inline_long),
         "value_long": frozenset(value_long), "flags_long": frozenset(flags_long),
         "data_long": frozenset(data_long), "plus": plus,
         "ends_at_program": ends_at_program, "commands": frozenset(commands),
         "inline_commands": frozenset(inline_commands),
         "stdin_commands": frozenset(stdin_commands),
+        "remote_operands": remote_operands,
     }
+
+
+# Option-value checks. Each returns "refuse" for a value that is program
+# text, "stdin" when the option makes the interpreter read code from stdin.
+# A perl -M/-m value perl turns into plain ``use Module LIST;``: a module name,
+# optionally ``=a,b`` (pasted inside a NUL-quoted q{}). Anything else is code.
+_PERL_MODULE_ARG = re.compile(r"-?[A-Za-z_][A-Za-z0-9_:]*(?:=.*)?\Z", re.DOTALL)
+# perl -d[t]:MOD loads Devel::MOD; an "=LIST" or any other text is pasted into
+# source, and a bare -d / -dt starts the debugger, which reads its commands
+# (perl code) from stdin.
+_PERL_DEBUGGER_ARG = re.compile(
+    r"t?:[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*\Z")
+# python -m modules whose command line runs program text from argv or stdin
+# (code, timeit, pdb commands, idlelib/IPython -c, the asyncio and _pyrepl
+# REPLs) or that hand off to another module named on argv (profile,
+# cProfile, trace, runpy), which would let `-m runpy code` reach the rest. A
+# denylist, not an allowlist: -m pytest/pip/venv/json.tool and the like are
+# ordinary file-running tools. compileall (byte-compiles, never executes),
+# site (prints paths), pydoc, doctest and unittest (run files) are not listed.
+_PYTHON_CODE_MODULES = frozenset({
+    "code", "timeit", "pdb", "profile", "cprofile", "trace", "runpy",
+    "idlelib", "ipython", "asyncio", "_pyrepl",
+})
+
+
+def _is_data_url(value):
+    return value.strip().lower().startswith("data:")
+
+
+def _perl_module_verdict(value):
+    return "refuse" if value and not _PERL_MODULE_ARG.match(value) else None
+
+
+def _perl_debugger_verdict(value):
+    if value in ("", "t"):
+        return "stdin"
+    return None if _PERL_DEBUGGER_ARG.match(value) else "refuse"
+
+
+def _data_url_verdict(value):
+    return "refuse" if _is_data_url(value) else None
+
+
+def _python_module_verdict(value):
+    top = value.strip().split(".", 1)[0].casefold()
+    return "refuse" if top in _PYTHON_CODE_MODULES else None
 
 
 _PYTHON_GRAMMAR = _inline_grammar(
     inline="c", flags="bBdEhiIOPqRsSuvVx?", value="WX", program="m", stdin="i",
+    checks={"m": _python_module_verdict},
     flags_long=("help", "version", "help-env", "help-xoptions", "help-all"),
     value_long=("check-hash-based-pycs",), ends_at_program=True,
 )
@@ -1013,8 +1069,11 @@ _INLINE_GRAMMARS = {
     "zsh": _SH_GRAMMAR,
     "dash": _SH_GRAMMAR,
     "perl": _inline_grammar(
-        inline="eE", flags="acfhlnpsStTuUvwWX0123456789",
-        value="CdDFiIVx", module="mM",
+        inline="eEF", flags="acfhlnpsStTuUvwWX0123456789", value="CDiIVx",
+        glued="d", checks={
+            "m": _perl_module_verdict, "M": _perl_module_verdict,
+            "d": _perl_debugger_verdict,
+        },
     ),
     "ruby": _inline_grammar(inline="e", value="CEIr"),
     "php": _inline_grammar(
@@ -1022,26 +1081,26 @@ _INLINE_GRAMMARS = {
         inline_long=("run", "process-begin", "process-code", "process-end"),
     ),
     "node": _inline_grammar(
-        inline="ep", flags="chiv", value="rC",
+        inline="ep", flags="chiv", value="C", checks={"r": _data_url_verdict},
         inline_long=("eval", "print"),
         flags_long=("check", "interactive", "version", "help"),
-        value_long=("require", "conditions", "input-type", "title"),
-        data_long=("import", "loader", "experimental-loader"),
+        value_long=("conditions", "input-type", "title"),
+        data_long=("import", "require", "loader", "experimental-loader"),
     ),
     "deno": _inline_grammar(
-        inline_long=("eval", "eval-file"), commands=("run", "repl"),
+        flags="Aq", flags_long=("allow-all", "quiet"),
+        inline_long=("eval", "eval-file"),
+        commands=("run", "repl", "test", "bench", "serve"),
         inline_commands=("eval",), stdin_commands=("repl",),
+        remote_operands=True,
     ),
     "bun": _inline_grammar(
         inline="ep", inline_long=("eval", "print"), commands=("run",),
-        inline_commands=("exec",),
+        inline_commands=("exec",), remote_operands=True,
     ),
 }
 _INLINE_GRAMMARS["nodejs"] = _INLINE_GRAMMARS["node"]
 
-# A perl -M/-m value perl turns into plain ``use Module LIST;``: a module name,
-# optionally ``=a,b`` (pasted inside a NUL-quoted q{}). Anything else is code.
-_PERL_MODULE_ARG = re.compile(r"-?[A-Za-z_][A-Za-z0-9_:]*(?:=.*)?\Z", re.DOTALL)
 # py.exe launcher version selectors (-3, -3.12, -3.12-32, -V:Company/Tag).
 _PY_LAUNCHER_SELECTOR = re.compile(r"-(?:[0-9]|V:)")
 
@@ -1096,12 +1155,13 @@ def _inline_code_refusal(key, args, stdin=""):
             break
         if arg.startswith("--"):
             name, has_value, value = arg[2:].partition("=")
+            name = name.replace("_", "-")
             if name in grammar["inline_long"]:
                 return refusal
             if name in grammar["data_long"]:
                 if not has_value:
                     value = args[index] if index < len(args) else ""
-                if value.strip().lower().startswith("data:"):
+                if _is_data_url(value):
                     return refusal
             if name in grammar["value_long"] or name in grammar["data_long"]:
                 pending += 0 if has_value else 1
@@ -1119,11 +1179,17 @@ def _inline_code_refusal(key, args, stdin=""):
                     continue
                 if letter in grammar["value"]:
                     rest = letters[position + 1:]
-                    if letter in grammar["module"]:
-                        module = rest or (args[index] if index < len(args) else "")
-                        if module and not _PERL_MODULE_ARG.match(module):
+                    glued = letter in grammar["glued"]
+                    check = grammar["checks"].get(letter)
+                    if check is not None:
+                        value = rest
+                        if not rest and not glued and index < len(args):
+                            value = args[index]
+                        verdict = check(value)
+                        if verdict == "refuse":
                             return refusal
-                    if not rest:
+                        reads_stdin = reads_stdin or verdict == "stdin"
+                    if not rest and not glued:
                         pending += 1
                     if letter in grammar["program"]:
                         operand_seen = True
@@ -1145,6 +1211,10 @@ def _inline_code_refusal(key, args, stdin=""):
         first_operand = False
         operand_seen = True
         reads_stdin = reads_stdin or arg == "-"
+        if grammar["remote_operands"] and arg.strip().lower().startswith(
+            ("data:", "http:", "https:")
+        ):
+            return refusal
         if not uncertain:
             break
     if not operand_seen:
