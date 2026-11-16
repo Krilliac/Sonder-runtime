@@ -410,11 +410,12 @@ def test_consult_heuristic_verdict_ignores_the_members_elapsed_times(models):
 
 
 def test_consult_recognises_the_multi_model_ensemble_footer(models):
-    """The plural header and the same-line "synthesized by" row, as server.py writes them."""
+    """The plural header and the own-line "synthesized by" row, as server.py writes them."""
     out = server.ensemble_answer(QUESTION, tiers="plain,other")
 
     assert "=== ENSEMBLE (2 models answered) ===" in out
-    assert re.search(r"in \d+ms  synthesized by other \(llama3\.2:3b\)\Z", out)
+    assert re.search(r"in \d+ms\n  synthesized by other \(llama3\.2:3b\)\Z", out)
+    assert re.search(r"^  synthesized by ", out, re.MULTILINE)
     assert consult_module._substance(out) == models.synth
 
 

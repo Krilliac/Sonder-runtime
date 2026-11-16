@@ -11,6 +11,7 @@ adapter's job (``adapters/security/role_tool_policy.py``).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Union
 
@@ -27,6 +28,9 @@ KEY_TOOLS = "tools"
 KEY_UNTOOLED = "untooled_commands"
 KEY_NAME = "name"
 KEY_WHY = "why"
+
+_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]*")
+_UNTOOLED_NAME = re.compile(r"/[a-z0-9_-]+")
 
 REFUSAL_TEMPLATE = "tool '%s' is not available to this account role"
 COMMAND_REFUSAL_TEMPLATE = "command '%s' is not available to this account role"
@@ -69,7 +73,8 @@ def parse_allowlist(payload: object) -> frozenset[str]:
     """
     if not isinstance(payload, dict):
         raise ValueError("allowlist document must be an object")
-    if payload.get(KEY_SCHEMA_VERSION) != ALLOWLIST_SCHEMA_VERSION:
+    version = payload.get(KEY_SCHEMA_VERSION)
+    if type(version) is not int or version != ALLOWLIST_SCHEMA_VERSION:
         raise ValueError("unsupported allowlist schema version")
     entries = payload.get(KEY_TOOLS)
     if not isinstance(entries, list):
@@ -80,8 +85,8 @@ def parse_allowlist(payload: object) -> frozenset[str]:
             raise ValueError("allowlist entries must be objects")
         name = entry.get(KEY_NAME)
         why = entry.get(KEY_WHY)
-        if not isinstance(name, str) or not name.strip() or name != name.strip():
-            raise ValueError("allowlist entry needs an exact tool name")
+        if not isinstance(name, str) or not name.strip() or not _TOOL_NAME.fullmatch(name):
+            raise ValueError("allowlist entry needs an exact tool name matching [a-z][a-z0-9_]*")
         if not isinstance(why, str) or not why.strip():
             raise ValueError("allowlist entry '%s' needs a justification" % name)
         names.append(name)
@@ -99,7 +104,8 @@ def parse_untooled_allowlist(payload: object) -> frozenset[str]:
     """
     if not isinstance(payload, dict):
         raise ValueError("allowlist document must be an object")
-    if payload.get(KEY_SCHEMA_VERSION) != ALLOWLIST_SCHEMA_VERSION:
+    version = payload.get(KEY_SCHEMA_VERSION)
+    if type(version) is not int or version != ALLOWLIST_SCHEMA_VERSION:
         raise ValueError("unsupported allowlist schema version")
     entries = payload.get(KEY_UNTOOLED)
     if not isinstance(entries, list):
@@ -110,8 +116,10 @@ def parse_untooled_allowlist(payload: object) -> frozenset[str]:
             raise ValueError("untooled entries must be objects")
         name = entry.get(KEY_NAME)
         why = entry.get(KEY_WHY)
-        if not isinstance(name, str) or not name.startswith("/") or name != name.strip().lower():
-            raise ValueError("untooled entry needs an exact lower-case slash command")
+        if not isinstance(name, str) or not _UNTOOLED_NAME.fullmatch(name):
+            raise ValueError(
+                "untooled entry needs an exact lower-case slash command matching /[a-z0-9_-]+"
+            )
         if not isinstance(why, str) or not why.strip():
             raise ValueError("untooled entry '%s' needs a justification" % name)
         names.append(name)
