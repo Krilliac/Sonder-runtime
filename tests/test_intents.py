@@ -215,3 +215,32 @@ def test_command_classifier_ignores_plain_questions_and_slashes():
     assert intents.classify_command("write me a poem about queues") is None
     assert intents.classify_command("/consult already a slash") is None
     assert intents.classify_command("refactor the whole project") is None
+
+
+import pytest
+
+
+@pytest.mark.parametrize("text", [
+    "run this by the team first",
+    "execute that plan carefully",
+    "practice makes perfect",
+    "this is not strict",
+    "I need strict typing",
+    "can you debug on windows",
+    "don't run it",
+    "please do not execute it",
+])
+def test_ordinary_chat_does_not_fire_control_intents(text):
+    assert intents.classify(text) == {}
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("be strict", {"strict": True}),
+    ("strict mode on", {"strict": True}),
+    ("run that", {"run": True}),
+    ("Run the code.", {"run": True}),
+    ("practice 4", {"train": 4}),
+    ("train on 7", {"train": 7}),
+])
+def test_anchored_command_phrasings_still_fire(text, expected):
+    assert intents.classify(text) == expected
