@@ -263,12 +263,15 @@ def test_history_refuses_to_follow_a_planted_symlink(tmp_path):
     assert target.read_text() == "keep\n"
 
 
-@pytest.mark.parametrize("vt_ok, wt, color, glyphs", [
-    (False, "1", "none", "ascii"),
-    (True, "", "16", "ascii"),
-    (True, "1", "16", "unicode"),
+@pytest.mark.parametrize("vt_ok, wt, color, glyphs, palette", [
+    (False, "1", "none", "ascii", "none"),
+    (True, "", "16", "ascii", "16"),
+    # Windows Terminal draws 24-bit colour, so it is detected as such.  Its
+    # background is not known, so what is painted stays on its own 16
+    # colours: the same bytes as when it was detected as a 16-colour console.
+    (True, "1", "truecolor", "unicode", "16"),
 ])
-def test_windows_vt_decides_colour_and_glyphs(monkeypatch, vt_ok, wt, color, glyphs):
+def test_windows_vt_decides_colour_and_glyphs(monkeypatch, vt_ok, wt, color, glyphs, palette):
     class _Tty:
         encoding = "utf-8"
 
@@ -283,6 +286,7 @@ def test_windows_vt_decides_colour_and_glyphs(monkeypatch, vt_ok, wt, color, gly
     monkeypatch.setattr(S, "_CACHED", None)
     caps = sonder_repl._init_terminal()
     assert (caps.color, caps.glyphs) == (color, glyphs)
+    assert caps.palette == palette
 
 
 def test_unknown_command_is_one_line_suggestion_first():

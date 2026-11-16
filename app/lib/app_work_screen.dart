@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'app_control.dart';
+import 'theme.dart';
 import 'workspace_ui.dart';
 
 class AppWorkScreen extends StatefulWidget {
@@ -134,40 +135,40 @@ class _AppWorkScreenState extends State<AppWorkScreen> {
                         constraints:
                             const BoxConstraints(maxWidth: conversationWidth),
                         child: ListView(
-                            padding: const EdgeInsets.all(20),
+                            padding: const EdgeInsets.all(SonderSpace.xl),
                             children: [
                               SizedBox(
                                   height: 4,
                                   child: client.busy
                                       ? const LinearProgressIndicator()
                                       : null),
-                              const SizedBox(height: 20),
+                              const SizedBox(height: SonderSpace.xl),
                               Text(status,
                                   style: Theme.of(context)
                                       .textTheme
                                       .headlineSmall),
-                              const SizedBox(height: 8),
+                              const SizedBox(height: SonderSpace.sm),
                               Text(
                                   '${client.project ?? 'No project'} · ${client.origin ?? 'Server unavailable'}',
                                   style: Theme.of(context).textTheme.bodySmall),
-                              const SizedBox(height: 20),
+                              const SizedBox(height: SonderSpace.xl),
                               const WorkspaceNotice(
                                   message:
                                       'Prepare first, then explicitly run on the selected server conversation. Server support and host approval are required.'),
                               if (_notice != null) ...[
-                                const SizedBox(height: 12),
+                                const SizedBox(height: SonderSpace.md),
                                 WorkspaceNotice(
                                     message: _notice!, tone: NoticeTone.warning)
                               ],
                               if (!available ||
                                   locked && !client.workScopeCurrent) ...[
-                                const SizedBox(height: 12),
+                                const SizedBox(height: SonderSpace.md),
                                 const WorkspaceNotice(
                                     message:
                                         'This selection is no longer available. Return to server conversations. Reconnecting does not automatically resume this work.',
                                     tone: NoticeTone.warning)
                               ],
-                              const SizedBox(height: 24),
+                              const SizedBox(height: SonderSpace.xxl),
                               TextField(
                                   key: const Key('work-prompt'),
                                   controller: _prompt,
@@ -183,12 +184,12 @@ class _AppWorkScreenState extends State<AppWorkScreen> {
                                       helperText: locked
                                           ? 'Original task sent for preparation.'
                                           : 'Your draft stays in this app until you prepare it.')),
-                              const SizedBox(height: 16),
+                              const SizedBox(height: SonderSpace.lg),
                               Text(
                                   'Automatic model route · 8 steps · web and location off',
                                   style: Theme.of(context).textTheme.bodySmall),
-                              const SizedBox(height: 20),
-                              Wrap(spacing: 12, runSpacing: 12, children: [
+                              const SizedBox(height: SonderSpace.xl),
+                              Wrap(spacing: SonderSpace.md, runSpacing: SonderSpace.md, children: [
                                 if (!locked)
                                   FilledButton(
                                       onPressed: !client.busy && available
@@ -226,29 +227,29 @@ class _AppWorkScreenState extends State<AppWorkScreen> {
                                       label: const Text('Refresh status')),
                               ]),
                               if (pending != null) ...[
-                                const SizedBox(height: 24),
+                                const SizedBox(height: SonderSpace.xxl),
                                 const Divider(),
                                 const Text(
                                     'Ask the host operator to review this exact approval request. This app cannot grant approval.'),
-                                const SizedBox(height: 8),
+                                const SizedBox(height: SonderSpace.sm),
                                 SelectableText(pending.callId)
                               ],
                               if (client.workExecutionUnknown) ...[
-                                const SizedBox(height: 16),
+                                const SizedBox(height: SonderSpace.lg),
                                 const WorkspaceNotice(
                                     message:
                                         'Execution may have been admitted. Only status checks are available here; another run will not be submitted.',
                                     tone: NoticeTone.warning)
                               ],
                               if (work != null) ...[
-                                const SizedBox(height: 24),
+                                const SizedBox(height: SonderSpace.xxl),
                                 const Divider(),
                                 Text('Server reference',
                                     style:
                                         Theme.of(context).textTheme.titleSmall),
-                                const SizedBox(height: 8),
+                                const SizedBox(height: SonderSpace.sm),
                                 SelectableText(work.id),
-                                const SizedBox(height: 16),
+                                const SizedBox(height: SonderSpace.lg),
                                 WorkspaceNotice(
                                     message: work.state ==
                                             'verification_pending'

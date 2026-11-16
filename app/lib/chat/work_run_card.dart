@@ -318,19 +318,19 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
             ],
           ),
           if (info?.progress.isNotEmpty == true) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: SonderSpace.tight),
             Semantics(
               liveRegion: true,
               label: 'Work progress',
               child: Container(
                 key: const Key('work-run-progress'),
-                padding: const EdgeInsets.only(left: 12),
+                padding: const EdgeInsets.only(left: SonderSpace.md),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     for (final line in info!.progress)
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        padding: const EdgeInsets.symmetric(vertical: SonderSpace.xxs),
                         child: Text(
                           line.text,
                           key: Key('work-progress-${line.id}'),

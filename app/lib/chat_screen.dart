@@ -397,32 +397,10 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _editProject() async {
-    final controller = TextEditingController(text: _chat.project);
     final value = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Project'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Project name',
-            hintText: 'default, app-ui, engine...',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (context) => _ProjectDialog(initial: _chat.project),
     );
-    controller.dispose();
     if (value == null) return;
     await _chat.saveCurrentThread(project: value);
   }
@@ -594,7 +572,7 @@ class _ChatScreenState extends State<ChatScreen>
                 IconButton(
                   key: const Key('chat-new-chat'),
                   tooltip: 'New chat',
-                  icon: const Icon(Icons.add_comment_outlined),
+                  icon: const Icon(Icons.maps_ugc_outlined),
                   onPressed: _newChat,
                 ),
               IconButton(
@@ -610,7 +588,8 @@ class _ChatScreenState extends State<ChatScreen>
                   _appControl.selectionKnown &&
                   _appControl.selection?.bindingId != null)
                 Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    padding: const EdgeInsets.fromLTRB(
+                        SonderSpace.lg, SonderSpace.sm, SonderSpace.lg, 0),
                     child: WorkspaceNotice(
                       message:
                           'A server conversation is selected. Running tasks is not available yet.',
@@ -627,7 +606,8 @@ class _ChatScreenState extends State<ChatScreen>
                   builder: (context, c, _) => !c.isOffline
                       ? const SizedBox.shrink()
                       : Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                          padding: const EdgeInsets.fromLTRB(
+                              SonderSpace.lg, SonderSpace.md, SonderSpace.lg, 0),
                           child: Center(
                             child: ConstrainedBox(
                               constraints: const BoxConstraints(
@@ -675,6 +655,26 @@ class _ChatScreenState extends State<ChatScreen>
                 onKey: _onComposerKey,
                 modeChip: _modeChip(),
                 onOpenCommands: _openCommandBrowser,
+                actions: [
+                  ComposerAction(
+                    id: 'commands',
+                    icon: Icons.terminal_rounded,
+                    label: 'Browse commands',
+                    onSelected: () => unawaited(_openCommandBrowser()),
+                  ),
+                  ComposerAction(
+                    id: 'project',
+                    icon: Icons.folder_outlined,
+                    label: 'Set project',
+                    onSelected: () => unawaited(_editProject()),
+                  ),
+                  ComposerAction(
+                    id: 'server-conversations',
+                    icon: Icons.link_outlined,
+                    label: 'Server conversations',
+                    onSelected: () => unawaited(_openAppControl()),
+                  ),
+                ],
                 desktop: desktop,
                 models: _chat.models,
                 model: _chat.model,
@@ -697,6 +697,64 @@ class _ChatScreenState extends State<ChatScreen>
   }
 }
 
+/// Names the conversation's project. The dialog owns its text controller:
+/// the field is still on screen while the dialog animates out, so the
+/// controller must outlive the pop that closes it.
+class _ProjectDialog extends StatefulWidget {
+  final String initial;
+  const _ProjectDialog({required this.initial});
+
+  @override
+  State<_ProjectDialog> createState() => _ProjectDialogState();
+}
+
+class _ProjectDialogState extends State<_ProjectDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+
+  /// The field and the buttons stay live while the dialog animates out, so
+  /// a second Enter or tap would pop the route underneath. Close once.
+  bool _closed = false;
+
+  void _close([String? value]) {
+    if (_closed) return;
+    _closed = true;
+    Navigator.of(context).pop(value);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Project'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Project name',
+          hintText: 'default, app-ui, engine...',
+        ),
+        onSubmitted: _close,
+      ),
+      actions: [
+        TextButton(
+          onPressed: _close,
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => _close(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
 class _ChatHeader extends StatelessWidget {
   final String title;
   final String project;
@@ -714,21 +772,21 @@ class _ChatHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
+    // The title names the conversation; how long it is rides in its tooltip
+    // so the bar stays a title and one quiet control.
+    final heading = Tooltip(
+      message: '$title / $_count',
+      child: Text(title,
+          maxLines: 1, overflow: TextOverflow.ellipsis, style: text.titleSmall),
+    );
     return LayoutBuilder(builder: (context, constraints) {
       if (constraints.maxWidth < 320) {
         // Tight phone headers keep the title readable first; the project
         // button returns as soon as there is room for both.
         final roomForProject = constraints.maxWidth >= 200;
         return Row(children: [
-          Expanded(
-              child: Tooltip(
-                  message: '$title / $_count',
-                  child: Text(title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.titleSmall))),
+          Expanded(child: heading),
           if (roomForProject)
             IconButton(
                 tooltip: 'Project: $project - tap to change',
@@ -738,56 +796,27 @@ class _ChatHeader extends StatelessWidget {
       }
       return Row(
         children: [
-          Flexible(
-            child: Text(title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: text.titleSmall),
-          ),
-          const SizedBox(width: 10),
-          Tooltip(
-            message: 'Project: tap to change',
-            child: InkWell(
-              onTap: onEditProject,
-              borderRadius: BorderRadius.circular(6),
-              child: Container(
-                height: 24,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: tokens.hairline),
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: tokens.accent,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 160),
-                    child: Text(
-                      project.trim().isEmpty ? 'default' : project,
-                      overflow: TextOverflow.ellipsis,
-                      style: tokens.mono(11, color: tokens.text2),
-                    ),
-                  ),
-                ]),
-              ),
+          Flexible(child: heading),
+          const SizedBox(width: SonderSpace.xs),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _projectWidth),
+            child: QuietAction(
+              key: const Key('chat-project'),
+              icon: Icons.folder_outlined,
+              label: project.trim().isEmpty ? 'default' : project,
+              tooltip: 'Project: tap to change',
+              semanticLabel: 'Project: '
+                  '${project.trim().isEmpty ? 'default' : project}, '
+                  'tap to change',
+              onPressed: onEditProject,
             ),
-          ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(_count,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: tokens.mono(11, color: tokens.muted)),
           ),
         ],
       );
     });
   }
+
+  /// The project name ellipsizes past this, so a long one cannot push the
+  /// title out of the bar.
+  static const double _projectWidth = 220;
 }

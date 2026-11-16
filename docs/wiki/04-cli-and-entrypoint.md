@@ -129,6 +129,10 @@ JSON on stderr at `SONDER_REPL_LOG_LEVEL` (default `WARNING`). `serve` and
   (`sonder_runtime/interfaces/repl/style.py`). `NO_COLOR` removes colour,
   `TERM=dumb` or `SONDER_PLAIN=1` also switch to ASCII glyphs and no
   redrawing, and `SONDER_GLYPHS` / `SONDER_THEME` override the guesses.
+  The REPL cannot see a terminal's background, so it draws with the
+  terminal's own 16 colours until the theme is known:
+  `SONDER_THEME=dark` (or `light`) on a 256-colour or truecolor terminal
+  (Windows Terminal counts as truecolor) switches to the app's palette.
 - **Piped output:** when stdout is not a terminal there is no prompt and no
   status line, and the banner goes to stderr as one line. With
   `SONDER_REPL_NDJSON=1`, every stdout line is JSON. Model answers, file
@@ -144,8 +148,9 @@ JSON on stderr at `SONDER_REPL_LOG_LEVEL` (default `WARNING`). `serve` and
 - **History:** a terminal session saves its history to
   `SONDER_HOME/repl_history` (`0600`, newest 200 lines, credential lines
   excluded). `SONDER_REPL_HISTORY=0` keeps history in memory only.
-- **Commands:** `/about` shows the source revisions, endpoint, session and
-  mode. `/status` shows the full status line plus the Ollama pool in plain
+- **Commands:** `/about` shows the version, working directory, source
+  revisions, endpoint, session and mode, and what was detected about the
+  terminal. `/status` shows the full status line plus the Ollama pool in plain
   words, and `/status pool` shows the pool detail. `/help status` explains
   each status-line field.
 - **Ctrl-C:** at the prompt, the first press clears the line and a second

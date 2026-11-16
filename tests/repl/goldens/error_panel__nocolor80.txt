@@ -1,6 +1,7 @@
 explode now
 ◈ working · routing · <t> · sonder:latest · Ctrl-C cancels
-✗ error ───────────────────────────────────────────────────────────────────────
+
+✗ error
 ERROR: local Ollama rejected the model request (HTTP 500) after 1 attempt(s):
 fake model crashed
   failed after <t> · 1 model call
