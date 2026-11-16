@@ -90,7 +90,8 @@ class SonderReveal extends StatelessWidget {
 /// tiles that are tappable as a whole.
 ///
 /// The fill is a soft pill of the raised tone: full for the selected row,
-/// lighter under the pointer. [inset] pulls the pill in from the hit area,
+/// a third as strong under the pointer. Selection is also known by its
+/// accent icon and heavier label, which the hover never carries. [inset] pulls the pill in from the hit area,
 /// so a 48 px target can draw a lighter row; keyboard focus adds a ring in
 /// the accent, drawn on the pill itself.
 class HoverSurface extends StatefulWidget {
@@ -133,7 +134,7 @@ class _HoverSurfaceState extends State<HoverSurface> {
     final background = widget.selected && widget.showSelected
         ? tokens.raised
         : _hover && widget.onTap != null
-            ? tokens.raised.withValues(alpha: 0.6)
+            ? tokens.raised.withValues(alpha: 0.35)
             : Colors.transparent;
     final surface = Padding(
       padding: widget.inset,

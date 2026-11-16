@@ -491,7 +491,8 @@ class _RailItem extends StatelessWidget {
             horizontal: SonderSpace.md, vertical: SonderSpace.sm),
         child: Row(children: [
           Icon(category.icon,
-              size: 18, color: selected ? tokens.text : tokens.text2),
+              size: 18,
+              color: selected ? tokens.accentText : tokens.text2),
           const SizedBox(width: SonderSpace.md),
           Expanded(
             child: Text(

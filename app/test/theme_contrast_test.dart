@@ -91,6 +91,28 @@ void main() {
         }
       });
 
+      test('the selected row is known by an accent icon, not the pill alone',
+          () {
+        // Sidebar and rail rows draw selection as a raised pill (about 1.4:1
+        // on the sunken tone, so not an indicator); the accentText icon on
+        // that pill, against the surface the row sits on, must be 3:1.
+        for (final base in [tokens.sunken, tokens.canvas, tokens.panel]) {
+          expect(SonderContrast.ratio(tokens.raised, base),
+              lessThan(SonderContrast.control),
+              reason: 'the pill alone is not enough on ${base.toARGB32()}');
+          expect(SonderContrast.ratio(tokens.accentText, base),
+              greaterThanOrEqualTo(SonderContrast.control));
+        }
+        expect(SonderContrast.ratio(tokens.accentText, tokens.raised),
+            greaterThanOrEqualTo(SonderContrast.control));
+        // Hover (a third as strong as selection) sits between the surface
+        // and the pill, and so never reads as selected.
+        final hover = Color.alphaBlend(
+            tokens.raised.withValues(alpha: 0.35), tokens.sunken);
+        expect(SonderContrast.ratio(hover, tokens.sunken),
+            lessThan(SonderContrast.ratio(tokens.raised, tokens.sunken)));
+      });
+
       test('surface tones step apart, so tone can carry the hierarchy', () {
         // The sidebar and cards against the page; hover and selection
         // against whatever they sit on; the user bubble against the page.

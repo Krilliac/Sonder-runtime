@@ -276,7 +276,7 @@ class ShellSidebar extends StatelessWidget {
                         icon: Icon(destination.icon,
                             size: 18,
                             color: destination == current
-                                ? tokens.text
+                                ? tokens.accentText
                                 : tokens.text2),
                         label: destination.label,
                         selected: destination == current,
@@ -791,7 +791,7 @@ class _ChatsRow extends StatelessWidget {
                   child: _NavSurface(
                     icon: Icon(WorkspaceDestination.chat.icon,
                         size: 18,
-                        color: selected ? tokens.text : tokens.text2),
+                        color: selected ? tokens.accentText : tokens.text2),
                     label: 'Chats',
                     tooltip: tooltip,
                     onTap: onTap,

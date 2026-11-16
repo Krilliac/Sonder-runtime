@@ -93,7 +93,7 @@ Goldens for these primitives (`test/goldens/primitives/`, tag `golden`, Linux on
 ## Layout and interaction
 **One app shell** (`lib/shell/app_shell.dart`) holds the four peer destinations: Chat, Agents, Runtime and Settings, in the manner of the Claude and Codex desktop apps.
 - **Wide (≥1000px):** a persistent sidebar (264px, collapsible to a 64px rail with Ctrl/⌘+B) on the `sunken` tone, with no border against the page. Top to bottom: the brand, **New chat**, **Search chats**, the **Chats** row heading the history grouped by date (Today, Yesterday, Previous 7 days, Older), then Agents, Runtime and Settings with their badges (running agents, approvals waiting), and the connection footer. The Chats row is the Chat destination; while the sidebar is expanded the open conversation's own row carries the highlight.
-- **Rows are pills:** every sidebar and rail row is a 48px target that draws a 40px `raised` pill when selected or hovered (`HoverSurface`), with a keyboard-only accent ring.
+- **Rows are pills:** every sidebar and rail row is a 48px target that draws a 40px `raised` pill when selected (full tone) or hovered (about a third as strong, `HoverSurface`). The selected row is also known by its `accentText` icon and a 500-weight label (the pill alone is about 1.4:1), and keyboard focus adds an accent ring.
 - **Narrow:** the same sidebar is a drawer, and pages show a menu button.
 - **Chat stays mounted** (offstage, tickers paused) while another destination is shown, so a streaming turn keeps running. Other destinations build on demand and swap with a short fade-through.
 - **Pages read `ShellScope`:** inside the shell they draw no way back to Chat and no workspace menu, because the shell owns navigation. Pumped alone (tests) they keep their own chrome.
@@ -138,7 +138,7 @@ Material controls own keyboard focus, tooltips and dialogs. Status always has te
 - **Loading and motion:** `Skeleton`/`SkeletonRows`/`EmptyState`, `SonderSwitcher`/`SonderReveal`/`HoverSurface`.
 - **Shell contract:** `ShellScope`, `ShellLeaveGuard`, `ShellMenuButton`.
 
-Spacing comes from `SonderSpace`: a 4-point grid (`xxs` 2 to `x6` 64), two half steps for the inside of dense controls (`tight` 6, `snug` 10) and `hair` for a one-pixel optical nudge. No raw number goes into padding, a gap or a spacing argument. Corners come from `SonderRadius` (cards `card`, sheets `sheet`, rows `row`). Cards are `panel` with a `hairline` edge; the category rail is part of the page, and its open category is a `raised` pill. No colour value is written outside `theme.dart`. `test/design_tokens_test.dart` scans the source for both rules.
+Spacing comes from `SonderSpace`: a 4-point grid (`xxs` 2 to `x6` 64), two half steps for the inside of dense controls (`tight` 6, `snug` 10) and `hair` for a one-pixel optical nudge. No raw number goes into padding, a gap or a spacing argument. Corners come from `SonderRadius` (cards `card`, sheets `sheet`, rows `row`). Cards are `panel` with a `hairline` edge; the category rail is part of the page, and its open category is a `raised` pill with an `accentText` icon and a 500-weight label. No colour value is written outside `theme.dart`. `test/design_tokens_test.dart` scans the source for both rules.
 
 ## Motion and content
 Motion is short and purposeful, never decorative.

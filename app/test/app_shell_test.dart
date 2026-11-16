@@ -265,6 +265,31 @@ void main() {
       await unmountChat(tester);
     });
 
+    testWidgets(
+        'the selected row carries an accent icon and a heavier label, '
+        'so the pill is not the only indicator', (tester) async {
+      await pumpShell(tester, FakeChatBackend(),
+          size: _desk, prefs: _seed(), clock: _clock, pageBuilder: _standIns());
+      await _settle(tester);
+      await tester.tap(_destination(WorkspaceDestination.agents));
+      await _settle(tester);
+      final tokens =
+          SonderTokens.of(tester.element(_destination(WorkspaceDestination.agents)));
+      Icon icon(WorkspaceDestination d) => tester.widget<Icon>(find
+          .descendant(of: _destination(d), matching: find.byType(Icon))
+          .first);
+      Text label(WorkspaceDestination d) => tester.widget<Text>(find
+          .descendant(of: _destination(d), matching: find.text(d.label))
+          .first);
+      expect(icon(WorkspaceDestination.agents).color, tokens.accentText);
+      expect(label(WorkspaceDestination.agents).style?.fontWeight,
+          FontWeight.w500);
+      expect(icon(WorkspaceDestination.settings).color, tokens.text2);
+      expect(label(WorkspaceDestination.settings).style?.fontWeight,
+          FontWeight.w400);
+      await unmountChat(tester);
+    });
+
     testWidgets('rows are 48 px targets that draw a slimmer pill',
         (tester) async {
       await pumpShell(tester, FakeChatBackend(),

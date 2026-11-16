@@ -638,7 +638,7 @@ void main() {
       await mouse.addPointer(location: Offset.zero);
       await mouse.moveTo(tester.getCenter(find.text('Row')));
       await tester.pumpAndSettle();
-      expect(fill(tester), tokens.raised.withValues(alpha: 0.6));
+      expect(fill(tester), tokens.raised.withValues(alpha: 0.35));
       await mouse.moveTo(Offset.zero);
       await tester.pumpAndSettle();
       expect(fill(tester), Colors.transparent);
