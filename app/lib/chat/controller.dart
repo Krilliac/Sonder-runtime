@@ -11,6 +11,7 @@ import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
 import 'permission_rules.dart';
+import 'session_temperature.dart';
 
 /// One transcript row: a stored [message] plus client-only facts that are
 /// never persisted or sent (a stable id for keys, whether Retry applies,
@@ -749,6 +750,8 @@ class ChatController extends ChangeNotifier {
       sessionId: sessionFor(_currentThreadId),
       project: _project,
       allowApproximateLocation: allowApproximateLocation,
+      sessionTemperature:
+          _temperatureSync.next(sessionFor(_currentThreadId), temperature),
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
     );
     final done = Completer<void>();
@@ -796,6 +799,12 @@ class ChatController extends ChangeNotifier {
   /// Chat request settings the shell keeps in sync from [Settings].
   String contextSize = '8192';
   bool allowApproximateLocation = false;
+
+  /// Sampling temperature (null is Auto). Sent as `session_temperature`
+  /// only when it differs from what this controller last sent for the
+  /// session, so a `/temp` typed in chat survives.
+  double? temperature;
+  final SessionTemperatureSync _temperatureSync = SessionTemperatureSync();
 
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;

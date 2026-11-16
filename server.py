@@ -166,7 +166,7 @@ import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
-from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi, chat_temperature as _chat_temperature
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -498,7 +498,7 @@ from sonder_runtime.adapters.model_error_formatting import (
     format_runtime_model_call_error as _format_runtime_model_call_error_policy,
 )
 from sonder_runtime.interfaces.http.serve_policy import (
-    serve_temperature as _serve_temperature,
+    serve_temperature as _serve_temperature, serve_temperature_override_value as _serve_temperature_request, serve_lane_temperature as _serve_lane_temperature,
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
@@ -1851,7 +1851,7 @@ def _make_generate(
         if isinstance(override, int) and not isinstance(override, bool):
             prediction_limit = max(1, min(num_predict, override))
         if cloud:
-            options = {"temperature": temperature, "num_predict": prediction_limit}
+            options = {"num_predict": prediction_limit, **({} if temperature is None else {"temperature": temperature})}
         else:
             options = _platform_local_model_options(
                 temperature,
@@ -3695,6 +3695,8 @@ def control_command(prompt: str, history=None, session="", project="",
         return command_registry_list(arg.strip())
     if cmd == "/activity":
         return activity_status()
+    if cmd == "/temp":
+        return _chat_temperature.temp_command(arg, session)
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
     if cmd in ("/runtime", "/models"):
@@ -6572,7 +6574,7 @@ def _route_chat_web(prompt, session, project, location_consent):
 def _sonder_impl_serialized(
     prompt: str,
     system: str = "",
-    temperature: float = 0.2,
+    temperature: float | None = None,
     num_predict: int = 1024,
     num_ctx: int = 0,
     context_size: str = "",
@@ -6684,6 +6686,7 @@ def _sonder_impl_serialized(
     )
 
     session_id = _resolve_session(session)
+    temperature = (resolved_temperature := _chat_temperature.resolve_turn_temperature(request=temperature, session=session)).value  # request > /temp > preset
     project_id = _resolve_project(project)
     explicit_context = bool(str(context_size or "").strip()) or int(num_ctx or 0) > 0
     if explicit_context:
@@ -6773,7 +6776,7 @@ def _sonder_impl_serialized(
                         _gate_answer_code(
                             response, iid=iid, prompt=prompt, history=history,
                             model=tgt_model, system=effective_system,
-                            temperature=temperature, num_predict=num_predict,
+                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=num_predict,
                             num_ctx=num_ctx_eff, cloud=cloud, tier_label=tier_label,
                         )
                     )
@@ -6842,7 +6845,7 @@ def _sonder_impl_serialized(
 
     if trace:
         params = {
-            "temperature": temperature,
+            "temperature": temperature, "temperature_source": resolved_temperature.source,
             "num_predict": num_predict,
             "num_ctx": num_ctx_eff,
             "num_ctx_native": _platform_native_context(
@@ -6866,7 +6869,7 @@ def _sonder_impl_serialized(
 def _sonder_impl(
     prompt: str,
     system: str = "",
-    temperature: float = 0.2,
+    temperature: float | None = None,
     num_predict: int = 1024,
     num_ctx: int = 0,
     context_size: str = "",
@@ -6911,7 +6914,7 @@ def _sonder_impl(
 def sonder(
     prompt: str,
     system: str = "",
-    temperature: float = 0.2,
+    temperature: float | None = None,
     num_predict: StrictInt = 1024,
     num_ctx: int = 0,
     context_size: str = "",
@@ -7068,7 +7071,7 @@ def _answer_with_history_impl(
     )
     escalation_plan, overflow = _overflow_route.plan(sys.modules[__name__], prompt, history, escalation_plan)
     overflow_failure = ""
-    temperature = _serve_temperature()
+    temperature = (resolved_temperature := _chat_temperature.resolve_turn_temperature(request=_serve_temperature_request(), session=session, lane=_serve_lane_temperature())).value
     pinned_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
         if str(context_size or "").strip() else None
@@ -7219,7 +7222,7 @@ def _answer_with_history_impl(
                         _gate_answer_code(
                             response, iid=iid, prompt=prompt, history=history,
                             model=model, system=effective_system,
-                            temperature=temperature, num_predict=1024,
+                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=1024,
                             num_ctx=req_ctx, cloud=cloud, tier_label=tier_label,
                         )
                     )
@@ -7286,7 +7289,7 @@ def _answer_with_history_impl(
         footer_iid = None
     if trace and trace_ctx is not None:
         params = {
-            "temperature": temperature,
+            "temperature": temperature, "temperature_source": resolved_temperature.source,
             "num_predict": 1024,
             "num_ctx": req_ctx,
             "num_ctx_native": _platform_native_context(

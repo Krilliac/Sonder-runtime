@@ -84,6 +84,8 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
+from sonder_runtime.domain.sampling_temperature import parse_temperature_setting as _parse_session_temperature
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -3287,8 +3289,13 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
-    """Return response text if `content` is a recognized slash command, else None."""
+                  idempotency_key="", workspace_project=None, lane_session="",
+                  storage_session=""):
+    """Return response text if `content` is a recognized slash command, else None.
+
+    ``storage_session`` is the turn's account-scoped session id: ``/temp``
+    keeps its value there, where the turn's own resolution reads it.
+    """
     state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
@@ -3634,6 +3641,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.last_iid = None
             return msg
         return "(nothing to record yet)"
+    if cmd == "/temp":
+        return _chat_temperature.temp_command(arg, storage_session)
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -7366,6 +7375,22 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        # The GUI's temperature slider: a number from 0 to 2 sets this
+        # session's value (as /temp does), "auto" clears it.  Absent leaves
+        # the session as it is, so a typed /temp is not overwritten.
+        session_temperature = req.get("session_temperature")
+        if session_temperature is not None:
+            try:
+                if isinstance(session_temperature, str):
+                    session_temperature = _parse_session_temperature(session_temperature)
+                _chat_temperature.STORE.set(storage_session, session_temperature)
+            except InvalidInput as error:
+                record_early_chat_metric("invalid_session_temperature")
+                self._send_json_payload({"error": {
+                    "message": "session_temperature: %s" % error,
+                    "type": "invalid_request",
+                }}, status=400)
+                return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7469,6 +7494,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                             workspace_project=project, lane_session=session,
+                            storage_session=storage_session,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
@@ -7562,7 +7588,7 @@ class Handler(BaseHTTPRequestHandler):
                             # cache so each draw is independent; force temp>0.
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(_live_serve_temperature()) or 0.0,
+                                float(_live_serve_temperature() or 0.0),
                                 0.05,
                             )
                             _samples = []
