@@ -4277,7 +4277,7 @@ def main(*, machine_output=False):
                 if _looks_like_slash_command(line):
                     _CURRENT_LINE[0] = " ".join(line.split())
                     parts = line.split(None, 1)
-                    cmd = parts[0].lower()
+                    cmd = parts[0].lower() if parts[0].isascii() else parts[0]
                     arg = parts[1] if len(parts) > 1 else ""
 
                     # One choke point for every hand-written branch below, including

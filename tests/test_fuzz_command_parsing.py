@@ -265,7 +265,7 @@ def test_arguments_never_smuggle_a_second_invocation(cat):
             for value in kwargs.values():
                 if "ZQMARK" in str(value):
                     # Positional words keep the documented lenient coercion, so an int/num/bool
-                    # parameter may carry the raw word (SUSPECT, see the lane report); what
+                    # parameter may carry the raw word (documented leniency, not a bug); what
                     # must not happen is a typed value or a second invocation holding it.
                     assert isinstance(value, str), f"{info}: {line!r} -> {kwargs!r}"
             if not a.params and lead + sep:
@@ -446,8 +446,10 @@ def test_named_typed_values_follow_the_coerce_oracle_or_refuse(cat):
         if isinstance(want, str):
             assert error is not None and error.problem == "invalid-value", f"{info}: {line!r} -> {result!r}"
         else:
-            assert error is None and result[1][param.name] == want or (
-                isinstance(want, float) and math.isnan(want)), f"{info}: {line!r} -> {result!r} {error!r}"
+            assert error is None, f"{info}: {line!r} -> {result!r} {error!r}"
+            got = result[1][param.name]
+            same = (math.isnan(got) and math.isnan(want)) if isinstance(want, float) and math.isnan(want)                 else got == want
+            assert same, f"{info}: {line!r} -> {result!r} (wanted {want!r})"
     _check_timings(timings, info)
 
 
@@ -926,8 +928,10 @@ def test_pytest_selector_with_trailing_parent_segment_before_node_id_is_refused(
         assert caught.value.code == SELECTOR_ESCAPES_PROJECT, raw
 
 
-def test_long_hostile_inputs_stay_inside_the_time_budget():
+def test_long_hostile_inputs_stay_inside_the_time_budget(cat):
     """10k-character runs of ``/``, ``"``, spaces and key=value noise: 2 s hard cap each."""
+    cc.catalog()  # the cold catalog build (seconds) is not what the cap measures
+    cr.resolve("help")
     info = _info("long-inputs")
     long_inputs = [
         "/" * 10000, '"' * 10000, " " * 10000, "'" * 10000, "\\" * 10000, "\n" * 10000, "=" * 10000,
@@ -951,3 +955,78 @@ def test_long_hostile_inputs_stay_inside_the_time_budget():
         for runner in _RUNNERS:
             _call(_parser(runner), SelectorRejected, text, timings, info)
     assert max(timings) < 2.0
+
+
+# --- non-ASCII free-data captures, ASCII-only keywords and slash heads --------
+
+_FOLDERS = ("K", "ſ", "İ", "ı")
+
+
+@pytest.mark.parametrize("line, want", [
+    ("weather Zürich", "/weather Zürich"),
+    ("forecast Málaga", "/weather Málaga"),
+    ("weather São Paulo", "/weather São Paulo"),
+    ("weather Montréal", "/weather Montréal"),
+    ("create a new rust project named café", "/scaffold rust café"),
+    ("switch to the café tier", "/model café"),
+    ("read notes.téxt", "/read notes.téxt"),
+])
+def test_non_ascii_free_data_captures_resolve_as_on_base(line, want):
+    assert cr.resolve(line) == want
+
+
+@pytest.mark.parametrize("line", [
+    "ſwitch to the x tier",
+    "switch to the x tıer",
+    "switch to the x tİer",
+    "uſe x tier",
+    "create a new ruſt project named x",
+    "crıeate a new rust project named x",
+    "ſcaffold a new rust project named x",
+    "create a new rust project namedſ x",
+    "forecaſt Zürich",
+    "weaſher Zürich",
+    "rıead a.éx",
+    "Keep Zürich",
+])
+def test_fold_characters_cannot_spell_a_keyword_in_unicode_rules(line):
+    assert cr.resolve(line) is None
+
+
+def test_fold_characters_never_spell_unicode_rule_keywords():
+    bodies = ("{s}witch to the x tier", "create a new ru{s}t project named x",
+              "wea{t}her Zürich", "for{e}cast Zürich", "r{s}ead a.éx")
+    for fold in _FOLDERS:
+        for body in bodies:
+            line = body.format(s=fold, t=fold, e=fold)
+            assert cr.resolve(line) is None, line
+
+
+def test_slash_head_with_a_kelvin_sign_does_not_dispatch_work_over_http(monkeypatch):
+    from sonder_runtime.interfaces.http import serve
+
+    seen = []
+    monkeypatch.setattr(serve, "_http_slash_refusal",
+                        lambda cmd, arg, **kw: seen.append(cmd) or "REFUSED")
+    plain = serve._handle_slash("/work x", context=None)
+    assert seen[-1] == "/work" and plain == "REFUSED"
+    serve._handle_slash("/worK x", context=None)
+    assert seen[-1] == "/worK"
+
+
+def test_slash_head_fold_in_repl_source_is_ascii_guarded():
+    """No repl.main harness drives a typed line end to end; pin the one dispatch line."""
+    from pathlib import Path
+
+    import sonder_runtime.interfaces.repl.repl as repl_module
+
+    text = Path(repl_module.__file__).read_text(encoding="utf-8")
+    assert "cmd = parts[0].lower() if parts[0].isascii() else parts[0]" in text
+    assert not re.search(r"cmd = parts\[0\]\.lower\(\)\s*$", text, re.MULTILINE)
+
+
+def test_clean_location_strips_repeated_articles_in_one_call_and_is_idempotent():
+    assert wi._clean_location("the " * 12 + "Paris") == "Paris"
+    for value in ("the " * 12 + "Paris", "the the x", "Paris tomorrow", "  the The Paris?! "):
+        once = wi._clean_location(value)
+        assert wi._clean_location(once) == once, value

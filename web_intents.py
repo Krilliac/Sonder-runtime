@@ -779,7 +779,9 @@ def _clean_location(value: str) -> str:
     location = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n?!.,;:")
     lowered = location.lower()
     # Strip to a fixpoint so a second call on the result is a no-op ("the the x").
-    for _ in range(8):
+    # Every pass either shortens the text (a trailing-time or "the " removal, or a
+    # strip) or leaves it unchanged and exits, so the loop terminates.
+    while True:
         previous = location
         location = _TRAILING_TIME.sub("", location).strip(" \t\r\n?!.,;:")
         lowered = location.lower()
