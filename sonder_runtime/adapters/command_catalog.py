@@ -1376,6 +1376,37 @@ _HTTP_SCOPED_TASK_ALIAS_TOOLS = (
 
 
 @functools.lru_cache(maxsize=1)
+def _http_slash_chain() -> tuple:
+    """``(http_slash_tools, http_slash_untooled)`` from one walk of the chain.
+
+    One function so the root-server reach stays a single pinned site and the
+    two answers cannot drift: every literal chain command is in exactly one.
+    """
+    server = importlib.import_module("server")  # lazy compatibility edge
+
+    names = _registered_tool_names(server)
+    delegated = _branch_tool_calls("server.py", "control_command", names)
+    own = _branch_tool_calls(
+        "sonder_serve.py", "_handle_slash", names | {_DELEGATION}, keep_empty=True,
+    )
+    merged: dict = {}
+    untooled = set()
+    for slash, tools in own.items():
+        resolved = set(tools)
+        if _DELEGATION in resolved:
+            resolved.discard(_DELEGATION)
+            resolved |= set(delegated.get(slash, ()))
+        if resolved:
+            merged[slash] = tuple(sorted(resolved))
+        else:
+            untooled.add(slash)
+    for slash in ("/todo", "/task", "/tasks"):
+        merged[slash] = _HTTP_SCOPED_TASK_ALIAS_TOOLS
+    mapped = _with_unregistered_work(merged)
+    return mapped, frozenset(untooled - set(mapped))
+
+
+@functools.lru_cache(maxsize=1)
 def http_slash_tools() -> dict:
     """Every app/HTTP slash command mapped to the MCP tools it can invoke.
 
@@ -1400,47 +1431,17 @@ def http_slash_tools() -> dict:
     attributing it nothing would have left those ten as ungated as the chain
     was -- they inherit ``control_command``'s own branch of the same name.
     """
-    server = importlib.import_module("server")  # lazy compatibility edge
-
-    names = _registered_tool_names(server)
-    delegated = _branch_tool_calls("server.py", "control_command", names)
-    own = _branch_tool_calls(
-        "sonder_serve.py", "_handle_slash", names | {_DELEGATION},
-    )
-    merged: dict = {}
-    for slash, tools in own.items():
-        resolved = set(tools)
-        if _DELEGATION in resolved:
-            resolved.discard(_DELEGATION)
-            resolved |= set(delegated.get(slash, ()))
-        if resolved:
-            merged[slash] = tuple(sorted(resolved))
-    for slash in ("/todo", "/task", "/tasks"):
-        merged[slash] = _HTTP_SCOPED_TASK_ALIAS_TOOLS
-    return _with_unregistered_work(merged)
+    return _http_slash_chain()[0]
 
 
 @functools.lru_cache(maxsize=1)
 def http_slash_untooled() -> frozenset:
     """``_handle_slash`` chain commands whose branch resolves to no tool.
 
-    Same AST walk and delegation resolution as ``http_slash_tools`` (which
-    omits them), so the two cannot drift: every literal chain command is in
-    exactly one of the two. The role gate refuses these for a ``user`` unless
-    the shipped untooled allowlist names them.
+    Same walk as ``http_slash_tools`` (which omits them). The role gate refuses
+    these for a ``user`` unless the shipped untooled allowlist names them.
     """
-    server = importlib.import_module("server")  # lazy compatibility edge
-    names = _registered_tool_names(server)
-    delegated = _branch_tool_calls("server.py", "control_command", names)
-    own = _branch_tool_calls(
-        "sonder_serve.py", "_handle_slash", names | {_DELEGATION}, keep_empty=True,
-    )
-    mapped = http_slash_tools()
-    return frozenset(
-        slash for slash, tools in own.items()
-        if slash not in mapped
-        and not (set(tools) - {_DELEGATION}) | set(delegated.get(slash, ()))
-    )
+    return _http_slash_chain()[1]
 
 
 @functools.lru_cache(maxsize=1)
@@ -1883,6 +1884,7 @@ def reset_cache() -> None:
     http_native_names.cache_clear()
     console_tools.cache_clear()
     console_disarmed_tools.cache_clear()
+    _http_slash_chain.cache_clear()
     http_slash_tools.cache_clear()
     http_slash_untooled.cache_clear()
     _module_level_functions.cache_clear()
