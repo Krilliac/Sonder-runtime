@@ -239,3 +239,20 @@ def test_a_developer_recursive_delete_still_removes_an_ordinary_tree(policy_file
     )
     assert result.get("deleted") is True, result
     assert not victim.exists()
+
+
+# ---- case variants of the exact files (POSIX compares paths case-sensitively) --------------
+
+
+def test_a_case_variant_of_a_policy_file_or_its_folder_is_still_a_policy_name(tmp_path):
+    from sonder_runtime.adapters.filesystem.operator_only_paths import PolicyFiles
+
+    shipped = tmp_path / "pkg" / "model_tool_policy.json"
+    overlay = tmp_path / "state" / "model_tool_policy.json"
+    files = PolicyFiles(shipped=shipped, overlay=overlay, state_dir=overlay.parent)
+    assert files.names(Path(str(tmp_path)) / "PKG" / "MODEL_TOOL_POLICY.JSON")
+    assert files.names(overlay.with_name("Model_Tool_Policy.json.LOCK"))
+    assert files.under(Path(str(tmp_path)) / "Pkg")
+    # Control: an unrelated name in the same folder is not a policy file.
+    assert not files.names(tmp_path / "pkg" / "readme.json")
+    assert not files.under(tmp_path / "elsewhere")

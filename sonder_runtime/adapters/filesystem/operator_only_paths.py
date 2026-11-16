@@ -68,7 +68,10 @@ class PolicyFiles:
 
     def names(self, path: Path) -> bool:
         """Whether ``path`` (ordinary spelling) is one of the files or an overlay ``.tmp-`` sibling."""
-        if path in self.exact:
+        # Folded, not ``path in self.exact``: Path equality is case-sensitive on
+        # POSIX, and a case variant is the same file on a case-insensitive volume.
+        folded = _folded(str(path))
+        if any(_folded(str(candidate)) == folded for candidate in self.exact):
             return True
         return self._starts_like_the_overlay(path)
 
@@ -87,7 +90,8 @@ class PolicyFiles:
 
     def under(self, path: Path) -> bool:
         """Whether ``path`` (ordinary spelling) is a directory above one of the files."""
-        return any(path in candidate.parents for candidate in self.exact)
+        folded = _folded(str(path))
+        return any(_folded(str(parent)) == folded for candidate in self.exact for parent in candidate.parents)
 
 
 def locate(package_data_dir: Path, resolve: Callable[[Path], Path]) -> PolicyFiles:
