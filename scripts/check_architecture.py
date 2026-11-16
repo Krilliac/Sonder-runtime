@@ -596,6 +596,144 @@ def resolve_relative(
     return ".".join(anchor + ([node.module] if node.module else []))
 
 
+SERVER_MODULE = "server"
+# The one module that may import ``server`` statically (the legacy root seam).
+STATIC_SERVER_IMPORT_ALLOWLIST = frozenset({
+    "sonder_runtime/bootstrap/legacy_root.py",
+})
+# Dynamic reach of the root ``server`` module, pinned per site as
+# ``(path, enclosing qualified function) -> count``.  A new reach in another
+# function of an allowlisted file, or a second reach in an allowlisted
+# function, fails.  The mapping may only shrink.
+DYNAMIC_SERVER_REACH_ALLOWLIST = {
+    ("sonder_runtime/adapters/command_catalog.py", "console_tools"): 1,
+    ("sonder_runtime/adapters/command_catalog.py", "http_slash_tools"): 1,
+    ("sonder_runtime/adapters/command_catalog.py", "catalog"): 1,
+    ("sonder_runtime/adapters/model_tool_grants.py", "host_classifier"): 1,
+    ("sonder_runtime/adapters/tool_lane_guard.py", "default_route_refusal"): 1,
+    ("sonder_runtime/bootstrap/legacy_root.py", "detach_owned_application"): 1,
+}
+_MODULE_LEVEL = "<module>"
+_DYNAMIC_IMPORT_NAMES = frozenset({"import_module", "__import__"})
+_SYS_MODULES_LOOKUPS = frozenset({"get", "pop", "setdefault"})
+
+
+def _is_server_literal(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value == SERVER_MODULE
+
+
+def _reach_aliases(tree: ast.AST) -> tuple[set[str], set[str], set[str]]:
+    """Names this module binds to ``sys``, to ``sys.modules`` and to the import functions."""
+    sys_names = {"sys"}
+    modules_names: set[str] = set()
+    import_names = set(_DYNAMIC_IMPORT_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sys" and alias.asname:
+                    sys_names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if node.module == "sys" and alias.name == "modules":
+                    modules_names.add(bound)
+                elif node.module == "importlib" and alias.name in _DYNAMIC_IMPORT_NAMES:
+                    import_names.add(bound)
+    return sys_names, modules_names, import_names
+
+
+def dynamic_server_reaches(tree: ast.AST) -> list[str]:
+    """Qualified enclosing function of each dynamic reach of the root ``server`` module.
+
+    Detects ``importlib.import_module("server")``, ``__import__("server")``,
+    ``sys.modules["server"]`` and ``sys.modules.get("server")`` (also ``pop``
+    and ``setdefault``), including ``import sys as s`` and ``from sys import
+    modules`` spellings.  A module name computed at run time cannot be seen
+    statically; review has to catch it.  Module-level reaches are reported as
+    ``<module>``.
+    """
+    sys_names, modules_names, import_names = _reach_aliases(tree)
+
+    def is_sys_modules(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return (
+                node.attr == "modules" and isinstance(node.value, ast.Name)
+                and node.value.id in sys_names
+            )
+        return isinstance(node, ast.Name) and node.id in modules_names
+
+    found: list[str] = []
+
+    def first_argument(call: ast.Call) -> ast.AST | None:
+        if call.args:
+            return call.args[0]
+        return next((kw.value for kw in call.keywords if kw.arg == "name"), None)
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scope = scope + (node.name,)
+        reached = False
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            if name in import_names and _is_server_literal(first_argument(node)):
+                reached = True
+            elif (
+                isinstance(func, ast.Attribute) and func.attr in _SYS_MODULES_LOOKUPS
+                and is_sys_modules(func.value) and _is_server_literal(first_argument(node))
+            ):
+                reached = True
+        elif isinstance(node, ast.Subscript):
+            reached = is_sys_modules(node.value) and _is_server_literal(node.slice)
+        if reached:
+            found.append(".".join(scope) or _MODULE_LEVEL)
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, ())
+    return found
+
+
+def _posix(path) -> str:
+    return path.as_posix() if hasattr(path, "as_posix") else str(path)
+
+
+def dynamic_server_reach_violations(trees, allowlist=None) -> list[str]:
+    """Violations of the per-site pin on dynamic reach of ``server``.
+
+    ``trees`` maps a repository-relative path (a ``Path``, compared by its
+    ``as_posix()`` spelling) to its parsed module.  Every ``(path, function)``
+    must reach exactly as often as ``allowlist`` pins it: more is a new reach,
+    fewer is a stale pin that must be removed so the mapping only shrinks.
+    """
+    pins = DYNAMIC_SERVER_REACH_ALLOWLIST if allowlist is None else allowlist
+    seen: dict[tuple[str, str], int] = {}
+    for path, tree in trees.items():
+        for function in dynamic_server_reaches(tree):
+            key = (_posix(path), function)
+            seen[key] = seen.get(key, 0) + 1
+    problems = []
+    for key in sorted(set(seen) | set(pins)):
+        found, pinned = seen.get(key, 0), pins.get(key, 0)
+        if found == pinned:
+            continue
+        path, function = key
+        if found > pinned:
+            problems.append(
+                f"{path}: {function}: {found} dynamic reach(es) of the root "
+                f"'{SERVER_MODULE}' module, allowlist pins {pinned}"
+            )
+        else:
+            problems.append(
+                f"{path}: {function}: allowlist pins {pinned} dynamic reach(es) "
+                f"of '{SERVER_MODULE}' but only {found} found; shrink the pin"
+            )
+    return problems
+
+
 def check(diagnostics: dict[str, int] | None = None) -> list[str]:
     violations: list[str] = []
     tracked_files = tracked_production_python_files()
@@ -712,6 +850,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
     imports: dict[str, set[str]] = {}
     files = sorted(PACKAGE_ROOT.rglob("*.py"))
     imports_by_path: dict[Path, frozenset[str]] = {}
+    reach_trees: dict[Path, ast.AST] = {}
 
     for path in files:
         source = path.read_text(encoding="utf-8")
@@ -719,6 +858,15 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
         module = module_name(path)
         layer = layer_of(path)
         rel = path.relative_to(REPO_ROOT)
+        reach_trees[rel] = tree
+        if (
+            SERVER_MODULE in absolute_imports(tree)
+            and rel.as_posix() not in STATIC_SERVER_IMPORT_ALLOWLIST
+        ):
+            violations.append(
+                f"{rel.as_posix()}: imports the root '{SERVER_MODULE}' module; "
+                "only bootstrap/legacy_root.py may"
+            )
         imported: set[str] = set()
 
         for node in ast.walk(tree):
@@ -890,6 +1038,7 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                     f"module {top!r}"
                 )
 
+    violations.extend(dynamic_server_reach_violations(reach_trees))
     # Compatibility rules cover tracked production outside sonder_runtime too.
     # Parse those files once, then replay all rules against the immutable index.
     # This reduces N rules x M files to M files without weakening the inventory.

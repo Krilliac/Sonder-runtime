@@ -4955,15 +4955,7 @@ def _post_model(
             if not embedded_detail:
                 return result, attempt
         except ModelCallError as error:
-            raise ModelCallError(
-                error.kind,
-                error.detail,
-                transient=False,
-                status=error.status,
-                attempts=attempt,
-                cloud=cloud,
-                retry_after_seconds=error.retry_after_seconds,
-            ) from error
+            raise error.restamped(attempts=attempt, cloud=cloud) from error
         except urllib.error.HTTPError as error:
             status = int(getattr(error, "code", 0) or 0)
             transient = status in _TRANSIENT_MODEL_HTTP_CODES
@@ -5502,24 +5494,26 @@ def _post(
     deadline = time.monotonic() + request_timeout
 
     def send(origin):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Ollama worker pool request timeout expired")
-        req = urllib.request.Request(
-            f"{origin}{path}", data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        def transport():
-            with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
-                _record_residency_dispatch(path, json.loads(data), _residency_feedback, _is_cloud_model_name)
-                raw = _read_ollama_response_bytes(resp)
-                return json.loads(raw.decode("utf-8"))
+        # Once per selected pool worker, inside all payload transformations and
+        # local retries; admission may queue, or serve the model's pinned num_ctx.
+        with ollama_pool.admitted(OLLAMA_POOL, path, payload, origin, deadline=deadline) as ticket:
+            body = ticket.body(data)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Ollama worker pool request timeout expired")
+            req = urllib.request.Request(
+                f"{origin}{path}", data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            def transport():
+                with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                    _record_residency_dispatch(path, json.loads(body), _residency_feedback, _is_cloud_model_name)
+                    raw = _read_ollama_response_bytes(resp)
+                    return json.loads(raw.decode("utf-8"))
 
-        # This callback runs once per selected pool worker, inside all payload
-        # transformations and local retries. Metadata probes are not inference.
-        if path in {"/api/chat", "/api/generate"}:
-            return dispatch_provider("ollama", path, json.loads(data), transport)
-        return transport()
+            if path in {"/api/chat", "/api/generate"}:  # metadata probes are not inference
+                return dispatch_provider("ollama", path, json.loads(body), transport)
+            return transport()
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
@@ -5595,14 +5589,13 @@ def _get(path: str) -> dict:
     _require_ollama_endpoint()
 
     def send(origin):
-        req = urllib.request.Request(f"{origin}{path}")
-        with OLLAMA_POOL.open_url(req, timeout=15) as resp:
+        with ollama_pool.admitted_get(OLLAMA_POOL, origin, path, timeout=15) as resp:
             raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
     return (
         OLLAMA_POOL.request(send, idempotent=True)
-        if OLLAMA_POOL.enabled else send(BASE)
+        if OLLAMA_POOL.enabled else OLLAMA_POOL.request_primary(send, origin=BASE)
     )
 
 
@@ -12774,10 +12767,9 @@ def repo_diff(
             scope, data["context"], data["elapsed_ms"],
         ),
     ]
-    if data["diff"]:
-        lines.append(data["diff"].rstrip())
-    else:
-        lines.append("  (no diff)")
+    lines.append(data["diff"].rstrip() or "  (no diff)")
+    if data.get("withheld"):
+        lines.append("  %d path(s) withheld (secret or control state)" % data["withheld"])
     if data["truncated"]:
         lines.append(
             "  ... output truncated at %d bytes" % data["output_limit"]
@@ -23421,7 +23413,7 @@ def _route_work_request(
 
 
 def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
-    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=timeout) as resp:
+    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/api/tags", timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
 
 

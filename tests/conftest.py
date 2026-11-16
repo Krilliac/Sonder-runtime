@@ -45,6 +45,10 @@ os.environ["SONDER_FLEET_DB"] = str(_FLEET_TEST_ROOT / "fleet.db")
 os.environ["SONDER_FLEET_PRINCIPAL_FILE"] = str(
     _FLEET_TEST_ROOT / "fleet-principal.json"
 )
+# GPU admission shares one machine-wide store and probes real host memory, so the
+# suite runs with it off; the admission tests opt in with a tmp_path store and
+# injected host-memory, /api/ps and /api/tags readers.
+os.environ["SONDER_GPU_ADMISSION"] = "off"
 
 
 def _cleanup_test_fleet_root():
@@ -59,6 +63,26 @@ atexit.register(_cleanup_test_fleet_root)
 
 
 import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _gpu_admission_off_by_default():
+    """Every test starts with GPU admission off and no typed binding.
+
+    The process-wide service is built lazily from whatever environment the first
+    caller sees; a test that cleared it would otherwise leave an enforcing
+    service (and the real machine-wide store) behind for every later test.
+    """
+    from sonder_runtime.adapters.inference import gpu_admission
+    from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
+
+    gpu_admission.reset_typed_gpu_admission()
+    gpu_admission.set_process_service(gpu_admission.GpuAdmission(GpuAdmissionConfig(mode="off")))
+    try:
+        yield
+    finally:
+        gpu_admission.reset_typed_gpu_admission()
+        gpu_admission.set_process_service(None)
 
 
 @pytest.fixture(autouse=True)

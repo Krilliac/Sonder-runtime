@@ -931,7 +931,12 @@ same names as the deny list above, taken from its default prefixes: the
 attempt of the turn; with model thinking off where the model's route accepts
 that, and asked once more as an ordinary call when that reply comes back empty
 or refused); only the first eight identifiers in a question (event
-ids, technique ids, hex values) get title priority. Passages are handed to the
+ids, technique ids, hex values) get title priority; "T1110" there finds the
+parent technique's page, not its sub-techniques'. A chosen passage whose title
+opens with an ATT&CK id (an emulation test or detection rule titled
+"T1003.001 ...") is followed by the passage of every other source whose title
+opens with the same id, so the ATT&CK page sits next to the pages that quote
+it (one title query per such id). Passages are handed to the
 model only when the best of them is close enough to the question: it must hold
 at least a fifth of the query's search words, each word weighted by how
 rare it is in the library (terms without a space only: a multi-word phrase the model

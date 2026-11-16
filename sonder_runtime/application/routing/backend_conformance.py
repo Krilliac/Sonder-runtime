@@ -245,12 +245,16 @@ def run_protocol_probes(
     now: float | None = None, timeout_seconds: float = 30.0,
     cases: tuple[BackendCapability, ...] = PROTOCOL_CASES,
     synthetic: bool = True,
+    propagate: tuple[type[BaseException], ...] = (),
 ) -> BackendConformanceRecord:
     """Validate bounded host-observed protocol traces; unimplemented cases stay unknown.
 
     Generic callbacks are diagnostic-only. Only a concrete host adapter that
     verifies the actual transport and backend identity can issue measured
     evidence; caller-selected ``synthetic=False`` cannot certify a callback.
+    ``propagate`` names exceptions that mean "not measured" (for example an
+    admission refusal: the case never ran); they abort the battery instead of
+    becoming a failed result.
     """
     if synthetic is not True:
         raise ValueError("arbitrary protocol callbacks cannot certify live inference")
@@ -262,12 +266,18 @@ def run_protocol_probes(
         case not in PROTOCOL_CASES for case in cases
     ):
         raise ValueError("unknown or duplicate conformance protocol case")
+    if not isinstance(propagate, tuple) or not all(
+        isinstance(kind, type) and issubclass(kind, BaseException) for kind in propagate
+    ):
+        raise TypeError("propagate must be a tuple of exception types")
     results = []
     for capability in cases:
         try:
             observed = provider.run_case(
                 capability, model=identity.model, timeout_seconds=float(timeout_seconds),
             )
+        except propagate:
+            raise
         except (AttributeError, NotImplementedError):
             observed = None
         except Exception:  # noqa: BLE001 - a host adapter can fail in any way
