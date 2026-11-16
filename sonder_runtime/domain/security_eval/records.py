@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from .errors import DatasetError, DatasetRecordError
 
@@ -45,14 +45,14 @@ class HypothesisRecord:
     stage: str
     reason: str
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"hid": self.hid, "repo_root": self.repo_root, "file": self.file,
                 "lines": self.lines.as_text(), "category": self.category,
                 "hypothesis": self.hypothesis, "label": self.label, "severity": self.severity,
                 "stage": self.stage, "reason": self.reason}
 
 
-def parse_line_range(value, *, max_span: int = MAX_RANGE_SPAN, line_no: int = 0) -> LineRange:
+def parse_line_range(value: object, *, max_span: int = MAX_RANGE_SPAN, line_no: int = 0) -> LineRange:
     """Accept ``"a-b"``, ``"a"``, an int or ``[a, b]``; ``1 <= a <= b`` and span <= ``max_span``."""
     if isinstance(value, bool):
         raise DatasetRecordError("lines must be a range, not a boolean", line_no)
@@ -76,7 +76,7 @@ def parse_line_range(value, *, max_span: int = MAX_RANGE_SPAN, line_no: int = 0)
     return LineRange(start, end)
 
 
-def check_relative_path(path: str, *, line_no: int = 0) -> str:
+def check_relative_path(path: object, *, line_no: int = 0) -> str:
     """Return the normalised relative path or raise: no ``..``, absolute, drive, UNC, ADS or NUL."""
     if not isinstance(path, str):
         raise DatasetRecordError("file must be a string", line_no)
@@ -104,7 +104,7 @@ def check_relative_path(path: str, *, line_no: int = 0) -> str:
     return "/".join(parts)
 
 
-def _text_field(obj: dict, name: str, line_no: int, *, required: bool) -> str:
+def _text_field(obj: dict[str, Any], name: str, line_no: int, *, required: bool) -> str:
     value = obj.get(name, "")
     if value is None:
         value = ""
@@ -122,7 +122,7 @@ def _text_field(obj: dict, name: str, line_no: int, *, required: bool) -> str:
     return value
 
 
-def parse_record(obj, line_no: int) -> HypothesisRecord:
+def parse_record(obj: object, line_no: int) -> HypothesisRecord:
     """Validate one decoded JSON object; raises ``DatasetRecordError`` carrying ``line_no``."""
     if not isinstance(obj, dict):
         raise DatasetRecordError("a record must be a JSON object", line_no)
@@ -147,14 +147,14 @@ def parse_record(obj, line_no: int) -> HypothesisRecord:
                             reason=reason)
 
 
-def collect_records(lines: Iterable[tuple[int, str]]):
+def collect_records(lines: Iterable[tuple[int, str]]) -> tuple[list[HypothesisRecord], list[dict[str, Any]]]:
     """Decode ``(line_no, text)`` pairs into ``(records, invalid)``.
 
     ``invalid`` is a list of ``{"line", "hid"?, "reason"}``. Blank lines are skipped. A repeated
     ``hid`` is invalid (the first one wins). Zero valid records raises ``DatasetError``.
     """
     records: list[HypothesisRecord] = []
-    invalid: list[dict] = []
+    invalid: list[dict[str, Any]] = []
     seen: set[str] = set()
     for line_no, text in lines:
         if not text.strip():

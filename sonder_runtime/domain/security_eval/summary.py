@@ -1,14 +1,16 @@
 """Short markdown summary of a report (pure; at most 60 lines)."""
 from __future__ import annotations
 
+from typing import Any
+
 MAX_LINES = 60
 
 
-def _num(value) -> str:
+def _num(value: float | None) -> str:
     return "n/a" if value is None else "%.3f" % value
 
 
-def _row(label: str, conf: dict) -> str:
+def _row(label: str, conf: dict[str, Any]) -> str:
     return "| %s | %d | %s | %s | %d/%d/%d/%d | %d/%d | %d | %d |" % (
         label, conf["n"], _num(conf["precision"]), _num(conf["recall"]), conf["tp"], conf["fp"],
         conf["fn"], conf["tn"], conf["label_uncertain"], conf["model_uncertain"], conf["unparsed"],
@@ -19,7 +21,7 @@ _HEADER = ("| %s | n | precision | recall | tp/fp/fn/tn | uncertain (label/model
            "|---|---|---|---|---|---|---|---|")
 
 
-def render_summary(report: dict) -> str:
+def render_summary(report: dict[str, Any]) -> str:
     lines = ["# Security eval: %s" % report.get("requested_model", "?")]
     if not report.get("complete", False):
         lines.append("> INCOMPLETE: stopped (%s), %s item(s) remaining; call again with the same "

@@ -22,7 +22,8 @@ import json
 import os
 import re
 import time
-from typing import Any, Mapping
+from collections.abc import Callable
+from typing import Any, Mapping, Protocol, TypeVar
 
 from ..adapters.provider_bindings import ProviderBindings  # noqa: F401 - documents the bindings type
 from ..adapters.security_eval.dataset import load_dataset
@@ -30,7 +31,7 @@ from ..adapters.security_eval.model_client import GatewayVerdictModel
 from ..adapters.security_eval.output_store import OutputStore
 from ..adapters.security_eval.repo_reader import ConfinedRepo, RepoLimits, RetrievalSettings
 from ..adapters.tool_lane_gateway import ServedTierGateway
-from ..application.security_eval.runner import ARMS, MODES, RunPlan, SecurityEvalRunner
+from ..application.security_eval.runner import ARMS, MODES, RunPlan, RunReport, SecurityEvalRunner
 from ..domain.common.errors import DependencyUnavailable, InvalidInput, SonderError
 from ..domain.security_eval.context_select import HELPER_VERSION
 from ..domain.security_eval.errors import TemplateError
@@ -39,6 +40,14 @@ from ..platform.security_eval_config import (
     CONTEXT_MODES, MODEL_RE, TEMPLATE_MAX_BYTES, SecurityEvalConfig, security_eval_config_from_env)
 
 _LIST_SPLIT = re.compile(r"[,\s;]+")
+
+_F = TypeVar("_F", bound=Callable[..., object])
+
+
+class _McpServer(Protocol):
+    """The one method of the MCP server object that ``register`` uses."""
+
+    def tool(self) -> Callable[[_F], _F]: ...
 
 
 class _MonotonicClock:
@@ -50,7 +59,7 @@ def _json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _names(text: str) -> frozenset:
+def _names(text: str) -> frozenset[str]:
     return frozenset(part for part in _LIST_SPLIT.split(str(text or "")) if part)
 
 
@@ -85,7 +94,7 @@ def _section(application: Any) -> SecurityEvalConfig:
     return security_eval_config_from_env(os.environ, [])
 
 
-def _identity(cfg: SecurityEvalConfig, model: str, mode: str, template: str | None) -> dict:
+def _identity(cfg: SecurityEvalConfig, model: str, mode: str, template: str | None) -> dict[str, Any]:
     """Everything that changes what a row means; hashed into the resume digest."""
     identity: dict[str, Any] = {
         "model": model, "helper_version": HELPER_VERSION, "num_ctx": cfg.num_ctx,
@@ -107,7 +116,7 @@ def _identity(cfg: SecurityEvalConfig, model: str, mode: str, template: str | No
     return identity
 
 
-def _summary_of(result) -> dict:
+def _summary_of(result: RunReport) -> dict[str, Any]:
     report = result.report
     overall = (report.get("scores") or {}).get("overall") or {}
     arms = {arm: {"precision": conf["precision"], "recall": conf["recall"], "n": conf["n"],
@@ -125,7 +134,7 @@ def _summary_of(result) -> dict:
 
 def evaluate(application: Any, *, model: str = "", out_dir: str = "", dataset: str = "", mode: str = "item",
              context: str = "", limit: int = 0, categories: str = "", stages: str = "", hids: str = "",
-             score_only: bool = False) -> dict:
+             score_only: bool = False) -> dict[str, Any]:
     """Run one slice of the eval; raises typed errors (the tool wrapper turns them into a result)."""
     cfg = _section(application)
     model = (model or cfg.model).strip()
@@ -177,13 +186,15 @@ def evaluate(application: Any, *, model: str = "", out_dir: str = "", dataset: s
     return payload
 
 
-def register(mcp, record, runtime=None) -> None:
+def register(mcp: _McpServer, record: Callable[..., object],
+             runtime: Callable[[], object] | None = None) -> None:
     """Register ``security_eval``; ``runtime`` is the server composition's zero-argument provider."""
     if runtime is not None and not callable(runtime):
         raise TypeError("runtime must be a callable returning the runtime object, got %s" % type(runtime).__name__)
 
-    def run(args: dict) -> str:
+    def run(args: dict[str, Any]) -> str:
         started = time.time()
+        payload: dict[str, Any]
         try:
             owner = runtime() if callable(runtime) else None
             provider = getattr(owner, "_application", None)

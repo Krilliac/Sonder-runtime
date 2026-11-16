@@ -23,7 +23,7 @@ import tempfile
 import textwrap
 import threading
 from bisect import bisect_left
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import sonder_runtime.adapters.git_discovery as git_discovery
 from sonder_runtime.platform import paths as runtime_paths
@@ -468,7 +468,7 @@ def _control_plane_paths() -> set[Path]:
     return {_resolve_best_effort(path) for path in paths}
 
 
-def _is_secret_path(path: Path) -> bool:
+def _is_secret_path(path: PurePath) -> bool:
     """True for a secret file name: the base rules plus the added token stores."""
     if _is_base_secret_path(path):
         return True
@@ -478,7 +478,7 @@ def _is_secret_path(path: Path) -> bool:
     )
 
 
-def _is_base_secret_path(path: Path) -> bool:
+def _is_base_secret_path(path: PurePath) -> bool:
     """The secret-name rules that existed before the token-store additions.
 
     Archive extraction refuses on exactly this predicate, so an archive that

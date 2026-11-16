@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import comb
+from typing import Any, Iterable, Sequence
 
 from .records import HypothesisRecord
 from .verdict import ParsedHypothesis
@@ -75,7 +76,7 @@ class Confusion:
         else:
             self.tn += 1
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"n": self.n, "tp": self.tp, "fp": self.fp, "fn": self.fn, "tn": self.tn,
                 "precision": self.precision, "recall": self.recall,
                 "label_uncertain": self.label_uncertain, "model_uncertain": self.model_uncertain,
@@ -87,10 +88,10 @@ class Confusion:
 class ScoreReport:
     """``overall[arm]`` and ``groups[field][value][arm]`` are ``Confusion`` values."""
 
-    overall: dict = field(default_factory=dict)
-    groups: dict = field(default_factory=dict)
+    overall: dict[str, Confusion] = field(default_factory=dict)
+    groups: dict[str, dict[str, dict[str, Confusion]]] = field(default_factory=dict)
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "overall": {arm: conf.as_dict() for arm, conf in sorted(self.overall.items())},
             "groups": {name: {value: {arm: conf.as_dict() for arm, conf in sorted(arms.items())}
@@ -99,7 +100,7 @@ class ScoreReport:
         }
 
 
-def score(rows, group_by=("category", "stage")) -> ScoreReport:
+def score(rows: Iterable[ScoreRow], group_by: Sequence[str] = ("category", "stage")) -> ScoreReport:
     """Score ``rows`` per arm, and per arm within each ``group_by`` field."""
     overall: dict[str, Confusion] = {}
     groups: dict[str, dict[str, dict[str, Confusion]]] = {name: {} for name in group_by}
@@ -121,7 +122,7 @@ class PairedComparison:
     p_value: float
     excluded: int
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"arm_a": self.arm_a, "arm_b": self.arm_b, "n_pairs": self.n_pairs, "b": self.b,
                 "c": self.c, "p_value": self.p_value, "excluded": self.excluded,
                 "note": "b: arm_a right and arm_b wrong; c: arm_a wrong and arm_b right; exact "
@@ -133,7 +134,7 @@ def _correct(row: ScoreRow) -> bool:
     return row.outcome == "SCORED" and row.predicted == row.label
 
 
-def paired_comparison(rows, arm_a: str = "none", arm_b: str = "retrieved") -> PairedComparison:
+def paired_comparison(rows: Iterable[ScoreRow], arm_a: str = "none", arm_b: str = "retrieved") -> PairedComparison:
     """Exact McNemar test of ``arm_a`` against ``arm_b`` over items both arms scored."""
     by_arm: dict[str, dict[str, ScoreRow]] = {arm_a: {}, arm_b: {}}
     for row in rows:
@@ -202,7 +203,7 @@ class ChunkScore:
     def recall(self) -> float | None:
         return self.matched_confirmed / self.scope_confirmed if self.scope_confirmed else None
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"chunks": self.chunks, "failed_chunks": self.failed_chunks,
                 "generated": self.generated, "matched_confirmed": self.matched_confirmed,
                 "matched_refuted": self.matched_refuted, "matched_uncertain": self.matched_uncertain,
@@ -212,7 +213,7 @@ class ChunkScore:
                 "note": "precision_floor counts unlabelled findings as wrong, so it is a lower bound"}
 
 
-def score_chunks(outcomes) -> dict:
+def score_chunks(outcomes: Iterable[ChunkOutcome]) -> dict[str, ChunkScore]:
     """Aggregate chunk outcomes per arm."""
     result: dict[str, ChunkScore] = {}
     for item in outcomes:
@@ -250,7 +251,8 @@ def _norm_file(path: str) -> str:
     return "/".join(parts)
 
 
-def match_findings(findings, records, tolerance: int, default_file: str = "") -> tuple[HypothesisRecord, ...]:
+def match_findings(findings: Iterable[ParsedHypothesis], records: Sequence[HypothesisRecord], tolerance: int,
+                   default_file: str = "") -> tuple[HypothesisRecord, ...]:
     """Match each located finding to at most one labelled record, each record at most once.
 
     A finding matches a record whose line range, widened by ``tolerance`` lines, overlaps the

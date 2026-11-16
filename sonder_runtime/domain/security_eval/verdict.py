@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from .errors import DatasetRecordError
 from .records import LineRange, parse_line_range
@@ -61,7 +63,7 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
     return [match.span(1) for match in _FENCE_RE.finditer(text)]
 
 
-def _objects(text: str, opener: str):
+def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right."""
     index = text.find(opener)
     while index >= 0:
@@ -74,11 +76,11 @@ def _objects(text: str, opener: str):
         index = text.find(opener, end)
 
 
-def _reason(value) -> str:
+def _reason(value: object) -> str:
     return value.strip()[:MAX_REASON_CHARS] if isinstance(value, str) else ""
 
 
-def _confidence(value) -> float | None:
+def _confidence(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value) if 0.0 <= float(value) <= 1.0 else None
@@ -108,7 +110,7 @@ def parse_verdict(text: str) -> ParsedVerdict:
     raise VerdictParseError("the reply holds no verdict")
 
 
-def _hypothesis(item) -> ParsedHypothesis | None:
+def _hypothesis(item: object) -> ParsedHypothesis | None:
     if not isinstance(item, dict):
         return None
     hypothesis = item.get("hypothesis")

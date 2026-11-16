@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from ...domain.security_eval.context_select import ContextBundle
 from ...domain.security_eval.records import LineRange
@@ -56,11 +56,11 @@ class VerdictModel(Protocol):
 
 
 class ResultStore(Protocol):
-    def read_rows(self) -> list[dict]: ...
+    def read_rows(self) -> list[dict[str, Any]]: ...
 
-    def append(self, row: dict) -> None: ...
+    def append(self, row: dict[str, Any]) -> None: ...
 
-    def write_report(self, report: dict, markdown: str) -> None: ...
+    def write_report(self, report: dict[str, Any], markdown: str) -> None: ...
 
 
 class Clock(Protocol):

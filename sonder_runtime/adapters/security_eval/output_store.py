@@ -10,7 +10,7 @@ import json
 import os
 import stat
 import uuid
-from typing import Sequence
+from typing import Any, Sequence
 
 from ...domain.security_eval.errors import OutputDirRefused
 from ..filesystem.atomic_json import write_json_atomic
@@ -83,9 +83,9 @@ class OutputStore:
     def out_dir(self) -> str:
         return self._dir
 
-    def read_rows(self) -> list[dict]:
+    def read_rows(self) -> list[dict[str, Any]]:
         path = self._paths[ITEMS_FILE]
-        rows: list[dict] = []
+        rows: list[dict[str, Any]] = []
         self.corrupt_lines = 0
         if not os.path.isfile(path):
             return rows
@@ -104,14 +104,14 @@ class OutputStore:
                     self.corrupt_lines += 1
         return rows
 
-    def append(self, row: dict) -> None:
+    def append(self, row: dict[str, Any]) -> None:
         line = json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n"
         with open(self._paths[ITEMS_FILE], "a", encoding="utf-8", newline="\n") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
 
-    def write_report(self, report: dict, markdown: str) -> None:
+    def write_report(self, report: dict[str, Any], markdown: str) -> None:
         write_json_atomic(self._paths[REPORT_FILE], report)
         summary = self._paths[SUMMARY_FILE]
         temporary = "%s.tmp-%s" % (summary, uuid.uuid4().hex)

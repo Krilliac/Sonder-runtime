@@ -30,10 +30,11 @@ from __future__ import annotations
 import os
 import re
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import Any, Callable, Iterable, Sequence
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
@@ -142,7 +143,7 @@ def _handle_relative(actual: str, root: str) -> str | None:
 
 def _opened_handle_path(fd: int) -> str | None:
     """The path of an open descriptor, or ``None`` where the platform cannot say."""
-    if os.name == "nt":
+    if sys.platform == "win32":  # not os.name: the type checker narrows on sys.platform only
         import ctypes
         import msvcrt
 
@@ -175,7 +176,7 @@ def _opened_handle_path(fd: int) -> str | None:
 def _open_no_follow(path: str) -> int:
     """Open ``path`` read-only without following a link in its last component."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    if os.name != "nt":
+    if sys.platform != "win32":
         return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
     import ctypes
     import msvcrt
@@ -215,7 +216,7 @@ def _open_no_follow(path: str) -> int:
 class ConfinedRepo:
     """One repo root, read-only. Single-threaded; the index is built once, lazily."""
 
-    def __init__(self, root: str, allowlist, limits: RepoLimits | None = None,
+    def __init__(self, root: str, allowlist: Iterable[object] | None, limits: RepoLimits | None = None,
                  settings: RetrievalSettings | None = None, *,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._limits = limits or RepoLimits()
@@ -229,7 +230,7 @@ class ConfinedRepo:
         self._bytes = 0
 
     @staticmethod
-    def _validate_root(root, allowlist) -> str:
+    def _validate_root(root: object, allowlist: Iterable[object] | None) -> str:
         if not isinstance(root, str) or not root.strip() or "\x00" in root:
             raise RepoRootRefused("repo_root is empty")
         if not os.path.isabs(root):
@@ -441,7 +442,7 @@ class ConfinedRepo:
         self._ensure_index()
         return self._paths
 
-    def index_report(self) -> dict:
+    def index_report(self) -> dict[str, Any]:
         self._ensure_index()
         return {"files": len(self._paths), "bytes": self._bytes,
                 "truncated": sorted(set(self._truncated)), "skipped": dict(self._skipped)}
@@ -506,8 +507,9 @@ class ConfinedRepo:
             skipped["no_hits"] = tuple(no_hits)
         return pack_context(hits, self._settings.max_context_chars, self._settings.max_hits_per_kind, skipped)
 
-    def _guards_before(self, lines: list[str], path: str, caller_line: int, pattern, names) -> list[ContextHit]:
-        out = []
+    def _guards_before(self, lines: list[str], path: str, caller_line: int, pattern: re.Pattern[str],
+                       names: Sequence[str]) -> list[ContextHit]:
+        out: list[ContextHit] = []
         for number in range(max(1, caller_line - _GUARD_WINDOW_BEFORE_CALLER), caller_line):
             text = lines[number - 1]
             if not is_guard_line(text):

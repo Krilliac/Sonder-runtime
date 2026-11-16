@@ -8,7 +8,9 @@ severity, stage and hid never reach the model. The system prompt says ``data`` i
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from string import Template
+from typing import Any
 
 from .errors import TemplateError
 from .records import HypothesisRecord
@@ -48,7 +50,7 @@ def number_lines(text: str, start: int) -> str:
     return "\n".join("%d: %s" % (start + offset, line) for offset, line in enumerate(text.split("\n")))
 
 
-def render_task(template: str, fields) -> str:
+def render_task(template: str, fields: Mapping[str, object]) -> str:
     """Substitute ``$name`` fields; a missing field, bad placeholder or oversize template is a ``TemplateError``."""
     if not isinstance(template, str) or not template.strip():
         raise TemplateError("the prompt template is empty")
@@ -62,7 +64,7 @@ def render_task(template: str, fields) -> str:
         raise TemplateError("the prompt template is malformed: %s" % exc) from None
 
 
-def _document(task: str, schema: dict, data: dict) -> str:
+def _document(task: str, schema: dict[str, Any], data: dict[str, Any]) -> str:
     return json.dumps({"task": task, "answer_schema": schema, "data": data}, ensure_ascii=False)
 
 

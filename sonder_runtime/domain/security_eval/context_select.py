@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 HELPER_VERSION = "1"
 KINDS = ("definition", "caller", "guard")
@@ -82,10 +82,10 @@ class ContextBundle:
     text: str = ""
     items: tuple[ContextHit, ...] = ()
     truncated: bool = False
-    skipped: dict = field(default_factory=dict)
+    skipped: dict[str, tuple[str, ...]] = field(default_factory=dict)
     reason: str = ""
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return {"helper_version": HELPER_VERSION, "chars": len(self.text),
                 "items": [{"kind": hit.kind, "path": hit.path, "line": hit.line, "ident": hit.ident}
                           for hit in self.items],
@@ -108,7 +108,7 @@ def extract_identifiers(text: str, limit: int) -> tuple[str, ...]:
     return tuple(ordered[:max(0, limit)])
 
 
-def _declaration(line: str):
+def _declaration(line: str) -> tuple[str, str] | None:
     """``(kind_word, name)`` when ``line`` declares something, else ``None``."""
     stripped = line.lstrip()
     head = _IDENT_RE.match(stripped)
@@ -141,7 +141,7 @@ def declared_name(line: str) -> str | None:
     return found[1] if found else None
 
 
-def enclosing_declaration(lines: Sequence[str], start: int):
+def enclosing_declaration(lines: Sequence[str], start: int) -> tuple[str, int] | None:
     """``(name, line_no)`` of the nearest function declaration at or above 1-based line ``start``."""
     index = min(start, len(lines)) - 1
     while index >= 0:
@@ -173,9 +173,10 @@ def _render(hit: ContextHit) -> str:
     return "[%s] %s:%d (%s)\n%s\n" % (hit.kind, hit.path, hit.line, hit.ident, hit.snippet)
 
 
-def pack_context(hits, max_chars: int, per_kind_limit: int, skipped=None) -> ContextBundle:
+def pack_context(hits: Sequence[ContextHit], max_chars: int, per_kind_limit: int,
+                 skipped: Mapping[str, Iterable[str]] | None = None) -> ContextBundle:
     """Pack ``hits`` into at most ``max_chars``: kind order, then path, then line; whole hits only."""
-    skipped = {key: tuple(value) for key, value in (skipped or {}).items()}
+    packed_skipped = {key: tuple(value) for key, value in (skipped or {}).items()}
     chosen: list[ContextHit] = []
     for kind in KINDS:
         of_kind = sorted((hit for hit in hits if hit.kind == kind),
@@ -206,4 +207,4 @@ def pack_context(hits, max_chars: int, per_kind_limit: int, skipped=None) -> Con
     else:
         reason = ""
     return ContextBundle(text="".join(parts), items=tuple(kept), truncated=truncated,
-                         skipped=skipped, reason=reason)
+                         skipped=packed_skipped, reason=reason)
