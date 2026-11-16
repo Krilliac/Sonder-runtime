@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
+import 'package:sonder_runtime/chat/session_temperature.dart';
 import 'package:sonder_runtime/models.dart';
 
 import 'fixtures/server_fixtures.dart';
@@ -47,10 +48,13 @@ Map<String, dynamic> _body(String body) =>
 String _lastUser(String body) =>
     ((_body(body)['messages'] as List).last as Map)['content'] as String;
 
-TurnRequest _turn(String text, {String? historyMode}) => TurnRequest(
+TurnRequest _turn(String text,
+        {String? historyMode, Object? sessionTemperature}) =>
+    TurnRequest(
       history: [ChatMessage(role: Role.user, content: text)],
       model: 'sonder',
       sessionId: 's1',
+      sessionTemperature: sessionTemperature,
       historyMode: historyMode,
     );
 
@@ -113,6 +117,70 @@ void main() {
     expect((events.last as TurnDone).reply.text, 'plain answer');
     expect(events.whereType<TurnDelta>().map((d) => d.text).join(),
         anyOf('', 'plain answer'));
+  });
+
+  test('session_temperature is absent unless the request carries one',
+      () async {
+    final bodies = <Map<String, dynamic>>[];
+    await recordStreamingClients(() async {
+      final backend = SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435');
+      await _collect(backend.startTurn(_turn('a')));
+      await _collect(backend.startTurn(_turn('b', sessionTemperature: 0.7)));
+      await _collect(backend.startTurn(_turn('c', sessionTemperature: 'auto')));
+    }, (request, body) async {
+      bodies.add(_body(await body.bytesToString()));
+      return _json('ok');
+    });
+    expect(bodies, hasLength(3));
+    expect(bodies[0].containsKey('session_temperature'), isFalse);
+    expect(bodies[1]['session_temperature'], 0.7);
+    expect(bodies[2]['session_temperature'], 'auto');
+  });
+
+  group('SessionTemperatureSync', () {
+    test('the first request sends the value, "auto" when Auto', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.pending('s1', null), 'auto');
+      expect(sync.pending('s2', 0.7), 0.7);
+    });
+
+    test('pending records nothing: an unconfirmed value is resent', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.pending('s1', 0.7), 0.7);
+      expect(sync.pending('s1', 0.7), 0.7);
+      sync.confirm('s1', 0.7);
+      sync.forget('s1');
+      expect(sync.pending('s1', 0.7), 0.7);
+    });
+
+    test('after confirm an unchanged value is omitted', () {
+      final sync = SessionTemperatureSync()..confirm('s1', 0.7);
+      expect(sync.pending('s1', 0.7), isNull);
+      sync.confirm('s2', 'auto');
+      expect(sync.pending('s2', null), isNull);
+    });
+
+    test('a change after confirm is sent, "auto" when back to Auto', () {
+      final sync = SessionTemperatureSync()..confirm('s1', 0.7);
+      expect(sync.pending('s1', 1.1), 1.1);
+      sync.confirm('s1', 1.1);
+      expect(sync.pending('s1', 1.1), isNull);
+      expect(sync.pending('s1', null), 'auto');
+    });
+
+    test('reset makes every session resend; sessions are independent', () {
+      final sync = SessionTemperatureSync()
+        ..confirm('s1', 0.7)
+        ..confirm('s2', 0.7);
+      expect(sync.pending('s1', 0.7), isNull);
+      sync.forget('s2');
+      expect(sync.pending('s1', 0.7), isNull);
+      expect(sync.pending('s2', 0.7), 0.7);
+      sync.confirm('s2', 0.7);
+      sync.reset();
+      expect(sync.pending('s1', 0.7), 0.7);
+      expect(sync.pending('s2', 0.7), 0.7);
+    });
   });
 
   test('historyMode "client" reaches the server as history: client (S5)',
