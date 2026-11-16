@@ -24,6 +24,7 @@ from typing import Any
 from sonder_runtime.adapters.persistence import batch_store, fanout_store
 from sonder_runtime.application.batch_jobs.runner import run_job
 from sonder_runtime.application.ports.batch_jobs import JobRecord, RunSettings
+from sonder_runtime.application.ports.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.bootstrap.batch_job_executor import FanoutStepExecutor
 from sonder_runtime.bootstrap.config_loading import load_config_or_none
 from sonder_runtime.domain.batch_jobs import (
@@ -102,7 +103,7 @@ class BatchWorker:
         with self._cond:
             self._queue.append(job_id)
             if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(target=self._loop, name="batch-job-worker", daemon=True)
+                self._thread = owned_runtime_thread(target=self._loop, name="batch-job-worker", daemon=True)
                 self._thread.start()
             self._cond.notify_all()
 

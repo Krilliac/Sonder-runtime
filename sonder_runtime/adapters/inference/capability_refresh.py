@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.adapters.inference.gpu_admission import GpuAdmissionRefused
 from sonder_runtime.domain.routing.backend_conformance import BackendConformanceRecord
 from sonder_runtime.platform import context_policy, paths
 from .capability_evidence import load_production_evidence
@@ -38,6 +39,8 @@ def refresh_capabilities(*, origin: str, home=None, models=(), timeout_seconds=1
     The timeout is per model, including identity reads. A failed refresh replaces
     old passing evidence with an unknown synthetic record, preventing reuse of
     an earlier success after the most recent measurement could not complete.
+    A GPU admission refusal is not a failed measurement (no probe ran): that
+    model is reported ``deferred`` and its stored evidence is left untouched.
     """
     if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
         raise ValueError("timeout must be finite and between 0 and 300 seconds")
@@ -56,6 +59,17 @@ def refresh_capabilities(*, origin: str, home=None, models=(), timeout_seconds=1
     for model, probe in zip(selected, probes, strict=True):
         try:
             record = probe.run(timeout_seconds=timeout_seconds)
+        except GpuAdmissionRefused as refused:
+            # Admission (a pinned window, the GPU queue, a memory floor) kept the
+            # battery from running: nothing was measured, so the earlier evidence
+            # stays exactly as it was and the model is reported deferred.
+            outcomes.append({
+                "model": model, "status": "deferred", "checked_at": None,
+                "reason": refused.refusal.reason.value,
+                "retry_after_seconds": refused.retry_after_seconds,
+                "model_digest": None, "ollama_version": None, "capabilities": {},
+            })
+            continue
         except Exception:  # noqa: BLE001 - content-free provider failure invalidates old evidence
             record = BackendConformanceRecord("ollama", model, time.time(), (), synthetic=True)
             status = "unavailable"

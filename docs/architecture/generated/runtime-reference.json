@@ -18575,6 +18575,12 @@
       "type": "BuildToolsConfig"
     },
     {
+      "default": null,
+      "field": "gpu_admission",
+      "section": "root",
+      "type": "GpuAdmissionConfig"
+    },
+    {
       "default": "[redacted]",
       "field": "api_key",
       "section": "secrets",
@@ -19511,6 +19517,143 @@
       "type": "bool"
     },
     {
+      "default": "enforce",
+      "field": "mode",
+      "section": "gpu_admission",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "store_path",
+      "section": "gpu_admission",
+      "type": "str"
+    },
+    {
+      "default": 1,
+      "field": "gpu_slots",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 1,
+      "field": "embed_slots",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "field": "probe_slots",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 2000,
+      "field": "probe_wait_ms",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 64,
+      "field": "max_queue_depth",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 300,
+      "field": "max_queue_wait_seconds",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 100,
+      "field": "poll_interval_ms",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 4096,
+      "field": "min_available_ram_mb",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 4096,
+      "field": "min_commit_headroom_mb",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": "queue",
+      "field": "on_host_floor",
+      "section": "gpu_admission",
+      "type": "str"
+    },
+    {
+      "default": 1000,
+      "field": "host_recheck_interval_ms",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 125,
+      "field": "unmeasured_host_factor_pct",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 1024,
+      "field": "host_overhead_mb",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": "serve_pinned",
+      "field": "ctx_conflict",
+      "section": "gpu_admission",
+      "type": "str"
+    },
+    {
+      "default": 2,
+      "field": "max_repins_per_model",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 600,
+      "field": "repin_window_seconds",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 1000,
+      "field": "ps_cache_ms",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 30,
+      "field": "ctx_check_interval_seconds",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": 30,
+      "field": "lease_ttl_margin_seconds",
+      "section": "gpu_admission",
+      "type": "int"
+    },
+    {
+      "default": [
+        "llama-server.exe",
+        "llama-server",
+        "ollama.exe",
+        "ollama"
+      ],
+      "field": "runner_process_names",
+      "section": "gpu_admission",
+      "type": "tuple[str, ...]"
+    },
+    {
       "default": true,
       "field": "toast",
       "section": "health_alerts",
@@ -20180,13 +20323,13 @@
   "counts": {
     "capabilities": 240,
     "commands": 358,
-    "configuration": 292,
+    "configuration": 315,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
     "tools": 240
   },
-  "digest": "202d4d0f158507f0a50880fb964cb82d0c533084cf2a2a23edafe2343ba70336",
+  "digest": "60ce0bcbec066d2db9b3a822a8326b23fc4612e5d73020e25a4f4cd943951739",
   "events": [
     {
       "name": "session.started",
@@ -51134,13 +51277,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "58483316d8bdd5f2e1ed64fdc5204f827ee313f89b1d7adbe474cfd5ca5aed0a",
+    "server.py": "982ee690083d36ea428e46ccbae951f2dc73b95c3650f81871667b9eeb51513c",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "64c68d40cfde244556b3c6291ee26797c4915c6c0f7113c1c04532988e1f4dd2",
+    "sonder_runtime/platform/config.py": "2a7e37cce7640076e08b8a1e9d4471fc1b7f85cffc0afa11fda81e5e1742e861",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
