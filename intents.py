@@ -34,18 +34,26 @@ _STRICT_RE = re.compile(
 )
 
 _RUN_RE = re.compile(
-    r"^" + _POLITE + r"(?:run|execute)(?:\s+(?:it|that|this|the\s+code|my\s+code|the\s+script))?" + _TAIL + r"$"
+    r"^" + _POLITE + r"(?:run|execute)"
+    r"(?:\s+(?:it|that|this|(?:the|my|this|that)\s+(?:code|script)))?"
+    r"(?:\s+(?:again|for\s+me))?" + _TAIL + r"$"
 )
 
 _TRAIN_N_RE = re.compile(
     r"^" + _POLITE + r"(?:train|practice)(?:\s+on)?\s+(?P<n>\d+)(?:\s+(?:tasks?|problems?|rounds?|times?))?" + _TAIL + r"$"
 )
 _TRAIN_DEFAULT_RE = re.compile(
-    r"^" + _POLITE + r"(?:self.?train|train\s+yourself|practice|improve\s+yourself|learn\s+something|teach\s+yourself)" + _TAIL + r"$"
+    r"^" + _POLITE + r"(?:self.?train|train\s+yourself|practice(?:\s+tasks)?|improve\s+yourself|learn\s+something|teach\s+yourself)" + _TAIL + r"$"
 )
 
-_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[,;]|\band\b|&)\s*")
-_NEGATION_RE = re.compile(r"\b(?:not|no|never|don'?t|dont|without|isn'?t|aren'?t|won'?t|cannot|can'?t)\b")
+# Clauses are split on the bare delimiters and stripped afterwards: a leading
+# `\s*` in the pattern would rescan every whitespace run (quadratic).
+_CLAUSE_SPLIT_RE = re.compile(r"[,;&]|\band\b")
+
+# Longest legitimate control turn is about ten short words ("please turn strict
+# mode on and show me your reasoning now"); anything longer than this is never
+# a control command, so it is rejected before any regex touches it.
+_MAX_CONTROL_CHARS = 200
 
 TRAIN_DEFAULT_N = 3
 
@@ -275,17 +283,17 @@ def classify(text):
     clause is a whole control phrasing ("strict on", "run it", "train on 5"),
     and never on questions, tasks or negated phrasings.
     """
-    t = (text or "").strip().lower()
-    t = re.sub(r"[.!?\s]+$", "", t)
-    if not t or len(t.split()) > 10:
+    t = text if isinstance(text, str) else str(text or "")
+    if len(t) > _MAX_CONTROL_CHARS:
         return {}
-    if _NEGATION_RE.search(t):
+    t = t.strip().lower().rstrip(".!? \t\r\n\f\v")
+    if not t or len(t.split()) > 10:
         return {}
     if _GUARD_RE.match(t) and not _SHOW_REASONING_RE.match(t):
         return {}
 
     out = {}
-    clauses = [c for c in _CLAUSE_SPLIT_RE.split(t) if c]
+    clauses = [c for c in (p.strip() for p in _CLAUSE_SPLIT_RE.split(t)) if c]
     if not clauses:
         return {}
     for clause in clauses:
