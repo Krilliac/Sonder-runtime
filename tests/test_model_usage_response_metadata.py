@@ -28,7 +28,8 @@ CASES = [
          "finish_reason": "length", "extra": "dropped", "model": "m"},
         {"done_reason": "", "total_duration": 1, "load_duration": 2, "prompt_eval_count": 3,
          "prompt_eval_cached_count": 4, "prompt_eval_duration": 5, "eval_count": 6,
-         "eval_duration": 7, "load_state": "warm", "cold_start": False, "finish_reason": "length"},
+         "eval_duration": 7, "load_state": "warm", "cold_start": False, "finish_reason": "length",
+         "served_model": "m"},
     ),
     (
         {"message": {"thinking": "abcdef"}, "reasoning_segments": 2, "thinking_chars": 40},
@@ -61,5 +62,5 @@ def test_response_metadata_never_copies_content_or_reasoning_text():
     out = {"message": {"content": "secret answer", "thinking": "private"}, "model": "m",
            "response": "x", "context": [1, 2]}
     result = response_metadata(out)
-    assert result == {"done_reason": "", "thinking_chars": 7}
+    assert result == {"done_reason": "", "thinking_chars": 7, "served_model": "m"}
     assert "secret answer" not in repr(result) and "private" not in repr(result)

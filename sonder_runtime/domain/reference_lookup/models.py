@@ -17,9 +17,38 @@ class IndexState(str, Enum):
     ERROR = "error"
 
 
+class SchemaCompat(str, Enum):
+    """How the index's ``schema_version`` relates to what this runtime reads.
+
+    ``NEWER`` is degraded but usable: the table shape this runtime validates
+    is intact, so passages are searched, but the newer ``sources`` metadata
+    is not interpreted (the search-terms prompt stays generic).
+    """
+
+    LEGACY = "legacy"      # no schema_version: version 1
+    CURRENT = "current"    # schema 2: subjects are read
+    NEWER = "newer"        # built by a newer library tool
+    INVALID = "invalid"    # schema_version present but unreadable: treated as legacy
+
+
+@dataclass(frozen=True)
+class LibrarySource:
+    """One entry of the index's ``sources`` metadata, already sanitised and capped."""
+
+    source: str
+    subject: str
+    passages: int
+    licence: str
+
+
 @dataclass(frozen=True)
 class IndexStatus:
-    """Result of validating the index file; ``detail`` is one sanitised line."""
+    """Result of validating the index file; ``detail`` is one sanitised line.
+
+    ``schema_version`` is the version the index declares (1 when it declares
+    none); ``library`` the usable ``sources`` entries; ``warnings`` one
+    sanitised line per ignored or unusable piece of metadata.
+    """
 
     state: IndexState
     path: str
@@ -27,6 +56,15 @@ class IndexStatus:
     sources: tuple[tuple[str, int], ...] = ()
     built_at: str = ""
     detail: str = ""
+    schema_version: int = 1
+    schema_compat: SchemaCompat = SchemaCompat.LEGACY
+    library: tuple[LibrarySource, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def subjects(self) -> tuple[str, ...]:
+        """The distinct subjects of the library, in index order (empty for a version 1 index)."""
+        return tuple(dict.fromkeys(entry.subject for entry in self.library))
 
     @property
     def ready(self) -> bool:

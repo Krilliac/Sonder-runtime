@@ -1222,6 +1222,7 @@ def test_make_generate_retains_only_content_free_backend_measurements(monkeypatc
         "prompt_eval_duration": 1_000_000,
         "eval_count": 1,
         "eval_duration": 1_000_000,
+        "served_model": "local-model",
     }
 
 
