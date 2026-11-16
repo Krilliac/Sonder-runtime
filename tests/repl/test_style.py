@@ -595,6 +595,49 @@ def test_markdown_styles_are_closed_on_every_line():
     assert S.markdown("> quoted words", 60, c=c) == ["\x1b[2m│\x1b[0m quoted words"]
 
 
+def test_markdown_code_spans_close_on_the_same_number_of_backticks():
+    c = _caps("16", "unknown", "unicode")
+    info = "[36m{}[0m"
+
+    def md(text):
+        return S.markdown(text, 80, c=c)
+
+    # One and two backticks; the marker run is never drawn.
+    assert md("`code`") == [info.format("code")]
+    assert md("``code``") == [info.format("code")]
+    assert md("a ``code`` b") == ["a " + info.format("code") + " b"]
+    # A span may hold shorter runs of backticks, verbatim.
+    assert md("`` ` ``") == [info.format("`")]
+    assert md("``a`b``") == [info.format("a`b")]
+    assert md("x ``` `` ```") == ["x " + info.format("``")]
+    # One space is stripped from each side when both are there.
+    assert md("`` `x` ``") == [info.format("`x`")]
+    # A run with no closer of its own length is plain text.
+    assert md("``a`") == ["``a`"]
+    assert md("`a``") == ["`a``"]
+    # Bold and code still sit side by side.
+    assert md("**b** ``c`d``") == ["[1mb[0m " + info.format("c`d")]
+
+
+def test_markdown_inline_stays_linear_on_pathological_lines():
+    import time
+
+    c = _caps("16", "unknown", "unicode")
+    n = 20000
+    lines = [
+        "`" * n,
+        "`a" * n,
+        "`` `" * (n // 4),
+        "".join("`" * k + "x" for k in range(1, 200)) * 5,
+        "**a*" * n,
+        "`a` **b** " * (n // 10),
+    ]
+    for text in lines:
+        start = time.perf_counter()
+        S.markdown(text, 80, c=c)
+        assert time.perf_counter() - start < 2.0, text[:20]
+
+
 def test_markdown_never_recolours_or_rewraps_code_and_tables():
     c = _caps("truecolor", "dark", "unicode")
     code = "x" * 120

@@ -844,7 +844,8 @@ _MD_BULLET = re.compile(r"^(\s{0,3})([-*+])\s+(.*)$")
 _MD_NUMBER = re.compile(r"^(\s{0,3})(\d{1,3}[.)])\s+(.*)$")
 _MD_QUOTE = re.compile(r"^>\s?(.*)$")
 _MD_RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}$")
-_MD_INLINE = re.compile(r"(`[^`]+`|\*\*[^*]+\*\*)")
+_MD_BOLD = re.compile(r"\*\*[^*]+\*\*")
+_MD_TICKS = re.compile(r"`+")
 
 
 def _paint_words(text: str, roles: tuple, c: Caps) -> str:
@@ -855,16 +856,72 @@ def _paint_words(text: str, roles: tuple, c: Caps) -> str:
     return " ".join(s(word, *roles, c=c) if word else word for word in text.split(" "))
 
 
+def _md_spans(text: str) -> list:
+    """The inline spans of one line, as ``(start, end, kind, content)``.
+
+    A code span opened by a run of N backticks closes at the next run of
+    exactly N, and its content is kept verbatim (CommonMark: one space is
+    dropped from each side when both are there).  A run with no closer of
+    its own length is plain text.  Bold is ``**...**``; the span that
+    starts first wins.  Every step moves forward over runs found once, and a
+    length that has no closer left is remembered, so a long pathological
+    line stays linear (no backtracking regex is involved).
+    """
+    runs = [(m.start(), m.end()) for m in _MD_TICKS.finditer(text)]
+    by_length: dict = {}
+    for index, (start, end) in enumerate(runs):
+        by_length.setdefault(end - start, []).append(index)
+    cursor = {length: 0 for length in by_length}
+    spans = []
+    pos = 0
+    run = 0
+    bold = None
+    bold_done = False
+    while True:
+        # The next code span that starts at or after pos.
+        code = None
+        while run < len(runs):
+            start, end = runs[run]
+            if start < pos:
+                run += 1
+                continue
+            length = end - start
+            indexes = by_length[length]
+            at = cursor[length]
+            while at < len(indexes) and indexes[at] <= run:
+                at += 1
+            cursor[length] = at
+            if at < len(indexes):
+                close = runs[indexes[at]]
+                code = (start, close[1], run, text[end:close[0]])
+                break
+            run += 1
+        if not bold_done and (bold is None or bold.start() < pos):
+            bold = _MD_BOLD.search(text, pos)
+            bold_done = bold is None
+        if code is None and bold is None:
+            return spans
+        if bold is not None and (code is None or bold.start() < code[0]):
+            spans.append((bold.start(), bold.end(), "bold", bold.group()[2:-2]))
+            pos = bold.end()
+        else:
+            body = code[3]
+            if len(body) > 2 and body[0] == " " and body[-1] == " " and body.strip(" "):
+                body = body[1:-1]
+            spans.append((code[0], code[1], "code", body))
+            pos = code[1]
+
+
 def _md_inline(text: str, c: Caps, base: tuple = ()) -> str:
     """Inline code and bold as styles; their markers are not drawn."""
     out = []
-    for part in _MD_INLINE.split(text):
-        if len(part) > 2 and part[0] == "`" and part[-1] == "`":
-            out.append(_paint_words(part[1:-1], ("info",), c))
-        elif len(part) > 4 and part.startswith("**") and part.endswith("**"):
-            out.append(_paint_words(part[2:-2], base + ("strong",), c))
-        else:
-            out.append(_paint_words(part, base, c))
+    last = 0
+    for start, end, kind, body in _md_spans(text):
+        out.append(_paint_words(text[last:start], base, c))
+        roles = ("info",) if kind == "code" else base + ("strong",)
+        out.append(_paint_words(body, roles, c))
+        last = end
+    out.append(_paint_words(text[last:], base, c))
     return "".join(out)
 
 
