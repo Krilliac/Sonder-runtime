@@ -44,8 +44,8 @@ _TRAIN_DEFAULT_RE = re.compile(
     r"^" + _POLITE + r"(?:self.?train|train\s+yourself|practice|improve\s+yourself|learn\s+something|teach\s+yourself)" + _TAIL + r"$"
 )
 
-_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[,;]|and|&)\s*")
-_NEGATION_RE = re.compile(r"(?:not|no|never|don'?t|dont|without|isn'?t|aren'?t|won'?t|cannot|can'?t)")
+_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[,;]|\band\b|&)\s*")
+_NEGATION_RE = re.compile(r"\b(?:not|no|never|don'?t|dont|without|isn'?t|aren'?t|won'?t|cannot|can'?t)\b")
 
 TRAIN_DEFAULT_N = 3
 
