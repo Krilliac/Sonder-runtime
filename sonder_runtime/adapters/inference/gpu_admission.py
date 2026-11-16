@@ -503,7 +503,7 @@ class GpuAdmission:
         logger.warning("gpu admission refused (%s): %s", refusal.reason.value, refusal.detail)
         raise GpuAdmissionRefused(refusal)
 
-    def _store_unavailable(self, error: StoreUnavailable) -> None:
+    def _store_unavailable(self, error: StoreUnavailable) -> NoReturn:
         self._store_failed(error)
         self._refuse(Refused(RefusalReason.STORE_UNAVAILABLE, str(error), retry_after_seconds=5.0))
 

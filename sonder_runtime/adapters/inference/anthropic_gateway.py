@@ -957,7 +957,7 @@ class AnthropicGateway:
                 nonlocal delivered
                 delivered = True
                 # ``mark`` is handed to ``_attempt`` only when ``sink`` is not None.
-                cast(Callable[[GenerationChunk], None], sink)(chunk)
+                cast("Callable[[GenerationChunk], None]", sink)(chunk)
 
             try:
                 return self._attempt(
