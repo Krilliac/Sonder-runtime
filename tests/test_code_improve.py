@@ -154,3 +154,33 @@ def test_internal_fence_line_is_not_removed_and_hash_strings_are_code():
     assert "```" in ci.strip_fences(fenced)
     assert ci.diff_objection('def f():\n    return "#old"\n',
                              'def f():\n    return "#new"\n') != "comment-only change (the code is unchanged)"
+
+
+def test_form_feed_before_target_does_not_corrupt_extract_or_splice():
+    module = "import os\n\x0c\ndef f(x):\n    y = x + 1\n    return y\n\n\ndef g():\n    return 2\n"
+    assert ci.extract_function(module, "f") == "def f(x):\n    y = x + 1\n    return y\n"
+    out = ci.splice_function(module, "def f(x):\n    return x + 2\n")
+    assert out == "import os\n\x0c\ndef f(x):\n    return x + 2\n\n\ndef g():\n    return 2\n"
+    ast.parse(out)
+
+
+def test_unicode_line_separators_do_not_shift_splice_indices():
+    module = "S = 'a\u2028b'\n\n\ndef f():\n    return 1\n"
+    out = ci.splice_function(module, "def f():\n    return 2\n")
+    assert out == "S = 'a\u2028b'\n\n\ndef f():\n    return 2\n"
+
+
+def test_identical_reply_reproduces_the_source_exactly():
+    beta = "def beta(value, default):\n    if not value:\n        return int(default)\n    return value\n"
+    assert ci.splice_function(_MODULE, beta) == _MODULE
+    no_eol = "def f():\n    return 1"
+    assert ci.splice_function(no_eol, "def f():\n    return 1") == no_eol
+    crlf = "X = 1\r\n\r\n\r\ndef f():\r\n    return 1\r\n"
+    assert ci.splice_function(crlf, "def f():\n    return 1\n") == crlf
+
+
+def test_improve_reports_no_change_for_an_identical_reply():
+    original = ci.extract_function(_MODULE, "alpha")
+    result = ci.improve_function(_MODULE, "alpha", _ask(original))
+    assert result["ok"] is False
+    assert result["reason"] == "no change proposed"
