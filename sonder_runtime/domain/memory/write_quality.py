@@ -112,11 +112,13 @@ _VERSION = re.compile(
     r"|(?<![\d.])\d+\.\d+\.\d+(?![\d.])",        # 1.2.3, not 10.0.0.1
 )
 # "Python 3.12", "UE 5.8": a capitalised name followed by a two-part number.
+# The name must start its token (not follow a word, "+", "#" or "-" character), so a
+# long run like "A-A-A-..." has one start instead of one per capital (was quadratic).
 # A number carrying a unit ("Timeout 2.5 seconds", "Wait 1.5 s") is a
 # quantity, and a structural or imperative lead word ("Section 3.2",
 # "Use 4.0 as ...") names no product, so neither reads as a version.
 _NAMED_VERSION = re.compile(
-    r"\b([A-Z][\w+#-]*)\s+\d+\.\d+(?![\d.])"
+    r"(?<![\w+#-])([A-Z][\w+#-]*)\s+\d+\.\d+(?![\d.])"
     r"(?!\s*(?i:%|x\b|[kmgt]i?b\b|ms\b|s\b|secs?\b|seconds?\b|mins?\b|"
     r"minutes?\b|h\b|hrs?\b|hours?\b|days?\b|px\b|pt\b|em\b|rem\b))"
 )
