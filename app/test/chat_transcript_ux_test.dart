@@ -425,6 +425,32 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets(
+      'a footer too long for its column wraps, the cost line first, and '
+      'stays inside the column', (tester) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend,
+        size: const Size(640, 900), prefs: _seed(_twoTurns));
+    await _settle(tester);
+    // The newest answer carries Retry as well, so its footer is the widest.
+    final footer = find.byKey(const Key('answer-footer')).last;
+    Rect inFooter(String key) => tester.getRect(
+        find.descendant(of: footer, matching: find.byKey(Key(key))));
+    final row = tester.getRect(footer);
+    final copy = inFooter('answer-copy');
+    final retry = inFooter('answer-retry');
+    final cost = inFooter('answer-footer-text');
+    // The actions keep the first line; the cost line takes the next one.
+    expect(retry.center.dy, closeTo(copy.center.dy, 0.5));
+    expect(cost.top, greaterThanOrEqualTo(copy.bottom));
+    for (final part in [copy, retry, cost]) {
+      expect(part.left, greaterThanOrEqualTo(row.left));
+      expect(part.right, lessThanOrEqualTo(row.right));
+    }
+    expect(tester.takeException(), isNull);
+    await unmountChat(tester);
+  });
+
   testWidgets('a phone at text scale 2 lays out without overflow',
       (tester) async {
     tester.platformDispatcher.textScaleFactorTestValue = 2.0;

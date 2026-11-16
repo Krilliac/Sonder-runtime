@@ -25,7 +25,7 @@ Canonical appearance: DESIGN.md, lib/theme.dart and the component kit (lib/ui/ki
 
 - **One reading column.** Your turn is a bubble on the right; the answer is unboxed prose from the left edge of the same 760px column. Neither depends on colour to tell the speakers apart: position and shape do.
 - **Work before the answer.** Reasoning, tool calls and activity fold into one row above the answer ("Used 3 tools · 2.0s · 1 refused"); a refused call is counted in words in that row, never hidden.
-- **The answer footer** is one row: the actions (Copy, Useful, Edited, and Retry on the newest answer only), the receipt's disclosure and the cost line.
+- **The answer footer** is one row: the actions (Copy, Useful, Edited, and Retry on the newest answer only), the receipt's disclosure and the cost line. Where the column has no room for all of it, the row wraps and the cost line moves to the second line first.
   - With a mouse it shows on the newest answer, on hover and on keyboard focus, and it stays while its panel is open.
   - On touch platforms it is always shown.
   - It is never removed from the accessibility tree, and a phone folds every detail into one 48dp disclosure.

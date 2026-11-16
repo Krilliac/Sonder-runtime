@@ -38,9 +38,10 @@ that hugs its text; the answer is unboxed prose from the column's left edge,
 with Markdown drawn as such. What Sonder did before answering (reasoning,
 tool calls, activity) is one collapsed row above the answer ("Used 3 tools ·
 2.0s · 1 refused"). Under the answer one footer row holds the actions, the
-receipt's disclosure and the cost line. Refusals are panels with the real
-remedies as buttons. The composer is one large rounded card under the
-column with the mode chip, the model picker and the + menu inside it.
+receipt's disclosure and the cost line, wrapping on a narrow column.
+Refusals are panels with the real remedies as buttons. The composer is one
+large rounded card under the column with the mode chip, the model picker and
+the + menu inside it.
 
 ## The shell
 

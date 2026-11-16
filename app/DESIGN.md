@@ -109,7 +109,7 @@ Goldens for these primitives (`test/goldens/primitives/`, tag `golden`, Linux on
 - One centred reading column (760px). Your turn is a `bubble` on the right that hugs its text; the answer is unboxed prose from the column's left edge. There is no speaker gutter.
 - Markdown is drawn as such: headings, lists, quotes, left-aligned tables with a `sunken` head, inline code on the `bubble` tone.
 - What Sonder did before answering (reasoning, tool calls, activity) is one collapsed row above the answer: "Used 3 tools · 2.0s · 1 refused". It opens to the calls.
-- Under the answer one footer row holds the actions (Copy / Useful / Edited, and Retry on the newest answer), the receipt's disclosure ("Response details") and the cost line. With a mouse it shows on the newest answer, on hover and on keyboard focus, and stays while its panel is open; on touch it is always shown. Actions confirm visibly. A phone folds every detail into one 48dp disclosure.
+- Under the answer one footer row holds the actions (Copy / Useful / Edited, and Retry on the newest answer), the receipt's disclosure ("Response details") and the cost line; where the column has no room for all of it the row wraps, the cost line first. With a mouse it shows on the newest answer, on hover and on keyboard focus, and stays while its panel is open; on touch it is always shown. Actions confirm visibly. A phone folds every detail into one 48dp disclosure.
 - The empty state is the mark, a greeting and a few suggestion chips.
 - Code blocks have a language header, Copy and a token-coloured highlighter (`lib/chat/markdown.dart`, `syntax_highlight.dart`).
 - Links open through a policy (`lib/chat/links.dart`):
