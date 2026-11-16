@@ -1116,7 +1116,8 @@ def _chord_problem(raw: str, chord: tuple[str, ...]) -> str | None:
         return "Windows key accepted"
     switches = {(frozenset(("alt",)), "tab"), (frozenset(("alt", "shift")), "tab"), (frozenset(("ctrl",)), "escape"),
                 (frozenset(("alt",)), "escape"), (frozenset(("alt", "ctrl")), "delete"), (frozenset(("ctrl", "shift")), "escape"),
-                (frozenset(("alt",)), "space")}
+                (frozenset(("alt",)), "space"),
+                (frozenset(("alt", "ctrl")), "tab"), (frozenset(("alt", "ctrl", "shift")), "tab")}
     if (frozenset(mods), key) in switches:
         return "task-switch chord accepted"
     return None
@@ -1429,6 +1430,55 @@ def test_think_blocks_are_stripped_case_insensitively_and_unterminated_ones_drop
         parse_verdict('<think>{"verdict": "REFUTED"}')
 
 
+_DOTTED_I = "İ"  # str.lower() turns it into two characters, which shifted indices into the original text
+
+
+def test_think_stripping_stays_index_aligned_after_dotted_capital_i():
+    hidden = '<think>{"verdict":"CONFIRMED"}</think>\nI could not decide.'
+    with pytest.raises(VerdictParseError):
+        parse_verdict(_DOTTED_I * 40 + hidden)
+    assert parse_hypotheses(_DOTTED_I * 80 + '<think>[{"hypothesis": "h"}]</think>\n[]') == ()
+    turkish = ('İSTANBUL İZMİR İĞDIR raporu. <think>Belki {"verdict":"CONFIRMED"} olabilir '
+               'ama emin değilim</think>\nVERDICT: REFUTED')
+    assert parse_verdict(turkish).verdict == "REFUTED"
+    # an unterminated opener after the dotted capitals still drops the rest, and nothing before it
+    with pytest.raises(VerdictParseError):
+        parse_verdict(_DOTTED_I * 40 + '<think>{"verdict":"CONFIRMED"}')
+    assert parse_verdict('{"verdict": "REFUTED"}' + _DOTTED_I * 40 + '<think>{"verdict":"CONFIRMED"}').verdict == "REFUTED"
+    assert parse_verdict(_DOTTED_I * 40 + '{"verdict": "UNCERTAIN"}<THINK>x</Think>').verdict == "UNCERTAIN"
+
+
+_REFERENCE_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_REFERENCE_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+
+
+def _reference_strip_think(text: str) -> str:
+    """The base implementation (regex substitution, then cut at an unterminated opener), index-aligned."""
+    text = _REFERENCE_THINK_RE.sub("", text)
+    opener = _REFERENCE_OPEN_RE.search(text)
+    return text if opener is None else text[:opener.start()]
+
+
+def test_strip_think_matches_the_regex_reference_on_random_fragment_strings():
+    from sonder_runtime.domain.security_eval.verdict import _strip_think
+
+    fragments = ("<think>", "</think>", "<THINK>", "</Think>", "<thinK>", _DOTTED_I, "K", "x",
+                 '{"verdict":"CONFIRMED"}', "\n")
+    rng = random.Random(SEED)
+    for _ in range(2000):
+        text = "".join(rng.choice(fragments) for _ in range(rng.randint(0, 24)))
+        assert _strip_think(text) == _reference_strip_think(text), repr(text)
+
+
+def test_strip_think_long_opener_run_after_a_closed_block_is_linear():
+    from sonder_runtime.domain.security_eval.verdict import _strip_think
+
+    text = "<think></think>x" + "<think>" * 200_000
+    started = time.perf_counter()
+    assert _strip_think(text) == "x"
+    assert time.perf_counter() - started < BLOB_BUDGET
+
+
 def test_scanner_skips_implausible_openers_without_spending_the_failure_cap():
     code = "int f() {\n" + "  { count++; }\n" * 200 + "}\n"
     assert parse_verdict(code + '{"verdict": "REFUTED", "reason": "guarded"}').verdict == "REFUTED"
@@ -1462,7 +1512,10 @@ def test_parse_verdict_and_hypotheses_deep_nesting_regression():
 
 def test_consult_helpers_hostile_blobs_stay_in_budget():
     run = _Run()
-    for name, blob in _blobs().items():
+    stacked = "\n=== ENSEMBLE (1 model answered) ===\n  m 0ms" * 20_000
+    blobs = {**_blobs(), "stacked-footers": "answer" + stacked, "stacked-footers-near-miss": "answer" + stacked + "x",
+             "stacked-footers-then-line": "answer" + stacked + "\nx"}
+    for name, blob in blobs.items():
         before = len(run.failures)
         for fn in (consult._judge_verdict, consult._substance):
             run.call(fn, (blob,), (), budget=BLOB_BUDGET)
