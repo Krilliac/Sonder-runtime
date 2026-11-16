@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -399,53 +400,120 @@ def test_shell_has_no_inline_script_for_the_csp(monkeypatch, tmp_path):
 
 # -- concurrency ---------------------------------------------------------------
 
-def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(tmp_path):
+@pytest.mark.parametrize("starved_first_reader", [False, True], ids=["free", "starved-first-reader"])
+def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
+        tmp_path, monkeypatch, starved_first_reader):
+    """Six request threads hammer the bundle cache while ``current.json`` flips between
+    two releases 30 times.  Every response must come from one whole release, and the
+    one it comes from must have been current at some point during that request.
+
+    The writer waits for a request that began after each swap to finish before making
+    the next swap, so every swap is observed whatever the thread scheduling.  Without
+    that wait, a reader starved for the length of the writer's loop saw only the final
+    pointer (r1) and the test flaked (CI run 43828341167).  The ``starved-first-reader``
+    case forces that schedule: the first bundle load stalls before it reads anything.
+    """
     from tests.web_app_fixtures import point_to
     web_app.clear_cache()
     write_release(tmp_path, "r1")
     files = dict(DEFAULT_FILES)
     files["main.dart.js"] = b"// second build"
     write_release(tmp_path, "r2", files=files, point=False)
-    seen: list[str] = []
+    main_js = {"r1": DEFAULT_FILES["main.dart.js"], "r2": files["main.dart.js"]}
+
+    if starved_first_reader:
+        real_load = web_app.load_bundle
+        loads = {"n": 0}
+
+        def slow_first_load(root):
+            loads["n"] += 1
+            if loads["n"] == 1:
+                time.sleep(0.25)
+            return real_load(root)
+
+        monkeypatch.setattr(web_app, "load_bundle", slow_first_load)
+
+    swaps = threading.Condition()
+    landed = [0]  # swaps fully in place: pointer replaced and its mtime stamped
+    begun = [0]  # swaps that may have touched current.json (landed, or in flight)
+    current = {0: "r1"}  # swap generation -> release current.json names
+    # (swaps landed before the request began, swaps begun when it ended, release served)
+    observed: list[tuple[int, int, str]] = []
+    newest_began = [0]  # max "began" over observed, so the writer's wait stays O(1)
     errors: list[str] = []
     stop = threading.Event()
 
-    def reader():
+    def request() -> None:
+        with swaps:
+            began = landed[0]
+        load = web_app.cached_bundle(tmp_path)
+        if not load.ok:
+            # Windows can refuse the read while os.replace is in flight; that
+            # failure is transient and never cached (test below).
+            if not load.transient:
+                errors.append(load.message)
+            return
+        assert load.bundle is not None
+        release = load.bundle.release_dir
+        result = web_app.resolve_request("/app/main.dart.js", load)
+        if result.kind != "file" or result.path is None:
+            errors.append(result.kind)
+        elif (not result.path.is_relative_to(release)
+              or result.path.read_bytes() != main_js.get(release.name)):
+            errors.append(f"{release.name} served main.dart.js from {result.path}")
+        with swaps:
+            observed.append((began, begun[0], release.name))
+            newest_began[0] = max(newest_began[0], began)
+            swaps.notify_all()
+
+    def reader() -> None:
         while not stop.is_set():
-            load = web_app.cached_bundle(tmp_path)
-            if not load.ok:
-                # Windows can refuse the read while os.replace is in flight; the
-                # xfail test below covers that transient failure being cached.
-                if load.message != "current.json is unreadable":
-                    errors.append(load.message)
-                continue
-            seen.append(load.bundle.release_dir.name)
-            result = web_app.resolve_request("/app/main.dart.js", load)
-            if result.kind != "file":
-                errors.append(result.kind)
+            try:
+                request()
+            except Exception as exc:  # noqa: BLE001 - reported to the test; a dead reader reads as a hang
+                errors.append(repr(exc))
+                return
 
     threads = [threading.Thread(target=reader) for _ in range(6)]
     for thread in threads:
         thread.start()
     try:
         for index in range(30):
-            for _attempt in range(200):  # Windows refuses os.replace while a reader has the file open
+            generation, name = index + 1, ("r2" if index % 2 == 0 else "r1")
+            with swaps:
+                current[generation] = name
+                begun[0] = generation
+            deadline = time.monotonic() + 10
+            while True:
                 try:
-                    point_to(tmp_path, "r2" if index % 2 == 0 else "r1")
+                    point_to(tmp_path, name)
                     break
-                except PermissionError:
+                except PermissionError:  # Windows refuses os.replace while a reader has the file open
+                    if time.monotonic() > deadline:
+                        raise AssertionError("could not swap current.json") from None
                     stop.wait(0.005)
-            else:
-                raise AssertionError("could not swap current.json")
-            stamp = (tmp_path / "current.json").stat().st_mtime_ns + (index + 1) * 5_000_000
+            stamp = (tmp_path / "current.json").stat().st_mtime_ns + generation * 5_000_000
             os.utime(tmp_path / "current.json", ns=(stamp, stamp))
+            with swaps:
+                landed[0] = generation
+                if not swaps.wait_for(
+                        lambda generation=generation: newest_began[0] >= generation, timeout=10):
+                    raise AssertionError(f"no request completed after swap {generation} to {name}")
     finally:
         stop.set()
         for thread in threads:
             thread.join(10)
+    assert not any(thread.is_alive() for thread in threads)
     web_app.clear_cache()
     assert not errors, errors[:3]
+    seen = [release for _, _, release in observed]
     assert set(seen) <= {"r1", "r2"} and "r2" in seen
+    # Every swap was seen by a request that started after it landed ...
+    assert {began for began, _, _ in observed} >= set(range(1, 31))
+    # ... and no request was answered from a release that was not current during it.
+    stale = [(began, ended, release) for began, ended, release in observed
+             if release not in {current[g] for g in range(began, ended + 1)}]
+    assert not stale, stale[:3]
 
 
 def test_transient_read_failure_is_not_cached(tmp_path, monkeypatch):
