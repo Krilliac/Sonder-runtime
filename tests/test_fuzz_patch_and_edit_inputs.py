@@ -1196,9 +1196,10 @@ _CONTEXT = [
 
 
 def _scan(text: str, raw_strings: bool = True, trigraphs: bool = True,
-          digraphs: bool = True) -> tuple[str, ...]:
+          digraphs: bool = True, **kwargs) -> tuple[str, ...]:
+    """One reading (``separators=`` picks the quote reading; the default is C++14)."""
     return scan_hostile_directives(
-        normalize_for_scan(text, raw_strings=raw_strings, trigraphs=trigraphs, digraphs=digraphs),
+        normalize_for_scan(text, raw_strings=raw_strings, trigraphs=trigraphs, digraphs=digraphs, **kwargs),
         include_ok=OK)
 
 
@@ -2034,6 +2035,9 @@ def test_regression_closing_digraph_is_also_read_as_written(text):
     ("a:>b // \\\v\n", 4),
     ('auto s = R"(x)";\n', 2),
     ('R"(a)" ??( %: <: \\\f\nx \\ \ny ??/\t\nz\n', 18),
+    ("char c = 'a', d = L'b', e = '1';\n", 1),
+    ("int x = 1'000;\n", 2),  # C++14 digit separator: the C17 reading (none) runs too
+    ("int x = \u0661'a';\n", 2),  # the legacy reading took U+0661 for a digit: it runs too
 ])
 def test_only_readings_that_differ_are_normalised(text, readings, monkeypatch):
     """One reading for plain text; a reading runs only when it lexes the text differently; 18 at most."""
@@ -2254,21 +2258,38 @@ def test_lexing_work_budget_refuses_a_large_file_that_needs_many_readings():
 
 
 def _union_of_every_lexing(before: str, after: str) -> set[str]:
+    """Every reading times every quote reading, plus the refusals no reading covers."""
+    from sonder_runtime.domain.build import repair as repair_module
+
     found: set[str] = set()
     modes: list[dict[str, bool]] = [{"trigraphs": t, "digraphs": d, "strict_splices": s}
                                     for t in (True, False) for d in (True, False) for s in (True, False)]
     modes.append({"legacy": True})
     for raw in (True, False):
         for mode in modes:
-            found.update(scan_hostile_directives(
-                added_logical_lines(before, after, raw_strings=raw, **mode), include_ok=OK))
+            for separators in ("cxx14", "none", "legacy"):
+                found.update(scan_hostile_directives(
+                    added_logical_lines(before, after, raw_strings=raw, separators=separators, **mode),
+                    include_ok=OK))
+            # The ambiguous quote counts in the C++14 quote reading; a bad raw prefix in C++14 and C++11.
+            for separators, kinds in (("cxx14", ("ambiguous", "bad_raw")), ("none", ("bad_raw",))):
+                events: set[str] = set()
+                for text in (before, after):
+                    repair_module._mask_literals(
+                        repair_module._translation_phases(text, **mode), raw_strings=raw,
+                        digraphs=mode.get("digraphs", False), separators=separators, events=events)
+                if "ambiguous" in kinds and "ambiguous" in events:
+                    found.add(repair_module._AMBIGUOUS_SEPARATOR)
+                if "bad_raw" in events:
+                    found.add(repair_module._BAD_RAW_DELIMITER)
     return found
 
 
 def test_skipping_equal_readings_never_changes_the_reasons():
     """The gated, de-duplicated scan must report exactly what scanning all 18 readings reports."""
     rng = _rng("lexing_dedupe")
-    noise = ["\\\n", "\\ \n", "\\\f\n", "??/\n", "??/ \n", "??(", "%:", "<:", ":>", 'R"(', ')"', "/*", "*/", "'", '"']
+    noise = ["\\\n", "\\ \n", "\\\f\n", "??/\n", "??/ \n", "??(", "%:", "<:", ":>", 'R"(', ')"', "/*", "*/", "'", '"',
+             "1'", "1'a", "\u0661'", 'R" (']
     checked = refused = 0
     for seed in HOSTILE + BENIGN:
         for _ in range(12):
@@ -2285,3 +2306,158 @@ def test_skipping_equal_readings_never_changes_the_reasons():
     assert checked >= 700
     # Both outcomes must occur, or the equality above says nothing about refusals.
     assert 0.1 * checked <= refused <= 0.9 * checked, (refused, checked)
+
+
+# --- round 5 review: Unicode digits and quotes after numbers, defined, line heads, U+180E/U+FEFF, raw prefixes ---
+# Every repro below was compiled with gcc 16.1, clang 22 and MSVC 19.44 (cl /E): the compiler opens or
+# probes ../../../../secret.h, which the scan used to accept.
+
+_SECRET = '#include "../../../../secret.h"\n'
+_ESCAPES_ROOT = "include escapes the project root"
+_AMBIGUOUS_QUOTE = "compilers lex differently"
+_BAD_RAW = "raw string whose delimiter"
+_ODD_LINE = "non-ASCII or control character"
+_ODD_BLANK = "U+FEFF (byte order mark) or U+180E"
+
+
+@pytest.mark.parametrize("lead", ["\u0661", "\uff11", "\u00b2", ".\u0661", "x\u0663"])
+def test_regression_unicode_digit_does_not_start_a_number_that_swallows_a_quote(lead):
+    """A Unicode digit is an identifier character to the compilers, so ``'/*'`` is a character literal.
+
+    Read as a pp-number (``str.isdigit``), the quote became a digit separator, ``/*`` opened a comment
+    and the include line below was masked away, while gcc, clang and MSVC include the file.
+    """
+    text = "int a = " + lead + "'/*';\n" + _SECRET + "int b = '*/';\n"
+    assert any(_ESCAPES_ROOT in reason for reason in _scan(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _scan_every_lexing(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _refused_end_to_end(text)), text
+
+
+def test_regression_quote_after_a_number_is_a_separator_only_before_an_identifier_character():
+    """``1'/*'``: C++14 takes ``'`` as a separator only before a digit, letter or ``_`` (gcc, clang).
+
+    So the quote opens ``'/*'`` and the include is live in every gcc/clang mode; MSVC takes every
+    quote after a number as a separator, so the readings disagree and the input is refused as well.
+    """
+    text = "int a = 1'/*';\n" + _SECRET + "int b = '*/';\n"
+    assert any(_ESCAPES_ROOT in reason for reason in _scan(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _scan(text, separators="none")), text
+    reasons = _refused_end_to_end(text)
+    assert any(_ESCAPES_ROOT in reason for reason in reasons), reasons
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in reasons), reasons
+
+
+@pytest.mark.parametrize("number", ["1", "0x1F", "1e+", ".5"])
+def test_regression_c17_reading_without_digit_separators_is_scanned(number):
+    """C17 and C++11 have no digit separators: ``1'a /* '`` is ``1`` and the literal ``'a /* '``.
+
+    gcc and clang (``-std=c17``, ``-std=c++11``) include the file; C++14, C23 and MSVC read ``1'a``
+    as one number and hide the include in the comment. Both readings are scanned.
+    """
+    text = "int a = " + number + "'a /* ';\n" + _SECRET + "int b = 0; */\n"
+    assert any(_ESCAPES_ROOT in reason for reason in _refused_end_to_end(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _scan_every_lexing(text)), text
+    assert _scan(text) == (), "C++14 reading: the include is inside the comment"
+    assert any(_ESCAPES_ROOT in reason for reason in _scan(text, separators="none")), text
+
+
+@pytest.mark.parametrize("text", [
+    "int a = 1''a'b'/*';\n" + _SECRET + "int b = '*/';\n",  # gcc: 1''a'b is one number; clang: 1 '' a 'b'
+    "int a = 1'.'/*';\n" + _SECRET + "int b = '*/';\n",
+    "int a = 1'$'/*';\n" + _SECRET + "int b = '*/';\n",
+    "int a = 1'\u00e9'/*';\n" + _SECRET + "int b = '*/';\n",
+    "int a = 1\u00e9'0'/*';\n" + _SECRET + "int b = '*/';\n",
+    "int a = \u00a01'0'/*';\n" + _SECRET + "int b = '*/';\n",
+    "int a = 1'0;\nint c = 2' /* ';\n" + _SECRET + "int b = 0; */\n",
+])
+def test_regression_quote_after_a_number_that_compilers_disagree_on_is_refused(text):
+    """MSVC takes every quote after a number as a separator, gcc continues over ``''`` and ``$``, clang
+    over UTF-8 identifier characters: no single reading covers them, so the input is refused."""
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _scan_every_lexing(text)), text
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("text", [
+    "int a = 1'000'000;\nlong b = 0x1F'FF'u;\ndouble c = 1.5e+3'0;\n",
+    "char c = '1', d = L'x', e = u8'y', f = U'z';\nint g = x1'2';\n",
+    "unsigned long long m = 0b1010'0101ull;\n",
+])
+def test_digit_separators_and_character_literals_stay_clean(text):
+    assert _scan_every_lexing(text) == (), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert texts and reasons == (), (text, reasons, TAG)
+
+
+@pytest.mark.parametrize("joiner", ["\u0300", "\u00b7", "\u200d", "\u200c", "\u203f", "\u00e9"])
+def test_regression_identifier_ending_in_defined_is_not_the_defined_operator(joiner):
+    """``X\u0300defined`` is one identifier (gcc, clang: combining marks, U+00B7, ZWJ, ZWNJ, U+203F
+    continue identifiers), so the ``__has_include`` after it is evaluated: here with a macro ``(``,
+    which probes the path in ``P``."""
+    name = "X" + joiner + "defined"
+    text = ("#define " + name + "\n#define LP2 (\n#define P \"../../../../secret.h\"\n"
+            "#if " + name + " __has_include LP2 P)\n#endif\n")
+    assert any(_COMPUTED in reason for reason in _scan(text)), text
+    assert any(_COMPUTED in reason for reason in _scan_every_lexing(text)), text
+    assert any(_COMPUTED in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("lead", ["\u00a0", "\u2028", "\x1c", "\x1d", "\x1e", "\x1f", "\x85"])
+def test_regression_shim_exemption_needs_a_line_head_every_compiler_reads_as_a_directive(lead):
+    """Python's ``\\s`` takes these, gcc lexes them as stray tokens: the line is not a directive to
+    gcc, so it expands ``__has_include(P)`` as ordinary text and probes the path in ``P``."""
+    text = '#define P "../../../../secret.h"\n' + lead + "#define __has_include(P) RESULT\n"
+    assert any(_COMPUTED in reason for reason in _scan(text)), text
+    assert any(_COMPUTED in reason for reason in _scan_every_lexing(text)), text
+    reasons = _refused_end_to_end(text)
+    assert any(_COMPUTED in reason for reason in reasons), reasons
+    assert any(_ODD_LINE in reason for reason in reasons), reasons
+    blank = '#define P "../../../../secret.h"\n#define\u00a0__has_include(P) RESULT\n'
+    assert any(_COMPUTED in reason for reason in _scan_every_lexing(blank)), blank
+    assert _scan_every_lexing(" \t#define __has_include(x) 0\n# \tif __has_include(<a.h>)\n#endif\n") == ()
+
+
+@pytest.mark.parametrize("lead", ["\u180e", "\ufeff", "\u200b", "\u3000", "\u00a0", "\x1c", "#\u180e", "#\u00a0"])
+def test_regression_invisible_character_before_a_directive_is_refused(lead):
+    """clang treats U+180E as a blank anywhere and gcc and clang skip a U+FEFF at the start of a file,
+    so ``\u180e#include`` is a directive to them; ``\\s`` does not match either. Any non-ASCII or
+    control character before, after or inside the ``#`` of a line fails closed."""
+    text = lead + _SECRET[1:] if lead.startswith("#") else lead + _SECRET
+    reasons = _scan(text)
+    assert any(_ODD_LINE in reason or _ODD_BLANK in reason for reason in reasons), (text, reasons)
+    reasons = _refused_end_to_end(text)
+    assert any(_ODD_LINE in reason or _ODD_BLANK in reason for reason in reasons), (text, reasons)
+
+
+def test_regression_byte_order_mark_added_at_the_start_of_the_file_is_refused():
+    """gcc and clang skip a leading U+FEFF, so the include on the patched first line is live."""
+    patch = CandidatePatch(hunks=(PatchHunk("src/core/math.cpp", "float normalized_length",
+                                            "\ufeff" + _SECRET + "float normalized_length"),), model_id="fake")
+    texts, reasons = validate_patch(patch, scope=SCOPE, current={"src/core/math.cpp": _MATH_SOURCE})
+    assert not texts and any(_ODD_BLANK in reason for reason in reasons), reasons
+    assert any(_ODD_BLANK in reason for reason in _scan("\ufeff" + _SECRET)), "per-reading scan"
+    # Refused anywhere in added text, mid-line too: one rule instead of a per-construct guess
+    # (clang 22 rejects ``_Pragma`` + U+180E + ``(``, but takes U+180E before ``#include`` as a blank).
+    for blank in ("\u180e", "\ufeff"):
+        text = 'int x; _Pragma' + blank + '("comment(lib, \\"evil\\")")\n'
+        assert any(_ODD_BLANK in reason for reason in _scan_every_lexing(text)), text
+        assert any(_ODD_BLANK in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("delimiter", [" ", "\t", "$", "@", "`", '"', "\u00a0", "\u00e9", "a" * 17])
+def test_regression_raw_string_with_a_delimiter_some_compiler_rejects_is_refused(delimiter):
+    """gcc and clang lex an invalid raw-string prefix up to the next ``"`` (across lines), MSVC keeps a
+    raw string: here gcc and clang both include the file, while every reading of the scan hid it."""
+    text = 'auto s = R"' + delimiter + '(\n/* "\n' + _SECRET + "*/\n"
+    assert "xxx" not in normalize_for_scan(text), "an invalid delimiter must not mask a raw-string body"
+    assert any(_BAD_RAW in reason for reason in _scan_every_lexing(text)), text
+    assert any(_BAD_RAW in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("text", [
+    'auto a = R"(x)";\nauto b = R"--(a)" b)--";\nauto c = u8R"\'(z)\'";\nauto d = LR"x()x";\n',
+    'auto e = R"abcdefghijklmnop(16)abcdefghijklmnop";\nint fR = 1; auto g = fR;\n',
+])
+def test_raw_strings_with_valid_delimiters_stay_clean(text):
+    assert _scan_every_lexing(text) == (), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert texts and reasons == (), (text, reasons, TAG)
