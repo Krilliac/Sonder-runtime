@@ -1313,7 +1313,7 @@ def m_concat(rng: random.Random, text: str) -> str:
 
 def m_macro(rng: random.Random, text: str) -> str:
     body = text.rstrip("\n")
-    if "\n" in body or re.match(r"\s*(/\*.*?\*/\s*)*(#|%:|\?\?=)", body, re.DOTALL) or "\\" in body.replace('\\"', "").replace("\\\\", ""):
+    if "\n" in body or re.match(r"\s*(?:/\*(?:[^*]|\*(?!/))*\*/\s*)*(?:#|%:|\?\?=)", body) or "\\" in body.replace('\\"', "").replace("\\\\", ""):
         return text
     if rng.random() < 0.5:
         return "#define NOP(...) __VA_ARGS__\nNOP(" + body + ")\n"
