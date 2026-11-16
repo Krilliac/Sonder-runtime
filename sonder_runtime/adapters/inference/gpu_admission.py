@@ -40,7 +40,6 @@ import platform
 import sys
 import threading
 import time
-import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -49,7 +48,7 @@ from typing import Any, Callable, Iterator, Mapping, NoReturn, Protocol, cast
 from sonder_runtime.adapters.inference.gpu_admission_store import (
     FULL, HELD, GpuAdmissionStore, StoreUnavailable,
 )
-from sonder_runtime.adapters.inference.log_safe import redact_url
+from sonder_runtime.adapters.inference.log_safe import redact_url, safe_origin
 from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
@@ -233,21 +232,15 @@ def _origin_without_userinfo(origin: str) -> str:
 
     Admission keys, caches and logs every origin it sees, so credentials are
     dropped here for every caller. An origin with no ``@`` is returned as is.
-    One that cannot be parsed becomes ``_UNPARSABLE_ORIGIN``: never "", which
-    ``ollama_policy`` reads as the default loopback host.
+    One with an ``@`` is rebuilt by ``log_safe.safe_origin`` from allowlisted
+    text only. When that declines (no http(s) scheme, a malformed host or
+    port, an ``@`` after the authority) the origin becomes
+    ``_UNPARSABLE_ORIGIN``: never "", which ``ollama_policy`` reads as the
+    default loopback host, and never loopback itself.
     """
     if "@" not in origin:
         return origin
-    try:
-        parts = urllib.parse.urlsplit(origin.strip())
-        host, port = parts.hostname, parts.port
-    except ValueError:
-        return _UNPARSABLE_ORIGIN
-    if not host or not parts.scheme:
-        return _UNPARSABLE_ORIGIN
-    if ":" in host:
-        host = "[%s]" % host
-    return "%s://%s%s" % (parts.scheme, host, "" if port is None else ":%d" % port)
+    return safe_origin(origin) or _UNPARSABLE_ORIGIN
 
 
 def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any] | None:
@@ -433,8 +426,10 @@ class GpuAdmission:
                 headers={"Content-Type": "application/json"}, method="POST")
             with ollama_endpoint.open_url(request, timeout=5.0) as response:
                 value = json.loads(response.read(_READ_LIMIT).decode("utf-8"))
-        except Exception:
-            logger.debug("gpu admission could not read /api/show for %s", model, exc_info=True)
+        except Exception as exc:
+            # No traceback: transport exception text can repeat the request URL.
+            logger.debug("gpu admission could not read /api/show for %s: %s", model,
+                         type(exc).__name__)
             return None
         return value if isinstance(value, Mapping) else None
 

@@ -1,9 +1,12 @@
 """Inference adapters must not put URL credentials in raw log records."""
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
+import random
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -11,7 +14,7 @@ import urllib.request
 import pytest
 
 from sonder_runtime.adapters.inference import gpu_admission, ollama_endpoint, ollama_vision
-from sonder_runtime.adapters.inference.log_safe import redact_url
+from sonder_runtime.adapters.inference.log_safe import redact_url, safe_origin
 from sonder_runtime.adapters.inference.openai_compat_gateway import (
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
@@ -356,3 +359,327 @@ def test_openai_compat_generate_does_not_log_base_url_credentials(caplog):
         pass
     assert any("OpenAICompatibleGateway.generate" in r.getMessage() for r in caplog.records)
     _assert_clean(caplog)
+
+
+# --- review 3: allowlist rendering, parse-error text, mutation guards -----------
+
+MARK = "Zq9MarkerXy"
+_TOKENS = {"<invalid url>", "http://<redacted>", "https://<redacted>"}
+# Everything redact_url may return besides a token: lower-case scheme and host,
+# decimal port, and a path of allowlisted characters or the path placeholder.
+_RENDERED = re.compile(
+    r"(?:https?://)?(?:[a-z0-9][a-z0-9._\-]*|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?"
+    r"(?:/<redacted>|(?:/[A-Za-z0-9._~%:+,=\-]*)*)"
+)
+_NOISE = ["", "", "/", "?", "#", "@", ";", ":", "\\", " ", "\t", "\n", "%40", "%2F", "://", "//"]
+_NOISE_NO_SLASH = [item for item in _NOISE if "/" not in item]
+_NOISE_NO_SLASH_OR_AT = [item for item in _NOISE_NO_SLASH if item != "@"]
+
+
+def _chain_text(exc: BaseException) -> str:
+    """The text of ``exc`` and of everything chained to it, shown or suppressed."""
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [exc]
+    parts: list[str] = []
+    while pending:
+        item = pending.pop()
+        if item is None or id(item) in seen:
+            continue
+        seen.add(id(item))
+        parts.extend((str(item), repr(item)))
+        pending.extend((item.__cause__, item.__context__))
+    return " | ".join(parts)
+
+
+def _assert_no_traceback(caplog, fragment: str) -> None:
+    matching = [r for r in caplog.records if fragment in r.getMessage()]
+    assert matching, "expected a log record containing %r" % fragment
+    assert all(not r.exc_info for r in matching), "%r is logged with a traceback" % fragment
+
+
+def _generated_urls(count: int, seed: int):
+    """``(where, url)`` pairs with MARK in userinfo, port, query, fragment or params.
+
+    MARK is never placed where it would be a host or a path segment, so no
+    rendering of these values may contain it.
+    """
+    rng = random.Random(seed)
+    schemes = ["http://", "https://", "HTTP://", "hTTps://", "", "", "ftp://", "//", "http:/", "http:"]
+    hosts = ["127.0.0.1", "localhost", "[::1]", "api.example.com", "EXAMPLE.com", "h", ""]
+    ports = ["", "", ":11434", ":80", ":99999", ":bad", ":"]
+    paths = ["", "/", "/v1", "/api/chat", "/a/b/c", "/v1/models/x:generate"]
+    tails = ["", "", "?next=http://x/@y", "&cb=http://h/@x", "#http://h/@x", "/@", "@", "/x@y", "?a=b@c"]
+    for _ in range(count):
+        where = rng.choice(["user", "password", "port", "query", "fragment", "params"])
+        scheme, host, port, path = (rng.choice(schemes), rng.choice(hosts), rng.choice(ports),
+                                    rng.choice(paths))
+        if where in ("user", "password"):
+            secret = rng.choice(_NOISE) + MARK + rng.choice(_NOISE)
+            userinfo = secret if where == "user" else "u:" + secret
+            url = scheme + userinfo + "@" + host + port + path
+        elif where == "port":
+            url = scheme + host + ":" + rng.choice(_NOISE_NO_SLASH_OR_AT) + MARK + path
+        elif where == "query":
+            url = scheme + host + port + path + "?k=" + rng.choice(_NOISE) + MARK
+        elif where == "fragment":
+            url = scheme + host + port + path + "#" + rng.choice(_NOISE) + MARK
+        else:
+            url = scheme + host + port + (path or "/") + ";p=" + rng.choice(_NOISE_NO_SLASH) + MARK
+        url += rng.choice(tails)
+        yield where, rng.choice(["", " ", "\t"]) + url + rng.choice(["", " ", "\n"])
+
+
+def test_redact_url_never_renders_a_marker_from_userinfo_port_query_fragment_or_params():
+    checked = 0
+    for where, url in _generated_urls(6000, seed=20261116):
+        rendered = redact_url(url)
+        assert MARK.lower() not in rendered.lower(), (where, url, rendered)
+        assert rendered in _TOKENS or _RENDERED.fullmatch(rendered), (where, url, rendered)
+        origin = safe_origin(url)
+        assert origin is None or MARK.lower() not in origin.lower(), (where, url, origin)
+        if where in ("user", "password"):
+            reduced = gpu_admission._origin_without_userinfo(url)
+            assert MARK.lower() not in reduced.lower(), (where, url, reduced)
+            assert "@" not in reduced, (where, url, reduced)
+        checked += 1
+    assert checked == 6000
+
+
+def test_redact_url_output_is_a_token_or_allowlisted_text_for_arbitrary_input():
+    rng = random.Random(7)
+    alphabet = "ab1AZ.:/@?#;[]%\\ \n\t-_~+=,<>'\"(){}|^`*&!$" + chr(0) + chr(127) + chr(233)
+    for _ in range(8000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 40)))
+        if rng.random() < 0.5:
+            text = rng.choice(["http://", "https://", "HTTP://"]) + text
+        rendered = redact_url(text)
+        assert rendered in _TOKENS or _RENDERED.fullmatch(rendered), (text, rendered)
+        origin = safe_origin(text)
+        assert origin is None or _RENDERED.fullmatch(origin), (text, origin)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        # Review 3: "://" late in the value is not a scheme separator.
+        ("u:s3cret@127.0.0.1:11434/cb?next=http://x/@y", "<invalid url>"),
+        ("127.0.0.1:11434/v1?api_key=s3cret&cb=http://h/@x", "<invalid url>"),
+        ("user:s3cret@host://a/b@c", "<invalid url>"),
+        ("foo://bar://u:s3cret@h", "<invalid url>"),
+        ("s3cret://u@h", "<invalid url>"),
+        # ;params are dropped from every segment.
+        ("http://h/p;s3cret=1", "http://h/p"),
+        ("http://h/a;s3cret=1/b;k=s3cret/c", "http://h/a/b/c"),
+        # A port that is not a port is not echoed.
+        ("http://h:s3cret/p", "<invalid url>"),
+        ("http://[::1]:s3cret/p", "<invalid url>"),
+        ("http://u:s3cret@h:99999/p", "<invalid url>"),
+        # A path outside the allowlist keeps the origin only.
+        ("http://u:s3cret@h/a b", "http://h/<redacted>"),
+        ("http://h/a\\s3cret", "http://h/<redacted>"),
+        # A bare host:port is the documented OLLAMA_HOST form and renders.
+        ("127.0.0.1:11434", "127.0.0.1:11434"),
+        ("localhost:11434/api/tags?k=s3cret", "localhost:11434/api/tags"),
+        ("[::1]:11434", "[::1]:11434"),
+        ("localhost", "<invalid url>"),
+        ("HTTP://U:s3cret@LOCALHOST:11434/V1", "http://localhost:11434/V1"),
+        ("http://h/" + "a" * 5000, "<invalid url>"),
+    ],
+)
+def test_redact_url_renders_from_the_allowlist_only(value, expected):
+    assert redact_url(value) == expected
+
+
+class _RaisingStr:
+    def __str__(self) -> str:
+        raise RuntimeError(MARK)
+
+    __repr__ = __str__
+
+
+class _HostileText(str):
+    def strip(self, *args):
+        raise RuntimeError(MARK)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [_RaisingStr(), _HostileText("http://u:s3cret@h/p"), b"http://u:s3cret@h/p", ["http://h"], 1.5],
+    ids=["str-raises", "strip-raises", "bytes", "list", "float"],
+)
+def test_redact_url_and_safe_origin_never_raise_and_never_echo(value):
+    assert redact_url(value) == "<invalid url>"
+    assert safe_origin(value) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "user:s3cret@127.0.0.1:11434/x?cb=http://h/@y",
+        "127.0.0.1:11434/?api_key=s3cret&next=http://a/@b",
+    ],
+)
+def test_configured_origin_does_not_log_a_value_with_a_late_scheme_separator(caplog, value):
+    """ollama_policy adds "http://" only when "://" is absent anywhere in the value."""
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ValueError) as caught:
+        ollama_endpoint.configured_origin(value)
+    assert SECRET not in _chain_text(caught.value)
+    _assert_emitted(caplog, "policy error")
+    _assert_clean(caplog)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://user/s3cret@127.0.0.1:11434",
+        "http://s3cret?x@127.0.0.1:11434",
+        "http://127.0.0.1:11434/s3cret@remote.example.com",
+        "ftp://u:s3cret@127.0.0.1:11434",
+        "u:s3cret@127.0.0.1:11434",
+    ],
+)
+def test_ambiguous_credentialed_origin_becomes_the_sentinel(origin):
+    from sonder_runtime.domain import ollama_policy
+
+    reduced = gpu_admission._origin_without_userinfo(origin)
+    assert reduced == gpu_admission._UNPARSABLE_ORIGIN
+    assert ollama_policy.is_loopback(reduced) is False
+    assert safe_origin(reduced) is None
+
+
+def _enforcing_service(tmp_path) -> gpu_admission.GpuAdmission:
+    reading = HostMemoryReading(
+        available_physical_bytes=64 * 2**30, total_physical_bytes=64 * 2**30,
+        commit_limit_bytes=96 * 2**30, commit_available_bytes=64 * 2**30, commit_enforced=True,
+    )
+    return gpu_admission.GpuAdmission(
+        GpuAdmissionConfig(mode="enforce", store_path=str(tmp_path / "gpu.sqlite3")),
+        host_reader=lambda: reading, memory_reader=lambda _key: None,
+        background=lambda work: work(),
+    )
+
+
+def test_read_json_failure_logs_no_credentials_and_no_traceback(caplog, monkeypatch):
+    """Direct call: admit() strips userinfo first, so it cannot guard this log."""
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(ollama_endpoint, "open_url", _FakeAdmissionTransport())
+    assert gpu_admission._read_json(CRED_ORIGIN, "/api/ps") is None
+    _assert_no_traceback(caplog, "gpu admission could not read")
+    _assert_clean(caplog)
+
+
+def test_show_modelfile_failure_logs_no_credentials_and_no_traceback(
+    caplog, monkeypatch, tmp_path
+):
+    caplog.set_level(logging.DEBUG)
+    service = _enforcing_service(tmp_path)
+    monkeypatch.setattr(ollama_endpoint, "open_url", _FakeAdmissionTransport())
+    assert service._show_modelfile(CRED_ORIGIN, "llava-local") is None
+    _assert_no_traceback(caplog, "gpu admission could not read /api/show")
+    _assert_clean(caplog)
+
+
+class _RecordingAdmission:
+    """Stands in for the process service: records what admit() is handed."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    @contextlib.contextmanager
+    def admit(self, path, payload, *, origin, **_kwargs):
+        self.calls.append((path, origin))
+        yield gpu_admission.passthrough_ticket(payload)
+
+
+def test_vision_post_hands_admission_an_origin_without_userinfo(monkeypatch):
+    """admit() strips userinfo itself, so only the argument shows what vision sent."""
+    recorder = _RecordingAdmission()
+    monkeypatch.setattr(ollama_vision.gpu_admission, "process_service", lambda: recorder)
+    monkeypatch.setattr(ollama_endpoint, "open_url", _FakeAdmissionTransport())
+    data = ollama_vision.OllamaVisionGateway._post(
+        "http://user:s3cret@127.0.0.1:11434/api/chat", {"model": "m"}, 5.0
+    )
+    assert data == {"message": {"content": "ok"}}
+    assert recorder.calls == [("/api/chat", "http://127.0.0.1:11434")]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # urllib reads a password that ends at an unescaped "/" as the port,
+        # and quotes it in its ValueError.
+        "http://user:s3cret/@127.0.0.1:11434/api/chat",
+        "http://127.0.0.1:s3cret/api/chat",
+        "http://user:s3cret@127.0.0.1:99999/api/chat",
+    ],
+)
+def test_vision_post_malformed_url_leaks_nothing(caplog, url):
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(DependencyUnavailable) as caught:
+        ollama_vision.OllamaVisionGateway._post(url, {"model": "m"}, 1.0)
+    assert SECRET not in _chain_text(caught.value)
+    _assert_no_traceback(caplog, "Ollama vision request failed")
+    _assert_clean(caplog)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user:s3cret/@127.0.0.1:11434/api/ps",
+        "http://127.0.0.1:s3cret/api/ps",
+        # http.client refuses a space with an InvalidURL that quotes path and query.
+        "http://127.0.0.1:11434/api/ps?key=s3cret&note=a b",
+    ],
+)
+def test_open_url_malformed_url_error_has_no_url_text(caplog, url):
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ValueError) as caught:
+        ollama_endpoint.open_url(urllib.request.Request(url))
+    assert SECRET not in _chain_text(caught.value)
+    _assert_clean(caplog)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:s3cret/v1",
+        "http://user:s3cret/@127.0.0.1:8080/v1",
+        "http://127.0.0.1:8080/v1?api_key=s3cret&note=a b",
+        "s3cret://127.0.0.1:8080/v1",
+        "http://[s3cret]/v1",
+    ],
+)
+def test_openai_compat_refuses_a_malformed_base_url_before_sending(caplog, base_url):
+    caplog.set_level(logging.DEBUG)
+    sent = []
+    cfg = OpenAICompatibleConfig(base_url=base_url, model="m")
+    gateway = OpenAICompatibleGateway(
+        cfg, transport=lambda url, payload, headers, timeout: sent.append(url) or {"ok": True},
+    )
+    with pytest.raises(InvalidInput) as caught:
+        gateway._post("/embeddings", {}, cfg, 5.0)
+    assert sent == []
+    assert SECRET not in _chain_text(caught.value)
+    for record in caplog.records:
+        assert SECRET not in record.getMessage()
+
+
+def test_openai_compat_at_sign_in_the_path_is_refused_with_an_accurate_message():
+    cfg = OpenAICompatibleConfig(base_url="https://api.example.com/@org/v1", model="m")
+    with pytest.raises(InvalidInput) as caught:
+        OpenAICompatibleGateway(cfg)._require_secure_transport(cfg)
+    assert "%40" in str(caught.value)
+    assert "set the API key instead" not in str(caught.value)
+    encoded = OpenAICompatibleConfig(base_url="https://api.example.com/%40org/v1", model="m")
+    OpenAICompatibleGateway(encoded)._require_secure_transport(encoded)
+
+
+def test_sonder_inference_invalid_base_url_error_has_no_chained_url_text():
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import normalize_base_url
+
+    with pytest.raises(InvalidInput) as caught:
+        normalize_base_url("https://user:s3cret/@127.0.0.1")
+    assert SECRET not in _chain_text(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None

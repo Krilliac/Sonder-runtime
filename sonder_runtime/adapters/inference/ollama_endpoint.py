@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
+import re
 import ssl  # noqa: F401 - tests patch ollama_endpoint.ssl.create_default_context
 import threading
 import weakref
@@ -12,7 +13,7 @@ import urllib.parse
 import urllib.request
 
 from sonder_runtime.adapters.tls_contexts import bundle_https_context
-from sonder_runtime.adapters.inference.log_safe import redact_url
+from sonder_runtime.adapters.inference.log_safe import redact_url, urlsplit_or_none
 from sonder_runtime.domain import ollama_policy
 
 logger = logging.getLogger(__name__)
@@ -254,8 +255,15 @@ def safe_display(value=None) -> str:
     return "%s://%s%s" % (parsed.scheme.lower(), rendered_host, suffix)
 
 
+_MALFORMED_REQUEST_URL = "Ollama request URL is malformed or has an invalid port"
+# What http.client refuses in a request target; its InvalidURL quotes the text.
+_UNSENDABLE_URL_CHARS = re.compile(r"[\x00-\x20\x7f]")
+
+
 def _origin_from_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
+    parsed = urlsplit_or_none(url)
+    if parsed is None:
+        raise ValueError(_MALFORMED_REQUEST_URL)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Ollama request URL must not contain inline credentials")
     host = parsed.hostname
@@ -279,7 +287,9 @@ def open_url(request, timeout=30, *, allow_remote=None):
     """Open one Ollama request without environment proxies or redirects."""
     url = request.full_url if hasattr(request, "full_url") else str(request)
     logger.debug(f"open_url: url={redact_url(url)!r}, timeout={timeout}")
-    parsed = urllib.parse.urlsplit(url)
+    parsed = urlsplit_or_none(url)
+    if parsed is None:
+        raise ValueError(_MALFORMED_REQUEST_URL)
     origin = configured_origin(
         _origin_from_url(url), allow_remote=allow_remote,
     )
@@ -290,6 +300,8 @@ def open_url(request, timeout=30, *, allow_remote=None):
         parsed.query,
         "",
     ))
+    if _UNSENDABLE_URL_CHARS.search(canonical_url):
+        raise ValueError(_MALFORMED_REQUEST_URL)
     if hasattr(request, "full_url"):
         headers = dict(request.header_items())
         canonical_request = urllib.request.Request(

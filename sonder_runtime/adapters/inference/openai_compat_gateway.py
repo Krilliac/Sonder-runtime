@@ -34,6 +34,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
 import time
@@ -46,7 +47,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-from .log_safe import redact_url
+from .log_safe import redact_url, urlsplit_or_none
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
     Embedding,
@@ -97,6 +98,12 @@ GET_BODY_LIMIT = 1_048_576
 POST_BODY_LIMIT = 16 * 1024 * 1024
 _READ_CHUNK = 65_536
 ENV_ALLOW_HTTP_NETWORKS = "SONDER_OPENAI_ALLOW_HTTP_NETWORKS"
+_MALFORMED_BASE_URL = (
+    "OpenAI-compatible base URL is not a valid http:// or https:// URL "
+    "(check the host, the port, and for spaces or control characters)"
+)
+# What http.client refuses in a request target; its InvalidURL quotes the text.
+_UNSENDABLE_URL_CHARS = re.compile(r"[\x00-\x20\x7f]")
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -266,7 +273,9 @@ class OpenAICompatibleGateway:
 
     @staticmethod
     def _is_loopback(base_url: str) -> bool:
-        host = (urlsplit(base_url).hostname or "").lower()
+        # Unparsable is never loopback; _require_secure_transport refuses it.
+        parts = urlsplit_or_none(base_url)
+        host = (parts.hostname or "").lower() if parts is not None else ""
         return host in _LOOPBACK_HOSTS
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
@@ -283,8 +292,13 @@ class OpenAICompatibleGateway:
         request can carry the bearer key.  Cloud consent does not relax it:
         consent is about where prompts go, not about sending them in clear.
         """
-        parts = urlsplit(cfg.base_url)
-        if "@" in parts.netloc or "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]:
+        # Nothing malformed may reach the transport: urllib and http.client
+        # quote the text they reject (a port, a netloc, a path and query) in
+        # their errors. Every refusal here has fixed text and no chained error.
+        parts = urlsplit_or_none(cfg.base_url)
+        if parts is None:
+            raise InvalidInput(_MALFORMED_BASE_URL)
+        if "@" in parts.netloc:
             # urllib never sends URL userinfo as auth (the key goes in a header),
             # and http.client's error for it repeats the password, so refuse it
             # before any request is built.
@@ -292,13 +306,21 @@ class OpenAICompatibleGateway:
                 "OpenAI-compatible base URL must not contain credentials "
                 "(user:password@); set the API key instead"
             )
+        if "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]:
+            # A password with an unescaped "/" parses as a path, so an "@" in
+            # the path cannot be told apart from credentials.
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain '@' before its "
+                "query string: it cannot be told apart from credentials "
+                "(user:password@). Write an '@' that belongs to the path as %40"
+            )
         scheme = (parts.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            raise InvalidInput("OpenAI-compatible endpoint must use http or https")
+        if not parts.hostname or _UNSENDABLE_URL_CHARS.search(cfg.base_url):
+            raise InvalidInput(_MALFORMED_BASE_URL)
         if scheme == "https" or self._is_loopback(cfg.base_url):
             return
-        if scheme != "http":
-            raise InvalidInput(
-                "OpenAI-compatible endpoint must use http or https, got %r" % scheme
-            )
         if self._trusted_plaintext_host(parts.hostname or "", cfg.plaintext_networks):
             return
         raise Forbidden(

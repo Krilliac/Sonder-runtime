@@ -74,7 +74,7 @@ from ...application.ports.model_gateway import (
     require_model_text,
 )
 from ...application.ports.model_gateway_contract import Capability, CapabilityHealth
-from .log_safe import redact_url
+from .log_safe import redact_url, urlsplit_or_none
 from ...domain.common.errors import (
     CapacityExceeded,
     DeadlineExceeded,
@@ -514,14 +514,13 @@ class SonderInferenceConfig:
 def normalize_base_url(value: str) -> str:
     """Validate an Inference base URL; map bind-all addresses to loopback."""
     raw = str(value or "").strip()
-    try:
-        parts = urlsplit(raw)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
+    parts = urlsplit_or_none(raw)
+    if parts is None:
         raise InvalidInput(
             "sonder-inference base URL %r is not a valid URL" % redact_url(raw)
-        ) from None
+        )
+    host = parts.hostname
+    port = parts.port
     if (parts.scheme not in ("http", "https") or not host
             or parts.username or parts.password or parts.query or parts.fragment):
         raise InvalidInput(

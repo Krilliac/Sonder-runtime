@@ -5,7 +5,6 @@ import base64
 import json
 import logging
 import time
-import urllib.parse
 import urllib.request
 
 from ...application.context import OperationContext
@@ -17,7 +16,7 @@ from ...domain.common.errors import (
 from ..provider_bindings import provider_bindings_from_env
 from . import ollama_endpoint
 from . import gpu_admission
-from .log_safe import redact_url
+from .log_safe import redact_url, safe_origin, urlsplit_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +39,17 @@ def _read_bounded(stream, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def _admission_origin(target: urllib.parse.SplitResult) -> str:
-    """``scheme://host[:port]`` for GPU admission, never carrying userinfo.
+def _admission_target(url: str) -> tuple[str, str]:
+    """``(origin, path)`` of ``url`` for GPU admission; the origin never carries userinfo.
 
-    Raises ValueError for a URL with no host or an invalid port.
+    Raises a ValueError with fixed text for a URL that ``safe_origin`` or
+    urllib rejects: urllib quotes the text it rejected in its own message.
     """
-    host = target.hostname
-    if not host:
-        raise ValueError("vision endpoint has no host")
-    if ":" in host:
-        host = "[%s]" % host
-    port = target.port
-    return "%s://%s%s" % (target.scheme, host, "" if port is None else ":%d" % port)
+    origin = safe_origin(url)
+    target = urlsplit_or_none(url)
+    if origin is None or target is None:
+        raise ValueError("vision endpoint URL is malformed")
+    return origin, target.path
 
 
 def configure_typed_request_timeout(seconds: int | None) -> None:
@@ -136,9 +134,9 @@ class OllamaVisionGateway:
         limit = RESPONSE_BODY_LIMIT
         budget = timeout or _configured_request_timeout
         try:
-            target = urllib.parse.urlsplit(url)
+            origin, path = _admission_target(url)
             with gpu_admission.process_service().admit(
-                target.path, payload, origin=_admission_origin(target),
+                path, payload, origin=origin,
                 deadline=time.monotonic() + budget,
             ) as ticket:
                 request = urllib.request.Request(
@@ -157,15 +155,14 @@ class OllamaVisionGateway:
         except gpu_admission.GpuAdmissionRefused as refused:
             raise Conflict(refused.detail) from refused
         except Exception as exc:
+            # No traceback: transport exception text can repeat the request URL.
             logger.warning(
                 f"Ollama vision request failed: url={redact_url(url)!r}, "
-                f"timeout={timeout}",
-                exc_info=True,
+                f"timeout={timeout}, error={type(exc).__name__}"
             )
             logger.error(
                 f"Ollama vision inference request failed, url={redact_url(url)!r}, "
-                f"timeout={timeout}",
-                exc_info=True,
+                f"timeout={timeout}, error={type(exc).__name__}"
             )
             raise DependencyUnavailable("local Ollama vision request failed") from exc
 
