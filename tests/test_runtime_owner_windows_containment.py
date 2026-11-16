@@ -304,7 +304,10 @@ def test_job_cleanup_includes_actual_descendant(tmp_path, attempt):
     )
 
     marker = tmp_path / "descendant.txt"
-    script = "import subprocess,sys,time; from pathlib import Path; child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']); Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(30)"
+    # The pid is written to a side file and renamed into place, so the marker
+    # never exists empty: write_text creates the file before it writes, and a
+    # poll in that gap read "" (CI run 43838872759).
+    script = "import subprocess,sys,time; from pathlib import Path; child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']); p=Path(sys.argv[1]); t=p.with_suffix('.tmp'); t.write_text(str(child.pid)); t.replace(p); time.sleep(30)"
     argv = (sys._base_executable, "-c", script, str(marker))
     limiter = NativeExtensionMemoryLimiter()
     prepared = limiter.prepare_process_job("descendant-fixture", argv, None, 4)
