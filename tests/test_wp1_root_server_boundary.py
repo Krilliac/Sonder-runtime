@@ -93,18 +93,20 @@ def gate():
     return _load_gate()
 
 
-# The five sites that may reach ``server`` dynamically, pinned here
+# The six sites that may reach ``server`` dynamically, pinned here
 # independently of the gate's own constant so editing one cannot hide in the other.
 EXPECTED_DYNAMIC_REACHES = {
     ("sonder_runtime/adapters/command_catalog.py", "console_tools"): 1,
     ("sonder_runtime/adapters/command_catalog.py", "http_slash_tools"): 1,
     ("sonder_runtime/adapters/command_catalog.py", "catalog"): 1,
+    ("sonder_runtime/adapters/model_tool_grants.py", "host_classifier"): 1,
     ("sonder_runtime/adapters/tool_lane_guard.py", "default_route_refusal"): 1,
     ("sonder_runtime/bootstrap/legacy_root.py", "detach_owned_application"): 1,
 }
 
 CATALOG = Path("sonder_runtime") / "adapters" / "command_catalog.py"
 GUARD = Path("sonder_runtime") / "adapters" / "tool_lane_guard.py"
+GRANTS = Path("sonder_runtime") / "adapters" / "model_tool_grants.py"
 
 _CATALOG_SOURCE = '''
 import importlib
@@ -127,6 +129,12 @@ import sys
 def default_route_refusal():
     return sys.modules.get("server")
 '''
+_GRANTS_SOURCE = '''
+import sys
+
+def host_classifier():
+    return sys.modules.get("server")
+'''
 _ROOT_SOURCE = '''
 import sys
 
@@ -137,7 +145,9 @@ _ROOT = Path("sonder_runtime") / "bootstrap" / "legacy_root.py"
 
 
 def _trees(**overrides):
-    sources = {CATALOG: _CATALOG_SOURCE, GUARD: _GUARD_SOURCE, _ROOT: _ROOT_SOURCE}
+    sources = {
+        CATALOG: _CATALOG_SOURCE, GUARD: _GUARD_SOURCE, GRANTS: _GRANTS_SOURCE, _ROOT: _ROOT_SOURCE,
+    }
     sources.update({Path(key): value for key, value in overrides.items()})
     return {path: ast.parse(textwrap.dedent(text)) for path, text in sources.items()}
 
@@ -149,14 +159,14 @@ def _package_trees():
     }
 
 
-def test_the_gate_pins_exactly_the_five_current_sites(gate):
+def test_the_gate_pins_exactly_the_six_current_sites(gate):
     assert gate.DYNAMIC_SERVER_REACH_ALLOWLIST == EXPECTED_DYNAMIC_REACHES
 
 
-def test_the_current_tree_passes_the_dynamic_reach_gate_and_sees_its_five_sites(gate):
+def test_the_current_tree_passes_the_dynamic_reach_gate_and_sees_its_six_sites(gate):
     trees = _package_trees()
     assert gate.dynamic_server_reach_violations(trees) == []
-    # Not vacuous: the scan really finds the five reaches in the real tree.
+    # Not vacuous: the scan really finds the six reaches in the real tree.
     seen = {}
     for path, tree in trees.items():
         for function in gate.dynamic_server_reaches(tree):
@@ -164,7 +174,7 @@ def test_the_current_tree_passes_the_dynamic_reach_gate_and_sees_its_five_sites(
     assert seen == EXPECTED_DYNAMIC_REACHES
 
 
-def test_the_synthetic_five_sites_pass_the_real_allowlist(gate):
+def test_the_synthetic_six_sites_pass_the_real_allowlist(gate):
     assert gate.dynamic_server_reach_violations(_trees()) == []
 
 
@@ -261,6 +271,7 @@ def test_paths_are_compared_by_their_posix_spelling(gate):
     trees = {
         windows: ast.parse(textwrap.dedent(_GUARD_SOURCE)),
         CATALOG: ast.parse(textwrap.dedent(_CATALOG_SOURCE)),
+        GRANTS: ast.parse(textwrap.dedent(_GRANTS_SOURCE)),
         _ROOT: ast.parse(textwrap.dedent(_ROOT_SOURCE)),
     }
     assert gate.dynamic_server_reach_violations(trees) == []

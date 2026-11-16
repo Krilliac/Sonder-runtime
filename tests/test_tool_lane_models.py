@@ -11,8 +11,9 @@ import pytest
 from sonder_runtime.domain import tool_lane_models as rule
 from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
 from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, ToolLaneDenyList
+from tests.support.tool_lane import FLOOR
 
-DEFAULTS = ToolLaneDenyList.from_policy(None)
+DEFAULTS = ToolLaneDenyList.from_policy(None, floor=FLOOR)
 QWEN_SOURCE = "mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF"
 ORNITH_SOURCE = "DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF"
 
@@ -112,7 +113,7 @@ def test_windows_path_containing_astra_prefix_is_denied():
 
 
 def test_policy_exact_name_matches_the_last_backslash_segment():
-    deny = ToolLaneDenyList.from_policy({"names": ["helper-model"]})
+    deny = ToolLaneDenyList.from_policy({"names": ["helper-model"]}, floor=FLOOR)
     assert denied(r"C:\models\helper-model", deny)
     assert not denied(r"C:\models\helper-model-extra", deny)
 
@@ -134,13 +135,13 @@ def _bs(text):
 def test_policy_prefix_still_matches_a_last_slash_segment_holding_a_backslash(name):
     name = _bs(name)
     assert chr(92) in name
-    deny = ToolLaneDenyList.from_policy({"prefixes": ["pfx-"]})
+    deny = ToolLaneDenyList.from_policy({"prefixes": ["pfx-"]}, floor=FLOOR)
     assert denied(name, deny)
     assert not denied(name)
 
 
 def test_policy_name_holding_a_backslash_still_matches_the_last_slash_segment():
-    deny = ToolLaneDenyList.from_policy({"names": [_bs("team|blocked")]})
+    deny = ToolLaneDenyList.from_policy({"names": [_bs("team|blocked")]}, floor=FLOOR)
     assert denied(_bs("hf.co/team|blocked"), deny)
     assert denied(_bs("team|blocked"), deny)
     assert not denied(_bs("hf.co/team|blocked-other"), deny)
@@ -180,7 +181,7 @@ def test_existing_defaults_helpers_and_other_gguf_repositories_remain_allowed(na
 
 
 def test_repository_tier_defaults_are_all_allowed():
-    defaults = RuntimeModelConfiguration.from_environment({}).tier_map()
+    defaults = RuntimeModelConfiguration.from_environment({}, floor=FLOOR).tier_map()
     assert defaults
     assert all(not denied(model) for model in defaults.values()), defaults
 
@@ -191,7 +192,7 @@ def test_a_longer_repo_name_under_a_denied_hf_source_is_denied_by_design():
 
 def test_hf_defaults_are_prefixes_not_exact_names():
     """The hosted ids, hostless ids and stems all come from the source list."""
-    prefixes = set(rule.DEFAULT_DENIED_PREFIXES)
+    prefixes = set(FLOOR.prefixes)
     for host in ("hf.co/", "huggingface.co/"):
         for source in (QWEN_SOURCE, ORNITH_SOURCE):
             assert (host + source).casefold() in prefixes
@@ -233,7 +234,7 @@ def test_ordinary_and_near_miss_names_are_allowed(name):
 
 @pytest.mark.parametrize("name", ["", "   ", "\t\n", None])
 def test_empty_and_none_are_allowed_even_when_unreadable(name):
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     for deny in (DEFAULTS, unreadable):
         for free_form in (False, True):
             assert rule.decide(name, deny, free_form=free_form).status is ModelLaneStatus.ALLOWED
@@ -300,7 +301,7 @@ def test_a_prefix_is_matched_against_the_last_path_segment():
 
 
 def test_an_exact_name_is_matched_against_the_last_path_segment():
-    deny = ToolLaneDenyList.from_policy({"names": ["Helper-Model"], "prefixes": []})
+    deny = ToolLaneDenyList.from_policy({"names": ["Helper-Model"], "prefixes": []}, floor=FLOOR)
     for name in ("helper-model", "HELPER-MODEL:latest", "owner/helper-model", "reg.io/owner/Helper-Model:latest"):
         assert denied(name, deny), name
     assert not denied("helper-model-2", deny)
@@ -309,14 +310,14 @@ def test_an_exact_name_is_matched_against_the_last_path_segment():
 
 
 def test_an_exact_name_does_not_match_as_a_prefix():
-    deny = ToolLaneDenyList.from_policy({"names": ["helper"], "prefixes": []})
+    deny = ToolLaneDenyList.from_policy({"names": ["helper"], "prefixes": []}, floor=FLOOR)
     assert denied("helper", deny)
     assert not denied("helper-2", deny)
     assert not denied("helper:2b", deny)  # a tag other than :latest is a different exact name
 
 
 def test_a_policy_prefix_matches_by_prefix():
-    deny = ToolLaneDenyList.from_policy({"names": [], "prefixes": ["Team-X/"]})
+    deny = ToolLaneDenyList.from_policy({"names": [], "prefixes": ["Team-X/"]}, floor=FLOOR)
     assert denied("team-x/anything:7b", deny)
     assert denied("TEAM-X/other", deny)
     assert not denied("other/team-x/anything", deny)  # policy prefixes keep full-name/last-segment matching
@@ -327,16 +328,16 @@ def test_a_policy_prefix_matches_by_prefix():
 
 def test_defaults_are_always_in_the_list_and_nothing_is_required_of_the_policy():
     for section in (None, {}, {"names": [], "prefixes": []}, {"names": None, "prefixes": None}, "nope", 7, []):
-        deny = ToolLaneDenyList.from_policy(section)
-        assert deny.prefixes[: len(rule.DEFAULT_DENIED_PREFIXES)] == rule.DEFAULT_DENIED_PREFIXES, section
+        deny = ToolLaneDenyList.from_policy(section, floor=FLOOR)
+        assert deny.prefixes[: len(FLOOR.prefixes)] == FLOOR.prefixes, section
         assert deny.extended is False, section
         assert denied("astra-cyber-27b", deny), section
 
 
 def test_policy_names_and_prefixes_extend_the_defaults():
-    deny = ToolLaneDenyList.from_policy({"names": [" Extra-One:LATEST ", "extra-two"], "prefixes": ["Acme/"]})
+    deny = ToolLaneDenyList.from_policy({"names": [" Extra-One:LATEST ", "extra-two"], "prefixes": ["Acme/"]}, floor=FLOOR)
     assert deny.names == frozenset({"extra-one", "extra-two"})
-    assert deny.prefixes == rule.DEFAULT_DENIED_PREFIXES + ("acme/",)
+    assert deny.prefixes == FLOOR.prefixes + ("acme/",)
     assert deny.extended is True
     assert denied("extra-one", deny) and denied("extra-two:latest", deny) and denied("acme/model", deny)
     assert denied("astra-cyber-27b", deny)  # the defaults survive the union
@@ -352,25 +353,25 @@ def test_policy_entries_can_never_remove_the_defaults():
         {"prefixes": ["astra-cyber-"]},  # re-listing a default does not duplicate or displace it
     )
     for section in attempts:
-        deny = ToolLaneDenyList.from_policy(section)
-        for default in rule.DEFAULT_DENIED_PREFIXES:
+        deny = ToolLaneDenyList.from_policy(section, floor=FLOOR)
+        for default in FLOOR.prefixes:
             assert default in deny.prefixes, (section, default)
         assert denied("astra-cyber-27b", deny)
         assert denied(f"hf.co/{QWEN_SOURCE}", deny)
-    deny = ToolLaneDenyList.from_policy({"prefixes": ["astra-cyber-", "ASTRA-CYBER-"]})
+    deny = ToolLaneDenyList.from_policy({"prefixes": ["astra-cyber-", "ASTRA-CYBER-"]}, floor=FLOOR)
     assert deny.prefixes.count("astra-cyber-") == 1
 
 
 def test_malformed_entries_are_ignored_not_fatal():
-    deny = ToolLaneDenyList.from_policy({"names": "single-string", "prefixes": 5})
+    deny = ToolLaneDenyList.from_policy({"names": "single-string", "prefixes": 5}, floor=FLOOR)
     assert deny.extended is False
-    deny = ToolLaneDenyList.from_policy({"names": ["", "   ", None, ":latest", "ok"], "prefixes": [""]})
+    deny = ToolLaneDenyList.from_policy({"names": ["", "   ", None, ":latest", "ok"], "prefixes": [""]}, floor=FLOOR)
     assert deny.names == frozenset({"ok"})
-    assert deny.prefixes == rule.DEFAULT_DENIED_PREFIXES
+    assert deny.prefixes == FLOOR.prefixes
 
 
 def test_an_empty_prefix_entry_cannot_deny_everything():
-    deny = ToolLaneDenyList.from_policy({"prefixes": ["", "  ", ":latest"]})
+    deny = ToolLaneDenyList.from_policy({"prefixes": ["", "  ", ":latest"]}, floor=FLOOR)
     assert not denied("qwen3.5:4b", deny)
     assert not denied("sonder", deny)
 
@@ -384,7 +385,7 @@ def test_the_list_is_immutable():
 # ---- unreadable policy -------------------------------------------------------
 
 def test_unreadable_policy_refuses_caller_named_models_only():
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     assert unreadable.readable is False
     named = rule.decide("qwen3.5:4b", unreadable, free_form=True)
     assert named.status is ModelLaneStatus.POLICY_UNREADABLE and named.denied is True
@@ -407,7 +408,7 @@ def test_default_route_selectors_are_always_allowed(selector):
     decision = rule.decide_selector(selector, BINDINGS, DEFAULTS)
     assert decision.status is ModelLaneStatus.ALLOWED
     # Even when the policy is unreadable: they name no model.
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     assert rule.decide_selector(selector, BINDINGS, unreadable).status is ModelLaneStatus.ALLOWED
 
 
@@ -417,7 +418,7 @@ def test_a_bound_tier_is_judged_by_the_model_it_is_bound_to():
     bad = rule.decide_selector("bad", BINDINGS, DEFAULTS)
     assert bad.status is ModelLaneStatus.DENIED and bad.model == "astra-cyber-9b"
     # A bound tier is not caller-named, so an unreadable list does not refuse it.
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     assert rule.decide_selector("fast", BINDINGS, unreadable).status is ModelLaneStatus.ALLOWED
     assert rule.decide_selector("bad", BINDINGS, unreadable).status is ModelLaneStatus.DENIED
 
@@ -427,7 +428,7 @@ def test_any_other_selector_is_a_caller_named_model():
     assert rule.decide_selector("  library/astra-cyber-9b:latest ", BINDINGS, DEFAULTS).denied
     assert rule.decide_selector(f"hf.co/{ORNITH_SOURCE}:Q4_K_M", BINDINGS, DEFAULTS).denied
     assert rule.decide_selector("qwen3.5:4b", BINDINGS, DEFAULTS).status is ModelLaneStatus.ALLOWED
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     assert rule.decide_selector("qwen3.5:4b", BINDINGS, unreadable).status is ModelLaneStatus.POLICY_UNREADABLE
 
 
@@ -461,7 +462,7 @@ def test_an_ordinary_served_model_is_allowed_and_a_served_name_is_not_free_form(
     assert rule.decide_served("qwen3.5:4b", DEFAULTS).status is ModelLaneStatus.ALLOWED
     assert rule.decide_served("gpt-4o-mini", DEFAULTS).status is ModelLaneStatus.ALLOWED
     # A configured served model is bound configuration, not a caller-named model.
-    unreadable = ToolLaneDenyList.from_policy(None, readable=False)
+    unreadable = ToolLaneDenyList.from_policy(None, readable=False, floor=FLOOR)
     assert rule.decide_served("qwen3.5:4b", unreadable).status is ModelLaneStatus.ALLOWED
     assert rule.decide_served("astra-cyber-9b", unreadable).status is ModelLaneStatus.DENIED
 

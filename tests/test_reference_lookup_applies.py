@@ -16,6 +16,7 @@ from sonder_runtime.domain.reference_lookup.applies import (
 )
 from sonder_runtime.platform import reference_library_config as config
 from tests._reference_lookup_index import SMALL_ROWS, create_index, rule_cache_cleared
+from tests.support.tool_lane import FLOOR
 
 
 # No applies rule is carried from one test to the next.
@@ -25,7 +26,7 @@ SOURCE_TAGS = (
     "hf.co/mradermacher/Qwen3.8-cyber-RedTeam-Surgical-Abliterated-GGUF:Q3_K_M",
     "hf.co/DuoNeural/Cyber-Ornith-1.5-9B-OBLITERATED-GGUF:Q8_0",
 )
-DEFAULT_RULE = AppliesRule.from_policy(None)
+DEFAULT_RULE = AppliesRule.from_policy(None, floor=FLOOR)
 
 
 @pytest.fixture(autouse=True)
@@ -94,8 +95,9 @@ def test_new_stem_and_segment_spellings_share_the_tool_lane_match(name):
 def test_built_in_rule_reuses_the_deny_lists_defaults():
     from sonder_runtime.domain import tool_lane_models as lanes
 
-    assert DEFAULT_RULE.prefixes == lanes.DEFAULT_DENIED_PREFIXES
-    assert DEFAULT_RULE.names == frozenset(lanes.DEFAULT_DENIED_NAMES)
+    deny = lanes.ToolLaneDenyList.from_policy(None, floor=FLOOR)
+    assert DEFAULT_RULE.prefixes == deny.prefixes
+    assert DEFAULT_RULE.names == deny.names
 
 
 @pytest.mark.parametrize("name", [
@@ -107,7 +109,7 @@ def test_ordinary_model_names_do_not_match(name):
 
 
 def test_policy_names_and_prefixes_extend_the_defaults():
-    rule = AppliesRule.from_policy({"enabled": True, "names": ["Custom:7B"], "prefixes": ["lab-"]})
+    rule = AppliesRule.from_policy({"enabled": True, "names": ["Custom:7B"], "prefixes": ["lab-"]}, floor=FLOOR)
     assert decide("custom:7b", rule).applies is True
     assert decide("registry/custom:7b:latest", rule).applies is True
     assert decide("lab-model-3", rule).applies is True
@@ -120,7 +122,7 @@ def test_policy_entries_still_match_a_last_slash_segment_holding_a_backslash():
     def bs(text):  # ``|`` stands for a backslash
         return text.replace("|", chr(92))
 
-    rule = AppliesRule.from_policy({"enabled": True, "names": [bs("team|blocked")], "prefixes": ["pfx-"]})
+    rule = AppliesRule.from_policy({"enabled": True, "names": [bs("team|blocked")], "prefixes": ["pfx-"]}, floor=FLOOR)
     for name in ("C:/models/pfx-model|weights.gguf", "hf.co/pfx-thing|team", "ollama/pfx-x|",
                  "team/pfx-thing|:latest", "hf.co/team|blocked"):
         name = bs(name)
@@ -130,7 +132,7 @@ def test_policy_entries_still_match_a_last_slash_segment_holding_a_backslash():
 
 
 def test_disabled_policy_and_kill_switch_turn_it_off_for_everyone():
-    off = AppliesRule.from_policy({"enabled": False, "names": ["custom:7b"]})
+    off = AppliesRule.from_policy({"enabled": False, "names": ["custom:7b"]}, floor=FLOOR)
     for name in ("astra-cyber-9b", SOURCE_TAGS[0], "custom:7b"):
         decision = decide(name, off)
         assert (decision.applies, decision.reason) == (False, AppliesReason.DISABLED_BY_POLICY)
@@ -141,7 +143,7 @@ def test_disabled_policy_and_kill_switch_turn_it_off_for_everyone():
 def test_applies_agrees_with_the_block_list_on_what_a_name_means():
     from sonder_runtime.domain import tool_lane_models as lanes
 
-    deny = lanes.ToolLaneDenyList.from_policy(None)
+    deny = lanes.ToolLaneDenyList.from_policy(None, floor=FLOOR)
     for name in ("astra-cyber-9b:latest", "x/astra-cyber-27b", SOURCE_TAGS[0], "sonder:latest", "qwen3:4b"):
         assert decide(name, DEFAULT_RULE).applies == lanes.decide(name, deny, free_form=False).denied
 

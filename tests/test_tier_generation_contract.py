@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 import pytest
 
-from sonder_runtime.adapters import runtime_policy, tool_lane_guard
+from sonder_runtime.adapters import restricted_tool_lane, runtime_policy, tool_lane_guard
 from sonder_runtime.adapters.provider_bindings import ProviderBindings
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -340,6 +340,7 @@ def _generation_host(graph, wire):
         "_model_usage_count": lambda x: x, "_model_usage_source": lambda *x: "measured",
         "_response_metadata": response_metadata,
         "activity_tracker": SimpleNamespace(record_model_call=lambda **kw: None),
+        "_restricted_tool_lane": restricted_tool_lane, "restricted": None,
     }
     module = ast.Module(body=[funcs["_make_generate"], funcs["_make_tier_generate"]], type_ignores=[])
     exec(compile(module, "server.py", "exec"), namespace)

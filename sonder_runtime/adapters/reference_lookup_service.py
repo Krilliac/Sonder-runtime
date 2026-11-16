@@ -30,6 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.reference_lookup_state as _state
 import sonder_runtime.adapters.runtime_policy as _policy
 from sonder_runtime.application.chat import reference_lookup as _lookup
@@ -132,7 +133,7 @@ def _rule(policy: Mapping[str, Any] | None = None) -> _applies.AppliesRule:
             return _policy.reference_lookup_rule(policy)
         return _cached_rule()
     except Exception:  # noqa: BLE001  # lookup is a help, not a safeguard: defaults stay in force
-        return _applies.AppliesRule.from_policy(None)
+        return _applies.AppliesRule.from_policy(None, floor=_model_tool_policy.shipped_floor())
 
 
 def applies(model: Any, policy: Mapping[str, Any] | None = None) -> _applies.AppliesDecision:
