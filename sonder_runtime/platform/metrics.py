@@ -275,6 +275,11 @@ class MetricsRegistry:
                 "Compute placement rejections by bounded reason code",
                 ["reason"], registry=self._registry,
             )
+            self.num_ctx_mismatch_total = Counter(
+                "sonder_num_ctx_mismatch_total",
+                "Loaded models whose effective num_ctx differs from the one sent",
+                registry=self._registry,
+            )
         else:
             noop = _NoopMetric()
             for name in (
@@ -296,6 +301,7 @@ class MetricsRegistry:
                 "ollama_worker_circuit_state_total",
                 "compute_nodes", "compute_active_jobs",
                 "compute_placements_total", "compute_placement_rejections_total",
+                "num_ctx_mismatch_total",
             ):
                 setattr(self, name, noop)
 
@@ -397,6 +403,10 @@ class MetricsRegistry:
             elapsed = 0.0
         self.model_calls_total.labels(tier=route, result=outcome).inc()
         self.model_call_duration_seconds.labels(tier=route).observe(elapsed)
+
+    def observe_num_ctx_mismatch(self) -> None:
+        """Count one loaded model running a different window than was sent."""
+        self.num_ctx_mismatch_total.inc()
 
     def observe_request_cache(self, result: str) -> None:
         """Record a deterministic-cache consultation with a closed label set."""
