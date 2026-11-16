@@ -267,14 +267,17 @@ void main() {
         expect(tester.getSize(find.byKey(const Key('composer-send'))),
             const Size(48, 48));
 
-        // Its edge darkens while the box has focus, and only then.
+        // Its edge takes the accent while the box has focus, and only then;
+        // the accent edge is 3:1 against the page (WCAG 1.4.11).
         final field = tester.widget<TextField>(find.byType(TextField));
         field.focusNode!.unfocus();
         await _settle(tester);
         expect(decoration().border, Border.all(color: tokens.hairline));
         field.focusNode!.requestFocus();
         await _settle(tester);
-        expect(decoration().border, Border.all(color: tokens.hairlineStrong));
+        expect(decoration().border, Border.all(color: tokens.accentText));
+        expect(SonderContrast.ratio(tokens.accentText, tokens.canvas),
+            greaterThanOrEqualTo(SonderContrast.control));
         await unmountChat(tester);
       }
     });

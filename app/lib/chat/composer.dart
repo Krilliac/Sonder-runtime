@@ -303,7 +303,7 @@ class _ComposerSurfaceState extends State<_ComposerSurface> {
         color: tokens.panel,
         borderRadius: BorderRadius.circular(SonderRadius.composer),
         border: Border.all(
-          color: focused ? tokens.hairlineStrong : tokens.hairline,
+          color: focused ? tokens.accentText : tokens.hairline,
         ),
         boxShadow: tokens.lift,
       ),
