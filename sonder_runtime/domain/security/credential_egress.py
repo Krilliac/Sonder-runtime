@@ -125,6 +125,9 @@ class RedirectChain:
         return checked
 
 
+_HOST_SCOPE = re.compile(r"[a-z0-9_*-]{1,63}(?:\.[a-z0-9_*-]{1,63})*")
+
+
 def _normalize_host(host: str) -> str:
     value = host.strip().lower().rstrip(".")
     if (
@@ -134,13 +137,22 @@ def _normalize_host(host: str) -> str:
         or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)
     ):
         raise ValueError("invalid host scope")
+    if ":" in value:
+        # Only an IPv6 literal, as EgressTarget.parse yields it, may hold ":".
+        try:
+            ip_address(value)
+        except ValueError as exc:
+            raise ValueError("invalid host scope") from exc
+        return value
     try:
         # IDNA maps U+3002 and friends to "."; trim again after encoding.
         encoded = value.encode("idna").decode("ascii").rstrip(".")
     except UnicodeError as exc:
         raise ValueError("invalid host scope") from exc
-    if not encoded or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in encoded):
-        # NFKC in the IDNA step maps compatibility characters (U+00A8, ...) to space.
+    if not _HOST_SCOPE.fullmatch(encoded):
+        # NFKC in the IDNA step turns compatibility characters into " ", "/",
+        # ":", "@", "." and other delimiters (U+00A8, U+FF0F, U+2100, U+FF20,
+        # U+2024, ...); only whole letter/digit/"-"/"_"/"*" labels remain.
         raise ValueError("invalid host scope")
     return encoded
 

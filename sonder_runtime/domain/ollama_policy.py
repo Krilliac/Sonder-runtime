@@ -29,26 +29,47 @@ def _candidate(value=None) -> str:
     return raw if "://" in raw else "http://%s" % raw
 
 
-def _trim_tail(text: str) -> str:
-    """Drop trailing "/" and whitespace together, in one linear pass.
+def _has_space_or_control(text: str) -> bool:
+    return any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in text)
 
-    The scan never crosses the first ``://`` so the result still contains it,
-    which keeps ``normalize`` a fixed point on text that is not an origin.
+
+def text_error(value=None) -> str:
+    """Return why the configured text can never name an origin, or ``""``.
+
+    Every gate (``policy_error``, worker validation) asks this about the text
+    as configured, trimmed once at both ends like ``_candidate`` does.  The
+    answer is the same before and after ``normalize``, which never removes an
+    interior whitespace, control or backslash character.
     """
+    raw = str(DEFAULT_HOST if value is None else value).strip()
+    if "\\" in raw:
+        return "must not contain a backslash"
+    if _has_space_or_control(raw):
+        return "is malformed or contains whitespace or control characters"
+    return ""
+
+
+def _trim_slashes(text: str) -> str:
+    """Drop trailing "/" only, never past the first ``://``."""
     floor = text.find("://") + 3
-    end = len(text)
-    while end > floor and (text[end - 1] == "/" or text[end - 1].isspace()):
-        end -= 1
-    return text[:end]
+    return text[:max(floor, len(text.rstrip("/")))]
 
 
 def normalize(value=None) -> str:
     """Return a canonical origin and rewrite exact bind-all hosts to loopback.
 
-    Text that is not a recognisable origin is returned trimmed but otherwise
-    unchanged; ``normalize`` is idempotent on every input.
+    Only the two ends are trimmed: whitespace, then trailing "/".  Text holding
+    whitespace or a control character anywhere else is returned as it is, so a
+    later gate still sees it; other text that is not a recognisable origin is
+    returned with its trailing "/" removed.  Every return value is a fixed
+    point: ``normalize(normalize(x)) == normalize(x)``.
     """
-    candidate = _trim_tail(_candidate(value))
+    candidate = _candidate(value)
+    if _has_space_or_control(candidate):
+        # urlparse silently deletes tab/CR/LF and int() accepts padded ports;
+        # canonicalising here would launder the text for whoever gates next.
+        return candidate
+    candidate = _trim_slashes(candidate)
     try:
         parsed = urllib.parse.urlparse(candidate)
         host = parsed.hostname
@@ -107,13 +128,9 @@ def is_loopback(value=None) -> bool:
 
 def policy_error(value=None, *, allow_remote=False) -> str:
     """Return a security error, or ``""`` for an accepted origin."""
-    # Validate the text as given (trimmed once at the ends) before any
-    # normalisation, so trimming can never uncover or hide an interior byte.
-    raw = str(DEFAULT_HOST if value is None else value).strip()
-    if "\\" in raw:
-        return "OLLAMA_HOST must not contain a backslash"
-    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw):
-        return "OLLAMA_HOST is malformed or contains whitespace or control characters"
+    reason = text_error(value)
+    if reason:
+        return "OLLAMA_HOST " + reason
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)

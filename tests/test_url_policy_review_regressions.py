@@ -7,6 +7,7 @@ import pytest
 
 import web_tools
 from sonder_runtime.adapters import web_search
+from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.security import credential_egress as egress
 from sonder_runtime.platform.config import load_config
@@ -33,22 +34,216 @@ def test_ollama_policy_error_still_accepts_padded_origins():
         assert ollama_policy.policy_error(value, allow_remote=True) == ""
 
 
+def test_ollama_policy_error_names_the_backslash():
+    for value in ("http://a" + chr(92) + "@127.0.0.1:11434", "http://127.0.0.1:11434" + chr(92)):
+        assert ollama_policy.policy_error(value, allow_remote=True) == "OLLAMA_HOST must not contain a backslash"
+    assert "whitespace or control" in ollama_policy.policy_error("http://127.0.0.1 :11434")
+
+
 @pytest.mark.parametrize("value", [
     "http://127.0.0.1:11434" + "/ " * 40,
     "http://a/ /",
     ":[::]://",
     "/",
     "http://" + "/ " * 5000,
+    "http:// /#",
+    "http://\u3000://",
+    "%\x1c\n:",
+    "http://%\x1c",
+    "http://.:80",
+    "http://h:1/?",
+    "x:///",
 ])
 def test_ollama_normalize_is_a_fixed_point(value):
     once = ollama_policy.normalize(value)
     assert ollama_policy.normalize(once) == once
 
 
+def test_ollama_normalize_fixed_point_survives_mutation_fuzz():
+    import random
+
+    rng = random.Random(20261116)
+    pieces = ["/", " ", "\t", "\n", "%", "@", ":", "[", "]", ".", "#", "?", "//", "://", "http://", "\u3000",
+              "\u2028", "\xa0", "\x1c", "\x85", "\x7f", "0.0.0.0", "localhost", "::", "11434", "a"]
+    for _ in range(20000):
+        value = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 8)))
+        once = ollama_policy.normalize(value)
+        assert ollama_policy.normalize(once) == once, (value, once)
+
+
+@pytest.mark.parametrize("value", [
+    "http://loc\nalhost:11434",
+    "http://127.0.0.1\t:11434",
+    "http://localhost:11434 /",
+    "http://localhost:11434/ /",
+    "http://localhost:11\r\n434",
+    "http://0.0.0.0:11434\x1c//",
+    "https://\u202810.0.0.5:11434 /",
+])
+def test_ollama_normalize_never_launders_interior_whitespace(value):
+    # A caller that normalizes first and gates second must still be refused.
+    once = ollama_policy.normalize(value)
+    assert once == value
+    assert ollama_policy.policy_error(once, allow_remote=True) != ""
+
+
+# Text base refused, or accepted only because urlparse and int() forgive
+# whitespace; each must be refused at every production entry point.
+_HOSTILE_ORIGINS = [
+    "http://127.0.0.1:11434" + "/ " * 40,
+    "http://localhost:11434/ /",
+    "http://localhost:11434 /",
+    "http://localhost:11434\x1f/",
+    "http://0.0.0.0:11434\x1c//",
+    "https://w.example.com:8443/ / /",
+    "https://w.example.com:8443 /",
+    "https://w.example.com:8443\xa0/",
+    "https://w.example.com:8443\u3000/",
+    "https://w.example.com:8443\u2028/",
+    "https://\u202810.0.0.5:11434 /",
+    "http://loc\nalhost:11434",
+    "http://127.0.0.1\t:11434",
+    "http://127.0.0.1:11434" + chr(92),
+    "http://a" + chr(92) + "@127.0.0.1:11434",
+    "http://[::1%25lo]:11434",
+    "http://[::1%lo]:11434",
+]
+
+# (configured text, canonical origin) pairs that main accepts and must keep.
+_LEGIT_LOCAL = [
+    ("127.0.0.1:11434", "http://127.0.0.1:11434"),
+    ("127.0.0.1:11434\n", "http://127.0.0.1:11434"),
+    ("http://127.0.0.1:11434\r\n", "http://127.0.0.1:11434"),
+    ("  http://localhost:11434  ", "http://127.0.0.1:11434"),
+    ("[::1]:11434", "http://[::1]:11434"),
+    ("http://localhost:11434/", "http://127.0.0.1:11434"),
+    ("http://localhost:11434//", "http://127.0.0.1:11434"),
+    ("HTTP://LOCALHOST:11434", "http://127.0.0.1:11434"),
+    ("http://0.0.0.0:11434", "http://127.0.0.1:11434"),
+]
+_LEGIT_REMOTE = [
+    ("https://b\u00fccher.de:443", "https://b\u00fccher.de:443"),
+    ("https://Ollama.Example.COM:8443/", "https://ollama.example.com:8443"),
+    ("https://w.example.com:8443//\n", "https://w.example.com:8443"),
+]
+
+
+@pytest.mark.parametrize("value", _HOSTILE_ORIGINS)
+@pytest.mark.parametrize("allow_remote", [False, True])
+def test_configured_origin_and_client_environment_refuse_hostile_text(value, allow_remote):
+    with pytest.raises(ValueError):
+        ollama_endpoint.configured_origin(value, allow_remote=allow_remote)
+    environment = {"OLLAMA_HOST": value}
+    if allow_remote:
+        environment["SONDER_ALLOW_REMOTE_OLLAMA"] = "1"
+    with pytest.raises(ValueError):
+        ollama_endpoint.client_environment(environment)
+
+
+@pytest.mark.parametrize("value", _HOSTILE_ORIGINS)
+@pytest.mark.parametrize("allow_remote", [False, True])
+def test_worker_entry_points_refuse_hostile_text(value, allow_remote):
+    with pytest.raises(ValueError):
+        ollama_pool.validate_worker_origin(value, allow_remote=allow_remote)
+    environment = {"SONDER_OLLAMA_WORKERS": value}
+    if allow_remote:
+        environment["SONDER_ALLOW_REMOTE_OLLAMA"] = "1"
+    with pytest.raises(ValueError):
+        ollama_pool.from_environment("http://127.0.0.1:11434", environment)
+    with pytest.raises(ValueError):
+        ollama_pool.from_environment(value, dict(environment, SONDER_OLLAMA_WORKERS=""))
+
+
+def test_worker_origin_errors_name_the_reason():
+    with pytest.raises(ValueError, match="whitespace or control"):
+        ollama_pool.validate_worker_origin("https://w.example.com:8443 /", allow_remote=True)
+    with pytest.raises(ValueError, match="backslash"):
+        ollama_pool.validate_worker_origin("http://127.0.0.1:11434" + chr(92), allow_remote=True)
+    with pytest.raises(ValueError, match="zone id or percent"):
+        ollama_pool.validate_worker_origin("http://[::1%25lo]:11434", allow_remote=True)
+
+
+@pytest.mark.parametrize("value,origin", _LEGIT_LOCAL + _LEGIT_REMOTE)
+def test_production_entry_points_keep_accepting_legitimate_origins(value, origin):
+    remote = (value, origin) in _LEGIT_REMOTE
+    environment = {"SONDER_ALLOW_REMOTE_OLLAMA": "1"} if remote else {}
+    assert ollama_endpoint.configured_origin(value, allow_remote=remote) == origin
+    assert ollama_endpoint.client_environment(dict(environment, OLLAMA_HOST=value))["OLLAMA_HOST"] == origin
+    assert ollama_pool.validate_worker_origin(value, allow_remote=remote) == origin
+    assert ollama_pool.from_environment(value, dict(environment)).configured_origins == (origin,)
+    if origin != "http://127.0.0.1:11434":
+        pool = ollama_pool.from_environment("http://127.0.0.1:11434", dict(environment, SONDER_OLLAMA_WORKERS=value))
+        assert pool.configured_origins == ("http://127.0.0.1:11434", origin)
+    if remote:
+        with pytest.raises(ValueError):
+            ollama_endpoint.configured_origin(value, allow_remote=False)
+        with pytest.raises(ValueError):
+            ollama_pool.validate_worker_origin(value, allow_remote=False)
+
+
+def test_configured_origin_gates_on_the_configured_text(monkeypatch):
+    seen = []
+    real = ollama_policy.policy_error
+
+    def spy(value=None, *, allow_remote=False):
+        seen.append(value)
+        return real(value, allow_remote=allow_remote)
+
+    monkeypatch.setattr(ollama_policy, "policy_error", spy)
+    assert ollama_endpoint.configured_origin(" HTTP://LOCALHOST:11434/ ", allow_remote=False) == "http://127.0.0.1:11434"
+    assert seen == ["HTTP://LOCALHOST:11434/"]
+
+
 @pytest.mark.parametrize("host", ["a\u00a8b.com", "a\u00afb.com", "a\u00b4b.com", "a\u02d8b.com"])
 def test_egress_normalize_host_rejects_nfkc_space(host):
     with pytest.raises(ValueError):
         egress._normalize_host(host)
+
+
+@pytest.mark.parametrize("host", [
+    "https\uff1a\uff0f\uff0fevil.com",  # NFKC -> https://evil.com
+    "a\u2100b.com",  # -> aa/cb.com
+    "a\uff20b.com",  # -> a@b.com
+    "a\uff1ab.com",  # -> a:b.com
+    "\uff1a\uff1a1",  # -> ::1, not an address as written
+    "\u2024evil.com",  # -> .evil.com
+    "a\u2026b.com",  # -> a...b.com
+    "a\uff1fb.com",  # -> a?b.com
+    "a?b.com",
+    "[ab].example.com",
+    "evil.com:443",
+    "a b.com",
+])
+def test_egress_normalize_host_rejects_delimiters_after_idna(host):
+    with pytest.raises(ValueError):
+        egress._normalize_host(host)
+
+
+@pytest.mark.parametrize("host,scope", [
+    ("example.com", "example.com"),
+    ("*.example.com", "*.example.com"),
+    ("*", "*"),
+    ("Example.COM.", "example.com"),
+    (" example.com\n", "example.com"),
+    ("b\u00fccher.de", "xn--bcher-kva.de"),
+    ("*.B\u00dcCHER.de", "*.xn--bcher-kva.de"),
+    ("xn--bcher-kva.de", "xn--bcher-kva.de"),
+    ("example.com\u3002", "example.com"),
+    ("my_host.internal", "my_host.internal"),
+    ("127.0.0.1", "127.0.0.1"),
+    ("::1", "::1"),
+    ("2001:DB8::1", "2001:db8::1"),
+])
+def test_egress_normalize_host_keeps_legitimate_scopes(host, scope):
+    assert egress._normalize_host(host) == scope
+    assert egress._normalize_host(scope) == scope
+
+
+def test_egress_ipv6_scope_still_matches_its_literal():
+    handle = egress.CredentialHandle.mint("issuer", ("::1", "good.com"))
+    assert handle.allows("https://[::1]:8443/x")
+    assert handle.allows("https://good.com/x")
+    assert not handle.allows("https://evil.com/x")
 
 
 def _feed(url):
