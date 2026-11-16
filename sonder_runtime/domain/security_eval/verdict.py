@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import DatasetRecordError
-from .records import LineRange, parse_line_range
+from .records import LineRange, check_relative_path, parse_line_range
 
 VERDICTS = ("CONFIRMED", "REFUTED", "UNCERTAIN")
 MAX_REASON_CHARS = 500
@@ -50,7 +50,10 @@ def _clean(text: str) -> str:
     if not isinstance(text, str):
         raise VerdictParseError("the reply is not text")
     text = text[:MAX_TEXT_CHARS]
-    text = _THINK_RE.sub("", text)
+    if "</think>" in text.lower():
+        # Without a closer the lazy match cannot succeed, but it would rescan to the end from
+        # every opener (quadratic on a run of "<think>").
+        text = _THINK_RE.sub("", text)
     start = text.lower().find("<think>")
     if start >= 0:
         text = text[:start]
@@ -63,13 +66,22 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
     return [match.span(1) for match in _FENCE_RE.finditer(text)]
 
 
+_MAX_FAILED_DECODES = 64
+
+
 def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right."""
     index = text.find(opener)
+    failures = 0
     while index >= 0:
         try:
             value, end = _DECODER.raw_decode(text, index)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A legitimate reply has a handful of brace groups; 64 failed
+            # decodes bound the scan so a long run of openers stays linear.
+            failures += 1
+            if failures >= _MAX_FAILED_DECODES:
+                return
             index = text.find(opener, index + 1)
             continue
         yield index, value
@@ -110,13 +122,23 @@ def parse_verdict(text: str) -> ParsedVerdict:
     raise VerdictParseError("the reply holds no verdict")
 
 
+def _safe_file(value: object) -> str:
+    """A model-named file as a plain relative path, or ``""`` (the chunk's own file) when it is not one."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        return check_relative_path(value.strip().replace("\\", "/"))
+    except DatasetRecordError:
+        return ""
+
+
 def _hypothesis(item: object) -> ParsedHypothesis | None:
     if not isinstance(item, dict):
         return None
     hypothesis = item.get("hypothesis")
     if not isinstance(hypothesis, str) or not hypothesis.strip():
         return None
-    file = item.get("file")
+    file = _safe_file(item.get("file"))
     lines = None
     if "lines" in item:
         try:
@@ -128,8 +150,7 @@ def _hypothesis(item: object) -> ParsedHypothesis | None:
         value = item.get(name)
         return value.strip()[:limit] if isinstance(value, str) else ""
 
-    return ParsedHypothesis(file=file.strip().replace("\\", "/")[:1024] if isinstance(file, str) else "",
-                            lines=lines, category=text("category", 64),
+    return ParsedHypothesis(file=file, lines=lines, category=text("category", 64),
                             hypothesis=hypothesis.strip()[:4000], severity=text("severity", 32))
 
 
