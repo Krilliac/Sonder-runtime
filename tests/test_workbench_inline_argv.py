@@ -183,3 +183,79 @@ def test_run_program_allows_ordinary_invocations(launch, case):
 ])
 def test_inline_interpreter_key_normalizes_names(basename, key):
     assert workbench._inline_interpreter_key(basename) == key
+
+
+# Follow-up bypasses: option values and operands that carry program text.
+REFUSED_VALUES = [
+    # perl -d:MOD=... builds `use Devel::MOD LIST`; bare -d reads debugger
+    # commands (code) from stdin; -F's pattern is pasted into split(...).
+    ("/usr/bin/perl", ["-d:Foo=1", "script.pl"], ""),
+    ("/usr/bin/perl", ["-d=x", "script.pl"], ""),
+    ("/usr/bin/perl", ["-d:Foo;print", "script.pl"], ""),
+    ("/usr/bin/perl", ["-d", "script.pl"], "p 1"),
+    ("/usr/bin/perl", ["-F,", "script.pl"], ""),
+    ("/usr/bin/perl", ["-aF/x/", "script.pl"], ""),
+    # node folds '_' into '-' in option names, and loads data: URLs.
+    ("C:/node/node.exe", ["--experimental_loader", "data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--experimental_loader=data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--loader=data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--require", "data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["-r", "data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--input_type=module", "--experimental_loader=DATA:x,1"], ""),
+    ("C:/node/node.exe", ["--input-type=module"], "console.log(1)"),
+    # deno/bun run data: and remote URLs as the program.
+    ("C:/deno/deno.exe", ["run", "data:text/javascript,console.log(1)"], ""),
+    ("C:/deno/deno.exe", ["run", "https://example.com/x.ts"], ""),
+    ("C:/deno/deno.exe", ["https://example.com/x.ts"], ""),
+    ("C:/deno/deno.exe", ["test", "http://example.com/x_test.ts"], ""),
+    ("C:/deno/deno.exe", ["run", "-A", " DATA:text/javascript,1"], ""),
+    ("C:/bun/bun.exe", ["data:text/javascript,console.log(1)"], ""),
+    ("C:/bun/bun.exe", ["run", "https://example.com/x.ts"], ""),
+    # python -m modules that run code from argv or stdin, or chain to one.
+    (PY, ["-m", "code"], ""),
+    (PY, ["-m", "timeit", "1"], ""),
+    (PY, ["-mtimeit", "1"], ""),
+    (PY, ["-Im", "code"], ""),
+    (PY, ["-m", "pdb", "script.py"], ""),
+    (PY, ["-m", "profile", "-m", "code"], ""),
+    (PY, ["-m", "cProfile", "-m", "code"], ""),
+    (PY, ["-m", "trace", "--trace", "-m", "code"], ""),
+    (PY, ["-m", "runpy", "code"], ""),
+    (PY, ["-m", "idlelib", "-c", "1"], ""),
+    (PY, ["-m", "idlelib.idle", "-c", "1"], ""),
+    (PY, ["-m", "IPython", "-c", "1"], ""),
+    (PY, ["-m", "asyncio"], ""),
+    (PY, ["-m", "_pyrepl"], ""),
+    ("C:/Windows/py.exe", ["-3.12", "-m", "pdb", "script.py"], ""),
+]
+
+ALLOWED_VALUES = [
+    ("/usr/bin/perl", ["-d:NYTProf", "script.pl"], ""),
+    ("/usr/bin/perl", ["-dt:Foo::Bar", "script.pl"], ""),
+    ("C:/node/node.exe", ["--require", "./hook.js", "x.js"], ""),
+    ("C:/node/node.exe", ["--experimental_loader", "./loader.mjs", "x.js"], ""),
+    ("C:/deno/deno.exe", ["run", "main.ts", "https://example.com"], ""),
+    ("C:/deno/deno.exe", ["run", "-A", "main.ts"], ""),
+    ("C:/bun/bun.exe", ["run", "main.ts"], ""),
+    (PY, ["-m", "pytest", "-q"], ""),
+    (PY, ["-m", "pip", "--version"], ""),
+    (PY, ["-m", "codecs"], ""),
+    (PY, ["-m", "compileall", "."], ""),
+    (PY, ["-m", "site"], ""),
+    (PY, ["-m", "pydoc", "json"], ""),
+    (PY, ["-m", "unittest", "discover"], ""),
+]
+
+
+@pytest.mark.parametrize("case", REFUSED_VALUES, ids=[_id(c) for c in REFUSED_VALUES])
+def test_run_program_refuses_program_text_in_option_values(launch, case):
+    program, args, stdin = case
+    with pytest.raises(PermissionError, match="script_run"):
+        launch(program, args, stdin)
+
+
+@pytest.mark.parametrize("case", ALLOWED_VALUES, ids=[_id(c) for c in ALLOWED_VALUES])
+def test_run_program_allows_ordinary_option_values(launch, case):
+    program, args, stdin = case
+    with pytest.raises(_Launched):
+        launch(program, args, stdin)
