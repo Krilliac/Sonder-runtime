@@ -1,5 +1,6 @@
 """Bounded, local-only configuration for durable batch jobs (``[batch_jobs]``)."""
 from dataclasses import dataclass
+from typing import Protocol
 
 ORDERS = ("stage_major", "item_major")
 
@@ -35,9 +36,16 @@ _INT_RANGES = (
 )
 
 
-def batch_jobs_errors(config) -> list[str]:
+class _HasBatchJobs(Protocol):
+    """The one attribute of the platform config that the validator reads."""
+
+    @property
+    def batch_jobs(self) -> BatchJobsConfig: ...
+
+
+def batch_jobs_errors(config: _HasBatchJobs) -> list[str]:
     section = config.batch_jobs
-    errors = []
+    errors: list[str] = []
     if type(section.enabled) is not bool:
         errors.append("[batch_jobs].enabled must be a boolean")
     for name, low, high in _INT_RANGES:

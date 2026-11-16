@@ -34,6 +34,7 @@ sonder_runtime/adapters/execution/output_batching.py
 sonder_runtime/adapters/execution/sandbox.py
 sonder_runtime/adapters/execution/subagent_dispatch_verifier.py
 sonder_runtime/adapters/external_mcp.py
+sonder_runtime/adapters/fanout_execution.py
 sonder_runtime/adapters/filesystem/__init__.py
 sonder_runtime/adapters/filesystem/sealed_python_main.py
 sonder_runtime/adapters/filesystem/typed.py
@@ -75,6 +76,7 @@ sonder_runtime/adapters/ollama/__init__.py
 sonder_runtime/adapters/ollama/gateway.py
 sonder_runtime/adapters/openai_compat/__init__.py
 sonder_runtime/adapters/persistence/__init__.py
+sonder_runtime/adapters/persistence/batch_store.py
 sonder_runtime/adapters/persistence/interactive_root_reconciliation.py
 sonder_runtime/adapters/persistence/repair_journal.py
 sonder_runtime/adapters/persistence/session_checkpoint_privacy.py
@@ -130,6 +132,8 @@ sonder_runtime/application/artifacts/master_fanin.py
 sonder_runtime/application/artifacts/readiness.py
 sonder_runtime/application/automation/__init__.py
 sonder_runtime/application/backup/__init__.py
+sonder_runtime/application/batch_jobs/__init__.py
+sonder_runtime/application/batch_jobs/runner.py
 sonder_runtime/application/build/__init__.py
 sonder_runtime/application/build/run_service.py
 sonder_runtime/application/build/strategy_bridge.py
@@ -230,6 +234,7 @@ sonder_runtime/application/persistence/outbox_cas.py
 sonder_runtime/application/plugin_manifest.py
 sonder_runtime/application/ports/__init__.py
 sonder_runtime/application/ports/artifact_store.py
+sonder_runtime/application/ports/batch_jobs.py
 sonder_runtime/application/ports/clock.py
 sonder_runtime/application/ports/command_catalog.py
 sonder_runtime/application/ports/compaction.py
@@ -347,6 +352,8 @@ sonder_runtime/application/workflows/__init__.py
 sonder_runtime/application/workflows/restart_recovery.py
 sonder_runtime/bootstrap/__init__.py
 sonder_runtime/bootstrap/anthropic_cli.py
+sonder_runtime/bootstrap/batch_job_executor.py
+sonder_runtime/bootstrap/batch_job_tools.py
 sonder_runtime/bootstrap/capabilities.py
 sonder_runtime/bootstrap/claim_check_agent_tools.py
 sonder_runtime/bootstrap/container.py
@@ -372,6 +379,7 @@ sonder_runtime/domain/approvals_limit.py
 sonder_runtime/domain/artifact_mobility_label.py
 sonder_runtime/domain/automation/__init__.py
 sonder_runtime/domain/automation/state_machine.py
+sonder_runtime/domain/batch_jobs.py
 sonder_runtime/domain/binaries/__init__.py
 sonder_runtime/domain/binaries/pe_debug.py
 sonder_runtime/domain/binaries/symstore.py
@@ -439,6 +447,7 @@ sonder_runtime/domain/public_policy.py
 sonder_runtime/domain/reference_lookup/__init__.py
 sonder_runtime/domain/reference_lookup/answer_check.py
 sonder_runtime/domain/reference_lookup/applies.py
+sonder_runtime/domain/reference_lookup/library_meta.py
 sonder_runtime/domain/reference_lookup/models.py
 sonder_runtime/domain/reference_lookup/prompt.py
 sonder_runtime/domain/reference_lookup/relevance.py
@@ -501,6 +510,7 @@ sonder_runtime/interfaces/sdk/client.py
 sonder_runtime/interfaces/sdk/discovery.py
 sonder_runtime/interfaces/sdk/plugins.py
 sonder_runtime/platform/__init__.py
+sonder_runtime/platform/batch_jobs_config.py
 sonder_runtime/platform/child_environment_policy.py
 sonder_runtime/platform/claim_check_config.py
 sonder_runtime/platform/config_environment.py
