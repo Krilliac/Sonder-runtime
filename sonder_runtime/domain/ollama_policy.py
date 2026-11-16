@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1:11434"
 REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_OLLAMA"
 _TRUE = {"1", "true", "yes", "on"}
+_BAD_ORIGIN_CHARS = chr(92) + chr(127)  # backslash and DEL
 
 
 def remote_allowed(environment) -> bool:
@@ -30,7 +31,22 @@ def _candidate(value=None) -> str:
 
 
 def normalize(value=None) -> str:
-    """Return a canonical origin and rewrite exact bind-all hosts to loopback."""
+    """Return a canonical origin and rewrite exact bind-all hosts to loopback.
+
+    Text that is not a recognisable origin is returned trimmed but otherwise
+    unchanged; the result is iterated to a fixed point so ``normalize`` is
+    idempotent on every input.
+    """
+    current = _normalize_once(value)
+    for _ in range(16):
+        following = _normalize_once(current)
+        if following == current:
+            break
+        current = following
+    return current
+
+
+def _normalize_once(value=None) -> str:
     candidate = _candidate(value).rstrip("/")
     try:
         parsed = urllib.parse.urlparse(candidate)
@@ -79,6 +95,8 @@ def is_loopback(value=None) -> bool:
         host = urllib.parse.urlparse(normalize(value)).hostname
         if not host:
             return False
+        if "%" in host:
+            return False
         if host.casefold().rstrip(".") == "localhost":
             return True
         return ipaddress.ip_address(host).is_loopback
@@ -95,10 +113,14 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         port = parsed.port
     except ValueError:
         return "OLLAMA_HOST is malformed or has an invalid port"
+    if any(c.isspace() or c in _BAD_ORIGIN_CHARS or ord(c) < 32 for c in origin):
+        return "OLLAMA_HOST is malformed or contains whitespace or control characters"
     if parsed.scheme.lower() not in {"http", "https"}:
         return "OLLAMA_HOST must use http or https"
     if not host:
         return "OLLAMA_HOST must include a hostname"
+    if "%" in host:
+        return "OLLAMA_HOST must not contain a zone id or percent escape"
     if parsed.username is not None or parsed.password is not None:
         logger.critical(f"OLLAMA_HOST contains inline credentials -- credential exposure risk, origin rejected for security")
         logger.error(f"OLLAMA_HOST contains inline credentials, origin rejected for security")

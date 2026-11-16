@@ -1379,7 +1379,7 @@ def normalize_origin(value: str) -> str:
         host, _sep, port = authority.partition(":")
         if ":" in port:
             return text
-    if port and not port.isdigit():
+    if not host or (port and not port.isdigit()):
         return text
     if port and _DEFAULT_PORTS.get(scheme) == port:
         port = ""

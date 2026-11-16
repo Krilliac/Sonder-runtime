@@ -498,20 +498,44 @@ class _TextParser(HTMLParser):
         return re.sub(r"\n\s+", "\n", re.sub(r"[ \t]+", " ", text)).strip()
 
 
+def _http_result_or(url, fallback):
+    """Return ``url`` only when it is a plain http(s) URL without control text.
+
+    Result links come from untrusted search pages; anything else (javascript:,
+    data:, file:, entity-obfuscated schemes, embedded CR/LF) collapses to the
+    provider ``fallback``, which ``_search_rows`` drops as a blocked host.
+    """
+    if (
+        isinstance(url, str)
+        and url.startswith(("http://", "https://"))
+        and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url)
+    ):
+        return url
+    return fallback
+
+
 def _clean_result_url(url):
+    fallback = "https://duckduckgo.com/"
     url = html.unescape(url or "")
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return fallback
     qs = urllib.parse.parse_qs(parsed.query)
     if "uddg" in qs and qs["uddg"]:
-        return qs["uddg"][0]
+        return _http_result_or(qs["uddg"][0], fallback)
     if parsed.scheme in ("http", "https"):
-        return url
-    return urllib.parse.urljoin("https://duckduckgo.com", url)
+        return _http_result_or(url, fallback)
+    return _http_result_or(urllib.parse.urljoin("https://duckduckgo.com", url), fallback)
 
 
 def _clean_bing_result_url(url):
+    fallback = "https://www.bing.com/"
     url = html.unescape(url or "")
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return fallback
     values = urllib.parse.parse_qs(parsed.query).get("u") or []
     if values and values[0].startswith("a1"):
         encoded = values[0][2:]
@@ -519,10 +543,10 @@ def _clean_bing_result_url(url):
             padding = "=" * (-len(encoded) % 4)
             target = base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
             if target.startswith(("http://", "https://")):
-                return target
+                return _http_result_or(target, fallback)
         except (ValueError, UnicodeDecodeError):
             pass
-    return url
+    return _http_result_or(url, fallback)
 
 
 def _search_rows(text, source_url, limit):

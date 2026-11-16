@@ -127,12 +127,21 @@ class RedirectChain:
 
 def _normalize_host(host: str) -> str:
     value = host.strip().lower().rstrip(".")
-    if not value or "/" in value or "://" in value:
+    if (
+        not value
+        or "/" in value
+        or "://" in value
+        or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
         raise ValueError("invalid host scope")
     try:
-        return value.encode("idna").decode("ascii")
+        # IDNA maps U+3002 and friends to "."; trim again after encoding.
+        encoded = value.encode("idna").decode("ascii").rstrip(".")
     except UnicodeError as exc:
         raise ValueError("invalid host scope") from exc
+    if not encoded:
+        raise ValueError("invalid host scope")
+    return encoded
 
 
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
