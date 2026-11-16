@@ -819,6 +819,29 @@ def test_http_caller_cannot_turn_on_cloud_egress(role, mode, gate):
         assert os.environ.get("SONDER_ALLOW_CLOUD") == "0"
 
 
+
+@pytest.mark.parametrize("action", ["status", "off", "on"])
+@pytest.mark.parametrize("role", _ROLES)
+def test_http_cloud_opt_in_is_bound_to_admin_authority(role, action, strongest, tripwires, monkeypatch):
+    """A decision, not a side effect: ``cloud_opt_in`` is a runtime-policy change.
+
+    Cloud consent is process-wide, so on a shared deployment one account's
+    ``on`` sends every later ``cloud-*`` prompt off the machine. Over HTTP it
+    therefore needs the same authority as ``runtime_policy_update``. Before
+    this binding, a developer account could run every action (status, off
+    and on included) once an allow rule existed. The trusted surfaces
+    (api-key, local-open) and admins keep it.
+    """
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "0")
+    out = str(ts._handle_slash(f"/cloud_opt_in {action}", context=_http_context(role)))
+    ran = "cloud_opt_in" in tripwires
+    if role in ("user", "developer"):
+        assert not ran and out.startswith("refused /cloud_opt_in: administrator"), _fail(f"{role} {action}: {out!r}")
+    else:
+        assert ran, _fail(f"{role} {action}: {out!r}")
+    assert ts.SYSTEM_OPERATION_TOOLS["cloud_opt_in"] == "runtime_policy_change"
+    assert ts.SYSTEM_OPERATION_ROLES["runtime_policy_change"] == "admin"
+
 def test_user_role_agent_cannot_turn_on_cloud_even_under_an_allow_rule(gate, monkeypatch):
     _set_mode(pm.AUTO)
     _allow_every_tool(monkeypatch)
