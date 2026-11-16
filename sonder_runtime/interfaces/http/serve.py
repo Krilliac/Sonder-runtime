@@ -3761,20 +3761,6 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
     try:
         if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
             return _served_task_tool(tool_name, kwargs, context)
-        # `/loop` and `/workflow_run` hand their actions to `_loop_dispatch`,
-        # which refuses operator-only tools unless an authenticated operator
-        # vouches for the call. Only an administrator-authorized context (or
-        # the local console, which has none) does; ordinary accounts never
-        # reach operator actions here -- the global-operation gate above has
-        # already refused them.
-        operator_loop = tool_name in ("loop", "workflow_run") and (
-            context is None or _admin_authorized(context)
-        )
-        if operator_loop:
-            def _run_operator_loop():
-                with server.loop_operator_authority():
-                    return str(handler(**kwargs))
-            return _narrate_http_command(tool_name, kwargs, _run_operator_loop, context)
         return _narrate_http_command(tool_name, kwargs, lambda: str(handler(**kwargs)), context)
     except TypeError as error:
         return "%s: %s" % (tool_name, error)

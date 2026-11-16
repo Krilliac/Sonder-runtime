@@ -349,8 +349,6 @@ from sonder_runtime.domain.model_response_detail import (
 from sonder_runtime.domain.loop_actions import (
     LOOP_ACTION_TOOLS as _LOOP_ACTION_TOOLS,
     loop_action_tool as _loop_action_tool,
-    loop_operator_authority,
-    loop_operator_tool_refusal as _loop_operator_tool_refusal,
     loop_verdict_result as _loop_verdict_result_policy,
 )
 from sonder_runtime.domain.serve_selection import (
@@ -4369,6 +4367,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
             "found": True,
             "reward": score,
             "outcome_inserted": recorded["outcome_inserted"],
+            "usage_rows_kept": recorded.get("usage_rows_kept", 0),
             "distillation_state": recorded["distillation_state"],
             "lesson_id": None,
             "distillation_reason": None,
@@ -7489,6 +7488,8 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    if result.get("usage_rows_kept"):
+        msg += " Lesson credit unchanged: stronger runtime evidence exists."
     return msg
 
 
@@ -15292,7 +15293,7 @@ def _loop_dispatch(action):
         k: v for k, v in (action or {}).items()
         if k not in {"code", "content", "files"}
     }
-    refusal = _loop_operator_tool_refusal(action_type, _LOOP_ACTION_TYPES, _AGENT_SYSTEM_OPERATOR_TOOLS) or _loop_permission_refusal(action_type, action)
+    refusal = _loop_permission_refusal(action_type, action)
     if refusal is not None:
         # A refused action never entered the queue.  Recording it as a normal
         # successful tool call made activity consumers report it as completed

@@ -727,34 +727,68 @@ def test_agent_dispatch_refuses_operator_tools_even_in_auto_mode(tool, monkeypat
     assert called == [] and out.startswith("ERROR: HOST POLICY"), out
 
 
-def test_loop_dispatch_refuses_learn_preference_in_default_mode(
-    monkeypatch, mode_sandbox,
-):
-    """`learn_preference` is operator-only on the agent dispatcher; a loop
-    action resolving to any `_AGENT_SYSTEM_OPERATOR_TOOLS` member is refused
-    the same way unless an authenticated operator surface vouches for it."""
+@pytest.mark.parametrize("tool", ["loop", "workflow_run"])
+@pytest.mark.parametrize("spelling", ["exact", "upper", "padded"])
+def test_model_dispatch_cannot_invoke_loop(tool, spelling, monkeypatch, mode_sandbox):
+    """The model-facing dispatcher refuses `loop` / `workflow_run`, so a model
+    cannot reach `_loop_dispatch` (and with it `learn_preference`)."""
+    called = []
+    monkeypatch.setattr(server, tool, lambda *a, **k: called.append(tool) or "RAN")
+    monkeypatch.setattr(server, "_loop_dispatch", lambda *a, **k: called.append("dispatch") or {})
+    name = {"exact": tool, "upper": tool.upper(), "padded": f"  {tool}" + chr(10)}[spelling]
+    args = {"actions_json": '[{"type": "learn_preference", "text": "x"}]'}
+    out = server._agent_dispatch(name, args)
+    assert called == [], f"{name!r} reached the loop from the agent dispatcher"
+    assert isinstance(out, str) and out.startswith("ERROR"), out
+
+
+def _http_context(role):
+    return {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": role, "role": role},
+    }
+
+
+@pytest.mark.parametrize("role", ["user", "developer"])
+@pytest.mark.parametrize("action", ["learn_preference", "unload", "emotion_update"])
+def test_served_non_admin_loop_cannot_carry_an_operator_action(role, action):
+    """A served non-admin account's `/loop` with an operator action is refused
+    before `server.loop` runs; the console and stdio paths never go through it."""
+    import json
+    import sonder_runtime.interfaces.http.serve as serve
+    payload = json.dumps({"actions": [{"type": action}]})
+    refusal = serve._loop_global_operation_refusal(payload, _http_context(role))
+    assert refusal.startswith("refused /loop"), (role, action, refusal)
+
+
+def test_direct_operator_loop_still_runs_learn_preference(monkeypatch, mode_sandbox):
+    """No narrowing of console / stdio MCP trust: `server.loop` called directly
+    (REPL `/loop`, stdio MCP) still dispatches an operator action."""
     called = []
     monkeypatch.setattr(
         server, "learn_preference", lambda *a, **k: called.append((a, k)) or "RAN",
     )
-    result = server._loop_dispatch({"type": "learn_preference", "text": "always run x"})
-    assert "learn_preference" in server._LOOP_ACTION_TYPES
-    assert called == []
-    assert result["ok"] is False and "HOST POLICY" in result["output"]
+    server.loop('[{"type": "learn_preference", "text": "always run x"}]', max_iterations=1)
+    assert len(called) == 1
 
 
-def test_loop_dispatch_runs_learn_preference_for_an_operator_surface(
-    monkeypatch, mode_sandbox,
-):
-    called = []
-    monkeypatch.setattr(
-        server, "learn_preference", lambda *a, **k: called.append((a, k)) or "RAN",
+@pytest.mark.parametrize("role", ["user", "developer"])
+@pytest.mark.parametrize("action", ["memory_privacy_repair", "memory_quality_repair"])
+def test_loop_spelling_meets_the_same_role_boundary_as_the_tool_route(role, action):
+    """`/loop [{"type": X}]` and `/X` agree on the served-role boundary for a
+    given account: both pass the role layer (developer) or both are refused
+    for lack of it (user). The remaining default-mode refusal on the direct
+    route is the permission gate, which `server.loop` applies per action
+    (see test_loop_dispatch_refuses_memory_repair_in_default_mode)."""
+    import json
+    import sonder_runtime.interfaces.http.serve as serve
+    ctx = _http_context(role)
+    direct = serve._http_tool_refusal((action,), "/" + action, ctx)
+    via_loop = serve._loop_global_operation_refusal(
+        json.dumps([{"type": action}]), ctx,
     )
-    with server.loop_operator_authority():
-        server._loop_dispatch({"type": "learn_preference", "text": "always run x"})
-    assert len(called) == 1
-    server._loop_dispatch({"type": "learn_preference", "text": "again"})
-    assert len(called) == 1
+    assert ("authorization" in direct) == ("authorization" in via_loop), (direct, via_loop)
+    assert ("authorization" in via_loop) == (role == "user"), via_loop
 
 
 @pytest.mark.parametrize("action", ["memory_privacy_repair", "memory_quality_repair"])
@@ -774,3 +808,86 @@ def test_loop_dispatch_refuses_memory_repair_in_default_mode(
 def test_loop_dispatch_cannot_reach_memory_export():
     assert "memory_export" not in server._LOOP_ACTION_TYPES
     assert "memory_export" in server._AGENT_SYSTEM_OPERATOR_TOOLS
+
+
+# --- lesson_usage write precedence: exact runtime > caller > heuristic ------
+
+def _attributed(db_path, iid, signal):
+    """Write an `attributed` (heuristic) outcome the way the runtime does."""
+    server._record_outcome_signal(iid, signal, source=rules.OUTCOME_SOURCE_ATTRIBUTED)
+
+
+def _usage_losses(db_path):
+    return _stats(db_path)["L1"]["losses"]
+
+
+def test_lesson_credit_exact_runtime_failure_is_not_erased_by_caller(db, distiller):
+    _seed_interaction(db, "P1")
+    server._record_outcome_signal("P1", "failed", source=rules.OUTCOME_SOURCE_MACHINE)
+    out = server.record_outcome("P1", "tests_passed")
+    assert _usage(db, "P1") == [("L1", "failed", -1.0, "machine")]
+    assert "Lesson credit unchanged" in out
+    assert _usage_losses(db) == 1
+
+
+def test_lesson_credit_caller_judgement_beats_heuristic_attribution(db, distiller):
+    _seed_interaction(db, "P2")
+    _attributed(db, "P2", "failed")
+    assert _usage(db, "P2") == [("L1", "failed", -1.0, "attributed")]
+    out = server.record_outcome("P2", "rejected")
+    assert _usage(db, "P2") == [("L1", "rejected", -0.5, "caller")]
+    assert "Lesson credit unchanged" not in out
+    assert _usage_losses(db) == 1
+
+
+def test_lesson_credit_exact_machine_failure_beats_heuristic_pass(db, distiller):
+    _seed_interaction(db, "P3")
+    _attributed(db, "P3", "tests_passed")
+    assert _usage(db, "P3") == [("L1", "tests_passed", 1.0, "attributed")]
+    server._record_outcome_signal("P3", "failed", source=rules.OUTCOME_SOURCE_MACHINE)
+    assert _usage(db, "P3") == [("L1", "failed", -1.0, "machine")]
+    assert _usage_losses(db) == 1
+
+
+def test_lesson_credit_exact_machine_failure_beats_caller_acceptance(db, distiller):
+    _seed_interaction(db, "P4")
+    server.record_outcome("P4", "accepted")
+    assert _usage(db, "P4")[0][3] == "caller"
+    server._record_outcome_signal("P4", "failed", source=rules.OUTCOME_SOURCE_MACHINE)
+    assert _usage(db, "P4") == [("L1", "failed", -1.0, "machine")]
+    assert _usage_losses(db) == 1
+
+
+def test_lesson_credit_self_curriculum_is_not_erased_by_caller(db, distiller):
+    _seed_interaction(db, "P5")
+    server.record_self_graded_outcome("P5", "failed")
+    server.record_outcome("P5", "accepted")
+    assert _usage(db, "P5") == [("L1", "failed", -1.0, "self_curriculum")]
+
+
+def test_lesson_credit_same_source_rewrite_is_allowed(db, distiller):
+    _seed_interaction(db, "P6")
+    server._record_outcome_signal("P6", "failed", source=rules.OUTCOME_SOURCE_MACHINE)
+    conn = server._open_db()
+    try:
+        n = memory_store._write_lesson_usage_outcome(
+            conn, "P6", "tests_passed", 1.0, rules.OUTCOME_SOURCE_MACHINE,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert n == 1
+    assert _usage(db, "P6") == [("L1", "tests_passed", 1.0, "machine")]
+
+
+def test_record_lesson_usage_outcome_follows_the_same_precedence(db):
+    _seed_interaction(db, "P7")
+    conn = server._open_db()
+    try:
+        memory_store.record_lesson_usage_outcome(
+            conn, "P7", "failed", -1.0, source=rules.OUTCOME_SOURCE_MACHINE)
+        memory_store.record_lesson_usage_outcome(
+            conn, "P7", "accepted", 1.0, source=rules.OUTCOME_SOURCE_CALLER)
+    finally:
+        conn.close()
+    assert _usage(db, "P7") == [("L1", "failed", -1.0, "machine")]
