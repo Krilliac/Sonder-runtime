@@ -25269,7 +25269,7 @@ def ensemble_answer(
         return answers[-1]["answer"] + lookup.footer(footer)
     if code_mode:
         return merged
-    return "%s\n%s  synthesized by %s (%s)" % (merged, lookup.footer(footer, "\n"), synth, synth_model)
+    return "%s\n%s\n  synthesized by %s (%s)" % (merged, lookup.footer(footer, "\n"), synth, synth_model)
 
 
 @mcp.tool()

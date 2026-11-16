@@ -88,7 +88,6 @@ def is_loopback(value=None) -> bool:
 
 def policy_error(value=None, *, allow_remote=False) -> str:
     """Return a security error, or ``""`` for an accepted origin."""
-    logger.debug(f"policy_error: checking origin value={value!r}, allow_remote={allow_remote}")
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -106,6 +105,12 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         return "OLLAMA_HOST must not contain inline credentials"
     if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
         return "OLLAMA_HOST must be an origin without a path, query, or fragment"
+    # Logged only once the value is a bare origin: a password with an unencoded
+    # "/" parses as host and port with the rest in the path, rejected above.
+    logger.debug(
+        f"policy_error: checking scheme={parsed.scheme!r}, host={host!r}, "
+        f"port={port!r}, allow_remote={allow_remote}"
+    )
     if port is None:
         return "OLLAMA_HOST must include an explicit port"
     if is_loopback(origin):
