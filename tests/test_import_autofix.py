@@ -279,3 +279,54 @@ def test_wrong_module_attr_fix_places_math_import_legally():
     compile(fixed, "<t>", "exec")
     assert fixed.index("import math") > fixed.index("from __future__")
     assert "math.cos(1)" in fixed
+
+
+def _run(source):
+    namespace = {"__name__": "__autofix_test__"}
+    exec(compile(source, "<t>", "exec"), namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("code", [
+    '"""doc"""; x = random.random()\n',
+    "from __future__ import annotations; x = random.random()\n",
+    '"""doc"""; from __future__ import annotations; x = random.random()\n',
+    '"""doc"""  ; x = random.random()  # trailing\n',
+    '"""caf\u00e9"""; x = random.random()\r\n',
+    '#!/usr/bin/env python\n"""doc"""; x = random.random()\n',
+])
+def test_import_precedes_first_use_when_anchor_shares_its_line(code):
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    namespace = _run(fixed)
+    assert 0.0 <= namespace["x"] < 1.0
+    assert fixed.count("import random") == 1
+
+
+def test_shared_line_docstring_stays_the_module_docstring():
+    namespace = _run(import_autofix.fix_missing_imports('"""doc"""; x = random.random()\n', _NAME_ERROR))
+    assert namespace["__doc__"] == "doc"
+
+
+def test_shebang_without_docstring_keeps_the_shebang_first():
+    code = "#!/usr/bin/env python\nx = random.random()\n"
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed == "#!/usr/bin/env python\nimport random\nx = random.random()\n"
+    _run(fixed)
+
+
+@pytest.mark.parametrize("code, expected_prefix", [
+    ("# generated file\n# -*- coding: latin-1 -*-\nx = random.random()\n",
+     "# generated file\n# -*- coding: latin-1 -*-\nimport random\n"),
+    ("\n# coding: utf-8\nx = random.random()\n", "\n# coding: utf-8\nimport random\n"),
+    ("# just a comment\nx = random.random()\n", "import random\n# just a comment\n"),
+])
+def test_encoding_cookie_stays_within_the_first_two_lines(code, expected_prefix):
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed.startswith(expected_prefix)
+    _run(fixed)
+
+
+def test_cookie_like_comment_on_line_two_after_code_is_not_a_cookie():
+    code = "y = 1\n# coding: utf-8\nx = random.random()\n"
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed.startswith("import random\ny = 1\n")
