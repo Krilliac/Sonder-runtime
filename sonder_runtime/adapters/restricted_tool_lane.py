@@ -56,7 +56,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 import sonder_runtime.adapters.generation_permit as _generation_permit
@@ -129,10 +129,14 @@ def suppressed() -> Iterator[None]:
         _ENTRY.reset(token)
 
 
-def suppressing(function: Callable) -> Callable:
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def suppressing(function: Callable[_P, _R]) -> Callable[_P, _R]:
     """Decorator form of :func:`suppressed`."""
     @functools.wraps(function)
-    def wrapped(*args, **kwargs):
+    def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         with suppressed():
             return function(*args, **kwargs)
 
@@ -173,7 +177,7 @@ def admit(
     *,
     unsafe: bool,
     prepared: bool,
-    resolve: Callable[[], tuple],
+    resolve: Callable[[], tuple[Any, ...]],
     provider_for: Callable[[Any], Any],
 ) -> tuple["RestrictedRun | None", str]:
     """Open a restricted run for this agent turn, if one applies.
@@ -243,7 +247,7 @@ class RestrictedRun:
 
     def __init__(
         self, *, lane: str, model: str, tools: frozenset[str], profiles: tuple[str, ...],
-        secret_globs: tuple[str, ...], caller_project: str, target: tuple,
+        secret_globs: tuple[str, ...], caller_project: str, target: tuple[Any, ...],
     ) -> None:
         self.lane = lane
         self.model = model

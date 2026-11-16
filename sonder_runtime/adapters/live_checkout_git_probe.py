@@ -95,7 +95,7 @@ def _start_directory(path: Path) -> Path | None:
         status = reads.status_of(current)
         if status.state is reads.ReadState.UNKNOWN:
             return None
-        if status.state is reads.ReadState.OK and stat.S_ISDIR(status.result.st_mode):
+        if status.state is reads.ReadState.OK and status.result is not None and stat.S_ISDIR(status.result.st_mode):
             return current
         parent = current.parent
         if parent == current:
@@ -127,7 +127,7 @@ def _first_error_line(stderr: bytes) -> str:
     return stderr.decode("utf-8", errors="replace").split("\n", 1)[0].rstrip("\r")
 
 
-def _run(git: str, arguments: tuple[str, ...], cwd: Path, *, searched: bool) -> subprocess.CompletedProcess | ProbeAnswer:
+def _run(git: str, arguments: tuple[str, ...], cwd: Path, *, searched: bool) -> subprocess.CompletedProcess[bytes] | ProbeAnswer:
     """One git run; an answer instead when it could not run.
 
     ``searched`` is True when ``git`` is the bare name (``shutil.which``

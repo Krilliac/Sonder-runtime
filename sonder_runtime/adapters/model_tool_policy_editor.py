@@ -144,13 +144,13 @@ def _profile_id(prefix: str, field: str, value: str) -> str:
     return "%s%s-%s" % (prefix, slug, digest)
 
 
-def _listing(config: _mtp.ModelToolConfig, field: str, value: str):
+def _listing(config: _mtp.ModelToolConfig, field: str, value: str) -> list[_mtp.MergedProfile]:
     return [profile for profile in config.profiles if value in profile.values(field)]
 
 
 # ---- the overlay write --------------------------------------------------------
 
-def _overlay_profiles(document: dict) -> list:
+def _overlay_profiles(document: dict[str, Any]) -> list[Any]:
     profiles = document.get("model_profiles")
     if not isinstance(profiles, list):
         profiles = []
@@ -158,14 +158,14 @@ def _overlay_profiles(document: dict) -> list:
     return profiles
 
 
-def _overlay_profile(document: dict, profile_id: str) -> dict | None:
+def _overlay_profile(document: dict[str, Any], profile_id: str) -> dict[str, Any] | None:
     return next(
         (item for item in _overlay_profiles(document) if isinstance(item, dict) and item.get("id") == profile_id),
         None,
     )
 
 
-def _add_value(container: dict, key: str, value: str) -> None:
+def _add_value(container: dict[str, Any], key: str, value: str) -> None:
     values = container.get(key)
     if not isinstance(values, list):
         values = []
@@ -174,7 +174,7 @@ def _add_value(container: dict, key: str, value: str) -> None:
         values.append(value)
 
 
-def _write(mutate: Callable[[dict], str]) -> str:
+def _write(mutate: Callable[[dict[str, Any]], str]) -> str:
     """Apply ``mutate`` to the overlay under its lock; never overwrite a bad overlay."""
     shipped, _issues = _mtp.load_shipped_document()
     if shipped is None:
@@ -268,7 +268,7 @@ def _allow(words: list[str], policy: Mapping[str, Any] | None) -> str:
                            _selector_of(blocking[0]), tool,
                        ))
 
-    def mutate(document: dict) -> str:
+    def mutate(document: dict[str, Any]) -> str:
         entry = _overlay_profile(document, profile_id)
         if entry is None:
             entry = {"id": profile_id}
@@ -316,13 +316,14 @@ def _revoke(words: list[str], policy: Mapping[str, Any] | None) -> str:
         raise _Refused("tool %r on profile %r comes from the shipped file%s; it cannot be revoked here"
                        % (tool, holder.id, " (a floor profile)" if holder.floor else ""))
 
-    def mutate(document: dict) -> str:
+    def mutate(document: dict[str, Any]) -> str:
         entry = _overlay_profile(document, holder.id)
-        tools = entry.get("tools") if isinstance(entry, dict) else None
-        if not isinstance(tools, list) or tool not in tools:
+        tools = entry.get("tools") if entry is not None else None
+        if entry is None or not isinstance(tools, list) or tool not in tools:
             raise _Refused("the overlay no longer lists tool %r on profile %r" % (tool, holder.id))
         tools.remove(tool)
-        match = entry.get("match") if isinstance(entry.get("match"), dict) else {}
+        raw_match = entry.get("match")
+        match = raw_match if isinstance(raw_match, dict) else {}
         has_match = any(match.get(key) for key in ("names", "prefixes"))
         if not tools and (holder.id.startswith(GRANT_PREFIX) or not has_match):
             # A console grant (or a shipped profile's extension) with no tool left
@@ -342,7 +343,7 @@ def _deny(words: list[str], policy: Mapping[str, Any] | None) -> str:
     if config.profile(profile_id) is not None:
         return "%s is already denied by the overlay (profile %s)." % (_shown(field, value), profile_id)
 
-    def mutate(document: dict) -> str:
+    def mutate(document: dict[str, Any]) -> str:
         _overlay_profiles(document).append({
             "id": profile_id, "match": {field: [value]}, "tools": [], "lanes": [],
         })
@@ -384,7 +385,7 @@ def _undeny(words: list[str], policy: Mapping[str, Any] | None) -> str:
         raise _Refused("the overlay does not deny %s" % _shown(field, value))
     ids = {profile.id for profile in holders}
 
-    def mutate(document: dict) -> str:
+    def mutate(document: dict[str, Any]) -> str:
         for entry in list(_overlay_profiles(document)):
             if not isinstance(entry, dict) or entry.get("id") not in ids or entry.get("tools"):
                 continue

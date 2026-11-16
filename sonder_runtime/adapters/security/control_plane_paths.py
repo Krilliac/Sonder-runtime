@@ -260,7 +260,7 @@ def control_plane_scope(paths):
         _ADDITIONAL.reset(token)
 
 
-def live_control_plane_inventory(*, additional=None):
+def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     """Read actual state-path precedence without state_path's mkdir/migration IO.
 
     additional is a trusted live callback returning ControlPlanePaths for stores

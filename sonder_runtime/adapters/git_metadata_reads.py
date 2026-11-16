@@ -157,7 +157,7 @@ def status_of(path: Path, *, follow_links: bool = True) -> Status:
 def read_small(path: Path) -> Read:
     """The bytes of the regular file at ``path``; unknown above :data:`MAX_READ_BYTES`, never absent for it."""
     status = status_of(path)
-    if status.state is not ReadState.OK:
+    if status.state is not ReadState.OK or status.result is None:
         return Read(status.state, unknown=status.unknown)
     if not stat.S_ISREG(status.result.st_mode):
         return Read(ReadState.UNKNOWN, unknown=Unknown.NOT_REGULAR)
@@ -209,7 +209,7 @@ def core_worktree_values(path: Path) -> ConfigValues:
     no value, any is unknown.
     """
     status = status_of(path)
-    if status.state is not ReadState.OK:
+    if status.state is not ReadState.OK or status.result is None:
         return ConfigValues(status.state, unknown=status.unknown)
     if not stat.S_ISREG(status.result.st_mode):
         return ConfigValues(ReadState.UNKNOWN, unknown=Unknown.NOT_REGULAR)
