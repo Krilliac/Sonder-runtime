@@ -947,3 +947,16 @@ def test_model_capacity_counts_free_slots_and_one_half_open_probe():
 
     primary.inflight = 3                      # every advertising worker busy
     assert pool.model_capacity("coder") == 0  # known zero, not unknown
+
+
+def test_validate_worker_origin_never_logs_inline_credentials(caplog):
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ValueError, match="inline credentials"):
+            validate_worker_origin(
+                "https://user:secretpw@127.0.0.1:11434", allow_remote=False
+            )
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secretpw" not in text
+    assert "user:" not in text

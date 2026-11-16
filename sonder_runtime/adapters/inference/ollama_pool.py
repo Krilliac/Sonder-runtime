@@ -325,7 +325,6 @@ def validate_worker_origin(
     trusted_origins: tuple[str, ...] = (),
 ) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
-    logger.debug(f"validating worker origin={origin!r}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
     try:
@@ -336,6 +335,10 @@ def validate_worker_origin(
         raise ValueError("worker endpoint must use http or https")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("worker endpoint must not contain inline credentials")
+    logger.debug(
+        f"validating worker origin scheme={parsed.scheme!r}, host={parsed.hostname!r}, "
+        f"port={port!r}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}"
+    )
     if not parsed.hostname or port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
@@ -372,7 +375,7 @@ def configure_typed_workers(
     capability_probe_batch_size: int | None = None,
     status_page_size: int | None = None,
 ) -> None:
-    logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origins={trusted_origins!r}")
+    logger.debug(f"configuring typed workers: count={len(worker_origins)}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}")
     logger.info(f"configuring {len(worker_origins)} typed Ollama worker(s), allow_remote={allow_remote}")
     normalized = tuple(
         validate_worker_origin(

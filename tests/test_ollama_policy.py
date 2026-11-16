@@ -23,3 +23,14 @@ def test_domain_policy_matches_endpoint_adapter_surface():
         assert endpoint.policy_error(value, allow_remote=False) == (
             ollama_policy.policy_error(value, allow_remote=False)
         )
+
+
+def test_policy_error_never_logs_inline_credentials(caplog):
+    import logging
+
+    secret = "https://user:secretpw@127.0.0.1:11434"
+    with caplog.at_level(logging.DEBUG):
+        assert ollama_policy.policy_error(secret)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secretpw" not in text
+    assert "user:" not in text

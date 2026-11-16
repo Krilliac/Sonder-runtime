@@ -88,7 +88,6 @@ def is_loopback(value=None) -> bool:
 
 def policy_error(value=None, *, allow_remote=False) -> str:
     """Return a security error, or ``""`` for an accepted origin."""
-    logger.debug(f"policy_error: checking origin value={value!r}, allow_remote={allow_remote}")
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -104,6 +103,10 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         logger.critical(f"OLLAMA_HOST contains inline credentials -- credential exposure risk, origin rejected for security")
         logger.error(f"OLLAMA_HOST contains inline credentials, origin rejected for security")
         return "OLLAMA_HOST must not contain inline credentials"
+    logger.debug(
+        f"policy_error: checking scheme={parsed.scheme!r}, host={host!r}, "
+        f"port={port!r}, allow_remote={allow_remote}"
+    )
     if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
         return "OLLAMA_HOST must be an origin without a path, query, or fragment"
     if port is None:
