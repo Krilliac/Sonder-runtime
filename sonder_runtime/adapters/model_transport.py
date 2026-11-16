@@ -54,6 +54,17 @@ class ModelCallError(urllib.error.URLError):
         self.reasoning_segments = usage_count(reasoning_segments)
         super().__init__(self.detail)
 
+    def restamped(self, *, attempts: int, cloud: bool) -> "ModelCallError":
+        """A non-transient copy carrying the caller's attempt count and route.
+
+        The local retry loop re-issues every classified error it does not
+        replay; subclasses that carry typed evidence override this to keep it.
+        """
+        return ModelCallError(
+            self.kind, self.detail, transient=False, status=self.status,
+            attempts=attempts, cloud=cloud, retry_after_seconds=self.retry_after_seconds,
+        )
+
 
 ModelCallError.__module__ = __name__
 

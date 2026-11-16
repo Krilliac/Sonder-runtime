@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 443,
+      "file_count": 446,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -210,6 +210,8 @@
         "sonder_runtime/adapters/inference/capability_evidence.py",
         "sonder_runtime/adapters/inference/capability_refresh.py",
         "sonder_runtime/adapters/inference/external_membership.py",
+        "sonder_runtime/adapters/inference/gpu_admission.py",
+        "sonder_runtime/adapters/inference/gpu_admission_store.py",
         "sonder_runtime/adapters/inference/gpu_residency.py",
         "sonder_runtime/adapters/inference/injected.py",
         "sonder_runtime/adapters/inference/membership_high_water.py",
@@ -234,6 +236,7 @@
         "sonder_runtime/adapters/inference/production_tier_router.py",
         "sonder_runtime/adapters/inference/request_tuning.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
+        "sonder_runtime/adapters/inference/runner_footprint.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
@@ -997,7 +1000,7 @@
       ]
     },
     {
-      "file_count": 308,
+      "file_count": 309,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1143,6 +1146,7 @@
         "sonder_runtime/domain/fleet_briefing.py",
         "sonder_runtime/domain/fleet_intent.py",
         "sonder_runtime/domain/fleet_pressure.py",
+        "sonder_runtime/domain/gpu_admission.py",
         "sonder_runtime/domain/health_alerts.py",
         "sonder_runtime/domain/health_formatting.py",
         "sonder_runtime/domain/host_tools/__init__.py",
@@ -1394,7 +1398,7 @@
       ]
     },
     {
-      "file_count": 54,
+      "file_count": 56,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1417,9 +1421,11 @@
         "sonder_runtime/platform/deployment_auth.py",
         "sonder_runtime/platform/environment_options.py",
         "sonder_runtime/platform/environment_probe.py",
+        "sonder_runtime/platform/gpu_admission_config.py",
         "sonder_runtime/platform/hardware_identity.py",
         "sonder_runtime/platform/hardware_probe.py",
         "sonder_runtime/platform/health_alerts_config.py",
+        "sonder_runtime/platform/host_memory.py",
         "sonder_runtime/platform/local_retry_policy.py",
         "sonder_runtime/platform/location_consent.py",
         "sonder_runtime/platform/logging.py",
