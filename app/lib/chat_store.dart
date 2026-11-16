@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'chat/store_files_stub.dart'
@@ -120,7 +122,20 @@ class ChatStore {
   }
 
   /// Forget per-process caches (tests swap the backend between cases).
-  static void resetCache() => _written.clear();
+  static void resetCache() {
+    _written.clear();
+    persistFailed.value = false;
+  }
+
+  /// True while the last save could not write every thread (quota, disk,
+  /// permissions). The UI shows a warning; the next fully successful save
+  /// clears it.
+  static final ValueNotifier<bool> persistFailed = ValueNotifier<bool>(false);
+
+  /// Set when history could not be read at all: saves then never delete
+  /// files for threads they do not know about, so unread history survives.
+  /// Cleared by the next successful [load].
+  static bool keepUnknownFiles = false;
 
   static String _nameFor(String id) {
     final safe = id.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
@@ -129,13 +144,23 @@ class ChatStore {
 
   static Future<List<ChatThread>> load() async {
     _written.clear();
-    await _migrateLegacy();
+    keepUnknownFiles = false;
+    final unmigrated = await _migrateLegacy();
     final names = await backend.list();
     final threads = <ChatThread>[];
     for (final name in names) {
       if (!name.startsWith('thread-') || !name.endsWith('.json')) continue;
-      final raw = await backend.read(name);
-      if (raw == null) continue;
+      String raw;
+      try {
+        final read = await backend.read(name);
+        if (read == null) continue;
+        raw = read;
+      } catch (_) {
+        // Unreadable (invalid UTF-8, locked, permission denied): set the
+        // blob aside like a corrupt one so it costs only itself.
+        await _trySetAside(name);
+        continue;
+      }
       try {
         final decoded = jsonDecode(raw);
         if (decoded is! Map<String, dynamic>) {
@@ -147,11 +172,24 @@ class ChatStore {
         // A thread that needed redaction is rewritten on the next save.
         if (identical(thread, parsed)) _written[thread.id] = raw;
       } catch (_) {
-        await _setAside(name);
+        await _trySetAside(name);
       }
+    }
+    // A v1 history that could not be saved yet stays visible this session
+    // (and is written by the next successful save).
+    for (final t in unmigrated) {
+      if (!threads.any((x) => x.id == t.id)) threads.add(t);
     }
     threads.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     return threads.isEmpty ? [ChatThread.fresh()] : threads;
+  }
+
+  static Future<void> _trySetAside(String name) async {
+    try {
+      await _setAside(name);
+    } catch (_) {
+      // Cannot even be moved: leave it in place and carry on.
+    }
   }
 
   static Future<void> _setAside(String name) async {
@@ -164,28 +202,41 @@ class ChatStore {
     await backend.rename(name, target);
   }
 
-  static Future<void> _migrateLegacy() async {
+  /// Migrate the v1 blob once. Returns the legacy threads when they could
+  /// not be saved (the kept legacy key and the missing marker make the next
+  /// start retry); empty otherwise.
+  static Future<List<ChatThread>> _migrateLegacy() async {
     final names = await backend.list();
-    if (names.contains(_migratedName)) return;
+    if (names.contains(_migratedName)) return const [];
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(legacyKey);
     if (raw != null && raw.trim().isNotEmpty) {
+      var threads = <ChatThread>[];
       try {
         final decoded = jsonDecode(raw) as List<dynamic>;
-        final threads = decoded
+        threads = decoded
             .whereType<Map<String, dynamic>>()
             .map(ChatThread.fromJson)
             .toList();
-        await save(threads);
-        await prefs.remove(legacyKey);
       } catch (_) {
         // Keep the unreadable v1 blob for a person to recover; never
         // overwrite it.
         await prefs.setString('$legacyKey.corrupt', raw);
         await prefs.remove(legacyKey);
       }
+      if (threads.isNotEmpty) {
+        // A save failure is not a corrupt blob: keep the legacy key, write
+        // no marker, and let the next start retry.
+        if (!await save(threads)) return threads;
+        await prefs.remove(legacyKey);
+      }
     }
-    await backend.write(_migratedName, DateTime.now().toIso8601String());
+    try {
+      await backend.write(_migratedName, DateTime.now().toIso8601String());
+    } catch (_) {
+      // Retried next start; the legacy key is already gone.
+    }
+    return const [];
   }
 
   static ChatThread _redactThread(ChatThread thread) {
@@ -202,7 +253,9 @@ class ChatStore {
   }
 
   /// Cap one thread: newest [maxMessages] messages, then drop oldest until
-  /// the serialized thread fits [maxThreadBytes].
+  /// the serialized thread fits [maxThreadBytes]. The newest user+assistant
+  /// pair (the last two messages) is always kept; if it alone is too large
+  /// its text is truncated with a visible marker.
   static ChatThread capThread(ChatThread thread) {
     var messages = thread.messages
         .where((m) => !m.pending)
@@ -211,42 +264,147 @@ class ChatStore {
     if (messages.length > maxMessages) {
       messages = messages.sublist(messages.length - maxMessages);
     }
-    var capped = thread.copyWith(messages: messages);
-    var size = utf8.encode(jsonEncode(capped.toJson())).length;
-    while (size > maxThreadBytes && messages.isNotEmpty) {
+    int sizeOf(List<ChatMessage> ms) =>
+        utf8.encode(jsonEncode(thread.copyWith(messages: ms).toJson())).length;
+    var size = sizeOf(messages);
+    while (size > maxThreadBytes && messages.length > 2) {
       // Drop in chunks proportional to the overshoot, at least one.
       final drop = (messages.length * (size - maxThreadBytes) / size)
           .ceil()
-          .clamp(1, messages.length);
+          .clamp(1, messages.length - 2);
       messages = messages.sublist(drop);
-      capped = thread.copyWith(messages: messages);
-      size = utf8.encode(jsonEncode(capped.toJson())).length;
+      size = sizeOf(messages);
     }
-    return capped;
+    if (size > maxThreadBytes) {
+      messages = _truncateToFit(messages, size, sizeOf);
+    }
+    return thread.copyWith(messages: messages);
   }
 
-  static Future<void> save(List<ChatThread> threads) async {
+  static const _truncationMarker =
+      '\n\n[truncated: this message was too large to keep]';
+
+  /// Shorten the largest text field until the thread fits. Removing one
+  /// UTF-16 unit removes at least one encoded byte, so the loop converges.
+  static List<ChatMessage> _truncateToFit(List<ChatMessage> input, int size,
+      int Function(List<ChatMessage>) sizeOf) {
+    final messages = [...input];
+    var guard = 0;
+    while (size > maxThreadBytes && guard++ < 64) {
+      var bestIndex = -1;
+      var bestIsContent = true;
+      var bestLength = _truncationMarker.length;
+      for (var i = 0; i < messages.length; i++) {
+        if (messages[i].content.length > bestLength) {
+          bestIndex = i;
+          bestIsContent = true;
+          bestLength = messages[i].content.length;
+        }
+        if (messages[i].reasoning.length > bestLength) {
+          bestIndex = i;
+          bestIsContent = false;
+          bestLength = messages[i].reasoning.length;
+        }
+      }
+      if (bestIndex < 0) break;
+      final cut = size - maxThreadBytes + _truncationMarker.length + 64;
+      var keep = bestLength - cut;
+      if (keep < 0) keep = 0;
+      final m = messages[bestIndex];
+      final text = bestIsContent ? m.content : m.reasoning;
+      // Never split a surrogate pair.
+      if (keep > 0 && keep < text.length) {
+        final unit = text.codeUnitAt(keep - 1);
+        if (unit >= 0xD800 && unit <= 0xDBFF) keep--;
+      }
+      final shorter = text.substring(0, keep) + _truncationMarker;
+      messages[bestIndex] = bestIsContent
+          ? m.copyWith(content: shorter)
+          : m.copyWith(reasoning: shorter);
+      size = sizeOf(messages);
+    }
+    return messages;
+  }
+
+  // Saves are serialized: callers fire them unawaited, so two could
+  // otherwise interleave their writes and deletes. While one runs, newer
+  // requests collapse into the latest list, which is written next.
+  static List<ChatThread>? _queued;
+  static Completer<bool>? _queuedDone;
+  static bool _saving = false;
+
+  /// Persist [threads]. Completes true when every thread was written. Never
+  /// throws: a failure is recorded in [persistFailed] and the remaining
+  /// threads are still written.
+  static Future<bool> save(List<ChatThread> threads) {
+    _queued = threads;
+    final done = _queuedDone ??= Completer<bool>();
+    if (!_saving) {
+      _saving = true;
+      unawaited(_drainSaves());
+    }
+    return done.future;
+  }
+
+  static Future<void> _drainSaves() async {
+    try {
+      while (_queued != null) {
+        final threads = _queued!;
+        final done = _queuedDone!;
+        _queued = null;
+        _queuedDone = null;
+        var ok = false;
+        try {
+          ok = await _saveNow(threads);
+        } catch (_) {
+          ok = false;
+        }
+        persistFailed.value = !ok;
+        done.complete(ok);
+      }
+    } finally {
+      _saving = false;
+    }
+  }
+
+  static Future<bool> _saveNow(List<ChatThread> threads) async {
     final kept = ([...threads]
           ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
         .take(maxThreads)
         .toList();
     final keepNames = <String>{};
+    var ok = true;
     for (final thread in kept) {
       final name = _nameFor(thread.id);
       keepNames.add(name);
-      final data = jsonEncode(capThread(thread).toJson());
-      if (_written[thread.id] == data) continue;
-      await backend.write(name, data);
-      _written[thread.id] = data;
-    }
-    for (final name in await backend.list()) {
-      if (name.startsWith('thread-') &&
-          name.endsWith('.json') &&
-          !keepNames.contains(name)) {
-        await backend.delete(name);
+      try {
+        final data = jsonEncode(capThread(thread).toJson());
+        if (_written[thread.id] == data) continue;
+        await backend.write(name, data);
+        _written[thread.id] = data;
+      } catch (_) {
+        ok = false;
+        _written.remove(thread.id);
       }
     }
+    try {
+      for (final name
+          in keepUnknownFiles ? const <String>[] : await backend.list()) {
+        if (name.startsWith('thread-') &&
+            name.endsWith('.json') &&
+            !keepNames.contains(name)) {
+          try {
+            await backend.delete(name);
+          } catch (_) {
+            ok = false;
+          }
+        }
+      }
+    } catch (_) {
+      ok = false;
+    }
     _written.removeWhere((id, _) => !keepNames.contains(_nameFor(id)));
+    return ok;
   }
 
   /// Per-thread session rotation counters (P1-9).

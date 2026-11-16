@@ -584,6 +584,22 @@ class _ChatScreenState extends State<ChatScreen>
           ),
           body: Column(
             children: [
+              ValueListenableBuilder<bool>(
+                valueListenable: _chat.persistFailed,
+                builder: (context, failed, _) => !failed
+                    ? const SizedBox.shrink()
+                    : const Padding(
+                        padding: EdgeInsets.fromLTRB(
+                            SonderSpace.lg, SonderSpace.sm, SonderSpace.lg, 0),
+                        child: WorkspaceNotice(
+                          key: Key('persist-failed-notice'),
+                          message: "Chats aren't being saved",
+                          detail:
+                              'The device refused the write (storage may be full). Recent messages could be lost when the app closes.',
+                          tone: NoticeTone.warning,
+                        ),
+                      ),
+              ),
               if (_appControl.hasSession &&
                   _appControl.selectionKnown &&
                   _appControl.selection?.bindingId != null)
