@@ -18,6 +18,7 @@ from sonder_runtime.platform.config import load_config
 from sonder_runtime.platform.logging import redactor_for_config
 from sonder_runtime.application.context import current_operation_context
 from sonder_runtime.application.security.prompt_provenance import TrustLabel
+from sonder_runtime.domain.common.errors import InvalidInput
 
 _NOTE_CONTEXT = contextvars.ContextVar("sonder_playbook_note_context", default=None)
 _CONFIG_GETTER = None
@@ -109,12 +110,18 @@ def register_tools(mcp, *, config=None, home=None, config_getter=None):
                       "model": "unknown", "repo": "unknown", "commit": "unknown",
                       **context.get("provenance", {})}
         provenance["trust"] = TrustLabel.UNTRUSTED.value if context.get("tainted", True) else TrustLabel.INDEPENDENTLY_VERIFIED.value
-        entry = get_store(config=config, home=home).note(
-            topic, category, title, body, evidence, triggers,
-            provenance=provenance,
-            tainted=context.get("tainted", True),
-            owner_correction=context.get("owner_correction", False),
-        )
+        try:
+            entry = get_store(config=config, home=home).note(
+                topic, category, title, body, evidence, triggers,
+                provenance=provenance,
+                tainted=context.get("tainted", True),
+                owner_correction=context.get("owner_correction", False),
+            )
+        except ValueError as exc:
+            # The playbook domain validates with ValueError (topic, category,
+            # sizes). mcp 2.2.0 hides a plain exception's text from the client;
+            # InvalidInput is the caller-facing type reloadable_mcp passes on.
+            raise InvalidInput(str(exc)) from exc
         if entry["status"] == "proposed":
             from sonder_runtime.adapters.playbook_review import record_pending
             record_pending(entry)

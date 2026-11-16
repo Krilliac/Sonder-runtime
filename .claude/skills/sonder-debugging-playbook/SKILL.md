@@ -100,7 +100,7 @@ opt in with `--run-network` / `--run-model` instead (section 3).
 ### `ModuleNotFoundError: No module named 'mcp.server.mcpserver'`
 
 MCP **1.x is installed** but Sonder requires 2.x. `requirements-runtime.txt`
-pins `mcp==2.0.0`; MCP 2.x renamed `mcp.server.fastmcp` → `mcp.server.mcpserver`
+pins `mcp==2.2.0`; MCP 2.x renamed `mcp.server.fastmcp` → `mcp.server.mcpserver`
 and `FastMCP` → `MCPServer`, and Sonder imports only the 2.x names. Full
 background: `docs/MCP_2_MIGRATION.md`.
 
@@ -459,7 +459,7 @@ Verified against commit 99162cf9 (2026-08-22). Re-verify volatile claims with:
 - Offline sentinels and skip markers: `grep -n "127.0.0.1:1\|run-network\|run-model" conftest.py`
 - run-tests exit codes: `grep -n "exit /b" scripts/run-tests.cmd` (expect 3 and 4)
 - Selector vacuous exit: `grep -n "Exit codes" -A 2 scripts/select_regression_tests.py`
-- MCP pin: `grep mcp== requirements-runtime.txt` (expect `mcp==2.0.0`)
+- MCP pin: `grep mcp== requirements-runtime.txt` (expect `mcp==2.2.0`)
 - CLI surface: `python -m sonder_runtime --help` (serve, preflight, doctor, migrate, drain, smoke present)
 - Epoch-2 flag: `grep -n "adopt-epoch2" sonder_runtime/__main__.py`
 - Doctor check order: `grep -n -A 12 "def default_checks" sonder_doctor.py`

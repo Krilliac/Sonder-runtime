@@ -201,7 +201,7 @@ honest positioning is "standard, on purpose":
 
 | Practice | Where in this repo | Status vs ecosystem |
 |---|---|---|
-| MCP as the tool protocol | `mcp==2.0.0` in `requirements-runtime.txt`; `python -m sonder_runtime mcp` | Standard protocol, standard use |
+| MCP as the tool protocol | `mcp==2.2.0` in `requirements-runtime.txt`; `python -m sonder_runtime mcp` | Standard protocol, standard use |
 | OpenAI-compatible HTTP API | README quick start; `/v1/chat/completions` on `127.0.0.1:11435` | De-facto ecosystem interface |
 | Transactional outbox | `docs/adr/ADR-004-transactional-outbox.md` (outbox_events per state DB, projected into operations.db) | Textbook pattern, applied locally |
 | Ports-and-adapters / modular monolith | `docs/architecture/adr/ADR-001`, `ADR-004-ports-and-adapters.md` | Standard architecture styles |

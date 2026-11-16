@@ -90,7 +90,11 @@ def test_preflight_rejects_an_unknown_name_without_deciding(policy_sandbox, monk
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("decided unknown tool")),
     )
 
-    with pytest.raises(ValueError, match="unknown registered MCP tool"):
+    # InvalidInput, not ValueError: mcp 2.2.0 hides a plain exception's text from
+    # the client, and reloadable_mcp keeps only SonderError messages.
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    with pytest.raises(InvalidInput, match="unknown registered MCP tool"):
         server.policy_explain("definitely_not_a_registered_tool")
 
 

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 # that ``import server`` leaves ``mcp`` out of ``sys.modules``.
 if TYPE_CHECKING:  # pragma: no cover - static typing only
     from mcp.server.mcpserver import MCPServer
-    from mcp.server.mcpserver.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     from mcp.server.mcpserver.resources import ResourceManager
     from mcp.server.mcpserver.prompts import PromptManager
     from mcp.server.mcpserver.tools import ToolManager
@@ -294,7 +294,7 @@ def _frame_rejection(raw: bytes):
     """``None`` for a frame the upstream parser accepts, else the reply.
 
     The reply is ``(request_id, code, message)``. The upstream ``mcp`` stdio
-    transport (2.0.0) hands a frame it cannot parse to the session as a bare
+    transport (2.0.0 through 2.2.0) hands a frame it cannot parse to the session as a bare
     exception, which the server loop drops without answering: ``not json``,
     a JSON array, ``"jsonrpc": "1.0"``, a lone-surrogate escape, and a request
     whose ``id`` is ``true`` (accepted upstream as a *notification*) all got no
@@ -544,9 +544,11 @@ class _ReloadableMCPServerMixin:
                 # MCP 1.x's low-level server kept a separate ``_tool_cache`` of
                 # output schemas for result validation, and this swap had to
                 # clear it or a changed/removed tool kept a stale schema. MCP
-                # 2.x validates against ``Tool.fn_metadata.output_schema`` on
-                # the tool object itself, so replacing the manager replaces the
-                # schema with it and there is no second cache to invalidate.
+                # 2.x validates against ``Tool.fn_metadata.output_model``
+                # (through a TypeAdapter cached on the metadata object), and
+                # only when ``output_schema`` is set. Both live on the tool
+                # object itself, so replacing the manager replaces them and
+                # there is no second cache to invalidate.
                 # The command catalog is a different story, and it is the
                 # permission gate's
                 # only source of truth for a tool's risk class. It is an
@@ -920,7 +922,22 @@ class _ReloadableMCPServerMixin:
         with (permission_modes.approval_call_scope() as spent,
               server.approved_call_reach(name, gate_arguments)):
             _refuse_if_gated(name, gate_arguments)
-            result = _flag_legacy_error_reply(await super().call_tool(name, arguments, context))
+            # mcp 2.2.0 turns any exception from a tool body that is not a
+            # ToolError into UnexpectedToolError("Error executing tool X"),
+            # hiding the reason. SonderError is the caller-facing taxonomy
+            # (its messages are meant for the client), so those keep their
+            # text. Every other exception stays hidden so internals do not
+            # leak; a deliberate ToolError passes through untouched.
+            try:
+                reply = await super().call_tool(name, arguments, context)
+            except UnexpectedToolError as exc:
+                from sonder_runtime.domain.common.errors import SonderError
+
+                cause = exc.__cause__
+                if isinstance(cause, SonderError):
+                    raise ToolError(f"Error executing tool {name}: {cause}") from cause
+                raise
+            result = _flag_legacy_error_reply(reply)
             if getattr(result, "is_error", False):
                 spent.restore()
         return result
@@ -1089,6 +1106,7 @@ class _ReloadableMCPServerMixin:
 _SDK_EXPORTS = frozenset({
     "MCPServer",
     "ToolError",
+    "UnexpectedToolError",
     "ResourceManager",
     "PromptManager",
     "ToolManager",
@@ -1099,6 +1117,10 @@ _SDK_EXPORTS = frozenset({
     "ReloadableMCPServer",
 })
 _SDK_LOCK = threading.Lock()
+
+
+class _NeverRaised(Exception):
+    """Stands in for an SDK exception class this mcp version does not define."""
 
 
 def _load_sdk():
@@ -1112,7 +1134,14 @@ def _load_sdk():
         if loaded is not None:
             return loaded
         from mcp.server.mcpserver import MCPServer
-        from mcp.server.mcpserver.exceptions import ToolError
+        from mcp.server.mcpserver import exceptions as _sdk_exceptions
+
+        ToolError = _sdk_exceptions.ToolError
+
+        # 2.2.0 added UnexpectedToolError (see call_tool). An older 2.x venv
+        # still loads: there a tool's exception text already reaches the
+        # client, so a class that is never raised keeps the mapping inert.
+        UnexpectedToolError = getattr(_sdk_exceptions, "UnexpectedToolError", None) or _NeverRaised
         from mcp.server.mcpserver.resources import ResourceManager
         from mcp.server.mcpserver.prompts import PromptManager
         from mcp.server.mcpserver.tools import ToolManager
@@ -1131,6 +1160,7 @@ def _load_sdk():
         namespace.update(
             MCPServer=MCPServer,
             ToolError=ToolError,
+            UnexpectedToolError=UnexpectedToolError,
             ResourceManager=ResourceManager,
             PromptManager=PromptManager,
             ToolManager=ToolManager,

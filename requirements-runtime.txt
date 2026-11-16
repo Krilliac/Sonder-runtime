@@ -3,7 +3,7 @@
 # probe and the runtime test suite; do not turn this into a floating range.
 # MCP 2.x renamed mcp.server.fastmcp -> mcp.server.mcpserver and FastMCP ->
 # MCPServer. Sonder imports the 2.x names; 1.x will not satisfy this file.
-mcp==2.0.0
+mcp==2.2.0
 cryptography==50.0.0
 # Unattended Windows self-mod checks require restricted tokens, MIC labels,
 # and kill-on-close Job Objects through the tested pywin32 bindings.
