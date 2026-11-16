@@ -2123,6 +2123,11 @@ def test_all_eighteen_lexings_of_a_full_size_candidate_stay_in_budget(monkeypatc
     "#if 'a' __has_include(<E/x.h>)\n#endif\n",
     "#if $ __has_include(<E/x.h>)\n#endif\n",
     "#if \u00e9 __has_include(<E/x.h>)\n#endif\n",
+    # Unicode decimal digits start identifiers for gcc/clang (C17, C23) and MSVC.
+    "#if \u0663LP __has_include(<E/x.h>))\n#endif\n",
+    "#if \uff11LP __has_include(<E/x.h>))\n#endif\n",
+    "#if .\u0663 __has_include(<E/x.h>))\n#endif\n",
+    "#if defined X \uff11LP __has_include(<E/x.h>))\n#endif\n",
     "#if 0\n#elif LP __has_include(<E/x.h>))\n#endif\n",
     # The price of the rule: these are fine for a compiler, but an identifier before the operand
     # cannot be told from a macro that opens a call. A nested #if (or a quoted operand) is accepted.
@@ -2264,7 +2269,7 @@ def test_skipping_equal_readings_never_changes_the_reasons():
     """The gated, de-duplicated scan must report exactly what scanning all 18 readings reports."""
     rng = _rng("lexing_dedupe")
     noise = ["\\\n", "\\ \n", "\\\f\n", "??/\n", "??/ \n", "??(", "%:", "<:", ":>", 'R"(', ')"', "/*", "*/", "'", '"']
-    checked = 0
+    checked = refused = 0
     for seed in HOSTILE + BENIGN:
         for _ in range(12):
             mutated, _names = _mutate_code(rng, seed)
@@ -2276,4 +2281,7 @@ def test_skipping_equal_readings_never_changes_the_reasons():
             got = set(scan_added_lexings(before, after, include_ok=OK))
             assert got == _union_of_every_lexing(before, after), (before, after, TAG)
             checked += 1
+            refused += bool(got)
     assert checked >= 700
+    # Both outcomes must occur, or the equality above says nothing about refusals.
+    assert 0.1 * checked <= refused <= 0.9 * checked, (refused, checked)
