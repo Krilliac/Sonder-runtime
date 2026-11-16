@@ -9,6 +9,9 @@ byte-for-byte intact.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
+
 from sonder_runtime.domain.agents.tool_naming import canonical_agent_tool_name
 
 
@@ -49,3 +52,47 @@ def loop_verdict_result(action_type, text, success_prefix, *, text_result):
     result = text_result(action_type, text)
     result["ok"] = bool(text) and text.startswith(success_prefix)
     return result
+
+
+# Set by a surface that has authenticated an operator (the console, local-open
+# HTTP, an administrator account) around a `loop`/`workflow_run` call it
+# serves.  Without it `_loop_dispatch` treats the actions as model-authored.
+_LOOP_OPERATOR_AUTHORITY = contextvars.ContextVar("loop_operator_authority", default=False)
+
+
+@contextlib.contextmanager
+def loop_operator_authority():
+    """Mark loop actions dispatched inside this block as operator-authored."""
+    token = _LOOP_OPERATOR_AUTHORITY.set(True)
+    try:
+        yield
+    finally:
+        _LOOP_OPERATOR_AUTHORITY.reset(token)
+
+
+def loop_operator_tool_refusal(action_type, action_types, operator_tools):
+    """Refusal result for a loop action whose tool is operator-only, or None.
+
+    The agent path refuses everything in ``operator_tools``; a loop action is
+    chosen by the same model, so the permission mode alone (which
+    `learn_preference` passes in the default mode) is not enough.  Unknown
+    action types keep the dispatcher's canonical vocabulary error.
+    """
+    name = str(action_type or "").strip().lower()
+    if name not in action_types or _LOOP_OPERATOR_AUTHORITY.get():
+        return None
+    tool = loop_action_tool(name)
+    if tool not in operator_tools:
+        return None
+    return {
+        "ok": False,
+        "type": str(action_type or ""),
+        "summary": "refused by the permission gate (operator-only tool)",
+        "output": (
+            "HOST POLICY: '%s' is refused: tool '%s' is a system operation "
+            "and cannot be run by a loop action. Use an authenticated "
+            "developer/admin surface with explicit operator intent. This is "
+            "standing policy, not a transient failure -- choose a different "
+            "action." % (action_type, tool)
+        ),
+    }

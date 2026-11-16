@@ -1384,8 +1384,9 @@ def record_outcome_and_claim_lesson_distillation(
             usage_cur = conn.execute(
                 "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
                 "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? "
-                "WHERE interaction_id=?",
-                (signal, reward_value, source, interaction_id),
+                "WHERE interaction_id=? AND (outcome_signal IS NULL "
+                "OR outcome_source IS NULL OR outcome_source=?)",
+                (signal, reward_value, source, interaction_id, source),
             )
             usage_rows_updated = usage_cur.rowcount
 

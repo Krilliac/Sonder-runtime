@@ -419,24 +419,24 @@ def test_contradicting_caller_pass_over_runtime_failure_does_not_distill(db, dis
     assert [r for r in _lessons(db) if r[0] != "L1"] == []
 
 
-def test_gap_caller_signal_overwrites_runtime_lesson_usage_credit(db, distiller):
-    """GAP (SUSPECT): a caller's different signal replaces the runtime's credit.
+def test_caller_signal_cannot_overwrite_runtime_lesson_usage_credit(db, distiller):
+    """A caller's different signal leaves the runtime's credit alone.
 
-    ``outcomes`` keeps first-writer-wins per (interaction, signal), but
-    ``lesson_usage`` is updated by interaction id alone, so a caller who knows
-    the id of a runtime-graded interaction turns the lesson's recorded
-    -1.0/self_curriculum into +1.0/caller. That erases a runtime loss from the
-    quarantine evidence (``losses_since_win`` -> 0). Pinned as today's behaviour;
-    the orchestrator decides whether to scope the UPDATE to the same source.
+    ``lesson_usage`` is only updated when it has no outcome yet, a legacy NULL
+    source, or the same source, so a caller who knows the id of a
+    runtime-graded interaction cannot turn the lesson's -1.0/self_curriculum
+    into +1.0/caller or reset its ``losses_since_win``. The caller's evidence
+    still lands in ``outcomes``.
     """
     _seed_interaction(db, "RT1")
     server.record_self_graded_outcome("RT1", "failed")
     assert _usage(db, "RT1") == [("L1", "failed", -1.0, "self_curriculum")]
     assert _stats(db)["L1"]["losses"] == 1
     server.record_outcome("RT1", "tests_passed")
-    assert _usage(db, "RT1") == [("L1", "tests_passed", 1.0, "caller")]
+    assert _usage(db, "RT1") == [("L1", "failed", -1.0, "self_curriculum")]
     stats = _stats(db)["L1"]
-    assert stats["losses"] == 0 and stats["losses_since_win"] == 0
+    assert stats["losses"] == 1 and stats["losses_since_win"] == 1
+    assert ("RT1", "tests_passed", 1.0, "caller") in _outcomes(db, "RT1")
 
 
 def test_gap_caller_can_preempt_runtime_verdict_on_same_signal(db, distiller):
@@ -727,22 +727,34 @@ def test_agent_dispatch_refuses_operator_tools_even_in_auto_mode(tool, monkeypat
     assert called == [] and out.startswith("ERROR: HOST POLICY"), out
 
 
-def test_gap_loop_dispatch_reaches_learn_preference_in_default_mode(
+def test_loop_dispatch_refuses_learn_preference_in_default_mode(
     monkeypatch, mode_sandbox,
 ):
-    """GAP (SUSPECT): the model-authored `loop` action path is NOT covered by
-    ``_AGENT_SYSTEM_OPERATOR_TOOLS``. `learn_preference` (operator-only on the
-    agent dispatcher, "prompt text must not be able to alter later users'
-    runtime behaviour") is a `loop` action type gated only by the permission
-    mode, and in the default mode it runs. The tool is stubbed so nothing real
-    is written. If the loop starts refusing, the gap is closed: invert this."""
+    """`learn_preference` is operator-only on the agent dispatcher; a loop
+    action resolving to any `_AGENT_SYSTEM_OPERATOR_TOOLS` member is refused
+    the same way unless an authenticated operator surface vouches for it."""
     called = []
     monkeypatch.setattr(
         server, "learn_preference", lambda *a, **k: called.append((a, k)) or "RAN",
     )
     result = server._loop_dispatch({"type": "learn_preference", "text": "always run x"})
     assert "learn_preference" in server._LOOP_ACTION_TYPES
-    assert len(called) == 1, f"loop path now refuses learn_preference: {result!r}"
+    assert called == []
+    assert result["ok"] is False and "HOST POLICY" in result["output"]
+
+
+def test_loop_dispatch_runs_learn_preference_for_an_operator_surface(
+    monkeypatch, mode_sandbox,
+):
+    called = []
+    monkeypatch.setattr(
+        server, "learn_preference", lambda *a, **k: called.append((a, k)) or "RAN",
+    )
+    with server.loop_operator_authority():
+        server._loop_dispatch({"type": "learn_preference", "text": "always run x"})
+    assert len(called) == 1
+    server._loop_dispatch({"type": "learn_preference", "text": "again"})
+    assert len(called) == 1
 
 
 @pytest.mark.parametrize("action", ["memory_privacy_repair", "memory_quality_repair"])
