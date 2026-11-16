@@ -118,10 +118,15 @@ def _insert_import(code, stmt):
     at = 0
     for index in range(min(2, len(lines))):
         raw = lines[index]
-        if (index == 0 and raw.startswith("#!")) or _CODING_RE.match(raw):
+        if _CODING_RE.match(raw) or (index == 0 and raw.startswith("#!")):
             at = index + 1
+        elif index == 0 and (not raw.strip() or raw.lstrip().startswith("#")):
+            # A comment (or blank) first line still lets the encoding cookie
+            # sit on line 2, so keep looking instead of stopping here.
+            continue
         else:
             break
+    anchor = None
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
@@ -132,13 +137,27 @@ def _insert_import(code, stmt):
         if (body and isinstance(body[0], ast.Expr)
                 and isinstance(body[0].value, ast.Constant)
                 and isinstance(body[0].value.value, str)):
-            at = max(at, body[0].end_lineno)
+            anchor = body[0]
             position = 1
         for node in body[position:]:
             if isinstance(node, ast.ImportFrom) and node.module == "__future__" and node.level == 0:
-                at = max(at, node.end_lineno)
+                anchor = node
             else:
                 break
+    if anchor is not None:
+        at = max(at, anchor.end_lineno)
+        line = lines[anchor.end_lineno - 1]
+        encoded = line.encode("utf-8")
+        rest = encoded[anchor.end_col_offset:].decode("utf-8").strip()
+        if rest and not rest.startswith("#"):
+            # The anchor shares its line with more code (`"""doc"""; x = f()`):
+            # a new line after it would run after that code, so put the import
+            # on the same line, right behind the anchor statement.
+            cut = anchor.end_col_offset
+            lines[anchor.end_lineno - 1] = (
+                encoded[:cut].decode("utf-8") + "; " + stmt
+                + encoded[cut:].decode("utf-8"))
+            return "".join(lines)
     head = "".join(lines[:at])
     if head and not head.endswith(("\n", "\r")):
         head += newline
