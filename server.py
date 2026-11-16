@@ -16827,7 +16827,7 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
 
 @mcp.tool()
 def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
-    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON)."""
+    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link."""
     _maybe_live_reload()
     export_format = "text"
     if str(format or "").strip():  # the default text path stays import-free

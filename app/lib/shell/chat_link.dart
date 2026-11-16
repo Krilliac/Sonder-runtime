@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ui/kit.dart';
+import '../ui/status_vocab.dart';
 
 /// Sharing a chat with a local assistant (Claude Code and the like) and
 /// opening one from a link. Everything stays on this machine: a link or code
@@ -40,9 +41,10 @@ String? chatShareLink(String sessionId, String? origin) {
   return '${uri.origin}/app/#/c/$sessionId';
 }
 
-/// Copy the link or code for [sessionId] and say so. Returns what was copied,
-/// or null when the item has nothing to copy (no usable origin).
-Future<String?> copyChatShare(
+/// Copy the link or code for [sessionId] and say so ("Copied"). A link with no
+/// usable origin and a clipboard that refuses the write each get their own
+/// toast instead. Returns whether the text was copied.
+Future<bool> copyChatShare(
   BuildContext context,
   ChatShareKind kind,
   String sessionId, {
@@ -52,12 +54,28 @@ Future<String?> copyChatShare(
     ChatShareKind.link => chatShareLink(sessionId, origin),
     ChatShareKind.code => chatShareCode(sessionId),
   };
-  if (text == null) return null;
-  await Clipboard.setData(ClipboardData(text: text));
+  if (text == null) {
+    if (context.mounted) {
+      showSonderToast(
+        context,
+        'No link is available here. Copy the chat code instead.',
+        kind: StatusKind.warn,
+      );
+    }
+    return false;
+  }
+  try {
+    await Clipboard.setData(ClipboardData(text: text));
+  } on PlatformException {
+    if (context.mounted) {
+      showSonderToast(context, 'Could not copy', kind: StatusKind.warn);
+    }
+    return false;
+  }
   if (context.mounted) {
     showSonderToast(context, 'Copied');
   }
-  return text;
+  return true;
 }
 
 /// A request to open a chat, from a `/c/<id>` route. A fresh [serial] makes
@@ -90,16 +108,13 @@ String? chatRefFromRoute(String? route) {
   if (path.startsWith('#')) path = path.substring(1);
   const prefix = '/c/';
   if (!path.startsWith(prefix)) return null;
+  // Not percent-decoded: the server-side resolver does not decode either, so
+  // `%61bc` is one invalid id on both sides.
   var ref = path.substring(prefix.length);
   final end = ref.indexOf(RegExp(r'[?#]'));
   if (end >= 0) ref = ref.substring(0, end);
   if (ref.endsWith('/')) ref = ref.substring(0, ref.length - 1);
-  if (ref.isEmpty) return null;
-  try {
-    return Uri.decodeComponent(ref);
-  } on ArgumentError {
-    return ref;
-  }
+  return ref.isEmpty ? null : ref;
 }
 
 /// `onGenerateRoute` for `/c/<id>`: hands the id to [ChatDeepLink] and leaves
@@ -131,9 +146,11 @@ class _ChatLinkLandingState extends State<_ChatLinkLanding> {
   @override
   void initState() {
     super.initState();
-    ChatDeepLink.request(widget.ref, into: widget.into);
+    // Handed over after the frame: the request notifies the shell
+    // synchronously, and the shell may setState (never during build).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      ChatDeepLink.request(widget.ref, into: widget.into);
       final navigator = Navigator.of(context);
       if (navigator.canPop()) navigator.pop();
     });

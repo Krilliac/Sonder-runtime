@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+    "catalog_digest": "8ce396ffcd04bc2393daf593861b42fc12c8c66e34e09a6ef9234105b5b15383",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+      "catalog_digest": "8ce396ffcd04bc2393daf593861b42fc12c8c66e34e09a6ef9234105b5b15383",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6638,7 +6638,7 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -20468,7 +20468,7 @@
     "schemas": 4,
     "tools": 241
   },
-  "digest": "d79d96560a59319238aba76a933643d48b0ed2c596e26153f6110fa0f1c5302f",
+  "digest": "e62501388cc435ece0044bfceb78aafb81fb6cc488f0bd9e218a06c551aa207f",
   "events": [
     {
       "name": "session.started",
@@ -23180,9 +23180,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+    "catalog_digest": "8ce396ffcd04bc2393daf593861b42fc12c8c66e34e09a6ef9234105b5b15383",
     "client": {
-      "digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+      "digest": "8ce396ffcd04bc2393daf593861b42fc12c8c66e34e09a6ef9234105b5b15383",
       "events": [
         {
           "name": "approval.denied",
@@ -25551,7 +25551,7 @@
           {
             "name": "session_export",
             "schema_available": true,
-            "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON)."
+            "summary": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link."
           },
           {
             "name": "set_context_size",
@@ -32360,7 +32360,7 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -41434,7 +41434,7 @@
           "name": "self_heal_repair"
         },
         {
-          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
+          "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link.",
           "inputSchema": {
             "properties": {
               "format": {
@@ -49816,7 +49816,7 @@
         },
         {
           "function": {
-            "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
+            "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link.",
             "name": "session_export",
             "parameters": {
               "properties": {
@@ -51607,7 +51607,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "a6dc08e0138a1c719a10a45af2dd2caef51e9212bdfe9e2fcea6fd2d9848fe85",
+    "server.py": "d417563447a9c4d55a3a253892120873e965e05c0ae5116b52b2039ac824693e",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -57792,7 +57792,7 @@
       }
     },
     {
-      "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON).",
+      "description": "Export a remembered conversation session as readable transcript text (format=\"atif\": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link.",
       "name": "session_export",
       "parameters": {
         "properties": {

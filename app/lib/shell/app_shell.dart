@@ -475,19 +475,12 @@ class _AppShellState extends State<AppShell>
       widget.shareOrigin ?? Settings.pageOrigin ?? widget.settings.serverUrl;
 
   Future<void> _shareThread(ChatThread thread, ChatShareKind kind) async {
-    final copied = await copyChatShare(
+    await copyChatShare(
       context,
       kind,
       _session.chat.sessionFor(thread.id),
       origin: _shareOrigin,
     );
-    if (copied == null && mounted) {
-      showSonderToast(
-        context,
-        'No link is available here. Copy the chat code instead.',
-        kind: StatusKind.warn,
-      );
-    }
   }
 
   Future<void> _openSearch() async {

@@ -20,6 +20,9 @@ SID = "chat-1794840126388000"
     "/app/#/c/" + SID,
     "#/c/" + SID,
     "http://localhost/app/#/c/" + SID + "/",
+    "HTTP://Example.COM:65535/app/#/c/" + SID,
+    "http://h/#/c/" + SID,
+    "http://h:1/app#/c/" + SID,
 ])
 def test_all_forms_normalise_to_the_id(text):
     assert parse_session_ref(text) == SID
@@ -32,6 +35,10 @@ def test_all_forms_normalise_to_the_id(text):
     "http://h/app/#/c/", "http://h/app/#/c/a/b", "http://h/app/#/c/..%2f..",
     "http://h/app/#/c/" + SID + "?x=1",
     "ftp://h/app/#/c/" + SID,
+    "http://user@h/app/#/c/" + SID, "http://user:pw@h:80/app/#/c/" + SID,
+    "http://h:0/app/#/c/" + SID, "http://h:65536/app/#/c/" + SID,
+    "http://h:99999/app/#/c/" + SID, "http://h:80x/app/#/c/" + SID,
+    "%61bc", "sonder:chat/%61bc", "http://h/app/#/c/%61bc",
     "sonder:session/" + SID, "chat id", "id\x00", "café",
 ])
 def test_junk_and_traversal_are_rejected(text):

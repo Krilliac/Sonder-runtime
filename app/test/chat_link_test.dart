@@ -20,11 +20,14 @@ const _id = 'chat-1794840126388000';
 const _origin = 'http://127.0.0.1:8000';
 final _now = DateTime(2026, 9, 30, 15);
 
-Map<String, Object> _seed() {
-  String thread(String id, String text, DateTime at) => jsonEncode({
+Map<String, Object> _seed(
+    {String bProject = 'engine', Map<String, int>? sessions}) {
+  String thread(String id, String text, DateTime at,
+          {String project = 'engine'}) =>
+      jsonEncode({
         'id': id,
         'title': text,
-        'project': 'engine',
+        'project': project,
         'created_at': at.toIso8601String(),
         'updated_at': at.toIso8601String(),
         'messages': [
@@ -34,8 +37,12 @@ Map<String, Object> _seed() {
       });
   return {
     'sonder_chat_v2/thread-a.json': thread('a', 'Shader cache', _now),
-    'sonder_chat_v2/thread-b.json':
-        thread('b', 'Pool on node1', _now.subtract(const Duration(hours: 2))),
+    'sonder_chat_v2/thread-b.json': thread(
+        'b', 'Pool on node1', _now.subtract(const Duration(hours: 2)),
+        project: bProject),
+    'sonder_chat_v2/thread-bad id.json': thread(
+        'bad id', 'Odd id', _now.subtract(const Duration(hours: 4))),
+    if (sessions != null) 'sonder_chat_v2/sessions.json': jsonEncode(sessions),
     'sonder_chat_v2/thread-$_id.json':
         thread(_id, 'Linked chat', _now.subtract(const Duration(hours: 3))),
     'sonder_chat_v2/migrated-v1': 'yes',
@@ -49,11 +56,12 @@ Future<void> _settle(WidgetTester tester) async {
 }
 
 /// Records what the app puts on the system clipboard.
-List<String> _mockClipboard(WidgetTester tester) {
+List<String> _mockClipboard(WidgetTester tester, {bool fail = false}) {
   final copied = <String>[];
   tester.binding.defaultBinaryMessenger
       .setMockMethodCallHandler(SystemChannels.platform, (call) async {
     if (call.method == 'Clipboard.setData') {
+      if (fail) throw PlatformException(code: 'unavailable');
       copied.add((call.arguments as Map)['text'] as String);
     }
     return null;
@@ -63,15 +71,21 @@ List<String> _mockClipboard(WidgetTester tester) {
   return copied;
 }
 
+final _navigator = GlobalKey<NavigatorState>();
+
 Future<void> _pump(WidgetTester tester, ValueNotifier<ChatLinkRequest?> link,
-    {Size size = const Size(1440, 900)}) async {
-  SharedPreferences.setMockInitialValues(_seed());
+    {Size size = const Size(1440, 900),
+    Map<String, Object>? prefs,
+    bool routed = false}) async {
+  SharedPreferences.setMockInitialValues(prefs ?? _seed());
   ChatStore.backend = PrefsChatStoreBackend();
   ChatStore.resetCache();
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   final settings = await Settings.load();
   await tester.pumpWidget(MaterialApp(
+    navigatorKey: _navigator,
+    onGenerateRoute: routed ? (s) => chatLinkRoute(s, into: link) : null,
     theme: SonderTheme.light,
     darkTheme: SonderTheme.dark,
     themeMode: ThemeMode.dark,
@@ -134,7 +148,8 @@ void main() {
       expect(chatRefFromRoute('#/c/$_id'), _id);
       expect(chatRefFromRoute('/c/$_id/'), _id);
       expect(chatRefFromRoute('/c/$_id?x=1'), _id);
-      expect(chatRefFromRoute('/c/..%2fx'), '../x');
+      expect(chatRefFromRoute('/c/%61bc'), '%61bc');
+      expect(isValidChatRef('%61bc'), isFalse);
       expect(chatRefFromRoute('/c/'), isNull);
       expect(chatRefFromRoute('/c'), isNull);
       expect(chatRefFromRoute('/settings'), isNull);
@@ -302,6 +317,107 @@ void main() {
       expect(link.value?.ref, 'b');
       expect(find.text('home'), findsOneWidget);
       expect(navigator.currentState!.canPop(), isFalse);
+    });
+  });
+
+  group('review fixes', () {
+    testWidgets('a link outside the project filter resets it, not mid-build',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link, prefs: _seed(bProject: 'release'), routed: true);
+      await tester.tap(find.byKey(const Key('shell-project-filter')));
+      await _settle(tester);
+      await tester.tap(find.text('engine').last);
+      await _settle(tester);
+      expect(find.byKey(const ValueKey('b')), findsNothing);
+      unawaited(_navigator.currentState!.pushNamed('/c/b'));
+      await _settle(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('b')), findsOneWidget);
+      expect(_selected(tester, 'b'), isTrue);
+      await unmountChat(tester);
+    });
+
+    testWidgets('a clipboard that refuses says so', (tester) async {
+      final copied = _mockClipboard(tester, fail: true);
+      await _pump(tester, ValueNotifier<ChatLinkRequest?>(null));
+      await tester.tap(find.byKey(const ValueKey('b')),
+          buttons: kSecondaryButton);
+      await _settle(tester);
+      await tester.tap(find.byKey(const Key('thread-menu-copy-code')));
+      await _settle(tester);
+      expect(copied, isEmpty);
+      expect(tester.takeException(), isNull);
+      expect(find.text('Could not copy'), findsOneWidget);
+      expect(find.text('Copied'), findsNothing);
+      await unmountChat(tester);
+    });
+
+    testWidgets('a rotated chat shares its server session and that opens it',
+        (tester) async {
+      final copied = _mockClipboard(tester);
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link, prefs: _seed(sessions: {'b': 2}));
+      await tester.tap(find.byKey(const ValueKey('b')),
+          buttons: kSecondaryButton);
+      await _settle(tester);
+      await tester.tap(find.byKey(const Key('thread-menu-copy-link')));
+      await _settle(tester);
+      expect(copied, ['$_origin/app/#/c/b-2']);
+      // Open the copied link from another chat.
+      expect(_selected(tester, 'a'), isTrue);
+      final route = copied.single.substring(copied.single.indexOf('#') + 1);
+      ChatDeepLink.request(chatRefFromRoute(route)!, into: link);
+      await _settle(tester);
+      expect(find.byKey(const Key('chat-not-found')), findsNothing);
+      expect(_selected(tester, 'b'), isTrue);
+      await unmountChat(tester);
+    });
+
+    testWidgets('the thread id of a rotated chat still opens it',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link, prefs: _seed(sessions: {'b': 2}));
+      ChatDeepLink.request('b', into: link);
+      await _settle(tester);
+      expect(_selected(tester, 'b'), isTrue);
+      await unmountChat(tester);
+    });
+
+    testWidgets('a session suffix the chat never reached does not match',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link, prefs: _seed(sessions: {'b': 2}));
+      ChatDeepLink.request('b-1', into: link);
+      await _settle(tester);
+      expect(find.byKey(const Key('chat-not-found')), findsOneWidget);
+      await unmountChat(tester);
+    });
+
+    testWidgets('a handled link is not reopened by later chat changes',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link);
+      ChatDeepLink.request('b', into: link);
+      await _settle(tester);
+      expect(_selected(tester, 'b'), isTrue);
+      await tester.tap(find.byKey(const ValueKey('a')));
+      await _settle(tester);
+      expect(_selected(tester, 'a'), isTrue);
+      expect(_selected(tester, 'b'), isFalse);
+      await unmountChat(tester);
+    });
+
+    testWidgets('an id that fails the format check is refused even if stored',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      await _pump(tester, link);
+      expect(find.byKey(const ValueKey('bad id')), findsOneWidget);
+      ChatDeepLink.request('bad id', into: link);
+      await _settle(tester);
+      expect(find.byKey(const Key('chat-not-found')), findsOneWidget);
+      expect(_selected(tester, 'bad id'), isFalse);
+      await unmountChat(tester);
     });
   });
 }
