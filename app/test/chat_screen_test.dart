@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat/transcript.dart';
+import 'package:sonder_runtime/chat_screen.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/models.dart';
 
@@ -75,6 +76,35 @@ void main() {
       await leave();
       expect(find.descendant(of: control, matching: find.text('app-ui')),
           findsOneWidget);
+      await unmountChat(tester);
+    });
+  });
+
+  group('project dialog', () {
+    testWidgets(
+        'a second Enter while the dialog animates out does not pop the '
+        'route underneath', (tester) async {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend, size: const Size(1440, 900));
+      await tester.pump(const Duration(milliseconds: 100));
+      final field = find.widgetWithText(TextField, 'Project name');
+      await tester.tap(find.byTooltip('Project: tap to change'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.enterText(field, 'engine');
+      // Two Enters before a single frame of the exit animation.
+      // The field is still mounted while the dialog fades, so a key repeat
+      // can reach its submit callback again; fire it directly, twice.
+      final submit = tester.widget<TextField>(field).onSubmitted!;
+      submit('engine');
+      submit('engine');
+      for (var i = 0; i < 25; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(tester.takeException(), isNull);
+      expect(field, findsNothing);
+      // The chat is the route underneath the dialog; it is still there.
+      expect(find.byType(ChatScreen), findsOneWidget);
       await unmountChat(tester);
     });
   });

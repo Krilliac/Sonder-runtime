@@ -712,6 +712,16 @@ class _ProjectDialogState extends State<_ProjectDialog> {
   late final TextEditingController _controller =
       TextEditingController(text: widget.initial);
 
+  /// The field and the buttons stay live while the dialog animates out, so
+  /// a second Enter or tap would pop the route underneath. Close once.
+  bool _closed = false;
+
+  void _close([String? value]) {
+    if (_closed) return;
+    _closed = true;
+    Navigator.of(context).pop(value);
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -729,15 +739,15 @@ class _ProjectDialogState extends State<_ProjectDialog> {
           labelText: 'Project name',
           hintText: 'default, app-ui, engine...',
         ),
-        onSubmitted: (value) => Navigator.of(context).pop(value),
+        onSubmitted: _close,
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _close,
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
+          onPressed: () => _close(_controller.text),
           child: const Text('Save'),
         ),
       ],
