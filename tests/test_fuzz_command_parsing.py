@@ -876,6 +876,20 @@ def test_clean_location_is_idempotent():
         f"once={failures[0][1]!r} twice={failures[0][2]!r}")
 
 
+def test_clean_location_long_article_runs_stay_linear():
+    """Hostile ``the the ... Paris`` runs must not make the fixpoint loop quadratic."""
+    assert wi._clean_location("the " * 12 + "Paris") == "Paris"
+    for n in (200, 5000, 50000):
+        start = time.perf_counter()
+        got = wi._clean_location("the " * n + "Paris")
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.2, f"{n} articles took {elapsed:.2f}s"
+        assert got == ""
+    start = time.perf_counter()
+    assert wi.classify("weather in " + "the " * 50000 + "Paris")["location"] == ""
+    assert time.perf_counter() - start < 1.0
+
+
 def test_clean_location_the_the_x_regression():
     once = wi._clean_location("the the x")
     assert wi._clean_location(once) == once
