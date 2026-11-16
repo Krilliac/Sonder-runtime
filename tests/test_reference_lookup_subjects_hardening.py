@@ -33,7 +33,10 @@ def _meta(subject):
                          ids=["balanced-5000", "open-60000"])
 def test_deeply_nested_sources_is_a_warning_not_an_exception(raw):
     meta = parse_library_meta("2", raw)
-    assert meta.library == () and "not valid JSON" in meta.warnings[0]
+    # Python 3.12 raises RecursionError on the balanced form ("not valid JSON"); 3.14's json
+    # parses it, and the nested list is then refused as a malformed entry. Either is a warning.
+    assert meta.library == () and meta.warnings
+    assert "not valid JSON" in meta.warnings[0] or "is malformed and was ignored" in meta.warnings[0]
 
 
 def test_deeply_nested_sources_does_not_stop_the_index_status(tmp_path):
