@@ -68,7 +68,16 @@ def _substance(text):
     "0ms" versus "31ms", and a judge reply carrying it is no longer the one
     line :func:`_judge_verdict` accepts.  The answers shown keep the footer.
     """
-    return _ENSEMBLE_FOOTER_RE.sub("", str(text or "")).strip()
+    out = str(text or "")
+    # Trailing whitespace goes before the match (the footer must end the text) but leading
+    # whitespace stays until the end: the footer's own leading newline is part of the match.
+    # Stacked footers peel one per pass; 8 passes is far more than a reply ever carries.
+    for _ in range(8):
+        stripped = _ENSEMBLE_FOOTER_RE.sub("", out.rstrip())
+        if stripped == out:
+            break
+        out = stripped
+    return out.strip()
 
 
 def _ask(ask_fn, prompt, tier):

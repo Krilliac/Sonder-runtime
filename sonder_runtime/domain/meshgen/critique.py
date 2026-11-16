@@ -226,10 +226,16 @@ def cap_score(score, floating_issues):
 def _first_object(text: str):
     decoder = json.JSONDecoder()
     index = text.find("{")
+    failures = 0
     while index != -1:
         try:
             value, _end = decoder.raw_decode(text, index)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A legitimate reply has a handful of brace groups; 64 failed
+            # decodes bound the scan so a long run of '{' stays linear.
+            failures += 1
+            if failures >= 64:
+                return None
             index = text.find("{", index + 1)
             continue
         if isinstance(value, dict):

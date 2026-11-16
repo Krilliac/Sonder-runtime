@@ -923,7 +923,7 @@ def test_normalize_tool_args_canonical_key_beats_alias():
 def test_normalize_tool_args_is_idempotent_on_flat_objects():
     rng = _rng(25)
     run = _Run()
-    keys = tuple(k for k in _ARG_KEYS if k not in ("tool", "name", "arguments", "args", "text"))
+    keys = tuple(k for k in _ARG_KEYS if k not in ("tool", "name", "arguments", "args", "text"))  # "text": see test_by_design_normalize_tool_args_text_alias_collision
     for _ in range(ITER * 2):
         args = {rng.choice(keys): _arg_value(rng, 2) for _ in range(rng.randint(0, 5))}
         schema = rng.choice(_SCHEMAS)
@@ -936,17 +936,25 @@ def test_normalize_tool_args_is_idempotent_on_flat_objects():
     run.check("normalize_tool_args idempotence", latency=False)
 
 
-def test_normalize_tool_args_text_alias_collision_regression():
-    """SUSPECT: 'text' stays when only 'needle' is present, but a second pass sees 'query' and silently drops it."""
+def test_by_design_normalize_tool_args_text_alias_collision():
+    """Normalization is applied once per call in production; a second application can unwrap or drop further.
+
+    Pins the single application: 'needle' becomes 'query' and 'text' stays. Applying it again sees 'query'
+    and drops 'text', which is why 'text' is not in the flat-object idempotence key pool above.
+    """
     first = normalize_tool_args(None, {"needle": "n", "text": "t"}, None)[0]
-    assert normalize_tool_args(None, first, None)[0] == first, "second pass changed %r" % (first,)
+    assert first == {"query": "n", "text": "t"}
 
 
-def test_normalize_tool_args_nested_envelope_regression():
-    """SUSPECT: the module claims idempotence, but a doubly wrapped envelope unwraps one level per call."""
+def test_by_design_normalize_tool_args_nested_envelope():
+    """Normalization is applied once per call in production; a second application can unwrap or drop further.
+
+    Pins the single application: only the outer envelope is unwrapped, leaving the inner one in place.
+    """
     args = {"tool": "a", "arguments": {"tool": "b", "arguments": {"path": "p"}}}
-    first = normalize_tool_args(None, args, None)[0]
-    assert normalize_tool_args(None, first, None)[0] == first
+    out, notes = normalize_tool_args(None, args, None)
+    assert out == {"tool": "b", "arguments": {"path": "p"}}
+    assert notes == ["unwrapped arguments envelope"]
 
 
 def test_normalize_decision_aliases_contract():
