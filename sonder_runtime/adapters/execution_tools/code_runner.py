@@ -707,6 +707,12 @@ class _WindowRegistry:
             except Exception:  # noqa: BLE001 - teardown is best effort; the job still closes
                 logging.getLogger(__name__).warning(
                     "runwindow lifetime teardown failed", exc_info=True)
+            # The teardown closes the job it terminated and clears the proc's
+            # handle. Closing window["job"] again in the release would hit a
+            # handle value Windows may already have reused (another console's
+            # job, or any handle in this process), so drop it here.
+            if getattr(window["proc"], "_sonder_job_handle", window["job"]) is None:
+                window["job"] = None
             try:
                 self._release_locked(key)
             except Exception:  # noqa: BLE001 - never kill the timer thread
