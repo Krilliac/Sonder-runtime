@@ -27,6 +27,7 @@ import contextvars
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -307,15 +308,14 @@ def test_loop_precheck_refuses_every_spelling_the_executor_would_fold_to_a_host_
 
 
 @pytest.mark.parametrize("action", ({}, {"type": ""}, {"type": None}, {"action": ""}), ids=repr)
-def test_gap_loop_precheck_allows_an_action_with_no_type_though_executor_defaults_to_code(action):
-    """GAP (defence in depth only): ``_loop_dispatch`` runs a typeless action as ``code`` (run_code),
-    but the pre-check sees an empty tool name and says nothing. The primary gate still refuses the
-    ``loop`` tool itself for a user (serve.py:3725), pinned below, so nothing runs today.
-    Proposed fix: treat an empty ``action_type`` as ``code`` in the pre-check."""
-    assert serve._loop_global_operation_refusal(json.dumps([action]), USER_CTX) == ""
+def test_loop_precheck_treats_an_action_with_no_type_as_code_like_the_executor(action):
+    """``_loop_dispatch`` runs a typeless action as ``code`` (run_code); the pre-check applies the same
+    default, so a user is refused at the pre-check as well as at the primary ``loop`` gate."""
     defaulted = (action.get("type") or action.get("action") or "code").strip().lower()
     assert defaulted == "code"
     assert server._loop_action_tool(defaulted) == "run_code"
+    refusal = serve._loop_global_operation_refusal(json.dumps([action]), USER_CTX)
+    assert refusal.startswith("refused /loop")
 
 
 def test_loop_tool_itself_is_refused_for_user_so_the_precheck_gap_is_not_reachable(monkeypatch, auto_mode,  # noqa: F811
@@ -430,13 +430,10 @@ def test_restricted_tool_role_for_malformed_contexts_fails_toward_user(context, 
 
 
 @pytest.mark.parametrize("account", ("admin", 7, ["admin"]), ids=repr)
-def test_gap_non_mapping_account_raises_attributeerror_not_a_decision(account):
-    """GAP (pins current): ``_restricted_tool_role`` catches only KeyError/TypeError, so a non-mapping
-    ``account`` escapes as AttributeError (the request errors; it is never treated as unrestricted).
-    Unreachable today: ``account`` always comes from admin_auth as a dict. Proposed fix: add AttributeError."""
+def test_non_mapping_account_fails_toward_restricted_user(account):
+    """A non-mapping ``account`` (AttributeError inside the authorization check) is restricted, never raised."""
     context = {"mode": "account", "authorized": True, "api_key": False, "account": account}
-    with pytest.raises(AttributeError):
-        serve._restricted_tool_role(context)
+    assert serve._restricted_tool_role(context) == "user"
 
 
 # --- 3. ContextVar propagation -----------------------------------------------
@@ -645,39 +642,37 @@ def test_huge_valid_allowlist_parses_linearly_and_is_exact():
 
 
 @pytest.mark.parametrize("entry", ("*", "file_*", "?", "**", ".*", "[a-z]*", "file_write|*"))
-def test_wildcard_looking_entries_are_literal_names_with_no_glob_semantics(entry):
-    """No wildcard is documented, so none may exist: ``*`` allows exactly a tool called ``*``."""
-    allowed = public_policy.parse_allowlist(_doc(_e(entry)))
-    assert allowed == frozenset({entry})
-    for tool in ("file_write", "status", "run_code", "file_", "anything"):
-        assert isinstance(public_policy.decide_tool(tool, "user", allowed), public_policy.ToolRefused), tool
-    assert public_policy.decide_tool(entry, "user", allowed) == public_policy.ToolAllowed()
+def test_wildcard_looking_entries_are_rejected_as_names(entry):
+    """No wildcard is documented, so none may exist: a glob-looking name does not match the name pattern."""
+    with pytest.raises(ValueError):
+        public_policy.parse_allowlist(_doc(_e(entry)))
 
 
-def test_case_duplicates_are_distinct_literal_entries_and_only_the_exact_case_matches():
-    """GAP (pins current): ``Status`` and ``status`` are two valid entries; no case folding, so the
-    reviewed-allowlist author who writes ``Status`` grants nothing on the agent path (fails closed)."""
-    allowed = public_policy.parse_allowlist(_doc(_e("status"), _e("Status")))
-    assert allowed == frozenset({"status", "Status"})
+def test_upper_case_names_are_rejected_so_a_case_typo_cannot_silently_grant_nothing():
+    """``Status`` is not a valid entry (no case folding exists, so it could never match a tool)."""
+    with pytest.raises(ValueError):
+        public_policy.parse_allowlist(_doc(_e("status"), _e("Status")))
+    allowed = public_policy.parse_allowlist(_doc(_e("status")))
     assert isinstance(public_policy.decide_tool("STATUS", "user", allowed), public_policy.ToolRefused)
 
 
-def test_gap_invisible_and_homoglyph_names_are_accepted_as_distinct_entries():
-    """GAP (pins current): ``str.strip`` does not remove zero-width characters, and nothing NFKC-normalises
-    or confusable-checks entries, so a review-invisible entry like ``status\\u200b`` parses.
-    It stays inert (never equals a real tool spelling), but a reviewer cannot see it in a diff.
-    Proposed fix: reject names that are not ``isprintable()``/ASCII ``[a-z0-9_]``."""
-    invisible = ("\u200b", "status\u200b", "\ufeffstatus", "st\u0430tus", "\uff53tatus", "a\nb", "a\x00b")
-    allowed = public_policy.parse_allowlist(_doc(*[_e(n) for n in invisible]))
-    assert allowed == frozenset(invisible)
-    assert isinstance(public_policy.decide_tool("status", "user", allowed), public_policy.ToolRefused)
+@pytest.mark.parametrize("name", (
+    "\u200b", "status\u200b", "\ufeffstatus", "st\u0430tus", "\uff53tatus", "a\nb", "a\x00b",
+    "Status", "file_*", "*", "1abc", "_abc", "a-b", "a b", "a.b", "", "a\n",
+))
+def test_tool_names_outside_the_strict_pattern_are_rejected(name):
+    """Names must match ``[a-z][a-z0-9_]*``: invisible, homoglyph, upper-case and glob-looking entries raise."""
+    with pytest.raises(ValueError):
+        public_policy.parse_allowlist(_doc(_e(name)))
 
 
 @pytest.mark.parametrize("version", (True, 1.0))
-def test_gap_schema_version_true_and_one_point_zero_are_accepted(version):
-    """GAP (pins current): ``True == 1`` and ``1.0 == 1`` so the version check accepts them. Harmless
-    (same document), but the check is not the strict ``is 1`` it reads as."""
-    assert public_policy.parse_allowlist(_doc(_e(), version=version)) == frozenset({"status"})
+def test_schema_version_true_and_one_point_zero_are_rejected(version):
+    """``True == 1`` and ``1.0 == 1``, but the version must be an int, so both raise (either parser)."""
+    with pytest.raises(ValueError):
+        public_policy.parse_allowlist(_doc(_e(), version=version))
+    with pytest.raises(ValueError):
+        public_policy.parse_untooled_allowlist(_doc(_e("/help"), key="untooled_commands", version=version))
 
 
 @pytest.mark.parametrize("name", ("/Help", "/help ", " /help", "help", "", "/HELP", "\\help", "//\u0130"))
@@ -686,14 +681,27 @@ def test_untooled_names_must_be_exact_lowercase_slash_commands(name):
         public_policy.parse_untooled_allowlist(_doc(_e(name), key="untooled_commands"))
 
 
-@pytest.mark.parametrize("name", ("/", "/*", "/a b", "/help\u200b"))
-def test_gap_untooled_parser_accepts_degenerate_slash_names(name):
-    """GAP (pins current): only ``startswith('/')`` and ``== strip().lower()`` are checked. ``/`` alone and
-    ``/*`` parse; ``/*`` is a literal (no glob), but ``/`` would let a user run a bare-slash command."""
-    allowed = public_policy.parse_untooled_allowlist(_doc(_e(name), key="untooled_commands"))
-    assert allowed == frozenset({name})
-    assert role_tool_policy.untooled_refusal_reason("/help", "user") in ("", role_tool_policy.untooled_refusal_reason("/help", "user"))
-    assert isinstance(public_policy.decide_tool("/other", "user", allowed), public_policy.ToolRefused)
+@pytest.mark.parametrize("name", ("/", "/*", "/a b", "/help\u200b", "/a/b", "/help\n"))
+def test_untooled_parser_rejects_degenerate_slash_names(name):
+    """A slash command is ``/`` plus one or more of ``[a-z0-9_-]``; ``/``, ``/*`` and spaces raise."""
+    with pytest.raises(ValueError):
+        public_policy.parse_untooled_allowlist(_doc(_e(name), key="untooled_commands"))
+
+
+def test_every_shipped_allowlist_file_parses_under_the_strict_rules():
+    """A shipped entry the strict parsers reject would fail closed to an empty allowlist and lock users out."""
+    payload = json.loads(role_tool_policy.ALLOWLIST_PATH.read_text(encoding="utf-8"))
+    tools = public_policy.parse_allowlist(payload)
+    commands = public_policy.parse_untooled_allowlist(payload)
+    assert tools and commands
+    role_tool_policy.user_tool_allowlist.cache_clear()
+    role_tool_policy.user_untooled_commands.cache_clear()
+    try:
+        assert role_tool_policy.user_tool_allowlist() == tools
+        assert role_tool_policy.user_untooled_commands() == commands
+    finally:
+        role_tool_policy.user_tool_allowlist.cache_clear()
+        role_tool_policy.user_untooled_commands.cache_clear()
 
 
 def test_each_parser_ignores_the_other_parsers_section():
@@ -711,14 +719,14 @@ def test_seeded_hostile_documents_obey_the_reference_oracle():
     versions = [1, 1, 1, 2, "1", None, True, 0]
 
     def oracle(doc):
-        if not isinstance(doc, dict) or doc.get("schema_version") != 1 or not isinstance(doc.get("tools"), list):
+        if not isinstance(doc, dict) or type(doc.get("schema_version")) is not int or doc.get("schema_version") != 1 or not isinstance(doc.get("tools"), list):
             return None
         out = []
         for entry in doc["tools"]:
             if not isinstance(entry, dict):
                 return None
             name, why = entry.get("name"), entry.get("why")
-            if not isinstance(name, str) or not name.strip() or name != name.strip():
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
                 return None
             if not isinstance(why, str) or not why.strip():
                 return None
