@@ -35,11 +35,6 @@ class HardwareProfilePort(Protocol):
     def to_dict(self) -> dict: ...
 
 
-MODEL_SPECS = {
-    "1.5b": {"params": 1.5, "hf": "Qwen/Qwen2.5-Coder-1.5B-Instruct", "hf_revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a", "ollama": "qwen2.5-coder:1.5b", "train_vram": 2.8, "train_ram": 6.0, "infer_vram": 1.6, "infer_ram": 3.0},
-    "3b": {"params": 3.0, "hf": "Qwen/Qwen2.5-Coder-3B-Instruct", "hf_revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5", "ollama": "qwen2.5-coder:3b", "train_vram": 5.0, "train_ram": 10.0, "infer_vram": 2.8, "infer_ram": 5.0},
-    "7b": {"params": 7.0, "hf": "Qwen/Qwen2.5-Coder-7B-Instruct", "hf_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242", "ollama": "qwen2.5-coder:7b", "train_vram": 10.0, "train_ram": 18.0, "infer_vram": 5.5, "infer_ram": 9.0},
-}
 MODEL_ALIASES = {"1.5": "1.5b", "1.5b": "1.5b", "3": "3b", "3b": "3b", "7": "7b", "7b": "7b"}
 TRAINING_CPU_OFFLOAD_SUPPORTED = False
 TRAINING_CPU_OFFLOAD_REASON = (
@@ -111,8 +106,8 @@ def memory_budgets(profile, options):
     return round(usable_vram, 2), round(usable_ram, 2)
 
 
-def _training_estimate(size, options):
-    spec = MODEL_SPECS[size]
+def _training_estimate(size, options, specs):
+    spec = specs[size]
     scale = max(0.5, options.sequence_length / 1024) * max(1, options.batch_size)
     return round(spec["train_vram"] + (scale - 1.0) * (0.35 + spec["params"] * 0.10), 2), round(spec["train_ram"] + max(0.0, scale - 1.0) * spec["params"] * 0.35, 2)
 
@@ -139,10 +134,10 @@ def _generic_inference_estimate(params_b, options):
     return round(total, 2), round(total + 1.0, 2)
 
 
-def _inference_estimate(size, options):
-    if size not in MODEL_SPECS:
+def _inference_estimate(size, options, specs):
+    if size not in specs:
         return _generic_inference_estimate(_size_params(size, options), options)
-    spec = MODEL_SPECS[size]
+    spec = specs[size]
     scale = max(0.25, options.context_length / 8192)
     return round(max(spec["infer_vram"], spec["infer_vram"] + (scale - 1.0) * spec["params"] * 0.18), 2), round(max(spec["infer_ram"], spec["infer_ram"] + (scale - 1.0) * spec["params"] * 0.12), 2)
 
@@ -166,13 +161,13 @@ def _requested_size(value):
     return "%gb" % float(match.group(1))
 
 
-def _inference_model_name(size, options):
-    if size in MODEL_SPECS:
-        return MODEL_SPECS[size]["ollama"]
+def _inference_model_name(size, options, specs):
+    if size in specs:
+        return specs[size]["ollama"]
     return options.requested_model or size
 
 
-def build_plan(profile=None, options=None):
+def build_plan(profile=None, options=None, *, specs):
     options = options or PlanOptions()
     if profile is None:
         raise ValueError("a detected hardware profile must be supplied to the application planning boundary")
@@ -182,20 +177,20 @@ def build_plan(profile=None, options=None):
     rejected = []
     inference_size = "1.5b"
     for size in ("7b", "3b", "1.5b"):
-        est_vram, est_ram = _inference_estimate(size, options)
+        est_vram, est_ram = _inference_estimate(size, options, specs)
         if (available_vram and est_vram <= usable_vram) or est_ram <= usable_ram:
             inference_size = size
             break
         rejected.append(f"Inference {size} rejected: needs about {est_vram:.1f} GB VRAM or {est_ram:.1f} GB RAM headroom.")
     if requested != "auto":
-        est_vram, est_ram = _inference_estimate(requested, options)
+        est_vram, est_ram = _inference_estimate(requested, options, specs)
         if est_vram <= usable_vram or est_ram <= usable_ram:
             inference_size = requested
         else:
             rejected.append(f"Requested inference {requested} needs about {est_vram:.1f} GB VRAM or {est_ram:.1f} GB RAM and cannot preserve memory reserves; using {inference_size}.")
-    infer_vram, infer_ram = _inference_estimate(inference_size, options)
+    infer_vram, infer_ram = _inference_estimate(inference_size, options, specs)
     infer_offload = bool(available_vram and infer_vram > usable_vram)
-    inference = Recommendation(True, inference_size, _inference_model_name(inference_size, options), "Ollama 4-bit inference" if available_vram else "Ollama 4-bit CPU inference", min(infer_vram, usable_vram) if usable_vram else 0.0, infer_ram if (infer_offload or not available_vram) else min(2.0, infer_ram), infer_offload, f"{available_vram:.1f} GB currently free VRAM and {usable_ram:.1f} GB usable system RAM after independent reserves.", list(rejected), {"context_length": options.context_length})
+    inference = Recommendation(True, inference_size, _inference_model_name(inference_size, options, specs), "Ollama 4-bit inference" if available_vram else "Ollama 4-bit CPU inference", min(infer_vram, usable_vram) if usable_vram else 0.0, infer_ram if (infer_offload or not available_vram) else min(2.0, infer_ram), infer_offload, f"{available_vram:.1f} GB currently free VRAM and {usable_ram:.1f} GB usable system RAM after independent reserves.", list(rejected), {"context_length": options.context_length})
     train_rejected = []
     training_size = ""
     runtime_supported = profile.cuda_available and profile.gpu_vendor == "nvidia"
@@ -203,7 +198,7 @@ def build_plan(profile=None, options=None):
         train_rejected.append("Local QLoRA disabled: this bitsandbytes path requires a supported NVIDIA CUDA runtime.")
     if options.allow_cpu_offload:
         train_rejected.append(TRAINING_CPU_OFFLOAD_REASON)
-    uncatalogued = requested != "auto" and requested not in MODEL_SPECS
+    uncatalogued = requested != "auto" and requested not in specs
     if uncatalogued:
         # An explicit size is a request to train that size.  Substituting a
         # different pinned base would start an attended weight update on a
@@ -216,7 +211,7 @@ def build_plan(profile=None, options=None):
     else:
         candidates = [requested]
     for size in candidates:
-        est_vram, est_ram = _training_estimate(size, options)
+        est_vram, est_ram = _training_estimate(size, options, specs)
         range_ok = (size == "1.5b" and available_vram >= 4.0) or (size == "3b" and available_vram >= 7.5) or (size == "7b" and available_vram >= 11.5 and usable_ram >= 16.0)
         direct_fit = est_vram <= usable_vram and est_ram <= usable_ram
         if runtime_supported and not options.allow_cpu_offload and range_ok and direct_fit:
@@ -230,16 +225,16 @@ def build_plan(profile=None, options=None):
         train_rejected.append(f"QLoRA {size} rejected: "+"; ".join(reasons or ["runtime unsupported"])+".")
     method = "QLoRA (4-bit NF4)"
     if options.full_finetune and not uncatalogued:
-        dense_size = requested if requested in MODEL_SPECS else "1.5b"
-        dense_vram, dense_ram = round(MODEL_SPECS[dense_size]["params"] * 16 + 4, 1), round(MODEL_SPECS[dense_size]["params"] * 8 + 8, 1)
+        dense_size = requested if requested in specs else "1.5b"
+        dense_vram, dense_ram = round(specs[dense_size]["params"] * 16 + 4, 1), round(specs[dense_size]["params"] * 8 + 8, 1)
         if not runtime_supported or dense_vram > usable_vram or dense_ram > usable_ram:
             train_rejected.append(f"Dense {dense_size} rejected: estimated {dense_vram:.1f} GB VRAM/{dense_ram:.1f} GB RAM; it is explicit opt-in and does not fit safely.")
             training_size = ""
         else:
             training_size, method = dense_size, "full-parameter bf16 (advanced opt-in)"
     if training_size:
-        est_vram, est_ram = (dense_vram, dense_ram) if method.startswith("full-parameter") else _training_estimate(training_size, options)
-        training = Recommendation(True, training_size, MODEL_SPECS[training_size]["hf"], method, est_vram, est_ram, False, f"{available_vram:.1f} GB currently free VRAM; {usable_vram:.1f} GB GPU budget and {usable_ram:.1f} GB RAM budget after desktop/OS reserves.", train_rejected, {"quantization": "NF4" if method.startswith("QLoRA") else "none", "sequence_length": options.sequence_length, "batch_size": options.batch_size, "gradient_accumulation": options.gradient_accumulation, "gradient_checkpointing": True})
+        est_vram, est_ram = (dense_vram, dense_ram) if method.startswith("full-parameter") else _training_estimate(training_size, options, specs)
+        training = Recommendation(True, training_size, specs[training_size]["hf"], method, est_vram, est_ram, False, f"{available_vram:.1f} GB currently free VRAM; {usable_vram:.1f} GB GPU budget and {usable_ram:.1f} GB RAM budget after desktop/OS reserves.", train_rejected, {"quantization": "NF4" if method.startswith("QLoRA") else "none", "sequence_length": options.sequence_length, "batch_size": options.batch_size, "gradient_accumulation": options.gradient_accumulation, "gradient_checkpointing": True})
     else:
         training = Recommendation(False, "", "", "disabled", 0.0, 0.0, False, "No supported attended local weight-training plan fits the live memory budgets.", train_rejected, {})
     return HardwarePlan(profile, inference, training, usable_vram, usable_ram, options)
@@ -269,4 +264,4 @@ def format_plan(plan):
     return "\n".join(lines)
 
 
-__all__ = ["HardwareProfilePort", "MODEL_SPECS", "MODEL_ALIASES", "TRAINING_CPU_OFFLOAD_SUPPORTED", "TRAINING_CPU_OFFLOAD_REASON", "PlanOptions", "Recommendation", "HardwarePlan", "memory_budgets", "build_plan", "format_hardware", "format_plan"]
+__all__ = ["HardwareProfilePort", "MODEL_ALIASES", "TRAINING_CPU_OFFLOAD_SUPPORTED", "TRAINING_CPU_OFFLOAD_REASON", "PlanOptions", "Recommendation", "HardwarePlan", "memory_budgets", "build_plan", "format_hardware", "format_plan"]

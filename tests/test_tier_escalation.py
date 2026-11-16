@@ -10,6 +10,7 @@ answered, and the workbench agent rerunning on the next model when its model
 cannot drive the loop while an explicit tier never moves.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -35,8 +36,13 @@ def _resolve(tier, tiers=TIERS):
 
 
 def test_plan_is_distinct_by_model_and_bounded_by_the_gateway_ceiling():
-    plan = te.plan(CODE_PROMPT, start=te.Rung("sonder", "m-code"),
-                   available=TIERS, resolve=_resolve)
+    plan = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=TIERS,
+        resolve=_resolve,
+        lists=_test_model_lists.load().values,
+    )
 
     assert plan.task == "code"
     # The code ladder is code -> general -> reasoning; code is the start's
@@ -49,16 +55,26 @@ def test_plan_is_distinct_by_model_and_bounded_by_the_gateway_ceiling():
 
 def test_plan_is_one_rung_when_every_tier_is_the_same_model():
     same = {tier: "m-one" for tier in TIERS}
-    plan = te.plan(CODE_PROMPT, start=te.Rung("sonder", "m-one"), available=same,
-                   resolve=lambda tier: _resolve(tier, same))
+    plan = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("sonder", "m-one"),
+        available=same,
+        resolve=lambda tier: _resolve(tier, same),
+        lists=_test_model_lists.load().values,
+    )
 
     assert plan.rungs == (te.Rung("sonder", "m-one"),)
     assert plan.escalations == 0
 
 
 def test_a_reasoning_prompt_starts_on_a_bound_reasoning_model_and_can_fall_back():
-    plan = te.plan(REASONING_PROMPT, start=te.Rung("sonder", "m-code"),
-                   available=TIERS, resolve=_resolve)
+    plan = te.plan(
+        REASONING_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=TIERS,
+        resolve=_resolve,
+        lists=_test_model_lists.load().values,
+    )
 
     assert plan.prerouted
     assert plan.start == te.Rung("reasoning", "m-reasoning")
@@ -67,8 +83,13 @@ def test_a_reasoning_prompt_starts_on_a_bound_reasoning_model_and_can_fall_back(
 
 def test_the_reasoning_pre_route_is_skipped_when_it_is_the_start_model():
     tiers = dict(TIERS, reasoning="m-code")
-    plan = te.plan(REASONING_PROMPT, start=te.Rung("sonder", "m-code"),
-                   available=tiers, resolve=lambda tier: _resolve(tier, tiers))
+    plan = te.plan(
+        REASONING_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=tiers,
+        resolve=lambda tier: _resolve(tier, tiers),
+        lists=_test_model_lists.load().values,
+    )
 
     assert not plan.prerouted
     assert plan.start.tier == "sonder"
@@ -76,9 +97,13 @@ def test_the_reasoning_pre_route_is_skipped_when_it_is_the_start_model():
 
 def test_vision_never_pre_routes_without_an_image_signal():
     tiers = dict(TIERS, vision="m-vision")
-    plan = te.plan("describe the screenshot and read the text in this image",
-                   start=te.Rung("sonder", "m-code"), available=tiers,
-                   resolve=lambda tier: _resolve(tier, tiers))
+    plan = te.plan(
+        "describe the screenshot and read the text in this image",
+        start=te.Rung("sonder", "m-code"),
+        available=tiers,
+        resolve=lambda tier: _resolve(tier, tiers),
+        lists=_test_model_lists.load().values,
+    )
 
     assert not plan.prerouted
     assert all(rung.model != "m-vision" for rung in plan.rungs)
@@ -92,24 +117,46 @@ def test_unbound_and_cloud_tiers_are_never_rungs():
             return te.Rung("reasoning", "big-cloud", cloud=True)
         return _resolve(tier)
 
-    plan = te.plan(CODE_PROMPT, start=te.Rung("sonder", "m-code"),
-                   available=TIERS, resolve=resolve)
+    plan = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=TIERS,
+        resolve=resolve,
+        lists=_test_model_lists.load().values,
+    )
 
     assert plan.rungs == (te.Rung("sonder", "m-code"),)
 
 
 def test_a_cloud_start_never_escalates():
-    plan = te.plan(CODE_PROMPT, start=te.Rung("cloud-code", "big-cloud", cloud=True),
-                   available=TIERS, resolve=_resolve)
+    plan = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("cloud-code", "big-cloud", cloud=True),
+        available=TIERS,
+        resolve=_resolve,
+        lists=_test_model_lists.load().values,
+    )
 
     assert plan.rungs == (te.Rung("cloud-code", "big-cloud", cloud=True),)
 
 
 def test_the_budget_is_clamped_to_the_gateway_ceiling():
-    wide = te.plan(CODE_PROMPT, start=te.Rung("sonder", "m-code"), available=TIERS,
-                   resolve=_resolve, max_escalations=10)
-    none = te.plan(CODE_PROMPT, start=te.Rung("sonder", "m-code"), available=TIERS,
-                   resolve=_resolve, max_escalations=0)
+    wide = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=TIERS,
+        resolve=_resolve,
+        max_escalations=10,
+        lists=_test_model_lists.load().values,
+    )
+    none = te.plan(
+        CODE_PROMPT,
+        start=te.Rung("sonder", "m-code"),
+        available=TIERS,
+        resolve=_resolve,
+        max_escalations=0,
+        lists=_test_model_lists.load().values,
+    )
 
     assert wide.escalations <= te.MAX_ESCALATIONS
     assert none.escalations == 0

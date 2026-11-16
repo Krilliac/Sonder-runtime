@@ -46,19 +46,11 @@ def configure_training_capacity(max_jobs: int) -> None:
 
 
 ROOT = Path(__file__).resolve().parent
-PERSONAL_MODEL = "sonder-personal:latest"
-ROLLBACK_MODEL = "sonder:latest"
 LLAMA_CPP_REVISION = "99f3dc32296f825fec94f202da1e9fede1e78cf9"
 LLAMA_CPP_TREE_SHA256 = "3cb23bb624453dc3511df618bc1445169d44b8fb635bd04a1b3eabc45db2d4df"
 
-
-# Compatibility names for callers that still import the legacy entrypoint.
-# The canonical planning implementation lives in the application boundary;
-# lifecycle/deployment code below remains intentionally in this module until
-# its external process and policy seams can be extracted safely.
 from sonder_runtime.application.training.hardware_planning import (
     MODEL_ALIASES as MODEL_ALIASES,
-    MODEL_SPECS as MODEL_SPECS,
     TRAINING_CPU_OFFLOAD_REASON as TRAINING_CPU_OFFLOAD_REASON,
     TRAINING_CPU_OFFLOAD_SUPPORTED as TRAINING_CPU_OFFLOAD_SUPPORTED,
     HardwarePlan as HardwarePlan,
@@ -70,6 +62,10 @@ from sonder_runtime.application.training.hardware_planning import (
     memory_budgets as _application_memory_budgets,
 )
 
+from sonder_runtime.adapters.model_list_consumers import training_attr, training_value as _list_value
+import sonder_runtime.adapters.training_model_catalog as _training_catalog
+__getattr__ = training_attr
+
 
 def memory_budgets(profile, options):
     return _application_memory_budgets(profile, options)
@@ -79,7 +75,7 @@ def build_plan(profile=None, options=None):
     profile = profile or system_profile.detect_hardware(
         gpu_index=(options or PlanOptions()).gpu_index
     )
-    return _application_build_plan(profile, options)
+    return _application_build_plan(profile, options, specs=_list_value("MODEL_SPECS"))
 
 
 def format_hardware(profile=None):
@@ -99,7 +95,7 @@ def state_path():
 def _read_state():
     path = state_path()
     if not path.exists():
-        return {"status": "never_started", "rollback_model": ROLLBACK_MODEL}
+        return {"status": "never_started", "rollback_model": _list_value('ROLLBACK_MODEL')}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -289,7 +285,7 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         run_dir = expected_run_dir
         if current.get("base_hf") != plan.training.model:
             return False, "Training resume plan does not match the interrupted run base model."
-        expected_revision = MODEL_SPECS[plan.training.model_size]["hf_revision"]
+        expected_revision = _list_value('MODEL_SPECS')[plan.training.model_size]["hf_revision"]
         if current.get("hf_revision") != expected_revision:
             return False, "Training resume base revision does not match the interrupted run."
         prior_plan_file = run_dir / "training-plan.json"
@@ -333,7 +329,7 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         return False, message
 
     output = run_dir / "adapter"
-    ok, free = _disk_ok(run_dir.parent, 3 + MODEL_SPECS[plan.training.model_size]["params"] * 2.2)
+    ok, free = _disk_ok(run_dir.parent, 3 + _list_value('MODEL_SPECS')[plan.training.model_size]["params"] * 2.2)
     if not ok:
         return False, f"Training not started: only {free:.1f} GB disk free."
     output.mkdir(parents=True, exist_ok=True)
@@ -496,8 +492,8 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "schema": 2,
         "run_id": run_id,
         "base_hf": plan.training.model,
-        "hf_revision": MODEL_SPECS[plan.training.model_size]["hf_revision"],
-        "base_ollama": MODEL_SPECS[plan.training.model_size]["ollama"],
+        "hf_revision": _list_value('MODEL_SPECS')[plan.training.model_size]["hf_revision"],
+        "base_ollama": _list_value('MODEL_SPECS')[plan.training.model_size]["ollama"],
         "model_size": plan.training.model_size,
         "method": plan.training.method,
         "created_ts": int(time.time()),
@@ -548,7 +544,7 @@ def _start_training_locked(plan, *, confirmed=False, dry_run=False, resume=False
         "base_hf": manifest["base_hf"],
         "hf_revision": manifest["hf_revision"],
         "base_ollama": manifest["base_ollama"],
-        "rollback_model": ROLLBACK_MODEL,
+        "rollback_model": _list_value('ROLLBACK_MODEL'),
     }
     _write_state(state)
     env = os.environ.copy()
@@ -676,11 +672,11 @@ def validate_adapter(adapter_dir, expected_base=""):
         )
     ollama_base = str(manifest.get("base_ollama") or "")
     size = str(manifest.get("model_size") or "")
-    if size not in MODEL_SPECS or ollama_base != MODEL_SPECS[size]["ollama"]:
+    if size not in _list_value('MODEL_SPECS') or ollama_base != _list_value('MODEL_SPECS')[size]["ollama"]:
         return False, "manifest Ollama base is not the exact mapped Qwen2.5-Coder base"
     if (
-        trained != MODEL_SPECS[size]["hf"]
-        or manifest.get("hf_revision") != MODEL_SPECS[size]["hf_revision"]
+        trained != _list_value('MODEL_SPECS')[size]["hf"]
+        or manifest.get("hf_revision") != _list_value('MODEL_SPECS')[size]["hf_revision"]
     ):
         return False, "manifest Hugging Face base is not the reviewed pinned commit"
     if manifest.get("schema") != 2:
@@ -1185,7 +1181,7 @@ def _validate_shared_alias_owner(
             return False, "sonder-personal:latest is owned by another runtime policy"
         if (
             personal_status != "exists"
-            or owner.get("model") != PERSONAL_MODEL
+            or owner.get("model") != _list_value('PERSONAL_MODEL')
             or owner.get("identity") != personal_identity
             or owner.get("digest") != personal_digest
         ):
@@ -1199,7 +1195,7 @@ def _validate_shared_alias_owner(
     return True, None
 
 
-def _write_shared_alias_owner(*, deployment_id, identity, digest):
+def _write_shared_alias_owner(*, deployment_id, identity, digest, personal_model=None):
     if not re.fullmatch(r"[0-9a-f]{64}", str(identity or "")):
         raise ValueError("shared alias owner identity is invalid")
     if not re.fullmatch(r"[0-9a-f]{64}", str(digest or "")):
@@ -1208,7 +1204,7 @@ def _write_shared_alias_owner(*, deployment_id, identity, digest):
     _write_json_atomic(paths["owner"], {
         "schema": 1,
         "origin": paths["origin"],
-        "model": PERSONAL_MODEL,
+        "model": personal_model if personal_model is not None else _list_value('PERSONAL_MODEL'),
         "policy_path": str(runtime_policy.policy_path().resolve()),
         "deployment_id": deployment_id,
         "identity": identity,
@@ -1333,7 +1329,7 @@ def _reconcile_pending_model_cleanup(*, ollama="", runner=subprocess.run):
 
 
 def _write_deployment_journal(payload):
-    _write_json_atomic(_deployment_journal_path(), payload)
+    _write_json_atomic(_deployment_journal_path(), _training_catalog.journal(payload))
 
 
 def _clear_deployment_journal(deployment_id):
@@ -1375,6 +1371,7 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
         return True, ""
     try:
         journal = _json_object(path, "deployment journal")
+        personal_model, rollback_model = _training_catalog.aliases(journal)
     except ValueError as exc:
         return False, f"pending deployment journal is unreadable: {_bounded_error(exc)}"
     operation = str(journal.get("operation") or "deploy")
@@ -1509,21 +1506,21 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
         )
         if committed:
             rollback_probe = run(
-                [ollama, "show", ROLLBACK_MODEL],
+                [ollama, "show", rollback_model],
                 capture_output=True, text=True, timeout=30,
             )
             try:
                 digest_matches = (
-                    promotion_eval.local_model_digest(ROLLBACK_MODEL) == rollback_digest
+                    promotion_eval.local_model_digest(rollback_model) == rollback_digest
                 )
             except (OSError, TypeError, ValueError):
                 digest_matches = False
             if (
                 current.get("error")
                 or current.get("revision") != journal["last_policy_revision"]
-                or current.get("local_models", {}).get("code") != ROLLBACK_MODEL
-                or current.get("local_models", {}).get("general") != ROLLBACK_MODEL
-                or _model_show_status(rollback_probe, ROLLBACK_MODEL) != "exists"
+                or current.get("local_models", {}).get("code") != rollback_model
+                or current.get("local_models", {}).get("general") != rollback_model
+                or _model_show_status(rollback_probe, rollback_model) != "exists"
                 or _show_identity(rollback_probe) != rollback_identity
                 or not digest_matches
             ):
@@ -1537,8 +1534,8 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
             current_revision = int(current.get("revision") or 0)
             target_matches = (
                 current.get("source") == "training rollback"
-                and current.get("local_models", {}).get("code") == ROLLBACK_MODEL
-                and current.get("local_models", {}).get("general") == ROLLBACK_MODEL
+                and current.get("local_models", {}).get("code") == rollback_model
+                and current.get("local_models", {}).get("general") == rollback_model
                 and current_revision in {
                     int(journal["last_policy_revision"]),
                     int(journal["prior_policy_revision"]) + 1,
@@ -1586,33 +1583,33 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
     )
     if committed_id == deployment_id:
         personal_probe = run(
-            [ollama, "show", PERSONAL_MODEL],
+            [ollama, "show", personal_model],
             capture_output=True, text=True, timeout=30,
         )
         try:
             committed_digest_matches = (
-                promotion_eval.local_model_digest(PERSONAL_MODEL) == candidate_digest
+                promotion_eval.local_model_digest(personal_model) == candidate_digest
             )
         except (OSError, TypeError, ValueError):
             committed_digest_matches = False
         committed_policy_matches = (
             not current.get("error")
             and recorded_state.get("policy_revision") == current.get("revision")
-            and current.get("local_models", {}).get("code") == PERSONAL_MODEL
-            and current.get("local_models", {}).get("general") == PERSONAL_MODEL
+            and current.get("local_models", {}).get("code") == personal_model
+            and current.get("local_models", {}).get("general") == personal_model
         )
         committed_alias_matches = (
-            _model_show_status(personal_probe, PERSONAL_MODEL) == "exists"
+            _model_show_status(personal_probe, personal_model) == "exists"
             and _show_identity(personal_probe) == candidate_identity
             and committed_digest_matches
         )
         if not committed_policy_matches or not committed_alias_matches:
             if not current.get("error"):
                 safe_models = {
-                    tier: ROLLBACK_MODEL if model == PERSONAL_MODEL else model
+                    tier: rollback_model if model == personal_model else model
                     for tier, model in current["local_models"].items()
                 }
-                safe_models.update({"code": ROLLBACK_MODEL, "general": ROLLBACK_MODEL})
+                safe_models.update({"code": rollback_model, "general": rollback_model})
                 if safe_models != current["local_models"]:
                     try:
                         safe_policy = runtime_policy.update(
@@ -1631,7 +1628,7 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
                 _write_shared_alias_owner(
                     deployment_id=deployment_id,
                     identity=candidate_identity,
-                    digest=candidate_digest,
+                    digest=candidate_digest, personal_model=personal_model,
                 )
             except (OSError, TypeError, ValueError):
                 return False, "committed deployment alias ownership could not be recorded"
@@ -1661,13 +1658,13 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
         return False, "pending deployment journal has invalid previous alias digest"
     alias_restored = False
     current_personal = run(
-        [ollama, "show", PERSONAL_MODEL], capture_output=True, text=True, timeout=30,
+        [ollama, "show", personal_model], capture_output=True, text=True, timeout=30,
     )
-    current_status = _model_show_status(current_personal, PERSONAL_MODEL)
+    current_status = _model_show_status(current_personal, personal_model)
     current_identity = _show_identity(current_personal) if current_status == "exists" else ""
     if current_status == "exists":
         try:
-            current_digest = promotion_eval.local_model_digest(PERSONAL_MODEL)
+            current_digest = promotion_eval.local_model_digest(personal_model)
         except (OSError, TypeError, ValueError):
             current_digest = ""
     else:
@@ -1706,24 +1703,24 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
                 and backup_digest_matches
             ):
                 copied = run(
-                    [ollama, "cp", previous_alias, PERSONAL_MODEL],
+                    [ollama, "cp", previous_alias, personal_model],
                     capture_output=True, text=True, timeout=30,
                 )
                 verified = run(
-                    [ollama, "show", PERSONAL_MODEL],
+                    [ollama, "show", personal_model],
                     capture_output=True, text=True, timeout=30,
                 ) if copied.returncode == 0 else copied
                 try:
                     restored_digest_matches = (
                         not previous_digest
-                        or promotion_eval.local_model_digest(PERSONAL_MODEL)
+                        or promotion_eval.local_model_digest(personal_model)
                         == previous_digest
                     )
                 except (OSError, TypeError, ValueError):
                     restored_digest_matches = False
                 alias_restored = (
                     copied.returncode == 0
-                    and _model_show_status(verified, PERSONAL_MODEL) == "exists"
+                    and _model_show_status(verified, personal_model) == "exists"
                     and _show_identity(verified) == previous_identity
                     and restored_digest_matches
                 )
@@ -1736,12 +1733,12 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
             and current_identity == candidate_identity
             and current_digest == candidate_digest
         ):
-            run([ollama, "rm", PERSONAL_MODEL], capture_output=True, text=True, timeout=30)
+            run([ollama, "rm", personal_model], capture_output=True, text=True, timeout=30)
             verified = run(
-                [ollama, "show", PERSONAL_MODEL],
+                [ollama, "show", personal_model],
                 capture_output=True, text=True, timeout=30,
             )
-            alias_restored = _model_show_status(verified, PERSONAL_MODEL) == "missing"
+            alias_restored = _model_show_status(verified, personal_model) == "missing"
 
     allowed_revisions = {
         int(journal.get("prior_policy_revision") or 0),
@@ -1749,11 +1746,11 @@ def _reconcile_pending_deployment(*, ollama="", runner=subprocess.run):
     }
     target_models = prior_models if alias_restored else {
         **{
-            tier: ROLLBACK_MODEL if model == PERSONAL_MODEL else model
+            tier: rollback_model if model == personal_model else model
             for tier, model in prior_models.items()
         },
-        "code": ROLLBACK_MODEL,
-        "general": ROLLBACK_MODEL,
+        "code": rollback_model,
+        "general": rollback_model,
     }
     policy_restored = current.get("local_models") == target_models
     if not policy_restored and not current.get("error"):
@@ -1877,6 +1874,7 @@ def _deployment_lock():
     with contextlib.ExitStack() as stack:
         for lock_path in lock_paths:
             stack.enter_context(_exclusive_byte_lock(lock_path))
+        stack.enter_context(_training_catalog.operation())
         try:
             old_owner = _json_object(owner_path, "training lifecycle owner")
         except ValueError:
@@ -1960,7 +1958,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
                 shutil.rmtree(stale, ignore_errors=True)
         if any(stale_staging_root.iterdir()):
             return False, "Deployment blocked: stale deployment staging cleanup failed."
-    required = MODEL_SPECS[manifest["model_size"]]["params"] * 1.5 + 2
+    required = _list_value('MODEL_SPECS')[manifest["model_size"]]["params"] * 1.5 + 2
     disk_ok, free = _disk_ok(run_dir, required)
     if not disk_ok:
         return False, f"Deployment blocked: {free:.1f} GB disk free; about {required:.1f} GB required."
@@ -2034,28 +2032,28 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             ):
                 return False
             restored = run(
-                [ollama, "cp", previous_alias, PERSONAL_MODEL],
+                [ollama, "cp", previous_alias, _list_value('PERSONAL_MODEL')],
                 capture_output=True, text=True, timeout=30,
             )
             if restored.returncode:
                 return False
         else:
             run(
-                [ollama, "rm", PERSONAL_MODEL],
+                [ollama, "rm", _list_value('PERSONAL_MODEL')],
                 capture_output=True, text=True, timeout=30,
             )
         verified = run(
-            [ollama, "show", PERSONAL_MODEL],
+            [ollama, "show", _list_value('PERSONAL_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
         expected = "exists" if previous_alias else "missing"
-        if _model_show_status(verified, PERSONAL_MODEL) != expected:
+        if _model_show_status(verified, _list_value('PERSONAL_MODEL')) != expected:
             return False
         if not previous_alias:
             return True
         try:
             restored_digest_matches = (
-                promotion_eval.local_model_digest(PERSONAL_MODEL) == previous_digest
+                promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL')) == previous_digest
             )
         except (OSError, TypeError, ValueError):
             restored_digest_matches = False
@@ -2093,10 +2091,10 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         if current.get("error") or current.get("revision") != policy_revision:
             return False
         safe_models = {
-            tier: ROLLBACK_MODEL if model == PERSONAL_MODEL else model
+            tier: _list_value('ROLLBACK_MODEL') if model == _list_value('PERSONAL_MODEL') else model
             for tier, model in current["local_models"].items()
         }
-        safe_models.update({"code": ROLLBACK_MODEL, "general": ROLLBACK_MODEL})
+        safe_models.update({"code": _list_value('ROLLBACK_MODEL'), "general": _list_value('ROLLBACK_MODEL')})
         if safe_models == current["local_models"]:
             policy_mutated = False
             return True
@@ -2298,10 +2296,10 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             return False, f"Model digest revalidation failed closed: {exc}"
 
         previous_probe = run(
-            [ollama, "show", PERSONAL_MODEL],
+            [ollama, "show", _list_value('PERSONAL_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
-        previous_status = _model_show_status(previous_probe, PERSONAL_MODEL)
+        previous_status = _model_show_status(previous_probe, _list_value('PERSONAL_MODEL'))
         if previous_status == "error":
             return False, (
                 "Deployment blocked: could not determine existing personal model state; "
@@ -2312,7 +2310,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             if not previous_identity:
                 return False, "Deployment blocked: existing personal model identity is unreadable."
             try:
-                previous_digest = promotion_eval.local_model_digest(PERSONAL_MODEL)
+                previous_digest = promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL'))
             except (OSError, TypeError, ValueError) as exc:
                 return False, f"Deployment blocked: personal alias digest is unreadable: {exc}"
             previous_alias = f"sonder-personal-previous:{deployment_id}"
@@ -2327,6 +2325,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         journal = {
             "schema": 1,
             "operation": "deploy",
+            **_training_catalog.record(),
             "deployment_id": deployment_id,
             "state_path": str(state_path()),
             "candidate_model": candidate,
@@ -2361,14 +2360,14 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         # external Ollama mutation in that gap must fail closed before backup or
         # publication; ordinary policy writers are already blocked here.
         reserved_probe = run(
-            [ollama, "show", PERSONAL_MODEL],
+            [ollama, "show", _list_value('PERSONAL_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
-        reserved_status = _model_show_status(reserved_probe, PERSONAL_MODEL)
+        reserved_status = _model_show_status(reserved_probe, _list_value('PERSONAL_MODEL'))
         alias_unchanged = reserved_status == previous_status
         if previous_status == "exists":
             try:
-                reserved_digest = promotion_eval.local_model_digest(PERSONAL_MODEL)
+                reserved_digest = promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL'))
             except (OSError, TypeError, ValueError):
                 reserved_digest = ""
             alias_unchanged = (
@@ -2392,7 +2391,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
 
         if previous_status == "exists":
             preserved = run(
-                [ollama, "cp", PERSONAL_MODEL, previous_alias],
+                [ollama, "cp", _list_value('PERSONAL_MODEL'), previous_alias],
                 capture_output=True, text=True, timeout=30,
             )
             verified_backup = run(
@@ -2436,10 +2435,10 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
                 # The reserved journal already names the backup. Preserve it so
                 # the next lifecycle command can recover safely.
                 return False, f"Deployment backup journal update failed: {exc}"
-        active_personal = any(model == PERSONAL_MODEL for model in prior_models.values())
+        active_personal = any(model == _list_value('PERSONAL_MODEL') for model in prior_models.values())
         if active_personal:
             safe_models = {
-                tier: ROLLBACK_MODEL if model == PERSONAL_MODEL else model
+                tier: _list_value('ROLLBACK_MODEL') if model == _list_value('PERSONAL_MODEL') else model
                 for tier, model in prior_models.items()
             }
             try:
@@ -2469,7 +2468,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             return False, f"Personal alias publication was not started: {exc}"
 
         promoted = run(
-            [ollama, "cp", candidate, PERSONAL_MODEL],
+            [ollama, "cp", candidate, _list_value('PERSONAL_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
         if promoted.returncode:
@@ -2492,11 +2491,11 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             return False, f"Published alias recovery journal update failed: {exc}"
 
         published_probe = run(
-            [ollama, "show", PERSONAL_MODEL],
+            [ollama, "show", _list_value('PERSONAL_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
         if (
-            _model_show_status(published_probe, PERSONAL_MODEL) != "exists"
+            _model_show_status(published_probe, _list_value('PERSONAL_MODEL')) != "exists"
             or _show_identity(published_probe) != candidate_identity
         ):
             restored = restore_previous_alias()
@@ -2510,7 +2509,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
                 f"preserved recovery alias: {previous_alias or '(none)'} ."
             )
         try:
-            if promotion_eval.local_model_digest(PERSONAL_MODEL) != candidate_digest:
+            if promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL')) != candidate_digest:
                 raise ValueError("published alias digest differs from candidate")
         except (OSError, TypeError, ValueError) as exc:
             restored = restore_previous_alias()
@@ -2524,7 +2523,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         }
         try:
             final_behavior = promotion_eval.evaluate_model(
-                PERSONAL_MODEL, challenge=deployment_id,
+                _list_value('PERSONAL_MODEL'), challenge=deployment_id,
             )
             final_results = {
                 task.get("id"): task.get("passed")
@@ -2541,13 +2540,13 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             )
             report_valid, _report_reason = promotion_eval.validate_model_report(
                 final_behavior,
-                expected_model=PERSONAL_MODEL,
+                expected_model=_list_value('PERSONAL_MODEL'),
                 challenge=deployment_id,
             )
             final_ok = final_ok and report_valid
         except Exception as exc:
             final_behavior = {
-                "model": PERSONAL_MODEL,
+                "model": _list_value('PERSONAL_MODEL'),
                 "score": 0,
                 "total": len(candidate_results),
                 "error": f"{type(exc).__name__}: {_bounded_error(exc)}",
@@ -2557,7 +2556,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
         if final_ok:
             try:
                 post_eval_digest_verified = (
-                    promotion_eval.local_model_digest(PERSONAL_MODEL) == candidate_digest
+                    promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL')) == candidate_digest
                 )
             except (OSError, TypeError, ValueError):
                 post_eval_digest_verified = False
@@ -2592,10 +2591,10 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             return False, f"Verified alias recovery journal update failed: {exc}"
 
         try:
-            if promotion_eval.local_model_digest(PERSONAL_MODEL) != candidate_digest:
+            if promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL')) != candidate_digest:
                 raise ValueError("published alias digest changed before policy activation")
             desired_models = dict(prior_models)
-            desired_models.update({"code": PERSONAL_MODEL, "general": PERSONAL_MODEL})
+            desired_models.update({"code": _list_value('PERSONAL_MODEL'), "general": _list_value('PERSONAL_MODEL')})
             policy = runtime_policy.update(
                 local_models=desired_models,
                 source="behavior-validated personal QLoRA deployment",
@@ -2633,7 +2632,7 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
             finalize_failed_recovery(restored, policy_restored)
             return False, f"Deployment recovery snapshot update failed: {exc}"
         state.update(
-            status="deployed", deployed_ts=int(time.time()), model=PERSONAL_MODEL,
+            status="deployed", deployed_ts=int(time.time()), model=_list_value('PERSONAL_MODEL'),
             previous_personal_model=previous_alias,
             policy_revision=policy["revision"],
             last_deployment_eval={
@@ -2699,8 +2698,8 @@ def _deploy_locked(adapter_dir="", *, converter="", ollama="", runner=subprocess
                 "Deployment committed; old recovery-alias cleanup remains pending."
             )
         return True, (
-            f"Behavior-validated and deployed {PERSONAL_MODEL}; "
-            f"{ROLLBACK_MODEL} remains available for rollback."
+            f"Behavior-validated and deployed {_list_value('PERSONAL_MODEL')}; "
+            f"{_list_value('ROLLBACK_MODEL')} remains available for rollback."
         )
     finally:
         if candidate_created:
@@ -2765,19 +2764,19 @@ def adopt_legacy_personal(*, confirmed=False, ollama="", runner=subprocess.run):
             ollama = _ollama_executable(ollama)
             probe = _run_external(
                 runner,
-                [ollama, "show", PERSONAL_MODEL],
+                [ollama, "show", _list_value('PERSONAL_MODEL')],
                 ollama_command=True,
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            status = _model_show_status(probe, PERSONAL_MODEL)
+            status = _model_show_status(probe, _list_value('PERSONAL_MODEL'))
             identity = _show_identity(probe)
             if status != "exists" or not identity:
                 detail = "is missing" if status == "missing" else "could not be verified"
-                return False, f"Legacy adoption blocked: {PERSONAL_MODEL} {detail}."
+                return False, f"Legacy adoption blocked: {_list_value('PERSONAL_MODEL')} {detail}."
             try:
-                digest = promotion_eval.local_model_digest(PERSONAL_MODEL)
+                digest = promotion_eval.local_model_digest(_list_value('PERSONAL_MODEL'))
             except (OSError, TypeError, ValueError) as exc:
                 return False, f"Legacy adoption blocked: exact alias digest failed: {exc}"
             _write_shared_alias_owner(
@@ -2786,7 +2785,7 @@ def adopt_legacy_personal(*, confirmed=False, ollama="", runner=subprocess.run):
                 digest=digest,
             )
             return True, (
-                f"Adopted exact legacy {PERSONAL_MODEL} identity for policy "
+                f"Adopted exact legacy {_list_value('PERSONAL_MODEL')} identity for policy "
                 f"{current_policy}. Future deployments will preserve it before promotion."
             )
     except RuntimeError as exc:
@@ -2818,10 +2817,10 @@ def release_personal_owner(*, confirmed=False):
             policy = runtime_policy.load(create=True)
             if policy.get("error"):
                 return False, "Alias ownership release blocked: runtime policy is unreadable."
-            if any(model == PERSONAL_MODEL for model in policy["local_models"].values()):
+            if _training_catalog.owner_is_routed(owner, policy["local_models"]):
                 return False, (
                     "Alias ownership release blocked: roll every tier off "
-                    f"{PERSONAL_MODEL} first."
+                    f"{owner['model']} first."
                 )
             _shared_alias_paths()["owner"].unlink()
             return True, (
@@ -2843,17 +2842,17 @@ def _rollback_locked(*, ollama="", runner=subprocess.run):
         or shutil.which("ollama") or "ollama"
     )
     probe = run(
-        [ollama, "show", ROLLBACK_MODEL],
+        [ollama, "show", _list_value('ROLLBACK_MODEL')],
         capture_output=True, text=True, timeout=30,
     )
     rollback_identity = _show_identity(probe)
-    if _model_show_status(probe, ROLLBACK_MODEL) != "exists" or not rollback_identity:
+    if _model_show_status(probe, _list_value('ROLLBACK_MODEL')) != "exists" or not rollback_identity:
         return False, (
-            f"Rollback blocked: {ROLLBACK_MODEL} could not be verified; "
+            f"Rollback blocked: {_list_value('ROLLBACK_MODEL')} could not be verified; "
             "runtime policy was not changed."
         )
     try:
-        rollback_digest = promotion_eval.local_model_digest(ROLLBACK_MODEL)
+        rollback_digest = promotion_eval.local_model_digest(_list_value('ROLLBACK_MODEL'))
     except (OSError, TypeError, ValueError) as exc:
         return False, f"Rollback blocked: exact model digest could not be verified: {exc}"
     transition_id = "rollback-%s-%s" % (time.time_ns(), uuid.uuid4().hex[:8])
@@ -2861,6 +2860,7 @@ def _rollback_locked(*, ollama="", runner=subprocess.run):
     journal = {
         "schema": 1,
         "operation": "rollback",
+        **_training_catalog.record(),
         "deployment_id": transition_id,
         "state_path": str(state_path()),
         "phase": "reserved",
@@ -2875,17 +2875,17 @@ def _rollback_locked(*, ollama="", runner=subprocess.run):
         before, journal = runtime_policy.reserve_transition(journal)
         reserved = True
         reserved_probe = run(
-            [ollama, "show", ROLLBACK_MODEL],
+            [ollama, "show", _list_value('ROLLBACK_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
         if (
-            _model_show_status(reserved_probe, ROLLBACK_MODEL) != "exists"
+            _model_show_status(reserved_probe, _list_value('ROLLBACK_MODEL')) != "exists"
             or _show_identity(reserved_probe) != rollback_identity
-            or promotion_eval.local_model_digest(ROLLBACK_MODEL) != rollback_digest
+            or promotion_eval.local_model_digest(_list_value('ROLLBACK_MODEL')) != rollback_digest
         ):
             raise RuntimeError("rollback model changed after transition reservation")
         policy = runtime_policy.update(
-            local_models={"code": ROLLBACK_MODEL, "general": ROLLBACK_MODEL},
+            local_models={"code": _list_value('ROLLBACK_MODEL'), "general": _list_value('ROLLBACK_MODEL')},
             source="training rollback",
             expected_revision=before["revision"],
             transition_token=policy_token,
@@ -2897,13 +2897,13 @@ def _rollback_locked(*, ollama="", runner=subprocess.run):
         )
         _write_deployment_journal(journal)
         committed_probe = run(
-            [ollama, "show", ROLLBACK_MODEL],
+            [ollama, "show", _list_value('ROLLBACK_MODEL')],
             capture_output=True, text=True, timeout=30,
         )
         if (
-            _model_show_status(committed_probe, ROLLBACK_MODEL) != "exists"
+            _model_show_status(committed_probe, _list_value('ROLLBACK_MODEL')) != "exists"
             or _show_identity(committed_probe) != rollback_identity
-            or promotion_eval.local_model_digest(ROLLBACK_MODEL) != rollback_digest
+            or promotion_eval.local_model_digest(_list_value('ROLLBACK_MODEL')) != rollback_digest
         ):
             raise RuntimeError("rollback model changed before state commit")
         state = _read_state()
@@ -2934,7 +2934,7 @@ def _rollback_locked(*, ollama="", runner=subprocess.run):
         suffix = "policy was restored" if restored else "policy recovery needs attention"
         return False, f"Rollback failed: {_bounded_error(exc)}; {suffix}."
     return True, (
-        f"Rolled code/general back to {ROLLBACK_MODEL}. Personal models and "
+        f"Rolled code/general back to {_list_value('ROLLBACK_MODEL')}. Personal models and "
         "checkpoints were not deleted."
     )
 

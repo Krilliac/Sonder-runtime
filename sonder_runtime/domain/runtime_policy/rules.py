@@ -37,30 +37,6 @@ LOCAL_TIERS = BASE_LOCAL_TIERS + OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = ("chat", "router", "workbench", "autopilot", "fleet", "review")
 # Environment values that explicitly leave an optional tier unbound.
 UNSET_TOKENS = frozenset({"none", "off", "disabled", "-"})
-DEFAULT_MODELS = {
-    # setup_alias/bootstrap_engine owns hardware-aware base-model selection.
-    # Runtime policy targets its stable alias rather than assuming a model
-    # family or that several models fit concurrently on a new host.
-    "fast": "sonder:latest",
-    "code": "sonder:latest",
-    "general": "sonder:latest",
-    "reasoning": "",
-    "vision": "",
-}
-# Embeddings are intentionally not a routing tier: they produce a separate
-# vector space for memory/indexing and must never be picked for chat work.
-DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
-RESERVED_PERSONAL_MODEL = "sonder-personal:latest"
-DEFAULT_ROUTING = {
-    # Chat is a routing lane, not a model tier. Ordinary conversation uses
-    # the general base tier unless the operator pins a request explicitly.
-    "chat": "general",
-    "router": "fast",
-    "workbench": "code",
-    "autopilot": "code",
-    "fleet": "code",
-    "review": "code",
-}
 # The NPU utility accelerator sits below the local tiers and never becomes
 # a generative tier. Policy only selects a behavior mode per capability; it
 # can never name models, paths, providers, or anything cloud-related.
@@ -101,7 +77,7 @@ def is_cloud_name(value: str) -> bool:
     return "-cloud" in lowered or lowered.endswith(":cloud")
 
 
-def is_reserved_personal_alias(value) -> bool:
+def is_reserved_personal_alias(value, reserved_personal_model: str) -> bool:
     model = str(value or "").strip().casefold()
     for prefix in ("registry.ollama.ai/library/", "library/"):
         if model.startswith(prefix):
@@ -109,10 +85,17 @@ def is_reserved_personal_alias(value) -> bool:
             break
     if ":" not in model:
         model += ":latest"
-    return model == RESERVED_PERSONAL_MODEL.casefold()
+    reserved_personal_model = reserved_personal_model.strip().casefold()
+    for prefix in ("registry.ollama.ai/library/", "library/"):
+        if reserved_personal_model.startswith(prefix):
+            reserved_personal_model = reserved_personal_model[len(prefix):]
+            break
+    if reserved_personal_model and ":" not in reserved_personal_model:
+        reserved_personal_model += ":latest"
+    return model == reserved_personal_model.casefold()
 
 
-def validate_model(value, fallback: str, *, allow_unset: bool = False) -> str:
+def validate_model(value, fallback: str, *, reserved_personal_model: str = "", allow_unset: bool = False) -> str:
     """Validate one tier's model name.
 
     ``allow_unset`` (optional tiers only) lets an explicit empty value mean
@@ -129,12 +112,12 @@ def validate_model(value, fallback: str, *, allow_unset: bool = False) -> str:
         raise ValueError("invalid local model name %r" % model)
     if is_cloud_name(model):
         raise ValueError("runtime policy local tiers cannot reference cloud models")
-    if is_reserved_personal_alias(model):
-        return RESERVED_PERSONAL_MODEL
+    if is_reserved_personal_alias(model, reserved_personal_model):
+        return reserved_personal_model
     return model
 
 
-def seed_model(env, tier: str, *, floor: ToolLaneFloor) -> str:
+def seed_model(env, tier: str, *, floor: ToolLaneFloor, lists) -> str:
     """Seed one tier's model from an explicit environment mapping.
 
     ``SONDER_REASONING=none`` / ``SONDER_VISION=off`` seed an optional tier as
@@ -146,26 +129,26 @@ def seed_model(env, tier: str, *, floor: ToolLaneFloor) -> str:
         configured = str(env.get("SONDER_CODE_LOCAL", "") or "").strip()
     if tier in OPTIONAL_LOCAL_TIERS and configured.lower() in UNSET_TOKENS:
         return ""
-    if is_reserved_personal_alias(configured):
+    if is_reserved_personal_alias(configured, lists["reserved_personal_model"]):
         configured = ""
     if configured and not is_cloud_name(configured):
-        model = validate_model(configured, DEFAULT_MODELS[tier])
+        model = validate_model(configured, lists["default_local_models"][tier], reserved_personal_model=lists["reserved_personal_model"])
         # A model blocked from tool lanes is never seeded into a tier, and
         # without the shipped floor no model can be judged, so none is.
         if not floor.available or decide_listed(
             model, ToolLaneDenyList.from_policy(None, floor=floor), free_form=False,
         ).denied:
-            return DEFAULT_MODELS[tier]
+            return lists["default_local_models"][tier]
         return model
-    return DEFAULT_MODELS[tier]
+    return lists["default_local_models"][tier]
 
 
-def seed_embedding_model(env) -> str:
+def seed_embedding_model(env, *, lists) -> str:
     """Seed the independent local embedding binding without accepting cloud."""
     configured = str(env.get("SONDER_EMBED_MODEL", "") or "").strip()
     if configured and not is_cloud_name(configured):
-        return validate_model(configured, DEFAULT_EMBEDDING_MODEL)
-    return DEFAULT_EMBEDDING_MODEL
+        return validate_model(configured, lists["default_embedding_model"], reserved_personal_model=lists["reserved_personal_model"])
+    return lists["default_embedding_model"]
 
 
 def default_tool_lane_denied_models(floor: ToolLaneFloor) -> dict:
@@ -181,14 +164,14 @@ def default_reference_lookup() -> dict:
     return _lookup_applies.default_section()
 
 
-def default_policy(env, *, floor: ToolLaneFloor) -> dict:
+def default_policy(env, *, floor: ToolLaneFloor, lists) -> dict:
     """Built-in policy seeded from an explicit environment mapping."""
     return {
         "version": VERSION,
         "revision": 0,
-        "local_models": {tier: seed_model(env, tier, floor=floor) for tier in LOCAL_TIERS},
-        "embedding_model": seed_embedding_model(env),
-        "routing": dict(DEFAULT_ROUTING),
+        "local_models": {tier: seed_model(env, tier, floor=floor, lists=lists) for tier in LOCAL_TIERS},
+        "embedding_model": seed_embedding_model(env, lists=lists),
+        "routing": dict(lists["default_routing"]),
         "npu": dict(DEFAULT_NPU),
         "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
         "provider_models": {},
@@ -514,14 +497,14 @@ def tool_lane_binding_notice(tier, model) -> str:
     )
 
 
-def normalize(payload, defaults=None, *, floor: ToolLaneFloor) -> dict:
+def normalize(payload, defaults=None, *, floor: ToolLaneFloor, lists) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("runtime policy must be a JSON object")
     # Environment variables seed a file only when it is first created. Once
     # a shared policy exists, normalization and recovery use stable
     # built-ins so separately launched surfaces cannot drift with their
     # inherited env.
-    base = default_policy(env={}, floor=floor) if defaults is None else defaults
+    base = default_policy(env={}, floor=floor, lists=lists) if defaults is None else defaults
     raw_models = payload.get("local_models") or {}
     raw_routing = payload.get("routing") or {}
     if not isinstance(raw_models, dict) or not isinstance(raw_routing, dict):
@@ -529,8 +512,9 @@ def normalize(payload, defaults=None, *, floor: ToolLaneFloor) -> dict:
     local_models = {
         tier: validate_model(
             raw_models.get(tier),
-            base["local_models"].get(tier, DEFAULT_MODELS[tier]),
+            base["local_models"].get(tier, lists["default_local_models"][tier]),
             allow_unset=tier in OPTIONAL_LOCAL_TIERS,
+            reserved_personal_model=lists["reserved_personal_model"],
         )
         for tier in LOCAL_TIERS
     }
@@ -544,10 +528,11 @@ def normalize(payload, defaults=None, *, floor: ToolLaneFloor) -> dict:
         local_models, ToolLaneDenyList.from_policy(tool_lane_denied, floor=floor),
     )
     for tier, _model in dropped:
-        local_models[tier] = base["local_models"].get(tier, DEFAULT_MODELS[tier])
+        local_models[tier] = base["local_models"].get(tier, lists["default_local_models"][tier])
     embedding_model = validate_model(
         payload.get("embedding_model"),
-        base.get("embedding_model", DEFAULT_EMBEDDING_MODEL),
+        base.get("embedding_model", lists["default_embedding_model"]),
+        reserved_personal_model=lists["reserved_personal_model"],
     )
     routing = {}
     for lane in ROUTING_LANES:
