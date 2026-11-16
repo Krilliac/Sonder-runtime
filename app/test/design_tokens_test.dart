@@ -2,10 +2,11 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// The design system's two source rules (DESIGN.md, "Components"): a colour
-/// value is written only in `lib/theme.dart`, and padding and gaps come from
-/// `SonderSpace`. Both are checked against the source, so a screen cannot
-/// drift from the tokens without this failing.
+/// The design system's source rules (DESIGN.md, "Components" and "Motion and
+/// content"): a colour value is written only in `lib/theme.dart`, padding and
+/// gaps come from `SonderSpace`, and a popup menu opens on the shared motion.
+/// Each is checked against the source, so a screen cannot drift from the
+/// tokens without this failing.
 void main() {
   List<File> sources() => Directory('lib')
       .listSync(recursive: true)
@@ -71,6 +72,20 @@ void main() {
     return hits;
   }
 
+  // A popup menu that does not name its motion opens on Material's own
+  // 300 ms; each one takes the shared style instead.
+  final popupMenu = RegExp(r'\b(?:PopupMenuButton|showMenu)\b(?:<[^(]*>)?\(');
+  const menuMotion = 'popUpAnimationStyle: SonderMotion.menu(context)';
+
+  List<String> menuHits(String name, String source) => [
+        for (final match in popupMenu.allMatches(source))
+          if (!source
+              .substring(match.end, closingParen(source, match.end - 1))
+              .contains(menuMotion))
+            '$name:${'\n'.allMatches(source.substring(0, match.start)).length + 1}: '
+                '${match.group(0)}',
+      ];
+
   test('the scanners see the app and catch what they are for', () {
     // A scan that reads nothing, or matches nothing, would pass for the
     // wrong reason: prove both have teeth before trusting an empty result.
@@ -98,6 +113,18 @@ void main() {
                 'padding: EdgeInsets.zero,\n'
                 'padding: const EdgeInsets.all(SonderSpace.x5 + SonderSpace.x5),\n'),
         hasLength(3));
+    expect(
+        menuHits(
+            'x.dart',
+            'PopupMenuButton<String>(\n'
+                '  tooltip: "a",\n'
+                '  itemBuilder: (context) => []),\n'
+                'PopupMenuButton<Map<String, int>>(\n'
+                '  popUpAnimationStyle: SonderMotion.menu(context),\n'
+                '  itemBuilder: (context) => []),\n'
+                'showMenu<int>(context: context, items: const []),\n'
+                'final PopupMenuButton<String> held;\n'),
+        ['x.dart:1: PopupMenuButton<String>(', 'x.dart:7: showMenu<int>(']);
   });
 
   test('a colour value is written only in theme.dart', () {
@@ -118,5 +145,19 @@ void main() {
     expect(hits, isEmpty,
         reason: 'use a SonderSpace token (extend the scale in theme.dart '
             'if a step is missing)');
+  });
+
+  test('every popup menu opens on the shared motion', () {
+    var menus = 0;
+    final hits = <String>[];
+    for (final file in sources()) {
+      final source = file.readAsStringSync();
+      menus += popupMenu.allMatches(source).length;
+      hits.addAll(menuHits(pathOf(file), source));
+    }
+    // The composer's + menu, the sidebar's project filter, the workspace
+    // menu: a scan that finds none of them is not looking.
+    expect(menus, greaterThanOrEqualTo(3));
+    expect(hits, isEmpty, reason: 'pass $menuMotion');
   });
 }

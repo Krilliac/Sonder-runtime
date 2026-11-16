@@ -160,4 +160,20 @@ void main() {
       expect(tokens.mono(13).fontFamilyFallback, contains(SonderTheme.symbols));
     }
   });
+
+  test('every motion token runs between 150 and 250 ms', () {
+    final steps = [SonderMotion.fast, SonderMotion.medium, SonderMotion.slow]
+        .map((duration) => duration.inMilliseconds)
+        .toList();
+    for (final step in steps) {
+      expect(step, inInclusiveRange(150, 250));
+    }
+    // Shortest first, and each step is a different length.
+    expect(steps, orderedEquals([...steps]..sort()));
+    expect(steps.toSet(), hasLength(steps.length));
+    // A page arrives on the longest step and leaves on a shorter one.
+    const pages = SonderPageTransitionsBuilder();
+    expect(pages.transitionDuration, SonderMotion.slow);
+    expect(pages.reverseTransitionDuration, SonderMotion.medium);
+  });
 }

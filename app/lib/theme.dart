@@ -433,8 +433,8 @@ abstract final class SonderMotion {
   /// Panels, category switches, expanding sections.
   static const medium = Duration(milliseconds: 220);
 
-  /// Page transitions and larger layout moves.
-  static const slow = Duration(milliseconds: 320);
+  /// Page transitions and larger layout moves: the longest step.
+  static const slow = Duration(milliseconds: 250);
 
   /// Material 3 emphasized decelerate: things arriving.
   static const enter = Cubic(0.05, 0.7, 0.1, 1.0);
@@ -450,6 +450,14 @@ abstract final class SonderMotion {
       MediaQuery.maybeDisableAnimationsOf(context) == true
           ? Duration.zero
           : duration;
+
+  /// How a popup menu opens: on [medium] in place of Material's own 300 ms,
+  /// and at once when the platform requests reduced motion. Every
+  /// `PopupMenuButton` passes it as `popUpAnimationStyle`.
+  static AnimationStyle menu(BuildContext context) =>
+      MediaQuery.maybeDisableAnimationsOf(context) == true
+          ? AnimationStyle.noAnimation
+          : const AnimationStyle(duration: medium, reverseDuration: medium);
 }
 
 /// Route transition shared by every pushed page: a short fade-through with a

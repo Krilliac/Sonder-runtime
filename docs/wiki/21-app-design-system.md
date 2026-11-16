@@ -18,8 +18,10 @@ every screen follows.
 - `SonderSpace` — the 4-point spacing scale. No one-off spacing literals.
 - `SonderRadius` — control 8, row 10, menu 12, card 16, sheet and bubble
   20, composer 26, and `pill`.
-- `SonderMotion` — fast 150 ms, medium 220 ms, slow 320 ms; reduced motion
-  removes them.
+- `SonderMotion` — fast 150 ms, medium 220 ms, slow 250 ms (a test holds
+  all three between 150 and 250 ms); reduced motion removes them.
+  `SonderMotion.menu` is the style every popup menu opens on (`medium`, not
+  Material's 300 ms); a source test requires it.
 - `SonderTheme.dark` / `SonderTheme.light` — `ThemeData` built from the tokens
   over a seeded scheme, with every component theme set so a bare `Card`,
   `TextField`, `Chip`, `FilledButton` or `Tooltip` already looks right.

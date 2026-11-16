@@ -838,6 +838,7 @@ class _ProjectFilter extends StatelessWidget {
     return PopupMenuButton<String>(
       key: const Key('shell-project-filter'),
       tooltip: 'Show chats from one project',
+      popUpAnimationStyle: SonderMotion.menu(context),
       position: PopupMenuPosition.under,
       onSelected: (value) => onSelected(value == _all ? null : value),
       itemBuilder: (context) => [

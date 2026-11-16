@@ -489,6 +489,7 @@ class _ActionsMenu extends StatelessWidget {
     return PopupMenuButton<ComposerAction>(
       key: const Key('composer-actions'),
       tooltip: 'More actions',
+      popUpAnimationStyle: SonderMotion.menu(context),
       position: PopupMenuPosition.over,
       offset: Offset(0, -menuHeight),
       onSelected: (action) => action.onSelected(),

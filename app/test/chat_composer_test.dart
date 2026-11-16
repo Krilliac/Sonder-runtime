@@ -343,6 +343,31 @@ void main() {
       await _settle(tester);
       await unmountChat(tester);
     });
+
+    testWidgets(
+        'the + menu opens on the medium step, and at once with reduced '
+        'motion', (tester) async {
+      addTearDown(
+          tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+      for (final reduce in [false, true]) {
+        tester.platformDispatcher.accessibilityFeaturesTestValue =
+            FakeAccessibilityFeatures(disableAnimations: reduce);
+        final backend = FakeChatBackend();
+        await pumpChat(tester, backend, size: const Size(1440, 900));
+        await _settle(tester);
+        await tester.tap(find.byKey(const Key('composer-actions')));
+        await _settle(tester);
+        final item = find.byKey(const Key('composer-action-commands'));
+        // Material's own menu takes 300 ms to open.
+        expect(ModalRoute.of(tester.element(item))!.transitionDuration,
+            reduce ? Duration.zero : SonderMotion.medium,
+            reason: 'reduced motion: $reduce');
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await _settle(tester);
+        expect(item, findsNothing);
+        await unmountChat(tester);
+      }
+    });
   });
 
   testWidgets('a 320 px strip keeps the mode word and does not overflow',

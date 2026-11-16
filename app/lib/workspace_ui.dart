@@ -33,6 +33,7 @@ class WorkspaceMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) => PopupMenuButton<WorkspaceDestination>(
         tooltip: 'Workspace navigation',
+        popUpAnimationStyle: SonderMotion.menu(context),
         icon: const Icon(Icons.apps_outlined),
         onSelected: onSelected,
         itemBuilder: (_) => [

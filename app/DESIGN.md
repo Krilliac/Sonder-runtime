@@ -142,7 +142,9 @@ Spacing comes from `SonderSpace`: a 4-point grid (`xxs` 2 to `x6` 64), two half 
 
 ## Motion and content
 Motion is short and purposeful, never decorative.
-- **Tokens** (`SonderMotion`): `fast` 150ms for hover and small state flips, `medium` 220ms for panels and category switches, `slow` 320ms for page transitions.
+- **Tokens** (`SonderMotion`): `fast` 150ms for hover and small state flips, `medium` 220ms for panels and category switches, `slow` 250ms for page transitions, meters and the larger moves. A test holds all three between 150 and 250ms.
+- **Menus:** a popup menu opens on `medium` (`SonderMotion.menu`) in place of Material's 300ms, and `test/design_tokens_test.dart` requires it of every menu in the source. Material's other self-timed parts (dialogs, sheets, the drawer, switches, tooltips) keep the framework's timing.
+- **Loops:** the skeleton shimmer and a button's spinner mean "still loading" and run until the thing arrives; they are not transitions and take no token. With reduced motion the skeleton holds still.
 - **Curves:** entrances decelerate (M3 emphasized decelerate), exits accelerate, in-place changes use the standard curve.
 - **What animates:**
   - every route uses the shared fade-through (`SonderPageTransitionsBuilder`);
