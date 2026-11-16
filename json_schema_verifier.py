@@ -79,6 +79,7 @@ blind spot here would remove capability the caller legitimately has:
 """
 import collections
 import json
+import math
 import re
 
 Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
@@ -517,6 +518,9 @@ def _validate_string(value, schema, path, ctx):
                               % (path, _show(value), _show(raw)))
 
 
+_NUMERIC_KEYWORDS = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf")
+
+
 def _validate_number(value, schema, path, ctx):
     def _bound(keyword):
         limit = schema.get(keyword, _MISSING)
@@ -526,6 +530,15 @@ def _validate_number(value, schema, path, ctx):
             _malformed(ctx, path, keyword, "must be a number, got %s" % _show(limit))
             return None
         return limit
+
+    if (isinstance(value, float) and not math.isfinite(value)
+            and any(keyword in schema for keyword in _NUMERIC_KEYWORDS)):
+        # NaN compares false against everything, so it used to slide through
+        # every bound, and Infinity made multipleOf raise. A non-finite value
+        # is not a number any numeric keyword can vouch for.
+        ctx.errors.append('%s: %s is not a finite number, so the numeric keywords '
+                          'cannot be satisfied' % (path, _show(value)))
+        return
 
     limit = _bound("minimum")
     if limit is not None and value < limit:
@@ -545,11 +558,23 @@ def _validate_number(value, schema, path, ctx):
     if limit is not None:
         if limit <= 0:
             _malformed(ctx, path, "multipleOf", "must be positive, got %s" % _show(limit))
-        else:
-            quotient = value / limit
-            if abs(quotient - round(quotient)) > 1e-9:
+        elif isinstance(limit, float) and not math.isfinite(limit):
+            _malformed(ctx, path, "multipleOf", "must be finite, got %s" % _show(limit))
+        elif isinstance(value, int) and isinstance(limit, int):
+            if value % limit != 0:
                 ctx.errors.append('%s: %s is not a multiple of %s'
                                   % (path, _show(value), limit))
+        else:
+            try:
+                quotient = value / limit
+                off = abs(quotient - round(quotient)) > 1e-9
+            except (OverflowError, ValueError):
+                ctx.errors.append('%s: %s is out of range for a "multipleOf" %s check'
+                                  % (path, _show(value), limit))
+            else:
+                if off:
+                    ctx.errors.append('%s: %s is not a multiple of %s'
+                                      % (path, _show(value), limit))
 
 
 def _validate(value, schema, path, ctx):
