@@ -171,7 +171,8 @@ _SPLICE_RE = re.compile(r"\\[ \t\f\v]*\n")
 _RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 
 
-def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
+def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool = True,
+                       digraphs: bool = True) -> str:
     """Translation phases 1-3 as far as the scan needs them.
 
     All nine trigraphs are replaced, backslash-newline splices (blanks between
@@ -185,14 +186,22 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
     ``raw_strings=False`` lexes ``R"(`` as C does (identifier + ordinary
     string): in C, or in a header a C TU includes, masking a "raw string"
     could hide real directives, so ``validate_patch`` scans both lexings.
+    ``trigraphs=False`` leaves ``??/`` and friends alone, as gcc, clang and
+    MSVC do by default (only ``-trigraphs``/``-std=c++14`` and older apply
+    them); ``digraphs=False`` leaves ``<:``/``<%`` alone so a header-name
+    such as ``<:/../x.h>`` is seen as written. Neither reading is safe to
+    assume, so ``scan_added_lexings`` scans every combination and unions
+    the reasons.
     A ``'`` inside a pp-number (``1'000``) is a C++14 digit separator, not
     the start of a character literal (which could otherwise swallow a
     string's quote and start a phantom comment that hides later lines).
     """
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
+    if trigraphs:
+        value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
     value = _SPLICE_RE.sub("", value)
-    value = value.replace("%:%:", "##").replace("%:", "#")
+    if digraphs:
+        value = value.replace("%:%:", "##").replace("%:", "#")
     out: list[str] = []
     i = 0
     n = len(value)
@@ -240,7 +249,7 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
             out.append(value[i:min(j + 1, n)])
             i = j + 1
             continue
-        if ch in "<:%" and i + 1 < n:
+        if digraphs and ch in "<:%" and i + 1 < n:
             pair = value[i:i + 2]
             if pair == "<:":
                 if value[i + 2:i + 3] == ":" and value[i + 3:i + 4] not in (":", ">"):
@@ -280,7 +289,9 @@ _PRAGMA_BAD_RE = re.compile(
 )
 _PRAGMA_OP_RE = re.compile(r"\b_Pragma\s*\(")
 _MS_PRAGMA_RE = re.compile(r"\b__pragma\s*\(")
-_HAS_RE = re.compile(r"\b__has_(?:include(?:_next)?|embed)\s*\(\s*([<\"])")
+_HAS_RE = re.compile(r"\b__has_(?:include(?:_next)?|embed)\s*\(\s*(\S?)")
+_HAS_SHIM_RE = re.compile(r"#\s*define\s+$")
+_HEADER_NAME_LIMIT = 4096
 _ASM_RE = re.compile(r"\b(?:asm|__asm__|__asm)\b")
 # An assembler directive anywhere in added code: in an asm body, a string
 # literal, a macro that later feeds asm (``#define X .incbin "f"``) or a
@@ -428,8 +439,12 @@ def scan_hostile_directives(added_text: str, *,
 
     ``include_ok(path)`` decides containment of a quoted include relative to
     the edited file (it must refuse ``..`` escaping the project root).
-    The scan has a work budget linear in the input; an input that exhausts it
-    (thousands of unterminated openers) is refused, never accepted.
+    Every opener scan (``_Pragma(``, ``__pragma(``, ``__attribute__((``, ``asm``,
+    ``[[``, ``__has_include(``) charges the characters it walks to a budget of
+    a fixed base plus 8 steps per input character, and each walk is capped
+    (4096 characters, 1026 for ``[[``), so the total work is linear in the
+    input. An input that exhausts the budget (thousands of unterminated
+    openers) is refused, never accepted.
     """
     text = str(added_text or "")
     budget = _Budget(_SCAN_BUDGET_BASE + _SCAN_BUDGET_PER_CHAR * len(text))
@@ -487,10 +502,23 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
         if _PRAGMA_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__pragma with a linker/section directive is refused")
     for match in _HAS_RE.finditer(text):
-        quoted = match.group(1) == '"'
+        budget.charge(1)
+        opener = match.group(1)
+        if opener not in ("<", '"'):
+            # ``#define P "C:/x"`` then ``__has_include(P)`` makes the compiler
+            # probe an arbitrary file; only a literal header-name is checkable.
+            # ``#define __has_include(x) 0`` (the usual fallback shim) is not a use.
+            prefix = text[max(0, match.start() - 256): match.start()]
+            budget.charge(len(prefix) + 1)
+            if not _HAS_SHIM_RE.search(prefix.rpartition("\n")[2]):
+                refuse("__has_include/__has_embed: computed operand (not a literal header-name)")
+            continue
+        quoted = opener == '"'
         closer = '"' if quoted else ">"
         start = match.end()
-        end = text.find(closer, start)
+        limit = min(len(text), start + _HEADER_NAME_LIMIT)
+        end = text.find(closer, start, limit)
+        budget.charge((limit if end < 0 else end) - start + 1)
         path = text[start:end] if end > start else ""
         problem = include_path_problem(path, quoted=quoted) if path else "computed __has_include"
         if not problem and quoted and not include_ok(path):
@@ -529,8 +557,11 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
         if _ATTR_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__attribute__ section/constructor/destructor is refused")
     for match in _CXX_ATTR_OPEN_RE.finditer(text):
-        end = text.find("]]", match.end(), match.end() + 1026)
-        body = text[match.end(): end if end >= 0 else len(text)][:1024]
+        window_end = min(len(text), match.end() + 1026)
+        end = text.find("]]", match.end(), window_end)
+        stop = window_end if end < 0 else end
+        budget.charge(stop - match.end() + 1)
+        body = text[match.end(): min(stop, match.end() + 1024)]
         if _ATTR_BAD_RE.search(body):
             refuse("[[gnu::section/constructor/destructor]] is refused")
             break
@@ -542,10 +573,13 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
     return tuple(reasons)
 
 
-def added_logical_lines(before: str, after: str, *, raw_strings: bool = True) -> str:
+def added_logical_lines(before: str, after: str, *, raw_strings: bool = True,
+                        trigraphs: bool = True, digraphs: bool = True) -> str:
     """Normalized logical lines present in ``after`` but not in ``before`` (multiset)."""
-    old = normalize_for_scan(before, raw_strings=raw_strings).split("\n")
-    new = normalize_for_scan(after, raw_strings=raw_strings).split("\n")
+    old = normalize_for_scan(before, raw_strings=raw_strings, trigraphs=trigraphs,
+                             digraphs=digraphs).split("\n")
+    new = normalize_for_scan(after, raw_strings=raw_strings, trigraphs=trigraphs,
+                             digraphs=digraphs).split("\n")
     counts: dict[str, int] = {}
     for line in old:
         counts[line] = counts.get(line, 0) + 1
@@ -556,6 +590,40 @@ def added_logical_lines(before: str, after: str, *, raw_strings: bool = True) ->
         else:
             added.append(line)
     return "\n".join(added)
+
+
+def _may_hold_digraph_header(text: str) -> bool:
+    """True when ``<:``/``<%`` could appear once splices (and trigraphs) are applied."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for candidate in (value, _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)):
+        joined = _SPLICE_RE.sub("", candidate)
+        if "<:" in joined or "<%" in joined:
+            return True
+    return False
+
+
+def scan_added_lexings(before: str, after: str, *,
+                       include_ok: Callable[[str], bool]) -> tuple[str, ...]:
+    """Union of the hostile-scan reasons over every lexing a compiler might use.
+
+    The lexings that change what the scanner sees: C++ raw strings versus C
+    (``R"(`` is an identifier and a string), trigraphs applied (``-trigraphs``,
+    ``-std=c++14``) versus ignored (the gcc/clang/MSVC default), and
+    digraphs normalised versus left as written (a header-name such as
+    ``<:/../x.h>`` is never digraph-translated by the compiler). Each scan has
+    its own bounded budget, so the total stays linear in the input.
+    """
+    digraph_modes = (True, False) if _may_hold_digraph_header(after) else (True,)
+    found: list[str] = []
+    for raw_strings in (True, False):
+        for trigraphs in (True, False):
+            for digraphs in digraph_modes:
+                added = added_logical_lines(before, after, raw_strings=raw_strings,
+                                            trigraphs=trigraphs, digraphs=digraphs)
+                for reason in scan_hostile_directives(added, include_ok=include_ok):
+                    if reason not in found:
+                        found.append(reason)
+    return tuple(found)
 
 
 # --- patches ------------------------------------------------------------------------
@@ -699,14 +767,9 @@ def validate_patch(
         if len(new_text.encode("utf-8", "replace")) > scope.max_file_bytes:
             reasons.append("FILE_TOO_LARGE: %s" % rel)
         changed_total += _changed_lines(before, new_text)
-        found: list[str] = []
-        # Both lexings: C++ (raw strings masked) and C (``R"(`` is not a raw
-        # string), so neither can hide a directive the other compiler sees.
-        for raw_strings in (True, False):
-            added = added_logical_lines(before, new_text, raw_strings=raw_strings)
-            for reason in scan_hostile_directives(added, include_ok=include_checker(scope, rel)):
-                if reason not in found:
-                    found.append(reason)
+        # Every lexing (raw strings, trigraphs, digraphs): none can hide a
+        # directive that a compiler reading the file the other way would see.
+        found = scan_added_lexings(before, new_text, include_ok=include_checker(scope, rel))
         reasons.extend("HOSTILE_DIRECTIVE: %s: %s" % (rel, reason) for reason in found)
     touched = set(loop_files_used) | {rel for rel, text in texts.items() if text != current.get(rel)}
     if changed_total > max_changed_lines:
@@ -1028,6 +1091,6 @@ __all__ = [
     "MAX_LOOP_FILES", "PatchHunk", "RepairEvidence", "added_logical_lines",
     "fix_report_to_wire", "include_checker", "include_path_problem", "looks_generated",
     "make_file_changes", "make_fix_report", "normalize_for_scan", "parse_candidate_patch",
-    "progress_key", "progress_to_wire", "repair_prompt", "scan_hostile_directives",
-    "sha256_text", "to_strategy_metrics", "validate_patch",
+    "progress_key", "progress_to_wire", "repair_prompt", "scan_added_lexings",
+    "scan_hostile_directives", "sha256_text", "to_strategy_metrics", "validate_patch",
 ]

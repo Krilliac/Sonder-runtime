@@ -77,7 +77,7 @@ def _json_depth(value) -> int:
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(path).expanduser()
+    candidate = Path(file_ops._reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = file_ops.workspace_root() / candidate
     return candidate.absolute()
@@ -86,7 +86,7 @@ def _requested_path(path: str) -> Path:
 def _guard_target(path: str, *, extra_roots: str, bypass: bool, apply: bool):
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path must be a non-empty string")
-    file_ops._reject_network_path(path)
+    path = file_ops._reject_network_path(path)
     if file_ops._foreign_absolute(path.strip()):
         raise PermissionError("path uses a non-native absolute form")
     requested = _requested_path(path)
