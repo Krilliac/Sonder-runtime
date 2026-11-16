@@ -208,7 +208,15 @@ class DurableContinuationService:
                 control._event.set()
             raise
 
-    def _mutate_after_predecessors(self, child_id, method, args, kwargs, *, timeout: float):
+    def _mutate_after_predecessors(
+        self,
+        child_id: str,
+        method: str,
+        args: tuple[object, ...],
+        kwargs: Mapping[str, object],
+        *,
+        timeout: float,
+    ) -> object:
         """Apply one mutation in durable order behind healthy earlier writers.
 
         The in-process lock only orders writers in this process.  Another
@@ -216,11 +224,15 @@ class DurableContinuationService:
         before this mutation retains its own, then still be finishing its
         receipt when this mutation's effect transaction takes the writer lock.
         The repository then refuses this mutation as blocked by that earlier
-        intent (its own intent stays retained, with no effect).  Wait for the
-        predecessor's exact receipt and retry the *same* prepared identity, so
-        the retry never leaves an orphaned intent or applies the effect twice.
+        intent (its own intent stays retained, with no effect).  Poll the
+        predecessor's exact receipt read-only, so the wait never contends for
+        the writer lock that predecessor needs, then retry the *same* prepared
+        identity once it has settled.  On success the retry therefore leaves
+        no orphaned intent of its own and never applies the effect twice.
         Ambiguity about this mutation itself, or a predecessor still without a
-        receipt at the deadline (a crashed writer), stays fail-closed.
+        receipt at the deadline (a crashed writer), stays fail-closed; in the
+        deadline case this mutation's own retained intent stays unreceipted
+        for reconciliation, as any refused write's does.
         """
         deadline = monotonic() + max(0.0, timeout)
         self._wait_for_storage_settlement(child_id, timeout=timeout)
@@ -235,12 +247,11 @@ class DurableContinuationService:
                     or blocking.child_id != child_id
                 ):
                     raise
-                if self._repository.reconcile(blocking) is not None:
-                    continue
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise
-                sleep(min(0.01, remaining))
+                while self._repository.reconcile(blocking) is None:
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise
+                    sleep(min(0.01, remaining))
 
     def _require_storage_settled(self, child_id):
         if child_id in self._storage_failures:
