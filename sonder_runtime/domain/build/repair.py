@@ -395,8 +395,10 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 unsure = True
             else:
                 pp_number = unsure = False
-        elif (ch in _ASCII_DIGITS or (ch == "." and value[i + 1:i + 2] in _ASCII_DIGITS)) \
-                and previous not in _ASCII_IDENT:
+        elif (ch in _ASCII_DIGITS and previous not in _ASCII_IDENT) \
+                or (ch == "." and value[i + 1:i + 2] in _ASCII_DIGITS):
+            # "." is never an identifier character, so ``.`` plus a digit starts a pp-number
+            # even right after one: ``b.0x1`` is ``b`` and ``.0x1``, literal part ``.0``.
             # ASCII digits only: a Unicode digit (U+0661, U+FF11, U+00B2) is an identifier
             # character to the compilers. After a non-ASCII character, ``\`` or ``$`` it is
             # unsure whether the digit starts a number or continues an identifier.
