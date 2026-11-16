@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 import uuid
 
 from sonder_runtime.application.chat import stream_sink
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 
 _logger = logging.getLogger("sonder.serve")
 # The chat code gate verifies fenced code after generation; code is held
@@ -66,10 +68,41 @@ def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None
     return live
 
 
+def wait_status_frame(line: str) -> bytes:
+    """An SSE comment carrying ``line``; clients ignore it, raw viewers read it."""
+    text = " ".join(str(line).split())[:300]
+    return (": sonder-status " + text + "\n\n").encode("utf-8")
+
+
+def arm_wait_status(handler, *, interval_seconds: float = wait_status.DEFAULT_INTERVAL_SECONDS,
+                    clock=time.monotonic) -> wait_status.AdmissionWaitReporter | None:
+    """A reporter that writes GPU-admission wait lines to ``handler``'s early SSE."""
+    early = getattr(handler, "_early_stream", None)
+    if early is None or early.client_gone:
+        return None
+
+    def emit(line: str) -> None:
+        frame = wait_status_frame(line)
+        with early.lock:
+            if early.client_gone:
+                return
+            try:
+                handler.wfile.write(frame)
+                flush = getattr(handler.wfile, "flush", None)
+                if callable(flush):
+                    flush()
+            except (OSError, ValueError):
+                early.client_gone = True
+
+    return wait_status.AdmissionWaitReporter(
+        emit, interval_seconds=interval_seconds, clock=clock)
+
+
 @contextlib.contextmanager
 def armed_for(handler, chunk, *, hold_code: bool):
     """Arm a live stream for the enclosed turn when the response is early SSE."""
-    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live:
+    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live, \
+            wait_status.armed(arm_wait_status(handler)):
         yield live
 
 
@@ -102,4 +135,7 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
     return True
 
 
-__all__ = ["CODE_FENCE", "arm", "armed_for", "write_stream_body"]
+__all__ = [
+    "CODE_FENCE", "arm", "arm_wait_status", "armed_for", "wait_status_frame",
+    "write_stream_body",
+]

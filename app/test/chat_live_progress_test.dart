@@ -248,6 +248,38 @@ void main() {
           findsOneWidget);
     });
 
+    testWidgets('a server status replaces the slow-model hint, as plain text',
+        (tester) async {
+      await pumpLine(tester);
+      for (var i = 0; i < 10; i++) {
+        tick();
+      }
+      live.value = live.value!
+          .copyWith(waitStatus: 'waiting for memory to load m: <b>4.2</b> GiB');
+      for (var i = 0; i < 10; i++) {
+        tick();
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // The status does not count as progress, so the row still opens.
+      expect(find.textContaining('! no output for 20s', findRichText: true),
+          findsOneWidget);
+      expect(
+          find.textContaining('waiting for memory to load m: <b>4.2</b> GiB',
+              findRichText: true),
+          findsOneWidget);
+      expect(
+          find.textContaining('slow local model?', findRichText: true),
+          findsNothing);
+      live.value = live.value!.copyWith(clearWaitStatus: true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+          find.textContaining('slow local model? try the fast route',
+              findRichText: true),
+          findsOneWidget);
+    });
+
     testWidgets('server progress under the same phase resets the stall clock',
         (tester) async {
       await pumpLine(tester);

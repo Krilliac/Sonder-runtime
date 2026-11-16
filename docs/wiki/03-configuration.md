@@ -52,6 +52,7 @@ work_wait_seconds = 240             # routed chat work: wait before answering wi
 work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
 work_max_running = 2                # concurrent routed work runs
 stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed turn generates
+prewarm_on_start = true             # load the default chat model once the listener is bound (SONDER_PREWARM_ON_START); needs prewarm enabled, goes through GPU admission
 
 [state]
 home = "/var/lib/sonder"
@@ -253,7 +254,8 @@ Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_WEB_APP` (`[server].web_app_enabled`), `SONDER_WEB_APP_DIR`
 (`[server].web_app_dir`, absolute),
 `SONDER_HTTP_WORK_WAIT_SECONDS`, `SONDER_HTTP_WORK_BUDGET_SECONDS`,
-`SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`.
+`SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`,
+`SONDER_PREWARM_ON_START` (`[server].prewarm_on_start`, default on).
 
 Orchestration: `SONDER_MAX_WORKER_CAP` lowers the absolute ceiling for explicit
 per-run `worker_cap` requests. It accepts a positive decimal integer only and

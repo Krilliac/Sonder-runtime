@@ -187,6 +187,10 @@ class ServerConfig:
     work_max_running: int = 2
     # SSE keep-alive comment interval while a streamed chat turn generates.
     stream_heartbeat_seconds: int = 15
+    # Load the default chat model as soon as the listener is bound so the first
+    # chat never waits on a cold load (SONDER_PREWARM_ON_START).  Still gated by
+    # the global prewarm switch and by GPU admission.
+    prewarm_on_start: bool = True
 
 
 @dataclass(frozen=True)
@@ -1571,6 +1575,8 @@ def _apply_environment(
                 if part.strip()
             ),
         )
+    if "SONDER_PREWARM_ON_START" in env:
+        server = replace(server, prewarm_on_start=_env_bool(env["SONDER_PREWARM_ON_START"]))
     if "SONDER_WEB_APP" in env:
         server = replace(server, web_app_enabled=_env_bool(env["SONDER_WEB_APP"]))
     if "SONDER_WEB_APP_DIR" in env:
@@ -1958,6 +1964,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for entry in server.allowed_hosts:
         if not _valid_allowed_host(entry):
             errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
+    if type(server.prewarm_on_start) is not bool:
+        errors.append("[server].prewarm_on_start must be a boolean")
     if type(server.web_app_enabled) is not bool:
         errors.append("[server].web_app_enabled must be a boolean")
     if type(server.web_app_dir) is not str or (

@@ -52,6 +52,7 @@ from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 from sonder_runtime.domain import gpu_admission as policy
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.gpu_admission import (
@@ -563,6 +564,8 @@ class GpuAdmission:
                     "waited %.0f s for a free %s GPU slot" % (
                         self.config.max_queue_wait_seconds, entry.pool),
                     retry_after_seconds=5.0))
+            wait_status.report_wait(
+                entry.model_key, detail="every %s GPU slot is busy" % entry.pool)
             self._pause(min(interval, max(0.0, limit - self._clock())))
 
     def _release_quietly(self, entry: _Entry) -> None:
@@ -616,7 +619,13 @@ class GpuAdmission:
             self._release_quietly(entry)
             with self._lock:
                 self._counters["queued"] += 1
+            wait_status.report_wait(
+                entry.model_key,
+                plan.reading.available_physical_bytes if plan.reading and plan.footprint else None,
+                plan.footprint.working_set_bytes if plan.reading and plan.footprint else None,
+                refusal.detail)
             self._pause(wait_interval)
+        wait_status.report_admitted()
         self._apply(entry, plan, body, store)
         entry.ticket.waited_seconds = self._clock() - started
         with self._lock:

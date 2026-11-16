@@ -89,7 +89,10 @@ class _LiveLineViewState extends State<LiveLineView> {
     final prev = _turn;
     if (next != null) {
       final newTurn = prev == null || next.startedAt != prev.startedAt;
-      final progressed = next.elapsedSeconds == prev?.elapsedSeconds ||
+      // A status comment is the server explaining the wait, not progress, so
+      // it leaves the stall clock alone.
+      final progressed = (next.elapsedSeconds == prev?.elapsedSeconds &&
+              next.waitStatus == prev?.waitStatus) ||
           next.phase != prev?.phase ||
           next.tokensIn != prev?.tokensIn;
       if (newTurn || progressed) _lastProgress = next.elapsedSeconds;
@@ -113,11 +116,14 @@ class _LiveLineViewState extends State<LiveLineView> {
     final tone = stalled ? tokens.warn : StatusKind.running.color(tokens);
     final style = tokens.mono(12, color: tokens.text2);
     final quietText = 'no output for ${elapsedLabel(quiet)}';
+    // The server's own reason for the wait, when it gave one, replaces the
+    // generic slow-model hint. Plain text only.
+    final hint = turn?.waitStatus ?? const LiveState().slowHint;
     return Semantics(
       key: const Key('live-line'),
       container: true,
       label: 'Sonder Runtime is working, ${state.phase}, '
-          '${elapsedLabel(seconds)}${stalled ? ', $quietText' : ''}',
+          '${elapsedLabel(seconds)}${stalled ? ', $quietText, $hint' : ''}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -187,8 +193,7 @@ class _LiveLineViewState extends State<LiveLineView> {
                         style: style.copyWith(
                             color: tokens.warn, fontWeight: FontWeight.w500)),
                     TextSpan(
-                        text:
-                            ' ${statusGlyphs['sep']} ${const LiveState().slowHint}',
+                        text: ' ${statusGlyphs['sep']} $hint',
                         style: style),
                   ]),
                   key: const Key('live-stall'),

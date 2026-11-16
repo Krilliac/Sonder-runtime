@@ -37,6 +37,10 @@ class LiveTurn {
   final String model;
   final int? tokensIn;
 
+  /// Why the server is holding the turn (plain text), or null. Set by a
+  /// status comment, cleared by the first answer text.
+  final String? waitStatus;
+
   /// Whole seconds since the turn started. Advanced by the controller's
   /// 1 Hz tick and never behind the wall clock, so it is right after the app
   /// was suspended and testable under fake time.
@@ -47,15 +51,23 @@ class LiveTurn {
     this.phase = 'routing',
     this.model = '',
     this.tokensIn,
+    this.waitStatus,
     this.elapsedSeconds = 0,
   });
 
-  LiveTurn copyWith({String? phase, int? tokensIn, int? elapsedSeconds}) =>
+  LiveTurn copyWith({
+    String? phase,
+    int? tokensIn,
+    int? elapsedSeconds,
+    String? waitStatus,
+    bool clearWaitStatus = false,
+  }) =>
       LiveTurn(
         startedAt: startedAt,
         phase: phase ?? this.phase,
         model: model,
         tokensIn: tokensIn ?? this.tokensIn,
+        waitStatus: clearWaitStatus ? null : waitStatus ?? this.waitStatus,
         elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
       );
 }
@@ -768,7 +780,12 @@ class ChatController extends ChangeNotifier {
         switch (event) {
           case TurnPhase(:final phase, :final tokensIn):
             live.value = live.value?.copyWith(phase: phase, tokensIn: tokensIn);
+          case TurnStatus(:final text):
+            live.value = live.value?.copyWith(waitStatus: text);
           case TurnDelta(:final text):
+            if (live.value?.waitStatus != null) {
+              live.value = live.value?.copyWith(clearWaitStatus: true);
+            }
             buffer.write(text);
             _updatePending(buffer.toString());
           case TurnDone(:final reply):

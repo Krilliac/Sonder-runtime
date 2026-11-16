@@ -95,6 +95,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
+from sonder_runtime.adapters.inference import startup_prewarm
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
@@ -891,6 +892,8 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # per-connection wait above.
 # Interval of SSE keep-alive comment frames while a streamed turn generates.
 STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
+# [server].prewarm_on_start: load the default chat model once the listener is bound.
+PREWARM_ON_START = os.environ.get("SONDER_PREWARM_ON_START", "1").strip().lower() not in {"0", "false", "no", "off"}
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -1237,8 +1240,9 @@ def configure_typed_config(config) -> None:
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
-    global STREAM_HEARTBEAT_SECONDS
+    global STREAM_HEARTBEAT_SECONDS, PREWARM_ON_START
     STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
+    PREWARM_ON_START = server_config.prewarm_on_start
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -8258,6 +8262,10 @@ def main(
             target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
         ).start()
         BOUND_PORT = port
+        startup_prewarm.start_default_model_prewarm(
+            setting=PREWARM_ON_START, prewarm=server.prewarm_model,
+            enabled=lambda: server.sonder_speculation.prewarm_enabled(),
+            thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         _warn_if_local_open()
