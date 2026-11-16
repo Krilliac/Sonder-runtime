@@ -178,12 +178,20 @@ _LEGACY_SPLICE_RE = re.compile(r"\\[ \t]*\n")
 # the splice readings lex differently.
 _BLANK_SPLICE_RE = re.compile(r"(?:\\|\?\?/)([ \t\f\v]+)\n")
 _DIGRAPH_PAIRS = ("<:", ":>", "<%", "%>", "%:")
-_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
+_RAW_OPEN_RE = re.compile(r'(?:u8|u|U|L)?R"')
+# Raw-string delimiter characters gcc, clang and MSVC all accept. Anything else
+# (a blank, ``$``, ``@``, a backquote, ``"``, a non-ASCII character, more than
+# 16 characters) is an error each compiler recovers from differently: gcc and
+# clang lex on to the next ``"`` (across lines), MSVC keeps a raw string with
+# another delimiter. No single reading covers that, so such a prefix is refused.
+_RAW_PREFIX_RE = re.compile(r"""(?:u8|u|U|L)?R"([A-Za-z0-9_{}\[\]#<>%:;.?*+\-/^&|~!=,']{0,16})\(""")
+# The delimiter rule before the fix above; the "legacy" masking keeps it.
+_LEGACY_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 
 
 def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool = True,
                        digraphs: bool = True, strict_splices: bool = False,
-                       legacy: bool = False) -> str:
+                       legacy: bool = False, separators: str = "cxx14") -> str:
     """Translation phases 1-3 as far as the scan needs them.
 
     All nine trigraphs are replaced, backslash-newline splices (blanks between
@@ -211,13 +219,18 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool =
     as the only digraph); it overrides the three mode flags. No compiler
     reads a file that way, but it is scanned too so that nothing the old
     scanner refused is accepted now.
-    A ``'`` inside a pp-number (``1'000``) is a C++14 digit separator, not
-    the start of a character literal (which could otherwise swallow a
-    string's quote and start a phantom comment that hides later lines).
+    ``separators`` picks how a ``'`` right after a pp-number is lexed (a
+    wrong guess lets a character literal swallow a quote or a ``/*`` and
+    hide later lines): ``"cxx14"`` (C++14, C23: a digit separator when an
+    ASCII digit, letter or ``_`` follows, as gcc, clang and MSVC agree),
+    ``"none"`` (C17, C++11: always a character literal) and ``"legacy"``
+    (the masking before these modes: any ``'`` inside a pp-number, whose
+    start was any Unicode digit). See ``_mask_literals``.
     """
     value = _translation_phases(text, trigraphs=trigraphs, digraphs=digraphs,
                                 strict_splices=strict_splices, legacy=legacy)
-    return _mask_literals(value, raw_strings=raw_strings, digraphs=digraphs and not legacy)
+    return _mask_literals(value, raw_strings=raw_strings, digraphs=digraphs and not legacy,
+                          separators=separators)
 
 
 def _translation_phases(text: str, *, trigraphs: bool = True, digraphs: bool = True,
@@ -244,35 +257,106 @@ def _translation_phases(text: str, *, trigraphs: bool = True, digraphs: bool = T
 _PLAIN_RUN_RE = re.compile(r"(?:[^/\"'<:%0-9.uULR\x80-\U0010ffff]|u(?!8?R\")|[UL](?!R\")|R(?!\"))+")
 _LETTERS_RE = re.compile(r"[A-Za-z_]+")
 _MASK_STARTERS = "/\"'<:%0123456789."  # never plain: skip the run match for these
+_ASCII_DIGITS = frozenset("0123456789")
+_ASCII_IDENT = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_ASCII_IDENT_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
+_IDENT_OR_DOLLAR = _ASCII_IDENT | {"$"}
+_UNSURE_IN_NUMBER = frozenset("\\$")  # a UCN or ``$``: gcc continues a pp-number over it
+_EXPONENTS = frozenset("eEpP")
+_SIGNS = frozenset("+-")
+_SEPARATOR_MODES = ("cxx14", "none", "legacy")
+# What one ``_mask_literals`` pass saw (``events``); ``scan_added_lexings`` acts on them.
+_EVENT_SEPARATOR = "separator"  # a ``'`` the C++14 reading took as a digit separator
+_EVENT_LEGACY = "legacy"        # the legacy masking lexes a ``'`` or a raw prefix differently
+_EVENT_AMBIGUOUS = "ambiguous"  # a ``'`` after a pp-number that compilers lex differently
+_EVENT_BAD_RAW = "bad_raw"      # a raw-string prefix whose delimiter some compiler rejects
+_AMBIGUOUS_SEPARATOR = ("a quote after a number that compilers lex differently (digit separator "
+                        "or character literal) is refused")
+_BAD_RAW_DELIMITER = ("a raw string whose delimiter some compiler rejects (each recovers "
+                      "differently) is refused")
 
 
-def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool) -> str:
-    """The token-level part of ``normalize_for_scan``: comments, raw strings, digraph pairs."""
+def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators: str = "cxx14",
+                   events: set[str] | None = None) -> str:
+    """The token-level part of ``normalize_for_scan``: comments, raw strings, digraph pairs.
+
+    A ``'`` right after a pp-number is where compilers part ways. Checked with
+    gcc 16, clang 22 and MSVC 19.44: in C++14 and C23 modes gcc and clang take
+    it as a digit separator only when an ASCII digit, letter or ``_`` follows
+    (gcc also across ``''``), in C17 and C++11 never, and MSVC in every mode
+    takes it always. ``separators`` picks the reading (see
+    ``normalize_for_scan``); every reading follows the same text up to the
+    first ``'`` it decides differently, so ``events`` (when given) records
+    whether another reading can differ at all: ``"separator"`` (the C++14
+    reading took a separator, so the C17 one differs), ``"legacy"`` (the
+    legacy reading decides a ``'`` or a raw prefix differently) and the two
+    that no reading covers: ``"ambiguous"`` (a ``'`` after a pp-number
+    followed by anything else, or a pp-number holding a character compilers
+    disagree on: non-ASCII, ``\\``, ``$``) and ``"bad_raw"`` (a raw prefix
+    whose delimiter some compiler rejects, or one after a non-ASCII
+    character or a backslash).
+
+    Pure; ``events`` is the only argument it mutates. Linear in ``value``.
+    """
+    if separators not in _SEPARATOR_MODES:
+        raise ValueError(f"separators must be one of {', '.join(_SEPARATOR_MODES)}")
     out: list[str] = []
     i = 0
     n = len(value)
-    pp_number = False  # inside a pp-number, where ' is a digit separator
+    pp_number = False  # C++14 reading: inside a pp-number (started by an ASCII digit)
+    unsure = False  # ... and it holds a character compilers lex differently
+    legacy_pp = False  # the legacy tracker: started by any Unicode digit, ' always continues it
     while i < n:
         ch = value[i]
-        if ch not in _MASK_STARTERS:
-            run = _PLAIN_RUN_RE.match(value, i)
-            if run is not None:
-                j = run.end()
-                if pp_number:  # letters and ``_`` continue a pp-number, anything else ends it
-                    pp_number = _LETTERS_RE.fullmatch(value, i, j) is not None
+        if pp_number or legacy_pp:
+            # Inside a number: ASCII identifier characters after one continue it in every
+            # tracker (and cannot start one or a raw prefix), so copy them in one step.
+            if ch in _ASCII_IDENT and i > 0 and value[i - 1] in _ASCII_IDENT:
+                j = _ASCII_IDENT_RUN_RE.match(value, i).end()
                 out.append(value[i:j])
                 i = j
                 continue
-        if ch == "'" and pp_number:
-            out.append(ch)
-            i += 1
-            continue
-        previous_ident = i > 0 and (value[i - 1].isalnum() or value[i - 1] == "_")
+        elif ch not in _MASK_STARTERS:
+            run = _PLAIN_RUN_RE.match(value, i)
+            if run is not None:
+                j = run.end()
+                out.append(value[i:j])
+                i = j
+                continue
+        if ch == "'" and (pp_number or legacy_pp):
+            separator = pp_number and not unsure and value[i + 1:i + 2] in _ASCII_IDENT
+            if events is not None:
+                if pp_number and not separator:
+                    events.add(_EVENT_AMBIGUOUS)
+                if separator:
+                    events.add(_EVENT_SEPARATOR)
+                if separator != legacy_pp:
+                    events.add(_EVENT_LEGACY)
+            take = legacy_pp if separators == "legacy" else separator and separators == "cxx14"
+            if take:
+                out.append(ch)
+                i += 1
+                continue
+        previous = value[i - 1] if i > 0 else ""
+        if legacy_pp:
+            legacy_pp = ch.isalnum() or ch in "_."
+        elif not (previous.isalnum() or previous == "_") and (
+                ch.isdigit() or (ch == "." and i + 1 < n and value[i + 1].isdigit())):
+            legacy_pp = True
         if pp_number:
-            pp_number = ch.isalnum() or ch in "_."
-        elif not previous_ident and (ch.isdigit() or (ch == "." and i + 1 < n
-                                                      and value[i + 1].isdigit())):
+            if ch in _ASCII_IDENT or ch == "." or (ch in _SIGNS and previous in _EXPONENTS):
+                pass
+            elif ch in _UNSURE_IN_NUMBER or not ch.isascii():
+                unsure = True
+            else:
+                pp_number = unsure = False
+        elif (ch in _ASCII_DIGITS or (ch == "." and value[i + 1:i + 2] in _ASCII_DIGITS)) \
+                and previous not in _ASCII_IDENT:
+            # ASCII digits only: a Unicode digit (U+0661, U+FF11, U+00B2) is an identifier
+            # character to the compilers. After a non-ASCII character, ``\`` or ``$`` it is
+            # unsure whether the digit starts a number or continues an identifier.
             pp_number = True
+            unsure = previous != "" and (previous in _UNSURE_IN_NUMBER or not previous.isascii())
         if ch == "/" and i + 1 < n and value[i + 1] == "/":
             end = value.find("\n", i)
             out.append(" ")
@@ -283,9 +367,23 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool) -> str:
             out.append(" ")
             i = n if end < 0 else end + 2
             continue
-        if raw_strings and ch in "uUL8R":
-            raw = _RAW_PREFIX_RE.match(value, i)
-            if raw and (i == 0 or not (value[i - 1].isalnum() or value[i - 1] == "_")):
+        if raw_strings and ch in "uULR" and _RAW_OPEN_RE.match(value, i) is not None:
+            legacy_raw = None if previous.isalnum() or previous == "_" \
+                else _LEGACY_RAW_PREFIX_RE.match(value, i)
+            if previous in _IDENT_OR_DOLLAR:
+                raw = None  # ``xR"`` and ``$R"`` are identifiers to every compiler
+            else:
+                raw = _RAW_PREFIX_RE.match(value, i)
+                # After a non-ASCII character or a stray backslash it is unsure whether an
+                # identifier continues (no raw string) or a blank precedes one.
+                if events is not None and (raw is None or previous == "\\"
+                                           or not previous.isascii()):
+                    events.add(_EVENT_BAD_RAW)
+            if events is not None and (raw is None) != (legacy_raw is None):
+                events.add(_EVENT_LEGACY)
+            if separators == "legacy":
+                raw = legacy_raw
+            if raw:
                 delimiter = ")" + raw.group(1) + '"'
                 start = raw.end()
                 end = value.find(delimiter, start)
@@ -335,7 +433,23 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool) -> str:
     return "".join(out)
 
 
+# ``\s`` is wider than any compiler's blank (it takes U+00A0, U+2028, U+0085,
+# \x1c-\x1f, which gcc lexes as stray tokens), so this recognises more lines
+# as directives, never fewer, and checks them. What it misses (U+180E, which
+# clang treats as blank but ``\s`` does not) is refused by the check below.
 _DIRECTIVE_RE = re.compile(r"^\s*#\s*([A-Za-z_]\w*)\s*(.*)$")
+# A line that starts like a directive: what precedes the ``#`` (group 1), what
+# separates it from the name (group 2), the ASCII name (3) and the next character (4).
+_DIRECTIVE_SHAPE_RE = re.compile(r"([^\x21-\x7e]*)(?:#|%:)([^\x21-\x7e]*)([A-Za-z0-9_]*)(.?)")
+_LINE_BLANKS = frozenset(" \t\f\v\r")
+_ODD_DIRECTIVE = ("a non-ASCII or control character before, after or inside a directive's '#' "
+                  "and name is refused (compilers disagree whether the line is a directive)")
+# U+FEFF is skipped as a byte order mark at the start of a file by gcc and clang;
+# clang 22 takes U+180E as a blank before a ``#`` (not between ``_Pragma`` and its
+# ``(``). ``\s`` matches neither; both are refused anywhere in added text, one
+# rule instead of a guess per construct.
+_ODD_BLANKS_RE = re.compile("[\ufeff\u180e]")
+_ODD_BLANKS = "U+FEFF (byte order mark) or U+180E in added text is refused (a compiler reads it as a blank)"
 _PRAGMA_BAD_RE = re.compile(
     r"\b(?:comment\s*\(\s*(?:linker|lib|user)\b|include_alias|section|init_seg|code_seg|"
     r"data_seg|const_seg|bss_seg|alloc_text|detect_mismatch)\b|\bGCC\s+poison\b|"
@@ -354,8 +468,13 @@ _HAS_OPERAND_RE = re.compile(r"\s*\(\s*([<\"])")
 # removed or tested, never evaluated. Matched from the start of the logical
 # line, so text before the ``#`` (``#if 0 #define __has_include(P)``, a
 # stringized or pasted ``#define``) is not a directive head.
-_HAS_NAME_HEAD_RE = re.compile(r"\s*(?:#|%:)\s*(?:define|undef|ifdef|ifndef|elifdef|elifndef)\s+")
-_HAS_IF_HEAD_RE = re.compile(r"\s*(?:#|%:)\s*(?:if|elif)\b")
+# Both grant an exemption, so they take only the blanks every compiler skips
+# (``\s`` would also take U+00A0 or \x1c, a stray token to gcc, which then
+# expands ``__has_include(P)`` on that line as ordinary text), and ``if``/``elif``
+# must not run on into an identifier character, ASCII or not.
+_HAS_NAME_HEAD_RE = re.compile(
+    r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:define|undef|ifdef|ifndef|elifdef|elifndef)[ \t\f\v]+")
+_HAS_IF_HEAD_RE = re.compile(r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:if|elif)(?![0-9A-Za-z_$]|[^\x00-\x7f])")
 # Words of an ``#if`` line. Group 1 is anything that may be (or hide) a macro:
 # an identifier, or a quote, backslash or other character that starts a token
 # this scan does not pair up. A pp-number and ``defined NAME``/``defined(NAME``
@@ -527,7 +646,10 @@ def _is_defined_operand(text: str, line_start: int, start: int, end: int, line_e
     budget.charge(start - j + k - end + 1)
     if j - 7 < line_start or text[j - 7:j] != "defined":
         return False
-    if j - 7 > line_start and (text[j - 8].isalnum() or text[j - 8] in "_$"):
+    # Any non-ASCII character may continue an identifier (U+0300, U+00B7, ZWJ,
+    # U+203F are not ``isalnum`` but compilers accept them), so ``X\u0300defined``
+    # is one identifier, not the operator.
+    if j - 7 > line_start and (text[j - 8] in _IDENT_OR_DOLLAR or not text[j - 8].isascii()):
         return False
     following = text[k] if k < line_end else ""
     return following == ")" if paren else following != "("
@@ -657,7 +779,16 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
         if reason not in reasons:
             reasons.append(reason)
 
+    if _ODD_BLANKS_RE.search(text):
+        refuse(_ODD_BLANKS)
     for line in text.split("\n"):
+        shape = _DIRECTIVE_SHAPE_RE.match(line)
+        if shape is not None:
+            lead, gap, name, after = shape.groups()
+            if any(c not in _LINE_BLANKS for c in lead) or any(c not in _LINE_BLANKS for c in gap) \
+                    or (name and after and after not in _LINE_BLANKS
+                        and not "\x21" <= after <= "\x7e"):
+                refuse(_ODD_DIRECTIVE)
         directive = _DIRECTIVE_RE.match(line)
         if not directive:
             continue
@@ -748,13 +879,16 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
 
 def added_logical_lines(before: str, after: str, *, raw_strings: bool = True,
                         trigraphs: bool = True, digraphs: bool = True,
-                        strict_splices: bool = False, legacy: bool = False) -> str:
+                        strict_splices: bool = False, legacy: bool = False,
+                        separators: str = "cxx14") -> str:
     """Normalized logical lines present in ``after`` but not in ``before`` (multiset)."""
     return _added_lines(
         normalize_for_scan(before, raw_strings=raw_strings, trigraphs=trigraphs,
-                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy),
+                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy,
+                           separators=separators),
         normalize_for_scan(after, raw_strings=raw_strings, trigraphs=trigraphs,
-                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy))
+                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy,
+                           separators=separators))
 
 
 def _added_lines(old_text: str, new_text: str) -> str:
@@ -832,10 +966,19 @@ def scan_added_lexings(before: str, after: str, *,
     and its added lines are scanned only when no earlier reading produced the
     same ones. Ordinary code costs one normalisation and one scan.
 
+    Each of those readings is masked with C++14 digit separators; when that
+    pass meets a ``'`` it takes as a separator, the C17/C++11 masking (no
+    separators) is scanned too, and when the legacy masking would decide a
+    ``'`` or a raw prefix differently, so is that one. A ``'`` after a number
+    that no reading covers (gcc, clang and MSVC each lex it differently) and
+    a raw prefix with a delimiter some compiler rejects are refused wherever
+    they stand in the old or the new text.
+
     The work is bounded: the distinct readings are counted first (cheap), and
     when there are more than two and together they would put more than
     ``_LEXING_WORK_CHARS`` characters (old plus new text, per reading)
-    through the scanner, the input is refused, never accepted.
+    through the scanner, the input is refused, never accepted. The quote
+    readings found while scanning count against the same bound.
     """
     blank_before, odd_before = _blank_splices(before)
     blank_after, odd_after = _blank_splices(after)
@@ -864,21 +1007,52 @@ def scan_added_lexings(before: str, after: str, *,
             if key not in done:
                 done.add(key)
                 plan.append((lexing, raw_strings, pairs))
-    if len(plan) > 2 and len(plan) * unit > _LEXING_WORK_CHARS:
+    readings = len(plan)
+    if readings > 2 and readings * unit > _LEXING_WORK_CHARS:
         return (_LEXING_REFUSAL,)
     scanned: set[bytes] = set()
     found: list[str] = []
+
+    def note(reason: str) -> None:
+        if reason not in found:
+            found.append(reason)
+
     for lexing, raw_strings, pairs in plan:
-        added = _added_lines(
-            _mask_literals(_translation_phases(before, **lexing), raw_strings=raw_strings, digraphs=pairs),
-            _mask_literals(_translation_phases(after, **lexing), raw_strings=raw_strings, digraphs=pairs))
-        mark = _digest(added)
-        if mark in scanned:
-            continue
-        scanned.add(mark)
-        for reason in scan_hostile_directives(added, include_ok=include_ok):
-            if reason not in found:
-                found.append(reason)
+        old = _translation_phases(before, **lexing)
+        new = _translation_phases(after, **lexing)
+        events: set[str] = set()
+        masked = [(_mask_literals(old, raw_strings=raw_strings, digraphs=pairs, events=events),
+                   _mask_literals(new, raw_strings=raw_strings, digraphs=pairs, events=events))]
+        # The C17 and legacy quote readings follow the C++14 one up to the first quote they
+        # decide differently, so each runs only when the C++14 pass saw such a quote.
+        extra = [mode for mode, event in (("none", _EVENT_SEPARATOR), ("legacy", _EVENT_LEGACY))
+                 if event in events]
+        if extra:
+            readings += len(extra)
+            if readings > 2 and readings * unit > _LEXING_WORK_CHARS:
+                note(_LEXING_REFUSAL)
+                return tuple(found)
+        for mode in extra:
+            seen: set[str] = set()
+            masked.append((
+                _mask_literals(old, raw_strings=raw_strings, digraphs=pairs, separators=mode, events=seen),
+                _mask_literals(new, raw_strings=raw_strings, digraphs=pairs, separators=mode, events=seen)))
+            if mode == "none" and _EVENT_BAD_RAW in seen:  # C++11 has raw strings too
+                events.add(_EVENT_BAD_RAW)
+        # Anywhere in the old or the new text, not only in added lines: a quote or raw
+        # prefix lexed differently changes which later lines are hidden in a comment.
+        if _EVENT_AMBIGUOUS in events:
+            note(_AMBIGUOUS_SEPARATOR)
+        if _EVENT_BAD_RAW in events:
+            note(_BAD_RAW_DELIMITER)
+        for old_masked, new_masked in masked:
+            added = _added_lines(old_masked, new_masked)
+            mark = _digest(added)
+            if mark in scanned:
+                continue
+            scanned.add(mark)
+            for reason in scan_hostile_directives(added, include_ok=include_ok):
+                note(reason)
     return tuple(found)
 
 
