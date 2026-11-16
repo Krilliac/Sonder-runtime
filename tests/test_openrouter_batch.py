@@ -41,16 +41,20 @@ class BatchPeer:
             self.requests.append((handler.path, dict(handler.headers), body))
             self.active += 1
             self.peak = max(self.peak, self.active)
+        in_flight = True
         try:
             self.before(prompt)
             status = self.status.get(prompt, 200)
             document = (_chat(prompt, model=body["model"]) if status == 200 else
                         {"error": {"code": status, "message": "synthetic batch failure"}})
             data = json.dumps(document).encode()
-            # Record the request as completed BEFORE any response byte is sent: the client may read the whole
-            # response and return before this thread runs again, so a record made afterwards can be missing.
+            # Record the request as completed, and leave the in-flight count, BEFORE any response byte is sent:
+            # the client may read the whole response and send its next request before this thread runs again,
+            # so a record made afterwards can be missing and a count dropped afterwards overstates the peak.
             with self.lock:
                 self.finished.append(prompt)
+                self.active -= 1
+                in_flight = False
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
             handler.send_header("Content-Length", str(len(data)))
@@ -61,8 +65,9 @@ class BatchPeer:
                 pass  # the deadline test intentionally closes the client first
             self.after(prompt)
         finally:
-            with self.lock:
-                self.active -= 1
+            if in_flight:
+                with self.lock:
+                    self.active -= 1
 
 
 @pytest.fixture
