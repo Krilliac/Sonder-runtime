@@ -44,6 +44,18 @@ List<String> _of(List<CodeToken> tokens, CodeTokenKind kind) => [
         if (t.kind == kind) t.text
     ];
 
+/// Every run of text in [span] with the style it is drawn in.
+List<(String, TextStyle)> _runs(InlineSpan span,
+    [TextStyle base = const TextStyle()]) {
+  if (span is! TextSpan) return const [];
+  final style = base.merge(span.style);
+  return [
+    if (span.text != null) (span.text!, style),
+    for (final child in span.children ?? const <InlineSpan>[])
+      ..._runs(child, style),
+  ];
+}
+
 void main() {
   setUpAll(loadGoldenFonts);
 
@@ -142,6 +154,65 @@ void main() {
       ]) {
         expect(decideLink('link', href), LinkDecision.show, reason: '$href');
       }
+    });
+  });
+
+  group('reading text', () {
+    testWidgets(
+        'prose is sans at 16 on a 26 px line; headings, quotes and tables '
+        'are drawn as such; mono is only for code', (tester) async {
+      await tester.pumpWidget(_app(const ConversationContent(
+        content: '## Plan\n\n'
+            'Warm the cache with `Precompile()` first.\n\n'
+            '- one\n- two\n\n'
+            '> Driver caches survive a restart.\n\n'
+            '| Stage | Before |\n|---|---|\n| First draw | 1.8 s |',
+        fullWidthCode: true,
+      )));
+      const tokens = SonderTokens.dark;
+      final theme = SonderTheme.dark.textTheme;
+      final sans = theme.bodyLarge!.fontFamily;
+      final mono = tokens.mono(14).fontFamily;
+      expect(sans, isNotNull);
+      expect(mono, isNot(sans));
+      List<(String, TextStyle)> runs(String containing) => _runs(tester
+          .widget<SelectableText>(find
+              .ancestor(
+                  of: find.textContaining(containing, findRichText: true),
+                  matching: find.byType(SelectableText))
+              .first)
+          .textSpan!);
+      TextStyle styleOf(String containing, String run) =>
+          runs(containing).firstWhere((r) => r.$1.contains(run)).$2;
+
+      final prose = styleOf('Warm the cache', 'Warm the cache');
+      expect(prose.fontFamily, sans);
+      expect(prose.fontSize, 16);
+      expect(prose.fontSize! * prose.height!, closeTo(26, 0.01));
+      expect(prose.color, tokens.text);
+
+      // Inline code: the mono face on the bubble tone, in the same line.
+      final code = styleOf('Warm the cache', 'Precompile()');
+      expect(code.fontFamily, mono);
+      expect(code.backgroundColor, tokens.bubble);
+      expect(code.fontSize! * code.height!, closeTo(26, 0.01));
+
+      final heading = styleOf('Plan', 'Plan');
+      expect(heading.fontFamily, sans);
+      expect(heading.fontSize, theme.titleLarge!.fontSize);
+      expect(heading.fontWeight, FontWeight.w600);
+
+      expect(styleOf('Driver caches', 'Driver caches').color, tokens.text2);
+      expect(styleOf('one', 'one').fontFamily, sans);
+
+      // A real table: left-aligned head on the sunken tone, hairline rules.
+      final table = tester.widget<Table>(find.byType(Table));
+      expect(table.border!.top.color, tokens.hairline);
+      expect(table.children.first.decoration,
+          BoxDecoration(color: tokens.sunken));
+      expect(styleOf('Stage', 'Stage').fontWeight, FontWeight.w600);
+      expect(styleOf('First draw', 'First draw').fontFamily, sans);
+      expect(tester.takeException(), isNull);
     });
   });
 

@@ -11,10 +11,10 @@ import 'controller.dart';
 /// cue) and suggests a faster route.
 const slowTurnSeconds = 20;
 
-/// The transcript's glyph gutter (❯ you, ◈ Sonder) and the gap after it.
-/// The live line puts its working glyph in the same column.
-const transcriptGutter = 24.0;
-const transcriptGutterGap = SonderSpace.md;
+/// The working glyph's column and the gap after it. The glyph starts at
+/// the reading column's edge, where an answer's first letter will be.
+const _glyphColumn = SonderSpace.lg;
+const _glyphGap = SonderSpace.sm;
 
 /// The live line of an in-flight turn (P1-1, §2.2):
 ///
@@ -23,7 +23,7 @@ const transcriptGutterGap = SonderSpace.md;
 ///    ! no output for 24s · slow local model? try the fast route
 /// ```
 ///
-/// The ◈ sits in the transcript gutter and breathes once a second; the text
+/// The ◈ leads the line and breathes once a second; the text
 /// is the REPL's live line (`status_line.liveLine`) without its glyph. The
 /// controller ticks [live] at 1 Hz, so the timer keeps counting with
 /// animations off. After [slowTurnSeconds] with no output — no new text
@@ -125,18 +125,18 @@ class _LiveLineViewState extends State<LiveLineView> {
           Row(
             children: [
               SizedBox(
-                width: transcriptGutter,
+                width: _glyphColumn,
                 child: ExcludeSemantics(
                   child: _BreathingGlyph(
                       seconds: seconds, color: tone, still: stalled),
                 ),
               ),
-              const SizedBox(width: transcriptGutterGap),
+              const SizedBox(width: _glyphGap),
               Expanded(
                 child: ExcludeSemantics(
                   child: LayoutBuilder(builder: (context, constraints) {
-                    // The glyph and its space live in the gutter, so the
-                    // REPL line gets two extra cells and drops them.
+                    // The glyph and its space are drawn beside the text,
+                    // so the REPL line gets two extra cells and drops them.
                     final cell = monoCellWidth(context, style);
                     final cols =
                         cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
@@ -178,8 +178,7 @@ class _LiveLineViewState extends State<LiveLineView> {
             visible: stalled,
             child: Padding(
               padding: const EdgeInsets.only(
-                  left: transcriptGutter + transcriptGutterGap,
-                  bottom: SonderSpace.xs),
+                  left: _glyphColumn + _glyphGap, bottom: SonderSpace.xs),
               child: ExcludeSemantics(
                 child: Text.rich(
                   TextSpan(children: [
@@ -240,7 +239,6 @@ class _BreathingGlyph extends StatelessWidget {
       duration: reduce ? Duration.zero : SonderMotion.slow,
       curve: SonderMotion.standard,
       child: Text(StatusKind.running.glyph,
-          textAlign: TextAlign.center,
           style: tokens.mono(14, color: color, weight: FontWeight.w600)),
     );
   }
