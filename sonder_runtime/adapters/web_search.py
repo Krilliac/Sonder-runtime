@@ -63,11 +63,12 @@ def search_raw(query: str, *, limit=5, timeout=10):
                     results = [
                         {
                             "title": str(row.get("title", "")),
-                            "url": str(row.get("url", "")),
+                            "url": tools._http_result_or(str(row.get("url", "")), ""),
                             "snippet": str(row.get("snippet", "")),
                         }
                         for row in (rows or [])[:limit]
                         if isinstance(row, dict)
+                        and tools._http_result_or(str(row.get("url", "")), "")
                     ]
                 elif "xml" in ctype or text.lstrip().startswith("<?xml"):
                     results = tools._search_rss_rows(raw, limit)

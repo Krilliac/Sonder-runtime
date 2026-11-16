@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1:11434"
 REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_OLLAMA"
 _TRUE = {"1", "true", "yes", "on"}
-_BAD_ORIGIN_CHARS = chr(92) + chr(127)  # backslash and DEL
 
 
 def remote_allowed(environment) -> bool:
@@ -30,24 +29,26 @@ def _candidate(value=None) -> str:
     return raw if "://" in raw else "http://%s" % raw
 
 
+def _trim_tail(text: str) -> str:
+    """Drop trailing "/" and whitespace together, in one linear pass.
+
+    The scan never crosses the first ``://`` so the result still contains it,
+    which keeps ``normalize`` a fixed point on text that is not an origin.
+    """
+    floor = text.find("://") + 3
+    end = len(text)
+    while end > floor and (text[end - 1] == "/" or text[end - 1].isspace()):
+        end -= 1
+    return text[:end]
+
+
 def normalize(value=None) -> str:
     """Return a canonical origin and rewrite exact bind-all hosts to loopback.
 
     Text that is not a recognisable origin is returned trimmed but otherwise
-    unchanged; the result is iterated to a fixed point so ``normalize`` is
-    idempotent on every input.
+    unchanged; ``normalize`` is idempotent on every input.
     """
-    current = _normalize_once(value)
-    for _ in range(16):
-        following = _normalize_once(current)
-        if following == current:
-            break
-        current = following
-    return current
-
-
-def _normalize_once(value=None) -> str:
-    candidate = _candidate(value).rstrip("/")
+    candidate = _trim_tail(_candidate(value))
     try:
         parsed = urllib.parse.urlparse(candidate)
         host = parsed.hostname
@@ -106,6 +107,13 @@ def is_loopback(value=None) -> bool:
 
 def policy_error(value=None, *, allow_remote=False) -> str:
     """Return a security error, or ``""`` for an accepted origin."""
+    # Validate the text as given (trimmed once at the ends) before any
+    # normalisation, so trimming can never uncover or hide an interior byte.
+    raw = str(DEFAULT_HOST if value is None else value).strip()
+    if "\\" in raw:
+        return "OLLAMA_HOST must not contain a backslash"
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw):
+        return "OLLAMA_HOST is malformed or contains whitespace or control characters"
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -113,8 +121,6 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         port = parsed.port
     except ValueError:
         return "OLLAMA_HOST is malformed or has an invalid port"
-    if any(c.isspace() or c in _BAD_ORIGIN_CHARS or ord(c) < 32 for c in origin):
-        return "OLLAMA_HOST is malformed or contains whitespace or control characters"
     if parsed.scheme.lower() not in {"http", "https"}:
         return "OLLAMA_HOST must use http or https"
     if not host:

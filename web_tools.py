@@ -465,7 +465,7 @@ class _MojeekSearchParser(HTMLParser):
         if title:
             self.links.append({
                 "title": html.unescape(title),
-                "url": html.unescape(self._href),
+                "url": _http_result_or(html.unescape(self._href), "https://www.mojeek.com/"),
             })
         self._href = None
         self._text = []
@@ -510,6 +510,10 @@ def _http_result_or(url, fallback):
         and url.startswith(("http://", "https://"))
         and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url)
     ):
+        try:
+            urllib.parse.urlparse(url)
+        except ValueError:
+            return fallback
         return url
     return fallback
 
@@ -587,7 +591,7 @@ def _search_rss_rows(raw, limit):
     seen = set()
     for item in root.findall(".//item"):
         title = _clean_search_title(item.findtext("title") or "")
-        url = (item.findtext("link") or "").strip()
+        url = _http_result_or((item.findtext("link") or "").strip(), "")
         description = item.findtext("description") or ""
         parser = _TextParser()
         parser.feed(description)

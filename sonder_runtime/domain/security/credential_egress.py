@@ -139,7 +139,8 @@ def _normalize_host(host: str) -> str:
         encoded = value.encode("idna").decode("ascii").rstrip(".")
     except UnicodeError as exc:
         raise ValueError("invalid host scope") from exc
-    if not encoded:
+    if not encoded or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in encoded):
+        # NFKC in the IDNA step maps compatibility characters (U+00A8, ...) to space.
         raise ValueError("invalid host scope")
     return encoded
 
