@@ -749,5 +749,30 @@ def test_huge_integer_multiple_of_is_exact_and_never_raises():
     huge = 10 ** 400
     assert J.json_schema_verify(str(huge), {"schema": {"multipleOf": 3}}).passed is False
     assert J.json_schema_verify(str(3 * 10 ** 400), {"schema": {"multipleOf": 3}}).passed is True
-    assert J.json_schema_verify(str(huge), {"schema": {"multipleOf": 0.1}}).passed is False
+    # 10**400 cannot be divided by 0.1 in floats: that is a limit of the checker,
+    # so it is reported as unchecked (the module docstring), not as a violation.
+    unchecked = J.json_schema_verify(str(huge), {"schema": {"multipleOf": 0.1}})
+    assert unchecked.passed is False
+    assert unchecked.reason.startswith("cannot verify")
+    errors, gaps = J.check(huge, {"multipleOf": 0.1})
+    assert errors == []
+    assert len(gaps) == 1
+
+
+def test_integral_float_multiple_of_is_checked_with_exact_integers():
+    schema = {"multipleOf": 2.0}
+    assert J.json_schema_verify("100000000000000001", {"schema": schema}).passed is False
+    assert J.json_schema_verify("100000000000000002", {"schema": schema}).passed is True
+    assert J.json_schema_verify("9007199254740993", {"schema": {"multipleOf": 3.0}}).passed is True
+    assert J.json_schema_verify("9007199254740994", {"schema": {"multipleOf": 3.0}}).passed is False
+
+
+def test_integer_too_long_for_json_loads_is_a_failed_verdict_not_a_raise():
+    verdict = J.json_schema_verify("1" * 5000, {"schema": {"type": "integer"}})
+    assert verdict.passed is False
+    assert "invalid json" in verdict.reason
+
+
+def test_numeric_keyword_set_is_not_duplicated():
+    assert not hasattr(J, "_NUMERIC_KEYWORDS")
     assert J.json_schema_verify("7", {"schema": {"multipleOf": 7}}).passed is True
