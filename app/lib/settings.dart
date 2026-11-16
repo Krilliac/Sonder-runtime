@@ -125,8 +125,9 @@ class Settings {
   String apiKey;
   AccountSession? accountSession;
 
-  /// `dark`, `light` or `system`. Dark is the primary theme; `system`
-  /// follows the platform. [darkMode] is derived for older call sites.
+  /// `dark`, `light` or `system`. Both themes are first-class; a new
+  /// install follows the platform ([defaultThemeMode]) until Appearance
+  /// says otherwise. [darkMode] is derived for older call sites.
   String themeMode;
   // Inference route/model identifier exposed by the Sonder Runtime server.
   String model;
@@ -156,7 +157,7 @@ class Settings {
     String? serverUrl,
     this.apiKey = '',
     this.accountSession,
-    this.themeMode = 'dark',
+    this.themeMode = defaultThemeMode,
     this.model = defaultModel,
     this.allowHosted = false,
     this.contextSize = '8192',
@@ -212,6 +213,9 @@ class Settings {
       );
 
   static const themeModes = ['dark', 'light', 'system'];
+
+  /// What a new install uses, and what an unreadable value falls back to.
+  static const defaultThemeMode = 'system';
 
   bool get darkMode => themeMode != 'light';
 
@@ -304,13 +308,14 @@ class Settings {
     );
   }
 
-  /// The stored preference, falling back to the boolean older builds wrote.
+  /// The stored preference, falling back to the boolean older builds wrote
+  /// (a choice someone made stays theirs), then to [defaultThemeMode].
   static String _themeModeFrom(SharedPreferences p) {
     final stored = p.getString(_kThemeMode);
     if (stored != null && themeModes.contains(stored)) return stored;
     final dark = p.getBool(_kDark);
-    if (dark == false) return 'light';
-    return 'dark';
+    if (dark == null) return defaultThemeMode;
+    return dark ? 'dark' : 'light';
   }
 
   /// Writes bearer credentials only to the platform credential store.
@@ -387,8 +392,8 @@ class Settings {
     }
     await p.remove(_kAccount);
     await p.setString(_kServer, serverUrl.trim());
-    await p.setString(
-        _kThemeMode, themeModes.contains(themeMode) ? themeMode : 'dark');
+    await p.setString(_kThemeMode,
+        themeModes.contains(themeMode) ? themeMode : defaultThemeMode);
     // Kept for builds that still read the boolean.
     await p.setBool(_kDark, darkMode);
     await p.setString(_kModel, model);
@@ -413,7 +418,8 @@ class Settings {
   /// Persists only the theme. Appearance applies at once and carries no
   /// credentials, so it never writes (or waits for) staged settings.
   static Future<void> saveThemeMode(String themeMode) async {
-    final mode = themeModes.contains(themeMode) ? themeMode : 'dark';
+    final mode =
+        themeModes.contains(themeMode) ? themeMode : defaultThemeMode;
     final p = await SharedPreferences.getInstance();
     await p.setString(_kThemeMode, mode);
     // Kept for builds that still read the boolean.

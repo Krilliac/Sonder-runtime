@@ -966,3 +966,143 @@ def test_unregistered_tool_is_reported_unknown_not_permission_refused():
     with pytest.raises(ToolError) as refused:
         asyncio.run(server.mcp.call_tool("no_such_tool_registered", {}))
     assert str(refused.value) == "Unknown tool: no_such_tool_registered"
+
+
+# --- Domain errors survive mcp 2.2.0's "Error executing tool" wrapping ------
+#
+# mcp 2.2.0 turns any non-ToolError exception from a tool body into
+# UnexpectedToolError("Error executing tool <name>") with the original on
+# __cause__ and no reason text. ReloadableMCPServer.call_tool maps a
+# SonderError cause back to ToolError(f"Error executing tool {name}: {cause}").
+# All four tests go through ``_handle_call_tool`` -- the handler a real client's
+# tools/call reaches -- on a private server, so nothing leaks into the shared
+# registry. Tests 1 and 4 only fail without the mapping on mcp >= 2.2.0; on
+# 2.0.0 the text is leaked by the SDK itself.
+
+def _mcp_version_tuple():
+    from importlib.metadata import version
+
+    parts = []
+    for piece in version("mcp").split(".")[:3]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
+def _call_raising(monkeypatch, name, exc):
+    import permission_modes
+
+    monkeypatch.setattr(
+        permission_modes,
+        "_rule_lookup",
+        lambda n: ({"action": permission_modes.ALLOW, "pattern": n}
+                   if str(n or "").lstrip("/") == name else None),
+    )
+    server = ReloadableMCPServer("error-mapping-sample")
+
+    def body() -> str:
+        raise exc
+
+    server.add_tool(body, name=name)
+    ctx = _request_ctx(object(), method="tools/call")
+    return asyncio.run(
+        server._handle_call_tool(ctx, CallToolRequestParams(name=name, arguments={}))
+    )
+
+
+def _error_text(result):
+    assert result.is_error is True
+    return "".join(getattr(c, "text", "") for c in result.content)
+
+
+def test_invalid_input_message_reaches_the_client(monkeypatch):
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    msg = "unknown signal 'x'; valid: a, b"
+    text = _error_text(_call_raising(monkeypatch, "err_invalid_input", InvalidInput(msg)))
+    assert msg in text
+    assert "err_invalid_input" in text
+
+
+def test_non_domain_exception_text_is_not_leaked(monkeypatch):
+    if _mcp_version_tuple() < (2, 2, 0):
+        pytest.skip("mcp < 2.2.0 includes the exception text in the tool error by design")
+    text = _error_text(
+        _call_raising(monkeypatch, "err_plain", RuntimeError("internal detail 12345"))
+    )
+    assert text == "Error executing tool err_plain"
+    assert "internal detail 12345" not in text
+
+
+def test_tool_error_message_is_unchanged(monkeypatch):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    text = _error_text(
+        _call_raising(monkeypatch, "err_tool_error", ToolError("deliberate refusal"))
+    )
+    assert "deliberate refusal" in text
+
+
+def test_other_sonder_error_subclasses_surface_too(monkeypatch):
+    from sonder_runtime.domain.common.errors import NotFound
+
+    text = _error_text(
+        _call_raising(monkeypatch, "err_not_found", NotFound("session 'abc' not found"))
+    )
+    assert "session 'abc' not found" in text
+    assert "err_not_found" in text
+
+
+# --- Validation messages from real tools survive the same wrapping ----------
+#
+# policy_explain (unknown tool name) and playbook_note (bad category) used to
+# raise plain ValueError; on mcp 2.2.0 the caller saw only "Error executing
+# tool <name>". They now raise InvalidInput.
+
+def _allow_only(monkeypatch, name):
+    import permission_modes
+
+    monkeypatch.setattr(
+        permission_modes,
+        "_rule_lookup",
+        lambda n: ({"action": permission_modes.ALLOW, "pattern": n}
+                   if str(n or "").lstrip("/") == name else None),
+    )
+
+
+def test_policy_explain_unknown_tool_message_reaches_the_client(monkeypatch):
+    # Uses the real module-level ``server.mcp``: policy_explain validates the
+    # name against that registry. Read-only (an unknown name is rejected before
+    # any policy decision is recorded), so it is hermetic.
+    import server
+
+    _allow_only(monkeypatch, "policy_explain")
+    ctx = _request_ctx(object(), method="tools/call")
+    result = asyncio.run(server.mcp._handle_call_tool(
+        ctx,
+        CallToolRequestParams(
+            name="policy_explain",
+            arguments={"tool_name": "definitely_not_a_registered_tool"},
+        ),
+    ))
+    assert "unknown registered MCP tool: definitely_not_a_registered_tool" in _error_text(result)
+
+
+def test_playbook_note_invalid_category_message_reaches_the_client(monkeypatch, tmp_path):
+    from sonder_runtime.bootstrap import playbooks
+
+    _allow_only(monkeypatch, "playbook_note")
+    monkeypatch.setattr(playbooks, "_CONFIG_GETTER", None)
+    private = ReloadableMCPServer("playbook-note-sample")
+    playbooks.register_tools(private, home=tmp_path)
+    ctx = _request_ctx(object(), method="tools/call")
+    result = asyncio.run(private._handle_call_tool(
+        ctx,
+        CallToolRequestParams(
+            name="playbook_note",
+            arguments={"topic": "windows-builds", "category": "",
+                       "title": "A title", "body": "A body"},
+        ),
+    ))
+    assert "unsupported playbook category" in _error_text(result)
+    assert not any(tmp_path.rglob("*.md")), "a rejected note must not be stored"

@@ -1,6 +1,7 @@
 # MCP 1.x → 2.x migration
 
-Sonder's runtime dependency moved from `mcp==1.29.0` to `mcp==2.0.0`. MCP 2.x
+Sonder's runtime dependency moved from `mcp==1.29.0` to `mcp==2.0.0` (now
+`mcp==2.2.0`; see "2.0.0 -> 2.2.0" below). MCP 2.x
 retired the `FastMCP` name and the `mcp.server.fastmcp` package; the ergonomic
 server it provided is now `MCPServer` in `mcp.server.mcpserver`. Nothing in
 Sonder's tool surface changed — `@mcp.tool()`, `@mcp.resource(...)` and
@@ -11,6 +12,13 @@ clean-looking `ImportError` at process start with no hint of the new name:
 
 ```
 ImportError: cannot import name 'FastMCP' from 'mcp.server.fastmcp' (unknown location)
+```
+
+That is the form on mcp 2.0.0. mcp 2.2.0 instead ships a stub `mcp/server/fastmcp.py`
+that raises `ModuleNotFoundError` with a hint:
+
+```
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'. This is mcp 2.x, where FastMCP was renamed to MCPServer (from mcp.server.mcpserver import MCPServer) and other APIs changed; see the migration guide at https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver or pin 'mcp<2' to keep running v1 code.
 ```
 
 ## Symbol map
@@ -91,9 +99,10 @@ why the whole suite stayed green while every modern client went unnotified.
 
 **`_lowlevel_server._tool_cache` is gone.** MCP 1.x cached output schemas on the
 low-level server, so a registry swap had to clear that cache or a rewritten tool
-kept a stale schema. 2.x reads the schema off `Tool.fn_metadata.output_schema` on
-the tool object the manager holds, so replacing the manager replaces the schema
-with it. `tests/test_reloadable_mcp.py` asserts the attribute is *absent* — if a
+kept a stale schema. 2.x validates against `Tool.fn_metadata.output_model` (through
+a TypeAdapter cached on the metadata object), and only when `output_schema` is set.
+Both sit on the tool object the manager holds, so replacing the manager replaces
+them. `tests/test_reloadable_mcp.py` asserts the attribute is *absent* — if a
 later MCP reintroduces a server-level tool cache, that assertion fails and the
 explicit clear has to come back, rather than the stale schema quietly returning
 with nothing left watching for it.
@@ -172,7 +181,7 @@ pass" has never on its own meant "a bundle can be built".
 
 ## The stdio frame guard (upstream drops malformed frames)
 
-mcp 2.0.0's `stdio_server` reads lines of any length, and when a line does not
+mcp 2.0.0 through 2.2.0's `stdio_server` reads lines of any length, and when a line does not
 parse it hands the session a bare exception that the server loop drops
 without replying. `not json`, a JSON array (batch), a truncated object,
 `"jsonrpc": "1.0"`, and an unpaired surrogate escape (`"\ud800"`) all got
@@ -197,3 +206,62 @@ through the stock transport rather than failing to start; the frame bound
 and the malformed-frame replies are then absent. When bumping the pin, run
 `tests/test_legacy_mcp_protocol.py`: its real-stdio test fails if the guard
 stops engaging.
+
+## 2.0.0 -> 2.2.0 (2026-11-15)
+
+`requirements-runtime.txt` now pins `mcp==2.2.0`.
+
+**Advisories fixed upstream.** GHSA-w4fh-qvv9-3v23 (bearer token audience),
+GHSA-5h93-6whr-6q8j (client follows cross-origin redirects), GHSA-rwrf-2pqf-9j8j
+(client fetches a `$ref` during output-schema validation) and GHSA-84m7-p3x7-pcfv
+(unbounded StreamableHTTP sessions). Sonder's legacy MCP serves stdio only and
+uses no SDK client outside tests, so none is reachable in production. The bump
+is hygiene.
+
+**Tool exceptions.** In 2.0.0 `Tool.run` wrapped any exception from a tool body
+as `ToolError("Error executing tool <name>: <reason>")`, so the client saw the
+reason. In 2.2.0 anything that is not a `ToolError`, `ResourceError` or
+`MCPError` becomes `UnexpectedToolError("Error executing tool <name>")` with the
+original as `__cause__`, and the server returns that text as an `is_error`
+result. Sonder's caller-facing errors are `SonderError` and its subclasses
+(`sonder_runtime/domain/common/errors.py`; `record_outcome` raises
+`InvalidInput("unknown signal ...; valid: ...")`).
+`_ReloadableMCPServerMixin.call_tool` in `reloadable_mcp.py` therefore catches
+`UnexpectedToolError` around the SDK call and, when the cause is a
+`SonderError`, re-raises `ToolError("Error executing tool <name>: <cause>")`.
+Every other exception keeps 2.2.0's generic text so internals do not leak, and a
+deliberate `ToolError` is untouched. So a message reaches an MCP client only
+when it is raised as a `SonderError` or `ToolError` (or returned as `ERROR:`
+text): a plain `ValueError` or `RuntimeError`, including one from a helper, now
+reads only "Error executing tool <name>". `policy_explain` raised `ValueError`
+for an unknown tool name and was changed to `InvalidInput` for this reason;
+`playbook_note` converts the playbook domain's `ValueError` (bad topic or
+category) to `InvalidInput` at the MCP edge. A surface sweep (`scripts/surface_sweep.py
+--surfaces mcp`, 233 calls under WSL) on both SDK versions found no other reply
+that lost its reason; it only covers the arguments the sweep synthesises. A
+`SonderError` from a nested tool call stays generic (the outer cause is the
+inner `UnexpectedToolError`); Sonder has no nested MCP tool calls. The one-shot
+approval handling is unchanged: a raised error is not restored.
+
+**Logging.** 2.2.0 logs a `ToolError` at INFO (`Tool %r failed: %r`), including
+Sonder's permission-gate and unknown-argument refusals and the mapped
+`SonderError`s above (so an `InternalFailure` logs at INFO without a traceback;
+2.0.0 logged nothing). Argument validation failures log `Tool %r rejected
+arguments: %r` with field names only, and any other crash logs a traceback at
+ERROR. Expect those lines on the `mcp` loggers.
+
+**Frame guard.** `mcp/server/stdio.py` and `mcp/shared/jsonrpc_dispatcher.py` are
+byte-identical between 2.0.0 and 2.2.0, so malformed frames are still dropped
+without a reply and the frame guard is still needed.
+
+**Sealed bundles.** `ENGINE-BUNDLE.json`'s `runtime_contract` is a sha256 over
+the sorted pin lines of `requirements-runtime.txt`
+(`engine_bundle.py:70-87`, `runtime_contract_fingerprint`), written at assembly
+(`scripts/assemble_engine_bundle.py:525`). Bootstrap recomputes it from the
+checkout and compares (`bootstrap_engine.py:402-405`). A bundle built with
+`mcp==2.0.0` therefore mismatches. It is not refused: the mismatch is passed to
+`ensure_python_deps` (`bootstrap_engine.py:416`), which skips its
+"already available" short-circuit (`:210`) and runs
+`pip install --only-binary=:all: -r requirements-runtime.txt` (`:229-240`). With
+`--offline` it returns an error instead (`:212-224`), so an old bundle needs a
+rebuild or a non-offline bootstrap.

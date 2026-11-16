@@ -2,7 +2,7 @@
 ///
 /// It recognises only four kinds of token: keywords, strings, comments and
 /// numbers. Everything else is plain text. That keeps highlighting subtle
-/// (the transcript stays a quiet instrument) and the scanner simple enough
+/// (code is for reading, not decoration) and the scanner simple enough
 /// to be obviously safe on model-authored input: one pass, no regular
 /// expression backtracking over the whole block, and a size cap past which
 /// a block is left plain. Colours are applied by the caller from theme

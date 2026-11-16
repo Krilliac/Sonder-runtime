@@ -33,6 +33,7 @@ class WorkspaceMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) => PopupMenuButton<WorkspaceDestination>(
         tooltip: 'Workspace navigation',
+        popUpAnimationStyle: SonderMotion.menu(context),
         icon: const Icon(Icons.apps_outlined),
         onSelected: onSelected,
         itemBuilder: (_) => [
@@ -42,10 +43,10 @@ class WorkspaceMenu extends StatelessWidget {
                 enabled: destination != current,
                 child: Row(children: [
                   Icon(destination.icon, size: 18),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: SonderSpace.md),
                   Text(destination.label),
                   if (destination == current) ...[
-                    const SizedBox(width: 16),
+                    const SizedBox(width: SonderSpace.lg),
                     const Icon(Icons.check, size: 16)
                   ]
                 ]))
@@ -165,7 +166,7 @@ class WorkspaceNotice extends StatelessWidget {
         liveRegion: liveRegion,
         child: Container(
           padding: framed
-              ? const EdgeInsets.fromLTRB(12, 10, 12, 10)
+              ? const EdgeInsets.fromLTRB(SonderSpace.md, SonderSpace.snug, SonderSpace.md, SonderSpace.snug)
               : EdgeInsets.zero,
           decoration: framed
               ? BoxDecoration(
@@ -197,7 +198,7 @@ class WorkspaceNotice extends StatelessWidget {
                                       ? FontWeight.w600
                                       : FontWeight.w500)),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: SonderSpace.snug),
                         Expanded(
                             child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,14 +207,14 @@ class WorkspaceNotice extends StatelessWidget {
                               Text(title, style: body),
                               if (detail != null && detail.isNotEmpty)
                                 Padding(
-                                  padding: const EdgeInsets.only(top: 2),
+                                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
                                   child: Text(detail,
                                       style: textTheme.bodyMedium
                                           ?.copyWith(color: tokens.text2)),
                                 ),
                               if (hint != null && hint.isNotEmpty)
                                 Padding(
-                                  padding: const EdgeInsets.only(top: 2),
+                                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
                                   child: Text(
                                       '${SonderStrings.hintLabel} $hint',
                                       style: textTheme.bodySmall
@@ -224,10 +225,10 @@ class WorkspaceNotice extends StatelessWidget {
                 ),
                 if (buttons.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 8),
+                    padding: const EdgeInsets.only(top: SonderSpace.sm),
                     child: Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
+                        spacing: SonderSpace.sm,
+                        runSpacing: SonderSpace.sm,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: buttons),
                   ),

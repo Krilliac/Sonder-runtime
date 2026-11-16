@@ -16,7 +16,7 @@ Future<T?> showSonderSheet<T>(BuildContext context,
     return showDialog<T>(
       context: context,
       builder: (context) => Dialog(
-        insetPadding: const EdgeInsets.all(24),
+        insetPadding: const EdgeInsets.all(SonderSpace.xxl),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 520),
           child: builder(context),
@@ -73,7 +73,7 @@ class SonderSheetFrame extends StatelessWidget {
       explicitChildNodes: true,
       label: semanticsLabel,
       child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+        padding: const EdgeInsets.fromLTRB(SonderSpace.xl, SonderSpace.lg, SonderSpace.xl, SonderSpace.lg),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -81,8 +81,8 @@ class SonderSheetFrame extends StatelessWidget {
             Semantics(
               header: true,
               child: Wrap(
-                spacing: 12,
-                runSpacing: 4,
+                spacing: SonderSpace.md,
+                runSpacing: SonderSpace.xs,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   StatusMark(kind, word: word, size: 14),
@@ -92,7 +92,7 @@ class SonderSheetFrame extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: SonderSpace.lg),
             DefaultTextStyle.merge(
               style: text.bodyMedium?.copyWith(color: tokens.text2),
               child: Column(
@@ -101,13 +101,13 @@ class SonderSheetFrame extends StatelessWidget {
                 children: children,
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: SonderSpace.xl),
             Align(
               alignment: Alignment.centerRight,
               child: Wrap(
                 alignment: WrapAlignment.end,
-                spacing: 8,
-                runSpacing: 8,
+                spacing: SonderSpace.sm,
+                runSpacing: SonderSpace.sm,
                 children: actions,
               ),
             ),

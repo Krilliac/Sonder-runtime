@@ -2964,10 +2964,17 @@ def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
     """
     try:
         tools = command_catalog.http_slash_tools().get(cmd, ())
+        untooled = cmd in command_catalog.http_slash_untooled()
     except command_catalog.CatalogUnavailable as exc:
         # Fail closed on ignorance: an empty map would answer "allowed" for
         # every command in this chain.
         return "refused %s: %s" % (cmd, exc)
+    if untooled:
+        # No tool to grade, so the per-tool role check below would see nothing.
+        role = _restricted_tool_role(context)
+        reason = role_tool_policy.untooled_refusal_reason(cmd, role) if role else ""
+        if reason:
+            return "refused %s: %s" % (cmd, reason)
     # The catalog deliberately reports the union of a slash alias' branches.
     # These aliases contain both an inspection and a process-wide mutation, so
     # applying the mutation's admin gate to `/emotion status` or `/prefer

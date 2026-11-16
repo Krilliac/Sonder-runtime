@@ -18,38 +18,78 @@ answer):
 
 ## Color and layout
 
-- All styling goes through one helper, `_paint(text, *styles)`, using the
-  palette in `class _Ansi`. Color is enabled only when stdout is a tty and
-  `NO_COLOR` is unset; truecolor needs `COLORTERM=truecolor|24bit`, and
-  every token has a hand-picked 256-colour cell (`_fg()`) so a plain xterm
-  sees the same hierarchy.
-- The palette is one accent and a few tones, not a rainbow: `teal` is the
-  accent (the header mark, the `❯` prompt, the answer label); `cyan` names
-  identity (model, persona) and the `manual` mode; `green`, `amber`, `red`
-  and `violet` are ok/plan, warn/acceptEdits, error/danger and auto;
-  `text2` and `muted` are the greys the chrome is drawn in. Meaning is never
-  carried by colour alone -- every coloured value has its label.
-- The launch header is a few packed lines, not a box: `_header_lines()`
-  packs `label value` segments to the terminal width (`_terminal_columns()`,
-  60..120) by printed width, then the hint and a rule. Width math must use
-  `_visible_len()` (escape-aware), never `len()`.
+- All chrome is built by `sonder_runtime/interfaces/repl/style.py`, a
+  stdlib-only module that returns strings and never writes to a stream. The
+  REPL paints through `_paint(text, *roles)`, which is `style.s`. Colour
+  roles are semantic (`muted`, `accent`, `info`, `success`, `warning`,
+  `danger`, `strong`), and glyphs are tokens with an ASCII fallback
+  (`style.g`).
+- Capabilities are decided once at start (`style.detect_caps`). Colour is
+  off with `NO_COLOR`, on `TERM=dumb`, when stdout is not a terminal, and on
+  a Windows console that cannot switch to VT mode. Otherwise the level is
+  truecolor (`COLORTERM=truecolor|24bit`, or Windows Terminal), 256
+  (`TERM=*256color`) or 16. With colour off no escape byte is written; with
+  ASCII glyphs the chrome is ASCII.
+- The palette is one accent and a few tones, not a rainbow. The accent is
+  Iris, the blue-violet of the app (`accentText` in `app/lib/theme.dart`):
+  the header mark, the `❯` prompt, the speaker label, headings and list
+  markers. `info` names identity (tier, persona) and code; `success`,
+  `warning` and `danger` are status; `muted` is the grey the chrome is drawn
+  in. The truecolor values are the app's text tones for the same roles, so a
+  turn reads the same in both, and every value reaches 4.5:1 on its
+  background (`tests/repl/test_style.py` computes it).
+- The exact palette needs a known background: it is used when the terminal
+  reports 256 colours or truecolor **and** its theme is known
+  (`SONDER_THEME=dark|light`, or `COLORFGBG`). Otherwise the roles map to the
+  terminal's own 16 colours (the accent is its bright blue), which the
+  terminal's scheme keeps readable on either background. `/about` names
+  what was detected and the switch.
+- Meaning is never carried by colour alone: every status has its glyph and
+  its word (`✓ ok`, `✗ failed`, `⊘ refused`).
+- The startup header is three lines, not a box (`style.banner`): the mark,
+  name and version with the persona, model and tier, mode and endpoint; the
+  working directory (`cwd`, the home folder shown as `~`); and the key
+  hints. A narrow terminal drops fields in a fixed order instead of
+  wrapping. Warnings (elevation, an update, startup notices) follow as lines
+  of their own.
+- A turn (`_print_chat_result`) is an empty line, the speaker label
+  (`◈ Sonder`, or `✗ error`), the tool calls, the answer, and one muted
+  footer that is the only place the turn's clock and counts appear. Each
+  tool call is two lines (`style.tool_call`): `▸ Read File src/a.py`, and
+  under it the result, `└ ✓ ok · 12ms` or `└ ✗ failed · 1.8s`. A failed
+  call is always shown, including when the whole turn failed.
+- The answer's Markdown is drawn when colour is on (`style.markdown`).
+  Headings, list markers, quote bars, rules, inline code and bold are
+  styled, and the markers that only ask for a style (`#`, `**`, backticks,
+  the fence) are not printed. A fenced block sits between two rules, the
+  first naming its language. Code, pipe tables and indented lines are never
+  recoloured or rewrapped. With colour off the answer is the source text,
+  wrapped.
+- While a turn runs, one live line is redrawn in place and erased when the
+  turn ends (`_WorkingIndicator`, `style.live_line`). With motion off it
+  prints one line, then a progress line every 15 s, with no carriage
+  returns and no escapes.
 - Where the raw composer cannot frame the prompt (Linux, macOS, a dumb
-  `TERM`), the composer title is printed as one muted status line
-  (`_status_line()`) and the prompt itself is the gutter glyph
+  `TERM`), the session state is printed as one muted status line
+  (`style.status_line`) and the prompt itself is the gutter glyph
   (`_prompt_glyph()`, `❯`), so typed input lines up with the transcript.
-  The raw composer (Windows) keeps the title in its frame.
-- Box and gutter glyphs degrade to ASCII when the console encoding cannot
-  encode them (`_box_chars()`); a decorative header must never crash a
-  launch.
-- OSC-8 hyperlinks (`_terminal_link()`) are emitted only when color is
-  enabled, so copied or piped output keeps the literal URL.
+  The raw composer (Windows) keeps the status in the title of its rounded
+  frame. The frame and the command palette are quiet and the prompt mark
+  and the picked palette row take the accent (`_composer_styles()`); the
+  text being typed is never tinted, and the tints change no cell of the
+  frame.
+- Width math counts terminal cells and skips escapes (`style.cell_width`,
+  `style.wrap`, `style.truncate`), never `len()`.
+- OSC 8 hyperlinks (`style.link`) are emitted only on terminals known to
+  support them, so copied or piped output keeps the literal URL.
 - Presentation failures never kill the REPL: slash-menu errors fall back
   to `input()`, and a closed stdout makes `/clear` a no-op.
 
 Formatters live in `sonder_runtime/adapters/observability/*_formatting.py`
 (and `domain/*_formatting.py`) and are pure plain text; ANSI is applied
 only at the REPL layer. New presentation logic should follow that split
-and come with exact-string contract tests (see `tests/test_repl_*.py`).
+and come with exact-string contract tests (see `tests/repl/test_style.py`
+and `tests/test_repl_*.py`).
 
 ## The scripted output contract
 
@@ -71,11 +111,12 @@ versioned and additive-only. Interactive terminals ignore the flag.
 
 ## Error presentation
 
-- Host refusals and model-transport failures render in the red-toned
-  `Sonder · error` panel (`_is_repl_error()` decides; a durable
+- Host refusals and model-transport failures render under the `✗ error`
+  label in the danger tone (`_is_repl_error()` decides; a durable
   interaction footer proves a real model answer and is never reclassified).
-- Known failure shapes get one muted `hint:` line under the interactive
-  panel — `adapters/observability/error_hint_formatting.py` maps grounded
+- Known failure shapes get one muted `hint:` in the footer of the
+  interactive turn, or on lines of its own under it when the row has no
+  room — `adapters/observability/error_hint_formatting.py` maps grounded
   message literals (Ollama unreachable, HTTP 404/transient rejections,
   model-pin refusals, cloud-disabled, plan-mode refusals) to a single next
   step. Unknown errors get no hint; piped output never includes hints as

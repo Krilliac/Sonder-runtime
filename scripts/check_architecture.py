@@ -607,7 +607,7 @@ STATIC_SERVER_IMPORT_ALLOWLIST = frozenset({
 # function, fails.  The mapping may only shrink.
 DYNAMIC_SERVER_REACH_ALLOWLIST = {
     ("sonder_runtime/adapters/command_catalog.py", "console_tools"): 1,
-    ("sonder_runtime/adapters/command_catalog.py", "http_slash_tools"): 1,
+    ("sonder_runtime/adapters/command_catalog.py", "_http_slash_chain"): 1,
     ("sonder_runtime/adapters/command_catalog.py", "catalog"): 1,
     ("sonder_runtime/adapters/model_tool_grants.py", "host_classifier"): 1,
     ("sonder_runtime/adapters/tool_lane_guard.py", "default_route_refusal"): 1,

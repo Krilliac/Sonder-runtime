@@ -42,6 +42,22 @@ def user_tool_allowlist() -> frozenset[str]:
         return frozenset()
 
 
+@functools.lru_cache(maxsize=1)
+def user_untooled_commands() -> frozenset[str]:
+    try:
+        payload = json.loads(ALLOWLIST_PATH.read_text(encoding="utf-8"))
+        return public_policy.parse_untooled_allowlist(payload)
+    except (OSError, ValueError):
+        _LOG.error("untooled command allowlist unavailable; user role runs none", exc_info=True)
+        return frozenset()
+
+
+def untooled_refusal_reason(command: object, role: str) -> str:
+    """"" when ``role`` may run the tool-less slash ``command``, else why not."""
+    decision = public_policy.decide_tool(str(command or ""), role, user_untooled_commands())
+    return decision.reason if isinstance(decision, public_policy.ToolRefused) else ""
+
+
 def refusal_reason(tool: object, role: str) -> str:
     """"" when ``role`` may run ``tool``, else the refusal reason."""
     decision = public_policy.decide_tool(str(tool or ""), role, user_tool_allowlist())

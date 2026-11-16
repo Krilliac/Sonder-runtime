@@ -173,7 +173,9 @@ def _caps(monkeypatch, **fields):
 
 def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkeypatch, capsys):
     # Spec 2.6 changed this output: turn header, body, one muted footer that
-    # is the only place the elapsed time appears ("done 1.0s").
+    # is the only place the elapsed time appears ("done 1.0s").  The header
+    # is the speaker's label on a line of its own, with no rule under it, and
+    # one empty line sets the reply apart from the line that asked for it.
     monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
     monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
     monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 1.0)
@@ -186,8 +188,70 @@ def test_interactive_chat_result_uses_chrome_without_changing_full_answer(monkey
     assert answer in text
     assert "done 1.0s" in text
     assert "rate: /pass /fail" in text
-    assert "◈ answer" in text
+    assert text.splitlines()[:2] == ["", "◈ Sonder"]
+    assert "─" not in text
     assert "completed in" not in text
+
+
+def test_interactive_chat_result_lists_each_tool_call_with_its_result(monkeypatch, capsys):
+    # Each call is its own line with the result under it; a failed call is
+    # named in words, and the activity block never reaches the screen.
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_cols", lambda: 80)
+    monkeypatch.setattr(sonder_repl.time, "monotonic", lambda: 1.0)
+    _caps(monkeypatch, color="none", glyphs="unicode")
+
+    answer = (
+        "The cache is rebuilt on first use.\n\n"
+        "=== ACTIVITY (observable work) ===\n"
+        "model calls: 2   tool calls: 2   tokens in/out: 2600/143\n"
+        "recent events:\n"
+        "  +12ms tool_call Read File src/a.py\n"
+        "  +1840ms tool_call Write File src/a.py\n"
+        "actions:\n"
+        "• Read File src/a.py\n"
+        "× Write File src/a.py\n"
+        "=== END ACTIVITY ===\n"
+    )
+    sonder_repl._print_chat_result(answer, 0.0)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:8] == [
+        "",
+        "◈ Sonder",
+        "  ▸ Read File src/a.py",
+        "    └ ✓ ok · 12ms",
+        "  ▸ Write File src/a.py",
+        "    └ ✗ failed · 1.8s",
+        "",
+        "The cache is rebuilt on first use.",
+    ]
+    assert "ACTIVITY" not in "\n".join(lines)
+    assert lines[-1] == "  done 1.0s · 2 model calls · 2 tools · 2.6k→143 tok"
+
+
+def test_interactive_answer_draws_markdown_in_colour_and_source_text_without(monkeypatch, capsys):
+    monkeypatch.setattr(sonder_repl, "_console_has_operator", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_stdout_is_interactive", lambda: True)
+    monkeypatch.setattr(sonder_repl, "_cols", lambda: 80)
+    answer = "## Plan\n\nRun `make`, then:\n\n```sh\nmake test\n```"
+
+    _caps(monkeypatch, color="16", glyphs="unicode")
+    sonder_repl._print_chat_result(answer, 0.0)
+    drawn = capsys.readouterr().out
+    assert "\x1b[" in drawn
+    shown = sonder_repl.S.strip_ansi(drawn)
+    assert "## Plan" not in shown and "Plan" in shown
+    assert "`make`" not in shown and "Run make, then:" in shown
+    assert "```" not in shown and "make test" in shown and "── sh ─" in shown
+
+    # Without colour nothing is rewritten: the reader gets the source text.
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    sonder_repl._print_chat_result(answer, 0.0)
+    plain = capsys.readouterr().out
+    assert "\x1b" not in plain
+    assert answer in plain
 
 
 def test_interactive_error_result_uses_error_tone(monkeypatch, capsys):
@@ -434,6 +498,36 @@ def test_read_input_forwards_a_bounded_argument_completer(monkeypatch):
     assert captured["argument_completer"] is marker
 
 
+def test_read_input_tints_the_composer_only_when_colour_is_on(monkeypatch):
+    captured = {}
+
+    class _Menu:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def read_line(*_args, **kwargs):
+            captured.update(kwargs)
+            return "hello"
+
+    monkeypatch.setattr(sonder_repl, "slash_menu", _Menu)
+
+    _caps(monkeypatch, color="truecolor", theme="dark", glyphs="unicode")
+    assert sonder_repl._read_input("frame", composer=True) == "hello"
+    # A quiet frame and palette, the prompt mark and the picked row in the
+    # accent; never a whole-row style, which would tint the typed text.
+    assert captured["frame_style"] == ""
+    assert captured["styles"] == {
+        "edge": "\x1b[38;2;158;154;146m", "row": "\x1b[38;2;158;154;146m",
+        "marker": "\x1b[38;2;182;176;250;1m", "selected": "\x1b[38;2;182;176;250;1m",
+    }
+
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    sonder_repl._read_input("frame", composer=True)
+    assert set(captured["styles"].values()) == {""}
+
+
 def test_catalogued_fanout_status_reuses_the_logged_in_repl_token(monkeypatch):
     captured = {}
     monkeypatch.setattr(sonder_repl, "CURRENT_TOKEN", "developer-session-token")
@@ -531,13 +625,68 @@ def test_startup_banner_reads_the_live_runtime_not_a_literal(monkeypatch):
 def test_startup_banner_is_one_design_on_every_platform(monkeypatch):
     _caps(monkeypatch, color="none", glyphs="unicode")
     monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "m"}, raising=False)
+    monkeypatch.setattr(sonder_repl, "_version_label", lambda: "1.2.3")
+    monkeypatch.setattr(sonder_repl, "_cwd_label", lambda: "~/work/demo")
     for available in (True, False):
         monkeypatch.setattr(sonder_repl, "_composer_available", lambda a=available: a)
         text = sonder_repl._startup_banner(None, "coder", "default", width=160)
         lines = text.splitlines()
-        assert lines[0].startswith("◈ sonder · coder · m (code) · ")
-        assert lines[1].strip().startswith("/help commands")
+        # Name and version, then who answers, how, and where it listens.
+        assert lines[0].startswith("◈ sonder 1.2.3 · coder · m (code) · ")
+        assert lines[1] == "  cwd ~/work/demo"
+        assert lines[2].strip().startswith("/help commands")
         assert "installed source" not in text and "─" not in text
+
+
+def test_startup_banner_without_a_version_or_folder_keeps_two_lines(monkeypatch):
+    # A build with no version metadata, or a folder that cannot be read,
+    # drops that part: it never prints an empty label.
+    _caps(monkeypatch, color="none", glyphs="unicode")
+    monkeypatch.setattr(sonder_repl._legacy_runtime, "TIERS", {"code": "m"}, raising=False)
+    monkeypatch.setattr(sonder_repl, "_version_label", lambda: "")
+    monkeypatch.setattr(sonder_repl, "_cwd_label", lambda: "")
+    lines = sonder_repl._startup_banner(None, "coder", "default", width=160).splitlines()
+    assert lines[0].startswith("◈ sonder · coder · m (code) · ")
+    assert lines[1].strip().startswith("/help commands")
+    assert not any(line.strip().startswith("cwd") for line in lines)
+
+
+def test_version_label_is_the_runtime_version_and_never_raises(monkeypatch):
+    from sonder_runtime.platform.version import runtime_version
+
+    assert sonder_repl._version_label() == str(runtime_version())
+
+    def _boom():
+        raise RuntimeError("no package metadata")
+
+    monkeypatch.setattr(sonder_repl, "_runtime_version", _boom)
+    assert sonder_repl._version_label() == ""
+
+
+def test_cwd_label_shows_the_home_folder_as_a_tilde(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    work = home / "work" / "demo"
+    work.mkdir(parents=True)
+    sibling = tmp_path / "homework"
+    sibling.mkdir()
+    real_expanduser = os.path.expanduser
+    monkeypatch.setattr(
+        sonder_repl.os.path, "expanduser",
+        lambda path: str(home) if path == "~" else real_expanduser(path))
+
+    monkeypatch.setattr(sonder_repl.os, "getcwd", lambda: str(work))
+    assert sonder_repl._cwd_label() == os.path.join("~", "work", "demo")
+    monkeypatch.setattr(sonder_repl.os, "getcwd", lambda: str(home))
+    assert sonder_repl._cwd_label() == "~"
+    # A folder whose name only starts like the home folder's is not inside it.
+    monkeypatch.setattr(sonder_repl.os, "getcwd", lambda: str(sibling))
+    assert sonder_repl._cwd_label() == str(sibling)
+
+    def _gone():
+        raise FileNotFoundError("the folder was removed")
+
+    monkeypatch.setattr(sonder_repl.os, "getcwd", _gone)
+    assert sonder_repl._cwd_label() == ""
 
 
 def test_shift_tab_hint_only_when_the_key_works(monkeypatch):

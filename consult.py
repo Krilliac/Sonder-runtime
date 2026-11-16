@@ -13,6 +13,18 @@ import sys
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _JUDGE_RE = re.compile(r"^\s*(YES|NO)\b", re.IGNORECASE)
 _HEURISTIC_AGREEMENT_THRESHOLD = 0.5
+# ``server.ensemble_answer`` -- the ask behind both the MCP tool and
+# :func:`_default_ask` -- ends every non-code answer with a provenance footer:
+# "=== ENSEMBLE (N model(s) answered) ===" and one indented row per model,
+# with its elapsed time.  It describes the run, not the answer.
+# At least one row, then the end: no trailing \s*, which overlapped the rows
+# and backtracked quadratically on long whitespace runs (``_ask`` strips its
+# input, and the server adds no trailing whitespace).
+# CRLF is deliberately not matched: ensemble_answer joins its footer with
+# "\n" and every consult path calls it in-process.
+_ENSEMBLE_FOOTER_RE = re.compile(
+    r"\n=== ENSEMBLE \(\d+ models? answered\) ===(?:\n  [^\n]*)+\Z"
+)
 
 
 def _default_ask(prompt, tier):
@@ -46,6 +58,17 @@ def _judge_verdict(text):
         return None
     verdicts = re.findall(r"\b(?:YES|NO)\b", value, re.IGNORECASE)
     return match.group(1).upper() if len(verdicts) == 1 else None
+
+
+def _substance(text):
+    """``text`` without a trailing ensemble provenance footer.
+
+    The footer must not decide agreement: its elapsed times differ from call to
+    call, so the same two answers could clear or miss the overlap threshold on
+    "0ms" versus "31ms", and a judge reply carrying it is no longer the one
+    line :func:`_judge_verdict` accepts.  The answers shown keep the footer.
+    """
+    return _ENSEMBLE_FOOTER_RE.sub("", str(text or "")).strip()
 
 
 def _ask(ask_fn, prompt, tier):
@@ -163,7 +186,8 @@ def consult(prompt, tiers=None, *, ask_fn=None, judge_fn=None, cloud_ok=None, lo
         {"tier": tier, "text": "[failed] %s" % text if failed else text}
         for tier, text, failed in graded
     ]
-    ok = [(tier, text) for tier, text, failed in graded if not failed]
+    # What the judge and the overlap heuristic compare: the answers, not the run.
+    ok = [(tier, _substance(text)) for tier, text, failed in graded if not failed]
     failed_tiers = [tier for tier, _text, failed in graded if failed]
     tail = "" if not failed_tiers else " (no answer from %s)" % ", ".join(failed_tiers)
 
@@ -178,7 +202,7 @@ def consult(prompt, tiers=None, *, ask_fn=None, judge_fn=None, cloud_ok=None, lo
         }, scope)
 
     judge, judge_failed = _ask(judge_ask, _judge_prompt(question, ok), ok[0][0])
-    verdict = None if judge_failed else _judge_verdict(judge)
+    verdict = None if judge_failed else _judge_verdict(_substance(judge))
     if verdict is None:
         agree = _all_overlap([text for _tier, text in ok])
         note = "Judge failed; token-overlap heuristic says the tiers %s.%s" % (

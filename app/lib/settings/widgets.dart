@@ -257,7 +257,7 @@ class FieldNote extends StatelessWidget {
       child: ExcludeSemantics(
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Padding(
-            padding: EdgeInsets.only(top: quiet ? 0 : 2),
+            padding: EdgeInsets.only(top: quiet ? 0 : SonderSpace.xxs),
             child: StatusMark(kind, size: quiet ? 12 : 12.5),
           ),
           const SizedBox(width: SonderSpace.md),

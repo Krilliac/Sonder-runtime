@@ -173,10 +173,45 @@ def test_live_line_carries_phase_time_and_cancel_hint_and_no_json(variant):
 def test_banner_is_short_and_never_advertises_shift_tab_on_posix(variant):
     _name, _cols, screens, _log, _inj = variant
     startup = [line for line in screens["startup"] if line.strip()]
-    # identity, hint, status line, prompt
-    assert len(startup) <= 4, startup
+    # identity, working directory, hint, status line, prompt
+    assert len(startup) <= 5, startup
     assert "Shift+Tab" not in "\n".join(startup)
     assert "timestamp" not in "\n".join(startup)
+
+
+def test_startup_names_the_program_and_the_working_directory(variant):
+    _name, cols, screens, _log, _inj = variant
+    startup = [line for line in screens["startup"] if line.strip()]
+    # The first row is the identity: mark, name, then what answers and how.
+    assert re.match(r"\S sonder\b", startup[0]), startup[0]
+    # The second is the folder file commands start from, on one row.
+    assert startup[1].startswith("  cwd "), startup
+    assert startup[1][len("  cwd "):].strip(), startup
+    assert visible_width(startup[1]) <= cols - 1, startup[1]
+
+
+def test_normalize_masks_what_differs_between_checkouts_and_runs():
+    assert normalize([
+        "◈ sonder 0.9.0.dev0 · sonder-code:14b (code) · manual",
+        "* sonder 12.3.4+local | m | manual",
+        "◈ sonder · m · manual",
+        "  cwd ~/work/sonder-runtime",
+        "  cwd …/a/long/path/that/was/cut",
+        "  cwd      /srv/checkout",
+        "  done 1.2s · 2 tools",
+        "    └ ✓ ok · 12ms",
+        "the cwd is a word here, and sonder 2 is not a banner",
+    ]) == [
+        "◈ sonder <version> · sonder-code:14b (code) · manual",
+        "* sonder <version> | m | manual",
+        "◈ sonder · m · manual",
+        "  cwd <cwd>",
+        "  cwd <cwd>",
+        "  cwd      <cwd>",
+        "  done <t> · 2 tools",
+        "    └ ✓ ok · <t>",
+        "the cwd is a word here, and sonder 2 is not a banner",
+    ]
 
 
 def test_help_fits_an_80x24_screen(variant):

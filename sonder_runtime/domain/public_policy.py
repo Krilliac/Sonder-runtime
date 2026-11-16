@@ -24,10 +24,12 @@ UNRESTRICTED_ROLES = frozenset({ROLE_DEVELOPER, ROLE_ADMIN})
 ALLOWLIST_SCHEMA_VERSION = 1
 KEY_SCHEMA_VERSION = "schema_version"
 KEY_TOOLS = "tools"
+KEY_UNTOOLED = "untooled_commands"
 KEY_NAME = "name"
 KEY_WHY = "why"
 
 REFUSAL_TEMPLATE = "tool '%s' is not available to this account role"
+COMMAND_REFUSAL_TEMPLATE = "command '%s' is not available to this account role"
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,8 @@ class ToolRefused:
 
     @property
     def reason(self) -> str:
-        return REFUSAL_TEMPLATE % self.tool
+        template = COMMAND_REFUSAL_TEMPLATE if self.tool.startswith("/") else REFUSAL_TEMPLATE
+        return template % self.tool
 
 
 ToolDecision = Union[ToolAllowed, ToolRefused]
@@ -84,4 +87,34 @@ def parse_allowlist(payload: object) -> frozenset[str]:
         names.append(name)
     if len(set(names)) != len(names):
         raise ValueError("allowlist names a tool twice")
+    return frozenset(names)
+
+
+def parse_untooled_allowlist(payload: object) -> frozenset[str]:
+    """Slash commands with no registered tool that a ``user`` may still run.
+
+    Same document and rules as ``parse_allowlist`` (every entry needs a
+    ``why``); a missing or malformed list raises ValueError so the caller
+    fails closed. Names are lower-case slash commands, e.g. ``/help``.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("allowlist document must be an object")
+    if payload.get(KEY_SCHEMA_VERSION) != ALLOWLIST_SCHEMA_VERSION:
+        raise ValueError("unsupported allowlist schema version")
+    entries = payload.get(KEY_UNTOOLED)
+    if not isinstance(entries, list):
+        raise ValueError("allowlist 'untooled_commands' must be a list")
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("untooled entries must be objects")
+        name = entry.get(KEY_NAME)
+        why = entry.get(KEY_WHY)
+        if not isinstance(name, str) or not name.startswith("/") or name != name.strip().lower():
+            raise ValueError("untooled entry needs an exact lower-case slash command")
+        if not isinstance(why, str) or not why.strip():
+            raise ValueError("untooled entry '%s' needs a justification" % name)
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise ValueError("untooled allowlist names a command twice")
     return frozenset(names)

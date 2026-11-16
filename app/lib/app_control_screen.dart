@@ -214,29 +214,29 @@ class _AppControlScreenState extends State<AppControlScreen> {
               alignment: Alignment.topCenter,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: conversationWidth),
-                child: ListView(padding: const EdgeInsets.all(20), children: [
+                child: ListView(padding: const EdgeInsets.all(SonderSpace.xl), children: [
                   SizedBox(
                       height: 4,
                       child:
                           client.busy ? const LinearProgressIndicator() : null),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: SonderSpace.xl),
                   Text('Choose a server conversation',
                       style: Theme.of(context).textTheme.headlineSmall),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: SonderSpace.sm),
                   Text(client.origin ?? 'Server not configured',
                       style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: SonderSpace.xl),
                   const WorkspaceNotice(
                       message:
                           'Create and select a server conversation. Managed work requires separate server support and explicit approval.'),
                   if (_notice != null) ...[
-                    const SizedBox(height: 12),
+                    const SizedBox(height: SonderSpace.md),
                     WorkspaceNotice(
                         message: _notice!,
                         tone:
                             _warning ? NoticeTone.warning : NoticeTone.success)
                   ],
-                  const SizedBox(height: 24),
+                  const SizedBox(height: SonderSpace.xxl),
                   if (!client.accountAvailable)
                     WorkspaceNotice(
                         message:
@@ -252,7 +252,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                     _enrollmentForm()
                   else ...[
                     _selectionPanel(tokens),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: SonderSpace.md),
                     OutlinedButton.icon(
                         onPressed: _canChange &&
                                 client.selectionKnown &&
@@ -264,8 +264,8 @@ class _AppControlScreenState extends State<AppControlScreen> {
                             : null,
                         icon: const Icon(Icons.playlist_add_check),
                         label: const Text('Open managed work')),
-                    const SizedBox(height: 16),
-                    Wrap(spacing: 8, runSpacing: 8, children: [
+                    const SizedBox(height: SonderSpace.lg),
+                    Wrap(spacing: SonderSpace.sm, runSpacing: SonderSpace.sm, children: [
                       OutlinedButton.icon(
                           onPressed: client.busy ? null : _refresh,
                           icon: const Icon(Icons.refresh, size: 18),
@@ -284,12 +284,12 @@ class _AppControlScreenState extends State<AppControlScreen> {
                     ]),
                     if (client.expiresAt != null)
                       Padding(
-                          padding: const EdgeInsets.only(top: 8),
+                          padding: const EdgeInsets.only(top: SonderSpace.sm),
                           child: Text(
                               'Session expires ${MaterialLocalizations.of(context).formatMediumDate(client.expiresAt!.toLocal())} at ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(client.expiresAt!.toLocal()))}',
                               style: Theme.of(context).textTheme.bodySmall)),
                     if (client.mutationPending) ...[
-                      const SizedBox(height: 16),
+                      const SizedBox(height: SonderSpace.lg),
                       WorkspaceNotice(
                           message:
                               'A ${client.pendingAction} request has an unknown outcome. The exact request is retained in memory.',
@@ -302,12 +302,12 @@ class _AppControlScreenState extends State<AppControlScreen> {
                                       refresh: true),
                               child: const Text('Check same request')))
                     ],
-                    const SizedBox(height: 24),
+                    const SizedBox(height: SonderSpace.xxl),
                     const Divider(),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: SonderSpace.lg),
                     Text('New conversation',
                         style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: SonderSpace.md),
                     TextField(
                         key: const Key('control-title'),
                         controller: _title,
@@ -327,7 +327,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                               'Link the current local chat as a label'),
                           subtitle: const Text(
                               'Its local ID does not grant control of a server conversation.')),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: SonderSpace.md),
                     Align(
                         alignment: Alignment.centerLeft,
                         child: FilledButton.icon(
@@ -345,7 +345,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                                 : null,
                             icon: const Icon(Icons.add, size: 18),
                             label: const Text('Create conversation'))),
-                    const SizedBox(height: 28),
+                    const SizedBox(height: SonderSpace.xxl),
                     Row(children: [
                       Expanded(
                           child: Text('Server conversations',
@@ -353,20 +353,20 @@ class _AppControlScreenState extends State<AppControlScreen> {
                       Text('${client.bindings.length} on this page',
                           style: Theme.of(context).textTheme.bodySmall)
                     ]),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: SonderSpace.md),
                     if (!client.bindingsLoaded)
                       const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
+                          padding: EdgeInsets.symmetric(vertical: SonderSpace.xxl),
                           child: Text(
                               'Conversations have not been loaded. Refresh to try again.')),
                     if (client.bindingsLoaded && client.bindings.isEmpty)
                       const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
+                          padding: EdgeInsets.symmetric(vertical: SonderSpace.xxl),
                           child: Text('No server conversations yet')),
                     for (final binding in client.bindings)
                       _bindingRow(binding, tokens),
-                    const SizedBox(height: 16),
-                    Wrap(spacing: 8, runSpacing: 8, children: [
+                    const SizedBox(height: SonderSpace.lg),
+                    Wrap(spacing: SonderSpace.sm, runSpacing: SonderSpace.sm, children: [
                       if (client.pagePosition > 0)
                         OutlinedButton(
                             onPressed: client.busy
@@ -385,7 +385,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                         const Text('End of conversations'),
                     ]),
                   ],
-                  const SizedBox(height: 32),
+                  const SizedBox(height: SonderSpace.x3),
                 ]),
               ))),
     );
@@ -396,10 +396,10 @@ class _AppControlScreenState extends State<AppControlScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(_replacing ? 'Replace app-control session' : 'Enable app control',
             style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
+        const SizedBox(height: SonderSpace.sm),
         const Text(
             'Confirm your project and account password. Access stays in memory until this app closes, disconnects or the session expires.'),
-        const SizedBox(height: 16),
+        const SizedBox(height: SonderSpace.lg),
         TextFormField(
             controller: _project,
             enabled: !client.busy && !client.enrollmentPending,
@@ -408,7 +408,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                     .hasMatch(value?.trim() ?? '')
                 ? null
                 : 'Use letters, numbers, underscores or hyphens (up to 128).'),
-        const SizedBox(height: 16),
+        const SizedBox(height: SonderSpace.lg),
         TextFormField(
             key: const Key('control-password'),
             controller: _password,
@@ -431,8 +431,8 @@ class _AppControlScreenState extends State<AppControlScreen> {
                 : utf8.encode(value).length > 4096
                     ? 'Password is too long.'
                     : null),
-        const SizedBox(height: 20),
-        Wrap(spacing: 8, runSpacing: 8, children: [
+        const SizedBox(height: SonderSpace.xl),
+        Wrap(spacing: SonderSpace.sm, runSpacing: SonderSpace.sm, children: [
           FilledButton(
               onPressed: client.busy ? null : _enable,
               child: Text(client.enrollmentPending
@@ -456,7 +456,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
     final selection = client.selection;
     final matches = client.bindings.where((b) => b.id == selection?.bindingId);
     return Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(SonderSpace.lg),
         decoration: BoxDecoration(
             color: tokens.panel,
             border: Border(left: BorderSide(color: tokens.accent, width: 2))),
@@ -466,7 +466,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                   ? 'Selected conversation'
                   : 'Current selection',
               style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 8),
+          const SizedBox(height: SonderSpace.sm),
           Text(
               !client.selectionKnown
                   ? 'Refresh to confirm the current selection.'
@@ -476,11 +476,11 @@ class _AppControlScreenState extends State<AppControlScreen> {
                           ? matches.first.displayTitle
                           : 'Conversation ${selection!.bindingId}',
               style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
+          const SizedBox(height: SonderSpace.sm),
           Text('Project: ${client.project ?? ''}',
               style: Theme.of(context).textTheme.bodySmall),
           if (client.selectionKnown && selection?.bindingId != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: SonderSpace.sm),
             TextButton(
                 onPressed: _canChange
                     ? () => _perform(client.clearSelection,
@@ -496,7 +496,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
     final selected =
         client.selectionKnown && client.selection?.bindingId == binding.id;
     return Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
+        padding: const EdgeInsets.symmetric(vertical: SonderSpace.lg),
         decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: tokens.hairline))),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -507,12 +507,12 @@ class _AppControlScreenState extends State<AppControlScreen> {
                     : Icons.chat_bubble_outline,
                 color: selected ? tokens.accent : tokens.text2,
                 size: 20),
-            const SizedBox(width: 12),
+            const SizedBox(width: SonderSpace.md),
             Expanded(
                 child: Text(binding.displayTitle,
                     style: Theme.of(context).textTheme.titleSmall)),
           ]),
-          const SizedBox(height: 8),
+          const SizedBox(height: SonderSpace.sm),
           Text(
               binding.revoked
                   ? 'Revoked'
@@ -535,7 +535,7 @@ class _AppControlScreenState extends State<AppControlScreen> {
                         style: const TextStyle(
                             fontFamily: SonderTheme.mono, fontSize: 12))),
               ]),
-          Wrap(spacing: 8, runSpacing: 8, children: [
+          Wrap(spacing: SonderSpace.sm, runSpacing: SonderSpace.sm, children: [
             OutlinedButton(
                 onPressed: _canChange &&
                         client.selectionKnown &&

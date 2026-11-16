@@ -45,6 +45,40 @@ void main() {
               return http.Response('{}', 200);
             }));
   });
+  testWidgets('the composer + menu opens app control as the toolbar does',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+          theme: SonderTheme.dark,
+          home: ChatScreen(
+            settings: Settings(
+                serverUrl: 'https://host.test',
+                accountSession: fixture.context().account),
+            onSettingsChanged: (_) {},
+          )));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('composer-actions')));
+      await tester.pumpAndSettle();
+      await tester
+          .tap(find.byKey(const Key('composer-action-server-conversations')));
+      await tester.pumpAndSettle();
+      expect(find.byType(AppControlScreen), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+        () => MockClient((request) async {
+              expect(
+                  request.headers.containsKey('X-Sonder-App-Control'), isFalse);
+              return http.Response('{}', 200);
+            }));
+  });
   testWidgets(
       'unknown enrollment requires explicit same request and fresh step-up',
       (tester) async {

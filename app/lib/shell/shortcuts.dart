@@ -230,8 +230,7 @@ class _ShortcutGuide extends StatelessWidget {
                         Padding(
                           padding: const EdgeInsets.only(
                               top: SonderSpace.lg, bottom: SonderSpace.xs),
-                          child:
-                              Text(title.toUpperCase(), style: text.labelSmall),
+                          child: Text(title, style: text.labelSmall),
                         ),
                         for (var i = 0; i < entries.length; i++) ...[
                           if (i > 0) Divider(height: 1, color: tokens.hairline),

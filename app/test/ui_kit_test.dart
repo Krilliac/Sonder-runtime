@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -65,8 +66,10 @@ void main() {
       expect(find.byKey(const Key('category-page-overview')), findsOneWidget);
       expect(find.text('overview body'), findsOneWidget);
       expect(find.text('models body'), findsNothing);
-      // Group headings are drawn once per run of categories.
-      expect(find.text('INFERENCE'), findsOneWidget);
+      // Group headings are drawn once per run of categories, as written
+      // (sentence case, never capitals).
+      expect(find.text('Inference'), findsOneWidget);
+      expect(find.text('INFERENCE'), findsNothing);
       expect(find.bySemanticsLabel(RegExp('Models.*3 routes', dotAll: true)),
           findsOneWidget);
 
@@ -138,6 +141,45 @@ void main() {
       )));
       await tester.pumpAndSettle();
       expect(find.text('models body'), findsOneWidget);
+    });
+
+    testWidgets(
+        'wide: the rail is part of the page; its open category is a raised '
+        'pill in the text tone', (tester) async {
+      _surface(tester, const Size(1280, 800));
+      await tester.pumpWidget(_app(CategoryScaffold(
+        title: 'Runtime',
+        categories: _categories(),
+      )));
+      await tester.pumpAndSettle();
+      const tokens = SonderTokens.dark;
+      Finder row(String id) => find.byKey(Key('category-$id'));
+      Finder pill(String id) => find
+          .descendant(of: row(id), matching: find.byType(AnimatedContainer))
+          .first;
+      Color? fill(String id) =>
+          (tester.widget<AnimatedContainer>(pill(id)).decoration!
+                  as BoxDecoration)
+              .color;
+      TextStyle label(String id, String text) => tester
+          .widget<Text>(
+              find.descendant(of: row(id), matching: find.text(text)))
+          .style!;
+
+      expect(tester.widget<HoverSurface>(row('overview')).selected, isTrue);
+      expect(fill('overview'), tokens.raised);
+      expect(label('overview', 'Overview').color, tokens.text);
+      expect(label('overview', 'Overview').fontWeight, FontWeight.w500);
+      expect(fill('models'), Colors.transparent);
+      expect(label('models', 'Models').color, tokens.text2);
+      // A 48 px target that draws a 40 px pill.
+      expect(tester.getSize(row('models')).height, 48);
+      expect(tester.getSize(pill('models')).height, 40);
+
+      await tester.tap(row('models'));
+      await tester.pumpAndSettle();
+      expect(fill('models'), tokens.raised);
+      expect(fill('overview'), Colors.transparent);
     });
 
     testWidgets('rail entries meet the tap-target guideline', (tester) async {
@@ -542,6 +584,93 @@ void main() {
       await tester.tap(find.text('Show all 30 lines'));
       await tester.pumpAndSettle();
       expect(find.text('Show less'), findsOneWidget);
+    });
+  });
+
+  group('HoverSurface', () {
+    const tokens = SonderTokens.dark;
+    final pill = find.descendant(
+        of: find.byType(HoverSurface),
+        matching: find.byType(AnimatedContainer));
+
+    Widget row({
+      bool selected = false,
+      bool showSelected = true,
+      VoidCallback? onTap,
+    }) =>
+        _app(Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 200,
+              height: 48,
+              child: HoverSurface(
+                selected: selected,
+                showSelected: showSelected,
+                inset: const EdgeInsets.symmetric(vertical: SonderSpace.xs),
+                onTap: onTap ?? () {},
+                child: const Center(child: Text('Row')),
+              ),
+            ),
+          ),
+        ));
+
+    Color? fill(WidgetTester tester) =>
+        (tester.widget<AnimatedContainer>(pill).decoration! as BoxDecoration)
+            .color;
+
+    Color ring(WidgetTester tester) =>
+        ((tester.widget<AnimatedContainer>(pill).foregroundDecoration!
+                    as BoxDecoration)
+                .border! as Border)
+            .top
+            .color;
+
+    testWidgets(
+        'the pill is the raised tone when selected, lighter under the '
+        'pointer and absent at rest', (tester) async {
+      await tester.pumpWidget(row());
+      expect(fill(tester), Colors.transparent);
+      // The inset shortens what is drawn, never what can be pressed.
+      expect(tester.getSize(find.byType(HoverSurface)).height, 48);
+      expect(tester.getSize(pill).height, 40);
+
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.text('Row')));
+      await tester.pumpAndSettle();
+      expect(fill(tester), tokens.raised.withValues(alpha: 0.35));
+      await mouse.moveTo(Offset.zero);
+      await tester.pumpAndSettle();
+      expect(fill(tester), Colors.transparent);
+      await mouse.removePointer();
+
+      await tester.pumpWidget(row(selected: true));
+      await tester.pumpAndSettle();
+      expect(fill(tester), tokens.raised);
+    });
+
+    testWidgets(
+        'a selection the owner draws elsewhere is still announced',
+        (tester) async {
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(row(selected: true, showSelected: false));
+      await tester.pumpAndSettle();
+      expect(fill(tester), Colors.transparent);
+      expect(tester.getSemantics(find.byType(HoverSurface)),
+          isSemantics(isSelected: true, isButton: true));
+      handle.dispose();
+    });
+
+    testWidgets('keyboard focus rings the pill in the accent', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(row(onTap: () => taps++));
+      expect(ring(tester), Colors.transparent);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      expect(ring(tester), tokens.accentText);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(taps, 1);
     });
   });
 
