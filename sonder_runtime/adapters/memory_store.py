@@ -1301,12 +1301,55 @@ def _claim_distillation(
     return cur.rowcount == 1
 
 
+# Evidence strength of the writer behind a lesson_usage row. A later outcome
+# may replace the stored one only when its source ranks at least as high, so a
+# weaker writer (a caller's judgement over exact runtime credit, or a heuristic
+# attribution over anything) can neither erase nor pre-empt stronger evidence.
+# Exact runtime evidence > caller judgement > heuristic/unprovenanced.
+_LESSON_USAGE_SOURCE_RANK = {
+    memory_rules.OUTCOME_SOURCE_MACHINE: 3,
+    memory_rules.OUTCOME_SOURCE_SELF_CURRICULUM: 3,
+    memory_rules.OUTCOME_SOURCE_CALLER: 2,
+}
+_LESSON_USAGE_DEFAULT_RANK = 1  # attributed (heuristic) and unknown
+_LESSON_USAGE_NO_SOURCE_RANK = 0  # a sourceless write: may only fill a NULL row
+
+
+def _lesson_usage_source_rank(source):
+    if source is None:
+        return _LESSON_USAGE_NO_SOURCE_RANK
+    return _LESSON_USAGE_SOURCE_RANK.get(source, _LESSON_USAGE_DEFAULT_RANK)
+
+
+def _write_lesson_usage_outcome(conn, interaction_id, signal, reward, source):
+    """Guarded lesson_usage UPDATE; returns the number of rows changed.
+
+    One statement, so the rank check and the write are atomic inside the
+    caller's transaction. A NULL stored source (legacy row or no outcome yet)
+    is always replaceable.
+    """
+    existing_rank = "CASE outcome_source " + " ".join(
+        "WHEN ? THEN %d" % rank for rank in _LESSON_USAGE_SOURCE_RANK.values()
+    ) + " ELSE %d END" % _LESSON_USAGE_DEFAULT_RANK
+    cur = conn.execute(
+        "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
+        "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? "
+        "WHERE interaction_id=? AND (outcome_source IS NULL OR "
+        + existing_rank + " <= ?)",
+        (signal, reward, source, interaction_id,
+         *_LESSON_USAGE_SOURCE_RANK, _lesson_usage_source_rank(source)),
+    )
+    return cur.rowcount
+
+
 def _outcome_distillation_result(
     row, *, outcome_inserted, usage_rows_updated, claimed, claim_token,
+    usage_rows_kept=0,
 ):
     return {
         "outcome_inserted": bool(outcome_inserted),
         "usage_rows_updated": int(usage_rows_updated or 0),
+        "usage_rows_kept": int(usage_rows_kept or 0),
         "distillation_state": row["state"] if row is not None else None,
         "claimed": bool(claimed),
         "claim_token": claim_token if claimed else None,
@@ -1380,14 +1423,15 @@ def record_outcome_and_claim_lesson_distillation(
         )
         outcome_inserted = outcome_cur.rowcount == 1
         usage_rows_updated = 0
+        usage_rows_kept = 0
         if outcome_inserted:
-            usage_cur = conn.execute(
-                "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
-                "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? "
-                "WHERE interaction_id=?",
-                (signal, reward_value, source, interaction_id),
+            usage_rows_updated = _write_lesson_usage_outcome(
+                conn, interaction_id, signal, reward_value, source,
             )
-            usage_rows_updated = usage_cur.rowcount
+            usage_rows_kept = conn.execute(
+                "SELECT COUNT(*) FROM lesson_usage WHERE interaction_id=?",
+                (interaction_id,),
+            ).fetchone()[0] - usage_rows_updated
 
         claimed = False
         if claim_distillation:
@@ -1412,6 +1456,7 @@ def record_outcome_and_claim_lesson_distillation(
     return _outcome_distillation_result(
         row, outcome_inserted=outcome_inserted,
         usage_rows_updated=usage_rows_updated, claimed=claimed,
+        usage_rows_kept=usage_rows_kept,
         claim_token=claim_token,
     )
 
@@ -2393,11 +2438,7 @@ def record_lesson_usage_outcome(conn, interaction_id, signal, reward, *, source=
     # than invented as caller or machine evidence.
     if source is not None:
         _checked_outcome_source(source)
-    conn.execute(
-        "UPDATE lesson_usage SET outcome_signal=?, reward=?, "
-        "outcome_ts=CURRENT_TIMESTAMP, outcome_source=? WHERE interaction_id=?",
-        (signal, reward, source, interaction_id),
-    )
+    _write_lesson_usage_outcome(conn, interaction_id, signal, reward, source)
     conn.commit()
 
 

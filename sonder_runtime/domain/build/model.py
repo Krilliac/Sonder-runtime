@@ -304,6 +304,8 @@ def safe_rel(rel: object) -> str | None:
     if is_absolute(text) or text.startswith("//"):
         return None
     normalized = posixpath.normpath(text)
+    if re.match(r"^[A-Za-z]:", normalized):
+        return None
     if normalized in (".", "") or normalized == ".." or normalized.startswith("../"):
         return None
     return normalized

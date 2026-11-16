@@ -7,6 +7,13 @@ and carries the caller's role through the request, so the agent dispatcher
 Failure is closed: an unreadable or invalid allowlist is an empty allowlist,
 so a user-role account then runs no tool at all.
 
+Caching: both allowlists are cached for the life of the process
+(``functools.lru_cache``). Editing the data file takes effect only after a
+restart or ``user_tool_allowlist.cache_clear()`` /
+``user_untooled_commands.cache_clear()``. A read or parse failure is cached
+too, as an empty allowlist (fail closed), and stays empty until restart or
+``cache_clear()``, even if the file is repaired meanwhile.
+
 State: the allowlist is a process-wide immutable frozenset (loaded once). The
 caller role is a ``ContextVar`` bound by the HTTP handler thread for the
 request it serves; ``None`` means "no role restriction applies" (local-open,
