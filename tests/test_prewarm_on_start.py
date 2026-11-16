@@ -211,8 +211,10 @@ def test_describe_wait_falls_back_to_the_detail_without_numbers():
 
 def _commit_bound_service(tmp_path, monkeypatch, state):
     fake = FakeOllama()
+    # Distinct floors (RAM 1 GiB, commit 3 GiB) so a swap of the two is caught.
     service = make_service(tmp_path, fake, host=(64 * GIB, 10 * GIB), on_host_floor="queue",
-                           host_recheck_interval_ms=100)
+                           host_recheck_interval_ms=100, min_available_ram_mb=1024,
+                           min_commit_headroom_mb=3072)
     domain_reading = type(service._host_reader())
     service._host_reader = lambda: domain_reading(
         available_physical_bytes=64 * GIB, total_physical_bytes=64 * GIB,
@@ -233,7 +235,7 @@ def test_commit_floor_wait_names_commit_headroom_not_ram(monkeypatch, tmp_path):
         server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
     assert lines
     assert lines[0].startswith("waiting for commit headroom to load ")
-    assert "need ~17.0 GiB + " in lines[0] and "18.0 GiB commit free" in lines[0]
+    assert "need ~17.0 GiB + 3.0 GiB floor, 18.0 GiB commit free" in lines[0]
     assert "64.0 GiB free" not in lines[0]
 
 
