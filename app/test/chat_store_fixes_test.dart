@@ -29,6 +29,7 @@ class _FakeBackend implements ChatStoreBackend {
   final List<String> failWrites = [];
   final List<String> unreadable = [];
   bool hold = false;
+  bool failRename = false;
 
   @override
   Future<List<String>> list() async => files.keys.toList();
@@ -57,6 +58,7 @@ class _FakeBackend implements ChatStoreBackend {
 
   @override
   Future<void> rename(String from, String to) async {
+    if (failRename) throw const FileSystemException('storage full');
     final v = files.remove(from);
     if (v != null) files[to] = v;
   }
@@ -227,5 +229,94 @@ void main() {
     ]);
     expect(b.files.containsKey('thread-a.json'), isTrue);
     expect(ChatStore.persistFailed.value, isFalse);
+  });
+
+  test('B1: a migration retry never overwrites or deletes newer data',
+      () async {
+    final legacy = jsonEncode([
+      _thread('old', [_user('from v1')], minute: 1).toJson()
+    ]);
+    SharedPreferences.setMockInitialValues(
+        <String, Object>{ChatStore.legacyKey: legacy});
+    final b = _FakeBackend()..failWrites.add('thread-old.json');
+    ChatStore.backend = b;
+    final first = await ChatStore.load();
+    expect(first.map((t) => t.id), ['old']);
+
+    // The disk recovers; the person edits "old" and creates "new".
+    b.failWrites.clear();
+    final edited = _thread('old', [_user('edited later')], minute: 5);
+    final fresh = _thread('new', [_user('brand new')], minute: 6);
+    expect(await ChatStore.save([fresh, edited]), isTrue);
+
+    // Restart. Even if the legacy key were still there, newer data wins.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(ChatStore.legacyKey, legacy);
+    b.files.remove('migrated-v1');
+    ChatStore.resetCache();
+    final second = await ChatStore.load();
+    expect(second.map((t) => t.id).toSet(), {'old', 'new'});
+    expect(b.files['thread-old.json'], contains('edited later'));
+    expect(b.files.containsKey('thread-new.json'), isTrue);
+    await ChatStore.save(second);
+    expect(b.files.containsKey('thread-new.json'), isTrue);
+  });
+
+  test('B1: the first fully successful save completes a pending migration',
+      () async {
+    final legacy = jsonEncode([
+      _thread('old', [_user('from v1')], minute: 1).toJson()
+    ]);
+    SharedPreferences.setMockInitialValues(
+        <String, Object>{ChatStore.legacyKey: legacy});
+    final b = _FakeBackend()..failWrites.add('thread-old.json');
+    ChatStore.backend = b;
+    final first = await ChatStore.load();
+    b.failWrites.clear();
+    expect(await ChatStore.save(first), isTrue);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(ChatStore.legacyKey), isNull);
+    expect(b.files.containsKey('migrated-v1'), isTrue);
+  });
+
+  test('B2: a blob that cannot be set aside is never deleted by a save',
+      () async {
+    final b = _FakeBackend()..failRename = true;
+    ChatStore.backend = b;
+    await ChatStore.save([
+      _thread('good', [_user('ok')], minute: 1)
+    ]);
+    b.files['thread-broken.json'] = '{"id": "broken", "mess';
+    b.files['thread-locked.json'] = 'x';
+    b.unreadable.add('thread-locked.json');
+    final loaded = await ChatStore.load();
+    expect(loaded.map((t) => t.id), ['good']);
+    await ChatStore.save([
+      _thread('good', [_user('ok2')], minute: 2),
+      _thread('other', [_user('o')], minute: 3),
+    ]);
+    expect(b.files['thread-broken.json'], '{"id": "broken", "mess');
+    expect(b.files.containsKey('thread-locked.json'), isTrue);
+  });
+
+  test('B3: after a failed load, files this session wrote can be deleted',
+      () async {
+    final b = _FakeBackend();
+    ChatStore.backend = b;
+    b.files['thread-unread.json'] = 'x';
+    ChatStore.keepUnknownFiles = true; // what loadThreads sets on failure
+    await ChatStore.save([
+      _thread('temp', [_user('t')], minute: 1)
+    ]);
+    expect(b.files.containsKey('thread-temp.json'), isTrue);
+    await ChatStore.save([
+      _thread('keep', [_user('k')], minute: 2)
+    ]);
+    expect(b.files.containsKey('thread-temp.json'), isFalse,
+        reason: 'a deleted thread must not come back on the next start');
+    expect(b.files.containsKey('thread-unread.json'), isTrue,
+        reason: 'never-read history is left alone');
+    expect(ChatStore.persistFailed.value, isTrue,
+        reason: 'the warning stays while history was never read');
   });
 }
