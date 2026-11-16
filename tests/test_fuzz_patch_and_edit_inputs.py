@@ -1870,3 +1870,223 @@ def test_extended_length_path_inside_the_workspace_resolves(tmp_path, monkeypatc
 def test_patch_path_refuses_device_names_with_a_colon_suffix(name):
     with pytest.raises(PermissionError):
         tp._patch_path("b/" + name, prefix="b/")
+
+
+# --- round 3 review: anchored shim, every __has_include token, splice blanks, all digraph spellings ---
+
+_COMPUTED = "computed operand"
+
+
+def _refused_end_to_end(text: str) -> tuple[str, ...]:
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert not texts, f"validate_patch accepted {text!r} ({TAG})"
+    return reasons
+
+
+@pytest.mark.parametrize("text", [
+    '#define P "//evil/share/x.h"\n#define F(x) x##define __has_include(P)\n#if F(a)\n#endif\n',
+    "#define S #define __has_include(P)\n",
+    "%:define S %:define __has_include(P)\n",
+    '#define P "//evil/share/x.h"\n#if 0 #define __has_include(P)\n#endif\n',
+    "int x; #define __has_include(P)\n",
+    "#define __has_include(x) __has_include_next(x)\n",
+    "#define S \\ \n#define __has_include(P)\n",
+])
+def test_regression_has_include_shim_exemption_is_anchored_to_the_line_start(text):
+    """A ``#define`` somewhere before the token is not the directive that defines it."""
+    assert any(_COMPUTED in reason for reason in _scan_every_lexing(text)), text
+    assert any(_COMPUTED in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("text", [
+    "#define __has_include(x) 0\n",
+    "#  define  __has_include_next(x) 0\n",
+    "%:define __has_include(x) 0\n",
+    "#ifndef __has_include\n#define __has_include(x) 0\n#endif\n",
+    "#ifdef __has_include\n#if __has_include(<optional>)\n#include <optional>\n#endif\n#endif\n",
+    "#undef __has_include\n",
+    "#if defined(__has_include) && __has_include(<version>)\n#endif\n",
+    "#if defined __has_include && __has_include(<version>)\n#endif\n",
+    '#if !defined( __has_include ) || !__has_include("detail/impl.inl")\n#endif\n',
+    "#if (defined(__has_include) && (__has_include(<a.h>) || __has_include_next(<b.h>)))\n#endif\n",
+    "#if __has_cpp_attribute(nodiscard) && __has_include(<version>)\n#endif\n",
+    "#if SPARK_AT_LEAST(3) && __has_include(<version>)\n#endif\n",
+    '#if 0\n#elif __has_include(<sys/types.h>) && __has_include("math.h")\n#endif\n',
+    "#if __has_include__(<version>)\n#endif\n",
+    "#if __has_embed(<data.h> limit(1)) && __has_include(<b.h>)\n#endif\n",
+    'bool h = __has_include("math.h");\n',
+    '#define HAVE_IMPL __has_include("detail/impl.inl")\n',
+    "#if /* why */ __has_include( <vector> ) // trailing\n#endif\n",
+    "#if __has_include(<vector>) \\\n    && __has_include(<optional>)\n#endif\n",
+])
+def test_has_include_shim_and_benign_uses_stay_clean(text):
+    assert _scan_every_lexing(text) == (), text
+    texts, reasons = _validate_replacement("length(v);\n" + text)
+    assert texts and reasons == (), (text, reasons, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    "#define H __has_include\n#define P 123\n#if H(P)\n#endif\n",
+    "#define LP (\n#define P 123\n#if __has_include LP P)\n#endif\n",
+    "#define H __has_include_next\n",
+    "#define H __has_embed\n",
+    "#if __has_include\n(<vector>)\n#endif\n",
+    "#define X defined __has_include\n",
+    "#if defined __has_include(P)\n#endif\n",
+    "#if defined(__has_include(P))\n#endif\n",
+    "#if notdefined(__has_include)\n#endif\n",
+    "#ifdef X\n#elif __has_include(P)\n#endif\n",
+    "int probe = __has_include;\n",
+])
+def test_regression_has_include_token_without_a_literal_operand_is_refused(text):
+    """An alias (``#define H __has_include``) or a macro-made ``(`` probes a computed path."""
+    assert any(_COMPUTED in reason for reason in _scan_every_lexing(text)), text
+    assert any(_COMPUTED in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("macro", ["__has_include__", "__has_include_next__"])
+def test_regression_old_gcc_has_include_spellings_are_checked_like_the_new_ones(macro):
+    for text in (f"#define P 1\n#if {macro}(P)\n#endif\n", f"#if {macro}(</etc/passwd>)\n#endif\n",
+                 f'#if {macro}("../../../../etc/shadow.h")\n#endif\n', f"#define H {macro}\n"):
+        assert any("__has_include/__has_embed" in reason for reason in _scan_every_lexing(text)), text
+        assert any("__has_include/__has_embed" in reason for reason in _refused_end_to_end(text)), text
+    assert _scan_every_lexing(f"#if {macro}(<vector>)\n#endif\n") == ()
+    assert _scan_every_lexing(f"#define {macro}(x) 0\n") == ()
+
+
+@pytest.mark.parametrize("text", [
+    "#define E ..\n#define CHK __has_include(<E/secret.h>)\n#if CHK\n#endif\n",
+    "#define ID(x) x\n#if ID(__has_include(<E/secret.h>))\n#endif\n",
+    "#if ID(')', __has_include(<E/secret.h>))\n#endif\n",
+    "#if ID(__has_include(<a)b.h>) + __has_include(<E/secret.h>))\n#endif\n",
+    "#if F(1)(__has_include(<E/secret.h>))\n#endif\n",
+    "#if $(__has_include(<E/secret.h>))\n#endif\n",
+    "int x = __has_include(<vector>);\n",
+])
+def test_angle_operand_that_the_compiler_macro_expands_is_refused(text):
+    """``<...>`` is a header-name only when written in ``#if``/``#elif`` outside a macro call.
+
+    In a macro body or a macro argument clang and MSVC macro-expand its tokens first (checked with
+    ``clang -E`` and ``cl /E``), so ``#define E ..`` turns ``<E/secret.h>`` into ``<../secret.h>``.
+    """
+    assert any("macro-expanded" in reason for reason in _scan_every_lexing(text)), text
+    assert any("macro-expanded" in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("blank", ["\f", "\v", " ", "\t", " \t\f\v"])
+@pytest.mark.parametrize("lead, payload, needle", [
+    ("// x ", '#pragma comment(lib, "evil")\n', "#pragma comment is refused"),
+    ("// x ", '#include "../../../../etc/x.h"\n', "include escapes the project root"),
+    ("/* */ // ", 'asm(".incbin \\"/etc/passwd\\"");\n', "assembler"),
+])
+def test_regression_backslash_blank_newline_is_not_a_splice_for_msvc(blank, lead, payload, needle):
+    """``cl`` splices only a backslash directly followed by the newline (checked with ``cl /E``).
+
+    gcc and clang splice across the blank, so for them the comment swallows the payload line; MSVC
+    compiles it. The scan has to refuse what either reading refuses.
+    """
+    text = lead + "\\" + blank + "\n" + payload
+    assert _scan(text) == (), "gcc/clang reading: the comment continues over the payload line"
+    strict = scan_hostile_directives(normalize_for_scan(text, strict_splices=True), include_ok=OK)
+    assert any(needle in reason for reason in strict), (text, strict, TAG)
+    assert any(needle in reason for reason in _scan_every_lexing(text)), text
+    assert any(needle in reason for reason in _refused_end_to_end(text)), text
+    trigraph = lead + "??/" + blank + "\n" + payload
+    assert any(needle in reason for reason in _scan_every_lexing(trigraph)), trigraph
+
+
+def test_strict_splice_reading_runs_when_only_the_old_text_has_a_blank_splice():
+    """The old text decides which lines are new: for MSVC the pragma below did not exist before."""
+    before = '#pragma comment(lib,\\ \n"evil")\n'
+    after = '#pragma comment(lib,"evil")\n'
+    assert any("#pragma comment" in reason for reason in scan_added_lexings(before, after, include_ok=OK))
+
+
+def test_normalize_splice_readings():
+    assert normalize_for_scan("a\\ \nb", strict_splices=True) == "a\\ \nb"
+    assert normalize_for_scan("a\\\f\nb", strict_splices=True) == "a\\\f\nb"
+    assert normalize_for_scan("a\\\nb", strict_splices=True) == "ab"
+    assert normalize_for_scan("a??/\nb ??/ \nc", strict_splices=True) == "ab \\ \nc"
+    assert normalize_for_scan("a\\\t\nb ??( <: %: ??=", legacy=True) == "ab ??( <: # #"
+    assert normalize_for_scan("a\\\f\nb", legacy=True) == "a\\\f\nb"
+
+
+@pytest.mark.parametrize("text", [
+    '#define S(x) #x\nasm(S(a:>.incbin "f"));\n',
+    '#define S(x) #x\nasm(S(a:>.incbin "f"));',
+])
+def test_regression_closing_digraph_is_also_read_as_written(text):
+    """``:>`` normalised to ``]`` makes ``.incbin`` look like a member access; as written it is refused."""
+    assert _scan_every_lexing(text), text
+    _refused_end_to_end(text)
+
+
+@pytest.mark.parametrize("text, scans", [
+    ("int x = 1;\n", 4),
+    ("int y = c ? a : b;\n", 4),
+    ("int y = c ?? 1 : 2;\n", 6),
+    ("x<:0:> = 1;\n", 10), ("a:>b\n", 10), ("a%>b\n", 10), ("%:define A 1\n", 10), ("<%\n", 10),
+    ("// c \\ \nint x;\n", 8),
+    ("// c ??/\t\nint x;\n", 10),
+    ("// c \\\f\nint x;\n", 10),
+    ("a:>b // \\\v\n", 18),
+])
+def test_extra_lexings_run_only_when_the_text_can_be_read_differently(text, scans, monkeypatch):
+    """4 scans for plain text; the digraph, strict-splice and legacy readings are gated; 18 at most."""
+    from sonder_runtime.domain.build import repair as repair_module
+
+    calls: list[int] = []
+    real = repair_module.scan_hostile_directives
+
+    def counting(added, **kwargs):
+        calls.append(1)
+        return real(added, **kwargs)
+
+    monkeypatch.setattr(repair_module, "scan_hostile_directives", counting)
+    scan_added_lexings("", text, include_ok=OK)
+    assert len(calls) == scans, (text, len(calls))
+    calls.clear()
+    scan_added_lexings(text, "int x;\n", include_ok=OK)  # the old text is gated on as well
+    assert len(calls) == scans, (text, len(calls))
+
+
+_LINEAR_SHAPES = {
+    "if_literals_one_line": "#if " + "__has_include(<a.h>) && " * 26_000,
+    "if_open_calls": "#if " + "F(" * 160_000 + "__has_include(<a.h>) " * 15_000,
+    "if_defined": "#if " + "defined(__has_include) && " * 24_000,
+    "if_defined_blanks": "#if " + ("defined" + " " * 50 + "__has_include" + " " * 50) * 5_300,
+    "leading_blanks": " " * 320_000 + "__has_include " * 22_000,
+    "blank_lines": ("\t" * 40 + "__has_include\n") * 11_800,
+    "shim_lines": "#define __has_include(x) 0\n" * 24_000,
+    "bare_tokens": "__has_include " * 45_000,
+    "open_angle_lines": "#if __has_include(<\n" * 33_000,
+    "if_unterminated_strings": "#if " + '" __has_include(<a.h>) ' * 27_000,
+    "blank_splices": "x \\ \n" * 128_000,
+    "blank_runs": ("\\" + " " * 63) * 10_000,
+    "trigraph_blank_runs": ("??/" + "\t" * 61) * 10_000,
+    "digraph_pairs": "%:<::>%><%" * 64_000,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_LINEAR_SHAPES))
+def test_has_include_and_splice_readings_stay_linear_at_640_kb(shape):
+    text = _LINEAR_SHAPES[shape]
+    assert 600_000 <= len(text) <= 700_000, len(text)
+    for label, call in (
+        ("scan", lambda: scan_hostile_directives(text, include_ok=OK)),
+        ("strict", lambda: normalize_for_scan(text, strict_splices=True)),
+        ("legacy", lambda: normalize_for_scan(text, legacy=True)),
+    ):
+        started = time.perf_counter()
+        call()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"{label} took {elapsed:.2f}s on {len(text)} chars of {shape} ({TAG})"
+
+
+def test_all_eighteen_lexings_of_a_full_size_candidate_stay_in_budget():
+    unit = "#if __has_include(<:a.h>) && F(%:\\\f\n"
+    text = unit * (64_000 // len(unit))
+    started = time.perf_counter()
+    reasons = scan_added_lexings("", text, include_ok=OK)
+    elapsed = time.perf_counter() - started
+    assert reasons and elapsed < 4.0, f"{elapsed:.2f}s for {len(text)} chars in 18 lexings ({TAG})"
