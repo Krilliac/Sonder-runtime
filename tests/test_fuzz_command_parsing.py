@@ -33,12 +33,15 @@ import random
 import re
 import sys
 import time
+import unicodedata
 
 import pytest
 
 import command_catalog as cc
 import command_router as cr
+import intents
 import web_intents as wi
+from sonder_runtime.application.command_surface import command_text as ct
 from sonder_runtime.adapters.command_parsing import _parse_game_campaign_command
 from sonder_runtime.domain.control_timeout import (
     DEFAULT_TIMEOUT,
@@ -876,20 +879,6 @@ def test_clean_location_is_idempotent():
         f"once={failures[0][1]!r} twice={failures[0][2]!r}")
 
 
-def test_clean_location_long_article_runs_stay_linear():
-    """Hostile ``the the ... Paris`` runs must not make the fixpoint loop quadratic."""
-    assert wi._clean_location("the " * 12 + "Paris") == "Paris"
-    for n in (200, 5000, 50000):
-        start = time.perf_counter()
-        got = wi._clean_location("the " * n + "Paris")
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.2, f"{n} articles took {elapsed:.2f}s"
-        assert got == ""
-    start = time.perf_counter()
-    assert wi.classify("weather in " + "the " * 50000 + "Paris")["location"] == ""
-    assert time.perf_counter() - start < 1.0
-
-
 def test_clean_location_the_the_x_regression():
     once = wi._clean_location("the the x")
     assert wi._clean_location(once) == once
@@ -971,10 +960,7 @@ def test_long_hostile_inputs_stay_inside_the_time_budget(cat):
     assert max(timings) < 2.0
 
 
-# --- non-ASCII free-data captures, ASCII-only keywords and slash heads --------
-
-_FOLDERS = ("K", "ſ", "İ", "ı")
-
+# --- non-ASCII free-data captures ---------------------------------------------
 
 @pytest.mark.parametrize("line, want", [
     ("weather Zürich", "/weather Zürich"),
@@ -989,33 +975,6 @@ def test_non_ascii_free_data_captures_resolve_as_on_base(line, want):
     assert cr.resolve(line) == want
 
 
-@pytest.mark.parametrize("line", [
-    "ſwitch to the x tier",
-    "switch to the x tıer",
-    "switch to the x tİer",
-    "uſe x tier",
-    "create a new ruſt project named x",
-    "crıeate a new rust project named x",
-    "ſcaffold a new rust project named x",
-    "create a new rust project namedſ x",
-    "forecaſt Zürich",
-    "weaſher Zürich",
-    "rıead a.éx",
-    "Keep Zürich",
-])
-def test_fold_characters_cannot_spell_a_keyword_in_unicode_rules(line):
-    assert cr.resolve(line) is None
-
-
-def test_fold_characters_never_spell_unicode_rule_keywords():
-    bodies = ("{s}witch to the x tier", "create a new ru{s}t project named x",
-              "wea{t}her Zürich", "for{e}cast Zürich", "r{s}ead a.éx")
-    for fold in _FOLDERS:
-        for body in bodies:
-            line = body.format(s=fold, t=fold, e=fold)
-            assert cr.resolve(line) is None, line
-
-
 def test_slash_head_with_a_kelvin_sign_does_not_dispatch_work_over_http(monkeypatch):
     from sonder_runtime.interfaces.http import serve
 
@@ -1028,19 +987,430 @@ def test_slash_head_with_a_kelvin_sign_does_not_dispatch_work_over_http(monkeypa
     assert seen[-1] == "/worK"
 
 
-def test_slash_head_fold_in_repl_source_is_ascii_guarded():
-    """No repl.main harness drives a typed line end to end; pin the one dispatch line."""
-    from pathlib import Path
-
-    import sonder_runtime.interfaces.repl.repl as repl_module
-
-    text = Path(repl_module.__file__).read_text(encoding="utf-8")
-    assert "cmd = parts[0].lower() if parts[0].isascii() else parts[0]" in text
-    assert not re.search(r"cmd = parts\[0\]\.lower\(\)\s*$", text, re.MULTILINE)
-
-
 def test_clean_location_strips_repeated_articles_in_one_call_and_is_idempotent():
     assert wi._clean_location("the " * 12 + "Paris") == "Paris"
     for value in ("the " * 12 + "Paris", "the the x", "Paris tomorrow", "  the The Paris?! "):
         once = wi._clean_location(value)
         assert wi._clean_location(once) == once, value
+
+
+# --- fold characters: one rule at the router entry and at the slash choke points ---
+
+LONG_S, DOTTED_I, DOTLESS_I = "\u017f", "\u0130", "\u0131"
+_ARGUMENT_EDGES = "?!,;:\"'`()[]{}<>"
+
+
+def test_fold_characters_are_exactly_the_code_points_python_folds_into_ascii():
+    """The entry rule is complete only if this list is, so enumerate every code point.
+
+    A character is a fold character when ``str.lower()`` turns it into text
+    holding an ASCII letter or digit, or IGNORECASE matches it against one.
+    """
+    ascii_word = re.compile(r"[a-z0-9]", re.IGNORECASE)
+    found = set()
+    for point in range(0x80, sys.maxunicode + 1):
+        char = chr(point)
+        if ascii_word.fullmatch(char) or any(c.isascii() and c.isalnum() for c in char.lower()):
+            found.add(char)
+    assert found == set(ct.FOLD_CHARACTERS) == {KELVIN, LONG_S, DOTTED_I, DOTLESS_I}
+
+
+def test_opaque_reading_has_no_ascii_meaning_and_maps_back():
+    typed = f"weather in Diyarbak{DOTLESS_I}r, {DOTTED_I}zmir 4{KELVIN} {LONG_S}"
+    opaque = ct.opaque_reading(typed)
+    assert opaque is not None and not ct.has_fold_character(opaque) and len(opaque) == len(typed)
+    assert ct.restore_fold_characters(opaque) == typed
+    assert ct.ascii_reading(typed) == "weather in Diyarbakir, Izmir 4K s"
+    stand_ins = set(opaque) - set(typed)
+    assert len(stand_ins) == 4
+    for char in stand_ins:
+        for changed in (char.lower(), char.upper(), char.casefold(), char.title(),
+                        unicodedata.normalize("NFKC", char), unicodedata.normalize("NFKD", char)):
+            assert changed == char
+        assert re.fullmatch(r"\w", char) and not re.fullmatch(r"[a-z0-9_]", char, re.IGNORECASE)
+    # A turn that already holds a stand-in could not be mapped back, so it has no opaque reading.
+    assert ct.opaque_reading(opaque) is None
+    assert cr.resolve(f"weather in {sorted(stand_ins)[0]}x {DOTLESS_I}") is None
+    assert not ct.has_fold_character("weather in Z\u00fcrich") and ct.has_fold_character(f"x{LONG_S}")
+
+
+@pytest.mark.parametrize("line, want", [
+    ("/Work", "/work"), ("/WORK fix it", "/work"), ("  /Task_Delete x", "/task_delete"), ("", ""), (None, ""), ("   ", ""),
+    ("/wor\u212a", "/wor\u212a"), ("/wor\u212a x", "/wor\u212a"), ("/\u017fTATS", "/\u017ftats"), ("/STRA\u00dfE", "/stra\u00dfe"),
+    ("/\uff37ork", "/\uff37ork"),
+])
+def test_slash_head_lowercases_ascii_letters_and_nothing_else(line, want):
+    assert ct.slash_head(line) == want
+    assert ct.ascii_lower("Sess\u0130ON \u212aEEP \u00c9") == "sess\u0130on \u212aeep \u00c9"
+
+
+@pytest.mark.parametrize("folded, want", [
+    # hand-written rules (the review's list)
+    ("ma\u212ae a new rust project", "/scaffold rust NewProject"),
+    ("\u017ftart a new rust project", "/scaffold rust NewProject"),
+    ("create a new rust con\u017fole project", "/scaffold rust NewProject"),
+    ("\u017felect the x model", "/model x"),
+    ("\u017fet the x model", "/model x"),
+    ("u\u017fe the x model", "/model x"),
+    ("foreca\u017ft Z\u00fcrich", "/weather Z\u00fcrich"),
+    ("\u017fwitch to the x tier", "/model x"),
+    ("switch to the x t\u0131er", "/model x"),
+    ("switch to the x t\u0130er", "/model x"),
+    # the tier stage (intents.classify_command)
+    ("\u0131mprove parse in parser.py", "/refactor parser.py parse"),
+    ("\u017fecond opinion on the parser", "/consult the parser"),
+    ("wh\u0131ch model \u017fhould handle the parser", "/route the parser"),
+    # the structured form and the catalog stage
+    ("u\u017fe the status tool", "/status"),
+    ("delete tas\u212a abc", "/task_delete abc"),
+    ("\u017fhow context health", "/context"),
+    # an ASCII-only capture is a keyword position too
+    ("run saved workflow \u212aeep", "/workflow_run keep"),
+    ("show task \u212aabc", "/task_show Kabc"),
+    ("weather \u0130stanbul", "/weather Istanbul"),
+    # same command, different argument: the keyword region holds the fold character
+    ("weather \u0131n Chicago", "/weather Chicago"),
+    ("resume sess\u0131on abc123", "/resume abc123"),
+])
+def test_a_fold_character_never_spells_a_keyword(folded, want):
+    """Every line here resolved before the fix because a fold character spelled a keyword.
+
+    The first assertion keeps the pin honest: the same line with the ASCII
+    letter in place is a real command, so None below is the refusal and not a
+    phrase that never resolved.
+    """
+    assert cr.resolve(ct.ascii_reading(folded)) == want
+    assert cr.resolve(folded) is None
+    report = cr.explain(folded)
+    assert report["resolved"] is None and report["source"] == "none"
+    assert report["detail"].get("reason") == "fold-character"
+
+
+@pytest.mark.parametrize("line, want", [
+    ("weather in \u0130stanbul", "/weather \u0130stanbul"),
+    ("weather in Diyarbak\u0131r", "/weather Diyarbak\u0131r"),
+    ("forecast for \u0130zmir", "/weather \u0130zmir"),
+    ("remember that helium boils at 4 \u212a", "/fact helium boils at 4 \u212a"),
+    ("second opinion on the Diyarbak\u0131r migration plan", "/consult the Diyarbak\u0131r migration plan"),
+    ("use the \u212aimi model", "/model \u212aimi"),
+    ("read \u017f.txt", "/read \u017f.txt"),
+    ("create a new rust project named \u212ax", "/scaffold rust \u212ax"),
+])
+def test_a_fold_character_typed_as_data_reaches_the_argument_unchanged(line, want):
+    assert cr.resolve(line) == want
+    report = cr.explain(line)
+    assert report["resolved"] == want and report["source"] in ("rule", "tier")
+
+
+def test_fold_character_substitutions_never_change_the_command_or_drop_what_was_typed():
+    """Swap letters for their fold characters anywhere in turns that resolve.
+
+    The turn either refuses or resolves to exactly what its ASCII spelling
+    resolves to, carrying every fold character the user typed.
+    """
+    rng = _rng(31)
+    info = _info("fold-substitution")
+    swaps = {"k": KELVIN, "K": KELVIN, "s": LONG_S, "i": DOTLESS_I, "I": DOTTED_I}
+    turns = [turn for turn, _ in _POSITIVE_TURNS] + [
+        "weather in Kiskunhalas", "forecast for Minsk", "remember that Kirk likes skiing", "resume session kiss123",
+        "second opinion on the parser", "which model should handle the risk report", "improve parse in parser.py",
+        "show task k1", "delete task kiwi", "use the kimi model", "read notes.txt", "list sessions", "show my stats",
+        "create a new rust project named kiosk", "switch to the fast tier", "search the web for skis in Minsk",
+    ]
+    refused = kept = 0
+    for turn in turns:
+        places = [index for index, char in enumerate(turn) if char in swaps]
+        for _ in range(60):
+            chosen = set(rng.sample(places, rng.randint(1, min(3, len(places))))) if places else set()
+            variant = "".join(swaps[char] if index in chosen else char for index, char in enumerate(turn))
+            if variant == turn:
+                continue
+            got = cr.resolve(variant)
+            if got is None:
+                refused += 1
+                continue
+            kept += 1
+            assert ct.ascii_reading(got) == cr.resolve(ct.ascii_reading(variant)), f"{info}: {variant!r} -> {got!r}"
+            for char in ct.FOLD_CHARACTERS:
+                assert got.count(char) == variant.count(char), f"{info}: {variant!r} -> {got!r}"
+            assert got.split(" ")[0].isascii(), f"{info}: {variant!r} -> {got!r}"
+    assert refused > 200 and kept > 20, (refused, kept)
+
+
+@pytest.mark.parametrize("line", [
+    # fold characters next to the argument: the branch had started passing "abc", "ab" or nothing
+    "delete task \u212aabc", "delete task abc\u212a", "delete task ab\u0130", "delete task \u212a", "show task \u212aabc",
+    # any other letter the ASCII tokenizer would drop (before: /task_delete caf)
+    "delete task caf\u00e9", "delete task \u00e1b\u00e7", "compare the workspaces caf\u00e9", "git merge \u00e9",
+    "run the test s\u00fc\u00edt\u00e9", "delete task abc\u200b", "delete task \u0661\u0662",
+    # an ASCII word the tokenizer would have to trim (before: abc, env, 12)
+    "delete task task/abc", "delete task .env", "delete task #12", "delete task -abc",
+])
+def test_catalog_stage_refuses_rather_than_alter_an_argument(line):
+    assert cr.resolve(line) is None
+    assert cr.explain(line)["source"] == "none"
+
+
+@pytest.mark.parametrize("line, want", [
+    ("delete task abc", "/task_delete abc"),
+    ("delete task abc?", "/task_delete abc"),
+    ("delete task \"abc\"", "/task_delete abc"),
+    ("i want to delete task abc!", "/task_delete abc"),
+    ("compare the workspaces cafe", "/workspace_compare cafe"),
+    ("inspect artifactcheck report.json", "/artifactcheck report.json"),
+    ("what\u2019s the repo status", "/repo_status"),
+])
+def test_catalog_stage_still_passes_a_typed_word_and_reads_past_punctuation(line, want):
+    assert cr.resolve(line) == want
+    assert cr.explain(line)["source"] == "catalog"
+
+
+def test_catalog_arguments_are_whole_words_the_user_typed():
+    rng = _rng(32)
+    info = _info("catalog-argument")
+    stems = ["delete task", "show task", "delete the task", "i want to delete task", "compare the workspaces",
+             "git merge", "inspect artifactcheck", "get weather in", "show the task progress"]
+    alphabet = _ARGUMENT_EDGES + "abcXYZ019_.-/#@$~*=+%&|^ " + "\u00e9\u00e7\u00fc\u212a\u0131\u0130\u017f\u200b\u00a0\u2019\u20ac\u0661"
+    hits = with_argument = 0
+    for _ in range(6000):
+        argument = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 7)))
+        turn = (rng.choice(stems) + " " + argument).strip()
+        report = cr.explain(turn)
+        got = report["resolved"]
+        assert got == cr.resolve(turn)
+        if got is None or report["source"] != "catalog":
+            continue
+        hits += 1
+        assert all(ord(c) < 128 or unicodedata.category(c)[0] in "PSZ" for c in turn), f"{info}: {turn!r} -> {got!r}"
+        typed = set(turn.split()) | {word.strip(_ARGUMENT_EDGES) for word in turn.split()}
+        for word in got.split(" ")[1:]:
+            with_argument += 1
+            assert word in typed, f"{info}: {turn!r} -> {got!r}"
+    assert hits > 100 and with_argument > 20, (hits, with_argument)
+
+
+# --- slash heads: every surface compares the head the same ASCII-only way -----
+
+def test_control_command_does_not_fold_a_kelvin_sign_into_work(monkeypatch):
+    """The chat path reaches control_command with the raw prompt and no HTTP role context."""
+    import server
+
+    calls, gated = [], []
+    monkeypatch.setattr(server, "workbench_agent", lambda *args, **kwargs: calls.append((args, kwargs)) or "WORKBENCH-RAN")
+    monkeypatch.setattr(server, "_control_tool_refusal",
+                        lambda tools, label, **kwargs: gated.append((tuple(tools), label)) or "")
+    assert "WORKBENCH-RAN" in str(server.control_command("/WORK fix the parser"))
+    assert len(calls) == 1 and gated[-1][1] == "/work" and gated[-1][0]
+    assert server.control_command("/wor\u212a fix the parser") is None
+    assert len(calls) == 1
+    assert gated[-1] == ((), "/wor\u212a")
+
+
+def test_http_gates_see_the_typed_head():
+    from sonder_runtime.interfaces.http import serve
+
+    assert serve._dangerous_http_slash("/work x") and serve._dangerous_http_slash("/WORK x")
+    assert not serve._dangerous_http_slash("/wor\u212a x")
+    # Names gated by membership alone; the action-gated ones (/updatecheck) answer by their argument.
+    by_name = serve.DANGEROUS_HTTP_SLASH_COMMANDS - serve._CONDITIONALLY_GATED_SLASH
+    with_k = sorted(name for name in by_name if "k" in name)
+    assert len(with_k) >= 3
+    for name in with_k:
+        assert serve._dangerous_http_slash(name + " apply")
+        assert not serve._dangerous_http_slash(name.replace("k", KELVIN) + " apply"), name
+    assert serve._slash_system_operation("/RUNTIME", "set x") == "runtime_policy_change"
+    assert serve._slash_system_operation("/runtime\u0130", "set x") == ""
+
+
+def test_catalog_branch_narrowing_does_not_fold_a_kelvin_sign():
+    union = cc.console_tools().get("/task", ())
+    assert len(union) > 1
+    assert tuple(cc.narrow_branch_tools("/TASK", "list", union)) == ("task_list",)
+    assert tuple(cc.narrow_branch_tools(f"/tas{KELVIN}", "list", union)) == tuple(union)
+    assert f"unknown command /wor{KELVIN}" in cc.unknown_command(f"/wor{KELVIN}")
+
+
+def test_repl_surfaces_treat_a_non_ascii_head_as_unknown(monkeypatch):
+    import sonder_runtime.interfaces.repl.repl as repl
+
+    assert repl._run_catalogued(f"/wor{KELVIN} x", f"/wor{KELVIN}").startswith(f"unknown command /wor{KELVIN}")
+    assert repl._repl_autopilot_owner("/MISSION", "start") == repl._repl_autopilot_owner("/mission", "start")
+    assert repl._history_safe("/LOGIN alice hunter2") is False and repl._history_safe("/stats") is True
+
+    looked_up = []
+
+    class _Tools(dict):
+        def get(self, key, default=None):
+            looked_up.append(key)
+            return default
+
+    monkeypatch.setattr(repl.command_catalog, "console_tools", lambda: _Tools())
+    assert repl._help_policy_note("/WORK") == "" and looked_up == ["/work"]
+    assert repl._help_policy_note(f"/wor{KELVIN} x") == "" and looked_up[-1] == f"/wor{KELVIN}"
+
+
+def test_control_intents_do_not_read_a_kelvin_sign_as_k():
+    """``intents.classify`` lowercases the turn; U+212A used to come out as "k"."""
+    assert intents.classify("show me your thinking") == {"trace": True}
+    assert intents.classify("Show Me Your THINKING") == {"trace": True}
+    assert intents.classify(f"show me your thin{KELVIN}ing") == {}
+    assert intents.classify(f"STRICT ON for the {DOTTED_I}zmir report") == intents.classify("strict on for the x report")
+
+
+_HEAD_FOLD_SOURCES = (
+    "server.py",
+    "intents.py",
+    "sonder_runtime/interfaces/http/serve.py",
+    "sonder_runtime/interfaces/http/facades/developer_chat.py",
+    "sonder_runtime/interfaces/repl/repl.py",
+    "sonder_runtime/interfaces/repl/handler.py",
+    "sonder_runtime/interfaces/repl/command_router.py",
+    "sonder_runtime/interfaces/repl/facades/build_tools.py",
+    "sonder_runtime/adapters/command_catalog.py",
+    "sonder_runtime/adapters/command_parsing.py",
+    "sonder_runtime/adapters/tool_lane_guard.py",
+)
+# The first word of a line, or a ``cmd``/``command`` value, folded with a Unicode-wide method.
+_HEAD_FOLD = re.compile(
+    r"""(?: \b(?:parts|pieces|name|command)\[0\] (?:\.lstrip\("/"\))?
+          | \bstr\((?:cmd|command)\b[^)]*\) (?:\.strip\(\))?
+          | \b(?:cmd|command)
+          | \.split\(None,\ 1\)\[0\] )
+        \.(?:lower|casefold|upper)\(\)""",
+    re.VERBOSE,
+)
+# Folds of a word that is not a command name; each is compared with ASCII keywords only.
+_NOT_A_HEAD = {
+    ("server.py", "head = parts[0].lower()"): "/approve sub-action (revoke, call) or a call id",
+    ("sonder_runtime/interfaces/http/serve.py", "action = parts[0].lower() if parts else \"\""):
+        "sub-action of /runtime, /update and /stash",
+    ("sonder_runtime/interfaces/repl/command_router.py", "if _norm_token(parts[0].lower()) not in _ARG_FILLERS:"):
+        "filler word before a one-word argument, compared with ASCII fillers",
+}
+
+
+def test_no_surface_folds_a_slash_head_with_a_unicode_method():
+    """New dispatch code must use ``command_text.slash_head``, not ``.lower()``.
+
+    ``"/wor" + KELVIN`` lowercases to ``"/work"``. A head folded that way on
+    one surface and not on another is how a gate and a dispatcher come to
+    disagree, so the raw fold is refused here wherever it appears.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    found = set()
+    scanned = 0
+    for relative in _HEAD_FOLD_SOURCES:
+        with open(os.path.join(root, relative), encoding="utf-8") as handle:
+            for line in handle:
+                scanned += 1
+                if _HEAD_FOLD.search(line):
+                    found.add((relative, line.strip()))
+    assert scanned > 40000
+    for raw in ("    cmd = parts[0].lower()", "x = str(cmd or \"\").strip().lower()", "c = value.split(None, 1)[0].lower()",
+                "if str(command or \"\").casefold() != \"/model\":", "cmd = \"/\" + name[0].lstrip(\"/\").lower()",
+                "cmd = parts[0].lower() if parts[0].isascii() else parts[0]", "command = pieces[0].upper()"):
+        assert _HEAD_FOLD.search(raw), raw
+    assert not _HEAD_FOLD.search("cmd = _slash_head(parts[0])")
+    unexpected = sorted(found - set(_NOT_A_HEAD))
+    assert not unexpected, "fold the head with command_text.slash_head instead: %r" % (unexpected,)
+    assert set(_NOT_A_HEAD) <= found, "stale exemption: %r" % (sorted(set(_NOT_A_HEAD) - found),)
+
+
+# --- _clean_location: one pass, same answers as the fixpoint definition -------
+
+_LONG_TAIL = " I am flying out next month for a conference and want to know what to pack, " * 7
+
+
+@pytest.mark.parametrize("text, place", [
+    ("weather in Paris today," + _LONG_TAIL, "Paris"),
+    ("what's the weather in Paris tomorrow?" + _LONG_TAIL, "Paris"),
+    ("weather for Austin, TX right now" + _LONG_TAIL, "Austin, TX"),
+])
+def test_a_long_message_still_reduces_to_its_place(text, place):
+    """A length cap on the input lost these: the time word cuts the tail, however long it is."""
+    assert len(text) > 512
+    assert wi.extract_weather_location(text) == place
+    assert wi.classify(text)["location"] == place
+    assert wi._clean_location(place + " today," + _LONG_TAIL) == place
+
+
+def _clean_location_by_fixpoint(value):
+    """The definition: cut the time phrase and peel one article until nothing changes."""
+    edges = " \t\r\n?!.,;:"
+    location = re.sub(r"\s+", " ", str(value or "")).strip(edges)
+    lowered = location.lower()
+    while True:
+        previous = location
+        location = wi._TRAILING_TIME.sub("", location).strip(edges)
+        lowered = location.lower()
+        if lowered.startswith("the ") and lowered not in wi._LOCATION_PLACEHOLDERS:
+            location = location[4:].strip()
+            lowered = location.lower()
+        if location == previous:
+            break
+    if not 2 <= len(location) <= 120 or lowered in wi._LOCATION_PLACEHOLDERS or any(ord(ch) < 32 for ch in location):
+        return ""
+    return location
+
+
+_ARTICLE_SEEDS = ["the the area", "the . the area", "The Area today", "the my area", "the near me tomorrow", "the . . Paris ?",
+                  "the here", "the the", "the today", "today the x", "the x today the y", "th\u0130 x", "the\u00a0x",
+                  "the this week x", "x this weekend y", "x right now", "the outside", "THE the The Paris"]
+
+
+def test_clean_location_equals_the_fixpoint_definition_and_is_idempotent():
+    rng = _rng(33)
+    info = _info("clean-location-fixpoint")
+    pieces = ["the ", " today", " the the ", "  ", ".....", "The ", "THE ", " area", "the area", " right now", " this week",
+              "my area", "the . "]
+    for seed in _LOC_SEEDS + _ARTICLE_SEEDS:
+        assert wi._clean_location(seed) == _clean_location_by_fixpoint(seed), f"{info}: {seed!r}"
+    changed_by_articles = 0
+    for _ in range(8000):
+        chars = list(rng.choice(_LOC_SEEDS + _ARTICLE_SEEDS))
+        for _ in range(rng.randint(1, 5)):
+            at = rng.randrange(len(chars) + 1)
+            op = rng.randrange(3)
+            if op == 0:
+                chars.insert(at, rng.choice(_LOC_CHARS + "THEarea\u0130"))
+            elif op == 1 and chars:
+                del chars[min(at, len(chars) - 1)]
+            else:
+                chars[at:at] = list(rng.choice(pieces))
+        value = "".join(chars)
+        got = wi._clean_location(value)
+        assert got == _clean_location_by_fixpoint(value), f"{info}: {value!r}"
+        assert wi._clean_location(got) == got, f"{info}: not idempotent for {value!r}"
+        changed_by_articles += bool(got) and value.lower().count("the ") >= 2
+    assert changed_by_articles > 200
+
+
+@pytest.mark.parametrize("value, want", [
+    ("the the area", ""), ("the . the area", ""), ("the area", ""), ("the . area", "area"), ("The THE Paris", "Paris"),
+    ("the here", ""), ("the the", "the"), ("the " * 12 + "Paris", "Paris"), ("  the The Paris?! ", "Paris"),
+])
+def test_clean_location_articles_and_placeholders(value, want):
+    assert wi._clean_location(value) == want
+    assert wi._clean_location(want) == want
+
+
+def test_clean_location_cost_grows_with_the_input_not_its_square():
+    """The fixpoint loop took 25 s on 20000 articles; one pass takes milliseconds.
+
+    Measured 13 ms and 9 ms for the first two inputs. The bound leaves room
+    for a loaded CI host and is still a hundred times under the old cost.
+    """
+    cases = [("the " * 50000 + "Paris", "Paris"), ("Paris" + " today x" * 50000, "Paris"),
+             ("the . " * 50000 + "the area", ""), ("x " * 100000, "")]
+    for value, want in cases:
+        best = None
+        for _ in range(3):
+            start = time.perf_counter()
+            got = wi._clean_location(value)
+            elapsed = time.perf_counter() - start
+            best = elapsed if best is None else min(best, elapsed)
+        assert got == want
+        assert best < 0.2, f"{len(value)} characters took {best:.3f}s"
+    start = time.perf_counter()
+    assert wi.classify("weather in " + "the " * 50000 + "Paris")["location"] == "Paris"
+    assert time.perf_counter() - start < 1.0
