@@ -3,10 +3,11 @@ import pytest
 from sonder_runtime.domain.runtime_model_configuration import (
     RuntimeModelConfiguration,
 )
+from tests.support.tool_lane import FLOOR
 
 
 def test_default_projection_preserves_server_model_and_tier_defaults():
-    config = RuntimeModelConfiguration.from_environment({})
+    config = RuntimeModelConfiguration.from_environment({}, floor=FLOOR)
 
     assert config.stable_alias == "sonder:latest"
     assert config.local_code_model == "sonder:latest"
@@ -37,7 +38,7 @@ def test_projection_applies_environment_overrides_and_retired_fallbacks():
             "SONDER_VISION": "vision-model:latest",
             "SONDER_CLOUD_CODE": "qwen3-coder:480b-cloud",
             "SONDER_CLOUD_GENERAL": "custom:cloud",
-        }
+        }, floor=FLOOR
     )
 
     assert config.local_code_model == "local-code:latest"
@@ -53,7 +54,7 @@ def test_projection_applies_environment_overrides_and_retired_fallbacks():
 
 
 def test_projection_is_immutable_but_exposes_an_independent_compatibility_seed():
-    config = RuntimeModelConfiguration.from_environment({})
+    config = RuntimeModelConfiguration.from_environment({}, floor=FLOOR)
 
     with pytest.raises((AttributeError, TypeError)):
         config.stable_alias = "changed"  # type: ignore[misc]

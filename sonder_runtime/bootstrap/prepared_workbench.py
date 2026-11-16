@@ -13,6 +13,7 @@ from ..application.ports.app_managed_work import (
     WorkSpec,
     canonical_digest,
 )
+from ..adapters.restricted_tool_lane import suppressed as _suppress_restricted_lane
 from ..application.routing import tier_escalation
 from ..interfaces import standalone_agent_lanes
 
@@ -308,7 +309,9 @@ class PreparedWorkbenchAdapter:
 
         token = _CURRENT.set(permit)
         try:
-            with standalone_agent_lanes.managed_controller_factory_scope(factory):
+            # A prepared plan is data from another surface, never a restricted
+            # agent-lane entry: a tool-lane-denied model stays refused here.
+            with standalone_agent_lanes.managed_controller_factory_scope(factory), _suppress_restricted_lane():
                 options = dict(
                     max_steps=prepared.spec.max_steps,
                     allow_web=prepared.spec.allow_web,

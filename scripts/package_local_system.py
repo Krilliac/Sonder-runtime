@@ -224,7 +224,16 @@ REQUIRED_FILES = {
     "sonder_runtime/application/workflows/__init__.py",
     "sonder_runtime/application/workflows/loop.py",
     "sonder_runtime/application/workflows/use_cases.py",
+    # The model tool policy floor. Without it every tool-using lane refuses
+    # every model (fail closed), so a bundle missing it is unusable.
+    "sonder_runtime/adapters/data/model_tool_policy.json",
 }
+# Package data that is JSON. ``_included`` drops every other ``.json`` file,
+# because JSON in a checkout is usually private state; these exact tracked
+# paths are versioned code data and must ship.
+PACKAGE_DATA_FILES = frozenset({
+    "sonder_runtime/adapters/data/model_tool_policy.json",
+})
 # The worktree may temporarily retain deleted paths in Git's index until the
 # migration commit is made. These are reviewed root modules that must not be
 # copied into a payload while that staged/deleted boundary is in flight.
@@ -340,6 +349,8 @@ def _included(rel: Path) -> bool:
     parts = rel.parts
     if not parts or any(part.startswith(".") for part in parts):
         return False
+    if rel.as_posix() in PACKAGE_DATA_FILES:
+        return True
     name = rel.name.lower()
     if name in PRIVATE_FILES or name.startswith("modelfile."):
         return False

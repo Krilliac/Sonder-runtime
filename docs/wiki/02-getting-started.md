@@ -156,8 +156,10 @@ When local work needs to be preserved before that guarded update, `/stash`
 shows source-recovery readiness. `/stash save` saves tracked source changes;
 `/stash save-untracked` also saves generated/untracked files; `/stash pop`
 restores the most recent recovery stash only when the canonical `main`
-checkout is clean. These commands use no user-selected repository, remote,
-revision, or stash selector. Saved workflows are per-user state by default
+checkout is clean and the operator typed it at the console, and only a stash
+that `/stash save` recorded in that checkout (a stash with the same message
+pushed from elsewhere is never popped). These commands use no user-selected
+repository, remote, revision, or stash selector. Saved workflows are per-user state by default
 (`%LOCALAPPDATA%\sonder\workflows.json` on Windows), not installation files.
 On first use, an older checkout-root `workflows.json` is copied into that state
 home and left in place for review. Emotion-vector tuning (`/emotion`) is
