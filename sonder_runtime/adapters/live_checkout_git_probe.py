@@ -95,6 +95,8 @@ def _start_directory(path: Path) -> Path | None:
         status = reads.status_of(current)
         if status.state is reads.ReadState.UNKNOWN:
             return None
+        if status.state is reads.ReadState.OK and status.result is None:
+            return None  # an OK status always carries its stat; unknown if it ever does not
         if status.state is reads.ReadState.OK and status.result is not None and stat.S_ISDIR(status.result.st_mode):
             return current
         parent = current.parent
