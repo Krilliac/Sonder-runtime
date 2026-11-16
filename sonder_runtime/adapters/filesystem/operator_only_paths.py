@@ -44,7 +44,11 @@ TEMP_MARKER = ".tmp-"
 
 
 def _folded(name: str) -> str:
-    return os.path.normcase(name)
+    # Case-insensitive on every platform: ``os.path.normcase`` folds nothing on
+    # POSIX, yet a case-insensitive volume (macOS APFS by default, a mounted
+    # NTFS/FAT/SMB share) makes ``MODEL_TOOL_POLICY.json`` the overlay itself,
+    # and a case variant is a policy-file spelling everywhere else.
+    return os.path.normcase(name).casefold()
 
 
 @dataclass(frozen=True)

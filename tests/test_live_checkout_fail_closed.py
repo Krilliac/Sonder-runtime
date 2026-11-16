@@ -289,6 +289,11 @@ class TestAuditRows:
             "nbsp": _core(b"\tworktree = \xc2\xa0/../../checkout\n"),
         }
         folder = _configured(tmp_path, "c_" + form, configs[form])
+        if form == "nbsp" and os.name != "nt":
+            # POSIX resolves ``..`` through the directory itself (git chdirs
+            # there), so the NBSP component must exist; Windows removes it by
+            # name and keeps the missing-component case.
+            (tmp_path / ("c_" + form) / " ").mkdir()
         assert _same(_toplevel(folder), checkout.repo)
         assert live_checkout.is_live(folder)
 
