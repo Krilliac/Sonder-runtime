@@ -4367,6 +4367,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
             "found": True,
             "reward": score,
             "outcome_inserted": recorded["outcome_inserted"],
+            "usage_rows_kept": recorded.get("usage_rows_kept", 0),
             "distillation_state": recorded["distillation_state"],
             "lesson_id": None,
             "distillation_reason": None,
@@ -7487,6 +7488,8 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    if result.get("usage_rows_kept"):
+        msg += " Lesson credit unchanged: stronger runtime evidence exists."
     return msg
 
 
@@ -18261,6 +18264,8 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
+    # The caller's judgement is the operator's review; a model must not review its own work.
+    "record_outcome",
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
@@ -25269,7 +25274,7 @@ def ensemble_answer(
         return answers[-1]["answer"] + lookup.footer(footer)
     if code_mode:
         return merged
-    return "%s\n%s  synthesized by %s (%s)" % (merged, lookup.footer(footer, "\n"), synth, synth_model)
+    return "%s\n%s\n  synthesized by %s (%s)" % (merged, lookup.footer(footer, "\n"), synth, synth_model)
 
 
 @mcp.tool()
