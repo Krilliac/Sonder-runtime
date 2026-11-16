@@ -7,6 +7,10 @@ Canonical appearance: DESIGN.md, lib/theme.dart and the component kit (lib/ui/ki
 - **Destinations.** The app shell (lib/shell/app_shell.dart) owns the four peer destinations: Chat, Agents, Runtime and Settings.
   - A destination page finds `ShellScope`, and inside the shell it draws no route back to Chat and no workspace menu.
   - On narrow layouts it shows `ShellMenuButton`, which opens the navigation drawer.
+- **Sidebar order.** Brand, New chat, Search chats, the Chats row with the history grouped by date under it, then Agents, Runtime and Settings, then the connection footer.
+  - The Chats row is the Chat destination. While the sidebar is expanded the open conversation's own row shows the selection; collapsed to the rail, the Chats icon does. Either way the row is announced as selected while Chat is showing.
+  - A reply still being written behind another destination is announced on that row in words ("Chats, a reply is working").
+  - Every row is a 48px target, whatever the size of the pill it draws.
 - **Chat stays mounted** while other destinations are shown, so a streaming turn and the composer draft survive a switch.
 - **Deep links.** A section request (`ShellScope.openSection`, e.g. Settings › connection or account, or an agent lane) opens that page at that section. The `/login`, `/register` and `/admin_login` intercepts open Settings › Account with the username filled in; the password never enters the chat.
 - **Leave guards.** Leaving a page runs its `ShellLeaveGuard` first: Settings' unsaved-changes guard, and Agents' unsent-draft and uncertain-command guard. This applies to the sidebar, the drawer, every shortcut and system back. Each switch asks once.
@@ -16,6 +20,18 @@ Canonical appearance: DESIGN.md, lib/theme.dart and the component kit (lib/ui/ki
   - `/`: the shortcut guide, which lists all of these.
   - Shift+Tab cycles the permission mode only inside the composer, so reverse focus traversal works everywhere else. Raising the mode still goes through the raise sheet.
 - **Changing the mode from Runtime.** Runtime's Permissions page changes the mode by switching to Chat and opening the composer's mode picker, so there is one mode-change path.
+
+## Conversation and composer
+
+- **One reading column.** Your turn is a bubble on the right; the answer is unboxed prose from the left edge of the same 760px column. Neither depends on colour to tell the speakers apart: position and shape do.
+- **Work before the answer.** Reasoning, tool calls and activity fold into one row above the answer ("Used 3 tools · 2.0s · 1 refused"); a refused call is counted in words in that row, never hidden.
+- **The answer footer** is one row: the actions (Copy, Useful, Edited, and Retry on the newest answer only), the receipt's disclosure and the cost line.
+  - With a mouse it shows on the newest answer, on hover and on keyboard focus, and it stays while its panel is open.
+  - On touch platforms it is always shown.
+  - It is never removed from the accessibility tree, and a phone folds every detail into one 48dp disclosure.
+- **The composer keeps every control inside its frame:** the + menu, the permission mode chip, the model picker, the context ring and Send/Stop. Enter sends and Shift+Enter adds a line; the field grows to eight lines and then scrolls.
+- **The + menu** ("More actions") offers Browse commands, Set project and Server conversations. Each opens exactly what its older entry point opens (the slash palette's browser, the header's project control, the toolbar's App control).
+- **The project dialog** saves from its Save button or Enter and discards on Cancel.
 
 ## Settings and Runtime surfaces
 
@@ -30,6 +46,7 @@ Canonical appearance: DESIGN.md, lib/theme.dart and the component kit (lib/ui/ki
   - send one POST bound to the tool and digest.
   Revoke is offered on issued approvals.
 - **Polling.** Runtime pauses its polls while another destination is in front, as it does when backgrounded or covered.
+- **Theme.** The app follows the system's light or dark setting until the person chooses Light, Dark or System in Settings › Appearance. A stored choice, including one saved by an older version, is kept.
 
 ## Links in conversations
 
@@ -71,7 +88,7 @@ Settings copy stays focused on connection, privacy and account actions. Architec
 
 ## App-control conversation bindings
 
-Source: `../docs/app-control-http.md` (backend contract), with server-issued binding IDs, immutable command receipts and selection epochs. The Chat toolbar opens App control. This is a subordinate conversation-management flow, not a fifth peer destination. Local chat IDs are optional labels; they never claim server authority. The selected host binding may be shown in Chat, but is never inserted into generic chat or tool requests.
+Source: `../docs/app-control-http.md` (backend contract), with server-issued binding IDs, immutable command receipts and selection epochs. The Chat toolbar opens App control, and the composer's + menu offers the same entry ("Server conversations"). This is a subordinate conversation-management flow, not a fifth peer destination. Local chat IDs are optional labels; they never claim server authority. The selected host binding may be shown in Chat, but is never inserted into generic chat or tool requests.
 
 AppControlClient owns its dedicated transport and memory-only bearer, bound to exact account/origin/runtime. Password step-up is explicit and the field clears before awaiting a request. Settings account/origin/key changes, signout, local forgetting, disposal, expiry and restart clear the control credential. It is never written to preferences, secure storage, logs, histories or URLs. Redirects and fallback are prohibited. Request aborts do not prove a server mutation did not happen.
 
@@ -109,4 +126,4 @@ The status vocabulary, notice component and confirmation sheets are specified in
 - **Notices lead with the word.** Every notice shows the glyph and kind word before its title and is announced "word: title"; warn is the warn tone and errors the danger tone.
 - **Language.** The app is English-only for now. Copy for new shared components lives in `lib/ui/strings.dart` as constants and small functions, so moving to `gen-l10n` is a mechanical step (one ARB key per entry, placeholders for function arguments). Server wording (refusal reasons, remedies) is rendered as sent, never translated or rewritten.
 
-Verification: status_vocab_test.dart, status_line_test.dart, theme_contrast_test.dart, ui_primitives_test.dart and goldens/primitives_golden_test.dart cover the vocabulary, formatters, contrast, notices, sheets and the bundled symbol font.
+Verification: app_shell_test.dart (sidebar order, the Chats row, row targets), chat_transcript_ux_test.dart (bubble and prose, work row, footer rules), chat_composer_test.dart (frame, growing field, + menu), chat_screen_test.dart (project dialog), settings_test.dart (theme default), status_vocab_test.dart, status_line_test.dart, theme_contrast_test.dart, ui_primitives_test.dart and goldens/primitives_golden_test.dart cover the vocabulary, formatters, contrast, notices, sheets and the bundled symbol font.
