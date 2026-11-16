@@ -1182,3 +1182,21 @@ def test_forwarded_client_ip_legal_zone_id_hop_still_resolves_to_itself():
 def test_parse_host_header_refuses_every_bracketed_host_with_a_zone_id():
     for value in ("[fe80::1%eth0]", "[fe80::1%12]", "[fe80::1%25eth0]:80", "[::1%lo]", "[fe80::1%]"):
         assert parse_host_header(value) is None
+
+
+@pytest.mark.parametrize(
+    "origin, host",
+    [
+        ("http://example.com:8080\t", "example.com:8080\t"),
+        ("\thttp://example.com:8080 ", " example.com:8080"),
+    ],
+)
+def test_same_origin_accepts_http_optional_whitespace(origin, host):
+    # RFC 9112 allows SP/HTAB around a field value; Python keeps a trailing
+    # tab, so refusing it would 403 a conforming client.
+    assert web_app.same_origin(origin, host, https_declared=False) is True
+
+
+@pytest.mark.parametrize("value", ["\x0blocalhost\x0c", "localhost\x0b", "\x0clocalhost", "local\x0bhost"])
+def test_parse_host_header_does_not_strip_vertical_tab_or_form_feed(value):
+    assert parse_host_header(value) is None

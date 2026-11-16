@@ -72,7 +72,11 @@ def parse_host_header(value) -> tuple[str, int | None] | None:
     """
     if not isinstance(value, str):
         return None
-    value = value.strip()
+    # Strip only HTTP optional whitespace (SP, HTAB): str.strip() would also
+    # erase vertical tab, form feed and line breaks, hiding a malformed value.
+    value = value.strip(" 	")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return None
     if not value or len(value) > _MAX_HOST_HEADER:
         return None
     port_text = ""

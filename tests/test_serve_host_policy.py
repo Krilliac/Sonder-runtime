@@ -363,3 +363,15 @@ def test_config_allowed_host_validity_matches_the_host_parser_and_never_raises(e
     else:
         accepted = True
     assert _valid_allowed_host(entry) is accepted
+
+
+@pytest.mark.parametrize(
+    "entry", ["\x0blocalhost", "localhost\x0c", "local\x0bhost", "localhost\t", " localhost", "\tlocalhost:8080 "]
+)
+def test_config_allowed_host_strips_only_http_whitespace_like_the_parser(entry):
+    try:
+        normalize_allowed_host(entry)
+        parser_ok = True
+    except ValueError:
+        parser_ok = False
+    assert _valid_allowed_host(entry) is parser_ok

@@ -849,7 +849,9 @@ def _valid_allowed_host(entry: object) -> bool:
     """
     if not _is_exact_string(entry):
         return False
-    entry = entry.strip()
+    entry = entry.strip(" 	")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in entry):
+        return False
     if not entry or len(entry) > 1024:
         return False
     port = ""
