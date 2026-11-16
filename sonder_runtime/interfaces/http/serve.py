@@ -2076,7 +2076,7 @@ def _restricted_tool_role(context):
         return None
     try:
         unrestricted = _developer_authorized(context)
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         unrestricted = False
     return None if unrestricted else public_policy.ROLE_USER
 
@@ -3093,7 +3093,8 @@ def _loop_global_operation_refusal(actions_json, context=None):
     for action in actions:
         if not isinstance(action, dict):
             continue
-        action_type = str(action.get("type") or action.get("action") or "").strip().lower()
+        # Same default as server._loop_dispatch: an action with no type runs as "code".
+        action_type = str(action.get("type") or action.get("action") or "code").strip().lower()
         action_tool = server._loop_action_tool(action_type)
         operation = _http_system_operation_for(action_tool)
         if not operation:
