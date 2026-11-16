@@ -25,7 +25,7 @@ def model_is_installed(model: str, installed) -> bool:
     return False
 
 
-def model_capability_error(tier: str, model: str, records) -> str:
+def model_capability_error(tier: str, model: str, records, *, vision_only_model_families) -> str:
     """Return a proven capability mismatch for a local tier binding.
 
     Installation alone is not enough to make a model usable by a chat tier:
@@ -39,7 +39,7 @@ def model_capability_error(tier: str, model: str, records) -> str:
     for name, record in records:
         if not model_is_installed(model, (name,)):
             continue
-        reason = nonchat_reason(record)
+        reason = nonchat_reason(record, vision_only_model_families=vision_only_model_families)
         if reason and not (tier == "vision" and "vision-only" in reason):
             return reason
         return ""

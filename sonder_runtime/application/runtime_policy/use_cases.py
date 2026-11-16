@@ -26,8 +26,8 @@ class PolicyView:
     source: str
 
     @classmethod
-    def from_raw(cls, raw: dict, *, floor: ToolLaneFloor) -> "PolicyView":
-        normalized = rules.normalize(raw, floor=floor)
+    def from_raw(cls, raw: dict, *, floor: ToolLaneFloor, lists) -> "PolicyView":
+        normalized = rules.normalize(raw, floor=floor, lists=lists)
         return cls(
             revision=normalized["revision"],
             local_models=normalized["local_models"],
@@ -39,14 +39,15 @@ class PolicyView:
 
 class RuntimePolicyService:
     def __init__(
-        self, repository: PolicyRepository, floor_provider: Callable[[], ToolLaneFloor],
+        self, repository: PolicyRepository, floor_provider: Callable[[], ToolLaneFloor], lists_provider: Callable,
     ) -> None:
         self._repository = repository
         self._floor_provider = floor_provider
+        self._lists_provider = lists_provider
 
     def get(self, context: OperationContext) -> PolicyView:
         del context  # read access is unprivileged for the local owner
-        return PolicyView.from_raw(self._repository.load(), floor=self._floor_provider())
+        return PolicyView.from_raw(self._repository.load(), floor=self._floor_provider(), lists=self._lists_provider())
 
     def update(
         self,
@@ -76,7 +77,7 @@ class RuntimePolicyService:
             if "concurrently" in message or "revision" in message:
                 raise ConcurrencyConflict(message) from exc
             raise Conflict(message) from exc
-        return PolicyView.from_raw(raw, floor=self._floor_provider())
+        return PolicyView.from_raw(raw, floor=self._floor_provider(), lists=self._lists_provider())
 
     def npu_mode(self, context: OperationContext, capability: str) -> str:
         del context

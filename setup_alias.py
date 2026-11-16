@@ -12,9 +12,25 @@ import bootstrap_engine
 from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters import prompt_store as _prompts
 
+from sonder_runtime.adapters.model_list_consumers import values as _list_values
 
-DEFAULT_EMBED_MODEL = "nomic-embed-text"
-STABLE_ALIAS = "sonder:latest"
+
+def _list_value(name):
+    value = _list_values()
+    for key in _LIST_KEYS[name].split("."):
+        value = value[key]
+    return value
+
+
+def __getattr__(name):
+    if name not in _LIST_KEYS:
+        raise AttributeError(name)
+    return _list_value(name)
+
+
+_LIST_KEYS = {'DEFAULT_EMBED_MODEL': 'default_embedding_model', 'STABLE_ALIAS': 'stable_alias'}
+
+
 
 
 def default_base_model() -> str:
@@ -165,16 +181,16 @@ def create_alias(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(model_file(base_model))
-        created = _run(ollama, ["create", STABLE_ALIAS, "-f", path], env=env)
+        created = _run(ollama, ["create", _list_value('STABLE_ALIAS'), "-f", path], env=env)
     finally:
         try:
             os.unlink(path)
         except OSError:
             pass
     if created.returncode == 0:
-        return True, f"Created the {STABLE_ALIAS} alias."
+        return True, f"Created the {_list_value('STABLE_ALIAS')} alias."
     detail = (created.stderr or created.stdout).strip()
-    return False, f"Could not create {STABLE_ALIAS}: {detail or 'ollama create failed'}"
+    return False, f"Could not create {_list_value('STABLE_ALIAS')}: {detail or 'ollama create failed'}"
 
 
 def main(argv=None) -> int:
@@ -186,7 +202,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--embed-model",
-        default=os.environ.get("SONDER_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+        default=os.environ.get("SONDER_EMBED_MODEL", _list_value('DEFAULT_EMBED_MODEL')),
     )
     parser.add_argument(
         "--no-embedding",
@@ -242,7 +258,7 @@ def main(argv=None) -> int:
             return 2
         gguf_path = candidates[0]
     if gguf_path:
-        ok, message = import_gguf(ollama, gguf_path, STABLE_ALIAS, env=env)
+        ok, message = import_gguf(ollama, gguf_path, _list_value('STABLE_ALIAS'), env=env)
         print(f"  import: {message}")
         if not ok:
             return 2
@@ -257,7 +273,7 @@ def main(argv=None) -> int:
         else:
             print("  embedding: skipped; recall/lessons can be enabled later")
         print("Done. %s now serves the imported model. Verify: ollama list"
-              % STABLE_ALIAS)
+              % _list_value('STABLE_ALIAS'))
         return 0
 
     base_model = args.model.strip() or default_base_model()

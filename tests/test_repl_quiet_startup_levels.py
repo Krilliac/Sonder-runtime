@@ -1,5 +1,6 @@
 """Routine startup/routing records are INFO/DEBUG, and approval reasons are plain."""
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import logging
 
@@ -17,7 +18,9 @@ def _levels(caplog, fragment):
 
 def test_no_keyword_classification_is_debug(caplog):
     caplog.set_level(logging.DEBUG)
-    capability_router.classify_task("hello there")
+    capability_router.classify_task(
+        "hello there", config=_test_model_lists.load().values["capability_router"]
+    )
     levels = _levels(caplog, "no keyword signal")
     assert levels == [logging.DEBUG]
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -25,7 +28,9 @@ def test_no_keyword_classification_is_debug(caplog):
 
 def test_unconfigured_local_tiers_notice_is_info(caplog):
     caplog.set_level(logging.DEBUG)
-    RuntimeModelConfiguration.from_environment({}, floor=FLOOR)
+    RuntimeModelConfiguration.from_environment(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     levels = _levels(caplog, "local tiers with no model configured")
     assert levels == [logging.INFO]
 

@@ -75,6 +75,9 @@ sonder_runtime/adapters/mcp_tool_manifest.py
 sonder_runtime/adapters/memory_replication/__init__.py
 sonder_runtime/adapters/meshgen/__init__.py
 sonder_runtime/adapters/model_bootstrap.py
+sonder_runtime/adapters/model_list_consumers.py
+sonder_runtime/adapters/model_lists.py
+sonder_runtime/adapters/model_lists_editor.py
 sonder_runtime/adapters/model_tool_grants.py
 sonder_runtime/adapters/model_tool_policy.py
 sonder_runtime/adapters/model_tool_policy_editor.py
@@ -124,7 +127,9 @@ sonder_runtime/adapters/system_clock.py
 sonder_runtime/adapters/task_events.py
 sonder_runtime/adapters/task_store.py
 sonder_runtime/adapters/testing/__init__.py
+sonder_runtime/adapters/tier_escalation.py
 sonder_runtime/adapters/training/__init__.py
+sonder_runtime/adapters/training_model_catalog.py
 sonder_runtime/adapters/typed_tool_executor.py
 sonder_runtime/adapters/updates/__init__.py
 sonder_runtime/adapters/updates/activation_journal.py

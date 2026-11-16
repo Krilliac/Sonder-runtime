@@ -1,7 +1,6 @@
-from sonder_runtime.domain.cloud_tier_policy import (
-    LEGACY_CLOUD_GENERAL_MODEL,
-    refresh_live_cloud_tiers,
-)
+from sonder_runtime.adapters import model_lists as _test_model_lists
+from sonder_runtime.domain.cloud_tier_policy import refresh_live_cloud_tiers
+LEGACY_CLOUD_GENERAL_MODEL = "gpt-oss:120b-cloud"
 
 
 def test_repairs_exact_legacy_binding_from_typed_default():
@@ -11,6 +10,9 @@ def test_repairs_exact_legacy_binding_from_typed_default():
         tiers,
         {},
         default_cloud_general_model="glm-5.2:cloud",
+        legacy_cloud_general_model=_test_model_lists.load().values[
+            "legacy_cloud_general_model"
+        ],
     )
 
     assert tiers == {"cloud-general": "glm-5.2:cloud"}
@@ -23,6 +25,9 @@ def test_preservation_flag_keeps_legacy_binding():
         tiers,
         {"SONDER_PRESERVE_LEGACY_CLOUD_GENERAL": "yes"},
         default_cloud_general_model="glm-5.2:cloud",
+        legacy_cloud_general_model=_test_model_lists.load().values[
+            "legacy_cloud_general_model"
+        ],
     )
 
     assert tiers["cloud-general"] == LEGACY_CLOUD_GENERAL_MODEL
@@ -35,6 +40,9 @@ def test_non_legacy_binding_is_not_overwritten():
         tiers,
         {},
         default_cloud_general_model="glm-5.2:cloud",
+        legacy_cloud_general_model=_test_model_lists.load().values[
+            "legacy_cloud_general_model"
+        ],
     )
 
     assert tiers["cloud-general"] == "operator:cloud"
@@ -47,6 +55,9 @@ def test_missing_binding_is_not_created():
         tiers,
         {},
         default_cloud_general_model="glm-5.2:cloud",
+        legacy_cloud_general_model=_test_model_lists.load().values[
+            "legacy_cloud_general_model"
+        ],
     )
 
     assert tiers == {}
