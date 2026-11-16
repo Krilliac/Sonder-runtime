@@ -321,6 +321,24 @@ void main() {
   });
 
   group('review fixes', () {
+    testWidgets('a cold start at /c/<id>/ opens the chat once', (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(null);
+      final requests = <String>[];
+      link.addListener(() => requests.add(link.value!.ref));
+      final navigator = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(MaterialApp(
+        navigatorKey: navigator,
+        initialRoute: '/c/b/',
+        onGenerateRoute: (settings) => chatLinkRoute(settings, into: link),
+        home: const Text('home'),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(requests, ['b']);
+      expect(navigator.currentState!.canPop(), isFalse);
+      expect(find.text('home'), findsOneWidget);
+    });
+
     testWidgets('a link outside the project filter resets it, not mid-build',
         (tester) async {
       final link = ValueNotifier<ChatLinkRequest?>(null);

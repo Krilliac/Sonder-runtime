@@ -66,7 +66,12 @@ Future<bool> copyChatShare(
   }
   try {
     await Clipboard.setData(ClipboardData(text: text));
-  } on PlatformException {
+  } catch (error) {
+    // A refused write is a PlatformException; a missing clipboard plugin
+    // (headless embedders) is a MissingPluginException. Anything else is a bug.
+    if (error is! PlatformException && error is! MissingPluginException) {
+      rethrow;
+    }
     if (context.mounted) {
       showSonderToast(context, 'Could not copy', kind: StatusKind.warn);
     }
@@ -150,8 +155,15 @@ class _ChatLinkLandingState extends State<_ChatLinkLanding> {
     // synchronously, and the shell may setState (never during build).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ChatDeepLink.request(widget.ref, into: widget.into);
       final navigator = Navigator.of(context);
+      final route = ModalRoute.of(context);
+      // A cold start at `/c/<id>/` pushes `/c/<id>` and `/c/<id>/` together;
+      // only the top landing opens the chat, the others just leave.
+      if (route != null && !route.isCurrent) {
+        navigator.removeRoute(route);
+        return;
+      }
+      ChatDeepLink.request(widget.ref, into: widget.into);
       if (navigator.canPop()) navigator.pop();
     });
   }
