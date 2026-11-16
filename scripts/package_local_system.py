@@ -227,12 +227,14 @@ REQUIRED_FILES = {
     # The model tool policy floor. Without it every tool-using lane refuses
     # every model (fail closed), so a bundle missing it is unusable.
     "sonder_runtime/adapters/data/model_tool_policy.json",
+    "sonder_runtime/adapters/data/model_lists.json",
 }
 # Package data that is JSON. ``_included`` drops every other ``.json`` file,
 # because JSON in a checkout is usually private state; these exact tracked
 # paths are versioned code data and must ship.
 PACKAGE_DATA_FILES = frozenset({
     "sonder_runtime/adapters/data/model_tool_policy.json",
+    "sonder_runtime/adapters/data/model_lists.json",
 })
 # The worktree may temporarily retain deleted paths in Git's index until the
 # migration commit is made. These are reviewed root modules that must not be

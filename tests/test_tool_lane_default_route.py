@@ -11,6 +11,7 @@ any model call or execution; with ordinary models the lane still escalates and
 still runs the result.  Nothing leaves the process.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import inspect
 import re
@@ -318,7 +319,9 @@ def test_projected_local_code_model_matches_the_runtime_configuration(monkeypatc
     else:
         monkeypatch.setenv("SONDER_CODE_LOCAL", configured)
         env = {"SONDER_CODE_LOCAL": configured}
-    runtime = RuntimeModelConfiguration.from_environment(env, floor=FLOOR)
+    runtime = RuntimeModelConfiguration.from_environment(
+        env, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert guard.projected_local_code_model(runtime.stable_alias) == runtime.local_code_model
 
 

@@ -11,6 +11,7 @@ focused chat-lane suites did not already establish:
   asks select and dispatch Autopilot and Fleet.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import dataclasses
 import json
@@ -185,7 +186,9 @@ def test_chat_cannot_execute_a_mutating_tool_merely_because_it_is_registered():
 def test_one_model_bound_to_general_and_code_keeps_chat_and_work_lanes_distinct(
     monkeypatch,
 ):
-    policy = rules.default_policy({}, floor=FLOOR)
+    policy = rules.default_policy(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     shared = policy["local_models"]["general"]
     assert policy["local_models"]["code"] == shared
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
@@ -216,7 +219,7 @@ def test_one_model_bound_to_general_and_code_keeps_chat_and_work_lanes_distinct(
         "chat", "general", "ordinary conversation",
     )
     assert pinned.tier == "code"
-    planner = RoutePlanner()
+    planner = RoutePlanner(config=_test_model_lists.load().values["capability_router"])
     chat_route = planner.select(
         RoutingRequest(lane="chat", prompt="Fix the parser module"),
         policy, RoutePlanner.from_policy(policy),

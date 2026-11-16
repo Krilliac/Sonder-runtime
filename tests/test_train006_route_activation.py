@@ -1,5 +1,6 @@
 """TRAIN-006: attended deployment and durable active-route composition."""
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -32,8 +33,13 @@ def _boundary(healthy=True):
         deployments,
         selections,
         AttendedRouteActivationBoundary(
-            RoutePlanner(), DeploymentRollbackService(deployments, health),
-            selections, policy=default_policy(env={}, floor=FLOOR), available=available,
+            RoutePlanner(config=_test_model_lists.load().values["capability_router"]),
+            DeploymentRollbackService(deployments, health),
+            selections,
+            policy=default_policy(
+                env={}, floor=FLOOR, lists=_test_model_lists.load().values
+            ),
+            available=available,
         ),
     )
 
