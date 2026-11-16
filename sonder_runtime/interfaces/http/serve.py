@@ -2011,7 +2011,7 @@ def _auth_context(auth_header="", account_header=""):
         "either": api_key_ok or account is not None,
         "local-open": True,
     }[mode]
-    _serve_logger.debug(f"_auth_context: mode={mode!r}, authorized={authorized}, api_key_ok={api_key_ok}, has_account={account is not None}")
+    _serve_logger.debug(f"_auth_context: mode={mode!r}, authorized={authorized}, has_account={account is not None}")
     return {
         "mode": mode,
         "authorized": authorized,
