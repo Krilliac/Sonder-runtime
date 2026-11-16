@@ -46,6 +46,7 @@ from sonder_runtime.domain.build.model import BuildDomainError
 from sonder_runtime.domain.build.repair import (
     CandidatePatch,
     PatchHunk,
+    added_logical_lines,
     include_checker,
     normalize_for_scan,
     parse_candidate_patch,
@@ -1909,11 +1910,11 @@ def test_regression_has_include_shim_exemption_is_anchored_to_the_line_start(tex
     "#if defined __has_include && __has_include(<version>)\n#endif\n",
     '#if !defined( __has_include ) || !__has_include("detail/impl.inl")\n#endif\n',
     "#if (defined(__has_include) && (__has_include(<a.h>) || __has_include_next(<b.h>)))\n#endif\n",
-    "#if __has_cpp_attribute(nodiscard) && __has_include(<version>)\n#endif\n",
-    "#if SPARK_AT_LEAST(3) && __has_include(<version>)\n#endif\n",
+    "#if defined(_WIN32) && !defined SPARK_NO_X && 201703L <= 1'000'000 && 0x1F && __has_include(<version>)\n#endif\n",
+    '#if __cplusplus >= 201703L && __has_include("detail/impl.inl")\n#endif\n',
     '#if 0\n#elif __has_include(<sys/types.h>) && __has_include("math.h")\n#endif\n',
     "#if __has_include__(<version>)\n#endif\n",
-    "#if __has_embed(<data.h> limit(1)) && __has_include(<b.h>)\n#endif\n",
+    "#if __has_embed(<data.h>) && __has_include(<b.h>)\n#endif\n",
     'bool h = __has_include("math.h");\n',
     '#define HAVE_IMPL __has_include("detail/impl.inl")\n',
     "#if /* why */ __has_include( <vector> ) // trailing\n#endif\n",
@@ -2021,33 +2022,36 @@ def test_regression_closing_digraph_is_also_read_as_written(text):
     _refused_end_to_end(text)
 
 
-@pytest.mark.parametrize("text, scans", [
-    ("int x = 1;\n", 4),
-    ("int y = c ? a : b;\n", 4),
-    ("int y = c ?? 1 : 2;\n", 6),
-    ("x<:0:> = 1;\n", 10), ("a:>b\n", 10), ("a%>b\n", 10), ("%:define A 1\n", 10), ("<%\n", 10),
-    ("// c \\ \nint x;\n", 8),
-    ("// c ??/\t\nint x;\n", 10),
-    ("// c \\\f\nint x;\n", 10),
-    ("a:>b // \\\v\n", 18),
+@pytest.mark.parametrize("text, readings", [
+    ("int x = 1;\n", 1),
+    ("int y = c ? a : b;\n", 1),
+    ("int y = c ?? 1 : 2;\n", 1),
+    ("int y = c ??! 1;\n", 2),
+    ("x<:0:> = 1;\n", 2), ("a:>b\n", 2), ("a%>b\n", 2), ("%:define A 1\n", 2), ("<%\n", 2),
+    ("// c \\ \nint x;\n", 2),
+    ("// c ??/\t\nint x;\n", 3),
+    ("// c \\\f\nint x;\n", 2),
+    ("a:>b // \\\v\n", 4),
+    ('auto s = R"(x)";\n', 2),
+    ('R"(a)" ??( %: <: \\\f\nx \\ \ny ??/\t\nz\n', 18),
 ])
-def test_extra_lexings_run_only_when_the_text_can_be_read_differently(text, scans, monkeypatch):
-    """4 scans for plain text; the digraph, strict-splice and legacy readings are gated; 18 at most."""
+def test_only_readings_that_differ_are_normalised(text, readings, monkeypatch):
+    """One reading for plain text; a reading runs only when it lexes the text differently; 18 at most."""
     from sonder_runtime.domain.build import repair as repair_module
 
     calls: list[int] = []
-    real = repair_module.scan_hostile_directives
+    real = repair_module._mask_literals
 
-    def counting(added, **kwargs):
+    def counting(value, **kwargs):
         calls.append(1)
-        return real(added, **kwargs)
+        return real(value, **kwargs)
 
-    monkeypatch.setattr(repair_module, "scan_hostile_directives", counting)
+    monkeypatch.setattr(repair_module, "_mask_literals", counting)
     scan_added_lexings("", text, include_ok=OK)
-    assert len(calls) == scans, (text, len(calls))
+    assert len(calls) == 2 * readings, (text, len(calls))  # old and new text per reading
     calls.clear()
-    scan_added_lexings(text, "int x;\n", include_ok=OK)  # the old text is gated on as well
-    assert len(calls) == scans, (text, len(calls))
+    scan_added_lexings(text, "int x;\n", include_ok=OK)  # the old text counts as well
+    assert len(calls) == 2 * readings, (text, len(calls))
 
 
 _LINEAR_SHAPES = {
@@ -2083,10 +2087,193 @@ def test_has_include_and_splice_readings_stay_linear_at_640_kb(shape):
         assert elapsed < 2.0, f"{label} took {elapsed:.2f}s on {len(text)} chars of {shape} ({TAG})"
 
 
-def test_all_eighteen_lexings_of_a_full_size_candidate_stay_in_budget():
-    unit = "#if __has_include(<:a.h>) && F(%:\\\f\n"
+def test_all_eighteen_lexings_of_a_full_size_candidate_stay_in_budget(monkeypatch):
+    from sonder_runtime.domain.build import repair as repair_module
+
+    scans: list[int] = []
+    real = repair_module.scan_hostile_directives
+
+    def counting(added, **kwargs):
+        scans.append(1)
+        return real(added, **kwargs)
+
+    monkeypatch.setattr(repair_module, "scan_hostile_directives", counting)
+    unit = 'R"(a)" ??( %:if __has_include(<:a.h>) && F(\\\f\nx \\ \ny ??/\t\nz\n'
     text = unit * (64_000 // len(unit))
     started = time.perf_counter()
     reasons = scan_added_lexings("", text, include_ok=OK)
     elapsed = time.perf_counter() - started
-    assert reasons and elapsed < 4.0, f"{elapsed:.2f}s for {len(text)} chars in 18 lexings ({TAG})"
+    assert len(scans) == 18, len(scans)
+    assert reasons and not any("lexing work budget" in reason for reason in reasons), reasons
+    assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars in 18 lexings ({TAG})"
+
+
+# --- round 4 review: identifiers before an angle operand, literals after a named token, lexing work ---
+
+@pytest.mark.parametrize("text", [
+    "#define F(x) x\n#define LP F(\n#define E /abs/dir\n#if LP __has_include(<E/x.h>))\n#endif\n",
+    "#if LP __has_include(<E/x.h>))\n#endif\n",
+    "#if X && __has_include(<E/x.h>)\n#endif\n",
+    "#if 1 && defined(A) X __has_include(<E/x.h>)\n#endif\n",
+    '#if __has_include("a.h") LP __has_include(<E/x.h>))\n#endif\n',
+    "#if __has_include(<a.h>) LP __has_include(<E/x.h>))\n#endif\n",
+    "#if defined(__has_include) LP __has_include(<E/x.h>))\n#endif\n",
+    "#if defined A B __has_include(<E/x.h>)\n#endif\n",
+    "#if 0x1 LP __has_include(<E/x.h>))\n#endif\n",
+    "#if 'a' __has_include(<E/x.h>)\n#endif\n",
+    "#if $ __has_include(<E/x.h>)\n#endif\n",
+    "#if \u00e9 __has_include(<E/x.h>)\n#endif\n",
+    "#if 0\n#elif LP __has_include(<E/x.h>))\n#endif\n",
+    # The price of the rule: these are fine for a compiler, but an identifier before the operand
+    # cannot be told from a macro that opens a call. A nested #if (or a quoted operand) is accepted.
+    "#if __cplusplus >= 201703L && __has_include(<optional>)\n#endif\n",
+    "#if __has_cpp_attribute(nodiscard) && __has_include(<version>)\n#endif\n",
+    "#if SPARK_AT_LEAST(3) && __has_include(<version>)\n#endif\n",
+    "#if __has_embed(<data.h> limit(1)) && __has_include(<b.h>)\n#endif\n",
+])
+def test_regression_identifier_before_an_angle_operand_may_open_a_macro_call(text):
+    """``#define LP F(`` makes ``#if LP __has_include(<E/x.h>))`` a macro argument, which is expanded.
+
+    Checked with ``clang -E`` and ``cl /E /Zc:preprocessor``: ``E`` is replaced before the probe.
+    """
+    assert any("macro-expanded" in reason for reason in _scan_every_lexing(text)), text
+    assert any("macro-expanded" in reason for reason in _refused_end_to_end(text)), text
+
+
+_EVIL = '"//evil/share/x.h"'
+
+
+@pytest.mark.parametrize("text", [
+    f"#define __has_include({_EVIL})\n",
+    f"#define __has_include ({_EVIL})\n",
+    "#define __has_include(<../../x.h>)\n",
+    f"#ifdef __has_include({_EVIL})\n#endif\n",
+    f"#undef __has_include ({_EVIL})\n",
+    f"#define __has_include_next ({_EVIL})\n",
+    f"#define __has_include\n({_EVIL})\n",
+    f"#if defined __has_include\n({_EVIL})\n#endif\n",
+    f"#if defined(__has_include) && __has_include\n({_EVIL})\n#endif\n",
+    f"bool h = __has_include\n  ({_EVIL});\n",
+])
+def test_regression_literal_after_a_named_has_include_token_is_still_path_checked(text):
+    """Naming the macro (``#define``, ``#ifdef``, ``defined``) exempts the token, not a path after it."""
+    assert any("__has_include/__has_embed" in reason for reason in _scan_every_lexing(text)), text
+    assert any("__has_include/__has_embed" in reason for reason in _refused_end_to_end(text)), text
+
+
+def test_gap_token_pasting_builds_tokens_the_scan_never_sees():
+    """KNOWN GAP, pinned on purpose: ``##`` builds ``__has_include`` and ``_Pragma`` from harmless halves.
+
+    ``CAT(__has_,include)(P)`` probes the path in ``P`` and ``CAT(_Pra,gma)("comment(lib, ...)")`` is a
+    pragma, yet no banned token is spelled anywhere. A lexical scanner cannot follow pasting; the build
+    sandbox and review are the control. If this test starts failing, the scanner learned pasting:
+    update the docs.
+    """
+    assert _scan_every_lexing(
+        f"#define CAT(a,b) a##b\n#define P {_EVIL}\n#if CAT(__has_,include)(P)\n#endif\n") == ()
+    assert _scan_every_lexing('#define CAT(a,b) a##b\nCAT(_Pra,gma)("comment(lib, \\"evil\\")")\n') == ()
+
+
+def test_gap_alias_defined_in_unchanged_code_is_not_followed():
+    """KNOWN GAP, pinned on purpose: only added lines are scanned, so an existing alias macro is trusted.
+
+    With ``#define FMT_HAS_INCLUDE(x) __has_include(x)`` already in the file, a patch that adds
+    ``#if FMT_HAS_INCLUDE("//evil/share/x.h")`` probes that path without spelling ``__has_include``.
+    Adding the alias itself is refused (the first assertion).
+    """
+    alias = "#  define FMT_HAS_INCLUDE(x) __has_include(x)\n"
+    use = f"#if FMT_HAS_INCLUDE({_EVIL})\n#endif\n"
+    assert scan_added_lexings("", alias + use, include_ok=OK)
+    assert scan_added_lexings(alias, alias + use, include_ok=OK) == ()
+
+
+def _fill(unit: str, head: str = "", tail: str = "", size: int = 640 * 1024) -> str:
+    return head + unit * ((size - len(head) - len(tail)) // len(unit)) + tail
+
+
+_MIX_UNIT = "%:if __has_include\\ \n(<a.h>) ??/\f\n"
+_ALL_LEXING_SHAPES = {
+    "if_many_ok": _fill("__has_include(<a.h>) && ", "#if ", "1\n"),
+    "unterminated_angle": _fill("__has_include(<"),
+    "if_unterminated_angle": _fill("__has_include(<", "#if "),
+    "defined_blanks": _fill(" ", "#if ", "defined __has_include\n"),
+    "defined_many": _fill("defined   __has_include || ", "#if ", "1\n"),
+    "parens_then": _fill("(", "#if ", "__has_include(<a.h>)\n"),
+    "call_parens": _fill("F(", "#if ", "__has_include(<a.h>)\n"),
+    "identifiers_then": _fill("A ", "#if ", "__has_include(<a.h>)\n"),
+    "string_then": _fill("__has_include(<a.h>)", '#if "'),
+    "define_lines": _fill("#define __has_include(x) 0\n"),
+    "define_literal_lines": _fill('#define __has_include("a.h")\n'),
+    "token_lines": _fill("__has_include\n"),
+    "token_blank": _fill("\f", "#if __has_include", "(<a.h>)\n"),
+    "token_newlines": _fill("\n", "#define __has_include", '("a.h")\n'),
+    "token_no_paren": _fill("__has_include "),
+    "blank_splice": _fill("\\ \n"),
+    "form_feed_splice": _fill("\\\f\n"),
+    "trigraph_splice": _fill("??/ \n"),
+    "digraph": _fill("%:<:"),
+    "mix": _fill(_MIX_UNIT),
+    "mix_raw": _fill('R"(a)" ??( ' + _MIX_UNIT),
+    "pound_lines_head": _fill("#    \t   define\t\t\t__has_include\n"),
+    "blank_head": _fill(" ", "", "#define __has_include(x) 0\n"),
+    "ifs_quotes": _fill('#if __has_include("a.h") && "x" && __has_include(<b.h>)\n'),
+    "elif_many": _fill("#elif __has_include(<a.h>)\n"),
+    "defined_paren_blanks": _fill(" ", "#if defined(", "__has_include)\n"),
+    "unterminated_quote": _fill('__has_include("'),
+    "plain": _fill("int add(int a, int b) { return a + b; } // scale\n"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ALL_LEXING_SHAPES))
+def test_regression_all_lexings_of_a_640_kb_file_stay_under_two_seconds(shape):
+    """The whole of ``scan_added_lexings`` (every reading), as a new file and as a half-changed file."""
+    text = _ALL_LEXING_SHAPES[shape]
+    assert 600_000 <= len(text) <= 660_000, len(text)
+    for label, before in (("new file", ""), ("half changed", text[: len(text) // 2])):
+        started = time.perf_counter()
+        scan_added_lexings(before, text, include_ok=OK)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"{shape} ({label}): {elapsed:.2f}s for every lexing of {len(text)} chars ({TAG})"
+
+
+def test_lexing_work_budget_refuses_a_large_file_that_needs_many_readings():
+    """Nine distinct readings of 640 kB is more work than one patch may cost: refused, never accepted."""
+    assert any("lexing work budget" in reason
+               for reason in scan_added_lexings("", _ALL_LEXING_SHAPES["mix"], include_ok=OK))
+    small = _fill(_MIX_UNIT, size=200 * 1024)
+    assert not any("lexing work budget" in reason for reason in scan_added_lexings("", small, include_ok=OK))
+    big_plain = _fill("int add(int a, int b) { return a + b; } // scale\n", size=2 * 1024 * 1024)
+    assert scan_added_lexings(big_plain[: len(big_plain) // 2], big_plain, include_ok=OK) == ()
+    two_readings = 'auto s = R"(x)";\n' + big_plain  # raw strings on and off: always allowed
+    assert scan_added_lexings("", two_readings, include_ok=OK) == ()
+
+
+def _union_of_every_lexing(before: str, after: str) -> set[str]:
+    found: set[str] = set()
+    modes: list[dict[str, bool]] = [{"trigraphs": t, "digraphs": d, "strict_splices": s}
+                                    for t in (True, False) for d in (True, False) for s in (True, False)]
+    modes.append({"legacy": True})
+    for raw in (True, False):
+        for mode in modes:
+            found.update(scan_hostile_directives(
+                added_logical_lines(before, after, raw_strings=raw, **mode), include_ok=OK))
+    return found
+
+
+def test_skipping_equal_readings_never_changes_the_reasons():
+    """The gated, de-duplicated scan must report exactly what scanning all 18 readings reports."""
+    rng = _rng("lexing_dedupe")
+    noise = ["\\\n", "\\ \n", "\\\f\n", "??/\n", "??/ \n", "??(", "%:", "<:", ":>", 'R"(', ')"', "/*", "*/", "'", '"']
+    checked = 0
+    for seed in HOSTILE + BENIGN:
+        for _ in range(12):
+            mutated, _names = _mutate_code(rng, seed)
+            after = _in_context(rng, mutated)
+            for _step in range(rng.randint(0, 3)):
+                k = rng.randrange(len(after) + 1)
+                after = after[:k] + rng.choice(noise) + after[k:]
+            before = rng.choice(["", _in_context(rng, ""), after[: rng.randrange(len(after) + 1)]])
+            got = set(scan_added_lexings(before, after, include_ok=OK))
+            assert got == _union_of_every_lexing(before, after), (before, after, TAG)
+            checked += 1
+    assert checked >= 700
