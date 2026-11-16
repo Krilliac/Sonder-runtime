@@ -71,8 +71,9 @@ def _substance(text):
     out = str(text or "")
     # Trailing whitespace goes before the match (the footer must end the text) but leading
     # whitespace stays until the end: the footer's own leading newline is part of the match.
-    # Stacked footers peel one per pass; 8 passes is far more than a reply ever carries.
-    for _ in range(8):
+    # Stacked footers peel one per pass. Each pass that changes the text strictly shortens it,
+    # so the loop ends without a pass cap.
+    while True:
         stripped = _ENSEMBLE_FOOTER_RE.sub("", out.rstrip())
         if stripped == out:
             break
