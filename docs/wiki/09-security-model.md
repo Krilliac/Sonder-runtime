@@ -121,9 +121,31 @@ of the model — an uncensored or "abliterated" model changes what it will
 - **Credential stores are denied by default, even inside a root.** The direct
   read tools (`file_read`, `file_read_range`, `data_inspect`, `image_inspect`,
   and the source of `file_copy`/`file_move`) refuse `.ssh`, `.aws`, `.azure`,
-  `.gnupg`, `.kube`, `.docker/config.json`, `.git/config`, `.netrc`,
-  `.git-credentials`, `.pgpass`, OpenSSH key files (`id_rsa`, `id_ed25519`,
-  ...) and `.env*` -- regardless of a developer token or `SONDER_FILE_BYPASS`.
+  `.gcloud`, `.config/gcloud`, `AppData/Roaming/gcloud`, `.gnupg`, `.kube`,
+  `.docker/config.json`, `.git/config`, `.config/gh/hosts.yml`,
+  `AppData/Roaming/GitHub CLI/hosts.yml`, `.config/glab-cli/config.yml`,
+  `.cargo/credentials[.toml]`, `.gem/credentials`, `.m2/settings.xml` and
+  `settings-security.xml`, `.netrc`, `.git-credentials`, `.pgpass`, `.npmrc`,
+  `.pypirc`, `kubeconfig`, `.terraformrc`/`terraform.rc`,
+  `credentials.tfrc.json`, `.boto`, `.s3cfg`, `.htpasswd`, `.vault-token`,
+  `*.kdbx`, GCP key files (`service-account.json`,
+  `application_default_credentials.json`), OpenSSH key files (`id_rsa`,
+  `id_ed25519`, ...) and `.env*` -- regardless of a developer token or
+  `SONDER_FILE_BYPASS`. Matching is case-insensitive and uses the root's
+  trailing directories too, so a root set at `~/.config` or `~/.config/gh`
+  does not unlock `gcloud/...`, `hosts.yml` or (for `~/.docker`)
+  `config.json`; only a root that is the store itself (`~/.ssh`,
+  `~/.config/gcloud`) or the exact file does.
+  `archive_create` refuses the same stores by full path, so a store cannot be
+  archived, extracted elsewhere and read. `archive_extract` deliberately does
+  not refuse a whole archive for a name that only the token-store additions
+  flag (`.npmrc`, `kubeconfig`, `.htpasswd`, `plain.kdbx`, ...): ordinary
+  repositories ship them. They are written, and reading the extracted file is
+  refused. Extraction refuses on the pre-existing name rules
+  (`_is_base_secret_path`) exactly as before, so `.env*` (including
+  `.env.prod.kdbx`), key files, `*credential*`/`*secret*` config files (this
+  includes `application_default_credentials.json` and
+  `credentials.tfrc.json`), `.ssh`, `.aws` and so on are still refused.
   The only way to read one is a root that names it: add the store directory
   itself (`~/.ssh`) or the exact file (`/proj/.env`) to `file_roots.local` or
   `SONDER_FILE_ROOTS` (a one-shot `/approve` of a call whose `extra_roots`

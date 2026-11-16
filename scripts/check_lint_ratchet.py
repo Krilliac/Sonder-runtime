@@ -1,6 +1,6 @@
 """Static-analysis gate and shrink-only ratchets.
 
-Three checks, one baseline file (``lint_baseline.json`` beside this script):
+Four checks, one baseline file (``lint_baseline.json`` beside this script):
 
 1. **Blocking rules** (``BLOCKING_RULES``) must have zero findings outside
    ``tests/``.  These are the classes that are runtime bugs rather than style:
@@ -16,6 +16,18 @@ Three checks, one baseline file (``lint_baseline.json`` beside this script):
    new behaviour belongs in ``sonder_runtime/``.  ``--update`` only ever
    lowers a limit.
 
+4. **Server shim ratchet**: ``server_shims`` is a *set of names*, not a count,
+   so swapping one protected name for another fails.  A shim is a top-level
+   function of ``server.py`` whose whole body forwards to a packaged module
+   through a ``deps=`` bundle (``return _campaigns.run(..., deps=_DEPS)``);
+   a name that merely re-exports moved code (``from sonder_runtime... import
+   name`` or ``name = alias.attr``) may also be listed.  The check fails when
+   the AST finds a thin-wrapper shim that is not listed, and when a listed name
+   is neither a thin wrapper nor a re-export any more.  Names are added only by
+   the extraction slice that creates the shim (``--add-shim NAME``, reviewed)
+   and leave the set when a retirement batch removes them (``--update`` prunes
+   names that no longer qualify, and never adds one).  The set starts empty.
+
 ``--rebaseline`` is the one explicit way to raise counts: it records the
 current tree as the new baseline and lists every bucket and limit it raised,
 so the rise is visible in review.  It is meant for integrating branches that
@@ -29,6 +41,7 @@ local configuration file.  Exit status: 0 ok, 1 violations, 2 tool failure.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import subprocess
 import sys
@@ -48,6 +61,11 @@ SIZE_RATCHET_MODULES = (
     "sonder_launcher.py",
     "sonder_runtime/interfaces/http/serve.py",
 )
+SERVER_SOURCE = "server.py"
+SHIMS_KEY = "server_shims"
+PACKAGED_ROOT = "sonder_runtime"
+# A shim forwards to the moved implementation with its dependency bundle.
+SHIM_BUNDLE_KEYWORD = "deps"
 
 
 def _ruff(select: tuple[str, ...], *, exclude_tests: bool) -> list[dict]:
@@ -95,6 +113,10 @@ def _counts(findings: list[dict]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
+def _baseline_sizes(baseline: dict) -> dict[str, int]:
+    return dict(baseline["module_lines"])
+
+
 def _module_sizes() -> dict[str, int]:
     sizes = {}
     for name in SIZE_RATCHET_MODULES:
@@ -105,17 +127,102 @@ def _module_sizes() -> dict[str, int]:
     return sizes
 
 
+def _packaged_aliases(tree: ast.Module) -> set[str]:
+    """Names the module binds to a ``sonder_runtime`` module or to a name inside one."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name.split(".")[0]
+                for alias in node.names
+                if alias.name.split(".")[0] == PACKAGED_ROOT
+            )
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.split(".")[0] == PACKAGED_ROOT:
+                names.update(alias.asname or alias.name for alias in node.names)
+    return names
+
+
+def _body_without_docstring(function: ast.AST) -> list[ast.stmt]:
+    body = list(function.body)
+    if (
+        body and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return body
+
+
+def find_server_shims(tree: ast.Module) -> set[str]:
+    """Top-level functions that only forward to a packaged module with a ``deps=`` bundle."""
+    aliases = _packaged_aliases(tree)
+    shims: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = _body_without_docstring(node)
+        if len(body) != 1:
+            continue
+        statement = body[0]
+        value = statement.value if isinstance(statement, (ast.Return, ast.Expr)) else None
+        if isinstance(value, ast.Await):
+            value = value.value
+        if not isinstance(value, ast.Call):
+            continue
+        func = value.func
+        if (
+            isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id in aliases
+            and any(keyword.arg == SHIM_BUNDLE_KEYWORD for keyword in value.keywords)
+        ):
+            shims.add(node.name)
+    return shims
+
+
+def find_server_reexports(tree: ast.Module) -> set[str]:
+    """Top-level names bound straight to a packaged module or to a name inside one."""
+    aliases = _packaged_aliases(tree)
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.split(".")[0] == PACKAGED_ROOT:
+                names.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Assign):
+            value = node.value
+            direct = isinstance(value, ast.Name) and value.id in aliases
+            nested = (
+                isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                and value.value.id in aliases
+            )
+            if direct or nested:
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
+def _server_shims() -> tuple[set[str], set[str]]:
+    """``(thin-wrapper shims, qualifying re-exports)`` found in ``server.py`` (empty when absent)."""
+    path = REPO_ROOT / SERVER_SOURCE
+    if not path.is_file():
+        return set(), set()
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=SERVER_SOURCE)
+    return find_server_shims(tree), find_server_reexports(tree)
+
+
 def _load_baseline() -> dict:
     if not BASELINE_PATH.is_file():
-        return {"lint": {}, "module_lines": {}}
+        return {"lint": {}, "module_lines": {}, SHIMS_KEY: []}
     data = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     if not isinstance(data.get("lint"), dict) or not isinstance(data.get("module_lines"), dict):
         raise RuntimeError("%s is malformed" % BASELINE_PATH.name)
+    shims = data.setdefault(SHIMS_KEY, [])
+    if not isinstance(shims, list) or not all(isinstance(name, str) and name for name in shims):
+        raise RuntimeError("%s: %s must be a list of names" % (BASELINE_PATH.name, SHIMS_KEY))
     return data
 
 
 def _write_baseline(
     lint: dict[str, int], sizes: dict[str, int], previous: dict, *, allow_raise: bool = False,
+    shims: set[str] | None = None,
 ) -> None:
     old_sizes = previous.get("module_lines", {})
     module_lines = {
@@ -131,6 +238,7 @@ def _write_baseline(
         "rules": list(RATCHET_RULES),
         "lint": lint,
         "module_lines": dict(sorted(module_lines.items())),
+        SHIMS_KEY: sorted(previous.get(SHIMS_KEY, []) if shims is None else shims),
     }
     BASELINE_PATH.write_text(json.dumps(payload, indent=1, sort_keys=False) + "\n", encoding="utf-8")
 
@@ -149,9 +257,19 @@ def main(argv: list[str] | None = None) -> int:
             "refuses while blocking findings exist"
         ),
     )
+    parser.add_argument(
+        "--add-shim", action="append", default=[], metavar="NAME",
+        help=(
+            "list a server.py name in server_shims; it must currently be a thin "
+            "wrapper or re-export of packaged code (the extraction slice that "
+            "creates the shim adds it, and the reviewer checks it)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.update and args.rebaseline:
         parser.error("--update and --rebaseline are mutually exclusive")
+    if args.add_shim and (args.update or args.rebaseline):
+        parser.error("--add-shim cannot be combined with --update or --rebaseline")
     try:
         blocking = _ruff(BLOCKING_RULES, exclude_tests=True)
         current = _counts(_ruff(RATCHET_RULES, exclude_tests=False))
@@ -160,6 +278,31 @@ def main(argv: list[str] | None = None) -> int:
         print("lint ratchet: %s" % exc, file=sys.stderr)
         return 2
     sizes = _module_sizes()
+    try:
+        wrappers, reexports = _server_shims()
+    except (OSError, SyntaxError, ValueError) as exc:
+        print("lint ratchet: could not read %s: %s" % (SERVER_SOURCE, exc), file=sys.stderr)
+        return 2
+    if args.add_shim:
+        unknown = sorted(name for name in args.add_shim if name not in wrappers | reexports)
+        if unknown:
+            print(
+                "refusing --add-shim: not a thin wrapper or re-export of packaged "
+                "code in %s: %s" % (SERVER_SOURCE, ", ".join(unknown)),
+                file=sys.stderr,
+            )
+            return 1
+        listed_now = set(baseline[SHIMS_KEY])
+        _write_baseline(
+            baseline["lint"], _baseline_sizes(baseline), baseline, allow_raise=True,
+            shims=listed_now | set(args.add_shim),
+        )
+        print("server_shims: added %s" % ", ".join(sorted(set(args.add_shim) - listed_now)))
+        return 0
+    listed = set(baseline[SHIMS_KEY])
+    unlisted_shims = sorted(wrappers - listed)
+    stale_shims = sorted(listed - (wrappers | reexports))
+    kept_shims = listed & (wrappers | reexports)
     blocking_violations = []
     for item in blocking:
         location = item.get("location") or {}
@@ -178,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
                 key, count, allowed.get(key, 0))
             violations.append(message)
             raised.append(message)
+    for name in unlisted_shims:
+        violations.append(
+            "server shim %s: thin wrapper of packaged code is not in server_shims "
+            "(the extraction slice that creates it adds it with --add-shim)" % name
+        )
     limits = baseline["module_lines"]
     for name, lines in sizes.items():
         if name in limits and lines > limits[name]:
@@ -190,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             for line in blocking_violations:
                 print("  " + line, file=sys.stderr)
             return 1
-        _write_baseline(current, sizes, baseline, allow_raise=True)
+        _write_baseline(current, sizes, baseline, allow_raise=True, shims=kept_shims)
         print("lint baseline rebaselined: %d findings in %d buckets; raised %d:" % (
             sum(current.values()), len(current), len(raised)))
         for line in raised:
@@ -202,10 +350,15 @@ def main(argv: list[str] | None = None) -> int:
             for line in violations:
                 print("  " + line, file=sys.stderr)
             return 1
-        _write_baseline(current, sizes, baseline)
+        _write_baseline(current, sizes, baseline, shims=kept_shims)
         print("lint baseline updated: %d findings in %d buckets" % (
             sum(current.values()), len(current)))
         return 0
+    for name in stale_shims:
+        violations.append(
+            "server shim %s: listed in server_shims but no longer a thin wrapper "
+            "or re-export (a retirement batch removes it; --update prunes it)" % name
+        )
     for line in violations:
         print(line)
     return 1 if violations else 0

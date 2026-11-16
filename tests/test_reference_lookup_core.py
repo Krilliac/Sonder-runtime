@@ -275,7 +275,9 @@ def test_select_passages_keeps_order_scores_and_bounds_k():
     ('t1558.003 kerberoasting', 'T1558.003', True),
     ('T1558 Steal or Forge', 't1558.003', False), ('T1558.0034 x', 't1558.003', False),
     ('xT1558.003', 't1558.003', False),
-    ('T1558.003 Kerberoasting', 't1558', True),       # pinned: '.' ends a token, so parent id matches
+    # A parent technique id is another page than its sub-techniques: '.' and a digit continue it.
+    ('T1558.003 Kerberoasting', 't1558', False), ('T1558 Steal or Forge Kerberos Tickets', 't1558', True),
+    ('T1558: parent', 't1558', True), ('See T1558.', 't1558', True),
     ('T1558.003 Kerberoasting', 't155', False), ('T15580 x', 't1558', False),
     ('Value 0xC000006A here', '0xc000006a', True), ('Value 0xC000006AB', '0xc000006a', False),
     ('', '4719', False), (None, '4719', False),

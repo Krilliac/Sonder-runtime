@@ -12763,10 +12763,9 @@ def repo_diff(
             scope, data["context"], data["elapsed_ms"],
         ),
     ]
-    if data["diff"]:
-        lines.append(data["diff"].rstrip())
-    else:
-        lines.append("  (no diff)")
+    lines.append(data["diff"].rstrip() or "  (no diff)")
+    if data.get("withheld"):
+        lines.append("  %d path(s) withheld (secret or control state)" % data["withheld"])
     if data["truncated"]:
         lines.append(
             "  ... output truncated at %d bytes" % data["output_limit"]
@@ -13051,8 +13050,8 @@ def text_search(
         _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     lines = [
-        "text search: %r under %s (%d files scanned)" %
-        (data["query"], data["root"], data["files_scanned"]),
+        "text search: %r under %s (%d files scanned%s)" %
+        (data["query"], data["root"], data["files_scanned"], data.get("withheld_note", "")),
     ]
     lines.extend(
         "  %(relative)s:%(line)s:%(column)s: %(text)s" % row
