@@ -302,3 +302,35 @@ def test_observatory_origins_without_a_host_are_refused_at_load(origin):
     with pytest.raises(Exception) as caught:
         load_config(env={"SONDER_OBSERVATORY_ORIGINS": origin})
     assert "live_export_origins" in str(caught.value)
+
+
+_LOOPBACK_PARITY_INPUTS = [
+    "http://[::1%25lo]:11434",
+    "http://[::1%lo]:11434",
+    "http://[::1]:11434",
+    "http://127.0.0.1:11434",
+    "http://localhost:11434",
+    "http://example.com:11434",
+    "http://[fe80::1%25eth0]:11434",
+]
+
+
+@pytest.mark.parametrize("value", _LOOPBACK_PARITY_INPUTS)
+def test_gateway_is_loopback_agrees_with_endpoint_is_loopback(value):
+    from sonder_runtime.adapters.inference import ollama_gateway
+
+    assert ollama_gateway._is_loopback(value) == ollama_endpoint.is_loopback(value)
+    if "%" in value:
+        assert ollama_gateway._is_loopback(value) is False
+        assert ollama_endpoint.is_loopback(value) is False
+
+
+@pytest.mark.parametrize("scope", ["fe80::1%*", "fe80::1%" + chr(252), "fe80::1%eth0"])
+def test_host_scope_refuses_ipv6_zone_ids(scope):
+    with pytest.raises(ValueError):
+        egress._normalize_host(scope)
+
+
+@pytest.mark.parametrize("scope", ["::1", "fe80::1", "::ffff:1.2.3.4"])
+def test_host_scope_still_accepts_bare_ipv6_literals(scope):
+    assert egress._normalize_host(scope) == scope

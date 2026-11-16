@@ -138,7 +138,10 @@ def _normalize_host(host: str) -> str:
     ):
         raise ValueError("invalid host scope")
     if ":" in value:
-        # Only an IPv6 literal, as EgressTarget.parse yields it, may hold ":".
+        # Only a bare IPv6 literal, as EgressTarget.parse yields it, may hold
+        # ":"; a zone id ("%eth0", "%*") is never part of a host scope.
+        if "%" in value:
+            raise ValueError("invalid host scope")
         try:
             ip_address(value)
         except ValueError as exc:
