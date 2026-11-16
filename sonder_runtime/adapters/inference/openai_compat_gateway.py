@@ -46,6 +46,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
+from .log_safe import redact_url
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
     Embedding,
@@ -343,7 +344,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         model = str(options.get("model") or cfg.model or request.tier or "default")
-        logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={cfg.base_url!r}, timeout={timeout}")
+        logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload = {
             "model": model,
             "messages": self._build_messages(request),
@@ -512,7 +513,8 @@ class OpenAICompatibleGateway:
     ) -> dict:
         self._require_secure_transport(cfg)
         url = cfg.base_url.rstrip("/") + path
-        logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
+        safe_url = redact_url(url)
+        logger.debug(f"OpenAICompatibleGateway._post: url={safe_url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
         if context is not None:
             self._check_liveness(context, phase="before provider send")
@@ -542,7 +544,7 @@ class OpenAICompatibleGateway:
             if code in (401, 403):
                 logger.error(
                     f"authentication failed for OpenAI-compatible endpoint, "
-                    f"http_status={code}, url={url!r}"
+                    f"http_status={code}, url={safe_url!r}"
                 )
                 raise Forbidden("endpoint rejected credentials (HTTP %d)" % code) from exc
             if code in (400, 404, 422):
@@ -550,20 +552,20 @@ class OpenAICompatibleGateway:
             if code == 429:
                 logger.warning(
                     f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
-                    f"url={url!r}"
+                    f"url={safe_url!r}"
                 )
                 raise CapacityExceeded(
                     "endpoint is rate limiting requests (HTTP 429)"
                 ) from exc
             logger.error(
                 f"OpenAI-compatible endpoint returned server error, "
-                f"http_status={code}, url={url!r}",
+                f"http_status={code}, url={safe_url!r}",
                 exc_info=True,
             )
             raise DependencyUnavailable("endpoint returned HTTP %d" % code) from exc
         except (socket.timeout, TimeoutError) as exc:
             logger.warning(
-                f"OpenAI-compatible endpoint timed out: url={url!r}, "
+                f"OpenAI-compatible endpoint timed out: url={safe_url!r}, "
                 f"timeout={timeout}"
             )
             raise DeadlineExceeded("endpoint timed out") from exc
@@ -572,11 +574,11 @@ class OpenAICompatibleGateway:
             if isinstance(reason, (socket.timeout, TimeoutError)):
                 logger.warning(
                     f"OpenAI-compatible endpoint timed out (URLError): "
-                    f"url={url!r}, timeout={timeout}"
+                    f"url={safe_url!r}, timeout={timeout}"
                 )
                 raise DeadlineExceeded("endpoint timed out") from exc
             logger.warning(
-                f"OpenAI-compatible endpoint unreachable: url={url!r}, "
+                f"OpenAI-compatible endpoint unreachable: url={safe_url!r}, "
                 f"reason={reason}"
             )
             classified = self._classified_connect_error(
@@ -590,7 +592,7 @@ class OpenAICompatibleGateway:
             # a dependency failure, never "unreachable": bytes were sent.
             logger.warning(
                 f"OpenAI-compatible endpoint sent a malformed HTTP response: "
-                f"url={url!r}, error={type(exc).__name__}"
+                f"url={safe_url!r}, error={type(exc).__name__}"
             )
             raise DependencyUnavailable(
                 "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
@@ -600,7 +602,7 @@ class OpenAICompatibleGateway:
             if classified is not None:
                 raise classified from exc
             logger.error(
-                f"OpenAI-compatible endpoint unreachable (OSError), url={url!r}",
+                f"OpenAI-compatible endpoint unreachable (OSError), url={safe_url!r}",
                 exc_info=True,
             )
             raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc

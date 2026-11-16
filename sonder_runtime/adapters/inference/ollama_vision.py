@@ -17,6 +17,7 @@ from ...domain.common.errors import (
 from ..provider_bindings import provider_bindings_from_env
 from . import ollama_endpoint
 from . import gpu_admission
+from .log_safe import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class OllamaVisionGateway:
         if self._provider_bindings.tier_providers.get(request.tier, "ollama") != "ollama":
             raise Forbidden("image analysis is only available on Ollama-bound vision tiers")
         endpoint = ollama_endpoint.normalize()
-        logger.debug(f"OllamaVisionGateway.analyze: endpoint={endpoint!r}, tier={request.tier!r}")
+        logger.debug(f"OllamaVisionGateway.analyze: endpoint={redact_url(endpoint)!r}, tier={request.tier!r}")
         if not ollama_endpoint.is_loopback(endpoint):
             raise Forbidden("vision analysis requires a loopback Ollama endpoint")
         target = self._target_resolver(request.tier, True)
@@ -102,7 +103,7 @@ class OllamaVisionGateway:
         if request.think is not None:
             payload["think"] = bool(request.think)
         url = endpoint + "/api/chat"
-        logger.debug(f"OllamaVisionGateway.analyze: posting to {url!r}, model={target.model!r}, timeout={timeout}")
+        logger.debug(f"OllamaVisionGateway.analyze: posting to {redact_url(url)!r}, model={target.model!r}, timeout={timeout}")
         data = (
             self._transport(url, payload, timeout)
             if self._transport is not None
@@ -143,12 +144,12 @@ class OllamaVisionGateway:
             raise Conflict(refused.detail) from refused
         except Exception as exc:
             logger.warning(
-                f"Ollama vision request failed: url={url!r}, "
+                f"Ollama vision request failed: url={redact_url(url)!r},"
                 f"timeout={timeout}",
                 exc_info=True,
             )
             logger.error(
-                f"Ollama vision inference request failed, url={url!r}, "
+                f"Ollama vision inference request failed, url={redact_url(url)!r},"
                 f"timeout={timeout}",
                 exc_info=True,
             )
