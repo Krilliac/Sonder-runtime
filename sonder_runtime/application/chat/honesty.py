@@ -7,7 +7,9 @@ plain response from gaining an implicit filesystem authority.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterable, Iterator
+from itertools import chain
 
 from .tool_intent import classify_file_intent
 
@@ -19,20 +21,38 @@ _FILE_CLAIM_RE = re.compile(
     r"(?:\s+(?:the|a|an|this|that))?\s+(?:file|script|document)\b",
     re.IGNORECASE,
 )
-# Path-like runs are bounded ({1,255}): an unbounded class that contains "."
-# followed by "\." backtracks quadratically when the search restarts at every
-# offset of a long dotted or slashed token (31 s for "x/" * 20000).
-_FILE_CLAIM_PATH_RE = re.compile(
-    r"\b(?:saved|created|wrote|written|generated)\b[^\n.!?]{0,120}"
-    r"(?:[A-Za-z0-9_./\\-]{1,255}\.[A-Za-z0-9]{1,12}|file|script|document)\b",
+# The path-bearing claim patterns are not regexes.  As regexes, a path class
+# holding "." followed by "\." backtracked quadratically while the search
+# restarted at every offset of a long dotted, slashed or hyphenated token
+# ("saved/" * 3333 took 24 s).  _ClaimScan below tokenises the reply once and
+# reproduces, match for match, finditer over these patterns (case-insensitive):
+#   active  \b<verb>\b[^\n.!?]{0,120}(?:<path>|file|script|document)\b
+#   paths   \b<verb>\b[^\n.!?]{0,100}?(<path>)\b
+#   passive \b(?:[A-Za-z0-9_.`'"/\\-]+\s+)?(?:file|script|document)\b<be>
+#           |\b<path>\b<be>
+# with <verb> = (?:saved|created|wrote|written|generated),
+# <path> = [A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12} and
+# <be> = \s+(?:was|has been|is)\s+(?:saved|created|written|generated)\b.
+_CLAIM_VERB = r"(?:saved|created|wrote|written|generated)"
+_CLAIM_WORD_RE = re.compile(rf"\b{_CLAIM_VERB}\b", re.IGNORECASE)
+_PATH_RUN_RE = re.compile(r"[A-Za-z0-9_./\\-]+", re.IGNORECASE)
+_QUOTED_RUN_RE = re.compile(r"[A-Za-z0-9_.`'\"/\\-]+", re.IGNORECASE)
+_SPACE_RUN_RE = re.compile(r"\s+")
+# A dot that can end <path>: its extension is followed by a word boundary.
+_GOOD_DOT_RE = re.compile(r"\.(?=[A-Za-z0-9]{1,12}\b)", re.IGNORECASE)
+_EXT_RE = re.compile(r"[A-Za-z0-9]{1,12}", re.IGNORECASE)
+_FILE_NOUN_RE = re.compile(r"(?:file|script|document)\b", re.IGNORECASE)
+_GAP_STOP_RE = re.compile(r"[\n.!?]")
+# (?<!\s) starts <be> only at the start of a whitespace run, so the search does
+# not rescan the rest of a long run from every offset inside it.
+_PASSIVE_BE_RE = re.compile(
+    r"(?<!\s)\s+(?:was|has been|is)\s+(?:saved|created|written|generated)\b",
     re.IGNORECASE,
 )
-_PASSIVE_FILE_CLAIM_RE = re.compile(
-    r"\b(?:[A-Za-z0-9_.`'\"/\\-]{1,255}\s+)?(?:file|script|document)\b\s+"
-    r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b"
-    r"|\b[A-Za-z0-9_./\\-]{1,255}\.[A-Za-z0-9]{1,12}\b\s+"
-    r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b",
-    re.IGNORECASE,
+_BOUNDARY_RE = re.compile(r"\b")
+_NO_PREFIX_RE = re.compile(r"no\s+", re.IGNORECASE)
+_NEGATED_PREFIX_RE = re.compile(
+    r"(?:did\s+not|didn't|haven't|hasn't|never|not|no|once|when|if|after)\s+(?:\w+\s+){0,2}$"
 )
 _RUN_PATH_RE = re.compile(
     r"\b(?:python(?:\.exe)?|py(?:\.exe)?|node(?:\.exe)?|ruby(?:\.exe)?|bash|sh)"
@@ -51,11 +71,157 @@ _RUN_DIRECT_PATH_RE = re.compile(
     r"([.\\/A-Za-z0-9_-]+\.[A-Za-z0-9]{1,12}))",
     re.IGNORECASE,
 )
-_CLAIM_PATH_RE = re.compile(
-    r"\b(?:saved|created|wrote|written|generated)\b[^\n.!?]{0,100}?"
-    r"([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12})\b",
-    re.IGNORECASE,
-)
+
+
+class _ClaimScan:
+    """Near-linear matcher for the active, path and passive claim patterns.
+
+    Built once per reply and read-only afterwards; owns only lists of offsets
+    into ``text``.  Every lookup is a bisect or dict probe, and the scans that
+    walk text (word-boundary searches) cover disjoint spans, so the total cost
+    is O(len(text) log len(text)) at worst.  Not shared across threads.
+    """
+
+    __slots__ = (
+        "claim_words", "good_dots", "noun_by_end", "noun_ends", "noun_starts",
+        "ok_dots", "ok_starts", "passive_be", "stops", "text", "tok_ends",
+        "tok_starts",
+    )
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.claim_words = [m.span() for m in _CLAIM_WORD_RE.finditer(text)]
+        self.passive_be = [m.span() for m in _PASSIVE_BE_RE.finditer(text)]
+        self.stops: list[int] = []
+        self.tok_starts: list[int] = []
+        self.tok_ends: list[int] = []
+        self.good_dots: list[int] = []
+        # Tokens whose last good dot lies after their first character, i.e.
+        # tokens where <path> can start at the first character.
+        self.ok_starts: list[int] = []
+        self.ok_dots: list[int] = []
+        self.noun_starts: list[int] = []
+        self.noun_ends: list[int] = []
+        self.noun_by_end: dict[int, int] = {}
+        if not self.claim_words and not self.passive_be:
+            return
+        self.stops = [m.start() for m in _GAP_STOP_RE.finditer(text)]
+        self.good_dots = good = [m.start() for m in _GOOD_DOT_RE.finditer(text)]
+        for match in _PATH_RUN_RE.finditer(text):
+            start, end = match.span()
+            self.tok_starts.append(start)
+            self.tok_ends.append(end)
+            index = bisect_left(good, end) - 1
+            if index >= 0 and good[index] > start:
+                self.ok_starts.append(start)
+                self.ok_dots.append(good[index])
+        for match in _FILE_NOUN_RE.finditer(text):
+            start, end = match.span()
+            self.noun_starts.append(start)
+            self.noun_ends.append(end)
+            self.noun_by_end[end] = start
+
+    def _stop_at_or_after(self, index: int) -> int:
+        found = bisect_left(self.stops, index)
+        return self.stops[found] if found < len(self.stops) else len(self.text)
+
+    def _last_dot_after(self, index: int) -> int:
+        """Last good dot after ``index`` in the token holding ``index``, or -1."""
+
+        token = bisect_right(self.tok_starts, index) - 1
+        if token < 0 or self.tok_ends[token] <= index:
+            return -1
+        found = bisect_left(self.good_dots, self.tok_ends[token]) - 1
+        if found >= 0 and self.good_dots[found] > index:
+            return self.good_dots[found]
+        return -1
+
+    def _ext_end(self, dot: int) -> int:
+        match = _EXT_RE.match(self.text, dot + 1)
+        return match.end() if match is not None else dot + 1
+
+    def _first_boundary(self, start: int, end: int) -> int:
+        """First word boundary in [start, end), or -1."""
+
+        if start >= end:
+            return -1
+        match = _BOUNDARY_RE.search(self.text, start, end)
+        return match.start() if match is not None and match.start() < end else -1
+
+    def active_claims(self) -> Iterator[tuple[int, int]]:
+        """Spans of the greedy "active" pattern, as finditer yields them."""
+
+        resume = 0
+        for start, verb_end in self.claim_words:
+            if start < resume:
+                continue
+            limit = min(verb_end + 120, self._stop_at_or_after(verb_end))
+            # Greedy gap: the match ends at the alternative that starts last.
+            at = end = -1
+            last = bisect_right(self.ok_starts, limit) - 1
+            if last >= 0 and self.ok_starts[last] > verb_end:
+                dot = self.ok_dots[last]
+            else:
+                dot = self._last_dot_after(verb_end)
+            if dot >= 0:
+                at, end = min(dot - 1, limit), self._ext_end(dot)
+            noun = bisect_right(self.noun_starts, limit) - 1
+            if noun >= 0 and self.noun_starts[noun] >= verb_end and self.noun_starts[noun] > at:
+                end = self.noun_ends[noun]
+            if end >= 0:
+                yield start, end
+                resume = end
+
+    def claim_path_spans(self) -> Iterator[tuple[int, int]]:
+        """Spans of group 1 of the lazy "paths" pattern, as finditer yields them."""
+
+        resume = 0
+        for start, verb_end in self.claim_words:
+            if start < resume:
+                continue
+            # Lazy gap: the first token, from the verb's end on, holding <path>.
+            dot = self._last_dot_after(verb_end)
+            at = verb_end
+            if dot < 0:
+                limit = min(verb_end + 100, self._stop_at_or_after(verb_end))
+                first = bisect_right(self.ok_starts, verb_end)
+                if first >= len(self.ok_starts) or self.ok_starts[first] > limit:
+                    continue
+                at, dot = self.ok_starts[first], self.ok_dots[first]
+            end = self._ext_end(dot)
+            yield at, end
+            resume = end
+
+    def passive_claims(self) -> Iterator[tuple[int, int]]:
+        """Spans of the "passive" pattern, as finditer yields them."""
+
+        if not self.passive_be:
+            return
+        text = self.text
+        spaces = {m.end(): m.start() for m in _SPACE_RUN_RE.finditer(text)}
+        quoted = {m.end(): m.start() for m in _QUOTED_RUN_RE.finditer(text)}
+        resume = 0
+        for be_start, be_end in self.passive_be:
+            candidates: list[int] = []
+            noun = self.noun_by_end.get(be_start)
+            if noun is not None:
+                space = spaces.get(noun)
+                run = quoted.get(space) if space is not None else None
+                if run is not None:
+                    candidates.append(self._first_boundary(max(run, resume), space))
+                if noun >= resume and _BOUNDARY_RE.match(text, noun):
+                    candidates.append(noun)
+            token = bisect_left(self.tok_ends, be_start)
+            if token < len(self.tok_ends) and self.tok_ends[token] == be_start:
+                found = bisect_left(self.good_dots, be_start) - 1
+                dot = self.good_dots[found] if found >= 0 else -1
+                if dot > self.tok_starts[token] and self._ext_end(dot) == be_start:
+                    begin = max(self.tok_starts[token], resume)
+                    candidates.append(self._first_boundary(begin, dot))
+            starts = [candidate for candidate in candidates if candidate >= 0]
+            if starts:
+                yield min(starts), be_end
+                resume = be_end
 
 
 def _without_code_fences(text: str) -> str:
@@ -92,27 +258,32 @@ def _run_paths(text: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _has_file_claim(text: str) -> bool:
-    for pattern in (_FILE_CLAIM_RE, _FILE_CLAIM_PATH_RE, _PASSIVE_FILE_CLAIM_RE):
-        for match in pattern.finditer(text):
-            if re.match(r"no\s+", match.group(0), re.IGNORECASE):
-                continue
-            prefix = text[max(0, match.start() - 32) : match.start()].casefold()
-            if re.search(
-                r"(?:did\s+not|didn't|haven't|hasn't|never|not|no|once|when|if|after)\s+(?:\w+\s+){0,2}$",
-                prefix,
-            ):
-                continue
-            return True
+def _has_file_claim(text: str, scan: _ClaimScan | None = None) -> bool:
+    scan = scan if scan is not None else _ClaimScan(text)
+    spans = chain(
+        (match.span() for match in _FILE_CLAIM_RE.finditer(text)),
+        scan.active_claims(),
+        scan.passive_claims(),
+    )
+    for start, end in spans:
+        if _NO_PREFIX_RE.match(text, start, end):
+            continue
+        prefix = text[max(0, start - 32) : start].casefold()
+        if _NEGATED_PREFIX_RE.search(prefix):
+            continue
+        return True
     return False
 
 
-def _claim_paths(text: str) -> tuple[str, ...]:
-    paths = [match.group(1) for match in _CLAIM_PATH_RE.finditer(text)]
-    for match in _PASSIVE_FILE_CLAIM_RE.finditer(text):
-        candidate = match.group(0).split()[0].strip("`\"'")
-        if "." in candidate and candidate not in paths:
+def _claim_paths(text: str, scan: _ClaimScan | None = None) -> tuple[str, ...]:
+    scan = scan if scan is not None else _ClaimScan(text)
+    paths = [text[start:end] for start, end in scan.claim_path_spans()]
+    seen = set(paths)
+    for start, end in scan.passive_claims():
+        candidate = text[start:end].split()[0].strip("`\"'")
+        if "." in candidate and candidate not in seen:
             paths.append(candidate)
+            seen.add(candidate)
     return tuple(paths)
 
 
@@ -141,8 +312,9 @@ def guard_unsaved_file_claim(
     visible = _without_code_fences(text).replace("`", "")
     written = tuple(str(path) for path in written_paths)
 
-    claim = _has_file_claim(visible)
-    claim_paths = _claim_paths(visible)
+    scan = _ClaimScan(visible)
+    claim = _has_file_claim(visible, scan)
+    claim_paths = _claim_paths(visible, scan)
     run_path = next(
         (
             path
