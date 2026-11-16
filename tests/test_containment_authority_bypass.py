@@ -465,10 +465,10 @@ def test_smuggled_authority_arguments_are_never_honoured(
 ):
     """The model knows a real developer token and a directory outside its roots."""
     dev = accounts_db[1]["developer"]
-    secret = str(outside / "secret.txt")
+    outside_file = str(outside / "secret.txt")
     # Positive control: the same token handed over by a person does open it.
-    assert SECRET in server.file_read(secret, extra_roots=str(outside), token=dev)
-    args = _smuggle_rows()(secret, str(outside), dev)[shape]
+    assert SECRET in server.file_read(outside_file, extra_roots=str(outside), token=dev)
+    args = _smuggle_rows()(outside_file, str(outside), dev)[shape]
     out = server._agent_dispatch("file_read", args)
     assert SECRET not in str(out), _fail(f"{shape} leaked the secret: {out!r}")
     assert str(out).startswith("ERROR:"), _fail(f"{shape}: {out!r}")
@@ -680,15 +680,15 @@ def test_by_design_file_bypass_env_lifts_agent_containment_but_not_for_user_role
     user-role HTTP caller's agent still meets the role allowlist first."""
     monkeypatch.setenv(*POSTURES[posture])
     monkeypatch.setenv("SONDER_FILE_BYPASS", "1")
-    secret = str(outside / "secret.txt")
-    assert SECRET in server._agent_dispatch("file_read", {"path": secret})
+    outside_file = str(outside / "secret.txt")
+    assert SECRET in server._agent_dispatch("file_read", {"path": outside_file})
     token = role_tool_policy._CALLER_ROLE.set("user")
     try:
-        out = server._agent_dispatch("file_read", {"path": secret})
+        out = server._agent_dispatch("file_read", {"path": outside_file})
     finally:
         role_tool_policy._CALLER_ROLE.reset(token)
     assert SECRET not in out and "not available to this account role" in out
-    reply = ts._handle_slash(f"/file_read path={secret}", context=_http_context("user"))
+    reply = ts._handle_slash(f"/file_read path={outside_file}", context=_http_context("user"))
     assert SECRET not in str(reply) and str(reply).startswith("refused")
 
 
