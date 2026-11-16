@@ -53,6 +53,9 @@ def _normalize_name(name: str) -> str:
     return name
 
 
+_ZONE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def _valid_dns_name(name: str) -> bool:
     if not name or len(name) > 253:
         return False
@@ -83,6 +86,9 @@ def parse_host_header(value) -> tuple[str, int | None] | None:
             if not rest.startswith(":"):
                 return None
             port_text = rest[1:]
+        if "%" in name:
+            # Browsers never send a zone id in Host; it is free text otherwise.
+            return None
         try:
             if ipaddress.ip_address(name).version != 6:
                 return None
@@ -92,6 +98,8 @@ def parse_host_header(value) -> tuple[str, int | None] | None:
     else:
         if value.count(":") > 1:
             # An unbracketed IPv6 literal is not a valid Host (RFC 9110 7.2).
+            return None
+        if not value.isascii():
             return None
         name, sep, port_text = value.partition(":")
         if sep and not port_text:
@@ -104,7 +112,7 @@ def parse_host_header(value) -> tuple[str, int | None] | None:
                 return None
     port = None
     if port_text:
-        if not port_text.isdigit() or len(port_text) > 5:
+        if not (port_text.isascii() and port_text.isdigit()) or len(port_text) > 5:
             return None
         port = int(port_text)
         if not 1 <= port <= 65535:
@@ -252,6 +260,9 @@ def forwarded_client_ip(peer: str, forwarded_for: str, *, proxy_declared: bool,
         return peer
     hops = [part.strip() for part in str(forwarded_for or "").split(",") if part.strip()]
     for hop in reversed(hops):
+        scope = hop.partition("%")[2] if "%" in hop else ""
+        if "%" in hop and not _ZONE_ID.fullmatch(scope):
+            return peer
         try:
             address = _unmapped(ipaddress.ip_address(hop))
         except ValueError:
@@ -284,6 +295,8 @@ def reflectable_origin(value) -> str | None:
     sanitizer CodeQL's ``py/http-response-splitting`` query recognises.
     """
     if not isinstance(value, str):
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         return None
     origin = value.replace("\r", "").replace("\n", "")
     return origin if origin == value else None
