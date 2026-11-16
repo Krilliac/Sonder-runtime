@@ -1477,3 +1477,151 @@ def test_regression_splice_with_form_feed_or_vertical_tab_is_joined(blank):
     """gcc and clang both accept a backslash, form feed/vertical tab, newline as a line splice."""
     text = "#inc\\" + blank + "\nlude \"/etc/passwd\"\n"
     assert _scan(text), f"splice with {blank!r} between backslash and newline hid #include ({TAG})"
+
+
+def test_text_patch_headers_never_resolve_unc_paths(tmp_path, request):
+    """A ``+++ b///host/share/x`` or ``+++ //host/share/x`` header must not make ``Path.resolve`` touch SMB."""
+    _enter_snapshot(request)
+    root = _build_world(tmp_path / "world")
+    real_resolve = Path.resolve
+    seen: list[str] = []
+
+    def spy(self, *args, **kwargs):
+        text = str(self)
+        if text.startswith("\\\\") and not text.startswith("\\\\?\\"):
+            seen.append(text)
+            raise OSError("network lookup blocked by the test")
+        return real_resolve(self, *args, **kwargs)
+
+    Path.resolve = spy  # type: ignore[method-assign]
+    request.addfinalizer(lambda: setattr(Path, "resolve", real_resolve))
+    for spelling in ("b///fuzz-host.invalid/share/x", "//fuzz-host.invalid/share/x", "b//fuzz-host.invalid/share/x",
+                     "///fuzz-host.invalid/share/x", "b/\\\\fuzz-host.invalid\\share\\x"):
+        patch = f"--- /dev/null\n+++ {spelling}\n@@ -0,0 +1 @@\n+created\n"
+        with pytest.raises((ValueError, PermissionError, FileNotFoundError, FileExistsError, tp.TextPatchError, OSError)):
+            tp.text_patch(str(root), patch, apply=False, extra_roots=str(root))
+    for network_root in ("//fuzz-host.invalid/share", "\\\\fuzz-host.invalid\\share"):
+        with pytest.raises((ValueError, PermissionError)):
+            tp.text_patch(network_root, _CREATE, apply=False)
+    assert not seen, f"UNC path resolved (network access) before rejection: {seen!r} ({TAG})"
+
+
+@pytest.mark.parametrize("value", [
+    "//host/share/x", "\\\\host\\share\\x", "\\\\?\\UNC\\host\\share\\x", "//?/UNC/host/share/x",
+    "\\\\.\\pipe\\x", "  //host/share/x", "//./pipe/x", "/??/UNC/h/s/x", "\\??\\UNC\\h\\s\\x",
+    "/??/C:/x", "\\??\\C:\\x", "\\\\?\\C:\\x", "//?/C:/x",
+])
+def test_resolve_path_rejects_network_spellings_before_resolving(value, monkeypatch):
+    real_resolve = Path.resolve
+    seen: list[str] = []
+
+    def spy(self, *args, **kwargs):
+        seen.append(str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy)
+    with pytest.raises(PermissionError):
+        file_ops.resolve_path(value)
+    assert not seen, (value, seen)
+
+
+@pytest.mark.parametrize("name", [
+    "CON", "con", "PRN", "AUX", "NUL", "nul.txt", "CON.", "CON ", "con .txt", "COM1", "com9.log", "COM0", "LPT1", "lpt9.x",
+    "COM\u00b9", "COM\u00b2.txt", "LPT\u00b3", "CONIN$", "CONOUT$", "conout$.txt",
+])
+def test_text_patch_rejects_windows_device_names(name, tmp_path, request):
+    _enter_snapshot(request)
+    root = _build_world(tmp_path / "world")
+    before = _snapshot(tmp_path / "world")
+    for spelling in (f"b/{name}", f"b/sub/{name}", f"b/{name}/x.txt"):
+        patch = f"--- /dev/null\n+++ {spelling}\n@@ -0,0 +1 @@\n+created\n"
+        with pytest.raises((ValueError, PermissionError)):
+            tp.text_patch(str(root), patch, apply=False, extra_roots=str(root))
+    assert _snapshot(tmp_path / "world") == before
+
+
+def test_patch_path_rejects_nul_anywhere():
+    for value in ("b/a\x00.txt", "\x00", "b/\x00", "a.txt\x00"):
+        with pytest.raises((ValueError, PermissionError)):
+            tp._patch_path(value, prefix="b")
+
+
+_PASSWD = '\\"/etc/passwd\\"'
+
+
+@pytest.mark.parametrize("text", [
+    'asm(".\\x69ncbin ' + _PASSWD + '");\n',
+    'asm(".\\x69nclude ' + _PASSWD + '");\n',
+    'asm(".\\151ncbin ' + _PASSWD + '");\n',
+    'asm(".\\151nclude ' + _PASSWD + '");\n',
+    'asm("\\056incbin ' + _PASSWD + '");\n',
+    'asm("\\x2eincbin ' + _PASSWD + '");\n',
+    'asm("\\u002eincbin ' + _PASSWD + '");\n',
+    'asm("\\U0000002eincbin ' + _PASSWD + '");\n',
+    'const char *s = ".\\x69ncbin ' + _PASSWD + '";\n',
+    'const char *s = ".\\151nclude ' + _PASSWD + '";\n',
+    'asm("nop\\n.\\x69nclude ' + _PASSWD + '");\n',
+])
+def test_hex_and_octal_escapes_cannot_hide_assembler_directives(text):
+    assert _scan(text), text
+    assert _scan(text, raw_strings=False), text
+
+
+def test_escape_decoding_keeps_ordinary_strings_clean():
+    for text in ('puts("a\\x41b\\101\\n\\t\\\\ \\"q\\" \\u00e9");\n', 'const char *p = "x.\\x66ile_name";\n',
+                 'asm volatile("nop\\n\\tnop");\n'):
+        assert _scan(text) == (), text
+
+
+@pytest.mark.parametrize("text", [
+    "<:<:gnu::constructor:>:> void f();\n",
+    "<:<:gnu::section(\".x\"):>:> int v;\n",
+    "??(??(gnu::constructor??)??) void f();\n",
+    "??(??(gnu::destructor??)??) void f();\n",
+    "<:[gnu::constructor]:> void f();\n",
+    "[<:gnu::constructor:>] void f();\n",
+    "??(<:gnu::constructor??):> void f();\n",
+    "??=include \"/etc/passwd\"\n",
+    "%:include \"/etc/passwd\"\n",
+    "??=pragma comment(lib, \"x\")\n",
+])
+def test_digraph_and_trigraph_attribute_brackets_are_detected(text):
+    assert _scan(text), text
+    assert _scan(text, raw_strings=False), text
+
+
+def test_normalize_translates_every_trigraph_and_digraph():
+    assert normalize_for_scan("??= ??' ??( ??) ??! ??< ??> ??-") == "# ^ [ ] | { } ~"
+    assert normalize_for_scan("a ??/\nb") == "a b"
+    assert normalize_for_scan("<: :> <% %> %: %:%:") == "[ ] { } # ##"
+    assert normalize_for_scan("a\\\f\nb") == "ab"
+    assert normalize_for_scan("a\\\v\r\nb") == "ab"
+
+
+def test_lt_colon_colon_is_not_a_digraph():
+    # C++11 [lex.pptoken]: ``<::`` not followed by ``:`` or ``>`` is ``<`` ``::``.
+    assert normalize_for_scan("std::vector<::T> v;") == "std::vector<::T> v;"
+    assert normalize_for_scan("a<::b") == "a<::b"
+    assert normalize_for_scan("a<:::b") == "a[::b"
+    assert normalize_for_scan("a<::>") == "a[]"
+    assert normalize_for_scan("x::>y") == "x::>y"
+    assert _scan("std::vector<::T> v;\nstd::map<::A, ::B> m;\n") == ()
+
+
+@pytest.mark.parametrize("spelling", ["/??/UNC/h/s/x.json", "\\??\\C:\\x.json", "\\??\\UNC\\h\\s\\x.json",
+                                      "//?/UNC/h/s/x.json", "//./pipe/x.json"])
+def test_patch_json_does_not_resolve_nt_namespace_paths(spelling, tmp_path, monkeypatch, request):
+    root = _build_json_world(tmp_path / "world")
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: root)
+    _enter_snapshot(request)
+    real_resolve = Path.resolve
+    seen: list[str] = []
+
+    def spy(self, *args, **kwargs):
+        seen.append(str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy)
+    with pytest.raises(PermissionError):
+        jp.patch_json(spelling, [{"op": "add", "path": "/z", "value": 1}])
+    assert not seen, f"{spelling!r} reached Path.resolve: {seen!r} ({TAG})"

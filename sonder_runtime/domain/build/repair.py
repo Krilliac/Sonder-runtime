@@ -163,15 +163,22 @@ def _glob_match(rel: str, glob: str) -> bool:
 
 # --- normalization and hostile scan -------------------------------------------------
 
+_TRIGRAPHS = {"=": "#", "/": "\\", "'": "^", "(": "[", ")": "]", "!": "|", "<": "{", ">": "}", "-": "~"}
+_TRIGRAPH_RE = re.compile(r"\?\?([=/'()!<>-])")
+# gcc and clang accept blanks (space, tab, form feed, vertical tab) between the
+# backslash and the newline of a line splice. CRLF/CR are already folded to LF.
+_SPLICE_RE = re.compile(r"\\[ \t\f\v]*\n")
 _RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 
 
 def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
     """Translation phases 1-3 as far as the scan needs them.
 
-    Trigraphs ``??=`` and ``??/`` are replaced, backslash-newline splices are
-    joined, digraphs ``%:%:``/``%:`` become ``##``/``#``, comments become a
-    space, and raw-string bodies are masked (their newlines kept) so text
+    All nine trigraphs are replaced, backslash-newline splices (blanks between
+    the backslash and the newline included) are joined, the digraphs
+    ``%:%:``/``%:``/``<:``/``:>``/``<%``/``%>`` become ``##``/``#``/``[``/``]``/
+    ``{``/``}`` (``<::`` not followed by ``:`` or ``>`` stays ``<`` ``::``),
+    comments become a space, and raw-string bodies are masked (their newlines kept) so text
     inside them cannot pose as a directive. Ordinary string contents are
     kept: ``_Pragma("...")`` and ``asm("...")`` arguments must stay visible.
 
@@ -183,8 +190,8 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
     string's quote and start a phantom comment that hides later lines).
     """
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    value = value.replace("??=", "#").replace("??/", "\\")
-    value = re.sub(r"\\[ \t]*\n", "", value)
+    value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
+    value = _SPLICE_RE.sub("", value)
     value = value.replace("%:%:", "##").replace("%:", "#")
     out: list[str] = []
     i = 0
@@ -233,6 +240,32 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
             out.append(value[i:min(j + 1, n)])
             i = j + 1
             continue
+        if ch in "<:%" and i + 1 < n:
+            pair = value[i:i + 2]
+            if pair == "<:":
+                if value[i + 2:i + 3] == ":" and value[i + 3:i + 4] not in (":", ">"):
+                    out.append("<")  # ``<::`` is ``<`` ``::`` (std::vector<::T>), not a digraph
+                    i += 1
+                else:
+                    out.append("[")
+                    i += 2
+                continue
+            if pair == "<%":
+                out.append("{")
+                i += 2
+                continue
+            if pair == "%>":
+                out.append("}")
+                i += 2
+                continue
+            if pair == ":>":
+                out.append("]")
+                i += 2
+                continue
+            if pair == "::":
+                out.append("::")  # maximal munch: ``::`` is one token, so ``::>`` is not ``:>``
+                i += 2
+                continue
         out.append(ch)
         i += 1
     return "".join(out)
@@ -273,7 +306,32 @@ _DECLSPEC_RE = re.compile(r"\b__declspec\s*\(\s*(?:allocate|code_seg)\b")
 _STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 
 
-def _balanced(text: str, start: int, limit: int = 4096) -> str:
+class _ScanBudgetExceeded(Exception):
+    """The scan did more work than a bounded input can legitimately need."""
+
+
+class _Budget:
+    """Character-steps still allowed for one scan (shared by every bounded sub-scan)."""
+
+    __slots__ = ("left",)
+
+    def __init__(self, steps: int) -> None:
+        self.left = steps
+
+    def charge(self, steps: int) -> None:
+        self.left -= steps
+        if self.left < 0:
+            raise _ScanBudgetExceeded
+
+
+# Each unterminated opener re-scans up to 4096 characters, so N openers cost
+# N * 4096 steps. A scan may spend this base plus a few steps per input
+# character; past it the input is refused (fail closed), never accepted.
+_SCAN_BUDGET_BASE = 262_144
+_SCAN_BUDGET_PER_CHAR = 8
+
+
+def _balanced(text: str, start: int, limit: int = 4096, budget: _Budget | None = None) -> str:
     """Text from ``start`` (just after an opening paren) to its closing paren."""
     depth = 1
     i = start
@@ -294,14 +352,41 @@ def _balanced(text: str, start: int, limit: int = 4096) -> str:
         elif ch == ")":
             depth -= 1
             if depth == 0:
+                if budget is not None:
+                    budget.charge(2 * (i - start) + 1)
                 return text[start:i]
         i += 1
+    if budget is not None:
+        budget.charge(2 * (end - start) + 1)
     return text[start:end]
 
 
+_C_ESCAPE_RE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]+)|([0-7]{1,3})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([ntrabfv'\"\\?]))")
+_C_SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+                     "'": "'", '"': '"', "\\": "\\", "?": "?"}
+
+
+def _decode_escape(match: re.Match) -> str:
+    hex_digits, octal, small, large, simple = match.groups()
+    if simple is not None:
+        return _C_SIMPLE_ESCAPES[simple]
+    if hex_digits is not None:
+        return chr(int(hex_digits, 16) & 0xFF)  # greedy like C; the byte is what reaches the assembler
+    if octal is not None:
+        return chr(int(octal, 8) & 0xFF)
+    code = int(small if small is not None else large, 16)
+    return chr(code) if code <= 0x10FFFF else match.group(0)
+
+
 def _unescape(literal: str) -> str:
+    """Decode the C escapes (simple, octal, ``\\x``, ``\\u``, ``\\U``) of a string literal.
+
+    ``.\\x69ncbin`` and ``.\\151ncbin`` reach the assembler as ``.incbin``, so the
+    directive scan has to see the decoded text.
+    """
     body = literal[1:-1] if len(literal) >= 2 else literal
-    return body.replace('\\"', '"').replace("\\\\", "\\")
+    return _C_ESCAPE_RE.sub(_decode_escape, body)
 
 
 def include_path_problem(path: str, *, quoted: bool) -> str:
@@ -343,14 +428,25 @@ def scan_hostile_directives(added_text: str, *,
 
     ``include_ok(path)`` decides containment of a quoted include relative to
     the edited file (it must refuse ``..`` escaping the project root).
+    The scan has a work budget linear in the input; an input that exhausts it
+    (thousands of unterminated openers) is refused, never accepted.
     """
+    text = str(added_text or "")
+    budget = _Budget(_SCAN_BUDGET_BASE + _SCAN_BUDGET_PER_CHAR * len(text))
+    try:
+        return _scan_hostile_directives(text, include_ok=include_ok, budget=budget)
+    except _ScanBudgetExceeded:
+        return ("scan work budget exceeded (unterminated openers); the input is refused",)
+
+
+def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
+                             budget: _Budget) -> tuple[str, ...]:
     reasons: list[str] = []
 
     def refuse(reason: str) -> None:
         if reason not in reasons:
             reasons.append(reason)
 
-    text = str(added_text or "")
     for line in text.split("\n"):
         directive = _DIRECTIVE_RE.match(line)
         if not directive:
@@ -380,7 +476,7 @@ def scan_hostile_directives(added_text: str, *,
             if _PRAGMA_BAD_RE.search(rest):
                 refuse("#pragma %s is refused" % clip(rest.split("(")[0].strip(), 40))
     for match in _PRAGMA_OP_RE.finditer(text):
-        body = _balanced(text, match.end())
+        body = _balanced(text, match.end(), budget=budget)
         literals = _STRING_RE.findall(body)
         if not literals:
             refuse("_Pragma without a string literal is refused")
@@ -388,7 +484,7 @@ def scan_hostile_directives(added_text: str, *,
         if _PRAGMA_BAD_RE.search(" ".join(_unescape(item) for item in literals)):
             refuse("_Pragma with a linker/section directive is refused")
     for match in _MS_PRAGMA_RE.finditer(text):
-        if _PRAGMA_BAD_RE.search(_balanced(text, match.end())):
+        if _PRAGMA_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__pragma with a linker/section directive is refused")
     for match in _HAS_RE.finditer(text):
         quoted = match.group(1) == '"'
@@ -409,12 +505,13 @@ def scan_hostile_directives(added_text: str, *,
         paren = window.find("(")
         brace = window.find("{")
         if paren >= 0 and (brace < 0 or paren < brace):
-            body = _balanced(window, paren + 1)
+            body = _balanced(window, paren + 1, budget=budget)
         elif brace >= 0:
             end = window.find("}", brace)
             body = window[brace: end if end > 0 else len(window)]
         else:
             body = window[:256]
+        budget.charge(4 * len(body) + 1)  # the string/regex passes below walk the whole body
         joined = "".join(_unescape(item) for item in _STRING_RE.findall(body))
         if _ASM_DIRECTIVE_RE.search(_asm_text(body)) or _ASM_DIRECTIVE_RE.search(_asm_text(joined)):
             refuse("inline assembly with an assembler file/section directive is refused")
@@ -429,10 +526,10 @@ def scan_hostile_directives(added_text: str, *,
             refuse("string literal carrying an assembler directive is refused")
             break
     for match in _ATTRIBUTE_RE.finditer(text):
-        if _ATTR_BAD_RE.search(_balanced(text, match.end())):
+        if _ATTR_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__attribute__ section/constructor/destructor is refused")
     for match in _CXX_ATTR_OPEN_RE.finditer(text):
-        end = text.find("]]", match.end())
+        end = text.find("]]", match.end(), match.end() + 1026)
         body = text[match.end(): end if end >= 0 else len(text)][:1024]
         if _ATTR_BAD_RE.search(body):
             refuse("[[gnu::section/constructor/destructor]] is refused")
@@ -514,7 +611,7 @@ def parse_candidate_patch(text: str, *, model_id: str = "") -> CandidatePatch:
         stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped)
     try:
         document = json.loads(stripped)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer is not JSON") from exc
     if not isinstance(document, dict) or set(document) - {"hunks", "rationale"}:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer has unexpected fields")

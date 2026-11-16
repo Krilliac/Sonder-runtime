@@ -1245,9 +1245,23 @@ def _require_plain_name_spelling(path: str) -> None:
         )
 
 
+def _reject_network_path(path: str) -> None:
+    """Refuse a UNC / extended / device-namespace spelling before any filesystem call.
+
+    ``Path.resolve`` (and even ``lstat``) on ``//host/share`` opens an SMB
+    connection and can leak NTLM credentials before a containment check runs.
+    Covers both slash flavours of the UNC, extended (``//?/``), device (``//./``) and NT (``/??/``) forms.
+    """
+    text = str(path).strip()
+    flat = text.replace("/", "\\")
+    if flat.startswith(("\\\\", "\\??\\")):
+        raise PermissionError("refusing a UNC or network path spelling")
+
+
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
     if not (path or "").strip():
         raise ValueError("empty path")
+    _reject_network_path(path)
     _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
