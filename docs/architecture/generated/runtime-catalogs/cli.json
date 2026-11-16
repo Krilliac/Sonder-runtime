@@ -235,6 +235,54 @@
       "summary": "Inspect one persistent autonomous run or the controller ledger."
     },
     {
+      "category": "diagnostics",
+      "name": "/batch_job_add_items",
+      "risk": "ask",
+      "summary": "Add a page of {key, fields} items to a draft, queued, running or paused job."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_cancel",
+      "risk": "ask",
+      "summary": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_create",
+      "risk": "ask",
+      "summary": "Create a durable batch job: N items through one or more local-model stages."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_recent",
+      "risk": "safe",
+      "summary": "List recent batch jobs available to this caller (ids, states and counts only)."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_results",
+      "risk": "safe",
+      "summary": "One page of per-item results with each step's exact answer, models and tokens (owner only)."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_resume",
+      "risk": "ask",
+      "summary": "Resume a paused, interrupted or cancelled job; an answered step is never run again."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/batch_job_start",
+      "risk": "ask",
+      "summary": "Queue a draft job; one worker runs queued jobs in order."
+    },
+    {
+      "category": "runtime",
+      "name": "/batch_job_status",
+      "risk": "safe",
+      "summary": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers."
+    },
+    {
       "category": "dev",
       "name": "/build",
       "risk": "execution",
@@ -1637,6 +1685,12 @@
       "name": "/secret_scan",
       "risk": "ask",
       "summary": "Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens)."
+    },
+    {
+      "category": "data",
+      "name": "/security_eval",
+      "risk": "mutation",
+      "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context."
     },
     {
       "category": "updates",

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "2d77139f647cb77182e7b8eb8deb55e12e129ce5ed72720299595aa5e1c532f9",
+    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "2d77139f647cb77182e7b8eb8deb55e12e129ce5ed72720299595aa5e1c532f9",
+      "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -1001,6 +1001,280 @@
             "type": "object"
           },
           "name": "autopilot_status"
+        },
+        {
+          "description": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "items": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Items",
+                "type": "array"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id",
+              "items"
+            ],
+            "title": "batch_job_add_itemsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_add_items"
+        },
+        {
+          "description": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_cancelArguments",
+            "type": "object"
+          },
+          "name": "batch_job_cancel"
+        },
+        {
+          "description": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "fields": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fields"
+              },
+              "items": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Items"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "stages": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Stages",
+                "type": "array"
+              },
+              "start": {
+                "default": false,
+                "title": "Start",
+                "type": "boolean"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "stages"
+            ],
+            "title": "batch_job_createArguments",
+            "type": "object"
+          },
+          "name": "batch_job_create"
+        },
+        {
+          "description": "List recent batch jobs available to this caller (ids, states and counts only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_finished": {
+                "default": true,
+                "title": "Include Finished",
+                "type": "boolean"
+              },
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "title": "batch_job_recentArguments",
+            "type": "object"
+          },
+          "name": "batch_job_recent"
+        },
+        {
+          "description": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_answers": {
+                "default": true,
+                "title": "Include Answers",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "offset": {
+                "default": 0,
+                "title": "Offset",
+                "type": "integer"
+              },
+              "stage": {
+                "default": "",
+                "title": "Stage",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resultsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_results"
+        },
+        {
+          "description": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_failed": {
+                "default": false,
+                "title": "Include Failed",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resumeArguments",
+            "type": "object"
+          },
+          "name": "batch_job_resume"
+        },
+        {
+          "description": "Queue a draft job; one worker runs queued jobs in order.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_startArguments",
+            "type": "object"
+          },
+          "name": "batch_job_start"
+        },
+        {
+          "description": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_statusArguments",
+            "type": "object"
+          },
+          "name": "batch_job_status"
         },
         {
           "description": "Clean build artifacts (auto-detects Make, Cargo, Go).",
@@ -6274,6 +6548,68 @@
           "name": "secret_scan"
         },
         {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
+        },
+        {
           "description": "Check for common local breakage without changing anything.",
           "effects": [],
           "execution_class": "pure",
@@ -9139,6 +9475,256 @@
       "risk": "safe",
       "summary": "Inspect one persistent autonomous run or the controller ledger.",
       "tool": "autopilot_status"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_add_items",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "items",
+          "required": true,
+          "type": "list"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+      "tool": "batch_job_add_items"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_cancel",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+      "tool": "batch_job_cancel"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_create",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "name",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "stages",
+          "required": true,
+          "type": "list"
+        },
+        {
+          "default": null,
+          "name": "fields",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "items",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "start",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Create a durable batch job: N items through one or more local-model stages.",
+      "tool": "batch_job_create"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_recent",
+      "native": false,
+      "params": [
+        {
+          "default": 20,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": true,
+          "name": "include_finished",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "List recent batch jobs available to this caller (ids, states and counts only).",
+      "tool": "batch_job_recent"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_results",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "stage",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "offset",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 50,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": true,
+          "name": "include_answers",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+      "tool": "batch_job_results"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_resume",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "include_failed",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+      "tool": "batch_job_resume"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/batch_job_start",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Queue a draft job; one worker runs queued jobs in order.",
+      "tool": "batch_job_start"
+    },
+    {
+      "aliases": [],
+      "category": "runtime",
+      "name": "/batch_job_status",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "job_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+      "tool": "batch_job_status"
     },
     {
       "aliases": [],
@@ -15718,6 +16304,77 @@
     },
     {
       "aliases": [],
+      "category": "data",
+      "name": "/security_eval",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "model",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "out_dir",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "dataset",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "item",
+          "name": "mode",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "context",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 0,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": "",
+          "name": "categories",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "stages",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "hids",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": false,
+          "name": "score_only",
+          "required": false,
+          "type": "bool"
+        }
+      ],
+      "risk": "mutation",
+      "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context.",
+      "tool": "security_eval"
+    },
+    {
+      "aliases": [],
       "category": "updates",
       "name": "/self_heal_check",
       "native": false,
@@ -18034,6 +18691,12 @@
     },
     {
       "default": null,
+      "field": "batch_jobs",
+      "section": "root",
+      "type": "BatchJobsConfig"
+    },
+    {
+      "default": null,
       "field": "claim_check",
       "section": "root",
       "type": "ClaimCheckConfig"
@@ -18043,6 +18706,12 @@
       "field": "build_tools",
       "section": "root",
       "type": "BuildToolsConfig"
+    },
+    {
+      "default": null,
+      "field": "security_eval",
+      "section": "root",
+      "type": "SecurityEvalConfig"
     },
     {
       "default": null,
@@ -18451,6 +19120,96 @@
       "field": "retention_monthly",
       "section": "backup",
       "type": "int"
+    },
+    {
+      "default": true,
+      "field": "enabled",
+      "section": "batch_jobs",
+      "type": "<class 'bool'>"
+    },
+    {
+      "default": 5000,
+      "field": "max_items_per_job",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 8,
+      "field": "max_stages",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 500,
+      "field": "max_items_per_add",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 32000,
+      "field": "max_item_input_chars",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 32000,
+      "field": "max_rendered_prompt_chars",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 64000,
+      "field": "answer_max_chars",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 300,
+      "field": "default_item_timeout_seconds",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 900,
+      "field": "max_item_timeout_seconds",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 4,
+      "field": "max_active_jobs",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 5,
+      "field": "max_consecutive_failures",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 20,
+      "field": "eta_window",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": 3,
+      "field": "eta_min_samples",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
+    },
+    {
+      "default": "stage_major",
+      "field": "order",
+      "section": "batch_jobs",
+      "type": "<class 'str'>"
+    },
+    {
+      "default": 1209600,
+      "field": "retention_ttl_seconds",
+      "section": "batch_jobs",
+      "type": "<class 'int'>"
     },
     {
       "default": 1,
@@ -19701,15 +20460,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 232,
-    "commands": 350,
-    "configuration": 299,
+    "capabilities": 241,
+    "commands": 359,
+    "configuration": 316,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
-    "tools": 232
+    "tools": 241
   },
-  "digest": "7b875d2d22695c41a739d1ea5861c80614674777557cb645c8b82df0e496e532",
+  "digest": "1c76dea0494c74d3be586170c53794ab20e4768dd8e7811b6b0692b16e42e1f3",
   "events": [
     {
       "name": "session.started",
@@ -22421,9 +23180,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "2d77139f647cb77182e7b8eb8deb55e12e129ce5ed72720299595aa5e1c532f9",
+    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
     "client": {
-      "digest": "2d77139f647cb77182e7b8eb8deb55e12e129ce5ed72720299595aa5e1c532f9",
+      "digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
       "events": [
         {
           "name": "approval.denied",
@@ -23616,6 +24375,14 @@
           "autopilot_resume",
           "autopilot_start",
           "autopilot_status",
+          "batch_job_add_items",
+          "batch_job_cancel",
+          "batch_job_create",
+          "batch_job_recent",
+          "batch_job_results",
+          "batch_job_resume",
+          "batch_job_start",
+          "batch_job_status",
           "build_clean",
           "build_run",
           "calibration_status",
@@ -23769,6 +24536,7 @@
           "script_run",
           "script_search",
           "secret_scan",
+          "security_eval",
           "self_heal_check",
           "self_heal_repair",
           "session_export",
@@ -23959,6 +24727,46 @@
             "name": "autopilot_status",
             "schema_available": true,
             "summary": "Inspect one persistent autonomous run or the controller ledger."
+          },
+          {
+            "name": "batch_job_add_items",
+            "schema_available": true,
+            "summary": "Add a page of {key, fields} items to a draft, queued, running or paused job."
+          },
+          {
+            "name": "batch_job_cancel",
+            "schema_available": true,
+            "summary": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state."
+          },
+          {
+            "name": "batch_job_create",
+            "schema_available": true,
+            "summary": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start."
+          },
+          {
+            "name": "batch_job_recent",
+            "schema_available": true,
+            "summary": "List recent batch jobs available to this caller (ids, states and counts only)."
+          },
+          {
+            "name": "batch_job_results",
+            "schema_available": true,
+            "summary": "One page of per-item results with each step's exact answer, models and tokens (owner only)."
+          },
+          {
+            "name": "batch_job_resume",
+            "schema_available": true,
+            "summary": "Resume a paused, interrupted or cancelled job; an answered step is never run again."
+          },
+          {
+            "name": "batch_job_start",
+            "schema_available": true,
+            "summary": "Queue a draft job; one worker runs queued jobs in order."
+          },
+          {
+            "name": "batch_job_status",
+            "schema_available": true,
+            "summary": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers."
           },
           {
             "name": "build_clean",
@@ -24724,6 +25532,11 @@
             "name": "secret_scan",
             "schema_available": true,
             "summary": "Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens). Returns findings with file, line, and type."
+          },
+          {
+            "name": "security_eval",
+            "schema_available": true,
+            "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call."
           },
           {
             "name": "self_heal_check",
@@ -25910,6 +26723,280 @@
             "type": "object"
           },
           "name": "autopilot_status"
+        },
+        {
+          "description": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "items": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Items",
+                "type": "array"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id",
+              "items"
+            ],
+            "title": "batch_job_add_itemsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_add_items"
+        },
+        {
+          "description": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_cancelArguments",
+            "type": "object"
+          },
+          "name": "batch_job_cancel"
+        },
+        {
+          "description": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "fields": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fields"
+              },
+              "items": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Items"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "stages": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Stages",
+                "type": "array"
+              },
+              "start": {
+                "default": false,
+                "title": "Start",
+                "type": "boolean"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "stages"
+            ],
+            "title": "batch_job_createArguments",
+            "type": "object"
+          },
+          "name": "batch_job_create"
+        },
+        {
+          "description": "List recent batch jobs available to this caller (ids, states and counts only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_finished": {
+                "default": true,
+                "title": "Include Finished",
+                "type": "boolean"
+              },
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "title": "batch_job_recentArguments",
+            "type": "object"
+          },
+          "name": "batch_job_recent"
+        },
+        {
+          "description": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_answers": {
+                "default": true,
+                "title": "Include Answers",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "offset": {
+                "default": 0,
+                "title": "Offset",
+                "type": "integer"
+              },
+              "stage": {
+                "default": "",
+                "title": "Stage",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resultsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_results"
+        },
+        {
+          "description": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "include_failed": {
+                "default": false,
+                "title": "Include Failed",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resumeArguments",
+            "type": "object"
+          },
+          "name": "batch_job_resume"
+        },
+        {
+          "description": "Queue a draft job; one worker runs queued jobs in order.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_startArguments",
+            "type": "object"
+          },
+          "name": "batch_job_start"
+        },
+        {
+          "description": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_statusArguments",
+            "type": "object"
+          },
+          "name": "batch_job_status"
         },
         {
           "description": "Clean build artifacts (auto-detects Make, Cargo, Go).",
@@ -31181,6 +32268,68 @@
             "type": "object"
           },
           "name": "secret_scan"
+        },
+        {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
         },
         {
           "description": "Check for common local breakage without changing anything.",
@@ -34978,6 +36127,264 @@
           "name": "autopilot_status"
         },
         {
+          "description": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+          "inputSchema": {
+            "properties": {
+              "items": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Items",
+                "type": "array"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id",
+              "items"
+            ],
+            "title": "batch_job_add_itemsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_add_items"
+        },
+        {
+          "description": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+          "inputSchema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_cancelArguments",
+            "type": "object"
+          },
+          "name": "batch_job_cancel"
+        },
+        {
+          "description": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start.",
+          "inputSchema": {
+            "properties": {
+              "fields": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Fields"
+              },
+              "items": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Items"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "stages": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Stages",
+                "type": "array"
+              },
+              "start": {
+                "default": false,
+                "title": "Start",
+                "type": "boolean"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "stages"
+            ],
+            "title": "batch_job_createArguments",
+            "type": "object"
+          },
+          "name": "batch_job_create"
+        },
+        {
+          "description": "List recent batch jobs available to this caller (ids, states and counts only).",
+          "inputSchema": {
+            "properties": {
+              "include_finished": {
+                "default": true,
+                "title": "Include Finished",
+                "type": "boolean"
+              },
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "title": "batch_job_recentArguments",
+            "type": "object"
+          },
+          "name": "batch_job_recent"
+        },
+        {
+          "description": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+          "inputSchema": {
+            "properties": {
+              "include_answers": {
+                "default": true,
+                "title": "Include Answers",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "limit": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "offset": {
+                "default": 0,
+                "title": "Offset",
+                "type": "integer"
+              },
+              "stage": {
+                "default": "",
+                "title": "Stage",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resultsArguments",
+            "type": "object"
+          },
+          "name": "batch_job_results"
+        },
+        {
+          "description": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+          "inputSchema": {
+            "properties": {
+              "include_failed": {
+                "default": false,
+                "title": "Include Failed",
+                "type": "boolean"
+              },
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_resumeArguments",
+            "type": "object"
+          },
+          "name": "batch_job_resume"
+        },
+        {
+          "description": "Queue a draft job; one worker runs queued jobs in order.",
+          "inputSchema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_startArguments",
+            "type": "object"
+          },
+          "name": "batch_job_start"
+        },
+        {
+          "description": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+          "inputSchema": {
+            "properties": {
+              "job_id": {
+                "title": "Job Id",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ],
+            "title": "batch_job_statusArguments",
+            "type": "object"
+          },
+          "name": "batch_job_status"
+        },
+        {
           "description": "Clean build artifacts (auto-detects Make, Cargo, Go).",
           "inputSchema": {
             "properties": {
@@ -39943,6 +41350,66 @@
           "name": "secret_scan"
         },
         {
+          "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+          "inputSchema": {
+            "properties": {
+              "categories": {
+                "default": "",
+                "title": "Categories",
+                "type": "string"
+              },
+              "context": {
+                "default": "",
+                "title": "Context",
+                "type": "string"
+              },
+              "dataset": {
+                "default": "",
+                "title": "Dataset",
+                "type": "string"
+              },
+              "hids": {
+                "default": "",
+                "title": "Hids",
+                "type": "string"
+              },
+              "limit": {
+                "default": 0,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mode": {
+                "default": "item",
+                "title": "Mode",
+                "type": "string"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "out_dir": {
+                "default": "",
+                "title": "Out Dir",
+                "type": "string"
+              },
+              "score_only": {
+                "default": false,
+                "title": "Score Only",
+                "type": "boolean"
+              },
+              "stages": {
+                "default": "",
+                "title": "Stages",
+                "type": "string"
+              }
+            },
+            "title": "security_evalArguments",
+            "type": "object"
+          },
+          "name": "security_eval"
+        },
+        {
           "description": "Check for common local breakage without changing anything.",
           "inputSchema": {
             "properties": {},
@@ -42543,6 +44010,288 @@
                 }
               },
               "title": "autopilot_statusArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+            "name": "batch_job_add_items",
+            "parameters": {
+              "properties": {
+                "items": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Items",
+                  "type": "array"
+                },
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id",
+                "items"
+              ],
+              "title": "batch_job_add_itemsArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+            "name": "batch_job_cancel",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "title": "batch_job_cancelArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start.",
+            "name": "batch_job_create",
+            "parameters": {
+              "properties": {
+                "fields": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Fields"
+                },
+                "items": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Items"
+                },
+                "name": {
+                  "title": "Name",
+                  "type": "string"
+                },
+                "stages": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Stages",
+                  "type": "array"
+                },
+                "start": {
+                  "default": false,
+                  "title": "Start",
+                  "type": "boolean"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "stages"
+              ],
+              "title": "batch_job_createArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "List recent batch jobs available to this caller (ids, states and counts only).",
+            "name": "batch_job_recent",
+            "parameters": {
+              "properties": {
+                "include_finished": {
+                  "default": true,
+                  "title": "Include Finished",
+                  "type": "boolean"
+                },
+                "limit": {
+                  "default": 20,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "title": "batch_job_recentArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+            "name": "batch_job_results",
+            "parameters": {
+              "properties": {
+                "include_answers": {
+                  "default": true,
+                  "title": "Include Answers",
+                  "type": "boolean"
+                },
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "limit": {
+                  "default": 50,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "offset": {
+                  "default": 0,
+                  "title": "Offset",
+                  "type": "integer"
+                },
+                "stage": {
+                  "default": "",
+                  "title": "Stage",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "title": "batch_job_resultsArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+            "name": "batch_job_resume",
+            "parameters": {
+              "properties": {
+                "include_failed": {
+                  "default": false,
+                  "title": "Include Failed",
+                  "type": "boolean"
+                },
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "title": "batch_job_resumeArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Queue a draft job; one worker runs queued jobs in order.",
+            "name": "batch_job_start",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "title": "batch_job_startArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+            "name": "batch_job_status",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "title": "Job Id",
+                  "type": "string"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "title": "batch_job_statusArguments",
               "type": "object"
             }
           },
@@ -47974,6 +49723,69 @@
         },
         {
           "function": {
+            "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+            "name": "security_eval",
+            "parameters": {
+              "properties": {
+                "categories": {
+                  "default": "",
+                  "title": "Categories",
+                  "type": "string"
+                },
+                "context": {
+                  "default": "",
+                  "title": "Context",
+                  "type": "string"
+                },
+                "dataset": {
+                  "default": "",
+                  "title": "Dataset",
+                  "type": "string"
+                },
+                "hids": {
+                  "default": "",
+                  "title": "Hids",
+                  "type": "string"
+                },
+                "limit": {
+                  "default": 0,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "mode": {
+                  "default": "item",
+                  "title": "Mode",
+                  "type": "string"
+                },
+                "model": {
+                  "default": "",
+                  "title": "Model",
+                  "type": "string"
+                },
+                "out_dir": {
+                  "default": "",
+                  "title": "Out Dir",
+                  "type": "string"
+                },
+                "score_only": {
+                  "default": false,
+                  "title": "Score Only",
+                  "type": "boolean"
+                },
+                "stages": {
+                  "default": "",
+                  "title": "Stages",
+                  "type": "string"
+                }
+              },
+              "title": "security_evalArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Check for common local breakage without changing anything.",
             "name": "self_heal_check",
             "parameters": {
@@ -49795,13 +51607,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "ce12ceccaf03154701106f975ce9be344b7089d9542e7d7b782814b5b9f7ce61",
+    "server.py": "982ee690083d36ea428e46ccbae951f2dc73b95c3650f81871667b9eeb51513c",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "0a1147fced9303fa79cd5c66a03ffa4d3afd781496fb544f48a7b55779518b07",
+    "sonder_runtime/platform/config.py": "fe9130c5ba494858db13d02eeb79815459764e5b204d9646d9a11a0beb57ed84",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -50669,6 +52481,264 @@
           }
         },
         "title": "autopilot_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Add a page of {key, fields} items to a draft, queued, running or paused job.",
+      "name": "batch_job_add_items",
+      "parameters": {
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "items"
+        ],
+        "title": "batch_job_add_itemsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Stop a job: no further step is dispatched; an in-flight call keeps the truthful fanout state.",
+      "name": "batch_job_cancel",
+      "parameters": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "batch_job_cancelArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create a durable batch job: N items through one or more local-model stages.\n\n``stages`` is a list of {name, model, prompt, system, num_predict, num_ctx, think,\ntemperature, timeout_s, depends_on}; a prompt may use {{field}} and, for a later\nstage, {{stage.<earlier stage>}}.  ``items`` are {key, fields:{...}}.  Local models\nonly.  With ``start`` true the job is queued at once; otherwise call batch_job_start.",
+      "name": "batch_job_create",
+      "parameters": {
+        "properties": {
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fields"
+          },
+          "items": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Items"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "stages": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Stages",
+            "type": "array"
+          },
+          "start": {
+            "default": false,
+            "title": "Start",
+            "type": "boolean"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "stages"
+        ],
+        "title": "batch_job_createArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "List recent batch jobs available to this caller (ids, states and counts only).",
+      "name": "batch_job_recent",
+      "parameters": {
+        "properties": {
+          "include_finished": {
+            "default": true,
+            "title": "Include Finished",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "title": "batch_job_recentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "One page of per-item results with each step's exact answer, models and tokens (owner only).",
+      "name": "batch_job_results",
+      "parameters": {
+        "properties": {
+          "include_answers": {
+            "default": true,
+            "title": "Include Answers",
+            "type": "boolean"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "stage": {
+            "default": "",
+            "title": "Stage",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "batch_job_resultsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Resume a paused, interrupted or cancelled job; an answered step is never run again.",
+      "name": "batch_job_resume",
+      "parameters": {
+        "properties": {
+          "include_failed": {
+            "default": false,
+            "title": "Include Failed",
+            "type": "boolean"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "batch_job_resumeArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Queue a draft job; one worker runs queued jobs in order.",
+      "name": "batch_job_start",
+      "parameters": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "batch_job_startArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Progress (done/total, rate, ETA), token totals, served models, failures; no answers.",
+      "name": "batch_job_status",
+      "parameters": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "batch_job_statusArguments",
         "type": "object"
       }
     },
@@ -55634,6 +57704,66 @@
           }
         },
         "title": "secret_scanArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context. Reads an external JSONL dataset (argument or SONDER_SECURITY_EVAL_DATASET), calls the named local model only (cloud and unconsented remote routes are refused), and writes items.jsonl, report.json and summary.md under out_dir. A call is a bounded slice; call again with the same out_dir to resume. score_only rescoring makes no model call.",
+      "name": "security_eval",
+      "parameters": {
+        "properties": {
+          "categories": {
+            "default": "",
+            "title": "Categories",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "dataset": {
+            "default": "",
+            "title": "Dataset",
+            "type": "string"
+          },
+          "hids": {
+            "default": "",
+            "title": "Hids",
+            "type": "string"
+          },
+          "limit": {
+            "default": 0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "item",
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "out_dir": {
+            "default": "",
+            "title": "Out Dir",
+            "type": "string"
+          },
+          "score_only": {
+            "default": false,
+            "title": "Score Only",
+            "type": "boolean"
+          },
+          "stages": {
+            "default": "",
+            "title": "Stages",
+            "type": "string"
+          }
+        },
+        "title": "security_evalArguments",
         "type": "object"
       }
     },

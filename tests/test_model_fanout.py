@@ -877,6 +877,8 @@ def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monke
 
     assert receipt["answers"] == [{
         "model": "local-a", "answer": "short answer", "elapsed_ms": receipt["answers"][0]["elapsed_ms"],
+        "requested_model": "local-a", "served_model": None, "tokens_in": None,
+        "tokens_out": None, "token_source": None,
         "answer_chars": 12, "stored_answer_chars": 12,
         "answer_truncation_known": True, "answer_truncated": False,
         "thinking_chars": 37, "done_reason": "stop",
@@ -884,6 +886,8 @@ def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monke
     assert receipt["usage"] == {
         "answer_chars": 12, "stored_answer_chars": 12, "answer_chars_known_models": 1,
         "thinking_chars": 37, "models_with_observed_thinking": 1,
+        "tokens_in_provider": 0, "tokens_out_provider": 0, "tokens_in_estimated": 0,
+        "tokens_out_estimated": 0, "rows_with_estimated_tokens": 0, "rows_with_unknown_tokens": 1,
     }
     with sqlite3.connect(database) as conn:
         stored = "\n".join(str(value) for row in conn.execute(
@@ -913,6 +917,8 @@ def test_model_fanout_usage_metadata_defaults_when_generator_has_none(monkeypatc
         "answer_chars": len("answer"), "stored_answer_chars": len("answer"),
         "answer_chars_known_models": 1, "thinking_chars": 0,
         "models_with_observed_thinking": 0,
+        "tokens_in_provider": 0, "tokens_out_provider": 0, "tokens_in_estimated": 0,
+        "tokens_out_estimated": 0, "rows_with_estimated_tokens": 0, "rows_with_unknown_tokens": 1,
     }
 
 
@@ -1783,6 +1789,8 @@ def test_vault_unavailable_fanout_result_is_configuration_failure(monkeypatch, t
     assert receipt["failures"] == [
         {
             "model": "local-a", "error": "sealed prompt unavailable", "elapsed_ms": 0,
+            "requested_model": "local-a", "served_model": None, "tokens_in": None,
+            "tokens_out": None, "token_source": None,
             "status": "failed", "failure_class": "configuration", "answer_chars": 0,
             "stored_answer_chars": 0, "answer_truncation_known": True,
             "answer_truncated": False, "thinking_chars": 0, "done_reason": None,
@@ -2193,3 +2201,55 @@ def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
     reply = server.sonder("run using phi4:latest: /run echo should-not-run", session="none")
 
     assert reply.startswith("ERROR: model selection cannot wrap a slash command")
+
+
+def test_receipt_rows_report_requested_and_served_model_with_separate_token_totals(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "m:1"}, {"name": "m:3"}]} if path == "/api/tags" else {"models": []}
+    ))
+
+    def fake_make(model, *_args, **_kwargs):
+        def generate(_prompt):
+            if model == "m:1":
+                generate.last_usage = {"tokens_in": 10, "tokens_out": 5, "token_source": "ollama"}
+                generate.last_response_meta = {"served_model": "m:2"}
+            else:
+                generate.last_usage = {"tokens_in": 7, "tokens_out": 3, "token_source": "estimated"}
+                generate.last_response_meta = {"served_model": "m:3"}
+            return "answer"
+        generate.last_usage = {}
+        generate.last_response_meta = {}
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make)
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    rows = {row["requested_model"]: row for row in receipt["answers"]}
+    assert rows["m:1"]["served_model"] == "m:2"
+    assert (rows["m:1"]["tokens_in"], rows["m:1"]["tokens_out"], rows["m:1"]["token_source"]) == (10, 5, "ollama")
+    assert rows["m:3"]["served_model"] == "m:3" and rows["m:3"]["token_source"] == "estimated"
+    usage = receipt["usage"]
+    assert (usage["tokens_in_provider"], usage["tokens_out_provider"]) == (10, 5)
+    assert (usage["tokens_in_estimated"], usage["tokens_out_estimated"]) == (7, 3)
+    assert usage["rows_with_estimated_tokens"] == 1
+
+
+def test_receipt_reports_legacy_rows_tokens_as_null_not_zero(monkeypatch, tmp_path):
+    _isolated_durable_fanout(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_get", lambda path: (
+        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+    ))
+    monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
+    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+
+    receipt = json.loads(server.model_fanout("hello", scope="local"))
+
+    row = receipt["answers"][0]
+    assert row["requested_model"] == "local-a"
+    assert row["tokens_in"] is None and row["tokens_out"] is None
+    assert row["served_model"] is None
+    assert receipt["usage"]["tokens_in_provider"] == 0
+    assert receipt["usage"]["rows_with_unknown_tokens"] == 1

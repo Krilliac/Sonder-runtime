@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+# ``token_source`` values that mean the provider counted the tokens; every other
+# non-empty source is a local estimate (or a mix) and is totalled separately.
+PROVIDER_TOKEN_SOURCES = frozenset(("ollama", "provider"))
+
+
 def usage_count(value):
     """Return a non-negative integer usage count, or ``None`` if invalid."""
     if value is None:
@@ -71,7 +76,7 @@ _RESPONSE_METADATA_KEYS = (
 )
 
 
-def response_metadata(out) -> dict:
+def response_metadata(out, served_model: str = "") -> dict:
     """The backend's bounded, non-content inference metadata for one response.
 
     Gateways can expose measured phase timing without retaining prompts,
@@ -79,6 +84,11 @@ def response_metadata(out) -> dict:
     scalar only (the historical empty-metadata contract is preserved), so
     fanout can explain output budgets without retaining private reasoning
     text; an aggregated multi-segment response reports its own total.
+
+    ``served_model`` is the model that actually answered: the response's own
+    non-empty ``model`` string, else the caller's resolved model.  It is
+    omitted when neither is known, so a requested name is never passed off as
+    a served one.
     """
     message = out.get("message")
     thinking = message.get("thinking", "") if isinstance(message, dict) else ""
@@ -91,8 +101,11 @@ def response_metadata(out) -> dict:
         if aggregate_thinking_chars is not None
         else len(thinking) if isinstance(thinking, str) else 0
     )
+    reported = out.get("model")
+    served = (reported if isinstance(reported, str) and reported.strip() else str(served_model or "")).strip()[:200]
     return {
         "done_reason": str(out.get("done_reason") or "").strip().casefold(),
         **{key: out.get(key) for key in _RESPONSE_METADATA_KEYS if key in out},
+        **({"served_model": served} if served else {}),
         **({"thinking_chars": thinking_chars} if thinking_chars > 0 else {}),
     }

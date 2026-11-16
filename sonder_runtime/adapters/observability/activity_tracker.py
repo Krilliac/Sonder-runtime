@@ -364,6 +364,7 @@ ACTION_TITLES = {
     "image_inspect": "Viewed Image",
     "artifact_generate": "Generated Assets",
     "mesh_generate": "Generated Model",
+    "security_eval": "Ran Security Eval",
     "artifact_verify": "Verified Assets",
     "game_reference_suite": "Ran Game Suite",
     "game_generate_and_test": "Built and Tested Game",

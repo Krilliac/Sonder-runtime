@@ -6,6 +6,7 @@ checks every name advertised here against the tools the MCP server registers.
 from __future__ import annotations
 
 MCP_TOOL_MANIFEST = {
+    "batch_job_create/batch_job_add_items/batch_job_start/batch_job_status/batch_job_results/batch_job_recent/batch_job_cancel/batch_job_resume": "Run a durable batch job: N items through one or more local-model stages, one single-model fanout child run per step, persisted so it resumes after a restart (an answered step is never run again). Status reports done/total, rate and ETA (null until enough samples), provider-counted and estimated tokens kept apart, and the served model per step. Results page through per-item answers, sealed at rest and returned exactly, to the owning caller only. A cloud model in any stage is refused at create time; templates use {{field}} and {{stage.<earlier stage>}} and unknown or non-ancestor references are refused. Consecutive backend failures pause the job (consecutive_failures) instead of failing every item; shared deployments scope jobs to their developer.",
     "agent": "Run a Claude-like tool-calling loop that can use local tools and web tools. Exact-ack unsafe lab mode removes its host tool policy only on a loopback, unprivileged process.",
     "autopilot_start/autopilot_status/autopilot_resume/autopilot_pause/autopilot_cancel": "Run a restart-persistent local goal with evidence-aware checkpoints, bounded replans, host tool gates, and explicit lifecycle control.",
     "runtime_policy_status/runtime_policy_update": "Inspect or guarded-edit shared hot-reloadable local model mappings and execution-lane tiers; cloud opt-in stays separate.",
@@ -59,6 +60,7 @@ MCP_TOOL_MANIFEST = {
     "run_project": "Run a bounded temporary multi-file project with optional build commands.",
     "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
     "mesh_generate": "Generate a low-poly 3D model (GLB/FBX) from a brief: model-written Blender scripts are safety-checked, built and rendered in headless Blender, critiqued by the vision model, and revised over several candidates (needs SONDER_BLENDER; runs model-written code at run_code trust).",
+    "security_eval": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context: reads an external JSONL dataset, calls only the named local model (cloud routes are refused) and writes items.jsonl, report.json and summary.md under the caller's out_dir.",
     "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
     "loop": "Repeat bounded code/model/system actions.",
     # Spell every tool out.  The old "workflow_list/save/run/delete"

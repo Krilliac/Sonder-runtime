@@ -378,6 +378,7 @@ from sonder_runtime.adapters.bounded_cloud_generation import (
 )
 from sonder_runtime.adapters.fanout_health import record_health as _fanout_health_policy
 from sonder_runtime.adapters.fanout_receipt import build_receipt as _fanout_receipt_policy
+from sonder_runtime.adapters import fanout_execution
 from sonder_runtime.adapters.fanout_synthesis import sources as _fanout_sources_policy
 from sonder_runtime.application.artifacts.candidates import CandidateFanIn
 from sonder_runtime.adapters.agent_work_coverage import (
@@ -1922,7 +1923,7 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
-            response_metadata = _response_metadata(out)  # bounded, non-content fields only
+            response_metadata = _response_metadata(out, served_model=used_model)  # bounded, non-content fields only
             gen.last_response_meta = response_metadata
             if (metadata_local := getattr(gen, "_response_metadata_local", None)) is not None:
                 metadata_local.value = response_metadata
@@ -24552,8 +24553,8 @@ def _execute_fanout_run(run_id):
     limits = _fanout_limits(run)
     try:
         ciphertext = fanout_store.execution_prompt_ciphertext(run_id)
-        question = fanout_prompt_vault.decrypt_prompt(ciphertext or "")
-    except fanout_prompt_vault.PromptVaultError:
+        question, system = fanout_execution.fanout_payload(limits, fanout_prompt_vault.decrypt_prompt(ciphertext or ""))
+    except (fanout_prompt_vault.PromptVaultError, ValueError):
         # Claim each pending row before recording the generic failure; do not
         # leak either the ciphertext or the original prompt in the receipt.
         while True:
@@ -24603,10 +24604,11 @@ def _execute_fanout_run(run_id):
                     and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
                 )
 
-            generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
-                                      timeout=limits["timeout"],
+            generate = _make_generate(model, system, limits["temperature"], limits["num_predict"],
+                                      limits["num_ctx"], timeout=limits["timeout"],
                                       allow_cloud_fallback=False, text_only=True,
-                                      cancel_check=dispatch_cancelled)
+                                      cancel_check=dispatch_cancelled,
+                                      **fanout_execution.generate_extras(limits))
             # A consent or ownership fence which wins before the durable
             # handoff has made no provider request, so it remains resumable.
             if dispatch_cancelled():
@@ -24620,25 +24622,17 @@ def _execute_fanout_run(run_id):
             raw_answer = str(generate(question) or "")
             if not raw_answer.strip():
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            metadata = getattr(generate, "last_response_meta", {}) or {}
-            metadata = dict(metadata) if isinstance(metadata, dict) else {}
-            usage = getattr(generate, "last_usage", {}) or {}
-            if isinstance(usage, dict):
-                metadata["tokens_in"] = usage.get("tokens_in", 0)
-                metadata["tokens_out"] = usage.get("tokens_out", 0)
+            metadata = fanout_execution.call_metadata(generate)
             # Preserve the raw provider count before trim/redaction while the
             # durable payload remains the prompt-safe version below.
             metadata["answer_chars"] = len(raw_answer)
-            return row, "answered", _fanout_safe_answer(raw_answer, question), "", int((time.monotonic() - started) * 1000), None, metadata
+            answer = fanout_execution.stored_answer(limits, raw_answer, question, metadata,
+                                                    seal=fanout_prompt_vault.encrypt_prompt,
+                                                    redact=_fanout_safe_answer)
+            return row, "answered", answer, "", int((time.monotonic() - started) * 1000), None, metadata
         except Exception as caught:
             exc = caught
-            metadata = getattr(generate, "last_response_meta", {}) if generate is not None else {}
-            metadata = metadata if isinstance(metadata, dict) else {}
-            usage = getattr(generate, "last_usage", {}) if generate is not None else {}
-            if isinstance(usage, dict):
-                metadata = dict(metadata)
-                metadata["tokens_in"] = usage.get("tokens_in", 0)
-                metadata["tokens_out"] = usage.get("tokens_out", 0)
+            metadata = fanout_execution.call_metadata(generate)
             # A cloud-policy revocation that wins the final pre-send fence is
             # not a provider failure and has not made a metered request. Keep
             # the row resumable by the normal skipped-result path rather than
@@ -24688,9 +24682,7 @@ def _execute_fanout_run(run_id):
                                                   _fanout_provider_retry_after_ts(exc)
                                                   if status == "failed" else None
                                               ),
-                                              answer_chars=metadata.get("answer_chars"),
-                                              thinking_chars=metadata.get("thinking_chars"),
-                                              done_reason=metadata.get("done_reason", ""))
+                                              **fanout_execution.result_fields(metadata))
         if recorded is not None:
             if (_is_cloud_model_name(row["model"])
                     and status in ("answered", "failed", "unknown")):
@@ -24739,7 +24731,7 @@ def _execute_fanout_run(run_id):
             persist(future.result())
             fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
-    if receipt is not None:
+    if receipt is not None and not limits["batch_job_id"]:
         # Local calls are recorded by _make_generate in this response thread.
         # Cloud calls use worker threads, whose activity context is purposely
         # not inherited; account for their terminal attempts once here.
@@ -26923,6 +26915,8 @@ _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
 # Convention: a registrar parameter named ``runtime`` receives this server-module provider.
 _agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
+from sonder_runtime.bootstrap.batch_job_tools import register as _register_batch_jobs  # noqa: E402
+_register_batch_jobs(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):
