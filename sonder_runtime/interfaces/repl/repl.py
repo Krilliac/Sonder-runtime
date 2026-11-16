@@ -61,6 +61,7 @@ from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
 from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.interfaces.repl import command_router
 from sonder_runtime.interfaces.repl import style as S
 from sonder_runtime.application.ports import repl_notices
@@ -1740,6 +1741,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /logs [n]          show the last n records of this session's REPL log
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
+  /temp [0-2|auto]   show/set this session's sampling temperature (auto = model preset)
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
   /cloud [status|on|off]  change process-local hosted/cloud consent
@@ -4378,6 +4380,9 @@ def main(*, machine_output=False):
                                   % build_identity.VERSION)
                     elif cmd == "/clear":
                         _clear_terminal_scrollback()
+                    elif cmd == "/temp":
+                        # Kept with this session id; the next turn reads it.
+                        _emit(_chat_temperature.temp_command(arg, session_id))
                     elif cmd == "/trace":
                         apply_trace(_on_off(arg, trace))
                     elif cmd == "/strict":

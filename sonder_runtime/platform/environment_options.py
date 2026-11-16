@@ -50,6 +50,9 @@ def local_model_options(
         "num_predict": num_predict,
         "num_ctx": normalize_context(num_ctx),
     }
+    if temperature is None:
+        # "auto": send no temperature so the model's preset applies.
+        del options["temperature"]
     runtime = {
         "num_thread": env_int_option(
             "SONDER_NUM_THREAD", cpu_thread_default(), environ=values

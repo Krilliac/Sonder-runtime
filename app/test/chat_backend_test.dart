@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
+import 'package:sonder_runtime/chat/session_temperature.dart';
 import 'package:sonder_runtime/models.dart';
 
 import 'fixtures/server_fixtures.dart';
@@ -47,10 +48,13 @@ Map<String, dynamic> _body(String body) =>
 String _lastUser(String body) =>
     ((_body(body)['messages'] as List).last as Map)['content'] as String;
 
-TurnRequest _turn(String text, {String? historyMode}) => TurnRequest(
+TurnRequest _turn(String text,
+        {String? historyMode, Object? sessionTemperature}) =>
+    TurnRequest(
       history: [ChatMessage(role: Role.user, content: text)],
       model: 'sonder',
       sessionId: 's1',
+      sessionTemperature: sessionTemperature,
       historyMode: historyMode,
     );
 
@@ -113,6 +117,64 @@ void main() {
     expect((events.last as TurnDone).reply.text, 'plain answer');
     expect(events.whereType<TurnDelta>().map((d) => d.text).join(),
         anyOf('', 'plain answer'));
+  });
+
+  test('session_temperature is absent unless the request carries one',
+      () async {
+    final bodies = <Map<String, dynamic>>[];
+    await recordStreamingClients(() async {
+      final backend = SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435');
+      await _collect(backend.startTurn(_turn('a')));
+      await _collect(backend.startTurn(_turn('b', sessionTemperature: 0.7)));
+      await _collect(backend.startTurn(_turn('c', sessionTemperature: 'auto')));
+    }, (request, body) async {
+      bodies.add(_body(await body.bytesToString()));
+      return _json('ok');
+    });
+    expect(bodies, hasLength(3));
+    expect(bodies[0].containsKey('session_temperature'), isFalse);
+    expect(bodies[1]['session_temperature'], 0.7);
+    expect(bodies[2]['session_temperature'], 'auto');
+  });
+
+  group('SessionTemperatureSync', () {
+    test('Auto and never changed sends nothing', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.next('s1', null), isNull);
+      expect(sync.next('s1', null), isNull);
+    });
+
+    test('a number is sent once, then absent while unchanged', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.next('s1', 0.7), 0.7);
+      expect(sync.next('s1', 0.7), isNull);
+      expect(sync.next('s1', 0.7), isNull);
+      expect(sync.next('s1', 1.1), 1.1);
+      expect(sync.next('s1', 1.1), isNull);
+    });
+
+    test('switching back to Auto sends "auto" once', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.next('s1', 0.7), 0.7);
+      expect(sync.next('s1', null), 'auto');
+      expect(sync.next('s1', null), isNull);
+      expect(sync.next('s1', 0.2), 0.2);
+    });
+
+    test('Auto first, then a number, is sent as a change', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.next('s1', null), isNull);
+      expect(sync.next('s1', 0.4), 0.4);
+    });
+
+    test('each session id is tracked on its own', () {
+      final sync = SessionTemperatureSync();
+      expect(sync.next('s1', 0.7), 0.7);
+      expect(sync.next('s2', 0.7), 0.7);
+      expect(sync.next('s1', 0.7), isNull);
+      expect(sync.next('s2', null), 'auto');
+      expect(sync.next('s1', 0.7), isNull);
+    });
   });
 
   test('historyMode "client" reaches the server as history: client (S5)',
