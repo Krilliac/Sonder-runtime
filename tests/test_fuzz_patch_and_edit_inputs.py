@@ -2520,7 +2520,10 @@ def test_regression_quote_after_an_exponent_sign_compilers_disagree_on_is_refuse
     assert any(_AMBIGUOUS_QUOTE in reason for reason in _refused_end_to_end(text)), text
 
 
-@pytest.mark.parametrize("number", ["1x", "1.", "1ul", "1e", "1_1"])
+# ``b.0x1`` is ``b`` and the pp-number ``.0x1``: its literal part is ``.0`` to MSVC, wherever
+# the ``.`` stands (review 7 found ``b.0x1'1`` read as a hex separator).
+@pytest.mark.parametrize("number", ["1x", "1.", "1ul", "1e", "1_1", "b.0x1", "b.0b1", "b.0xa",
+                                    "_.0B1", "b9.0x1"])
 def test_regression_separator_msvc_reads_as_a_character_literal_is_refused(number):
     """MSVC takes a quote as a separator only right after a digit of the number's literal part:
     ``1x'1`` is ``1x`` and a character literal to it, a separator to gcc and clang (C++14), while
