@@ -1,6 +1,8 @@
 """Read-only inspection facade independent of MCP and legacy modules."""
 from __future__ import annotations
 
+from typing import Any
+
 from ..context import OperationContext
 from ..ports.tool_executor import ToolCall, ToolExecutor, ToolResult
 
@@ -25,7 +27,7 @@ class InspectionService:
         self._executor = executor
 
     def inspect(
-        self, tool: str, arguments: dict, context: OperationContext
+        self, tool: str, arguments: dict[str, Any], context: OperationContext
     ) -> ToolResult:
         if tool not in INSPECTION_TOOLS:
             return ToolResult(

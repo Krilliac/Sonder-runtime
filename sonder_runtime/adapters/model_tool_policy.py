@@ -326,7 +326,7 @@ def _parse_document(raw: Any, *, extends: frozenset[str] = frozenset()) -> _Docu
 
 # ---- file access -------------------------------------------------------------
 
-def _identity(path: Path) -> tuple | None:
+def _identity(path: Path) -> tuple[Any, ...] | None:
     """Identity of one file (path, mtime, size, inode); ``(path, None)`` when absent; None when it cannot be stat'ed."""
     try:
         stat = os.stat(path)
@@ -618,10 +618,10 @@ def _merge_profiles(shipped: _Document | None, overlay: _Document | None) -> tup
 
 # ``(key, config, expiry)``: expiry is None for a clean read, else the
 # ``time.monotonic()`` after which a failed read is read again.
-_CACHE: tuple[tuple, ModelToolConfig, float | None] | None = None
+_CACHE: tuple[tuple[Any, ...], ModelToolConfig, float | None] | None = None
 
 
-def identity_key() -> tuple | None:
+def identity_key() -> tuple[Any, ...] | None:
     """Identity of both files, for callers that cache what they derived from them."""
     overlay, _reason = _safe_overlay_path()
     overlay_id = _identity(overlay) if overlay is not None else None

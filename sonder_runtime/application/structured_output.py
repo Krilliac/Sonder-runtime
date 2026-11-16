@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .context import OperationContext
-from .ports.model_gateway import ModelGateway, ModelRequest
+from .ports.model_gateway import ModelGateway, ModelRequest, ModelResponse
 from .security.prompt_provenance import ProvenanceError
 from ..domain.common.errors import InvalidInput
 from ..domain.json_reply import check_reply, unsupported_keywords
@@ -90,7 +90,7 @@ def generate_structured(
     gateway: ModelGateway,
     request: ModelRequest,
     context: OperationContext,
-    schema: dict,
+    schema: dict[str, object],
     *,
     retries: int = 1,
 ) -> StructuredResult:
@@ -111,7 +111,7 @@ def generate_structured(
     failure: StructuredFailure | None = None
     value: object = None
     unchecked: tuple[str, ...] = ()
-    response = None
+    response: ModelResponse | None = None
     for attempt in range(retries + 1):
         response = gateway.generate(current, context)
         checked = check_reply(response.text, schema)
@@ -144,6 +144,8 @@ def generate_structured(
         except ProvenanceError:
             failure = StructuredFailure("retry_unavailable", checked.errors)
             break
+    # retries >= 0 guarantees one pass through the loop above.
+    assert response is not None
     return StructuredResult(
         value=value, failure=failure, attempts=tuple(attempts),
         model=response.model, tier=response.tier,

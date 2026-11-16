@@ -14,13 +14,14 @@ A step answered earlier is never dispatched again.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import replace
 
 from sonder_runtime.application.ports.batch_jobs import (
-    BatchStorePort, JobOutcome, JobRecord, StepExecutorPort, StepRequest,
+    BatchStorePort, JobOutcome, JobRecord, RunSettings, StepExecutorPort, StepRequest,
 )
 from sonder_runtime.domain.batch_jobs import (
-    BREAKER_FAILURE_CLASSES, JobStatus, PauseReason, StepReason, StepState, StepStatus,
+    BREAKER_FAILURE_CLASSES, JobStatus, PauseReason, StageSpec, StepReason, StepState, StepStatus,
     breaker_trips, effective_statuses, is_finished, next_step, referenced_stages, render_prompt,
 )
 from sonder_runtime.domain.common.errors import SonderError
@@ -38,14 +39,14 @@ def lease_seconds_for(job: JobRecord) -> int:
     return min(MAX_LEASE_SECONDS, longest + LEASE_MARGIN_SECONDS)
 
 
-def _retry_set(states, settings) -> set[tuple[str, str]]:
+def _retry_set(states: Mapping[tuple[str, str], StepState], settings: RunSettings) -> set[tuple[str, str]]:
     retryable = {StepStatus.UNKNOWN, StepStatus.SKIPPED}
     if settings.retry_failed:
         retryable.add(StepStatus.FAILED)
     return {key for key, state in states.items() if state.status in retryable}
 
 
-def _view(states, retry) -> dict[tuple[str, str], StepState]:
+def _view(states: Mapping[tuple[str, str], StepState], retry: set[tuple[str, str]]) -> dict[tuple[str, str], StepState]:
     """States as the scheduler sees them: a step due for retry looks pending."""
     return {
         key: (replace(state, status=StepStatus.PENDING) if key in retry else state)
@@ -53,11 +54,14 @@ def _view(states, retry) -> dict[tuple[str, str], StepState]:
     }
 
 
-def _prepare(job, executor, stage, key, states):
+def _prepare(
+    job: JobRecord, executor: StepExecutorPort, stage: StageSpec, key: str,
+    states: Mapping[tuple[str, str], StepState],
+) -> tuple[StepRequest, StepReason | None]:
     """Render one step.  Returns ``(request, None)`` or ``(request, reason)`` when it cannot run."""
     item = executor.item(job.id, key)
     request = StepRequest(job=job, stage=stage, item_key=key, system="", prompt="", state=states.get((stage.name, key)))
-    upstream = {}
+    upstream: dict[str, str] = {}
     for name in referenced_stages(stage):
         source = states.get((name, key))
         if source is None or source.status is not StepStatus.ANSWERED:
@@ -87,7 +91,7 @@ def run_job(job_id: str, *, store: BatchStorePort, executor: StepExecutorPort,
     retry = _retry_set(states, settings)
     consecutive = steps_run = 0
 
-    def stop(status, reason=None):
+    def stop(status: JobStatus, reason: PauseReason | None = None) -> JobOutcome:
         store.finish(job_id, owner_id, status, reason)
         return JobOutcome(status=status, pause_reason=reason, steps_run=steps_run)
 

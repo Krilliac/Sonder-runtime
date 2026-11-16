@@ -82,6 +82,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from ...application.context import OperationContext
@@ -362,7 +363,7 @@ def check_endpoint_policy(settings: AnthropicSettings) -> None:
         )
 
 
-def load_sdk():
+def load_sdk() -> Any:
     """Import the optional SDK, or raise the typed, actionable error."""
     try:
         return importlib.import_module("anthropic")
@@ -439,7 +440,7 @@ def _type_names(exc: BaseException) -> frozenset[str]:
 class _Prepared:
     settings: AnthropicSettings
     model: str
-    params: dict
+    params: dict[str, Any]
     reservation: int
     reserved_usd: Decimal
 
@@ -548,7 +549,7 @@ class AnthropicGateway:
             )
 
     def _reserve(
-        self, settings: AnthropicSettings, model: str, params: dict,
+        self, settings: AnthropicSettings, model: str, params: dict[str, Any],
     ) -> tuple[int, Decimal]:
         """Refuse a call whose worst case would pass the cap; else reserve that cost.
 
@@ -734,7 +735,7 @@ class AnthropicGateway:
 
     # -- one physical call ----------------------------------------------------
 
-    def _build_client(self, key: str, settings: AnthropicSettings):
+    def _build_client(self, key: str, settings: AnthropicSettings) -> Any:
         if self._client_factory is not None:
             return self._client_factory(key, settings.timeout_seconds)
         # Explicit api_key and base_url make the SDK ignore ANTHROPIC_API_KEY,
@@ -762,7 +763,7 @@ class AnthropicGateway:
             )
         return client
 
-    def _client(self, slot: int, key: str, settings: AnthropicSettings):
+    def _client(self, slot: int, key: str, settings: AnthropicSettings) -> Any:
         """One SDK client per key slot, rebuilt only if its key or endpoint changed."""
         with self._lock:
             cached = self._clients.get(slot)
@@ -824,7 +825,7 @@ class AnthropicGateway:
         }
 
     def _account(
-        self, data: dict, model: str, slot: int, reserved: Decimal | None = None,
+        self, data: dict[str, Any], model: str, slot: int, reserved: Decimal | None = None,
     ) -> None:
         """The sole accounting boundary: runs for every completed physical response.
 
@@ -874,7 +875,7 @@ class AnthropicGateway:
         data["cached_tokens"] = counts["cache_read_input_tokens"]
         record_usage(facts)
 
-    def _account_partial(self, stream: object, model: str, slot: int) -> None:
+    def _account_partial(self, stream: Any, model: str, slot: int) -> None:
         """Bill what an unfinished stream already consumed; never raises.
 
         After ``message_start`` the SDK's message snapshot carries the input
@@ -893,13 +894,15 @@ class AnthropicGateway:
             logger.error("anthropic: could not account an unfinished stream (%s)", type(exc).__name__)
 
     def _attempt(
-        self, settings: AnthropicSettings, slot: int, key: str, model: str, params: dict,
-        context: OperationContext, timeout: float, sink, stop, reserved: Decimal | None = None,
-    ) -> dict:
+        self, settings: AnthropicSettings, slot: int, key: str, model: str, params: dict[str, Any],
+        context: OperationContext, timeout: float,
+        sink: Callable[[GenerationChunk], None] | None,
+        stop: threading.Event | None, reserved: Decimal | None = None,
+    ) -> dict[str, Any]:
         self._check_liveness(context, phase="before provider send")
         self._admit()
 
-        def send() -> dict:
+        def send() -> dict[str, Any]:
             failure: Exception | None = None
             final = None
             try:
@@ -932,12 +935,19 @@ class AnthropicGateway:
             return data
 
         # Evidence capture commits the effective body (never the key) before send.
-        return dispatch_provider(PROVIDER_LABEL, OPERATION, params, send)
+        # ``dispatch_provider`` is unannotated in its module; it returns exactly what
+        # ``send`` returned.  The cast is at the call so a rebind of the name is honoured.
+        return cast(
+            "Callable[[str, str, dict[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]]",
+            dispatch_provider,
+        )(PROVIDER_LABEL, OPERATION, params, send)
 
     def _invoke(
-        self, settings: AnthropicSettings, model: str, params: dict, context: OperationContext,
-        timeout: float, *, sink=None, stop=None, reserved: Decimal | None = None,
-    ) -> dict:
+        self, settings: AnthropicSettings, model: str, params: dict[str, Any], context: OperationContext,
+        timeout: float, *,
+        sink: Callable[[GenerationChunk], None] | None = None,
+        stop: threading.Event | None = None, reserved: Decimal | None = None,
+    ) -> dict[str, Any]:
         """Key 1, then key 2 once, only after a 401 or credit-exhausted refusal."""
         slots = settings.key_slots
         for position, (slot, key) in enumerate(slots):
@@ -946,7 +956,8 @@ class AnthropicGateway:
             def mark(chunk: GenerationChunk) -> None:
                 nonlocal delivered
                 delivered = True
-                sink(chunk)
+                # ``mark`` is handed to ``_attempt`` only when ``sink`` is not None.
+                cast("Callable[[GenerationChunk], None]", sink)(chunk)
 
             try:
                 return self._attempt(
@@ -967,7 +978,7 @@ class AnthropicGateway:
 
     # -- generate ----------------------------------------------------------
 
-    def _finish(self, data: dict, request: ModelRequest, model: str, started: float) -> ModelResponse:
+    def _finish(self, data: dict[str, Any], request: ModelRequest, model: str, started: float) -> ModelResponse:
         if data.get("stop_reason") == "refusal":
             raise Forbidden("Claude declined this request (stop_reason=refusal)")
         usage = data.get("usage") or {}
@@ -1010,10 +1021,10 @@ class AnthropicGateway:
         except BaseException:
             self._ledger.release(prepared.reservation)
             raise
-        events: queue.Queue = queue.Queue(maxsize=_STREAM_BUFFER_CHUNKS)
+        events: queue.Queue[GenerationChunk | None] = queue.Queue(maxsize=_STREAM_BUFFER_CHUNKS)
         stop = threading.Event()
         finished = threading.Event()
-        terminal: list[tuple[str, object]] = []
+        terminal: list[tuple[str, Any]] = []
 
         def publish(chunk: GenerationChunk) -> None:
             # A slow consumer backpressures the SDK read without trapping the
@@ -1046,7 +1057,9 @@ class AnthropicGateway:
                     pass  # the consumer discovers terminal state after drain
 
         started = time.monotonic()
-        thread = owned_runtime_thread(
+        # ``owned_runtime_thread`` is unannotated in its module; both of its paths return
+        # a ``threading.Thread``.  The cast is at the call so a rebind of the name is honoured.
+        thread = cast("Callable[..., threading.Thread]", owned_runtime_thread)(
             target=contextvars.copy_context().run, args=(worker,),
             name="anthropic-stream", daemon=True,
         )
@@ -1072,10 +1085,10 @@ class AnthropicGateway:
                     continue
                 kind, value = terminal[0]
                 if kind == "error":
-                    raise value  # type: ignore[misc]
-                response = self._finish(value, request, prepared.model, started)  # type: ignore[arg-type]
+                    raise value
+                response = self._finish(value, request, prepared.model, started)
                 yield GenerationChunk(
-                    text="", finish_reason=value.get("stop_reason"),  # type: ignore[union-attr]
+                    text="", finish_reason=value.get("stop_reason"),
                     input_tokens=response.tokens_in, output_tokens=response.tokens_out,
                 )
                 return

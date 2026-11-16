@@ -17,8 +17,9 @@ import functools
 import json
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Any, Protocol, TypeVar
 
 from ..adapters.claim_checker import ClaimChecker, claim_from_mapping
 from ..application.ports.tool_registry import ToolSchemaSelection
@@ -40,8 +41,16 @@ _DIGEST_HEX = "0" * 64  # inventory_digest and the selection_id are sha256 hex
 _ITEM_SEPARATOR = ", "  # json.dumps' default item separator between array elements
 _VERDICTS = ("reject", "flag", "keep")
 
+_F = TypeVar("_F", bound=Callable[..., object])
 
-def _error(code: str, message: str) -> dict:
+
+class _McpServer(Protocol):
+    """The one method of the MCP server object that ``register`` uses."""
+
+    def tool(self) -> Callable[[_F], _F]: ...
+
+
+def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message[:300]}}
 
 
@@ -64,7 +73,7 @@ def _default_config() -> ClaimCheckConfig:
     return getattr(config, "claim_check", None) or ClaimCheckConfig()
 
 
-def _claims_from_arguments(arguments: Mapping) -> list[dict]:
+def _claims_from_arguments(arguments: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = arguments.get("claims_json")
     single = arguments.get("file")
     if raw not in (None, "") and single not in (None, ""):
@@ -92,9 +101,9 @@ def _claims_from_arguments(arguments: Mapping) -> list[dict]:
     return raw
 
 
-def _check_reports(arguments: Mapping, config: ClaimCheckConfig | None,
+def _check_reports(arguments: Mapping[str, Any], config: ClaimCheckConfig | None,
                    root_guard: Callable[[str], str] | None,
-                   file_guard: Callable[[str], str] | None) -> tuple[dict | None, list[ClaimReport]]:
+                   file_guard: Callable[[str], str] | None) -> tuple[dict[str, Any] | None, list[ClaimReport]]:
     """Run the checks: ``(error, [])`` on a refused request, else ``(None, reports)``."""
     if not isinstance(arguments, Mapping):
         return _error("invalid_arguments", "arguments must be an object"), []
@@ -134,7 +143,7 @@ def _check_reports(arguments: Mapping, config: ClaimCheckConfig | None,
         return None, ClaimChecker(resolved, config, read_guard=read_guard).check_many(claims)
 
 
-def _read_policy_scope(default_guard: bool):
+def _read_policy_scope(default_guard: bool) -> contextlib.AbstractContextManager[Any]:
     """The default guard re-derives the control-plane inventory per call; resolve it once.
 
     A host-supplied guard owns its own cost and is left alone."""
@@ -144,13 +153,13 @@ def _read_policy_scope(default_guard: bool):
     return read_policy_snapshot()
 
 
-def _assemble(reports: list[ClaimReport], body: list[dict]) -> dict:
+def _assemble(reports: list[ClaimReport], body: list[dict[str, Any]]) -> dict[str, Any]:
     verdicts = {name: 0 for name in _VERDICTS}
     duplicates = 0
     for report in reports:
         verdicts[report.verdict.value] += 1
         duplicates += bool(report.duplicate_of)
-    out = {"ok": True, "reports": body,
+    out: dict[str, Any] = {"ok": True, "reports": body,
            "summary": {"total": len(reports), "duplicates": duplicates, "verdicts": verdicts}}
     omitted = len(reports) - len(body)
     if omitted:
@@ -158,9 +167,9 @@ def _assemble(reports: list[ClaimReport], body: list[dict]) -> dict:
     return out
 
 
-def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = None,
+def run_claim_check(arguments: Mapping[str, Any], *, config: ClaimCheckConfig | None = None,
                     root_guard: Callable[[str], str] | None = None,
-                    file_guard: Callable[[str], str] | None = None) -> dict:
+                    file_guard: Callable[[str], str] | None = None) -> dict[str, Any]:
     """Check one claim or a batch; returns a JSON-serializable dict. Refusals are typed
     errors; an unexpected fault in the checker propagates to the caller."""
     error, reports = _check_reports(arguments, config, root_guard, file_guard)
@@ -169,12 +178,13 @@ def run_claim_check(arguments: Mapping, *, config: ClaimCheckConfig | None = Non
     return _assemble(reports, _fit_reports(reports, MAX_OUTPUT_CHARS - 2, len))  # "[" and "]"
 
 
-def _fit_reports(reports, budget: int, cost: Callable[[str], int]) -> list[dict]:
+def _fit_reports(reports: list[ClaimReport], budget: int,
+                 cost: Callable[[str], int]) -> list[dict[str, Any]]:
     """Leading reports whose cost fits ``budget``; each is serialized once.
 
     ``cost(text)`` is what the JSON text of one report (or the ", " separator) adds to
     the final output; costs are additive, so the prefix is found in one pass."""
-    body: list[dict] = []
+    body: list[dict[str, Any]] = []
     used = 0
     separator = cost(_ITEM_SEPARATOR)
     for report in reports:
@@ -197,7 +207,7 @@ def _wire_cost(text: str) -> int:
 
 
 @functools.cache
-def _wrapper_evidence() -> dict:
+def _wrapper_evidence() -> dict[str, Any]:
     """The evidence native ``execute()`` adds after ``native_claim_check`` returns, at its
     worst case: the progressive-tools schema-selection marker (``_MAX_SELECTED_TOOLS``
     names at ``_MAX_TOOL_NAME_CHARS``, a 64-hex selection id), the
@@ -208,7 +218,7 @@ def _wrapper_evidence() -> dict:
             "native_compatibility_path": True}
 
 
-def native_frame_bytes(result: Mapping) -> int:
+def native_frame_bytes(result: Mapping[str, Any]) -> int:
     """Encoded size of a native tool result as the standard MCP transport writes it,
     without the JSON-RPC envelope (``_FRAME_ENVELOPE_BYTES`` covers that)."""
     standard = {
@@ -219,7 +229,7 @@ def native_frame_bytes(result: Mapping) -> int:
     return len(json.dumps(standard, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
 
 
-def _within_roots(roots) -> Callable[[str], str]:
+def _within_roots(roots: Iterable[str | os.PathLike[str]]) -> Callable[[str], str]:
     resolved = [Path(os.path.realpath(r)) for r in roots]
 
     def guard(root: str) -> str:
@@ -230,16 +240,19 @@ def _within_roots(roots) -> Callable[[str], str]:
     return guard
 
 
-def _native_result(result: dict) -> dict:
+def _native_result(result: dict[str, Any]) -> dict[str, Any]:
     failed = not result["ok"]
     return {"output": json.dumps(result, ensure_ascii=False), "isError": failed,
             "error": "tool_refused" if failed else None,
             "evidence": {"tool": "claim_check"}}
 
 
-def native_claim_check(arguments: Mapping, roots=None, *, config: ClaimCheckConfig | None = None,
-                       root_guard=None, file_guard=None,
-                       max_frame_bytes: int | None = None) -> dict:
+def native_claim_check(arguments: Mapping[str, Any],
+                       roots: Iterable[str | os.PathLike[str]] | None = None, *,
+                       config: ClaimCheckConfig | None = None,
+                       root_guard: Callable[[str], str] | None = None,
+                       file_guard: Callable[[str], str] | None = None,
+                       max_frame_bytes: int | None = None) -> dict[str, Any]:
     """Native transport handler, entered after its schema and permission gate.
 
     The reports are cut so the whole encoded response frame stays within
@@ -262,8 +275,10 @@ def native_claim_check(arguments: Mapping, roots=None, *, config: ClaimCheckConf
     return _native_result(_assemble(reports, _fit_reports(reports, budget, _wire_cost)))
 
 
-def register(mcp, record, project_root=None, *, config_provider=None, root_guard=None,
-             file_guard=None) -> None:
+def register(mcp: _McpServer, record: Callable[..., Any] | None, project_root: object = None, *,
+             config_provider: Callable[[], ClaimCheckConfig | None] | None = None,
+             root_guard: Callable[[str], str] | None = None,
+             file_guard: Callable[[str], str] | None = None) -> None:
     """Register ``claim_check`` without touching the filesystem at startup."""
 
     @mcp.tool()

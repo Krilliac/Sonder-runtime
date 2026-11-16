@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 
 _MAX_TEXT = 160
 
@@ -45,7 +46,7 @@ class Claim:
     # the cited line contradicts the claim, so they are searched, not required.
     guard_symbols: tuple[str, ...] = ()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.file, str) or not self.file.strip():
             raise ClaimError("claim needs a file")
         if self.line_start is None and self.line_end is not None:
@@ -93,7 +94,7 @@ class ClaimReport:
     guards: tuple[GuardHit, ...]
     duplicate_of: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         claim = self.claim
         return {
             "claim_id": claim.claim_id,
@@ -124,7 +125,7 @@ def _clip(text: str) -> str:
 def check_line_in_range(claim: Claim, line_count: int) -> CheckResult:
     if claim.line_start is None:
         return CheckResult("line_in_range", CheckStatus.NOT_CHECKABLE, "claim cites no line")
-    if claim.line_end > line_count:
+    if cast(int, claim.line_end) > line_count:
         return CheckResult(
             "line_in_range", CheckStatus.FAIL,
             f"cited line {claim.line_end} is past the end of the file ({line_count} lines)")
@@ -133,7 +134,7 @@ def check_line_in_range(claim: Claim, line_count: int) -> CheckResult:
         f"lines {claim.line_start}-{claim.line_end} exist ({line_count} lines)")
 
 
-def _word(symbol: str) -> re.Pattern:
+def _word(symbol: str) -> re.Pattern[str]:
     return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(symbol) + r"(?![A-Za-z0-9_])")
 
 
@@ -152,7 +153,7 @@ def check_symbols_near(claim: Claim, lines: list[str], window: int,
     if not claim.symbols:
         return CheckResult("symbols_near", CheckStatus.NOT_CHECKABLE, "claim names no symbols")
     first = max(1, claim.line_start - window)
-    last = min(len(lines), claim.line_end + window)
+    last = min(len(lines), cast(int, claim.line_end) + window)
     evidence: list[Evidence] = []
     missing: list[str] = []
     for symbol in claim.symbols:
@@ -180,7 +181,7 @@ def check_symbols_near(claim: Claim, lines: list[str], window: int,
 
 # --- guard shapes -----------------------------------------------------------
 
-_GUARD_PATTERNS: dict[str, tuple[re.Pattern, ...]] = {
+_GUARD_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "bounds": tuple(re.compile(p) for p in (
         r"\b(?:Math\.|MathF\.|MathHelper\.|std::)?(?:Min|Clamp|min|clamp)\s*\(",
         r"(?:\.Length|\.Count|\.Size|\.size\(\)|\blen\(|\bsizeof\b)[^;{]*(?:<=|>=|<|>)",
@@ -351,7 +352,7 @@ def collapse_duplicates(claims: list[Claim], window: int) -> list[int]:
         key = _file_key(claim.file)
         match = None
         for candidate in primaries.get(key, ()):
-            if abs(claims[candidate].line_start - claim.line_start) <= window:
+            if abs(cast(int, claims[candidate].line_start) - claim.line_start) <= window:
                 match = candidate
                 break
         if match is None:

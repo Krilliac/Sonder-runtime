@@ -12,7 +12,7 @@ import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ...domain.common.errors import Forbidden, InvalidInput, SonderError
 from ...domain.security_eval.context_select import HELPER_VERSION, ContextBundle
@@ -25,7 +25,7 @@ from ...domain.security_eval.scoring import (
     ChunkOutcome, ScoreRow, match_findings, paired_comparison, score, score_chunks)
 from ...domain.security_eval.summary import render_summary
 from ...domain.security_eval.verdict import VerdictParseError, parse_hypotheses, parse_verdict
-from .ports import Clock, ModelCall, RepoProvider, ResultStore, VerdictModel
+from .ports import Clock, ModelCall, Repo, RepoProvider, ResultStore, SourceWindow, VerdictModel
 
 ARMS = ("none", "retrieved")
 MODES = ("item", "chunk")
@@ -48,9 +48,9 @@ class RunPlan:
     keep_raw_chars: int = 0
     chunk_chars: int = 9500
     match_line_tolerance: int = 5
-    categories: frozenset = frozenset()
-    stages: frozenset = frozenset()
-    hids: frozenset = frozenset()
+    categories: frozenset[str] = frozenset()
+    stages: frozenset[str] = frozenset()
+    hids: frozenset[str] = frozenset()
     dataset_sha256: str = ""
     invalid_lines: int = 0
     cancelled: Callable[[], bool] | None = None
@@ -68,7 +68,7 @@ class RunReport:
     remaining: int
     processed: int
     skipped_done: int
-    report: dict = field(default_factory=dict)
+    report: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -76,10 +76,10 @@ class _Unit:
     hid: str
     arm: str
     kind: str
-    repo: object
+    repo: Repo
     record: HypothesisRecord | None = None
-    window: object = None
-    scope: tuple = ()
+    window: SourceWindow | None = None
+    scope: tuple[HypothesisRecord, ...] = ()
     file: str = ""
     error: Exception | None = None
 
@@ -106,6 +106,11 @@ class SecurityEvalRunner:
         """Rescore ``items.jsonl`` and rewrite the report; makes no model call."""
         return self._execute(records, plan, call_model=False)
 
+    def _require_model(self) -> VerdictModel:
+        if self._model is None:
+            raise RuntimeError("this run needs a model and none was supplied")
+        return self._model
+
     # -- planning -------------------------------------------------------------------------
     @staticmethod
     def _validate(plan: RunPlan) -> None:
@@ -125,7 +130,8 @@ class SecurityEvalRunner:
                 and (not plan.stages or r.stage in plan.stages)
                 and (not plan.hids or r.hid in plan.hids)]
 
-    def _units(self, selected, plan: RunPlan, repos: dict) -> list[_Unit]:
+    def _units(self, selected: Sequence[HypothesisRecord], plan: RunPlan,
+               repos: Mapping[str, Repo]) -> list[_Unit]:
         units: list[_Unit] = []
         if plan.mode == "item":
             for record in selected:
@@ -152,7 +158,7 @@ class SecurityEvalRunner:
                                        "chunk", repo, window=window, scope=scope, file=file))
         return units
 
-    def _execute(self, records, plan: RunPlan, *, call_model: bool) -> RunReport:
+    def _execute(self, records: Sequence[HypothesisRecord], plan: RunPlan, *, call_model: bool) -> RunReport:
         self._validate(plan)
         digest = plan.digest
         rows = self._store.read_rows()
@@ -175,7 +181,7 @@ class SecurityEvalRunner:
             stopped = "score_only"
         else:
             if pending:
-                self._model.preflight()
+                self._require_model().preflight()
             started = self._clock.now()
             for unit in pending:
                 if plan.cancelled is not None and plan.cancelled():
@@ -195,8 +201,8 @@ class SecurityEvalRunner:
         return RunReport(remaining == 0, stopped, remaining, processed, skipped_done, report)
 
     # -- one unit -------------------------------------------------------------------------
-    def _base_row(self, unit: _Unit, plan: RunPlan, digest: str) -> dict:
-        row = {"hid": unit.hid, "arm": unit.arm, "mode": unit.kind, "model": plan.requested_model,
+    def _base_row(self, unit: _Unit, plan: RunPlan, digest: str) -> dict[str, Any]:
+        row: dict[str, Any] = {"hid": unit.hid, "arm": unit.arm, "mode": unit.kind, "model": plan.requested_model,
                "config_digest": digest, "outcome": "SCORED"}
         if unit.record is not None:
             record = unit.record
@@ -210,12 +216,12 @@ class SecurityEvalRunner:
         return row
 
     @staticmethod
-    def _failed(row: dict, outcome: str, exc: BaseException) -> dict:
+    def _failed(row: dict[str, Any], outcome: str, exc: BaseException) -> dict[str, Any]:
         row.update({"outcome": outcome, "error_type": type(exc).__name__, "error": str(exc)[:200]})
         return row
 
     @staticmethod
-    def _context_text(bundle: ContextBundle | None, row: dict) -> str:
+    def _context_text(bundle: ContextBundle | None, row: dict[str, Any]) -> str:
         if bundle is None:
             row.update({"context_chars": 0, "context_items": 0, "context_truncated": False})
             return ""
@@ -228,14 +234,14 @@ class SecurityEvalRunner:
         return bundle.text
 
     @staticmethod
-    def _call_fields(row: dict, call: ModelCall, plan: RunPlan) -> None:
+    def _call_fields(row: dict[str, Any], call: ModelCall, plan: RunPlan) -> None:
         row.update({"served_model": call.served_model, "served_model_source": call.served_model_source,
                     "tokens_in": call.tokens_in, "tokens_out": call.tokens_out,
                     "token_source": call.token_source, "duration_ms": call.duration_ms})
         if plan.keep_raw_chars > 0:
             row["raw"] = call.text[:plan.keep_raw_chars]
 
-    def _run_unit(self, unit: _Unit, plan: RunPlan, digest: str) -> dict:
+    def _run_unit(self, unit: _Unit, plan: RunPlan, digest: str) -> dict[str, Any]:
         row = self._base_row(unit, plan, digest)
         if unit.error is not None:
             return self._failed(row, "SOURCE_ERROR", unit.error)
@@ -243,10 +249,10 @@ class SecurityEvalRunner:
             return self._run_item(unit, plan, row)
         return self._run_chunk(unit, plan, row)
 
-    def _ask(self, row: dict, prompt: str, plan: RunPlan):
+    def _ask(self, row: dict[str, Any], prompt: str, plan: RunPlan) -> ModelCall | None:
         """The model call; ``None`` after recording MODEL_ERROR. Policy refusals abort the run."""
         try:
-            call = self._model.ask(DEFAULT_SYSTEM_PROMPT, prompt)
+            call = self._require_model().ask(DEFAULT_SYSTEM_PROMPT, prompt)
         except ResidencyRefused:
             raise
         except Forbidden:
@@ -257,8 +263,10 @@ class SecurityEvalRunner:
         self._call_fields(row, call, plan)
         return call
 
-    def _run_item(self, unit: _Unit, plan: RunPlan, row: dict) -> dict:
+    def _run_item(self, unit: _Unit, plan: RunPlan, row: dict[str, Any]) -> dict[str, Any]:
         record, repo = unit.record, unit.repo
+        if record is None:
+            raise RuntimeError("an item unit carries its record")
         try:
             window = repo.read_window(record.file, record.lines, plan.pad_lines)
         except _SOURCE_ERRORS as exc:
@@ -282,8 +290,10 @@ class SecurityEvalRunner:
                     "parse_mode": parsed.parse_mode})
         return row
 
-    def _run_chunk(self, unit: _Unit, plan: RunPlan, row: dict) -> dict:
+    def _run_chunk(self, unit: _Unit, plan: RunPlan, row: dict[str, Any]) -> dict[str, Any]:
         window, repo = unit.window, unit.repo
+        if window is None:
+            raise RuntimeError("a chunk unit without an error carries its window")
         bundle = None
         if unit.arm == "retrieved":
             try:
@@ -306,8 +316,8 @@ class SecurityEvalRunner:
 
     # -- report ---------------------------------------------------------------------------
     @staticmethod
-    def _report(rows: list[dict], plan: RunPlan, digest: str, complete: bool, stopped: str,
-                remaining: int) -> dict:
+    def _report(rows: list[dict[str, Any]], plan: RunPlan, digest: str, complete: bool, stopped: str,
+                remaining: int) -> dict[str, Any]:
         mine = [row for row in rows if row.get("config_digest") == digest]
         items = [row for row in mine if row.get("mode", "item") == "item"]
         chunks = [row for row in mine if row.get("mode") == "chunk"]
@@ -317,7 +327,7 @@ class SecurityEvalRunner:
         arms_seen = sorted({r.arm for r in score_rows} | {str(row.get("arm")) for row in chunks})
         called = [row for row in mine if row.get("served_model")]
         measured = [row for row in called if row.get("token_source") == "measured"]
-        report = {
+        report: dict[str, Any] = {
             "schema": 1, "mode": plan.mode, "requested_model": plan.requested_model,
             "helper_version": HELPER_VERSION, "config_digest": digest, "config": dict(plan.identity),
             "arms": arms_seen, "dataset_sha256": plan.dataset_sha256,

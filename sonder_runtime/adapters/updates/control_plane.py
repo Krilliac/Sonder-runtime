@@ -1,8 +1,10 @@
 """Read-only update status adapter for operator projections."""
 from __future__ import annotations
 
+from typing import Any
 
-def read_update_status() -> dict:
+
+def read_update_status() -> dict[str, Any]:
     """Read the bounded public update status without coupling bootstrap to engine."""
     # The engine is loaded only when this read is requested.  Keeping the
     # import inside the adapter avoids a bootstrap -> engine -> bootstrap cycle.

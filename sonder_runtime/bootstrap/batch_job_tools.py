@@ -19,16 +19,17 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, cast
 
 from sonder_runtime.adapters.persistence import batch_store, fanout_store
 from sonder_runtime.application.batch_jobs.runner import run_job
 from sonder_runtime.application.ports.batch_jobs import JobRecord, RunSettings
 from sonder_runtime.application.ports.runtime_threads import Thread as owned_runtime_thread
-from sonder_runtime.bootstrap.batch_job_executor import FanoutStepExecutor
+from sonder_runtime.bootstrap.batch_job_executor import ExecutorRuntime, FanoutStepExecutor
 from sonder_runtime.bootstrap.config_loading import load_config_or_none
 from sonder_runtime.domain.batch_jobs import (
-    JobStatus, Limits, StepState, StepStatus, effective_statuses, receipt_body, step_entry,
+    ItemSpec, JobSpec, JobStatus, Limits, StepState, StepStatus, effective_statuses, receipt_body, step_entry,
     token_rollup, validate_items, validate_spec,
 )
 from sonder_runtime.domain.common.errors import (
@@ -40,6 +41,30 @@ logger = logging.getLogger(__name__)
 
 NOT_FOUND_MESSAGE = "batch job was not found"
 MAX_RESULTS_PAGE = 200
+
+_F = TypeVar("_F", bound=Callable[..., object])
+
+
+class _McpServer(Protocol):
+    """The one method of the MCP server object that ``register`` uses."""
+
+    def tool(self) -> Callable[[_F], _F]: ...
+
+
+class ToolsRuntime(ExecutorRuntime, Protocol):
+    """The server-module surface the tool bodies use (the server module or a test double)."""
+
+    def _developer_gate(self, tool_name: str, token: str, started: float) -> str | None: ...
+
+    def _direct_fanout_identity(self, token: str) -> tuple[str, Mapping[str, Any] | None]: ...
+
+    def _deployment_authenticates_callers(self) -> bool: ...
+
+    def resolve_discovered_model_record(self, selector: str) -> tuple[str, object] | None: ...
+
+    def _fanout_nonchat_reason(self, record: object) -> str: ...
+
+    def _is_cloud_model_name(self, model: str) -> bool: ...
 
 
 def _config() -> BatchJobsConfig:
@@ -67,23 +92,23 @@ def _settings(config: BatchJobsConfig) -> RunSettings:
     )
 
 
-def error_payload(error: SonderError) -> dict:
+def error_payload(error: SonderError) -> dict[str, Any]:
     return {"ok": False, "error": {"code": error.code, "message": str(error)}}
 
 
-def _plain_int(value, name, low, high):
+def _plain_int(value: object, name: str, low: int, high: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise InvalidInput("%s must be an integer in %d..%d" % (name, low, high))
     return value
 
 
-def _plain_bool(value, name):
+def _plain_bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise InvalidInput("%s must be a boolean" % name)
     return value
 
 
-def _job_id(value) -> str:
+def _job_id(value: object) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 80:
         raise InvalidInput("job_id must be a non-empty string")
     return value.strip()
@@ -92,7 +117,7 @@ def _job_id(value) -> str:
 class BatchWorker:
     """One daemon thread running queued job ids in order; started on first submit."""
 
-    def __init__(self, run_one):
+    def __init__(self, run_one: Callable[[str], None]) -> None:
         self._run_one = run_one
         self._queue: deque[str] = deque()
         self._cond = threading.Condition()
@@ -103,7 +128,8 @@ class BatchWorker:
         with self._cond:
             self._queue.append(job_id)
             if self._thread is None or not self._thread.is_alive():
-                self._thread = owned_runtime_thread(target=self._loop, name="batch-job-worker", daemon=True)
+                self._thread = cast("Callable[..., threading.Thread]", owned_runtime_thread)(
+                    target=self._loop, name="batch-job-worker", daemon=True)
                 self._thread.start()
             self._cond.notify_all()
 
@@ -138,7 +164,7 @@ class BatchWorker:
 class BatchJobService:
     """The tool bodies; each returns a plain dict and raises ``SonderError`` for misuse."""
 
-    def __init__(self, runtime, record):
+    def __init__(self, runtime: Callable[[], ToolsRuntime] | None, record: Callable[..., object] | None) -> None:
         if runtime is not None and not callable(runtime):
             raise TypeError("runtime must be a callable returning the runtime object, got %s" % type(runtime).__name__)
         self._runtime_provider = runtime
@@ -147,7 +173,9 @@ class BatchJobService:
         self.worker = BatchWorker(self._run_one)
 
     # -- plumbing -----------------------------------------------------------
-    def _rt(self):
+    def _rt(self) -> ToolsRuntime:
+        if self._runtime_provider is None:
+            raise TypeError("no runtime provider was supplied")
         return self._runtime_provider()
 
     def executor(self) -> FanoutStepExecutor:
@@ -178,7 +206,7 @@ class BatchJobService:
         owner, account = self._rt()._direct_fanout_identity(token)
         return owner, str((account or {}).get("role") or "local-open")
 
-    def _authorized(self, job_id, token: str) -> JobRecord:
+    def _authorized(self, job_id: object, token: str) -> JobRecord:
         """The job, or one ``NotFound`` for a missing job and another caller's job alike."""
         job = batch_store.get_job(_job_id(job_id))
         if job is None:
@@ -191,7 +219,7 @@ class BatchJobService:
             return job
         raise NotFound(NOT_FOUND_MESSAGE)
 
-    def _resolve_models(self, spec):
+    def _resolve_models(self, spec: JobSpec) -> JobSpec:
         """Replace each stage model with its canonical installed name; refuse non-chat models."""
         rt = self._rt()
         stages = []
@@ -221,11 +249,18 @@ class BatchJobService:
         logger.error("batch job %s could not be filled or started", job_id, exc_info=exc)
         return InternalFailure("batch job tool failed; job %s was cancelled" % job_id)
 
-    def _seal_items(self, items):
+    def _seal_items(self, items: Iterable[ItemSpec]) -> list[tuple[str, str]]:
         executor = self.executor()
         return [(item.key, executor.seal_fields(item.fields)) for item in items]
 
-    def _receipt(self, job: JobRecord) -> dict:
+    def _current(self, job_id: str) -> JobRecord:
+        """The job as stored now; a job that has just been written is always there."""
+        job = batch_store.get_job(job_id)
+        if job is None:
+            raise NotFound(NOT_FOUND_MESSAGE)
+        return job
+
+    def _receipt(self, job: JobRecord) -> dict[str, Any]:
         keys = batch_store.item_keys(job.id)
         states = batch_store.step_states(job.id)
         body = receipt_body(
@@ -243,7 +278,8 @@ class BatchJobService:
         }
 
     # -- tool bodies --------------------------------------------------------
-    def create(self, name, stages, fields, items, start, token) -> dict:
+    def create(self, name: str, stages: list[dict[str, Any]], fields: list[str] | None,
+               items: list[dict[str, Any]] | None, start: bool, token: str) -> dict[str, Any]:
         config = self._enabled()
         _plain_bool(start, "start")
         limits = _limits(config)
@@ -270,26 +306,27 @@ class BatchJobService:
             raise self._abandon_draft(job.id, exc) from exc
         if start:
             self.worker.submit(job.id)
-        return {"ok": True, "job": self._receipt(batch_store.get_job(job.id))}
+        return {"ok": True, "job": self._receipt(self._current(job.id))}
 
-    def add_items(self, job_id, items, token) -> dict:
+    def add_items(self, job_id: str, items: list[dict[str, Any]], token: str) -> dict[str, Any]:
         config = self._enabled()
         job = self._authorized(job_id, token)
         validated = validate_items(items, job.spec, _limits(config), existing_keys=batch_store.item_keys(job.id))
         total = batch_store.add_items(job.id, self._seal_items(validated), max_items=config.max_items_per_job)
         return {"ok": True, "job_id": job.id, "added": len(validated), "items": total}
 
-    def start(self, job_id, token) -> dict:
+    def start(self, job_id: str, token: str) -> dict[str, Any]:
         config = self._enabled()
         job = self._authorized(job_id, token)
         job = batch_store.start_job(job.id, max_active=config.max_active_jobs)
         self.worker.submit(job.id)
         return {"ok": True, "job": self._receipt(job)}
 
-    def status(self, job_id, token) -> dict:
+    def status(self, job_id: str, token: str) -> dict[str, Any]:
         return {"ok": True, "job": self._receipt(self._authorized(job_id, token))}
 
-    def results(self, job_id, stage, offset, limit, include_answers, token) -> dict:
+    def results(self, job_id: str, stage: str, offset: int, limit: int, include_answers: bool,
+                token: str) -> dict[str, Any]:
         _plain_int(offset, "offset", 0, 10_000_000)
         _plain_int(limit, "limit", 1, MAX_RESULTS_PAGE)
         _plain_bool(include_answers, "include_answers")
@@ -302,9 +339,10 @@ class BatchJobService:
         effective = effective_statuses(job.spec, keys, states)
         executor = self.executor()
         page = keys[offset:offset + limit]
-        rows = []
+        rows: list[dict[str, Any]] = []
         for key in page:
-            steps, owned = [], []
+            steps: list[dict[str, Any]] = []
+            owned: list[StepState] = []
             for name in names:
                 if stage and name != stage:
                     continue
@@ -319,7 +357,7 @@ class BatchJobService:
         return {"ok": True, "job_id": job.id, "stage": stage or None, "offset": offset,
                 "total_items": len(keys), "next_offset": end if end < len(keys) else None, "items": rows}
 
-    def recent(self, limit, include_finished, token) -> dict:
+    def recent(self, limit: int, include_finished: bool, token: str) -> dict[str, Any]:
         _plain_int(limit, "limit", 1, 100)
         _plain_bool(include_finished, "include_finished")
         rt = self._rt()
@@ -328,15 +366,15 @@ class BatchJobService:
         return {"ok": True, "jobs": batch_store.recent_jobs(
             request_owner=owner if scoped else None, include_finished=include_finished, limit=limit)}
 
-    def cancel(self, job_id, token) -> dict:
+    def cancel(self, job_id: str, token: str) -> dict[str, Any]:
         job = self._authorized(job_id, token)
         job = batch_store.request_cancel(job.id)
         # The in-flight step keeps the truthful skipped/unknown fanout semantics.
         for run_id in batch_store.active_child_runs(job.id):
             fanout_store.request_cancel(run_id)
-        return {"ok": True, "job": self._receipt(batch_store.get_job(job.id))}
+        return {"ok": True, "job": self._receipt(self._current(job.id))}
 
-    def resume(self, job_id, include_failed, token) -> dict:
+    def resume(self, job_id: str, include_failed: bool, token: str) -> dict[str, Any]:
         config = self._enabled()
         _plain_bool(include_failed, "include_failed")
         job = self._authorized(job_id, token)
@@ -345,7 +383,8 @@ class BatchJobService:
         return {"ok": True, "job": self._receipt(job)}
 
 
-def register(mcp, record, runtime=None) -> BatchJobService:
+def register(mcp: _McpServer, record: Callable[..., object] | None,
+             runtime: Callable[[], ToolsRuntime] | None = None) -> BatchJobService:
     """Register the ``batch_job_*`` tools; ``record`` is the server's ``_record_direct_tool``.
 
     The tools' schemas use the host's strict integer and boolean types so a
@@ -356,10 +395,15 @@ def register(mcp, record, runtime=None) -> BatchJobService:
     """
     service = BatchJobService(runtime, record)
     host = runtime() if callable(runtime) else None
-    StrictInt = getattr(host, "StrictInt", int)  # noqa: N806 - used as an annotation type
-    StrictBool = getattr(host, "StrictBool", bool)  # noqa: N806
+    if TYPE_CHECKING:
+        # The host's validation types are chosen at runtime; the checker sees plain int and bool.
+        StrictInt: TypeAlias = int  # noqa: N806
+        StrictBool: TypeAlias = bool  # noqa: N806
+    else:
+        StrictInt = getattr(host, "StrictInt", int)  # noqa: N806 - used as an annotation type
+        StrictBool = getattr(host, "StrictBool", bool)  # noqa: N806
 
-    def run(name: str, token: str, shown: dict, body) -> str:
+    def run(name: str, token: str, shown: dict[str, Any], body: Callable[[], dict[str, Any]]) -> str:
         started = time.time()
         try:
             service._gate(name, token, started)

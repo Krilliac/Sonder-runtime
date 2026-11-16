@@ -17,6 +17,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any, cast
 
 from sonder_runtime.domain.claim_check import (
     CheckResult, CheckStatus, Claim, ClaimError, ClaimReport, GuardHit, Verdict,
@@ -164,6 +165,7 @@ class ClaimChecker:
         real, failure = self._resolve(claim.file)
         if failure is not None:
             return ClaimReport(claim, decide_verdict((failure,), ()), (failure,), ())
+        real = cast(str, real)
         lines = self._lines(real)
         if lines is None:
             note = CheckResult(
@@ -198,9 +200,10 @@ class ClaimChecker:
             claim.category, " ".join((claim.guard, *claim.guard_symbols)))
         rel = self._relative(real)
         near_first = claim.line_start - cfg.guard_window_lines
-        near_last = claim.line_end + cfg.guard_window_lines
+        near_last = cast(int, claim.line_end) + cfg.guard_window_lines
 
-        def scan(file_lines, path, first, last, where):
+        def scan(file_lines: list[str], path: str, first: int, last: int,
+                 where: str) -> list[GuardHit]:
             # A name the claim says is missing outranks a generic guard shape.
             named = find_named_guards(file_lines, path, first, last, claim.guard_symbols, where)
             taken = {h.line for h in named}
@@ -277,7 +280,7 @@ class ClaimChecker:
         return reports
 
 
-def check_claim(root, claim: Claim, config: ClaimCheckConfig | None = None) -> ClaimReport:
+def check_claim(root: str | os.PathLike[str], claim: Claim, config: ClaimCheckConfig | None = None) -> ClaimReport:
     return ClaimChecker(root, config).check(claim)
 
 
@@ -286,7 +289,7 @@ def check_claim(root, claim: Claim, config: ClaimCheckConfig | None = None) -> C
 _LINE_FORM = re.compile(r"\s*(\d{1,7})(?:\s*[-:]\s*(\d{1,7}))?\s*")
 
 
-def _line_pair(row: Mapping) -> tuple[int | None, int | None]:
+def _line_pair(row: Mapping[str, Any]) -> tuple[int | None, int | None]:
     start, end = row.get("line_start"), row.get("line_end")
     if start is not None:
         return start, end
@@ -308,7 +311,7 @@ def _line_pair(row: Mapping) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _symbol_tuple(value) -> tuple[str, ...]:
+def _symbol_tuple(value: object) -> tuple[str, ...]:
     if value is None or value == "":
         return ()
     if isinstance(value, str):
@@ -318,7 +321,7 @@ def _symbol_tuple(value) -> tuple[str, ...]:
     raise ClaimError("symbols must be a string or a list of strings")
 
 
-def claim_from_mapping(row: Mapping) -> Claim:
+def claim_from_mapping(row: Mapping[str, Any]) -> Claim:
     """Build a claim from a JSON-style mapping; prose in ``text`` fills missing citations."""
     if not isinstance(row, Mapping):
         raise ClaimError("claim must be a JSON object")
@@ -359,14 +362,15 @@ class BatchSummary:
         default_factory=lambda: {"reject": 0, "flag": 0, "keep": 0})
 
 
-def check_jsonl(source, destination, root, config: ClaimCheckConfig | None = None) -> BatchSummary:
+def check_jsonl(source: str | os.PathLike[str], destination: str | os.PathLike[str],
+                root: str | os.PathLike[str], config: ClaimCheckConfig | None = None) -> BatchSummary:
     """Check every claim of a JSONL file; write one JSON line per input row, in order.
 
     A row may carry ``repo_root`` to override ``root``. Malformed rows become
     ``{"line_no", "error": {"code", "message"}}`` entries instead of failing the batch.
     """
     config = config or ClaimCheckConfig()
-    rows: list[tuple[int, object]] = []
+    rows: list[tuple[int, str]] = []
     with open(source, encoding="utf-8") as handle:
         for number, raw in enumerate(handle, 1):
             if not raw.strip():
@@ -375,7 +379,7 @@ def check_jsonl(source, destination, root, config: ClaimCheckConfig | None = Non
             if len(rows) > config.max_batch_claims:
                 raise ClaimError(
                     f"batch holds more than max_batch_claims={config.max_batch_claims} claims")
-    outputs: list[dict | None] = [None] * len(rows)
+    outputs: list[dict[str, object] | None] = [None] * len(rows)
     groups: dict[str, list[tuple[int, Claim]]] = {}
     for position, (number, raw) in enumerate(rows):
         try:

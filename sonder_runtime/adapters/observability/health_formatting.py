@@ -1,8 +1,10 @@
 """Human-readable formatting policies for runtime health snapshots."""
 from __future__ import annotations
 
+from typing import Any
 
-def format_context_health(data: dict) -> str:
+
+def format_context_health(data: dict[str, Any]) -> str:
     """Render a context-health snapshot without owning its data collection."""
     lines = [
         "sonder context health",

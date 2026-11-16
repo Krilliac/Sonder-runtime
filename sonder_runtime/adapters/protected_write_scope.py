@@ -113,7 +113,7 @@ class _Places:
         return any(item == place or place in item.parents or item in place.parents for item in self.whole)
 
 
-def _is_link(entry: os.DirEntry) -> bool:
+def _is_link(entry: os.DirEntry[str]) -> bool:
     if entry.is_symlink():
         return True
     if os.name != "nt":

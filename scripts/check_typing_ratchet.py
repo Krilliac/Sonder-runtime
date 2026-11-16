@@ -1,0 +1,527 @@
+"""Typing ratchet: a static type check that only tightens.
+
+Every ``.py`` file under ``sonder_runtime/`` is in exactly one of two lists
+kept beside this script:
+
+* ``typing_strict_modules.txt`` -- modules that pass ``mypy --strict``.  They
+  must keep passing: any error reported in one of them fails the gate.
+* ``typing_baseline.txt`` -- the legacy modules that are not strict yet.  The
+  list may only shrink.  A module leaves it when it is fixed (``--update``
+  promotes every baseline module that now passes) or deleted.
+
+A new file that is in neither list fails the gate: write it so it passes
+``--strict`` and add it to the strict list (``--update`` does that for new files
+that pass).  Nothing new ever enters the baseline.
+
+Checks, in order:
+
+1. Every listed path exists, and no path is in both lists.
+2. Every file under ``sonder_runtime/`` is listed (the "new untyped module" check).
+3. ``mypy --strict`` reports no error in any strict module.
+   A strict module may not opt itself out: any ``# mypy:`` configuration comment
+   or a ``# type: ignore`` comment above its first statement (which mypy treats
+   as ignoring the whole file) fails the gate, as does ``no_type_check``.
+   ``mypy.ini`` may not weaken the check either: only an allowlist of keys is
+   accepted, and a ``[mypy-*]`` section may do nothing but ignore a missing
+   third-party import.  mypy's own summary must also show that it checked
+   exactly the discovered modules, a ``.pyi`` stub under the package is refused, and any error path that is not a discovered
+   module is a tool failure, so a module cannot escape by being skipped.
+4. With ``--against REF``: the baseline holds nothing that REF's baseline did
+   not, and no module that is strict at REF dropped out of the strict list
+   while its file still exists.  This is what makes the lists one-way in review.
+
+``mypy.ini`` carries the shared settings; strictness comes from ``--strict``
+on the command line and is applied only to the allowlist, so run this script
+rather than bare mypy.  A module that shares its name with a package
+(``x.py`` beside ``x/__init__.py``) is dead code Python never imports and mypy
+cannot check, so it is outside the ratchet.
+
+What the gate does not cover: mypy's own unreachable-code rules.  mypy skips
+the bodies of ``if TYPE_CHECKING: ... else:``, of ``sys.platform`` branches
+other than linux and win32, and of ``sys.version_info`` branches that do not
+match the pinned ``python_version``, so code there is not checked and the gate
+cannot see it.  A strict module is protected from the opt-outs listed above,
+not from every way of writing code that mypy does not look at.
+
+Exit status: 0 ok, 1 violations, 2 tool failure (mypy missing, crashed, or
+produced output this script cannot read).
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import configparser
+import io
+import re
+import subprocess
+import sys
+import tokenize
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = "sonder_runtime"
+STRICT_PATH = Path(__file__).with_name("typing_strict_modules.txt")
+BASELINE_PATH = Path(__file__).with_name("typing_baseline.txt")
+CONFIG_NAME = "mypy.ini"
+PLATFORMS = ("linux", "win32")
+
+_SUMMARY_LINE = re.compile(
+    r"^(?:Success: no issues found in (?P<ok>\d+) source files?"
+    r"|Found \d+ errors? in \d+ files? \(checked (?P<bad>\d+) source files?\))$"
+)
+_ERROR_LINE = re.compile(r"^(?P<path>[^\s:][^:]*\.py):(?P<line>\d+)(?::\d+)?: error: (?P<message>.*)$")
+_STRICT_HEADER = (
+    "# Modules that pass `mypy --strict` and must keep passing (see scripts/check_typing_ratchet.py).",
+    "# Grow this list; removing a module whose file still exists fails the gate.",
+)
+_BASELINE_HEADER = (
+    "# Legacy modules that are not strict yet. Shrink-only: never add a line.",
+    "# `python scripts/check_typing_ratchet.py --update` drops modules that now pass or were deleted.",
+)
+
+
+class RatchetError(RuntimeError):
+    """The gate could not run (mypy absent, crashed, or unparseable output)."""
+
+
+def discover_modules(root: Path = REPO_ROOT, package: str = PACKAGE) -> list[str]:
+    """Return every checkable ``.py`` path under *package*, posix-style and sorted."""
+    found = []
+    for path in sorted((root / package).rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        if path.name != "__init__.py" and path.with_suffix("").joinpath("__init__.py").is_file():
+            continue
+        found.append(path.relative_to(root).as_posix())
+    return found
+
+
+def find_stubs(root: Path = REPO_ROOT, package: str = PACKAGE) -> list[str]:
+    """Return every ``.pyi`` stub under *package*.
+
+    mypy checks ``foo.pyi`` instead of ``foo.py`` when both exist, so a stub next
+    to a strict module would replace the module in the check.  None are allowed.
+    """
+    return [
+        path.relative_to(root).as_posix()
+        for path in sorted((root / package).rglob("*.pyi"))
+        if "__pycache__" not in path.parts
+    ]
+
+
+def read_list(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    entries = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            entries.append(line)
+    return entries
+
+
+def write_list(path: Path, header: Sequence[str], entries: Sequence[str]) -> None:
+    body = "\n".join([*header, *sorted(set(entries))]) + "\n"
+    path.write_text(body, encoding="utf-8", newline="\n")
+
+
+def parse_mypy_output(text: str) -> dict[str, list[str]]:
+    """Group ``error:`` lines by posix path; ``note:`` lines are ignored."""
+    errors: dict[str, list[str]] = defaultdict(list)
+    for raw in text.splitlines():
+        match = _ERROR_LINE.match(raw.strip())
+        if match:
+            path = match.group("path").replace("\\", "/")
+            errors[path].append("%s:%s: %s" % (path, match.group("line"), match.group("message")))
+    return dict(errors)
+
+
+def parse_checked_count(text: str) -> int:
+    """Return the number of source files mypy says it checked, from its summary line."""
+    counts = []
+    for raw in text.splitlines():
+        match = _SUMMARY_LINE.match(raw.strip())
+        if match:
+            counts.append(int(match.group("ok") or match.group("bad")))
+    if len(counts) != 1:
+        raise RatchetError(
+            "mypy printed %d summary lines (expected exactly 1), so the number of checked files is unknown: %s"
+            % (len(counts), text.strip()[-500:])
+        )
+    return counts[0]
+
+
+# [mypy] keys the repo needs, each with the only value accepted for it.  Anything
+# else (exclude, ignore_errors, disable_error_code, show_absolute_path,
+# no_error_summary, ...) can hide a strict module from the gate or break its
+# parsing, so it fails the gate until it is added here with a reason.
+_ALLOWED_GLOBAL_KEYS: dict[str, re.Pattern[str]] = {
+    "python_version": re.compile(r"3\.\d+"),
+    "files": re.compile(re.escape(PACKAGE)),
+    "mypy_path": re.compile(r"\."),
+    "namespace_packages": re.compile(r"true"),
+    "explicit_package_bases": re.compile(r"true"),
+    # Types flow from every imported module but only the modules named on the
+    # command line report errors; this key is required for that, and "silent"
+    # is the only value that keeps the strict modules themselves reporting.
+    "follow_imports": re.compile(r"silent"),
+    "ignore_missing_imports": re.compile(r"true"),
+    "show_error_codes": re.compile(r"true"),
+    "pretty": re.compile(r"false"),
+    "enable_error_code": re.compile(r"ignore-without-code"),
+}
+# A per-module section is only for third-party packages that may be missing.
+_THIRD_PARTY_SECTION = re.compile(r"^mypy-([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\.\*)?)$")
+
+
+def validate_mypy_config(config_path: Path, package: str = PACKAGE) -> list[str]:
+    """Return violations for a ``mypy.ini`` that could relax checking of a strict module."""
+    parser = configparser.RawConfigParser(strict=True)
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            parser.read_file(handle)
+    except (OSError, UnicodeDecodeError, configparser.Error) as exc:
+        raise RatchetError("cannot read %s: %s" % (config_path.name, exc)) from exc
+    name = config_path.name
+    violations = []
+    if not parser.has_section("mypy"):
+        violations.append("mypy config: %s has no [mypy] section" % name)
+    for section in parser.sections():
+        if section == "mypy":
+            for key in parser.options(section):
+                value = parser.get(section, key).strip().lower()
+                allowed = _ALLOWED_GLOBAL_KEYS.get(key)
+                if allowed is None:
+                    violations.append("mypy config: [mypy] key %r is not allowed in %s" % (key, name))
+                elif not allowed.fullmatch(value):
+                    violations.append(
+                        "mypy config: [mypy] %s = %s is not an accepted value in %s" % (key, value, name)
+                    )
+            continue
+        match = _THIRD_PARTY_SECTION.match(section)
+        if match is None or match.group(1).split(".")[0] == package:
+            violations.append(
+                "mypy config: section [%s] in %s is not allowed (only [mypy-<third-party package>] "
+                "sections that set ignore_missing_imports)" % (section, name)
+            )
+            continue
+        for key in parser.options(section):
+            value = parser.get(section, key).strip().lower()
+            if key != "ignore_missing_imports" or value != "true":
+                violations.append(
+                    "mypy config: [%s] may only set ignore_missing_imports = True, not %s" % (section, key)
+                )
+    return violations
+
+
+def require_known_paths(errors: Mapping[str, Sequence[str]], modules: Sequence[str]) -> None:
+    """Raise when mypy reported an error for a path that is not a discovered module."""
+    unknown = sorted(set(errors) - set(modules))
+    if unknown:
+        raise RatchetError(
+            "mypy reported errors for paths that are not discovered modules (absolute or "
+            "unexpected paths would hide errors): %s" % ", ".join(unknown[:5])
+        )
+
+
+_MYPY_DIRECTIVE = re.compile(r"^#\s*mypy\s*:", re.IGNORECASE)
+_RAW_MYPY_DIRECTIVE = _MYPY_DIRECTIVE
+_TYPE_IGNORE = re.compile(r"^#\s*type\s*:\s*ignore(?![\w-])", re.IGNORECASE)
+
+
+def find_opt_outs(source: str) -> list[str]:
+    """Describe every way *source* switches off or relaxes its own type check.
+
+    Flags any ``# mypy:`` configuration comment (file-level ``ignore-errors`` or
+    inline flags that relax ``--strict``) and any ``# type: ignore`` comment that
+    sits above the first real statement, which mypy applies to the whole file.
+    """
+    try:
+        tree = ast.parse(source)
+        comments = [
+            (token.start[0], token.string)
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type == tokenize.COMMENT
+        ]
+    except (SyntaxError, tokenize.TokenError, ValueError) as exc:
+        return ["cannot be scanned for opt-out comments (%s)" % exc]
+    body = list(tree.body)
+    if (
+        body and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    first_line = body[0].lineno if body else 10**9
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id.startswith("no_type_check"):
+            found.append("line %d uses `%s`, which switches off checking" % (node.lineno, node.id))
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("no_type_check"):
+            found.append("line %d uses `%s`, which switches off checking" % (node.lineno, node.attr))
+        elif isinstance(node, ast.ImportFrom):
+            found.extend(
+                "line %d imports `%s`, which switches off checking" % (node.lineno, alias.name)
+                for alias in node.names if alias.name.startswith("no_type_check")
+            )
+    seen_directives = set()
+    for line, text in comments:
+        if _MYPY_DIRECTIVE.match(text):
+            seen_directives.add(line)
+            found.append("line %d has a `# mypy:` configuration comment (%s)" % (line, text))
+        elif line < first_line and _TYPE_IGNORE.match(text):
+            found.append("line %d has `# type: ignore` before the first statement, which ignores the whole file" % line)
+    # mypy reads these from the raw text split on "\n", so a column-0 line inside a
+    # triple-quoted string counts too and no tokenizer comment exists for it.
+    for number, raw in enumerate(source.split("\n"), start=1):
+        if number not in seen_directives and _RAW_MYPY_DIRECTIVE.match(raw):
+            found.append("line %d has a `# mypy:` configuration line mypy reads (%s)" % (number, raw.strip()))
+    return found
+
+
+def _run_mypy_once(root: Path, platform: str, expected_sources: int) -> dict[str, list[str]]:
+    command = [
+        sys.executable, "-m", "mypy", "--strict", "--enable-error-code", "ignore-without-code",
+        "--config-file", str(root / CONFIG_NAME),
+        "--platform", platform,
+        "--cache-dir", str(root / ".mypy_cache" / platform),
+    ]
+    try:
+        completed = subprocess.run(
+            command, cwd=root, capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        raise RatchetError("could not run mypy: %s" % exc) from exc
+    output = completed.stdout + completed.stderr
+    if "No module named mypy" in output:
+        raise RatchetError("mypy is not installed (pip install -r requirements-dev.txt)")
+    if completed.returncode not in (0, 1):
+        raise RatchetError("mypy failed (exit %d): %s" % (completed.returncode, output.strip()[-2000:]))
+    checked = parse_checked_count(completed.stdout)
+    if checked != expected_sources:
+        raise RatchetError(
+            "mypy checked %d source files on %s but %d modules were discovered; a module is "
+            "being skipped or an extra source was added (exclude, a stub, a dot-directory?)"
+            % (checked, platform, expected_sources)
+        )
+    errors = parse_mypy_output(completed.stdout)
+    printed = sum(1 for raw in completed.stdout.splitlines() if ": error:" in raw)
+    parsed = sum(len(lines) for lines in errors.values())
+    if printed > parsed:
+        # An error line this script could not attribute to a file (for example a
+        # Windows drive-colon path) must never read as a clean module.
+        raise RatchetError(
+            "mypy printed %d error lines but only %d were readable: %s"
+            % (printed, parsed, output.strip()[-2000:])
+        )
+    if completed.returncode == 1 and not errors:
+        # Exit 1 means mypy found errors. If none parsed, the output format
+        # changed and a silent pass would be a fabricated one.
+        raise RatchetError("mypy reported errors this script could not read: %s" % output.strip()[-2000:])
+    if completed.returncode == 0 and errors:
+        raise RatchetError("mypy exited 0 but printed errors; refusing to trust the result")
+    return errors
+
+
+def run_mypy(root: Path = REPO_ROOT, expected_sources: int = 1) -> dict[str, list[str]]:
+    """Run ``mypy --strict`` for each platform and return the merged errors per file.
+
+    A module must be clean on every platform in ``PLATFORMS``, so the verdict
+    does not depend on which OS runs the gate (CI is Linux, development is
+    Windows, and ``sys.platform`` branches change what mypy sees).  mypy must
+    report having checked exactly *expected_sources* files on each platform.
+    """
+    merged: dict[str, list[str]] = {}
+    for platform in PLATFORMS:
+        for path, lines in _run_mypy_once(root, platform, expected_sources).items():
+            known = merged.setdefault(path, [])
+            known.extend(line for line in lines if line not in known)
+    return merged
+
+
+def evaluate(
+    modules: Sequence[str],
+    strict: Sequence[str],
+    baseline: Sequence[str],
+    errors: Mapping[str, Sequence[str]],
+    root: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return ``(violations, promotable)`` for the current tree.
+
+    ``promotable`` is every module that is not strict yet and has no mypy error:
+    a baseline module that was fixed, or a new file written strict-clean.
+    When *root* is given, each strict module's source is also scanned for
+    comments that opt it out of checking.
+    """
+    require_known_paths(errors, modules)
+    present = set(modules)
+    strict_set = set(strict)
+    baseline_set = set(baseline)
+    violations = []
+    for path in sorted(strict_set - present):
+        violations.append("strict list names %s, which does not exist (remove it)" % path)
+    for path in sorted(baseline_set - present):
+        violations.append("baseline names %s, which does not exist (remove it)" % path)
+    for path in sorted(strict_set & baseline_set):
+        violations.append("%s is in both the strict list and the baseline (remove it from the baseline)" % path)
+    for path in modules:
+        if path not in strict_set and path not in baseline_set:
+            violations.append(
+                "%s is new and not in the strict list: make it pass `mypy --strict` and add it "
+                "to scripts/typing_strict_modules.txt (--update adds it if it passes)" % path
+            )
+    for path in sorted(strict_set & present):
+        for line in errors.get(path, ()):
+            violations.append("strict module regressed: %s" % line)
+    if root is not None:
+        for path in sorted(strict_set & present):
+            try:
+                source = (root / path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                violations.append("strict module %s cannot be read for the opt-out scan: %s" % (path, exc))
+                continue
+            for problem in find_opt_outs(source):
+                violations.append("strict module opts out of checking: %s: %s" % (path, problem))
+    promotable = [
+        path for path in modules
+        if path not in strict_set and path in present and not errors.get(path)
+    ]
+    return violations, promotable
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        raise RatchetError("could not run git: %s" % exc) from exc
+
+
+def _verify_ref(root: Path, ref: str) -> None:
+    completed = _git(root, "rev-parse", "--verify", "--quiet", "%s^{commit}" % ref)
+    if completed.returncode != 0:
+        raise RatchetError(
+            "--against %s does not resolve to a commit (typo, shallow checkout or missing fetch?)" % ref
+        )
+
+
+def _git_show(root: Path, ref: str, relative: Path) -> list[str] | None:
+    """Lines of *relative* at *ref*, or None when the ref resolves but has no such file.
+
+    An unresolvable ref or any other git failure raises, so it cannot read as "no lists yet".
+    """
+    _verify_ref(root, ref)
+    listing = _git(root, "ls-tree", "--name-only", ref, "--", relative.as_posix())
+    if listing.returncode != 0:
+        raise RatchetError("git ls-tree %s failed: %s" % (ref, listing.stderr.strip()))
+    if not listing.stdout.strip():
+        return None
+    completed = _git(root, "show", "%s:%s" % (ref, relative.as_posix()))
+    if completed.returncode != 0:
+        raise RatchetError("git show %s:%s failed: %s" % (ref, relative.as_posix(), completed.stderr.strip()))
+    return [
+        line.strip() for line in completed.stdout.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def compare_against(
+    root: Path, ref: str, modules: Sequence[str], strict: Sequence[str], baseline: Sequence[str],
+) -> list[str]:
+    """One-way checks against the lists at *ref*. A ref without lists yet is not an error."""
+    base_strict = _git_show(root, ref, STRICT_PATH.relative_to(REPO_ROOT))
+    base_baseline = _git_show(root, ref, BASELINE_PATH.relative_to(REPO_ROOT))
+    violations = []
+    present = set(modules)
+    if base_baseline is not None:
+        for path in sorted(set(baseline) - set(base_baseline)):
+            violations.append("baseline gained %s (the baseline may only shrink)" % path)
+    if base_strict is not None:
+        for path in sorted((set(base_strict) & present) - set(strict)):
+            violations.append("%s was strict at %s and is no longer in the strict list" % (path, ref))
+    return violations
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--update", action="store_true",
+        help="promote passing modules into the strict list and drop deleted ones; never grows the baseline",
+    )
+    mode.add_argument(
+        "--init", action="store_true",
+        help="first-time setup: write both lists from the current tree (refuses if they exist)",
+    )
+    parser.add_argument(
+        "--against", metavar="REF",
+        help="also require the lists to be one-way relative to REF (a git ref such as origin/main)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        modules = discover_modules()
+        stubs = find_stubs(REPO_ROOT)
+        if stubs:
+            print("typing ratchet FAILED (%d):" % len(stubs), file=sys.stderr)
+            for stub in stubs:
+                print("  stub file %s is not allowed: mypy would check it instead of the .py module" % stub,
+                      file=sys.stderr)
+            return 1
+        config_violations = validate_mypy_config(REPO_ROOT / CONFIG_NAME)
+        errors = run_mypy(REPO_ROOT, len(modules))
+        require_known_paths(errors, modules)
+        if args.init:
+            if config_violations:
+                raise RatchetError("; ".join(config_violations))
+            if STRICT_PATH.exists() or BASELINE_PATH.exists():
+                print("typing ratchet: lists already exist; use --update", file=sys.stderr)
+                return 1
+            clean = [path for path in modules if not errors.get(path)]
+            write_list(STRICT_PATH, _STRICT_HEADER, clean)
+            write_list(BASELINE_PATH, _BASELINE_HEADER, [p for p in modules if errors.get(p)])
+            print("typing ratchet: %d strict, %d baseline" % (len(clean), len(modules) - len(clean)))
+            return 0
+        strict = read_list(STRICT_PATH)
+        baseline = read_list(BASELINE_PATH)
+        if not strict:
+            raise RatchetError("%s is empty or missing; run --init once" % STRICT_PATH.name)
+        violations, promotable = evaluate(modules, strict, baseline, errors, REPO_ROOT)
+        violations = config_violations + violations
+        if args.against:
+            violations += compare_against(REPO_ROOT, args.against, modules, strict, baseline)
+    except (RatchetError, OSError) as exc:
+        print("typing ratchet: %s" % exc, file=sys.stderr)
+        return 2
+    if args.update:
+        regressions = [v for v in violations if v.startswith(("strict module", "mypy config"))]
+        if regressions:
+            print("refusing --update while a strict module has errors:", file=sys.stderr)
+            for line in regressions:
+                print("  " + line, file=sys.stderr)
+            return 1
+        present = set(modules)
+        new_strict = sorted({p for p in strict if p in present} | set(promotable))
+        new_baseline = sorted(p for p in baseline if p in present and p not in set(promotable))
+        write_list(STRICT_PATH, _STRICT_HEADER, new_strict)
+        write_list(BASELINE_PATH, _BASELINE_HEADER, new_baseline)
+        print("typing ratchet updated: %d strict (+%d promoted), %d baseline" % (
+            len(new_strict), len(promotable), len(new_baseline)))
+        listed = set(new_strict) | set(new_baseline)
+        unlisted = [path for path in modules if path not in listed]
+        for path in unlisted:
+            print("  %s is new and fails `mypy --strict`: fix it, then re-run --update" % path, file=sys.stderr)
+        return 1 if unlisted else 0
+    if violations:
+        print("typing ratchet FAILED (%d):" % len(violations), file=sys.stderr)
+        for line in violations:
+            print("  " + line, file=sys.stderr)
+        return 1
+    print("typing ratchet ok: %d strict modules, %d baseline, %d promotable (run --update)" % (
+        len(strict), len(baseline), len(promotable)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

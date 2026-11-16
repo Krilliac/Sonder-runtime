@@ -14,9 +14,10 @@ import dataclasses
 import json
 import os
 import socket
+import sqlite3
 import time
 import uuid
-from typing import Sequence
+from typing import Any, Sequence
 
 import sonder_runtime.adapters.persistence.fanout_store as fanout_store
 from sonder_runtime.application.ports.batch_jobs import JobRecord, RunSettings
@@ -40,7 +41,7 @@ def _settings(raw: str) -> RunSettings:
     return RunSettings(**{key: value for key, value in data.items() if key in _SETTING_FIELDS})
 
 
-def _record(row) -> JobRecord:
+def _record(row: sqlite3.Row) -> JobRecord:
     return JobRecord(
         id=row["id"], name=row["name"], status=JobStatus(row["status"]), pause_reason=row["pause_reason"],
         spec=spec_from_dict(json.loads(row["spec_json"])), settings=_settings(row["settings_json"]),
@@ -51,8 +52,8 @@ def _record(row) -> JobRecord:
     )
 
 
-def _fetch(conn, job_id: str):
-    row = conn.execute("SELECT * FROM batch_jobs WHERE id=?", (str(job_id),)).fetchone()
+def _fetch(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row:
+    row: sqlite3.Row | None = conn.execute("SELECT * FROM batch_jobs WHERE id=?", (str(job_id),)).fetchone()
     if row is None:
         raise NotFound("batch job was not found")
     return row
@@ -92,6 +93,8 @@ def add_items(job_id: str, entries: Sequence[tuple[str, str]], *, max_items: int
         job = _fetch(conn, job_id)
         if JobStatus(job["status"]) not in _ADDABLE:
             raise Conflict("items cannot be added to a job in status " + job["status"])
+        count: int
+        last: int
         count, last = conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(seq),0) FROM batch_items WHERE job_id=?", (str(job_id),)
         ).fetchone()
@@ -130,7 +133,8 @@ def item_ciphertext(job_id: str, item_key: str) -> str | None:
         conn.close()
 
 
-def _enqueue(conn, job_id: str, now: float, extra_settings: dict | None = None) -> None:
+def _enqueue(conn: sqlite3.Connection, job_id: str, now: float,
+             extra_settings: dict[str, Any] | None = None) -> None:
     owner = (fanout_store._safe_text("batch-%d" % os.getpid(), 200), os.getpid(), socket.gethostname())
     row = _fetch(conn, job_id)
     settings = json.loads(row["settings_json"] or "{}")
@@ -142,7 +146,7 @@ def _enqueue(conn, job_id: str, now: float, extra_settings: dict | None = None) 
     )
 
 
-def _capacity(conn, max_active: int) -> None:
+def _capacity(conn: sqlite3.Connection, max_active: int) -> None:
     marks = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
     active = conn.execute(
         "SELECT COUNT(*) FROM batch_jobs WHERE status IN (%s)" % marks, [s.value for s in ACTIVE_JOB_STATUSES]
@@ -225,10 +229,10 @@ def claim_job(job_id: str, owner_id: str, owner_pid: int, lease_seconds: int) ->
 
 def heartbeat(job_id: str, owner_id: str, lease_seconds: int) -> bool:
     with fanout_store._write_transaction() as conn:
-        return conn.execute(
+        return bool(conn.execute(
             "UPDATE batch_jobs SET lease_until=?,updated_ts=? WHERE id=? AND owner_id=? AND status='running'",
             (fanout_store._lease(lease_seconds), time.time(), str(job_id), str(owner_id)),
-        ).rowcount > 0
+        ).rowcount > 0)
 
 
 def cancel_requested(job_id: str) -> bool:
@@ -244,12 +248,12 @@ def finish(job_id: str, owner_id: str, status: JobStatus, pause_reason: PauseRea
     now = time.time()
     terminal = status in (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.INTERRUPTED)
     with fanout_store._write_transaction() as conn:
-        return conn.execute(
+        return bool(conn.execute(
             "UPDATE batch_jobs SET status=?,pause_reason=?,owner_id='',owner_pid=0,owner_host='',lease_until=NULL,"
             "finished_ts=?,updated_ts=? WHERE id=? AND owner_id=? AND status='running'",
             (status.value, pause_reason.value if pause_reason else "", now if terminal else None, now,
              str(job_id), str(owner_id)),
-        ).rowcount > 0
+        ).rowcount > 0)
 
 
 _STEP_COLUMNS = (
@@ -260,7 +264,7 @@ _STEP_COLUMNS = (
 )
 
 
-def _state(row) -> StepState:
+def _state(row: sqlite3.Row) -> StepState:
     status = StepStatus(row["status"])
     return StepState(
         stage=row["batch_stage"], item_key=row["batch_item_key"], status=status, run_id=row["run_id"],
@@ -296,7 +300,7 @@ def step_state_for_run(run_id: str) -> StepState | None:
         conn.close()
 
 
-def recent_jobs(*, request_owner: str | None, include_finished: bool, limit: int) -> list[dict]:
+def recent_jobs(*, request_owner: str | None, include_finished: bool, limit: int) -> list[dict[str, Any]]:
     """A content-free job history: ids, states and counts only (no names or inputs)."""
     limit = max(1, min(int(limit), 100))
     fanout_store.reconcile_stale_runs()

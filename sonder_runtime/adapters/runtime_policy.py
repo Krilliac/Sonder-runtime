@@ -25,6 +25,7 @@ import sonder_runtime.adapters.model_tool_grants as _model_tool_grants
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.reference_lookup_state as _lookup_state
 from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
+from sonder_runtime.domain.reference_lookup.applies import AppliesRule
 from sonder_runtime.domain.runtime_policy import rules as _rules
 from sonder_runtime.platform import paths as runtime_paths
 
@@ -61,7 +62,7 @@ def tool_lane_deny_list(policy):
     )
 
 
-def reference_lookup_rule(policy):
+def reference_lookup_rule(policy: object) -> AppliesRule:
     """The lookup rule for a loaded policy (the shipped floor always included)."""
     return _rules.reference_lookup_rule(policy, floor=_model_tool_policy.shipped_floor())
 

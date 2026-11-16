@@ -8,7 +8,9 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
 from sonder_runtime.platform.config_environment import env_bool
 
@@ -80,7 +82,13 @@ def _path_ok(value: str) -> bool:
     return chr(0) not in value and len(value) <= 4096
 
 
-def security_eval_config_from_env(env, errors: list[str] | None = None) -> SecurityEvalConfig:
+def _with(config: SecurityEvalConfig, name: str, value: str | int | float) -> SecurityEvalConfig:
+    """``config`` with the field called ``name`` set; ``name`` comes from this module's key tables."""
+    changes: dict[str, Any] = {name: value}
+    return replace(config, **changes)
+
+
+def security_eval_config_from_env(env: Mapping[str, object] | None, errors: list[str] | None = None) -> SecurityEvalConfig:
     """Parse the SONDER_SECURITY_EVAL_* keys of ``env``; problems are appended to ``errors``."""
     problems = errors if errors is not None else []
     text = {key: str(value).strip() for key, value in dict(env or {}).items()
@@ -94,10 +102,10 @@ def security_eval_config_from_env(env, errors: list[str] | None = None) -> Secur
         value = text.get(PREFIX + key, "")
         if value:
             if _path_ok(value):
-                config = replace(config, **{key.lower(): value})
+                config = _with(config, key.lower(), value)
             else:
                 bad(key, "is not a usable path")
-    roots = []
+    roots: list[str] = []
     for part in text.get(PREFIX + "REPO_ROOTS", "").split(os.pathsep):
         part = part.strip()
         if not part:
@@ -126,22 +134,22 @@ def security_eval_config_from_env(env, errors: list[str] | None = None) -> Secur
         if not raw:
             continue
         try:
-            value = int(raw)
+            number = int(raw)
         except ValueError:
             bad(key, "is not an integer")
             continue
-        if low <= value <= high:
-            config = replace(config, **{name: value})
+        if low <= number <= high:
+            config = _with(config, name, number)
         else:
             bad(key, "must be within %d..%d" % (low, high))
     raw = text.get(PREFIX + "TEMPERATURE", "")
     if raw:
         try:
-            value = float(raw)
+            temperature = float(raw)
         except ValueError:
-            value = math.nan
-        if 0.0 <= value <= 1.0:
-            config = replace(config, temperature=value)
+            temperature = math.nan
+        if 0.0 <= temperature <= 1.0:
+            config = replace(config, temperature=temperature)
         else:
             bad("TEMPERATURE", "must be a number within 0..1")
     raw = text.get(PREFIX + "THINK", "").lower()

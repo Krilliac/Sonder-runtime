@@ -14,6 +14,7 @@ anyOf.  Annotation keywords assert nothing and are not gaps.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import re
@@ -149,7 +150,7 @@ def _walk(value: object, schema: object, path: str, errors: list[str],
         _walk_number(value, schema, path, errors, unchecked)
 
 
-def _walk_object(value: dict, schema: dict, path: str, errors: list[str],
+def _walk_object(value: dict[str, object], schema: dict[str, object], path: str, errors: list[str],
                  unchecked: set[str]) -> None:
     required = schema.get("required", [])
     if isinstance(required, list):
@@ -175,7 +176,7 @@ def _walk_object(value: dict, schema: dict, path: str, errors: list[str],
             _walk(value[name], extra, "%s.%s" % (path, name), errors, unchecked)
 
 
-def _bound(schema: dict, keyword: str, unchecked: set[str]) -> int | float | None:
+def _bound(schema: dict[str, object], keyword: str, unchecked: set[str]) -> int | float | None:
     if keyword not in schema:
         return None
     bound = schema[keyword]
@@ -185,7 +186,7 @@ def _bound(schema: dict, keyword: str, unchecked: set[str]) -> int | float | Non
     return bound
 
 
-def _walk_array(value: list, schema: dict, path: str, errors: list[str],
+def _walk_array(value: list[object], schema: dict[str, object], path: str, errors: list[str],
                 unchecked: set[str]) -> None:
     low = _bound(schema, "minItems", unchecked)
     high = _bound(schema, "maxItems", unchecked)
@@ -202,7 +203,7 @@ def _walk_array(value: list, schema: dict, path: str, errors: list[str],
             unchecked.add("items")
 
 
-def _walk_string(value: str, schema: dict, path: str, errors: list[str],
+def _walk_string(value: str, schema: dict[str, object], path: str, errors: list[str],
                  unchecked: set[str]) -> None:
     low = _bound(schema, "minLength", unchecked)
     high = _bound(schema, "maxLength", unchecked)
@@ -225,9 +226,9 @@ def _walk_string(value: str, schema: dict, path: str, errors: list[str],
         errors.append("%s: string does not match the pattern" % path)
 
 
-def _walk_number(value: int | float, schema: dict, path: str, errors: list[str],
+def _walk_number(value: int | float, schema: dict[str, object], path: str, errors: list[str],
                  unchecked: set[str]) -> None:
-    checks = (
+    checks: tuple[tuple[str, Callable[[int | float, int | float], bool], str], ...] = (
         ("minimum", lambda v, b: v < b, "is below the minimum"),
         ("maximum", lambda v, b: v > b, "is above the maximum"),
         ("exclusiveMinimum", lambda v, b: v <= b, "is not above the exclusive minimum"),
@@ -311,7 +312,7 @@ def unsupported_keywords(schema: object) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def check_reply(text: str, schema: dict) -> ReplyCheck:
+def check_reply(text: str, schema: dict[str, object]) -> ReplyCheck:
     """Parse ``text`` as JSON and check it against ``schema``.
 
     A single surrounding Markdown code fence is tolerated; anything else around

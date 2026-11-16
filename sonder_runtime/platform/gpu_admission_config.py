@@ -8,8 +8,10 @@ the window the model is already loaded with.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 MODES = ("enforce", "observe", "off")
 ON_HOST_FLOOR = ("queue", "refuse")
@@ -84,8 +86,12 @@ class GpuAdmissionConfig:
     )
 
 
-def gpu_admission_errors(config) -> list[str]:
-    """Every bound violation in ``config.gpu_admission``, as readable messages."""
+def gpu_admission_errors(config: Any) -> list[str]:
+    """Every bound violation in ``config.gpu_admission``, as readable messages.
+
+    ``config`` is a runtime config or a section whose fields may hold any value
+    (that is what is being validated), so it is typed ``Any``.
+    """
     section = config.gpu_admission if hasattr(config, "gpu_admission") else config
     errors: list[str] = []
     for name, allowed in (("mode", MODES), ("on_host_floor", ON_HOST_FLOOR),
@@ -113,13 +119,17 @@ def gpu_admission_errors(config) -> list[str]:
     return errors
 
 
-def apply_gpu_admission_environment(section: GpuAdmissionConfig, env, errors: list[str]) -> GpuAdmissionConfig:
+def apply_gpu_admission_environment(
+    section: GpuAdmissionConfig, env: Mapping[str, object], errors: list[str],
+) -> GpuAdmissionConfig:
     """Fold the documented ``SONDER_GPU_*`` overrides over ``section``.
 
     An unparseable value is reported and ignored (it never silently relaxes a
     limit); a parseable out-of-range value is caught by ``gpu_admission_errors``.
     """
-    updates: dict[str, object] = {}
+    # Values are int or str per key (validated by ``gpu_admission_errors``);
+    # ``Any`` lets them pass to the per-field types of ``replace``.
+    updates: dict[str, Any] = {}
     for key, variable in ENVIRONMENT_NAMES.items():
         raw = str(env.get(variable, "") or "").strip()
         if not raw:

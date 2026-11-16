@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from sonder_runtime.adapters import fanout_execution
 from sonder_runtime.adapters.persistence import batch_store, fanout_store
@@ -26,14 +28,35 @@ _MARKER = "sealed-fanout-prompt:batch-step"
 _RETRYABLE = (StepStatus.UNKNOWN, StepStatus.SKIPPED, StepStatus.FAILED)
 
 
+class PromptVault(Protocol):
+    """The ``fanout_prompt_vault`` module surface this adapter uses."""
+
+    PromptVaultError: type[Exception]
+
+    def encrypt_prompt(self, prompt: str) -> str: ...
+
+    def decrypt_prompt(self, ciphertext: str) -> str: ...
+
+
+class ExecutorRuntime(Protocol):
+    """The server-module surface the executor uses (the server module or a test double)."""
+
+    @property
+    def fanout_prompt_vault(self) -> PromptVault: ...
+
+    def _execute_fanout_run(self, run_id: str) -> object: ...
+
+    def _fanout_worker_id(self) -> str: ...
+
+
 class FanoutStepExecutor:
     """``StepExecutorPort`` over durable fanout child runs."""
 
-    def __init__(self, runtime):
+    def __init__(self, runtime: ExecutorRuntime) -> None:
         self._runtime = runtime
 
     @property
-    def _vault(self):
+    def _vault(self) -> PromptVault:
         return self._runtime.fanout_prompt_vault
 
     def _open(self, ciphertext: str) -> str:
@@ -42,7 +65,7 @@ class FanoutStepExecutor:
         except self._vault.PromptVaultError as exc:
             raise IntegrityFailure("sealed batch data is unavailable") from exc
 
-    def seal_fields(self, fields) -> str:
+    def seal_fields(self, fields: Mapping[str, str]) -> str:
         try:
             return self._vault.encrypt_prompt(json.dumps(dict(fields), ensure_ascii=False, sort_keys=True))
         except self._vault.PromptVaultError as exc:
@@ -61,7 +84,7 @@ class FanoutStepExecutor:
             raise IntegrityFailure("sealed answer is missing")
         return self._open(ciphertext), state.answer_truncated or not state.answer_truncation_known
 
-    def _limits(self, request: StepRequest) -> dict:
+    def _limits(self, request: StepRequest) -> dict[str, Any]:
         stage, settings = request.stage, request.job.settings
         return {
             "num_predict": stage.num_predict, "timeout": stage.timeout_s,
@@ -87,7 +110,8 @@ class FanoutStepExecutor:
             limits=self._limits(request), execution_prompt_ciphertext=sealed,
             batch_job_id=request.job.id, batch_item_key=request.item_key, batch_stage=request.stage.name,
         )
-        return run["id"]
+        run_id: str = run["id"]
+        return run_id
 
     def _ready_run(self, request: StepRequest, system: str, prompt: str) -> str:
         """A queued child run for this step: resumed when one exists, else created."""

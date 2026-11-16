@@ -86,6 +86,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import sonder_runtime.adapters.git_metadata_reads as reads
@@ -286,7 +287,7 @@ class _Live:
         return tuple(item for repo in self.repositories for item in (repo.git_dir, *repo.commons))
 
 
-def _location_sources() -> tuple[tuple[str, Callable[[], object]], ...]:
+def _location_sources() -> tuple[tuple[str, Callable[[], str | os.PathLike[str]]], ...]:
     """Each control-plane location's name and the call that names it, looked up at call time."""
     return (
         ("workspace_root", file_ops.workspace_root),
@@ -298,7 +299,7 @@ def _location_sources() -> tuple[tuple[str, Callable[[], object]], ...]:
 
 def _control_locations() -> list[Path]:
     """Every control-plane location; raises :class:`LiveCheckoutUnlocated` when one cannot be named."""
-    locations = []
+    locations: list[Path] = []
     for name, source in _location_sources():
         try:
             locations.append(file_ops._resolve_best_effort(Path(source())))
@@ -527,7 +528,7 @@ class LiveCheckoutRefusal:
             self.cause.value, self.where,
         )
 
-    def as_result(self) -> dict:
+    def as_result(self) -> dict[str, Any]:
         """The dict shape the ``harness_tools`` functions return for a refusal."""
         return {"ok": False, "error": self.message, "guard": LiveCheckoutGuard.LIVE_CHECKOUT.value}
 

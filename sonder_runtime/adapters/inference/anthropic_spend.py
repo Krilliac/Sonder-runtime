@@ -28,6 +28,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 from ...domain.common.errors import DependencyUnavailable
 from ..filesystem.atomic_json import file_lock, write_json_atomic
@@ -88,7 +89,7 @@ class SpendLedger:
             return _default_path()
         return Path(source() if callable(source) else source)
 
-    def _read(self, path: Path) -> dict:
+    def _read(self, path: Path) -> dict[str, Any]:
         if not path.exists():
             return {"schema": SCHEMA, "days": {}}
         try:
@@ -106,7 +107,7 @@ class SpendLedger:
             )
         return {"schema": SCHEMA, "days": days}
 
-    def _day_entry(self, document: dict, day: str) -> dict:
+    def _day_entry(self, document: dict[str, Any], day: str) -> dict[str, Any]:
         entry = document["days"].get(day)
         return entry if isinstance(entry, dict) else {}
 

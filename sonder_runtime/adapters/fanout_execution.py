@@ -8,6 +8,8 @@ here as small explicit-input functions so the executor only calls them.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 
 from sonder_runtime.domain.model_usage import usage_count
 from sonder_runtime.domain.fanout_receipts import safe_answer as _default_redact
@@ -23,7 +25,7 @@ def seal_envelope(system: str, prompt: str) -> str:
     )
 
 
-def fanout_payload(limits, plaintext):
+def fanout_payload(limits: Mapping[str, Any], plaintext: str) -> tuple[str, str]:
     """Return ``(question, system)`` from the decrypted sealed payload.
 
     A plain run seals the raw prompt string.  A batch child run seals the JSON
@@ -44,12 +46,12 @@ def fanout_payload(limits, plaintext):
     return envelope["prompt"], envelope["system"]
 
 
-def generate_extras(limits):
+def generate_extras(limits: Mapping[str, Any]) -> dict[str, Any]:
     """Optional ``_make_generate`` keywords; a plain run passes none."""
     return {} if limits.get("think") is None else {"think": limits["think"]}
 
 
-def call_metadata(generate):
+def call_metadata(generate: object) -> dict[str, Any]:
     """Bounded response metadata and token usage from a finished (or failed) call.
 
     ``generate`` may be ``None`` when building it failed.  Usage is copied only
@@ -66,7 +68,10 @@ def call_metadata(generate):
     return out
 
 
-def stored_answer(limits, raw_answer, question, metadata, *, seal, redact=_default_redact):
+def stored_answer(
+    limits: Mapping[str, Any], raw_answer: str, question: str, metadata: dict[str, Any], *,
+    seal: Callable[[str], str], redact: Callable[[str, str], str] = _default_redact,
+) -> str:
     """The answer text for the durable row.
 
     A plain run keeps the prompt-echo and credential redaction.  A sealed run
@@ -82,14 +87,15 @@ def stored_answer(limits, raw_answer, question, metadata, *, seal, redact=_defau
     return ""
 
 
-def result_fields(metadata):
+def result_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
     """``fanout_store.record_result`` keywords carried by a call's metadata."""
+    usage = cast("Callable[[object], int | None]", usage_count)
     return {
         "answer_chars": metadata.get("answer_chars"),
         "thinking_chars": metadata.get("thinking_chars"),
         "done_reason": metadata.get("done_reason", ""),
-        "tokens_in": usage_count(metadata.get("tokens_in")),
-        "tokens_out": usage_count(metadata.get("tokens_out")),
+        "tokens_in": usage(metadata.get("tokens_in")),
+        "tokens_out": usage(metadata.get("tokens_out")),
         "token_source": metadata.get("token_source", ""),
         "served_model": metadata.get("served_model", ""),
         "sealed_answer": metadata.get("sealed_answer", ""),

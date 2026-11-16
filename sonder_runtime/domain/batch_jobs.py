@@ -13,7 +13,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.model_usage import PROVIDER_TOKEN_SOURCES
@@ -138,13 +138,13 @@ class StepState:
     answer_truncation_known: bool = False
 
 
-def _plain_int(value, name, low, high):
+def _plain_int(value: object, name: str, low: int, high: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise InvalidInput("%s must be an integer in %d..%d" % (name, low, high))
     return value
 
 
-def _plain_text(value, name, *, limit, allow_empty=False):
+def _plain_text(value: object, name: str, *, limit: int, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not allow_empty and not value.strip()) or len(value) > limit:
         raise InvalidInput("%s must be a string of at most %d characters" % (name, limit))
     if _CONTROL.search(value):
@@ -184,7 +184,7 @@ def _ancestors(stage_index: int, deps: Sequence[tuple[str, ...]], names: Sequenc
     return seen
 
 
-def validate_spec(raw, limits: Limits, *, is_cloud_model: Callable[[str], bool]) -> JobSpec:
+def validate_spec(raw: object, limits: Limits, *, is_cloud_model: Callable[[str], bool]) -> JobSpec:
     """Validate a caller-supplied job spec; raises ``InvalidInput`` with a precise reason.
 
     ``raw`` is ``{"name", "fields": [...], "stages": [{name, model, prompt, ...}]}``.
@@ -272,7 +272,7 @@ def validate_spec(raw, limits: Limits, *, is_cloud_model: Callable[[str], bool])
     return JobSpec(name=name.strip(), fields=tuple(fields), stages=tuple(stages))
 
 
-def validate_items(raw, spec: JobSpec, limits: Limits, *, existing_keys: Iterable[str] = ()) -> tuple[ItemSpec, ...]:
+def validate_items(raw: object, spec: JobSpec, limits: Limits, *, existing_keys: Iterable[str] = ()) -> tuple[ItemSpec, ...]:
     """Validate one page of items: ``[{"key": str, "fields": {name: str}}]``."""
     if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
         raise InvalidInput("items must be a list")
@@ -306,7 +306,7 @@ def validate_items(raw, spec: JobSpec, limits: Limits, *, existing_keys: Iterabl
 def render_prompt(stage: StageSpec, item: ItemSpec, upstream: Mapping[str, str]) -> tuple[str, str]:
     """Render ``(system, prompt)`` in one pass; substituted values are never re-scanned."""
 
-    def substitute(match):
+    def substitute(match: re.Match[str]) -> str:
         token = match.group(1)
         if token.startswith(_STAGE_REF):
             name = token[len(_STAGE_REF):]
@@ -345,7 +345,7 @@ def effective_statuses(spec: JobSpec, item_keys: Sequence[str],
 
 
 def next_step(spec: JobSpec, item_keys: Sequence[str],
-              effective: Mapping[tuple[str, str], StepStatus], *, order: str = "stage_major"):
+              effective: Mapping[tuple[str, str], StepStatus], *, order: str = "stage_major") -> tuple[str, str] | None:
     """The next ``(stage name, item key)`` that is pending with every dependency answered."""
     if order == "item_major":
         sequence = ((stage, key) for key in item_keys for stage in spec.stages)
@@ -372,7 +372,7 @@ def counts(effective: Mapping[tuple[str, str], StepStatus]) -> dict[str, int]:
 
 
 def progress(spec: JobSpec, item_keys: Sequence[str], states: Mapping[tuple[str, str], StepState],
-             *, segment_start: float | None, eta_window: int, eta_min_samples: int) -> dict:
+             *, segment_start: float | None, eta_window: int, eta_min_samples: int) -> dict[str, Any]:
     """Done/total, rate and ETA.  Blocked steps count as done (they will never run).
 
     The rate uses only completions inside the current execution segment (since
@@ -406,7 +406,7 @@ def progress(spec: JobSpec, item_keys: Sequence[str], states: Mapping[tuple[str,
     }
 
 
-def token_rollup(states: Iterable[StepState]) -> dict:
+def token_rollup(states: Iterable[StepState]) -> dict[str, int]:
     """Token totals with provider-counted and estimated counts kept apart.
 
     A step with no recorded tokens is *unknown*, never zero.  An estimate never
@@ -445,7 +445,7 @@ def served_model_counts(states: Iterable[StepState]) -> dict[str, int]:
 MAX_LISTED_STEPS = 200
 
 
-def step_entry(state: StepState, status: StepStatus | None = None) -> dict:
+def step_entry(state: StepState, status: StepStatus | None = None) -> dict[str, Any]:
     """A step as a receipt row: models, tokens and timing, never any content."""
     return {
         "stage": state.stage, "item_key": state.item_key, "status": (status or state.status).value,
@@ -458,7 +458,7 @@ def step_entry(state: StepState, status: StepStatus | None = None) -> dict:
 
 
 def receipt_body(spec: JobSpec, item_keys: Sequence[str], states: Mapping[tuple[str, str], StepState],
-                 *, segment_start: float | None, eta_window: int, eta_min_samples: int) -> dict:
+                 *, segment_start: float | None, eta_window: int, eta_min_samples: int) -> dict[str, Any]:
     """Progress, token totals, per-stage rollups, failures and blocked steps for a job receipt."""
     effective = effective_statuses(spec, item_keys, states)
     stages = []
@@ -493,7 +493,7 @@ def breaker_trips(consecutive: int, limit: int) -> bool:
     return consecutive >= limit
 
 
-def spec_to_dict(spec: JobSpec) -> dict:
+def spec_to_dict(spec: JobSpec) -> dict[str, Any]:
     """Persistable form of an already validated spec."""
     return {
         "name": spec.name, "fields": list(spec.fields),
@@ -509,7 +509,7 @@ def spec_to_dict(spec: JobSpec) -> dict:
     }
 
 
-def spec_from_dict(raw: Mapping) -> JobSpec:
+def spec_from_dict(raw: Mapping[str, Any]) -> JobSpec:
     """Rebuild a spec this module persisted; the data is trusted, not re-validated."""
     return JobSpec(
         name=str(raw.get("name", "")),
