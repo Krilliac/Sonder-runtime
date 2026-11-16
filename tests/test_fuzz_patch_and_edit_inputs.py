@@ -2567,3 +2567,19 @@ def test_regression_defined_exemption_needs_an_if_line_every_compiler_reads_as_o
     assert any(_COMPUTED in reason for reason in _scan(text)), ascii(text)
     assert any(_COMPUTED in reason for reason in _refused_end_to_end(text)), ascii(text)
     assert _scan_every_lexing("#if defined(__has_include)\n#endif\n") == ()
+
+
+# --- review 8: pins for two mutants that survived (raw prefix inside a number, trailing quote of the literal part) ---
+
+
+@pytest.mark.parametrize("text", ['double a = 1.R"x y(" ;\n', 'double a = 1.R"x@y(" ;\n'])
+def test_bad_raw_prefix_inside_a_number_is_refused(text):
+    """A raw prefix whose delimiter is not a valid raw delimiter, glued to a number, is still refused."""
+    assert any(_BAD_RAW in reason for reason in _scan_every_lexing(text)), text
+
+
+@pytest.mark.parametrize(
+    "text", ['int a = 1\'R"(x)";\n', 'int a = 0x1\'R"(x)";\n', 'auto a = 1\'u8R"(x)" ;\n'])
+def test_separator_before_a_raw_string_stays_clean(text):
+    """``1'R"(x)"`` is a number then a valid raw string in every reading; it must not be refused."""
+    assert _scan_every_lexing(text) == (), text

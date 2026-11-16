@@ -309,7 +309,8 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     (``_LITERAL_PART_RE``: ``1'/`` yes, ``1x'2``, ``1.'2``, ``1e+'2`` no).
     The exponent sign is not uniform either: clang (C++) and g++
     ``-std=c++14`` end the number before a sign after ``p`` in a decimal
-    number, clang in MS mode before a sign after ``e`` in a hex one.
+    number (g++ C++11 and C++14 in a hex one too: ``0xp+``, ``0x.p-``),
+    clang in MS mode before a sign after ``e`` in a hex one.
     ``separators`` picks the reading (see
     ``normalize_for_scan``); every reading follows the same text up to the
     first ``'`` it decides differently, so ``events`` (when given) records
