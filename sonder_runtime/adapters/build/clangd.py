@@ -154,8 +154,18 @@ def path_to_uri(path: str) -> str:
     return "file://" + quote(absolute, safe="/")
 
 
+# UNC / NT / device-namespace prefixes. Mirrors executor._UNC_PREFIXES (executor.py) so the
+# adapter does not import the tool surface; compared on the slash-normalised form, so
+# "\\", "//", "\??\", "/??/", "\\?\", "//?/", "\\.\" and "//./" are all refused.
+_NT_PREFIXES = ("\\\\", "//", "\\??\\", "\\\\?\\", "\\\\.\\")
+_NT_PREFIXES_NORMALISED = tuple(sorted({p.replace("\\", "/") for p in _NT_PREFIXES}))
+
+
 def uri_to_path(uri: str) -> str:
-    parts = urlsplit(str(uri or ""))
+    try:
+        parts = urlsplit(str(uri or ""))
+    except ValueError:
+        return ""
     if parts.scheme != "file":
         return ""
     if parts.netloc and parts.netloc.lower() != "localhost":
@@ -163,10 +173,12 @@ def uri_to_path(uri: str) -> str:
     path = unquote(parts.path)
     if "\x00" in path:
         return ""
-    if os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
-        path = path[1:].replace("/", "\\")
-    if path.replace("\\", "/").startswith("//"):
+    normalised = path.replace("\\", "/")
+    if normalised.startswith(_NT_PREFIXES_NORMALISED) or normalised == "/??":
         return ""
+    if (os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":"
+            and path[1].isascii() and path[1].isalpha()):
+        path = path[1:].replace("/", "\\")
     return path
 
 

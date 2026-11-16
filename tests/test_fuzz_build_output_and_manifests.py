@@ -46,7 +46,7 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -1368,39 +1368,82 @@ def test_fuzz_parse_update_object_error_contract():
     _check_timings("parse_update_object", timings)
 
 
+def _local_path_oracle(path: str) -> str | None:
+    """Independent oracle: why ``path`` is NOT a plain local drive-letter or rooted path, else None."""
+    import ntpath
+    from pathlib import PureWindowsPath
+
+    if chr(0) in path:
+        return "NUL"
+    drive, _rest = ntpath.splitdrive(path)
+    if drive and not (len(drive) == 2 and drive[0].isalpha() and drive[1] == ":"):
+        return "non-drive prefix %r (UNC or device namespace)" % drive
+    pure_drive = PureWindowsPath(path).drive
+    if pure_drive and not (len(pure_drive) == 2 and pure_drive[0].isalpha() and pure_drive[1] == ":"):
+        return "PureWindowsPath drive %r" % pure_drive
+    head = path.replace("\\", "/")[:4]
+    if head[:2] == "//" or head[:3] == "/??" and head[3:4] in ("", "/"):
+        return "device-shaped head %r" % head
+    return None
+
+
 def test_fuzz_clangd_uri_to_path_never_yields_nul_and_has_no_other_exception():
     """SUSPECT: ``%00`` in a file URI decodes to a NUL byte in the returned path."""
+    import re
+
     rng = _rng(65)
     timings: list[float] = []
     pieces = ["file://", "file:///", "file:////", "host", "share", "%2e%2e", "%2E%2E", "..", "/", "%2f", "%5c", "%5C", "C:", "%3A",
-              "a", "%00", "%", "%zz", "\\", "?q=1", "#f", "//", "x y", "%25", "%252e%252e"]
-    unc_seen = []
-    unc_inputs = []
+              "a", "%00", "%", "%zz", "\\", "?q=1", "#f", "//", "x y", "%25", "%252e%252e", "%3F%3F", "%3f", "[", "]"]
+    shape_counts = {"host in netloc": 0, "////": 0, "%5C%5C": 0, "%3F%3F": 0}
     for _ in range(6000):
         uri = rng.choice(("file://", "file:///", "file:////", "")) + "".join(rng.choice(pieces) for _ in range(rng.randint(0, 8)))
         path, error = _run("uri_to_path", uri_to_path, uri, (), timings)
         if error is not None:
             continue
-        if "\x00" in path:
-            _fail("uri_to_path", uri, "decoded a NUL into the path")
-        if path.replace("\\", "/").startswith("//"):
-            unc_seen.append(uri)
-        split = urlsplit(uri)
-        decoded = unquote(split.path)
-        drive_form = len(decoded) > 2 and decoded[0] == "/" and decoded[2] == ":"
-        if split.scheme == "file" and ((split.netloc and split.netloc.lower() != "localhost")
-                                       or (decoded.replace("\\", "/").startswith("//") and not drive_form)):
-            unc_inputs.append(uri)
+        if not isinstance(path, str):
+            _fail("uri_to_path", uri, "returned %r, not a str" % (path,))
+        if path != "":
+            reason = _local_path_oracle(path)
+            if reason is not None:
+                _fail("uri_to_path", uri, "returned a non-local path (%s): %r" % (reason, path))
+        lower = uri.lower()
+        try:
+            netloc = urlsplit(uri).netloc
+        except ValueError:
+            netloc = None
             if path != "":
-                _fail("uri_to_path", uri, "UNC/host-shaped URI was not refused: %r" % (path,))
+                _fail("uri_to_path", uri, "malformed netloc was not refused: %r" % (path,))
+        required = []
+        if netloc and netloc.lower() != "localhost" and lower.startswith("file:"):
+            required.append("host in netloc")
+        if uri.startswith("file:////"):
+            required.append("////")
+        if re.match(r"file:///(%5c){2}", lower):
+            required.append("%5C%5C")
+        if re.match(r"file:///(%3f){2}(?:/|%5c|%2f|$)", lower):
+            required.append("%3F%3F")
+        for shape in required:
+            shape_counts[shape] += 1
+            if path != "":
+                _fail("uri_to_path", uri, "%s shape was not refused: %r" % (shape, path))
     _check_timings("uri_to_path", timings)
     assert uri_to_path("http://x/a") == "" and uri_to_path("") == "" and uri_to_path(None) == ""   # type: ignore[arg-type]
-    assert not unc_seen, "UNC-shaped path returned: %r" % (unc_seen[:3],)
-    assert unc_inputs, "the generator never produced a UNC-shaped URI"
+    missing = [shape for shape, count in shape_counts.items() if count == 0]
+    assert not missing, "the generator never produced these UNC/NT shapes: %r (%r)" % (missing, shape_counts)
 
 
 def test_clangd_uri_to_path_host_form_does_not_become_unc():
     """file://host/share/x names a remote host; the host must not be silently dropped into a local path."""
-    for uri in ("file:////host/share/x", "file:///%5C%5Chost%5Cshare%5Cx", "file://host/share/x"):
-        path = uri_to_path(uri).replace("\\", "/")
-        assert not path.startswith("//") and not path.startswith("/\\\\".replace("\\", "/")), (uri, path)
+    for uri in ("file:////host/share/x", "file:///%5C%5Chost%5Cshare%5Cx", "file://host/share/x",
+                "file:///%3F%3F/UNC/h/s", "file:///%5C%3F%3F%5CC:%5Cx", "file:///%3F%3F/C:/x",
+                "file:///%2F%2F%3F/C:/x", "file:///%2F%2F./pipe/x"):
+        assert uri_to_path(uri) == "", uri
+
+
+def test_clangd_uri_to_path_malformed_bracket_netloc_returns_empty():
+    """urlsplit raises ValueError on an unbalanced bracket netloc; uri_to_path must refuse, not raise."""
+    for uri in ("file://[x/a", "file://[::1/a", "file://a]/x"):
+        with pytest.raises(ValueError):
+            urlsplit(uri)
+        assert uri_to_path(uri) == "", uri
