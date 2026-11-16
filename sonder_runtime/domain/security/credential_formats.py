@@ -23,7 +23,7 @@ import re
 
 # Provider-issued API keys and tokens with a recognisable prefix.
 KNOWN_CREDENTIAL = re.compile(
-    r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
+    r"(?:(?<![A-Za-z0-9])|(?<=A[KS]IA[A-Z0-9]{16}))(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
     r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"glpat-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|"
     r"npm_[A-Za-z0-9]{12,}|pypi-[A-Za-z0-9_-]{16,}|"

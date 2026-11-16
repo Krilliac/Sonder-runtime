@@ -75,7 +75,7 @@ _PATTERNS: tuple[re.Pattern, ...] = (
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
         r"[\"']?\s*[:=]\s*)"
-        r"(\"[^\s\"',;}{]{4,}\"?|'[^\s\"',;}{]{4,}'?|[^\s\"',;}{]{4,})"
+        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
     re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+://)([^/@\s:]+:[^/@\s]+)@"),
     re.compile(
@@ -90,6 +90,35 @@ _PATTERNS: tuple[re.Pattern, ...] = (
     # known-credential formats the contribution privacy classifier refuses.
     *CREDENTIAL_FORMATS,
 )
+
+_PEM = _PATTERNS[6]
+_MAX_PASSES = 4
+
+# The PEM pattern is quadratic on repeated BEGIN headers with no matching END
+# (each BEGIN lazily scans to the end of the text). A BEGIN after the last
+# complete END can never match, so the pattern is applied only to the prefix
+# that ends at the last complete END marker: identical output, linear scan.
+_PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+
+
+def _sub_pem(pattern, text):
+    limit = 0
+    for m in _PEM_END.finditer(text):
+        limit = m.end()
+    if not limit:
+        return text
+    return pattern.sub(REDACTED, text[:limit]) + text[limit:]
+
+
+def _apply_patterns(text):
+    for pattern in _PATTERNS:
+        if pattern is _PEM:
+            text = _sub_pem(pattern, text)
+        elif pattern.groups >= 2:
+            text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
+        else:
+            text = pattern.sub(REDACTED, text)
+    return text
 
 
 class Redactor:
@@ -120,13 +149,9 @@ class Redactor:
                     text = text.replace(value, REDACTED)
             # A substitution can create a new word boundary, so repeat the
             # pattern passes until stable (bounded; mirrors the domain layer).
-            for _ in range(4):
+            for _ in range(_MAX_PASSES):
                 before = text
-                for pattern in _PATTERNS:
-                    if pattern.groups >= 2:
-                        text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
-                    else:
-                        text = pattern.sub(REDACTED, text)
+                text = _apply_patterns(text)
                 if text == before:
                     break
             for prefix in self._path_prefixes:

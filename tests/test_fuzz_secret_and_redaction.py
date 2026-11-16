@@ -356,6 +356,7 @@ def test_redact_structure_no_secret_survives_and_shape_preserved() -> None:
         secrets: list[Secret] = []
         sens_values: list[str] = []
         tree = _gen_tree(rng, rng.randint(1, 6), secrets, sens_values)
+        shape_before = _shape(tree)
         for sensitive in (True, False):
             out = timer.run(redact_structure, tree, label=repr(tree), sensitive_keys=sensitive)
             blob = repr(out)
@@ -366,7 +367,7 @@ def test_redact_structure_no_secret_survives_and_shape_preserved() -> None:
                 for v in sens_values:
                     assert v not in blob, _fail(f"sensitive-key value {v!r} survived: {tree!r} -> {out!r}")
         # Input is not mutated.
-        assert _shape(tree) == _shape(tree)
+        assert _shape(tree) == shape_before
     timer.check()
 
 
@@ -540,7 +541,7 @@ def test_scan_hostile_large_inputs_stay_in_budget() -> None:
 
 _HOSTILE_UNITS = (
     "eyJ" + "a" * 7 + ".", "AKIA", "ghp_", "api_key ", "password\t", "token  ", "secret ", "sk-", "a" * 50,
-    "-----BEGIN ", "-----BEGIN RSA PRIVATE KEY-----", "Bearer ", "authorization: ", "x:y@", "https://",
+    "-----BEGIN ", "-----BEGIN RSA PRIVATE KEY-----", "-eyJ", "Bearer ", "authorization: ", "x:y@", "https://",
     "\n", "\r\n", "-", "_", ".",
 )
 
@@ -566,12 +567,48 @@ def test_regression_redact_text_scheme_scan_is_not_quadratic() -> None:
 
 def test_regression_redact_text_not_idempotent_after_adjacent_substitution() -> None:
     """SUSPECT: a replaced credential makes ``[REDACTED]`` adjacent to text a later pass then matches."""
-    adjacent = "ghp_" + "A" * 20 + "Cookie: a=b"
+    adjacent = "AKIA0000000000000000Cookie: a=b"
     once = redact_text(adjacent)
+    assert "a=b" not in once, f"{adjacent!r} -> {once!r}"
     assert redact_text(once) == once, f"{adjacent!r} -> {once!r} -> {redact_text(once)!r}"
     stray_quote = "token = 'abcdefgh\"sk"
     once = redact_text(stray_quote)
     assert redact_text(once) == once, f"{stray_quote!r} -> {once!r} -> {redact_text(once)!r}"
+
+
+def test_regression_adjacent_aws_keys_redacted_in_one_pass() -> None:
+    """The AKIA/ASIA lookbehind saw the previous key's last character, so chains survived."""
+    scanner = CredentialScanner()
+    chains = {
+        "akia8": "aws=" + "".join(f"AKIA{i:016d}" for i in range(1, 9)),
+        "mixed": "k:" + "".join(f"{'AKIA' if i % 2 else 'ASIA'}{i:016d}" for i in range(1, 9)),
+    }
+    for name, text in chains.items():
+        out = redact_text(text)
+        assert "AKIA" not in out and "ASIA" not in out, f"{name}: {out!r}"
+        assert redact_text(out) == out, f"{name}: {out!r}"
+    akia = "".join(f"AKIA{i:016d}" for i in range(1, 9))
+    assert any(f.kind == "aws_access_key" for f in scanner.scan(akia))
+    assert any(f.kind == "aws_access_key" for f in scanner.scan("x " + akia))
+
+
+@pytest.mark.parametrize("size", [64 * 1024])
+@pytest.mark.parametrize("unit", ["-----BEGIN RSA PRIVATE KEY-----", "-eyJ"])
+def test_regression_repeated_unit_is_linear(unit: str, size: int) -> None:
+    text = (unit * (size // len(unit) + 1))[:size]
+    for fn in (redact_text, CredentialScanner().scan):
+        t0 = time.perf_counter()
+        fn(text)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.2, f"{fn.__name__} on {unit!r} x {size}: {elapsed:.3f}s"
+
+
+def test_pem_block_semantics_unchanged() -> None:
+    body = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----"
+    tail = "-----BEGIN RSA PRIVATE KEY-----\nunterminated"
+    out = redact_text("a " + body + " b " + tail)
+    assert "MIIEow" not in out
+    assert out.endswith(tail)
 
 
 # ---------------------------------------------------------------------------
