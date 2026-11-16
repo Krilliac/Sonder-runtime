@@ -725,3 +725,29 @@ def test_nesting_within_the_limit_is_still_fully_checked():
     schema_cursor["properties"] = {"c": {"type": "object"}}
     document_cursor["c"] = "not an object"
     assert J.validate(document, schema), "a violation at the bottom must still be found"
+
+
+@pytest.mark.parametrize("artifact, schema", [
+    ("NaN", {"type": "number", "minimum": 0}),
+    ("NaN", {"type": "number", "maximum": 10}),
+    ("NaN", {"type": "number", "exclusiveMinimum": 0}),
+    ("Infinity", {"type": "number", "multipleOf": 2}),
+    ("-Infinity", {"type": "number", "multipleOf": 0.1}),
+    ("NaN", {"type": "number", "multipleOf": 3}),
+])
+def test_non_finite_numbers_fail_numeric_keywords_without_raising(artifact, schema):
+    verdict = J.json_schema_verify(artifact, {"schema": schema})
+    assert verdict.passed is False
+    assert "finite" in verdict.reason
+
+
+def test_non_finite_number_without_numeric_keywords_is_unchanged():
+    assert J.json_schema_verify("NaN", {"schema": {"type": "number"}}).passed is True
+
+
+def test_huge_integer_multiple_of_is_exact_and_never_raises():
+    huge = 10 ** 400
+    assert J.json_schema_verify(str(huge), {"schema": {"multipleOf": 3}}).passed is False
+    assert J.json_schema_verify(str(3 * 10 ** 400), {"schema": {"multipleOf": 3}}).passed is True
+    assert J.json_schema_verify(str(huge), {"schema": {"multipleOf": 0.1}}).passed is False
+    assert J.json_schema_verify("7", {"schema": {"multipleOf": 7}}).passed is True
