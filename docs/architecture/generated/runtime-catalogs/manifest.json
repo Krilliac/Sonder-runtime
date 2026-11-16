@@ -1,9 +1,9 @@
 {
-  "artifact_digest": "7576e1e3e82346665f97d7b05378db2e7a3184c252dacf0c18e47eb6590e6dfe",
-  "catalog_digest": "b97b8806401a20f9fa34c3d703917d8effcd24a68da3eb31becb1e825032cd99",
+  "artifact_digest": "1decf699e9dbc81641396873c1947839c9c97569cac3daf04eb745d3a7803d2a",
+  "catalog_digest": "dcaa3d556d7ff5a997a8ee0fa8ed8bf277ab09dd9cb9152aa711f99461eeab61",
   "files": {
-    "cli.json": "cc2cb67be3803ae3f20eacc1d6535293c6c80405993dbd3e90673c39b6a5cdd1",
-    "client.json": "8d605d80781c04ee85d09228df75881bd77b838d2cde2dcf39e66653df54ab70",
+    "cli.json": "8095d6deae6257c9df3eb863a110ed22d106b64b41f8ef861a466aa4cf1331f1",
+    "client.json": "c264a3a4ce8cfd0fe2d29f75dfb9e5201782d5478b5a3cfc372ec1309fb61b5f",
     "conformance.json": "c6ea68c3e8ad88a21651878905a4e0e0bdc32416f9d96c6b4a19097782e08654",
     "mcp.json": "d163507e17531403f47743d6b04b8455b88ba752dd39330d521781d84a3723bc",
     "openai.json": "237e659967d3eb16b2b448404d576de2f80a0b1fd7fb381c1efb8ce5695dd069",

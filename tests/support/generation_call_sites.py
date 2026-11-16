@@ -1230,6 +1230,8 @@ _ENTRIES = [
      "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
      "to Application.model_gateway (the legacy bridge, which judges the served model on every "
      "call) and, through ServedTierGateway, to ChatService (text consumers)"),
+    ("sonder_runtime/bootstrap/batch_job_executor.py", "FanoutStepExecutor.execute", "_execute_fanout_run", 1, TEXT,
+     "batch step: the answer is vault-sealed and returned to the owner as text, never run or applied"),
     ("sonder_runtime/bootstrap/build_tools.py", "_LazyModelGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
      "lazy handle over the gateway build_fix is given"),
     ("sonder_runtime/bootstrap/mesh_agent_tools.py", "generate_mesh.generate", "_generate_text", 1, EXEC,

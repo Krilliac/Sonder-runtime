@@ -36,9 +36,13 @@ SMALL_ROWS = [
 ]
 
 
-def create_index(path: Path, rows=SMALL_ROWS, *, meta: bool = True, built_at: str = '2026-01-01T00:00:00+00:00'
-                 ) -> Path:
-    """Write a client-shaped index at path and return it."""
+def create_index(path: Path, rows=SMALL_ROWS, *, meta: bool = True, built_at: str = '2026-01-01T00:00:00+00:00',
+                 schema_version: object = None, sources: object = None) -> Path:
+    """Write a client-shaped index at path and return it.
+
+    ``schema_version`` and ``sources`` add the version 2 meta rows; a ``sources`` value that is
+    not a string is stored as JSON, a string is stored as given (so a test can store broken JSON).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
@@ -54,6 +58,11 @@ def create_index(path: Path, rows=SMALL_ROWS, *, meta: bool = True, built_at: st
             conn.execute(CREATE_META)
             conn.execute('INSERT INTO meta VALUES (?, ?)', ('summary', json.dumps(summary)))
             conn.execute('INSERT INTO meta VALUES (?, ?)', ('built_at', built_at))
+            if schema_version is not None:
+                conn.execute('INSERT INTO meta VALUES (?, ?)', ('schema_version', str(schema_version)))
+            if sources is not None:
+                text = sources if isinstance(sources, str) else json.dumps(sources)
+                conn.execute('INSERT INTO meta VALUES (?, ?)', ('sources', text))
         conn.execute("INSERT INTO passages(passages) VALUES('optimize')")
         conn.commit()
     finally:

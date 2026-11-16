@@ -48,6 +48,7 @@ from ...domain.reference_lookup.terms import (
     parse_terms,
     query_terms,
     split_scope,
+    strip_subject_echo,
 )
 
 NO_ROOM_WARNING = 'no room for references'
@@ -151,8 +152,8 @@ def is_cancellation(exc: BaseException) -> bool:
     return isinstance(exc, Cancelled) or getattr(exc, "kind", None) == CANCELLED_KIND
 
 
-def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool = False
-            ) -> tuple[list[str], list[str], list[str], bool]:
+def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool = False,
+            subjects: Sequence[str] = ()) -> tuple[list[str], list[str], list[str], bool]:
     """(kept terms, dropped terms, warnings, judged unrelated); a failed or empty expansion is a warning only.
 
     With ``scope`` the same call is also asked whether the question is in the
@@ -165,9 +166,11 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
         return [], [], [], False
     unrelated = False
     try:
-        reply = expand_fn(build_expand_prompt(question, scope=scope))
+        reply = expand_fn(build_expand_prompt(question, scope=scope, subjects=subjects))
+        if subjects and isinstance(reply, str):
+            reply = strip_subject_echo(reply, subjects)
         if scope and isinstance(reply, str):
-            reply, unrelated = split_scope(reply)
+            reply, unrelated = split_scope(reply, subjects)
         terms = parse_terms(reply)
     except Exception as exc:  # reported to the caller as a warning, never hidden
         if is_cancellation(exc):
@@ -279,7 +282,8 @@ def retrieve(
         if char_budget <= 0:
             return _bare(LookupReason.NO_ROOM, warnings=(NO_ROOM_WARNING,))
         terms, dropped, warnings, unrelated = _expand(
-            question, expand_fn, scope=unrelated_coverage > min_coverage > 0)
+            question, expand_fn, scope=unrelated_coverage > min_coverage > 0,
+            subjects=status.subjects)
         match = fts_query(question, terms)
         rows: tuple[RankedRow, ...] = ()
         if match and k > 0:

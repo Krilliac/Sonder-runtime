@@ -67,6 +67,7 @@ from sonder_runtime.platform.memory_replication_config import (
 from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
 from sonder_runtime.platform.claim_check_config import ClaimCheckConfig, claim_check_errors
 from sonder_runtime.platform.playbooks_config import PlaybooksConfig, playbooks_errors
+from sonder_runtime.platform.batch_jobs_config import BatchJobsConfig, batch_jobs_errors
 from sonder_runtime.platform.gpu_admission_config import (
     GpuAdmissionConfig, apply_gpu_admission_environment, gpu_admission_errors,
 )
@@ -666,6 +667,7 @@ class SonderConfig:
     )
     spanda: SpandaConfig = field(default_factory=SpandaConfig)
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
+    batch_jobs: BatchJobsConfig = field(default_factory=BatchJobsConfig)
     claim_check: ClaimCheckConfig = field(default_factory=ClaimCheckConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
     security_eval: SecurityEvalConfig = field(default_factory=SecurityEvalConfig)
@@ -694,6 +696,7 @@ class SonderConfig:
             "backup",
             "spanda",
             "playbooks",
+            "batch_jobs",
             "gpu_admission",
             "claim_check",
         ):
@@ -1005,6 +1008,7 @@ _SECTION_TYPES = {
     "backup": BackupConfig,
     "spanda": SpandaConfig,
     "playbooks": PlaybooksConfig,
+    "batch_jobs": BatchJobsConfig,
     "gpu_admission": GpuAdmissionConfig,
     "claim_check": ClaimCheckConfig,
 }
@@ -1844,6 +1848,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(control_state_rehearsal_errors(config))
     errors.extend(spanda_errors(config))
     errors.extend(playbooks_errors(config))
+    errors.extend(batch_jobs_errors(config))
     errors.extend(gpu_admission_errors(config))
     errors.extend(claim_check_errors(config))
     errors.extend(deployment_errors(config))
