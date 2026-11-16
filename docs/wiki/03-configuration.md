@@ -441,10 +441,10 @@ self-modification job run by `scripts/nightly_self_improve.py` and
 refuses them, the chat code gate never runs their replies, and they are never
 bound to a tier. The self-modification job checks its model (`--model`, else
 the `code` tier) before it starts a run and stops with `model refused, no run
-started: ...`. The built-in list is the `astra-cyber-` prefix and two source
-repositories. For each source, the hosted `hf.co/owner/repo` and
+started: ...`. The shipped list (the "floor", see below) is the `astra-cyber-`
+prefix and two source repositories. For each source, the hosted `hf.co/owner/repo` and
 `huggingface.co/owner/repo` ids, the hostless `owner/repo` id, and the repository
-name without `-GGUF` (the model stem) are denied as prefixes. A built-in stem
+name without `-GGUF` (the model stem) are denied as prefixes. A floor stem
 matches at the start of any path segment, followed by any characters, including
 another format or quantisation suffix. The `astra-cyber-` prefix likewise
 matches at the start of any segment. Both `/` and `\` separate segments;
@@ -455,9 +455,251 @@ Policy-added names and prefixes are matched against the full name, its last
 `/` segment (backslashes included, as before), and its last segment after
 either separator.
 
-The runtime policy can add entries (`tool_lane_denied_models` in
-`runtime_policy.json`: `{"names": [...], "prefixes": [...]}`) but never remove
-the built-in ones, and no tool or MCP parameter edits it. A malformed section
+The model lists live in two JSON files, not in Python:
+
+- **Shipped defaults**, `sonder_runtime/adapters/data/model_tool_policy.json`
+  (schema `version` 1, shipped beside `semantic_tier_head.json` and versioned with
+  the code). It holds `model_profiles`, each `{"id", "floor", "match": {"names",
+  "prefixes"}, "tools", "lanes"}`, and `undetermined_served_models` (served-model
+  ids that name no model: `""` and `default`). The `security-advisers` profile is
+  a floor (`"floor": true`) with `tools: []`, meaning chat by name only, and
+  every prefix spelled out. Entries are lowercase; the loader casefolds them
+  anyway.
+- **Operator overlay**, `<state home>/model_tool_policy.json` (the path in
+  `SONDER_MODEL_TOOL_POLICY` instead, when set), same schema, optional. It is a
+  separate file from `runtime_policy.json` so that `runtime_policy_update` can
+  never reach it. Edit it by hand, or at the console with `/runtime tools`
+  (below); that editor is its only writer in Sonder (see "Protected from the
+  file tools" below). It can add names and prefixes (in
+  a new profile, or in a floor profile's `match`), add `tools` and `lanes` to
+  any profile (a floor included), add served-model ids that name no model and
+  add `restricted_secret_path_globs`. It cannot set `"floor"`, cannot set
+  `restricted_tool_ceiling`, and cannot remove or narrow anything shipped: the
+  floor's names and prefixes, shipped tools and shipped globs are always in
+  force whatever the overlay says (the overlay's entries are unioned in). A
+  profile that matches no model, an unknown key, a duplicate `id`, a bad name
+  or glob or a file over 1 MiB makes the overlay invalid.
+
+Protected from the file tools. Both files are control-plane state, and these
+tools refuse to change them (the overlay with its `.lock` and `.tmp-`
+siblings; the shipped file and, without a developer token, the whole package
+data directory holding it):
+
+- `file_write`, `file_edit`, `file_copy`/`file_move`, `file_delete`, batch
+  writes and the patch tools, from an agent turn or MCP. A developer token
+  does not open the two policy files (or a recursive delete of a folder that
+  holds one): only the attended `/runtime tools` editor writes the overlay,
+  and nothing at run time writes the shipped file. The token still opens the
+  rest of the package data directory and the other control-plane state. A
+  developer-token recursive delete removes a symlink or junction itself and
+  never follows it into another folder.
+- `fetch_artifact`: a destination, staging file or provenance sidecar there.
+  `archive_extract` refuses a destination directory that would hold a policy
+  file (a missing overlay included).
+- `apply_patch`: it lists every path a patch would write (`git apply
+  --numstat`, both names of a rename) and refuses the patch when any is
+  protected, in any repository, attended or not.
+- `rename_symbol`: every file it would rewrite gets the file tools' check, and
+  one protected file refuses the whole rename (the preview still runs).
+- `format_code` and `lint_run` with `fix`: the formatter is not run when its
+  path (or the root) is or holds a protected place (the workspace root, the
+  package data directory, Sonder's own code directories, the overlay, the
+  Sonder home's control files) or lies inside one, when a symlink or junction
+  under it leads to one, or when it holds a hard link to a protected file. The
+  folder is scanned for hard links only when a protected file has more than
+  one name, so a pnpm store or a uv environment is not refused. A check-only
+  run is unchanged. These path checks are defence in depth: a formatter runs a
+  program, so it is an execution-risk tool (below).
+
+The live runtime checkout. The checkout Sonder runs from (the repository
+holding the workspace root, the package data directory, the overlay or the
+Sonder home) is never changed by a model. Production is fast-forwarded from
+origin/main and self-modification has its own reviewed pipeline, so in that
+checkout `git_checkout`, `git_branch`, `git_commit`, `git_tag`, `git_stash`
+push, pop and drop, `git_merge`, `git_cherry_pick`, `apply_patch` (without
+`check_only`), `format_code` and
+`lint_run` with `fix` refuse unless the operator typed that very tool at the
+console (`/git_checkout ...`) with a person present. The rule does not try to
+predict what a call would write or which commit a ref names: it looks at the
+paths, asks `git rev-parse` which repository git would use there, and looks at
+the attendance signal
+(`adapters/operator_attendance.py`), which the console dispatcher sets only
+around the tool the operator typed, so a model loop started by `/agent` is not
+attended and neither is a piped or scripted console. No token opens it.
+
+What counts as live is what git would act on, not the nearest `.git`
+(`adapters/live_checkout.py`). Any path inside the live tree is live, whatever
+`.git` markers sit in between: git skips a `.git` folder whose `HEAD` is not a
+ref and keeps walking up, and a repository nested in the live tree is still
+inside it. A path outside the tree is live when a git directory it reaches
+is, or shares state with, the live one: a `.git` file whose `gitdir:` names
+the live git directory, a git directory whose `commondir` is the live one
+(unless it is a registered worktree off the live branch, below), or a
+`core.worktree` that points into the live tree or at a folder containing it.
+A junction, symlink or different spelling of the live checkout is still the
+live checkout (identified by directory identity, not by name).
+
+The rule fails closed. Every file it reads (`.git` files, `commondir`, `HEAD`,
+loose refs, config) is read as present, absent or unknown; a file over 1 MiB,
+a NUL byte, bytes that are not UTF-8, a config with a BOM or a continuation
+line that mentions `worktree`, a drive-relative path or any error other than
+"no such file" counts as unknown, and unknown is live. When the live checkout
+itself cannot be located (a control-plane location raises, or its git
+metadata cannot be read), every path is live and the refusal says so. Git's
+own answer is a second check: if `git rev-parse`, run in that folder, names a
+live git directory or a work tree inside or containing the live tree, or fails
+with anything but "not a git repository", the path is live. That costs two
+short git runs (about 20 ms) only for a path the file rule does not already
+call live.
+
+A repository that is not the live checkout is unaffected: a user's project,
+including repositories nested in it, and a git worktree of the runtime outside
+the live tree (its `.git` is a file naming its own `HEAD` and index) keep every
+git tool as plain git. A worktree counts only when it is registered (its git
+directory is `<live>/.git/worktrees/<name>` and that entry's `gitdir` names
+its very `.git` file) and its `HEAD` is not on the branch the live checkout has
+checked out; a hand-made git directory sharing the live one is live whatever
+its `HEAD` says. A worktree shares branches, tags and the stash with the
+live repository, which is why `/runtime_source_stash pop` (and `/stash pop`)
+needs the operator at the console and restores only a stash that
+`runtime_source_stash save` recorded in the live checkout. It applies that
+stash once: if the drop that follows fails, a second pop reports it instead of
+applying it again. For the same reason `git_stash pop` and `git_stash drop`
+refuse, in any worktree, when the top stash entry is that recorded recovery
+stash.
+
+The shipped file is pinned. The first valid read of the shipped policy (the
+module reads it as the process starts) records its SHA-256. A later read that
+finds other bytes makes the floor unavailable, so every tool-using lane
+refuses every model, exactly as for a missing file, until Sonder is restarted
+or the operator runs `/runtime tools reload` at the console. `reload` pins
+what is on disk and prints the old and the new hash and everything that
+differs (floor names and prefixes, the restricted tool ceiling, the secret
+path globs, the undetermined served names and each profile's tools), so
+compare it with the committed file before trusting it
+(`git diff` on `model_tool_policy.json`). Writing the pinned bytes back
+restores the floor without a reload, and a rewrite with identical bytes is not
+a change. `runtime_source_update` and a reviewed self-modification deploy
+change the shipped file on purpose; after either, the floor stays unavailable
+until a restart or a `reload`. An observation filter already running for a
+granted turn withholds everything once the shipped file stops matching its pin
+or the overlay turns invalid.
+
+Other names for the same file count. A Windows `\\?\` spelling is compared in
+its ordinary form (a namespace with no ordinary form, such as `\\.\` or
+`GLOBALROOT`, counts as protected), a UNC spelling of a local folder and a hard
+link are compared by file identity, and no file tool writes in place to a file
+that has more than one hard link without a developer token. On Windows every
+file tool (reads included) refuses the caller's path when a component ends in
+a dot or a space, or holds `:` after the drive (`overlay.json.`, `overlay.json `,
+`overlay.json::$DATA`), because Windows treats those as the trimmed name; `.`
+and `..` components are fine. A name that starts like the overlay
+(`model_tool_policy*`, or the stem of an overlay renamed with
+`SONDER_MODEL_TOOL_POLICY`) in the overlay's folder or the state home is
+refused for create, write, move, copy and delete, with or without a developer
+token.
+
+Not covered: the tools that run programs (`build_run`, `test_run`,
+`dependency_add`/`remove`/`update`, `build_clean`, `run_code` and the rest)
+can change any file their program writes; they are execution-risk tools
+(`permission_modes.risk_of`), gated as such, not by these path checks. The
+shipped-file pin is what keeps the floor in force when such a write succeeds,
+for the life of the process.
+
+The shipped file also holds `restricted_tool_ceiling` (the only tools any
+profile may ever grant: `text_search`, `repository_symbol_index`,
+`file_read_range`, `directory_tree`, `context_pack`) and
+`restricted_secret_path_globs` (`.env`, `.env.*`, `*.pem`, `*.key`, `*.pfx`,
+`*.p12`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.ssh/**`, `**/secrets/**`,
+`*credential*`, `*token*`, `*secret*`, `.git/config`, `.netrc`, `.npmrc`,
+`.pypirc`).
+
+##### Restricted tool grants
+
+A model that a profile with `tools` matches is *restricted*: still refused in
+every tool lane and still chat by name everywhere, except in the lanes the
+profile lists (`agent`, the `agent` tool; `workbench_agent`, `workbench_agent`
+with an explicit tier), where it may drive only the granted tools. Every
+profile match keeps the model on the deny list, so a grant never opens any
+other lane (`codegen_build_loop`, `mesh_generate`, campaigns, the code gate, the
+default route, a tier binding, fan-out and the rest refuse it exactly as
+before). A profile with `tools: []` (the shipped `security-advisers`) is chat by
+name only, as it always was.
+
+A model is restricted only when all of these hold: the caller named it (by
+name, not through a tier, a prepared target, a bridged provider or the default
+route); the deny list matches it; no profile with no tools, no overlay `deny-`
+entry and no legacy `tool_lane_denied_models` entry matches it; every matching
+grant lists the lane; and the intersection of the matching grants' tools is
+not empty. An unreadable policy file, an unreadable overlay or a missing
+shipped file grants nothing. The `agent` entry is opened only by a direct
+`agent` call and `workbench_agent` with an explicit tier; a model-planned
+`loop` action, `/work` on tier `auto` (its escalation rungs), chat file routing
+and a prepared plan never open it.
+
+A tool is granted only when it is in the shipped ceiling *and* passes a code
+check: its risk grade is `safe`; it does not reach the network, read or change
+memory or learning state, operate the system, or start a program (`run_*`,
+`*_run`, `build_*`); and it is a read-only, project-confined tool the agent
+lane dispatches. A tool that fails is dropped and `/runtime status` shows a
+`DROPPED` line with the reason (the overlay is otherwise applied). Granting
+also needs at least one secret glob.
+
+A restricted run is read-only, with no web or location access, no host
+profile or brief, no playbook memory and no speculative tool calls. It is
+offered only the granted tools (the caller's `allowed_tools`, if any,
+intersected with them) and every call is checked at dispatch, so a forged call
+to any other tool is refused. It needs a project: the caller must pass
+`project=` naming an existing directory (a missing project or a memory-project
+label is refused: "a restricted model needs a project root"). Every path
+argument is resolved against that root and refused when it leaves it or
+matches a secret glob (case-insensitive; a glob without `/` matches any path
+component, one with `/` any tail of the path); so is a search `glob` that
+selects secret files and `include_hidden` / `include_ignored`. `text_search`,
+`repository_symbol_index` and `directory_tree` results are filtered before the
+model, the activity record or the caller sees them: a row or tree entry naming
+a secret path (as spelled or after following links), an entry inside a
+directory that matches a glob, or a line that does not parse, is withheld and
+counted. Tree walks never follow a symlink, a junction or any other name-surrogate
+reparse point (one whose tag cannot be read counts as a link); other reparse points,
+such as cloud-file placeholders, are walked as ordinary content.
+
+The grant is decided again during the turn: at every model call the files must
+still grant every tool the turn was opened with (revoking any one stops the
+next call), and at every dispatch the tool must still be granted. A tool
+granted after the turn opened does not join it. The secret globs are read
+again at every dispatch and every result filter, so a glob added mid-turn
+applies to the next call (one removed mid-turn applies until the turn ends);
+globs that cannot be read refuse the call and withhold the result.
+
+At the console:
+
+```text
+/runtime tools                                   show profiles (with sources), ceiling, globs, DROPPED and ERROR lines
+/runtime tools allow <model|prefix*> <tool> [agent|workbench_agent]
+/runtime tools revoke <model|prefix*> <tool>
+/runtime tools deny <model|prefix*>
+/runtime tools undeny <model|prefix*>
+```
+
+Writes happen only at the REPL with an operator present; from MCP, HTTP, a
+piped console or an agent they are refused and the file is not touched. A
+write takes the overlay's lock, refuses to overwrite an unreadable or invalid
+overlay, validates the result and replaces the file atomically. `allow`
+refuses a tool outside the ceiling or failing the check, and a model that a
+tool-less profile also matches (grant on that profile's own selector, e.g.
+`/runtime tools allow astra-cyber-* text_search`). Shipped entries cannot be
+revoked or undenied. `runtime_policy_data()` carries the same view under
+`model_tool_policy`.
+
+Both are read again when their size or modification time changes. `/runtime
+status` shows both paths and every load error.
+
+The `tool_lane_denied_models` section of `runtime_policy.json` (`{"names":
+[...], "prefixes": [...]}`) is deprecated in favour of the overlay but still read
+and unioned (add-only), so existing files keep working. Neither it nor the
+overlay can remove a floor entry, and no tool or MCP parameter edits either
+list (`/runtime tools` at an attended console is the only writer of the overlay). A malformed section
 makes the whole policy file invalid: it then loads as built-in defaults, which
 also reverts every tier binding, and caller-named models are refused in tool
 lanes until the file is repaired or reset (`/runtime reset`). A `local_models`
@@ -547,8 +789,22 @@ applies the same served-model rule to every non-Ollama request it dispatches.
 Ordinary models are judged against a deny list cached per version of the
 policy file, so they pay no extra disk read per call.
 
-Three configurations fail closed where they did not before:
+Six configurations fail closed:
 
+- With the shipped `model_tool_policy.json` missing, unreadable or invalid (no
+  floor profile counts as invalid), every tool-using lane refuses every model,
+  tier-bound ones and the default route included, and the refusal and
+  `/runtime status` name the file. Text-only chat is unaffected, and tier
+  bindings are not rewritten. Fix: restore the file from the install.
+- With the overlay present but unreadable or invalid (or impossible to
+  inspect), every tool-using lane refuses every model, tier-bound ones, the
+  default route and bridged providers included, because the overlay may be
+  what restricted a model and a broken file cannot say which. The refusal and
+  `/runtime status` name the file, text-only chat is unaffected, tier bindings
+  are not rewritten, and a runtime-policy update that binds a tier is refused
+  until it is fixed. A failed read is reused for at most a second and refuses
+  while it is. The file is never rewritten; fix it by hand (or delete it). A
+  missing overlay is normal.
 - With the policy file unreadable, a model named by the caller (not one a tier
   is bound to) is refused in tool lanes, and the chat code gate does not run
   its reply. Fix: repair the file (`/runtime status` shows the error) or reset

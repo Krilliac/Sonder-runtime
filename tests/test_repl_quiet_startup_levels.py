@@ -8,6 +8,7 @@ import pytest
 import permission_modes
 from sonder_runtime.domain.routing import capability_router
 from sonder_runtime.domain.runtime_model_configuration import RuntimeModelConfiguration
+from tests.support.tool_lane import FLOOR
 
 
 def _levels(caplog, fragment):
@@ -24,7 +25,7 @@ def test_no_keyword_classification_is_debug(caplog):
 
 def test_unconfigured_local_tiers_notice_is_info(caplog):
     caplog.set_level(logging.DEBUG)
-    RuntimeModelConfiguration.from_environment({})
+    RuntimeModelConfiguration.from_environment({}, floor=FLOOR)
     levels = _levels(caplog, "local tiers with no model configured")
     assert levels == [logging.INFO]
 

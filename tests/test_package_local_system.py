@@ -480,3 +480,17 @@ def test_compaction_engine_module_is_shipped_in_the_payload():
     assert engine in package.REQUIRED_FILES
     assert package._included(Path(engine))
     assert engine in {path.relative_to(package.ROOT).as_posix() for path in package._tracked_files()}
+
+
+def test_shipped_model_tool_policy_ships_in_the_desktop_payload():
+    """The tool-lane floor lives in this JSON file. ``_included`` drops
+    ``.json`` files, so without the exemption a packaged build had no floor,
+    and every tool-using lane refused every model (fail closed)."""
+    rel = "sonder_runtime/adapters/data/model_tool_policy.json"
+    assert package._included(Path(rel))
+    assert rel in package.REQUIRED_FILES
+    repo = Path(package.__file__).resolve().parents[1]
+    package._privacy_scan(repo / rel)
+    # The exemption is exact: other JSON stays out of the payload.
+    assert not package._included(Path("sonder_runtime/adapters/data/other.json"))
+    assert not package._included(Path("permissions.json"))

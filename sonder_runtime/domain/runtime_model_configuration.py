@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Mapping
 
-from .tool_lane_models import ToolLaneDenyList, decide
+from .tool_lane_models import ToolLaneDenyList, ToolLaneFloor, decide_listed
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class RuntimeModelConfiguration:
 
     @classmethod
     def from_environment(
-        cls, env: Mapping[str, str]
+        cls, env: Mapping[str, str], *, floor: ToolLaneFloor,
     ) -> "RuntimeModelConfiguration":
         stable_alias = "sonder:latest"
         default_cloud_code_model = "kimi-k2.7-code:cloud"
@@ -82,7 +82,7 @@ class RuntimeModelConfiguration:
         local_code_model = str(env.get("SONDER_CODE_LOCAL", stable_alias))
         # Like a tier seed, the local code fallback never names a model that
         # is blocked from tool-using lanes: it backs the default route.
-        if decide(local_code_model, ToolLaneDenyList.from_policy(None), free_form=False).denied:
+        if decide_listed(local_code_model, ToolLaneDenyList.from_policy(None, floor=floor), free_form=False).denied:
             logger.warning(f"SONDER_CODE_LOCAL={local_code_model!r} is blocked from tool-using lanes; using {stable_alias!r}")
             local_code_model = stable_alias
         return cls(
