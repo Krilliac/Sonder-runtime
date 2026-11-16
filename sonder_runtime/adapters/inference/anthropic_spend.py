@@ -124,16 +124,17 @@ class SpendLedger:
             return self._today_locked()
 
     def try_reserve(self, amount: Decimal, cap: Decimal) -> tuple[int | None, Decimal, Decimal]:
-        """Atomically refuse at the cap, else hold ``amount`` for a call in flight.
+        """Atomically refuse over the cap, else hold ``amount`` for a call in flight.
 
         Returns ``(token, spent_today, inflight)``; ``token`` is ``None`` when
-        spend plus the reservations already held has reached ``cap``.  Release
+        spend plus the reservations already held plus ``amount`` would exceed
+        ``cap`` (an exact fit is admitted).  Release
         the token with :meth:`release` once the call's real cost is recorded.
         """
         with self._thread_lock:
             spent = self._today_locked()
             inflight = sum(self._inflight.values(), Decimal(0))
-            if spent + inflight >= cap:
+            if spent + inflight + amount > cap:
                 return None, spent, inflight
             token = self._next_token
             self._next_token += 1

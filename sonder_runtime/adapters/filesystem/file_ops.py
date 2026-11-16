@@ -70,8 +70,20 @@ SECRET_FILES = {
     # OpenSSH private keys carry no secret suffix.
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 }
-SECRET_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
-SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube"}
+# Each secret-name list is split in two: the BASE rules that existed before the
+# token-store coverage change, and the ADDED rules. Archive extraction refuses
+# on the base rules only (see ``_is_base_secret_path``); every other guard uses
+# the union. ``_is_secret_path(x) == _is_base_secret_path(x) or added(x)``.
+BASE_SECRET_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
+ADDED_SECRET_SUFFIXES = frozenset({".kdbx"})
+SECRET_SUFFIXES = set(BASE_SECRET_SUFFIXES | ADDED_SECRET_SUFFIXES)
+BASE_SENSITIVE_READ_DIRECTORIES = frozenset({
+    ".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube",
+})
+ADDED_SENSITIVE_READ_DIRECTORIES = frozenset({".gcloud"})
+SENSITIVE_READ_DIRECTORIES = set(
+    BASE_SENSITIVE_READ_DIRECTORIES | ADDED_SENSITIVE_READ_DIRECTORIES
+)
 # Credential stores the direct read tools (file_read, file_read_range,
 # data_inspect, image_inspect, file_copy/move sources) deny by default even
 # inside an allowed root, and even with a developer token or bypass: a key
@@ -80,13 +92,47 @@ SENSITIVE_READ_DIRECTORIES = {".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube
 # directory itself (``~/.ssh``), a path inside it, or the exact file
 # (``/proj/.env``) listed in ``file_roots.local`` or ``SONDER_FILE_ROOTS``.
 # See ``credential_read_component``.
-CREDENTIAL_READ_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".gnupg", ".kube"})
-CREDENTIAL_READ_FILES = frozenset({
+CREDENTIAL_READ_DIRECTORIES = frozenset({
+    ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
+})
+BASE_CREDENTIAL_READ_FILES = frozenset({
     ".netrc", "_netrc", ".git-credentials", ".pgpass",
     "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
 })
+ADDED_CREDENTIAL_READ_FILES = frozenset({
+    # Package-registry / tool tokens and cluster credentials, by well-known name.
+    ".npmrc", ".pypirc", "kubeconfig", ".terraformrc", "terraform.rc",
+    "credentials.tfrc.json", ".boto", ".s3cfg", ".htpasswd", ".vault-token",
+    # GCP service-account key files and application-default credentials.
+    "service-account.json", "service_account.json", "serviceaccount.json",
+    "application_default_credentials.json",
+})
+CREDENTIAL_READ_FILES = BASE_CREDENTIAL_READ_FILES | ADDED_CREDENTIAL_READ_FILES
+# Credential stores recognised by extension (password databases).
+CREDENTIAL_READ_SUFFIXES = ADDED_SECRET_SUFFIXES
 # (directory, file) pairs whose file is a credential store only in context.
-CREDENTIAL_READ_PAIRS = frozenset({(".docker", "config.json"), (".git", "config")})
+CREDENTIAL_READ_PAIRS = frozenset({
+    (".docker", "config.json"), (".git", "config"),
+    (".cargo", "credentials.toml"), (".cargo", "credentials"),
+    (".gem", "credentials"),
+    (".m2", "settings.xml"), (".m2", "settings-security.xml"),
+    # GitHub CLI on Windows: %APPDATA%/GitHub CLI/hosts.yml
+    ("github cli", "hosts.yml"),
+})
+# Consecutive (directory, directory) pairs that are a credential store as a
+# whole (``~/.config/gcloud`` holds credentials.db and access_tokens.db), and
+# (directory, directory, file) triples for a single token file in a shared
+# directory (``~/.config/gh/hosts.yml``; ``gh/config.yml`` stays readable).
+CREDENTIAL_READ_DIRECTORY_PAIRS = frozenset({
+    (".config", "gcloud"),
+    # Google Cloud SDK on Windows: %APPDATA%/gcloud (under .../AppData/Roaming).
+    # Never the bare word "gcloud": that would refuse ordinary project folders.
+    ("roaming", "gcloud"),
+})
+CREDENTIAL_READ_TRIPLES = frozenset({
+    (".config", "gh", "hosts.yml"),
+    (".config", "glab-cli", "config.yml"),
+})
 # Sonder's own first-party package below the install root. The mutation guard
 # used to recognize Sonder modules only by ``parent == root``, which was true
 # when every module sat directly in the install directory. The SPEC-3 Phase 5
@@ -423,11 +469,32 @@ def _control_plane_paths() -> set[Path]:
 
 
 def _is_secret_path(path: Path) -> bool:
+    """True for a secret file name: the base rules plus the added token stores."""
+    if _is_base_secret_path(path):
+        return True
+    return (
+        path.name.lower() in ADDED_CREDENTIAL_READ_FILES
+        or path.suffix.lower() in ADDED_SECRET_SUFFIXES
+    )
+
+
+def _is_base_secret_path(path: Path) -> bool:
+    """The secret-name rules that existed before the token-store additions.
+
+    Archive extraction refuses on exactly this predicate, so an archive that
+    could be extracted before still can, and one that was refused still is.
+    Names flagged only by the added rules (``.npmrc``, ``kubeconfig``, ...) are
+    left to the read guard: ordinary repositories ship them.
+    """
     name = path.name.lower()
     suffix = path.suffix.lower()
-    # CREDENTIAL_READ_FILES is the direct-read deny list; folding it in here
-    # keeps archive/scan/compare exclusions from drifting behind it.
-    if name in SECRET_FILES or name in CREDENTIAL_READ_FILES or suffix in SECRET_SUFFIXES:
+    # BASE_CREDENTIAL_READ_FILES is the original direct-read deny list; folding
+    # it in here keeps archive/scan/compare exclusions from drifting behind it.
+    if (
+        name in SECRET_FILES
+        or name in BASE_CREDENTIAL_READ_FILES
+        or suffix in BASE_SECRET_SUFFIXES
+    ):
         return True
     if name in {".env", ".envrc"} or name.startswith(".env.") or suffix == ".env":
         # ``secrets.env`` / ``prod.env`` / ``sonder.env`` carry the same
@@ -589,9 +656,23 @@ def _credential_part(parts) -> str:
             return part
         if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_PAIRS:
             return "%s/%s" % (part, lowered[index + 1])
-        if index == last and (part in CREDENTIAL_READ_FILES or _is_env_file(part)):
+        if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_DIRECTORY_PAIRS:
+            return "%s/%s" % (part, lowered[index + 1])
+        if index + 1 < last and (part, lowered[index + 1], lowered[index + 2]) in CREDENTIAL_READ_TRIPLES:
+            return "%s/%s/%s" % (part, lowered[index + 1], lowered[index + 2])
+        if index == last and (
+            part in CREDENTIAL_READ_FILES
+            or _is_env_file(part)
+            or Path(part).suffix in CREDENTIAL_READ_SUFFIXES
+        ):
             return part
     return ""
+
+
+# Public names for the two path predicates, for callers outside this module (the security-eval
+# repo reader). The private names stay: this module and existing callers use them.
+is_secret_path = _is_secret_path
+credential_part = _credential_part
 
 
 def credential_read_component(path: Path) -> str:
@@ -612,15 +693,42 @@ def credential_read_component(path: Path) -> str:
         return _credential_part(resolved.parts[1:])
     found = ""
     for root in containing:
-        if any(part.lower() in CREDENTIAL_READ_DIRECTORIES for part in root.parts):
+        lowered_root = [part.lower() for part in root.parts]
+        if any(part in CREDENTIAL_READ_DIRECTORIES for part in lowered_root):
             # The root is the store (``~/.ssh``) or lies inside it: named.
             return ""
-        relative = () if resolved == root else resolved.relative_to(root).parts
-        part = _credential_part(relative)
+        if any(
+            pair in CREDENTIAL_READ_DIRECTORY_PAIRS
+            for pair in zip(lowered_root, lowered_root[1:], strict=False)
+        ):
+            # The root is a whole-directory store (``~/.config/gcloud``) or
+            # lies inside it: named.
+            return ""
+        if resolved == root:
+            return ""
+        # A pair or triple rule names its parent directories, so a root set at
+        # or inside those parents (``<proj>/.config``, ``~/.config/gh``) must
+        # not hide them: judge the root's trailing components plus the rest.
+        relative = resolved.relative_to(root).parts
+        part = _credential_part(tuple(root.parts[-2:]) + tuple(relative))
         if not part:
             return ""
         found = found or part
     return found
+
+
+def credential_path_component(root: Path, relative_parts) -> str:
+    """Credential-store component for *relative_parts* below *root* ("" if none).
+
+    For callers that hold a project root and member paths below it (archive
+    creation): the root's last two directories count, so a root set inside a
+    store (``<proj>/.config`` with member ``gcloud/credentials.db``) cannot be
+    used to hide it. Unlike ``credential_read_component`` this never consults
+    the operator's allowed roots: a root that names the store (``~/.ssh``,
+    ``~/.config/gcloud``) unlocks reading it there, but does not make the
+    store archivable, because an archive can be moved out of that root.
+    """
+    return _credential_part(tuple(Path(root).parts[-2:]) + tuple(relative_parts))
 
 
 def _require_credential_read_access(path: Path) -> None:
@@ -788,6 +896,7 @@ def resolve_repository_read_path(
         if (
             _is_sensitive_control_path(resolved)
             or any(part.lower() in SENSITIVE_READ_DIRECTORIES for part in relative.parts)
+            or credential_read_component(resolved)
         ):
             raise PermissionError("repository path is secret or control state")
     return resolved

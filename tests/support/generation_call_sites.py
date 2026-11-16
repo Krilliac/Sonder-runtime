@@ -18,7 +18,18 @@ A *site* is one reference, in one enclosing function, to one of:
   ``request=`` / ``context=`` keyword, anywhere (the packaged ``ModelGateway``
   port);
 * the unchecked packaged gateway: the ``raw_gateway`` name and any read of an
-  ``.model_gateway`` attribute (``Application.model_gateway``).
+  ``.model_gateway`` attribute (``Application.model_gateway``);
+* a call-time seam (kind ``seam``): ``late(<namespace>, "<tracked name>")`` or
+  ``value(<namespace>, "<tracked name>")`` from ``bootstrap/legacy_seams.py``,
+  which code moved out of ``server.py`` uses to reach a server function through
+  a dependency bundle.  It is a site of the tracked name in its enclosing
+  function.  A keyword argument fed by ``late(..., "<tracked name>")`` must be
+  spelled ``<tracked name>`` (``CampaignDeps(sonder=late(globals(), "sonder"))``,
+  never ``ask=``), so a later ``deps.sonder(...)`` is the site the scan follows;
+  a misnamed one is reported in ``Scan.errors``.  An injected tier map read as
+  ``value(<namespace>, "TIERS")()`` or ``deps.TIERS()`` is a real binding for
+  ``selector_refusal``.  ``SEAM_EXTENSION_ENABLED`` switches all of this off for
+  the mutation tests that prove each case is otherwise undetected.
 
 References are calls, bare names (``chat_request=_chat_request``), imports,
 names bound to one (``from server import ensemble_answer as ea``, ``ask =
@@ -133,6 +144,16 @@ DEFAULT_ROUTE_SELECTORS = frozenset({"''", "'sonder'", "'local'"})
 DEFAULT = "<default>"
 UNKNOWN = "<unknown selector>"
 ENDPOINT_PATHS = ("/api/chat", "/api/generate", "/v1/chat/completions")
+# ``sonder_runtime/bootstrap/legacy_seams.py``: call-time lookups into server's namespace.
+SEAM_HELPER_LATE = "late"
+SEAM_HELPER_VALUE = "value"
+SEAM_HELPERS = frozenset({SEAM_HELPER_LATE, SEAM_HELPER_VALUE})
+SEAM_MODULE = "sonder_runtime.bootstrap.legacy_seams"
+SEAM_KIND = "seam"
+# The tier map a moved module reads through a seam or its dependency bundle.
+TIERS_NAME = "TIERS"
+DEPS_BUNDLE_NAME = "deps"
+SEAM_EXTENSION_ENABLED = True
 GATEWAY_GENERATE = ".generate(request, context)"
 # The unchecked packaged gateway.  ``bootstrap/app.py`` builds it once as
 # ``raw_gateway`` and hands it to ``Application.model_gateway``; every use of
@@ -367,6 +388,30 @@ class _Scanner(ast.NodeVisitor):
             else:
                 names = []
             self.shadowed_refusals.update(name for name in names if name in REFUSAL_CALLS)
+        # ``late``/``value`` a file rebinds itself (a parameter, a local, an
+        # import from elsewhere) are not trusted to read a real tier map.
+        self.shadowed_seams: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                names = [node.id]
+            elif isinstance(node, ast.arg):
+                names = [node.arg]
+            elif isinstance(node, ast.ExceptHandler):
+                names = [node.name] if node.name else []
+            elif isinstance(node, ast.Import):
+                names = [alias.asname or alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [
+                    alias.asname or alias.name for alias in node.names
+                    if node.module != SEAM_MODULE or (alias.asname or alias.name) != alias.name
+                ]
+            else:
+                names = []
+            self.shadowed_seams.update(name for name in names if name in SEAM_HELPERS)
+        self.errors: list[str] = []
+        self._seam_names: set[int] = set()
         self.scope: list[str] = []
         self.functions: list[ast.AST] = []
         self.parents: dict[ast.AST, ast.AST] = {}
@@ -491,8 +536,41 @@ class _Scanner(ast.NodeVisitor):
             scope = self.parents.get(scope)
         return False
 
+    @staticmethod
+    def _seam(node: ast.AST | None) -> tuple[str, str] | None:
+        """``(helper, name)`` of ``late(<ns>, "<tracked>")`` or ``value(<ns>, "<tracked>")``."""
+        if not SEAM_EXTENSION_ENABLED or not isinstance(node, ast.Call):
+            return None
+        helper = _called_name(node)
+        if (
+            helper in SEAM_HELPERS and len(node.args) == 2 and not node.keywords
+            and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+            and _Scanner._tracked(node.args[1].value)
+        ):
+            return helper, node.args[1].value
+        return None
+
+    def _injected_tier_map(self, node: ast.Call) -> bool:
+        """``value(<ns>, "TIERS")()`` or ``deps.TIERS()``: the tier map a moved module was handed."""
+        if not SEAM_EXTENSION_ENABLED or node.args or node.keywords:
+            return False
+        getter = node.func
+        if isinstance(getter, ast.Attribute):
+            return (
+                getter.attr == TIERS_NAME and isinstance(getter.value, ast.Name)
+                and getter.value.id == DEPS_BUNDLE_NAME
+            )
+        return (
+            isinstance(getter, ast.Call) and _called_name(getter) == SEAM_HELPER_VALUE
+            and SEAM_HELPER_VALUE not in self.shadowed_seams
+            and len(getter.args) == 2 and not getter.keywords
+            and isinstance(getter.args[1], ast.Constant) and getter.args[1].value == TIERS_NAME
+        )
+
     def _real_bindings(self, node: ast.AST | None, call: ast.Call) -> bool:
-        """Accept TIERS, server.TIERS, or a lexical runtime TIERS fallback."""
+        """Accept TIERS, server.TIERS, an injected tier map, or a lexical runtime TIERS fallback."""
+        if isinstance(node, ast.Call) and self._injected_tier_map(node):
+            return True
         if isinstance(node, ast.Name):
             return node.id == "TIERS" and (self.path == "server.py" or self.imported_tiers)
         if isinstance(node, ast.Attribute):
@@ -797,6 +875,18 @@ class _Scanner(ast.NodeVisitor):
                 self._record(alias.name, "import", node, None, {UNKNOWN})
 
     def visit_Call(self, node):
+        seam = self._seam(node)
+        if seam is not None:
+            # The name is spelled as a string argument: record it once, as a seam.
+            self._seam_names.add(id(node.args[1]))
+            self._record(seam[1], SEAM_KIND, node, None, {UNKNOWN})
+        for keyword in node.keywords:
+            fed = self._seam(keyword.value)
+            if fed is not None and fed[0] == SEAM_HELPER_LATE and keyword.arg not in (None, fed[1]):
+                self.errors.append(
+                    "%s :: %s: keyword %r is fed by late(..., %r); name it %r so the scan "
+                    "follows deps.%s(...)" % (self.path, self.qualname, keyword.arg, fed[1], fed[1], fed[1])
+                )
         if isinstance(node.func, ast.Attribute) and node.func.attr == "generate":
             keywords = {keyword.arg for keyword in node.keywords}
             if len(node.args) >= 2 or keywords & {"request", "context"}:
@@ -814,7 +904,7 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_Constant(self, node):
         value = node.value
-        if not isinstance(value, str) or id(node) in self.docstrings:
+        if not isinstance(value, str) or id(node) in self.docstrings or id(node) in self._seam_names:
             return
         if value in CHOKE_POINTS:  # getattr(server, "_make_generate"), __all__, setattr
             self._record(value, "str", node, None, {UNKNOWN})
@@ -831,6 +921,7 @@ class Scan:
     definitions: dict[str, set[str]]
     text_only_calls: list[tuple[str, str, str]]
     unparseable: list[str]
+    errors: list[str] = field(default_factory=list)
 
 
 def collect(files: dict[str, list[Path]] | None = None) -> Scan:
@@ -839,6 +930,7 @@ def collect(files: dict[str, list[Path]] | None = None) -> Scan:
     definitions: dict[str, set[str]] = {}
     text_only_calls: list[tuple[str, str, str]] = []
     unparseable: list[str] = []
+    errors: list[str] = []
     for paths in files.values():
         for path in paths:
             rel = _rel(path)
@@ -852,7 +944,8 @@ def collect(files: dict[str, list[Path]] | None = None) -> Scan:
             sites.update(scanner.sites)
             definitions[rel] = scanner.definitions
             text_only_calls.extend(scanner.text_only_calls)
-    return Scan(sites, files, definitions, text_only_calls, unparseable)
+            errors.extend(scanner.errors)
+    return Scan(sites, files, definitions, text_only_calls, unparseable, errors)
 
 
 # ---- the registry -----------------------------------------------------------
@@ -1093,6 +1186,9 @@ _ENTRIES = [
      "SonderInferenceProtocolProbe._request", "/v1/chat/completions", 1, TEXT, _PROBE),
     ("sonder_runtime/adapters/model_bootstrap.py", "LegacyModelBootstrapAdapter.make_generate",
      "_make_generate", 1, CHOKE, "OllamaGateway's generate factory; forwards every keyword"),
+    ("sonder_runtime/adapters/security_eval/model_client.py", "GatewayVerdictModel.ask", GATEWAY_GENERATE, 1, TEXT,
+     "security_eval verdicts are parsed and scored as text, never run; the registrar hands this the "
+     "ServedTierGateway text wrapper, and residency is refused before any request"),
     ("sonder_runtime/adapters/provider_dispatch/fallback.py", "PreSendFallbackGateway.generate",
      GATEWAY_GENERATE, 2, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/adapters/provider_dispatch/gateway.py", "ProviderDispatchGateway.generate",
@@ -1134,6 +1230,8 @@ _ENTRIES = [
      "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
      "to Application.model_gateway (the legacy bridge, which judges the served model on every "
      "call) and, through ServedTierGateway, to ChatService (text consumers)"),
+    ("sonder_runtime/bootstrap/batch_job_executor.py", "FanoutStepExecutor.execute", "_execute_fanout_run", 1, TEXT,
+     "batch step: the answer is vault-sealed and returned to the owner as text, never run or applied"),
     ("sonder_runtime/bootstrap/build_tools.py", "_LazyModelGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
      "lazy handle over the gateway build_fix is given"),
     ("sonder_runtime/bootstrap/mesh_agent_tools.py", "generate_mesh.generate", "_generate_text", 1, EXEC,
@@ -1142,6 +1240,10 @@ _ENTRIES = [
      "the vision critique steers the next round's script; a refused vision tier turns the critique off",
      (), "the call passes no selector: _vision_analyze_impl always answers on the vision tier, "
      "which the critique judges by name ('vision')"),
+    ("sonder_runtime/bootstrap/security_eval_agent_tools.py", "evaluate", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1,
+     TEXT, "reads Application.model_gateway only to wrap it in ServedTierGateway (the text consumers' handle, as "
+     "ChatService gets it): the tool is text-only, and the checked ToolLaneGateway would refuse the "
+     "security adviser models this eval exists to measure; reviewer sign-off requested"),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "<module>", "/v1/chat/completions", 1, TEXT,
      _OWN_CHAT),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "ModelRequestFacade.invoke.complete",

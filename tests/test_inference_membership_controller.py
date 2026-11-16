@@ -20,6 +20,7 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.ports.inference_membership import MembershipSourceLimits
 from sonder_runtime.domain.inference_membership import MembershipSnapshot
 from sonder_runtime.platform.config import OllamaConfig
+from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 REMOTE = "https://worker.example:11434"
@@ -591,7 +592,8 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
 
     config = SonderConfig(state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(
         url=REMOTE if primary_remote else LOCAL, workers=() if primary_remote else (REMOTE,),
-        allow_remote=True, worker_capability_ttl_seconds=60))
+        allow_remote=True, worker_capability_ttl_seconds=60),
+        gpu_admission=GpuAdmissionConfig(mode="off"))
     # Exercise the preloaded legacy case as well as the real command wiring:
     # this is the otherwise-uncontrolled pool that the serve command must retire.
     stale_pool = OllamaWorkerPool(config.ollama.url, config.ollama.workers, allow_remote=True,
@@ -701,7 +703,7 @@ def test_executable_root_refuses_unbound_remote_membership_in_isolated_process(t
     environment.update(SONDER_HOME=str(tmp_path), SONDER_DB=str(tmp_path / "memory.db"),
                        SONDER_FLEET_DB=str(tmp_path / "fleet.db"), SONDER_FLEET_HEARTBEAT="0",
                        SONDER_ALLOW_CLOUD="0", SONDER_WEB_TOOLS="0", SONDER_LIVE_RELOAD="0",
-                       SONDER_EMBED_CACHE="0", SONDER_FALLBACK_LOCAL="0", SONDER_HOST="127.0.0.1",
+                       SONDER_GPU_ADMISSION="off", SONDER_EMBED_CACHE="0", SONDER_FALLBACK_LOCAL="0", SONDER_HOST="127.0.0.1",
                        OLLAMA_HOST=REMOTE if transport_configuration == "remote_primary" else LOCAL,
                        SONDER_OLLAMA_WORKERS=REMOTE if transport_configuration == "remote_worker" else "",
                        SONDER_ALLOW_REMOTE_OLLAMA="1" if transport_configuration.startswith("remote_") or configuration.startswith("typed_") else "0")
@@ -740,10 +742,12 @@ def finish_with_impostor(self, module_name, source_path, namespace=None):
     elif mode.startswith("typed_"):
         from sonder_runtime.bootstrap.app import build_application
         from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig
+        from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
         config = SonderConfig(state=StateConfig(home=os.environ["SONDER_HOME"]), ollama=OllamaConfig(
             url=os.environ["OLLAMA_HOST"],
             workers=tuple(filter(None, os.environ["SONDER_OLLAMA_WORKERS"].split(","))),
-            allow_remote=True, worker_capability_ttl_seconds=60))
+            allow_remote=True, worker_capability_ttl_seconds=60),
+            gpu_admission=GpuAdmissionConfig(mode="off"))
         application = build_application(config=config)
         if mode in ("typed_local_config_remote_pool", "typed_remote_config_local_pool"):
             other = "http://127.0.0.1:11434" if mode == "typed_local_config_remote_pool" else "https://worker.example:11434"

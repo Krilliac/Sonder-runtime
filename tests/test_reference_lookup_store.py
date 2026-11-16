@@ -469,12 +469,15 @@ def test_priority_passages_come_from_titles_only_never_from_a_body_mention(prio)
     assert not any(p.title.startswith(decoy) for p in results[:2])
 
 
-def test_parent_technique_id_in_the_question_prioritises_titles_with_that_token(prio):
+def test_parent_technique_id_in_the_question_prioritises_the_parent_page_only(prio):
+    # "T1558" names the parent technique; "T1558.001" and the other sub-techniques are other
+    # pages.  Before, they held the token too and filled the source cap ahead of the parent.
+    natural = _natural(prio, 'tell me about T1558', 6)
+    assert not any(p.title.startswith('T1558 Steal') for p in natural)
     results = _search(prio, 'tell me about T1558', 6)
-    assert _has(results[0], 't1558') and _has(results[1], 't1558')
-    # pinned client behaviour: sub-technique pages carry the token too and fill the source cap first
-    assert not any(p.title.startswith('T1558 Steal') for p in results)
-    assert any(p.title.startswith('T1558 Steal') for p in _search(prio, 'tell me about T1558', 8))
+    assert results[0].title == 'T1558 Steal or Forge Kerberos Tickets'
+    assert [_has(p, 't1558') for p in results] == [True] + [False] * (len(results) - 1)
+    assert _titles(results[1:]) == _titles(natural[:len(results) - 1])
 
 
 def test_subtechnique_id_prioritises_only_that_subtechnique(prio):

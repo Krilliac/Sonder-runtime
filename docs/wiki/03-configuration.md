@@ -665,8 +665,9 @@ has to.
 #### Reference lookup
 
 For some local models a chat turn first searches a local reference library
-(Windows security event pages, MITRE ATT&CK techniques, Sigma detection
-rules) and sends the passages it found inside the user turn, between marker
+(an index built outside Sonder: security references such as Windows event
+pages, MITRE ATT&CK and Sigma rules, and, in a version 2 index, coding and
+debugging references; see "Setting up the reference library" below) and sends the passages it found inside the user turn, between marker
 lines that carry a random code for that turn. The built-in models are the
 same names as the deny list above, taken from its default prefixes: the
 `astra-cyber-` prefix and the two Hugging Face GGUF sources (as `hf.co/...` or
@@ -675,7 +676,12 @@ same names as the deny list above, taken from its default prefixes: the
 attempt of the turn; with model thinking off where the model's route accepts
 that, and asked once more as an ordinary call when that reply comes back empty
 or refused); only the first eight identifiers in a question (event
-ids, technique ids, hex values) get title priority. Passages are handed to the
+ids, technique ids, hex values) get title priority; "T1110" there finds the
+parent technique's page, not its sub-techniques'. A chosen passage whose title
+opens with an ATT&CK id (an emulation test or detection rule titled
+"T1003.001 ...") is followed by the passage of every other source whose title
+opens with the same id, so the ATT&CK page sits next to the pages that quote
+it (one title query per such id). Passages are handed to the
 model only when the best of them is close enough to the question: it must hold
 at least a fifth of the query's search words, each word weighted by how
 rare it is in the library (terms without a space only: a multi-word phrase the model
@@ -684,14 +690,18 @@ design question about another subject shares many common words with it) is
 answered without passages and says
 `Sources: none (no reference passage was close enough to the question)`. The
 same search-terms call is also asked, on a second line, whether the question
-is about computers, networks, accounts, logs or security at all; a reply of
+is in the library's subjects at all (for a version 1 index: "about computers,
+networks, accounts, logs or security in any way"; for a version 2 index: "about
+any of these subjects", the subjects the index names, which the request also
+lists); a reply of
 `UNRELATED` raises the floor for that turn from a fifth to two fifths. The
 verdict never removes passages by itself (the smaller measured model gave it
 to five of 44 covered questions), and a reply without a verdict leaves the
 floor where it was. Short questions on other subjects that the model judges related, or
 whose best passage reaches two fifths, still get passages. The
-floors are constants measured on the security library
-(`sonder_runtime/domain/reference_lookup/relevance.py`); it does not apply to
+floors are constants measured on the security-only library and not yet
+re-measured on the expanded one
+(`sonder_runtime/domain/reference_lookup/relevance.py`); they do not apply to
 the `reference_search` tool, which returns the nearest passages as they are.
 The reply is cleaned
 (copied marker lines removed, display-safe text), its `[n]` citations are
@@ -709,15 +719,149 @@ excluded from lesson distillation and the training export.
 | `SONDER_REFERENCE_LOOKUP=0` | kill switch: no automatic lookup for any model, and `reference_search` answers unavailable |
 | `reference_lookup` in `runtime_policy.json` | `{"enabled": true, "names": [...], "prefixes": [...]}`: entries add to the built-in names, never remove them; `enabled: false` turns automatic lookup off; a `path` key is rejected, because the index path comes only from the environment |
 
-The index itself is built by a separate tool and is not shipped with Sonder.
-A missing or unusable index fails open: the turn answers without passages and
-says `Sources: none (reference lookup unavailable: <reason>)`. The runtime
-policy status output and `diagnostics` show one line with the index path, its
-state, the names in force and the last error. A cancelled search-terms call
+The index itself is built by a separate tool and is not shipped with Sonder
+(see below). A missing or unusable index fails open: the turn answers without
+passages and says `Sources: none (reference lookup unavailable: <reason>)`.
+The runtime policy status output and `diagnostics` show one line with the
+index path, its state, the schema version, the passage sources with their
+counts, the names in force and the last error. A cancelled search-terms call
 ends the turn in the chat routes. It does not in `consult`: `consult` turns
 any exception from a member call into that member's error entry (as it did
 before this feature), so a cancellation there is reported as that member's
 error and the call goes on.
+
+##### Setting up the reference library
+
+The reference library is a read-only search index of public documentation:
+security references (Windows event pages, MITRE ATT&CK, Sigma rules) and, in a
+newer index, coding and debugging references. Sonder does not ship it and does
+not build it. Local models that the lookup rule names (the `astra-cyber-` models
+and the Hugging Face GGUF sources by default, plus anything the policy's
+`reference_lookup` section adds) search it automatically before they answer, and
+any MCP client can search it with the read-only `reference_search` tool. When a
+turn used passages, the reply ends with a `Sources:` block that lists them, and
+`Sources: none (<reason>)` says why none were used (no passage was close enough,
+or the library is unavailable). Nothing is fetched at question time.
+
+1. Get the builder, a separate repository, `Krilliac/sonder-references`. It
+needs Python 3.12 or newer and no packages outside the standard library.
+
+```
+git clone https://github.com/Krilliac/sonder-references.git
+cd sonder-references
+```
+
+2. Fetch the sources. `--all` fetches all of them; `--list` prints their names
+and licences, and you can name a subset instead (for example `attack sigma
+cwe`). `--verify` then reports any file that is missing, for example one an
+antivirus removed. On Linux or macOS use `python3` in place of `py -3.12`.
+
+```
+py -3.12 -I fetch_references.py --all
+py -3.12 -I fetch_references.py --verify
+```
+
+3. Build the index, either straight into the default location below or into a
+file of your choice (`<index path>`) that you point Sonder at.
+
+```
+py -3.12 -I sentinel.py index --out "<index path>"
+```
+
+That repository's README covers updating, antivirus false positives, the
+licences of each source and troubleshooting.
+
+Connect the index to Sonder in one of two ways.
+
+- Build it into the default path, `<Sonder home>/references/references.sqlite`.
+  The Sonder home is, on Windows, `%LOCALAPPDATA%\sonder`
+  (for example `C:\Users\<you>\AppData\Local\sonder`); on Linux
+  `$XDG_DATA_HOME/sonder`, or `~/.local/share/sonder` when that is unset; on
+  macOS `~/Library/Application Support/sonder` (an existing
+  `~/.local/share/sonder` is kept when the macOS folder does not exist yet).
+  Three things override all three, strongest first: a home set inside the
+  process (the app's own `configure_home`), then `SONDER_STATE_HOME`, then
+  `SONDER_HOME`.
+  Create the `references` folder if it is not there.
+- Or set the path of the file in the environment of every Sonder process, for
+  example for PowerShell:
+
+```
+$env:SONDER_REFERENCE_INDEX = "D:\data\references.sqlite"
+```
+
+and for a POSIX shell:
+
+```
+export SONDER_REFERENCE_INDEX=/data/references.sqlite
+```
+
+The file is checked again whenever its modification time or size changes, so
+a rebuild is picked up by a running Sonder without a restart. Build to a new
+file and rename it over the old one when you can, so a search never meets a
+half-written index.
+
+Check that it worked. The policy status output and `diagnostics` show the
+lookup line. A working version 2 index looks like this (names and counts are
+the ones in your index):
+
+```
+index=/home/<you>/.local/share/sonder/references/references.sqlite readable=yes schema=2 passages=8908 sources=attack:640, events:3400, sigma:4868 built=2026-11-13T09:00:00+00:00; automatic lookup names=...
+```
+
+`readable=yes` means the index passed validation; `schema=` is its version (1
+for an index without a `schema_version` row). Then run one search from any MCP
+client (a question your library covers, here a Windows event id):
+
+```
+reference_search(query="event 4625 failed logon", k=3)
+```
+
+A result with framed passages and a `Sources:` list means the whole path works;
+`reference lookup unavailable: <reason>` names what is wrong.
+
+To turn the lookup off for a process, set the kill switch. Automatic lookup
+stops for every model and `reference_search` answers unavailable:
+
+```
+$env:SONDER_REFERENCE_LOOKUP = "0"
+```
+
+Troubleshooting:
+
+- **`readable=no (missing: file not found)`.** The file is not where Sonder
+  looks. The status line starts with the path it used; compare it with where
+  the builder wrote the file, and check whether `SONDER_REFERENCE_INDEX` is set
+  in this process (an empty value means the default path is used).
+- **Schema too new.** The status line shows `readable=yes` with a warning
+  `index built by a newer library tool (schema N, this runtime reads up to 2)`.
+  The index is still searched, because its tables passed validation, but its
+  list of subjects is not used: the search-terms request falls back to the
+  security-only wording. Update Sonder, or rebuild the index with the matching
+  builder version, to get the subjects.
+- **Warnings about `sources` entries.** A malformed or oversized entry in the
+  index's metadata is ignored and logged as a warning on the
+  `sonder.reference_lookup` logger; the lookup keeps working with the rest.
+- **Answers have no `Sources:` passages.** Read the reason in the line itself.
+  `Sources: none (no reference passage was close enough to the question)` is
+  the relevance floor: the question is outside the library or shares too few
+  words with it. `Sources: none (reference lookup unavailable: ...)` is an
+  index problem, so read the status line. If the model is not named by the rule
+  (`names=` and `prefixes=` in the status line), no automatic lookup runs at
+  all; add it under `reference_lookup` in `runtime_policy.json`.
+- **A UNC path (`\\server\share\references.sqlite`) is refused or unreadable.**
+  A managed child process only admits an index inside its own private roots;
+  elsewhere the status line reads `readable=no (error: index not admitted by the
+  runtime: ...)`. SQLite also locks unreliably over network shares. Copy the file to
+  a local folder and point `SONDER_REFERENCE_INDEX` at the copy.
+- **It works in one process but not another.** Each process reads
+  `SONDER_REFERENCE_INDEX` from its own environment, fixed when it started. The
+  MCP server (`python -m sonder_runtime mcp`) is long-running: one started
+  before you set the variable (or before you changed it) still looks at the old
+  path, so it reports the file as missing while a new shell finds it. A rebuild
+  alone does not need a restart; a changed variable does. Restart the MCP
+  server, and the app or console that launched it, from a shell that has the
+  variable set, then read the status line again.
 
 Lookup applies to the MCP chat tool (by tier or `model_override`), the HTTP
 chat route, text-mode `ensemble_answer` (one retrieval shared by every member

@@ -209,6 +209,7 @@ _CATEGORY_BY_TOOL = {
     "weather_lookup": "web",
     "openrouter_models": "web",
     "mesh_generate": "execution",
+    "security_eval": "data",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
     "local_service_probe": "system",
@@ -413,6 +414,10 @@ _DANGEROUS = frozenset({
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
     "playbook_read",
+    # Batch-job reads (bootstrap/batch_job_tools.py): status and results read
+    # job state and the caller's own sealed answers, recent lists ids and
+    # counts only; none starts, resumes or cancels work, calls a model or writes.
+    "batch_job_status", "batch_job_results", "batch_job_recent",
     # Reads files the repository read guard allows and writes nothing
     # (bootstrap/claim_check_agent_tools.py; tests/test_claim_check_tool.py).
     "claim_check",

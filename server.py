@@ -378,6 +378,7 @@ from sonder_runtime.adapters.bounded_cloud_generation import (
 )
 from sonder_runtime.adapters.fanout_health import record_health as _fanout_health_policy
 from sonder_runtime.adapters.fanout_receipt import build_receipt as _fanout_receipt_policy
+from sonder_runtime.adapters import fanout_execution
 from sonder_runtime.adapters.fanout_synthesis import sources as _fanout_sources_policy
 from sonder_runtime.application.artifacts.candidates import CandidateFanIn
 from sonder_runtime.adapters.agent_work_coverage import (
@@ -1922,7 +1923,7 @@ def _make_generate(
                 "token_source": source,
             }
             gen.last_usage = dict(usage)
-            response_metadata = _response_metadata(out)  # bounded, non-content fields only
+            response_metadata = _response_metadata(out, served_model=used_model)  # bounded, non-content fields only
             gen.last_response_meta = response_metadata
             if (metadata_local := getattr(gen, "_response_metadata_local", None)) is not None:
                 metadata_local.value = response_metadata
@@ -4951,15 +4952,7 @@ def _post_model(
             if not embedded_detail:
                 return result, attempt
         except ModelCallError as error:
-            raise ModelCallError(
-                error.kind,
-                error.detail,
-                transient=False,
-                status=error.status,
-                attempts=attempt,
-                cloud=cloud,
-                retry_after_seconds=error.retry_after_seconds,
-            ) from error
+            raise error.restamped(attempts=attempt, cloud=cloud) from error
         except urllib.error.HTTPError as error:
             status = int(getattr(error, "code", 0) or 0)
             transient = status in _TRANSIENT_MODEL_HTTP_CODES
@@ -5498,24 +5491,26 @@ def _post(
     deadline = time.monotonic() + request_timeout
 
     def send(origin):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Ollama worker pool request timeout expired")
-        req = urllib.request.Request(
-            f"{origin}{path}", data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        def transport():
-            with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
-                _record_residency_dispatch(path, json.loads(data), _residency_feedback, _is_cloud_model_name)
-                raw = _read_ollama_response_bytes(resp)
-                return json.loads(raw.decode("utf-8"))
+        # Once per selected pool worker, inside all payload transformations and
+        # local retries; admission may queue, or serve the model's pinned num_ctx.
+        with ollama_pool.admitted(OLLAMA_POOL, path, payload, origin, deadline=deadline) as ticket:
+            body = ticket.body(data)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Ollama worker pool request timeout expired")
+            req = urllib.request.Request(
+                f"{origin}{path}", data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            def transport():
+                with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
+                    _record_residency_dispatch(path, json.loads(body), _residency_feedback, _is_cloud_model_name)
+                    raw = _read_ollama_response_bytes(resp)
+                    return json.loads(raw.decode("utf-8"))
 
-        # This callback runs once per selected pool worker, inside all payload
-        # transformations and local retries. Metadata probes are not inference.
-        if path in {"/api/chat", "/api/generate"}:
-            return dispatch_provider("ollama", path, json.loads(data), transport)
-        return transport()
+            if path in {"/api/chat", "/api/generate"}:  # metadata probes are not inference
+                return dispatch_provider("ollama", path, json.loads(body), transport)
+            return transport()
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
@@ -5591,14 +5586,13 @@ def _get(path: str) -> dict:
     _require_ollama_endpoint()
 
     def send(origin):
-        req = urllib.request.Request(f"{origin}{path}")
-        with OLLAMA_POOL.open_url(req, timeout=15) as resp:
+        with ollama_pool.admitted_get(OLLAMA_POOL, origin, path, timeout=15) as resp:
             raw = _read_ollama_response_bytes(resp)
             return json.loads(raw.decode("utf-8"))
 
     return (
         OLLAMA_POOL.request(send, idempotent=True)
-        if OLLAMA_POOL.enabled else send(BASE)
+        if OLLAMA_POOL.enabled else OLLAMA_POOL.request_primary(send, origin=BASE)
     )
 
 
@@ -12770,10 +12764,9 @@ def repo_diff(
             scope, data["context"], data["elapsed_ms"],
         ),
     ]
-    if data["diff"]:
-        lines.append(data["diff"].rstrip())
-    else:
-        lines.append("  (no diff)")
+    lines.append(data["diff"].rstrip() or "  (no diff)")
+    if data.get("withheld"):
+        lines.append("  %d path(s) withheld (secret or control state)" % data["withheld"])
     if data["truncated"]:
         lines.append(
             "  ... output truncated at %d bytes" % data["output_limit"]
@@ -13058,8 +13051,8 @@ def text_search(
         _record_direct_tool("text_search", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
     lines = [
-        "text search: %r under %s (%d files scanned)" %
-        (data["query"], data["root"], data["files_scanned"]),
+        "text search: %r under %s (%d files scanned%s)" %
+        (data["query"], data["root"], data["files_scanned"], data.get("withheld_note", "")),
     ]
     lines.extend(
         "  %(relative)s:%(line)s:%(column)s: %(text)s" % row
@@ -23424,7 +23417,7 @@ def _route_work_request(
 
 
 def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
-    with OLLAMA_POOL.open_url(urllib.request.Request(f"{origin}/api/tags"), timeout=timeout) as resp:
+    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/api/tags", timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
 
 
@@ -24560,8 +24553,8 @@ def _execute_fanout_run(run_id):
     limits = _fanout_limits(run)
     try:
         ciphertext = fanout_store.execution_prompt_ciphertext(run_id)
-        question = fanout_prompt_vault.decrypt_prompt(ciphertext or "")
-    except fanout_prompt_vault.PromptVaultError:
+        question, system = fanout_execution.fanout_payload(limits, fanout_prompt_vault.decrypt_prompt(ciphertext or ""))
+    except (fanout_prompt_vault.PromptVaultError, ValueError):
         # Claim each pending row before recording the generic failure; do not
         # leak either the ciphertext or the original prompt in the receipt.
         while True:
@@ -24611,10 +24604,11 @@ def _execute_fanout_run(run_id):
                     and (not run.get("cloud_opt_in") or not _cloud_allowed_policy(os.environ))
                 )
 
-            generate = _make_generate(model, "", 0.2, limits["num_predict"], 4096,
-                                      timeout=limits["timeout"],
+            generate = _make_generate(model, system, limits["temperature"], limits["num_predict"],
+                                      limits["num_ctx"], timeout=limits["timeout"],
                                       allow_cloud_fallback=False, text_only=True,
-                                      cancel_check=dispatch_cancelled)
+                                      cancel_check=dispatch_cancelled,
+                                      **fanout_execution.generate_extras(limits))
             # A consent or ownership fence which wins before the durable
             # handoff has made no provider request, so it remains resumable.
             if dispatch_cancelled():
@@ -24628,25 +24622,17 @@ def _execute_fanout_run(run_id):
             raw_answer = str(generate(question) or "")
             if not raw_answer.strip():
                 raise ModelCallError("empty_response", "empty response", cloud=_is_cloud_model_name(model))
-            metadata = getattr(generate, "last_response_meta", {}) or {}
-            metadata = dict(metadata) if isinstance(metadata, dict) else {}
-            usage = getattr(generate, "last_usage", {}) or {}
-            if isinstance(usage, dict):
-                metadata["tokens_in"] = usage.get("tokens_in", 0)
-                metadata["tokens_out"] = usage.get("tokens_out", 0)
+            metadata = fanout_execution.call_metadata(generate)
             # Preserve the raw provider count before trim/redaction while the
             # durable payload remains the prompt-safe version below.
             metadata["answer_chars"] = len(raw_answer)
-            return row, "answered", _fanout_safe_answer(raw_answer, question), "", int((time.monotonic() - started) * 1000), None, metadata
+            answer = fanout_execution.stored_answer(limits, raw_answer, question, metadata,
+                                                    seal=fanout_prompt_vault.encrypt_prompt,
+                                                    redact=_fanout_safe_answer)
+            return row, "answered", answer, "", int((time.monotonic() - started) * 1000), None, metadata
         except Exception as caught:
             exc = caught
-            metadata = getattr(generate, "last_response_meta", {}) if generate is not None else {}
-            metadata = metadata if isinstance(metadata, dict) else {}
-            usage = getattr(generate, "last_usage", {}) if generate is not None else {}
-            if isinstance(usage, dict):
-                metadata = dict(metadata)
-                metadata["tokens_in"] = usage.get("tokens_in", 0)
-                metadata["tokens_out"] = usage.get("tokens_out", 0)
+            metadata = fanout_execution.call_metadata(generate)
             # A cloud-policy revocation that wins the final pre-send fence is
             # not a provider failure and has not made a metered request. Keep
             # the row resumable by the normal skipped-result path rather than
@@ -24696,9 +24682,7 @@ def _execute_fanout_run(run_id):
                                                   _fanout_provider_retry_after_ts(exc)
                                                   if status == "failed" else None
                                               ),
-                                              answer_chars=metadata.get("answer_chars"),
-                                              thinking_chars=metadata.get("thinking_chars"),
-                                              done_reason=metadata.get("done_reason", ""))
+                                              **fanout_execution.result_fields(metadata))
         if recorded is not None:
             if (_is_cloud_model_name(row["model"])
                     and status in ("answered", "failed", "unknown")):
@@ -24747,7 +24731,7 @@ def _execute_fanout_run(run_id):
             persist(future.result())
             fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
-    if receipt is not None:
+    if receipt is not None and not limits["batch_job_id"]:
         # Local calls are recorded by _make_generate in this response thread.
         # Cloud calls use worker threads, whose activity context is purposely
         # not inherited; account for their terminal attempts once here.
@@ -26931,6 +26915,8 @@ _register_openrouter(mcp, _record_direct_tool)
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools  # noqa: E402
 # Convention: a registrar parameter named ``runtime`` receives this server-module provider.
 _agent_help_tools.register_agent_tools(mcp, _record_direct_tool, lambda: sys.modules[__name__])
+from sonder_runtime.bootstrap.batch_job_tools import register as _register_batch_jobs  # noqa: E402
+_register_batch_jobs(mcp, _record_direct_tool, lambda: sys.modules[__name__])
 
 
 def route_computer_use(text):

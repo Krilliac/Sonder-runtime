@@ -37,6 +37,7 @@ from ...domain.reference_lookup.selection import (
     candidate_limit,
     fit_passages,
     select_passages,
+    with_siblings,
 )
 from ...domain.reference_lookup.terms import (
     MAX_IDENTIFIERS,
@@ -47,6 +48,7 @@ from ...domain.reference_lookup.terms import (
     parse_terms,
     query_terms,
     split_scope,
+    strip_subject_echo,
 )
 
 NO_ROOM_WARNING = 'no room for references'
@@ -76,6 +78,16 @@ class TermStatistics(Protocol):
     """
 
     def term_stats(self, terms: Sequence[str], rowids: Sequence[int]) -> TermStats: ...
+
+
+class TitleRows(Protocol):
+    """What the same-identifier siblings need from the index adapter.
+
+    Kept apart from ``ReferenceSearch``: an index that does not offer it is
+    searched as before, without siblings.
+    """
+
+    def best_title_rows(self, ident: str) -> tuple[RankedRow, ...]: ...
 
 
 class LookupReason(str, Enum):
@@ -140,8 +152,8 @@ def is_cancellation(exc: BaseException) -> bool:
     return isinstance(exc, Cancelled) or getattr(exc, "kind", None) == CANCELLED_KIND
 
 
-def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool = False
-            ) -> tuple[list[str], list[str], list[str], bool]:
+def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool = False,
+            subjects: Sequence[str] = ()) -> tuple[list[str], list[str], list[str], bool]:
     """(kept terms, dropped terms, warnings, judged unrelated); a failed or empty expansion is a warning only.
 
     With ``scope`` the same call is also asked whether the question is in the
@@ -154,9 +166,11 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
         return [], [], [], False
     unrelated = False
     try:
-        reply = expand_fn(build_expand_prompt(question, scope=scope))
+        reply = expand_fn(build_expand_prompt(question, scope=scope, subjects=subjects))
+        if subjects and isinstance(reply, str):
+            reply = strip_subject_echo(reply, subjects)
         if scope and isinstance(reply, str):
-            reply, unrelated = split_scope(reply)
+            reply, unrelated = split_scope(reply, subjects)
         terms = parse_terms(reply)
     except Exception as exc:  # reported to the caller as a warning, never hidden
         if is_cancellation(exc):
@@ -166,6 +180,26 @@ def _expand(question: str, expand_fn: Callable[[str], str] | None, scope: bool =
     if not kept:
         return [], dropped, [NO_TERMS_WARNING], unrelated
     return kept, dropped, [], unrelated
+
+
+def add_siblings(index: object, rows: Sequence[RankedRow], k: int) -> Sequence[RankedRow]:
+    """``rows`` with same-identifier pages of other sources placed after the identifier pages selected.
+
+    See ``selection.with_siblings``.  An index without ``best_title_rows`` gets
+    ``rows`` unchanged; a title query that fails adds nothing for that
+    identifier (the siblings are a help: the turn keeps the plain ranking).
+    """
+    fetch = getattr(index, "best_title_rows", None)
+    if not callable(fetch) or not rows or k <= 0:
+        return rows
+
+    def siblings(ident: str) -> Sequence[RankedRow]:
+        try:
+            return tuple(fetch(ident))
+        except ReferenceIndexError:  # a help only: without it the plain ranking stands
+            return ()
+
+    return with_siblings(rows, k, siblings)
 
 
 def passage_coverage(index: object, terms: Sequence[str], passages: Sequence[Passage]) -> float | None:
@@ -217,7 +251,10 @@ def retrieve(
     prompt); ``None`` skips expansion.  A failed call searches with the
     question words alone and adds a warning.  Only the first
     ``MAX_IDENTIFIERS`` identifiers of the question get title priority (one
-    title query each).
+    title query each).  A selected passage whose title opens with an
+    ATT&CK-style identifier is then followed by the same identifier's page in
+    each other source (``add_siblings``: one title query per such identifier,
+    when the index offers ``best_title_rows``).
 
     ``min_coverage`` above 0 is the relevance floor for passages handed to a
     model on its own (``domain.reference_lookup.relevance``): when the best
@@ -245,7 +282,8 @@ def retrieve(
         if char_budget <= 0:
             return _bare(LookupReason.NO_ROOM, warnings=(NO_ROOM_WARNING,))
         terms, dropped, warnings, unrelated = _expand(
-            question, expand_fn, scope=unrelated_coverage > min_coverage > 0)
+            question, expand_fn, scope=unrelated_coverage > min_coverage > 0,
+            subjects=status.subjects)
         match = fts_query(question, terms)
         rows: tuple[RankedRow, ...] = ()
         if match and k > 0:
@@ -255,7 +293,7 @@ def retrieve(
             except ReferenceIndexError as exc:
                 return _bare(LookupReason.INDEX_UNAVAILABLE, terms=terms, dropped=dropped,
                              warnings=warnings, state=exc.state, detail=exc.detail)
-        found = select_passages(rows, k)
+        found = select_passages(add_siblings(index, rows, k), k)
         passages = fit_passages(found, char_budget)
         if not found:
             warnings.append(NO_MATCH_WARNING)

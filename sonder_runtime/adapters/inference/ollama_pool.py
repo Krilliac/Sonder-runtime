@@ -18,7 +18,7 @@ from sonder_runtime.platform.runtime_threads import (
 )
 
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import contextvars
 import hashlib
 import hmac
@@ -43,6 +43,8 @@ import urllib.request
 import logging
 
 import sonder_runtime.adapters.model_inventory as model_inventory
+import sonder_runtime.adapters.inference.gpu_admission as gpu_admission_module
+import sonder_runtime.adapters.inference.prewarm_gate as prewarm_gate
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.inference_membership import (
     CapabilityEvidence, MembershipHighWater, MembershipReconciliation,
@@ -120,6 +122,10 @@ class WorkerPoolError(urllib.error.URLError):
     """Base for privacy-safe pool admission and availability failures."""
 
 
+class CapabilityProbeDeferred(Exception):
+    """GPU admission deferred a capability probe; the worker itself is not at fault."""
+
+
 class WorkerPoolBackpressure(WorkerPoolError):
     """No worker capacity or bounded queue slot was available."""
 
@@ -187,6 +193,36 @@ def local_agent_admission(
         yield
     finally:
         _LOCAL_ADMISSION_SCOPE.reset(token)
+
+
+def admitted(pool, path: str, payload, origin: str, *, deadline: float | None = None):
+    """Context manager that admits one request to ``origin`` through ``pool``.
+
+    Every server-side call that reaches a local Ollama enters here: the pool's
+    ``gpu_admission`` decides lane, queue place, ``num_ctx`` and host memory.
+    A pool without that service (a test double) admits everything unchanged.
+    The caller class comes from ``local_agent_admission`` when one is active.
+    """
+    service = getattr(pool, "gpu_admission", None)
+    if service is None:
+        return nullcontext(gpu_admission_module.passthrough_ticket(payload))
+    scope = _LOCAL_ADMISSION_SCOPE.get()
+    return service.admit(
+        path, payload, origin=origin, deadline=deadline,
+        caller=scope[0] if scope else "interactive", prewarm=prewarm_gate.is_prewarm(),
+    )
+
+
+@contextmanager
+def admitted_get(pool, origin: str, path: str, *, timeout: float):
+    """GET ``origin + path`` through ``pool.open_url`` inside one admission.
+
+    Yields the open response; the admission (a PROBE slot for a loopback
+    origin) is held until the caller has read it and leaves the block.
+    """
+    with admitted(pool, path, None, origin, deadline=time.monotonic() + timeout):
+        with pool.open_url(urllib.request.Request(origin + path), timeout=timeout) as response:
+            yield response
 
 
 def _safe_error(error: BaseException) -> str:
@@ -642,6 +678,7 @@ class OllamaWorkerPool:
         capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
         capability_probe_timeout_seconds: float = 2.0,
         status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
+        gpu_admission=None,
         capability_prober: Callable[[str], object] | None = None,
         recent_evidence=None,
         identity_for=None,
@@ -735,6 +772,9 @@ class OllamaWorkerPool:
         self._probe_timeout = float(capability_probe_timeout_seconds)
         self._status_page_size = int(status_page_size)
         self._capability_prober = capability_prober
+        self.gpu_admission = (
+            gpu_admission if gpu_admission is not None else gpu_admission_module.process_service()
+        )
         self._recent_evidence = recent_evidence
         self._identity_for = identity_for
         self._capability_routing = capability_routing
@@ -1046,8 +1086,30 @@ class OllamaWorkerPool:
     def origins(self) -> tuple[str, ...]:
         return tuple(state.endpoint.origin for state in self._states)
 
+    def _probe_permit(self, origin: str) -> Callable[[], None]:
+        """Take the PROBE admission for one capability probe; return its release.
+
+        Called before the probe's bounded timer starts, so time spent waiting
+        for a slot can never read as the worker timing out. The gate bounds its
+        own wait (``probe_wait_ms``) and skips remote origins. A refusal is a
+        deferred check, not a worker fault: it surfaces as
+        ``CapabilityProbeDeferred``, which the refresh skips without touching
+        the worker's failure count, circuit or capabilities (the next refresh
+        asks again because the cached capabilities stay stale).
+        """
+        acquire = getattr(self.gpu_admission, "acquire_probe", None)
+        if acquire is None:
+            return lambda: None
+        try:
+            return acquire("/api/tags", origin=origin)
+        except gpu_admission_module.GpuAdmissionRefused as refused:
+            raise CapabilityProbeDeferred(
+                "capability probe deferred: %s" % refused.refusal.reason.value) from None
+
     @staticmethod
     def _retryable(error: BaseException) -> bool:
+        if isinstance(error, gpu_admission_module.GpuAdmissionRefused):
+            return False
         if isinstance(error, ModelCallError):
             return int(getattr(error, "status", 0) or 0) in _FAILOVER_HTTP_CODES
         if isinstance(error, WorkerPoolError):
@@ -1291,17 +1353,33 @@ class OllamaWorkerPool:
                 return
 
             def run(state: _WorkerState):
-                started = self._clock()
                 def clear_inflight():
                     with self._condition:
                         state.capability_probe_inflight = False
                         self._condition.notify_all()
 
+                # Admission first, outside the bounded timer; the slot is held
+                # until the probe thread really finishes (even past a timeout).
+                try:
+                    release = self._probe_permit(state.endpoint.origin)
+                except BaseException as refused:
+                    clear_inflight()
+                    if isinstance(refused, CapabilityProbeDeferred):
+                        return None, 0.0, refused
+                    raise
+
+                def complete():
+                    try:
+                        release()
+                    finally:
+                        clear_inflight()
+
+                started = self._clock()
                 payload, error = _bounded_capability_probe(
                     self._capability_prober,
                     state.endpoint.origin,
                     self._probe_timeout,
-                    clear_inflight,
+                    complete,
                 )
                 elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
                 return payload, elapsed_ms, error
@@ -1364,6 +1442,11 @@ class OllamaWorkerPool:
                         )
                         continue
                     self._metrics["capability_probes"] += 1
+                    if isinstance(error, CapabilityProbeDeferred):
+                        logger.info(
+                            "capability probe for worker %s deferred by gpu admission; will retry",
+                            state.endpoint.worker_id)
+                        continue
                     if error is not None:
                         logger.debug(f"capability probe failed for {state.endpoint.worker_id}: {_safe_error(error)}")
                         logger.warning(
@@ -2480,7 +2563,15 @@ class OllamaWorkerPool:
             "request_placement": "whole-worker; no model sharding",
             "model_sharding": False,
             "indefinite_scale": False,
+            **self._gpu_admission_summary(),
         }
+
+    def _gpu_admission_summary(self) -> dict:
+        """The admission snapshot (in-memory only) unless admission is off."""
+        service = self.gpu_admission
+        if getattr(service, "mode", "off") == "off" or not callable(getattr(service, "snapshot", None)):
+            return {}
+        return {"gpu_admission": service.snapshot()}
 
     def summary(self) -> dict:
         """Return cached aggregate state only; never probe or construct detail."""
@@ -2736,6 +2827,10 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
             _DEFAULT_FAILURE_THRESHOLD, maximum=_MAX_FAILURE_THRESHOLD,
         )
     )
+    admission = (
+        gpu_admission_module.process_service() if environment is None
+        else gpu_admission_module.service_for_environment(env)
+    )
     recent_evidence = identity_for = None
     capability_routing = "advisory"
     if environment is None:
@@ -2769,6 +2864,7 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         capability_probe_batch_size=probe_batch_size,
         capability_probe_timeout_seconds=probe_timeout_ms / 1000.0,
         status_page_size=status_page_size,
+        gpu_admission=admission,
         max_inflight_per_worker=(
             typed_max_inflight if use_typed and typed_max_inflight is not None
             else _positive_int(
@@ -2813,6 +2909,8 @@ __all__ = [
     "WorkerPoolError",
     "WorkerPoolUnavailable",
     "WorkerSnapshot",
+    "admitted",
+    "admitted_get",
     "configure_typed_workers",
     "configure_typed_pool",
     "from_environment",

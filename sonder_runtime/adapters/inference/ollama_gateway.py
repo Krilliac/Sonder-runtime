@@ -57,6 +57,7 @@ ollama_pool = importlib.import_module(
 )
 from ...domain.common.errors import (
     Cancelled,
+    Conflict,
     DeadlineExceeded,
     DependencyUnavailable,
     Forbidden,
@@ -151,6 +152,12 @@ def _map_model_error(exc) -> Exception:
         return DeadlineExceeded(detail)
     if kind == "cancelled":
         return Cancelled(detail)
+    if kind == "admission":
+        # A typed refusal (host memory floor, full queue, pinned window): the
+        # caller should ask again later, not treat the model as down.
+        refusal = Conflict(detail)
+        refusal.retry_after_seconds = getattr(exc, "retry_after_seconds", None)
+        return refusal
     if getattr(exc, "transient", False) or kind in (
         "request", "protocol", "empty_response",
     ):

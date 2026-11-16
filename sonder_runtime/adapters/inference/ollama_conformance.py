@@ -14,7 +14,9 @@ import urllib.request
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
+import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
 from sonder_runtime.adapters.inference.ollama_endpoint import open_url
+from sonder_runtime.domain.gpu_admission import CtxPolicy
 from sonder_runtime.application.routing.backend_conformance import (
     PROTOCOL_CASES,
     run_protocol_probes,
@@ -62,18 +64,27 @@ class OllamaConformanceProbe:
         self._identity_changed = False
 
     def _request(self, path: str, payload: Mapping[str, object] | None, *, timeout: float) -> dict:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
+        if self._deadline - time.monotonic() <= 0:
             raise TimeoutError("Ollama conformance wall budget exhausted")
-        body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
-        request = urllib.request.Request(
-            self.base_url + path, data=body,
-            headers={"Content-Type": "application/json"} if body is not None else {},
-            method="POST" if body is not None else "GET",
-        )
-        with open_url(request, timeout=min(timeout, remaining),
-                      allow_remote=False) as response:
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        # The evidence is bound to the window sent, so this battery never accepts
+        # a rewritten num_ctx: a loaded model at another window makes it wait.
+        # A refusal (GpuAdmissionRefused) propagates: it is not a measurement.
+        with gpu_admission.process_service().admit(
+            path, payload, origin=self.base_url, deadline=self._deadline,
+            ctx_policy=CtxPolicy.EXACT,
+        ) as ticket:
+            remaining = self._deadline - time.monotonic()  # admission may have queued
+            if remaining <= 0:
+                raise TimeoutError("Ollama conformance wall budget exhausted")
+            sent = ticket.payload  # the decided body (INHERIT_PINNED names the window)
+            body = None if sent is None else json.dumps(sent, separators=(",", ":")).encode()
+            request = urllib.request.Request(
+                self.base_url + path, data=body,
+                headers={"Content-Type": "application/json"} if body is not None else {},
+                method="POST" if body is not None else "GET",
+            )
+            with open_url(request, timeout=min(timeout, remaining), allow_remote=False) as response:
+                raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError("Ollama response exceeds size bound")
         value = json.loads(raw.decode("utf-8"))
@@ -230,6 +241,8 @@ class OllamaConformanceProbe:
                 chat = ProbeResult(BackendCapability.CHAT, False, "plain_chat_response_too_large")
             else:
                 chat = ProbeResult(BackendCapability.CHAT, bool(text.strip()), "plain_chat_passed" if text.strip() else "plain_chat_empty")
+        except gpu_admission.GpuAdmissionRefused:
+            raise  # never measured: the request did not run
         except ValueError as error:
             if "model mismatch" in str(error):
                 raise
@@ -237,7 +250,8 @@ class OllamaConformanceProbe:
         except Exception:  # noqa: BLE001 - probe failures become measured failures
             chat = ProbeResult(BackendCapability.CHAT, False, "plain_chat_error")
         protocol = run_protocol_probes(self, identity=self._identity, timeout_seconds=timeout_seconds,
-                                        cases=PROTOCOL_CASES)
+                                        cases=PROTOCOL_CASES,
+                                        propagate=(gpu_admission.GpuAdmissionRefused,))
         self._check_identity()
         return BackendConformanceRecord("ollama", self.model, protocol.checked_at,
                                         (chat, *protocol.results), probe_version=3,
