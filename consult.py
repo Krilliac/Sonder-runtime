@@ -1,8 +1,8 @@
 """Independent two-tier consultation and agreement reporting.
 
 The answers are never merged or ranked. Agreement is normally judged by a
-third model call. If that judge is unavailable or does not begin with YES/NO,
-the verdict falls back to a conservative normalized-token Jaccard overlap
+third model call. If that judge is unavailable, or its reply is not a single
+line starting with YES or NO (and containing no other YES/NO word), the verdict falls back to a conservative normalized-token Jaccard overlap
 (at least 0.5), and confidence remains ``unknown`` to expose that downgrade.
 """
 
@@ -11,7 +11,6 @@ import sys
 
 
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
-_JUDGE_RE = re.compile(r"^\s*(YES|NO)\b", re.IGNORECASE)
 _HEURISTIC_AGREEMENT_THRESHOLD = 0.5
 # ``server.ensemble_answer`` -- the ask behind both the MCP tool and
 # :func:`_default_ask` -- ends every non-code answer with a provenance footer:
