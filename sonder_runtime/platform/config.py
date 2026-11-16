@@ -882,15 +882,16 @@ def _is_loopback_host(host: object) -> bool:
 
 
 def _redact_url_userinfo(value: object) -> str:
-    """Return ``value`` as text with any authority userinfo replaced by ``***``."""
+    """Return ``value`` as text with everything up to its last ``@`` replaced by ``***``.
+
+    These values are meant to be bare origins, so an ``@`` anywhere after the
+    scheme is treated as the end of userinfo. That over-redacts a path holding
+    ``@``, but it also covers a password with an unencoded ``/``, ``?`` or ``#``,
+    which a parse that stops the authority at those characters would echo.
+    """
     text = str(value)
     start = text.find("//") + 2 if "//" in text else 0
-    end = len(text)
-    for marker in "/?#":
-        position = text.find(marker, start)
-        if position != -1:
-            end = min(end, position)
-    at = text.rfind("@", start, end)
+    at = text.rfind("@", start)
     if at == -1:
         return text
     return text[:start] + "***" + text[at:]

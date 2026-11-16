@@ -754,12 +754,15 @@ def test_ollama_origins_reject_ambiguous_or_credential_bearing_urls(
 @pytest.mark.parametrize("value", [
     "https://user:secretpw@127.0.0.1:not-a-port",
     "ftp://user:secretpw@",
+    # Unencoded "/" or "?" in the password: the authority must not end there.
+    "https://user:secret/pw@127.0.0.1:not-a-port",
+    "ftp://user:secret?pw@127.0.0.1:11434",
 ])
 def test_ollama_url_errors_never_echo_userinfo(variable, value):
     with pytest.raises(ConfigError) as excinfo:
         load_config(env={variable: value})
     text = "\n".join(excinfo.value.errors) + str(excinfo.value)
-    assert "secretpw" not in text
+    assert "secret" not in text
     assert "user:" not in text
 
 

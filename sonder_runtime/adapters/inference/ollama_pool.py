@@ -335,16 +335,18 @@ def validate_worker_origin(
         raise ValueError("worker endpoint must use http or https")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("worker endpoint must not contain inline credentials")
-    logger.debug(
-        f"validating worker origin scheme={parsed.scheme!r}, host={parsed.hostname!r}, "
-        f"port={port!r}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}"
-    )
     if not parsed.hostname or port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
         raise ValueError(
             "worker endpoint must be an origin without a path, query, or fragment"
         )
+    # Logged only once the value is a bare origin: a password with an unencoded
+    # "/" parses as host and port with the rest in the path, rejected above.
+    logger.debug(
+        f"validating worker origin scheme={parsed.scheme!r}, host={parsed.hostname!r}, "
+        f"port={port!r}, allow_remote={allow_remote}, trusted_origin_count={len(trusted_origins)}"
+    )
     if not _is_loopback(normalized):
         logger.debug(f"origin {normalized!r} is remote, checking policy")
         if not allow_remote:
@@ -2716,11 +2718,16 @@ def configure_typed_pool(pool: OllamaWorkerPool) -> None:
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
-    try:
-        primary_parts = urlsplit(ollama_policy.normalize(primary_origin))
-        safe_primary = f"{primary_parts.scheme}://{primary_parts.hostname}:{primary_parts.port}"
-    except ValueError:
-        safe_primary = "<unparseable>"
+    # An origin holding "@" may carry userinfo that urlsplit reads as a host and
+    # port (a password with an unencoded "/"), so it is never logged at all.
+    if "@" in str(primary_origin):
+        safe_primary = "<redacted>"
+    else:
+        try:
+            primary_parts = urlsplit(ollama_policy.normalize(primary_origin))
+            safe_primary = f"{primary_parts.scheme}://{primary_parts.hostname}:{primary_parts.port}"
+        except ValueError:
+            safe_primary = "<unparseable>"
     logger.debug(f"from_environment: primary_origin={safe_primary!r}")
     logger.info(f"building Ollama worker pool from environment, primary_origin={safe_primary!r}")
     env = os.environ if environment is None else environment
