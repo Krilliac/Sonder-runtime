@@ -179,6 +179,104 @@ def test_user_role_slash_commands_that_map_to_host_tools_are_refused(monkeypatch
     assert checked >= 10
 
 
+def _handle_slash_literal_commands():
+    import ast
+    from pathlib import Path
+    tree = ast.parse(Path(serve.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_handle_slash")
+    found = set()
+    non_literal = []
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                and node.left.id == "cmd"):
+            comp = node.comparators[0]
+            if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+                found.add(comp.value)
+            elif (isinstance(comp, (ast.Tuple, ast.Set, ast.List))
+                  and all(isinstance(e, ast.Constant) for e in comp.elts)):
+                found |= {e.value for e in comp.elts if isinstance(e.value, str)}
+            else:
+                non_literal.append("line %d: %s" % (node.lineno, ast.unparse(node)))
+    assert not non_literal, (
+        "_handle_slash compares cmd to a non-literal, which no gate can "
+        "enumerate: %s" % non_literal
+    )
+    return {c for c in found if c.startswith("/") and len(c) > 1}
+
+
+def _first_prompt_name():
+    from sonder_runtime.adapters import prompt_store
+    return sorted(prompt_store.CATALOG)[0]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_untooled_prompts_command_is_refused_for_user_only(monkeypatch, mode):
+    _set_mode(monkeypatch, mode)
+    name = _first_prompt_name()
+    for argument in ("show " + name, "path " + name, "path", "reload", ""):
+        refusal = serve._http_slash_refusal("/prompts", argument, context=_context("user"))
+        assert refusal.startswith("refused /prompts"), (mode, argument, refusal)
+        for role in ("developer", "admin", "local-open"):
+            other = serve._http_slash_refusal("/prompts", argument, context=_context(role))
+            assert "not available to this account role" not in other, (mode, role, argument, other)
+
+
+@pytest.mark.parametrize("cmd,argument", [("/help", ""), ("/trace", "on"), ("/strict", "on")])
+def test_untooled_session_commands_stay_allowed_for_user(monkeypatch, cmd, argument):
+    _set_mode(monkeypatch, "default")
+    assert serve._http_slash_refusal(cmd, argument, context=_context("user")) == ""
+
+
+def test_every_chain_command_is_tooled_or_untooled_and_untooled_is_refused_by_default(monkeypatch):
+    """A future branch that calls no tool is refused for user until reviewed."""
+    from sonder_runtime.adapters.security import role_tool_policy
+    _set_mode(monkeypatch, "default")
+    tooled = set(command_catalog.http_slash_tools())
+    untooled = set(command_catalog.http_slash_untooled())
+    chain = _handle_slash_literal_commands()
+    unclassified = sorted(chain - tooled - untooled)
+    assert not unclassified, "chain commands in neither map: %s" % unclassified
+    assert not (tooled & untooled)
+    allowed = role_tool_policy.user_untooled_commands()
+    assert allowed <= untooled, sorted(allowed - untooled)
+    for cmd in sorted(untooled):
+        refusal = serve._http_slash_refusal(cmd, "", context=_context("user"))
+        if cmd in allowed:
+            assert refusal == "", (cmd, refusal)
+        else:
+            assert refusal.startswith("refused"), "untooled %s is neither allowlisted nor refused" % cmd
+
+
+def test_unparseable_chain_source_refuses_user_slash_commands(monkeypatch):
+    """A dispatch source the catalog cannot read must refuse, not allow."""
+    monkeypatch.setattr(command_catalog, "_source_path", lambda name: "Z:/nonexistent/" + name)
+    command_catalog.reset_cache()
+    try:
+        for cmd in ("/prompts", "/help"):
+            refusal = serve._http_slash_refusal(cmd, "", context=_context("user"))
+            assert refusal.startswith("refused %s" % cmd), (cmd, refusal)
+    finally:
+        monkeypatch.undo()
+        command_catalog.reset_cache()
+
+
+def test_non_literal_cmd_comparison_makes_catalog_unavailable(monkeypatch, tmp_path):
+    source = tmp_path / "chain.py"
+    source.write_text(
+        "NAMES = ('/x',)\ndef _handle_slash(cmd):\n    if cmd in NAMES:\n        return 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(command_catalog, "_source_path", lambda name: str(source))
+    with pytest.raises(command_catalog.CatalogUnavailable):
+        command_catalog._branch_tool_calls("x.py", "_handle_slash", frozenset())
+
+
+def test_untooled_refusal_names_a_command_not_a_tool():
+    refusal = serve._http_slash_refusal("/prompts", "", context=_context("user"))
+    assert "command '/prompts' is not available to this account role" in refusal
+
+
 _LOOP_HOST_ACTIONS = ({"type": "file_write"}, {"type": "code"}, {"type": "project"})
 
 
@@ -336,3 +434,15 @@ def test_computer_use_chat_route_itself_is_unchanged_for_the_operator(monkeypatc
     result = computer_use_chat.route("stop controlling", object())
     assert dispatched == ["computer_use_stop"]
     assert result == "{}"
+
+
+def test_every_dispatch_chain_is_enumerable_by_the_catalog():
+    """A non-literal ``cmd`` comparison in any chain makes the catalog unavailable.
+
+    The catalog then refuses every slash command (fail closed), so catch it here
+    instead of at runtime: the console chain, control_command and _handle_slash.
+    """
+    command_catalog.reset_cache()
+    assert command_catalog.console_tools()
+    assert command_catalog.http_slash_tools()
+    assert command_catalog.http_slash_untooled()
