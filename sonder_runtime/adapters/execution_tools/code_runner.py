@@ -19,8 +19,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from sonder_runtime.platform import logging as sonder_logging
 from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.application.workflows import loop as workflow_loop
 
 
@@ -121,6 +123,12 @@ SUPPORTED_LANGUAGES = {
 DEFAULT_TIMEOUT = 10
 MAX_TIMEOUT = 60
 MAX_OUTPUT_CHARS = 12000
+# Bytes of each child pipe _collect_output keeps: output up to this size is
+# returned exactly as communicate() did (whole, then _trim_output's tail
+# cut); past it a head and tail are kept and the middle is drained and
+# discarded. 5 x MAX_OUTPUT_CHARS leaves room for utf-8's 4 bytes per char.
+DEFAULT_CAPTURE_BYTES = 5 * MAX_OUTPUT_CHARS
+_READ_CHUNK_BYTES = 65536
 DEFAULT_LOOP_ITERATIONS = 5
 MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
@@ -546,16 +554,142 @@ def _decode_child_output(raw):
         return raw.decode(locale.getpreferredencoding(False), errors="replace")
 
 
-def _collect_output(proc, input_bytes, timeout):
-    """Feed stdin, wait for exit and collect output: (stdout, stderr, timeout_exc).
+def _utf8_cut_end(data):
+    """Drop a utf-8 sequence the head capture cut in half (so it decodes)."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:
+            continue
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            if need > back:
+                return data[:-back]
+        break
+    return data
 
-    ``timeout_exc`` is None for a completed run; on timeout the process tree
-    has been torn down and the partial output is what it printed in time.
+
+def _utf8_cut_start(data):
+    """Drop continuation bytes left at the start of a rolled tail capture."""
+    skip = 0
+    while skip < min(3, len(data)) and data[skip] & 0xC0 == 0x80:
+        skip += 1
+    return data[skip:]
+
+
+class _StreamCapture:
+    """Bounded capture of one child pipe: the first and last bytes it wrote.
+
+    Fed by exactly one reader thread and read by the runner thread; the lock
+    covers both, because after a timeout the reader may still be draining a
+    pipe a surviving descendant holds while the runner builds its result.
+    Memory is bounded by ``capture_bytes`` plus one read chunk.
     """
+
+    def __init__(self, capture_bytes):
+        self._lock = threading.Lock()
+        self._head_limit = capture_bytes // 5
+        self._tail_limit = capture_bytes - self._head_limit
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._total = 0
+
+    def feed(self, chunk):
+        with self._lock:
+            self._total += len(chunk)
+            room = self._head_limit - len(self._head)
+            if room > 0:
+                self._head += chunk[:room]
+                chunk = chunk[room:]
+            if chunk:
+                self._tail += chunk
+                excess = len(self._tail) - self._tail_limit
+                if excess > 0:
+                    del self._tail[:excess]
+
+    def text(self):
+        """Decoded output; past the capture, head + marker + tail in MAX_OUTPUT_CHARS."""
+        with self._lock:
+            head, tail, total = bytes(self._head), bytes(self._tail), self._total
+        if total == len(head) + len(tail):
+            return _decode_child_output(head + tail)
+        marker = (
+            "\n[... output truncated: %d bytes written, showing the start and end ...]\n"
+            % total
+        )
+        head_text = _decode_child_output(_utf8_cut_end(head))[:MAX_OUTPUT_CHARS // 4]
+        room = max(0, MAX_OUTPUT_CHARS - len(head_text) - len(marker))
+        tail_text = _decode_child_output(_utf8_cut_start(tail))
+        return head_text + marker + (tail_text[-room:] if room else "")
+
+
+def _drain_into(stream, capture):
+    read = getattr(stream, "read1", stream.read)
     try:
-        stdout, stderr = proc.communicate(input=input_bytes, timeout=timeout)
-        return stdout, stderr, None
-    except subprocess.TimeoutExpired as exc:
+        while True:
+            chunk = read(_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            capture.feed(chunk)
+    except (OSError, ValueError):
+        return
+
+
+def _feed_stdin(stream, data):
+    try:
+        if data:
+            stream.write(data)
+    except (OSError, ValueError):
+        pass  # the child exited or closed stdin without reading it all
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _collect_output(proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE_BYTES):
+    """Feed stdin, wait for exit and collect output: (stdout, stderr, timed_out).
+
+    Replaces ``communicate()``, which held every byte a child printed until it
+    exited: a snippet printing gigabytes exhausted host memory before
+    _trim_output ever ran. Each pipe is drained into a bounded
+    _StreamCapture, and the child keeps running to completion (the excess is
+    discarded rather than the child killed), so a chatty but correct program
+    still reports its real exit status; the timeout bounds how long it runs.
+
+    The deadline covers what communicate() covered: the child exiting *and*
+    both pipes closing, so a descendant still holding a pipe keeps the run
+    open until the deadline. On timeout the tree is torn down and the output
+    is what was printed in time.
+    """
+    deadline = time.monotonic() + timeout
+    captures = (_StreamCapture(capture_bytes), _StreamCapture(capture_bytes))
+    readers = []
+    for stream, capture in zip((proc.stdout, proc.stderr), captures, strict=True):
+        if stream is not None:
+            reader = owned_runtime_thread(
+                target=_drain_into, args=(stream, capture),
+                name="sonder-code-runner-reader", daemon=True,
+            )
+            reader.start()
+            readers.append((reader, stream))
+    if proc.stdin is not None:
+        owned_runtime_thread(
+            target=_feed_stdin, args=(proc.stdin, input_bytes),
+            name="sonder-code-runner-stdin", daemon=True,
+        ).start()
+    timed_out = False
+    try:
+        # The child gets the whole timeout; only the pipe joins use the
+        # deadline, which starting the threads moved by microseconds.
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if not timed_out:
+        for reader, _stream in readers:
+            reader.join(max(0.0, deadline - time.monotonic()))
+        timed_out = any(reader.is_alive() for reader, _stream in readers)
+    if timed_out:
         _terminate_process_tree(proc)
         # ``taskkill /T`` can report success before the process handle is
         # signalled.  Waiting on the direct handle first prevents the
@@ -568,15 +702,25 @@ def _collect_output(proc, input_bytes, timeout):
                 proc.kill()
             except OSError:
                 pass
-        try:
-            stdout, stderr = proc.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = exc.output, exc.stderr
-        return stdout, stderr, exc
+        # Collect what is still in the pipes, as communicate(timeout=1) did.
+        late = time.monotonic() + 1
+        for reader, _stream in readers:
+            reader.join(max(0.0, late - time.monotonic()))
+    for reader, stream in readers:
+        if not reader.is_alive():  # a live reader still owns its pipe
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    return captures[0].text(), captures[1].text(), timed_out
 
 
 def _abort_process(proc):
-    """Tear down and reap ``proc``'s tree after a failure past the spawn."""
+    """Tear down and reap ``proc``'s tree after a failure past the spawn.
+
+    The pipes are left to the reader threads and garbage collection: closing
+    a buffered pipe blocks on the lock a reader holds while it waits in read.
+    """
     try:
         _terminate_process_tree(proc)
     except Exception:  # noqa: BLE001 - keep going: the job close below still kills the tree
@@ -587,12 +731,6 @@ def _abort_process(proc):
         try:
             proc.kill()
         except OSError:
-            pass
-    for stream in (proc.stdin, proc.stdout, proc.stderr):
-        try:
-            if stream is not None:
-                stream.close()
-        except (OSError, ValueError):
             pass
 
 
@@ -658,7 +796,7 @@ def _run_process(cmd, cwd, stdin, timeout, language):
         raise
     finally:
         _release_job(proc)
-    if timed_out is not None:
+    if timed_out:
         timeout_exc = subprocess.TimeoutExpired(
             cmd, timeout,
             output=_decode_child_output(stdout),
