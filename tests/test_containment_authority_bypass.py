@@ -25,10 +25,8 @@ string token or approval is dropped from every agent proposal"),
 operator, even in unsafe lab mode") and ``cloud_opt_in``'s docstring
 ("enabling is explicit consent").
 
-Each test id says what the attacker tries. Tests named ``test_gap_*`` pin a
-current behaviour that no document forbids but that a model could use; tests
-named ``test_by_design_*`` pin behaviour the documents accept. Neither kind is
-a failure today; both name the behaviour so a change to it is a decision.
+Each test id says what the attacker tries. Tests named ``test_by_design_*``
+pin behaviour the documents accept, so a change to it is a decision.
 
 Seeded variation (``FUZZ_SEED``, printed in every failure message) is used
 only where one shape has many spellings: operator tool names and the one
@@ -186,7 +184,7 @@ def _recorder(original, sink, entry, reply):
 def tripwires(monkeypatch):
     """Replace every operator tool body with a recorder, on both dispatch routes."""
     reached = []
-    for name in OPERATOR_NAMES + ("cloud_opt_in",):
+    for name in OPERATOR_NAMES:
         tool = _REGISTRY.get(name)
         original = tool.fn if tool is not None else getattr(server, name, None)
         body = _recorder(original, reached, lambda _kwargs, _n=name: _n, f"TRIPWIRE {name} RAN")
@@ -617,23 +615,20 @@ def test_an_approval_covers_exactly_one_call_once(gate, monkeypatch):
     assert again.startswith("ERROR:") and len(ran) == 1
 
 
-def test_gap_slash_prefixed_agent_name_spends_an_approval_but_runs_nothing(gate, monkeypatch):
-    """GAP (low): the gate and the dispatcher read ``/file_write`` differently.
-
-    ``permission_modes.call_digest``/``_decide`` strip a leading ``/``, so the
-    gate spends the approval issued for ``file_write``; ``_agent_dispatch``
-    does not, so the call then resolves to no tool. Nothing runs and nothing is
-    widened, but a model can burn an operator's one-shot approval. Pinned so a
-    fix (strip ``/`` in ``_agent_dispatch`` or refuse it before the gate) is a
-    visible change.
-    """
+def test_slash_prefixed_agent_name_is_refused_before_it_can_spend_an_approval(gate, monkeypatch):
+    """Proves the gap is closed: ``/file_write`` is refused as an unknown tool
+    before the permission gate is consulted, so an operator's one-shot approval
+    of the exact ``file_write`` call is not consumed. The real ``file_write``
+    call then still runs exactly once with that approval."""
     ran = []
     monkeypatch.setattr(server, "file_write", lambda **kwargs: ran.append(kwargs) or "wrote")
     issued = gate.issue("file_write", pm.call_digest("file_write", CALL), approver="console operator")
     out = server._agent_dispatch("/file_write", dict(CALL))
     assert out == "ERROR: unknown tool '/file_write'."
     assert ran == []
-    assert gate.get(issued.nonce).state() == "spent"
+    assert gate.get(issued.nonce).state() == "open"
+    assert server._agent_dispatch("file_write", dict(CALL)) == "wrote"
+    assert len(ran) == 1 and gate.get(issued.nonce).state() == "spent"
 
 
 # --- 4. env-only authority on an authenticated deployment ---------------------------
@@ -751,12 +746,12 @@ def test_authenticated_developer_gate_needs_a_developer_token(posture, gate, mon
 
 
 @pytest.mark.parametrize("typo", ["admn", "Admin", "admin ", "developr", "root"])
-def test_gap_require_with_an_unknown_role_is_satisfied_by_any_logged_in_account(typo):
-    """GAP (latent fail-open): ``ranks.get(role, 0)`` ranks an unknown
-    *required* role as ``user``, so a typo at a call site would let every
-    logged-in account through. Every call site passes a known literal today
-    (next test), so nothing is reachable now."""
-    assert admin_auth.require({"username": "usr1", "role": "user"}, typo) == (True, "")
+def test_require_with_an_unknown_role_fails_closed(typo):
+    """Proves the gap is closed: an unknown *required* role is refused with
+    ``unknown role`` for a user, a developer and an admin account alike, and is
+    never ranked as ``user``. A missing login is still reported first."""
+    for role in ("user", "developer", "admin"):
+        assert admin_auth.require({"username": "acct", "role": role}, typo) == (False, "unknown role")
     assert admin_auth.require(None, typo) == (False, "login required")
 
 
@@ -832,40 +827,38 @@ def test_user_role_agent_cannot_turn_on_cloud_even_under_an_allow_rule(gate, mon
         out = server._agent_dispatch("cloud_opt_in", {"action": "on"})
     finally:
         role_tool_policy._CALLER_ROLE.reset(token)
-    assert "not available to this account role" in out
+    # The operator-tool refusal now fires before the role policy is reached.
+    assert out.startswith("ERROR: HOST POLICY") and "system operation" in out, out
     assert os.environ.get("SONDER_ALLOW_CLOUD") == "0"
 
 
-def test_gap_agent_cloud_opt_in_runs_under_an_explicit_allow_rule(gate, monkeypatch):
-    """GAP: ``cloud_opt_in`` is not in ``_AGENT_SYSTEM_OPERATOR_TOOLS`` nor in
-    the generic fallback's exclusions. Only the permission gate (graded
-    ``dangerous``, refused unattended) stands in front of it, so an operator's
-    broad ``allow`` rule -- written to stop prompts, not to consent to cloud --
-    lets a model write ``SONDER_ALLOW_CLOUD=1`` for the whole process. Its
-    docstring calls enabling "explicit consent" and the operator-tools comment
-    says process-wide controls need a human operator, but no document names
-    this tool as agent-refused. A one-shot approval of exactly this call is
-    the documented route and is not what this pins."""
+def test_agent_cloud_opt_in_is_refused_under_an_explicit_allow_rule(gate, tripwires, monkeypatch):
+    """Proves the gap is closed: ``cloud_opt_in`` is in
+    ``_AGENT_SYSTEM_OPERATOR_TOOLS``, so a model is refused as for any operator
+    tool even under a ``*: allow`` rule; the body never runs and
+    ``SONDER_ALLOW_CLOUD`` is unchanged."""
     _set_mode(pm.MANUAL)
     _allow_every_tool(monkeypatch)
+    before = os.environ.get("SONDER_ALLOW_CLOUD")
     out = server._agent_dispatch("cloud_opt_in", {"action": "on"})
-    assert out.startswith("hosted/cloud tiers: ENABLED")
-    assert os.environ.get("SONDER_ALLOW_CLOUD") == "1"
+    assert out.startswith("ERROR: HOST POLICY") and "system operation" in out, out
+    assert "cloud_opt_in" in server._AGENT_SYSTEM_OPERATOR_TOOLS
+    assert tripwires == []
+    assert os.environ.get("SONDER_ALLOW_CLOUD") == before
 
 
 def test_real_unsafe_lab_agent_cannot_opt_into_cloud_even_under_an_allow_rule(
     gate, monkeypatch, tmp_path,
 ):
-    """With the real unsafe-lab activation the GAP above is closed, but by a
-    side effect: unsafe mode applies hosted-agent policy to every registry-only
-    tool (``_agent_run_tool_refusal``), and ``cloud_opt_in`` is registry-only.
-    Were it ever flipped, ``unsafe_lab.active()`` would refuse every later
-    dispatch, because the acknowledgement refuses cloud consent."""
+    """With the real unsafe-lab activation ``cloud_opt_in`` is refused as a
+    system operation. Were the flag ever flipped, ``unsafe_lab.active()`` would
+    refuse every later dispatch, because the acknowledgement refuses cloud
+    consent."""
     _activate_unsafe_lab(monkeypatch, tmp_path)
     _set_mode(pm.AUTO)
     _allow_every_tool(monkeypatch)
     out = server._agent_dispatch("cloud_opt_in", {"action": "on"})
-    assert out.startswith("ERROR: HOST POLICY") and "hosted agent policy" in out, out
+    assert out.startswith("ERROR: HOST POLICY") and "system operation" in out, out
     assert os.environ.get("SONDER_ALLOW_CLOUD") == "0"
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     with pytest.raises(unsafe_lab.UnsafeLabError, match="cloud"):
