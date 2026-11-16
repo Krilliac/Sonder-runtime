@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -18,6 +20,7 @@ from datetime import datetime, timezone
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 from sonder_runtime.adapters import git_program_guard
+from sonder_runtime.adapters import operator_attendance
 from sonder_runtime.adapters.git_mutation_guard import guard_git_mutation
 import sonder_logging
 
@@ -34,11 +37,68 @@ MAX_DIFF_CONTEXT = 20
 RUNTIME_UPDATE_REMOTE = "origin"
 RUNTIME_UPDATE_BRANCH = "main"
 RUNTIME_STASH_MESSAGE = "sonder runtime recovery"
+# ``pop`` writes old edits back into the live runtime checkout, so it runs only
+# when the operator typed this tool at the console (``operator_attendance``).
+RUNTIME_STASH_TOOL = "runtime_source_stash"
+# The stash commits ``save`` made in one checkout, kept in that checkout's own
+# git directory, one record per line: the commit id, or ``applied <id>`` once
+# ``pop`` has applied it and before its drop is confirmed.  The stash list is
+# shared by every worktree of a repository and any caller can copy the message,
+# so ``pop`` restores only a commit recorded here: a stash pushed from another
+# worktree is never one.  An applied record is never applied again.
+RUNTIME_STASH_LEDGER = "sonder-runtime-stashes"
+_RUNTIME_STASH_LEDGER_LIMIT = 64
+_LEDGER_APPLIED = "applied "
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# ``git stash drop`` reports "Dropped stash@{n} (<commit id>)"; only the id is read (the words are translated).
+_DROPPED_COMMIT = re.compile(r"\(([0-9a-f]{40}(?:[0-9a-f]{24})?)\)")
 _TRUSTED_RUNTIME_ORIGINS = frozenset({
     "https://github.com/krilliac/sonder-runtime",
     "git@github.com:krilliac/sonder-runtime",
     "ssh://git@github.com/krilliac/sonder-runtime",
 })
+
+
+class RuntimeStashStateError(ValueError):
+    """``runtime_source_stash pop`` stopped because the stash list is not in the state it needs.
+
+    A ``ValueError``, so every caller that reports a refused stash action reports these too.
+    """
+
+
+class RecoveryStashAlreadyApplied(RuntimeStashStateError):
+    """The newest recorded recovery stash was applied by an earlier ``pop`` whose drop did not complete."""
+
+    def __init__(self, commit, reference):
+        self.commit = commit
+        self.reference = reference
+        super().__init__(
+            "runtime stash pop already applied the recovery stash %s, but its drop failed and the entry is "
+            "still in the stash list as %s; it is not applied twice. Once its changes are where you want "
+            "them, drop that entry with git at a shell" % (commit, reference)
+        )
+
+
+class RecoveryStashDropMismatch(RuntimeStashStateError):
+    """``git stash drop`` removed another entry than the recovery stash (or did not say which)."""
+
+    def __init__(self, commit, dropped, *, restored):
+        self.commit = commit
+        self.dropped = dropped
+        self.restored = restored
+        if not dropped:
+            detail = "did not name the entry it removed, so it could not be checked"
+        elif restored:
+            detail = "removed %s instead (the stash list changed in between); it was stored back at the top" % dropped
+        else:
+            detail = (
+                "removed %s instead (the stash list changed in between) and it could not be stored back; "
+                "restore it at a shell with git stash store %s" % (dropped, dropped)
+            )
+        super().__init__(
+            "runtime stash pop applied the recovery stash %s, but git stash drop %s. The recovery stash is "
+            "recorded as applied and will not be applied again" % (commit, detail)
+        )
 
 
 def _bounded_int(value, default, minimum, maximum):
@@ -509,34 +569,114 @@ def _runtime_mutation_arguments(root, subcommand):
     ]
 
 
-def runtime_stash_status(root, *, timeout=DEFAULT_TIMEOUT):
-    """Return bounded, content-free recovery readiness and stash metadata.
-
-    Only stashes bearing the host-created recovery marker are exposed here.
-    A caller must never mistake an unrelated developer stash for a Sonder
-    recovery checkpoint, particularly because ``pop`` both restores and drops
-    its selected stash.
-    """
-    top = _require_runtime_checkout(root, timeout=timeout)
-    status = repo_status(top, timeout=timeout, max_output=16_384, bypass=True)
+def _stash_entries(top, *, timeout):
+    """Every stash entry as ``(reference, commit id, subject)``, newest first."""
     listed = _checked_git(
         top,
-        ["stash", "list", "--format=%gd%x00%gs"],
-        timeout=timeout, max_output=16_384, operation="stash list",
+        ["stash", "list", "--format=%gd%x00%H%x00%gs"],
+        timeout=timeout, max_output=64_000, operation="stash list",
     )
     entries = []
     for line in listed["stdout"].splitlines():
-        reference, separator, subject = line.strip().partition("\x00")
-        if not separator or not reference or RUNTIME_STASH_MESSAGE not in subject:
-            continue
-        entries.append(reference)
+        fields = line.strip().split("\x00", 2)
+        if len(fields) == 3 and fields[0] and fields[1]:
+            entries.append((fields[0], fields[1], fields[2]))
+    return entries
+
+
+def _stash_ledger(top, *, timeout):
+    """The ledger file in this checkout's own git directory (``RUNTIME_STASH_LEDGER``)."""
+    git_dir = _runtime_git_text(
+        top, ["rev-parse", "--absolute-git-dir"], operation="git directory probe", timeout=timeout,
+    )
+    if not git_dir:
+        raise ValueError("git directory probe returned no directory")
+    return Path(git_dir) / RUNTIME_STASH_LEDGER
+
+
+def _ledger_records(ledger):
+    """``{commit id: applied}`` for each record in ``ledger``, oldest first; empty when it is missing or unreadable."""
+    try:
+        text = ledger.read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return {}
+    records = {}
+    for line in (item.strip() for item in text.splitlines()):
+        applied = line.startswith(_LEDGER_APPLIED)
+        commit = line[len(_LEDGER_APPLIED):] if applied else line
+        if _COMMIT_ID.fullmatch(commit):
+            records[commit] = applied
+    return records
+
+
+def _write_ledger_records(ledger, records):
+    """Replace ``ledger`` with ``records`` (the newest ``_RUNTIME_STASH_LEDGER_LIMIT``), atomically."""
+    kept = list(records.items())[-_RUNTIME_STASH_LEDGER_LIMIT:]
+    temporary = ledger.with_name(ledger.name + ".tmp")
+    temporary.write_text(
+        "".join((_LEDGER_APPLIED if applied else "") + commit + "\n" for commit, applied in kept),
+        encoding="ascii",
+    )
+    os.replace(temporary, ledger)
+
+
+def _recovery_stashes(top, *, timeout):
+    """``(reference, commit id, applied)`` of each recovery stash this checkout's ``save`` recorded, newest first."""
+    records = _ledger_records(_stash_ledger(top, timeout=timeout))
+    return [
+        (reference, commit, records[commit])
+        for reference, commit, subject in _stash_entries(top, timeout=timeout)
+        if RUNTIME_STASH_MESSAGE in subject and commit in records
+    ]
+
+
+def recorded_recovery_stash_at(root, selector="stash@{0}", *, timeout=DEFAULT_TIMEOUT):
+    """The commit id ``selector`` names when it is a recovery stash ``save`` recorded, else ``""``.
+
+    The stash list is shared by every worktree of a repository, so the ledger
+    of every worktree counts: the common directory's own and each
+    ``worktrees/<name>`` one.  ``""`` when there is no such stash entry.
+    Raises ``ValueError``, ``PermissionError`` or ``TimeoutError`` when git
+    cannot answer, so a caller can refuse instead of guessing.
+    """
+    root = Path(root)
+    named = _run_git(
+        root, ["rev-parse", "-q", "--verify", selector + "^{commit}"], timeout=timeout, max_output=16_384,
+    )
+    if named["timed_out"]:
+        raise TimeoutError("git stash probe timed out")
+    commit = named["stdout"].strip()
+    if named["returncode"] != 0 or not _COMMIT_ID.fullmatch(commit):
+        return ""
+    common = _runtime_git_text(
+        root, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        operation="common directory probe", timeout=timeout,
+    )
+    if not common:
+        raise ValueError("git common directory probe returned no directory")
+    ledgers = [Path(common) / RUNTIME_STASH_LEDGER, *(Path(common) / "worktrees").glob("*/" + RUNTIME_STASH_LEDGER)]
+    return commit if any(commit in _ledger_records(ledger) for ledger in ledgers) else ""
+
+
+def runtime_stash_status(root, *, timeout=DEFAULT_TIMEOUT):
+    """Return bounded, content-free recovery readiness and stash metadata.
+
+    Only stashes this checkout's ``save`` made and recorded are exposed here
+    (``RUNTIME_STASH_LEDGER``).  A caller must never mistake an unrelated
+    developer stash, or one pushed with a copied message from another
+    worktree, for a Sonder recovery checkpoint, particularly because ``pop``
+    both restores and drops its selected stash.
+    """
+    top = _require_runtime_checkout(root, timeout=timeout)
+    status = repo_status(top, timeout=timeout, max_output=16_384, bypass=True)
+    entries = _recovery_stashes(top, timeout=timeout)
     return {
         "root": str(top),
         "branch": status.get("branch") or "",
         "clean": status.get("clean") is True,
         "change_count": int(status.get("change_count") or 0),
         "stash_count": len(entries),
-        "top": entries[0] if entries else "",
+        "top": entries[0][0] if entries else "",
     }
 
 
@@ -545,13 +685,118 @@ def runtime_stash(root, action, *, timeout=MAX_TIMEOUT):
 
     This is purposefully not a general Git stash wrapper: actions, message,
     checkout, and stash selector are all fixed by the host.  ``pop`` requires
-    an empty checkout to avoid merging an old recovery into fresh local edits.
+    an empty checkout to avoid merging an old recovery into fresh local edits,
+    the operator at the console (``RUNTIME_STASH_TOOL`` attended), and a stash
+    that ``save`` recorded in this checkout.  Raises ``PermissionError`` for
+    an unattended ``pop``, :class:`RecoveryStashAlreadyApplied` when the
+    newest recorded stash was applied by a pop whose drop failed, and
+    :class:`RecoveryStashDropMismatch` when the drop removed another entry.
     """
     selected = str(action or "").strip().lower().replace("_", "-")
     if selected not in {"save", "save-untracked", "pop"}:
         raise ValueError("runtime stash action must be save, save-untracked, or pop")
+    if selected == "pop" and not operator_attendance.attended_for(RUNTIME_STASH_TOOL):
+        raise PermissionError(
+            "runtime stash pop writes old edits into the live Sonder runtime checkout; it runs only "
+            "when the operator types /stash pop or /%s action=pop at the console" % RUNTIME_STASH_TOOL
+        )
     with guard_git_mutation(Path(root).resolve(), "runtime_stash_%s" % selected):
         return _runtime_stash_unguarded(root, selected, timeout=timeout)
+
+
+def _runtime_stash_save(top, selected, *, timeout):
+    """Push the recovery stash under a one-off message and record its commit id in the ledger."""
+    message = "%s %s" % (RUNTIME_STASH_MESSAGE, secrets.token_hex(8))
+    command = ["stash", "push", "--message", message]
+    if selected == "save-untracked":
+        command.append("--include-untracked")
+    _checked_git(
+        top,
+        _runtime_mutation_arguments(top, command),
+        timeout=timeout, max_output=64_000, operation="stash save",
+    )
+    created = [commit for _, commit, subject in _stash_entries(top, timeout=timeout) if message in subject]
+    if len(created) != 1:
+        raise ValueError(
+            "runtime stash saved the changes but could not identify the new stash, so it was not "
+            "recorded for /stash pop; restore it with git stash at the console"
+        )
+    ledger = _stash_ledger(top, timeout=timeout)
+    records = _ledger_records(ledger)
+    records[created[0]] = False
+    _write_ledger_records(ledger, records)
+
+
+def _drop_recorded_stash(top, commit, *, timeout):
+    """Drop the stash entry holding ``commit``, checking which entry git removed.
+
+    ``git stash drop`` takes only ``stash@{n}``, read from a list taken just
+    before; a stash pushed or dropped from another worktree in between shifts
+    the indices of the shared list, so ``stash@{n}`` can name another entry by
+    the time git runs.  The commit git reports dropping is compared with
+    ``commit``; another entry is stored back (at the top of the list) and
+    :class:`RecoveryStashDropMismatch` is raised, as it is when git names no
+    commit.  Nothing to do when ``commit`` is no longer in the list.
+    """
+    entries = _stash_entries(top, timeout=timeout)
+    current = next((reference for reference, entry, _ in entries if entry == commit), "")
+    if not current:
+        return
+    result = _checked_git(
+        top,
+        _runtime_mutation_arguments(top, ["stash", "drop", current]),
+        timeout=timeout, max_output=64_000, operation="stash drop",
+    )
+    named = _DROPPED_COMMIT.search(result["stdout"] + "\n" + result["stderr"])
+    dropped = named.group(1) if named else ""
+    if dropped == commit:
+        return
+    if not dropped:
+        raise RecoveryStashDropMismatch(commit, "", restored=False)
+    subject = next((text for _, entry, text in entries if entry == dropped), "")
+    try:
+        if not subject:
+            subject = _runtime_git_text(
+                top, ["show", "-s", "--format=%s", dropped], operation="stash subject probe", timeout=timeout,
+            )
+        _checked_git(
+            top,
+            _runtime_mutation_arguments(top, ["stash", "store", "--message", subject or dropped, dropped]),
+            timeout=timeout, max_output=16_384, operation="stash store",
+        )
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        raise RecoveryStashDropMismatch(commit, dropped, restored=False) from exc
+    raise RecoveryStashDropMismatch(commit, dropped, restored=True)
+
+
+def _runtime_stash_pop(top, before, *, timeout):
+    """Apply the newest recorded recovery stash by commit id, mark it applied, then drop its entry and its record."""
+    stashes = _recovery_stashes(top, timeout=timeout)
+    if not stashes:
+        raise ValueError(
+            "runtime stash pop requires an existing recovery stash saved by runtime_source_stash in this checkout"
+        )
+    reference, commit, applied = stashes[0]
+    if applied:
+        raise RecoveryStashAlreadyApplied(commit, reference)
+    if not before["clean"]:
+        raise PermissionError("runtime stash pop requires a clean source checkout")
+    # Applied by commit id, not by stash@{n}: a stash pushed from another worktree in the
+    # meantime shifts the indices of the shared list but cannot change what a commit id names.
+    # The drop has only stash@{n}, so _drop_recorded_stash checks what it removed.
+    _checked_git(
+        top,
+        _runtime_mutation_arguments(top, ["stash", "apply", commit]),
+        timeout=timeout, max_output=64_000, operation="stash pop",
+    )
+    ledger = _stash_ledger(top, timeout=timeout)
+    records = _ledger_records(ledger)
+    records[commit] = True
+    _write_ledger_records(ledger, records)
+    _drop_recorded_stash(top, commit, timeout=timeout)
+    records = _ledger_records(ledger)
+    records.pop(commit, None)
+    _write_ledger_records(ledger, records)
 
 
 def _runtime_stash_unguarded(root, selected, *, timeout):
@@ -560,24 +805,9 @@ def _runtime_stash_unguarded(root, selected, *, timeout):
     if selected.startswith("save"):
         if before["clean"]:
             return {"action": selected, "changed": False, "before": before, "after": before}
-        command = ["stash", "push", "--message", RUNTIME_STASH_MESSAGE]
-        if selected == "save-untracked":
-            command.append("--include-untracked")
-        _checked_git(
-            top,
-            _runtime_mutation_arguments(top, command),
-            timeout=timeout, max_output=64_000, operation="stash save",
-        )
+        _runtime_stash_save(top, selected, timeout=timeout)
     else:
-        if not before["clean"]:
-            raise PermissionError("runtime stash pop requires a clean source checkout")
-        if not before["stash_count"]:
-            raise ValueError("runtime stash pop requires an existing recovery stash")
-        _checked_git(
-            top,
-            _runtime_mutation_arguments(top, ["stash", "pop", before["top"]]),
-            timeout=timeout, max_output=64_000, operation="stash pop",
-        )
+        _runtime_stash_pop(top, before, timeout=timeout)
     return {
         "action": selected,
         "changed": True,

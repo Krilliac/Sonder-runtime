@@ -126,6 +126,16 @@ def _normalize_windows_extended_final_path(resolved: Path) -> Path:
     return normal
 
 
+def normalized_final_path(resolved: Path) -> Path:
+    """The ordinary spelling of a Windows ``\\\\?\\`` path, the same way the inventory sees it.
+
+    For callers that compare paths with this inventory by name (the file
+    tools' protected-path checks).  Raises ``ValueError`` for a namespace with
+    no ordinary spelling; off Windows the path is returned unchanged.
+    """
+    return _normalize_windows_extended_final_path(Path(resolved))
+
+
 @dataclass(frozen=True)
 class ControlPlanePaths:
     """Explicit trusted constructor paths; no guessed store defaults."""
@@ -340,6 +350,18 @@ def live_control_plane_inventory(*, additional=None):
     # Live emotion-vector tuning is saved beside it (the bundled default in
     # the checkout is covered by the workspace entry above).
     atomic.append(home / "emotion_vectors.json")
+    # The operator's model tool policy overlay (model_tool_policy.overlay_path:
+    # the env override wins over the state home). Only the attended console
+    # editor writes it, under file_lock and through a ``.tmp-`` sibling; a model
+    # write would grant tools or drop the operator's deny profiles.
+    from ..model_tool_policy import OVERLAY_ENV, OVERLAY_FILE_NAME
+
+    tool_policy_override = os.environ.get(OVERLAY_ENV, "").strip()
+    atomic.append(
+        _canonical(tool_policy_override)
+        if tool_policy_override
+        else state(OVERLAY_FILE_NAME)
+    )
     from .unsafe_lab import _audit_path
 
     catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()

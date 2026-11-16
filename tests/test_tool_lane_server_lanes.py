@@ -18,6 +18,7 @@ import server
 from sonder_runtime.adapters import runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as guard
 from tests.support.tool_lane import (
+    FLOOR,
     ALLOWED,
     BLOCKED,
     DENIED,
@@ -524,7 +525,7 @@ def test_a_denied_sonder_code_local_never_backs_the_default_route(catalog, monke
         RuntimeModelConfiguration,
     )
 
-    configuration = RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": DENIED})
+    configuration = RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": DENIED}, floor=FLOOR)
     monkeypatch.setattr(server, "LOCAL_CODE_MODEL", configuration.local_code_model)
     monkeypatch.setattr(server, "_get", lambda *a, **k: {})  # no catalog: the fallback model answers
     monkeypatch.setitem(server.TIERS, "general", "")
