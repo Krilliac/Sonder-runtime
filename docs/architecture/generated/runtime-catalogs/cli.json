@@ -1687,6 +1687,12 @@
       "summary": "Scan workspace files for leaked secrets (API keys, passwords, private keys, tokens)."
     },
     {
+      "category": "data",
+      "name": "/security_eval",
+      "risk": "mutation",
+      "summary": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context."
+    },
+    {
       "category": "updates",
       "name": "/self_heal_check",
       "risk": "safe",
