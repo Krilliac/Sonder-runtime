@@ -437,7 +437,13 @@ def same_origin(origin: str | None, host_header: str | None, *, https_declared: 
     """
     if not isinstance(origin, str) or not isinstance(host_header, str):
         return False
-    match = _ORIGIN.fullmatch(origin.strip())
+    # Only HTTP optional whitespace (SP, HTAB) may surround a field value;
+    # any other control character, at the edges or inside, refuses the match.
+    origin = origin.strip(" 	")
+    host_header = host_header.strip(" 	")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in origin + host_header):
+        return False
+    match = _ORIGIN.fullmatch(origin)
     if match is None:
         return False
     scheme = match.group(1).lower()

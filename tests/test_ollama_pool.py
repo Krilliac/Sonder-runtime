@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from urllib.error import URLError
@@ -947,3 +948,40 @@ def test_model_capacity_counts_free_slots_and_one_half_open_probe():
 
     primary.inflight = 3                      # every advertising worker busy
     assert pool.model_capacity("coder") == 0  # known zero, not unknown
+
+
+_POOL_LOGGER = "sonder_runtime.adapters.inference.ollama_pool"
+
+
+def test_validate_worker_origin_never_logs_inline_credentials(caplog):
+    with caplog.at_level(logging.DEBUG, logger=_POOL_LOGGER):
+        with pytest.raises(ValueError, match="inline credentials"):
+            validate_worker_origin(
+                "https://user:secretpw@127.0.0.1:11434", allow_remote=False
+            )
+        validate_worker_origin("http://127.0.0.1:11434", allow_remote=False)
+    records = [r for r in caplog.records if r.name == _POOL_LOGGER]
+    assert records
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secretpw" not in text
+    assert "user:" not in text
+
+
+@pytest.mark.parametrize("origin", [
+    "https://user:secretpw@127.0.0.1:11434",
+    # A password with an unencoded "/" parses as host "user", port 1.
+    "https://user:1/secretpw@127.0.0.1:11434",
+])
+def test_from_environment_never_logs_inline_credentials(caplog, origin):
+    from sonder_runtime.adapters.inference.ollama_pool import from_environment
+
+    with caplog.at_level(logging.DEBUG, logger=_POOL_LOGGER):
+        try:
+            from_environment(origin, environment={})
+        except Exception:
+            pass
+    records = [r for r in caplog.records if r.name == _POOL_LOGGER]
+    assert records
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secretpw" not in text
+    assert "user" not in text
