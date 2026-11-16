@@ -691,3 +691,247 @@ def test_runtime_update_format_marks_cached_remote_ref_as_known():
     })
 
     assert "newest known origin/main" in text
+
+SECRET_BODY = {
+    ".env": "STRIPE_LIVE=sk_live_abcdef0123456789\n",
+    "id_rsa": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+    ".git-credentials": "https://user:hunter2token@example.invalid\n",
+}
+SECRET_MARKERS = ("sk_live_", "b3BlbnNzaC1rZXktdjEAAAAA", "hunter2token")
+
+
+def _secret_repo(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "config").mkdir()
+    files = dict(SECRET_BODY)
+    files["ordinary.txt"] = "base\n"
+    files["config/app.txt"] = "base\n"
+    files["config/.env"] = "PGPASS=base\n"
+    for name in files:
+        (repo / name).write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-f", ".")
+    _git(repo, "commit", "-m", "secrets")
+    for name, body in files.items():
+        if name == "config/.env":
+            body = "PGPASS=changed-pgpass\n"
+        else:
+            body = body + "new-line\n"
+        (repo / name).write_text(body, encoding="utf-8")
+    return repo
+
+
+def _assert_no_secret(text):
+    for marker in SECRET_MARKERS + ("PGPASS", "changed-pgpass"):
+        assert marker not in text
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("scope", ["", "config/", "config"])
+def test_repo_diff_unscoped_or_directory_scope_withholds_secret_paths(
+    tmp_path, staged, scope,
+):
+    repo = _secret_repo(tmp_path)
+    if staged:
+        _git(repo, "add", "-f", "-A")
+    result = _diff(repo, staged=staged, path=scope, context=0)
+    _assert_no_secret(result["diff"])
+    assert "config/app.txt" in result["diff"]
+    assert ("ordinary.txt" in result["diff"]) == (scope == "")
+    assert result["withheld"] == (1 if scope else 4)
+
+
+def test_repo_diff_all_changes_withheld_returns_empty_diff_with_count(tmp_path):
+    repo = _secret_repo(tmp_path)
+    _git(repo, "checkout", "--", "ordinary.txt", "config/app.txt")
+    result = _diff(repo, context=0)
+    assert result["diff"] == ""
+    assert result["withheld"] == 4
+    assert result["truncated"] is False
+
+
+def test_repo_diff_scoped_ordinary_file_is_unchanged(tmp_path):
+    repo = _secret_repo(tmp_path)
+    result = _diff(repo, path="ordinary.txt")
+    assert "+new-line" in result["diff"]
+    assert result["withheld"] == 0
+    _assert_no_secret(result["diff"])
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_repo_diff_withholds_renames_to_and_from_secret_paths(tmp_path, staged):
+    repo = _repo(tmp_path)
+    (repo / "plain.txt").write_text("plain-body-line\n" * 5, encoding="utf-8")
+    (repo / ".env").write_text("STRIPE_LIVE=sk_live_renamed0123\n" * 5, encoding="utf-8")
+    _git(repo, "add", "-f", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "mv", "plain.txt", ".env.new")
+    _git(repo, "mv", ".env", "ordinary-name.txt")
+    if not staged:
+        _git(repo, "reset", "-q")
+    result = _diff(repo, staged=staged, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert staged is False or "plain-body-line" not in result["diff"]
+    assert result["withheld"] == (4 if staged else 1)
+
+
+@pytest.mark.parametrize("name", ["*", ":(glob)**"])
+def test_repo_diff_pathspec_named_files_cannot_widen_the_diff(tmp_path, name):
+    repo = _secret_repo(tmp_path)
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input="odd\n", capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    try:
+        _git(repo, "update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, name))
+    except AssertionError:
+        pytest.skip("this platform cannot hold a tracked path named %r" % name)
+    _git(repo, "commit", "-m", "odd name")
+    (repo / "ordinary.txt").write_text("again\n", encoding="utf-8")
+    result = _diff(repo, context=0)
+    _assert_no_secret(result["diff"])
+    assert "+again" in result["diff"]
+
+@pytest.mark.parametrize("name", ["*", ":(glob)**", ":(top)."])
+def test_repo_diff_listed_pathspec_looking_names_stay_literal(
+    monkeypatch, tmp_path, name,
+):
+    repo = _secret_repo(tmp_path)
+    monkeypatch.setattr(
+        git_tools, "_diff_changed_paths", lambda *a, **k: [[name]],
+    )
+    result = _diff(repo, context=0)
+    _assert_no_secret(result["diff"])
+    assert result["diff"] == ""
+
+def _file_dir_repo(tmp_path, *, file_to_dir, staged):
+    repo = _repo(tmp_path)
+    secret = "STRIPE=sk_live_filedir0123\n"
+    if file_to_dir:
+        (repo / "deploy").write_text("plain\n", encoding="utf-8")
+    else:
+        (repo / "deploy").mkdir()
+        (repo / "deploy" / ".env").write_text(secret, encoding="utf-8")
+    _git(repo, "add", "-f", "-A")
+    _git(repo, "commit", "-m", "base")
+    if file_to_dir:
+        _git(repo, "rm", "-q", "-f", "deploy")
+        (repo / "deploy").mkdir()
+        (repo / "deploy" / ".env").write_text(secret, encoding="utf-8")
+        _git(repo, "add", "-f", "deploy/.env")
+    else:
+        _git(repo, "rm", "-q", "-f", "deploy/.env")
+        (repo / "deploy").write_text("plain\n", encoding="utf-8")
+        _git(repo, "add", "deploy")
+    if not staged:
+        _git(repo, "reset", "-q")
+    return repo
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize("file_to_dir", [True, False])
+@pytest.mark.parametrize("scope", ["", "deploy"])
+def test_repo_diff_file_directory_swap_never_prints_secret_section(
+    tmp_path, staged, file_to_dir, scope,
+):
+    repo = _file_dir_repo(tmp_path, file_to_dir=file_to_dir, staged=staged)
+    result = _diff(repo, staged=staged, path=scope, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert "deploy/.env" not in result["diff"]
+    if staged:
+        assert result["withheld"] >= 1
+
+
+@pytest.mark.parametrize("separator", ["\r", "\f", "\x1c", "\x85", "\u2028"])
+def test_repo_diff_content_line_breaks_cannot_forge_a_section_header(tmp_path, separator):
+    repo = _file_dir_repo(tmp_path, file_to_dir=True, staged=True)
+    forged = "A=1" + separator + "diff --git a/deploy b/deploy\nS=sk_live_forged\n"
+    (repo / "deploy" / ".env").write_bytes(forged.encode("utf-8"))
+    _git(repo, "add", "-f", "deploy/.env")
+    result = _diff(repo, staged=True, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert result["withheld"] >= 1
+
+
+def test_repo_diff_section_filter_splits_on_newline_only():
+    text = (
+        "diff --git a/deploy/.env b/deploy/.env\n"
+        "+A=1\rdiff --git a/ok b/ok\n+S=sk_live_cr\n"
+        "+B=2\u2028diff --git a/ok b/ok\n+T=sk_live_ls\n"
+        "diff --git a/ok b/ok\n+fine\n"
+    )
+    kept, dropped, unparseable = git_tools._filter_diff_sections(text, {"ok"})
+    assert "sk_live_" not in kept
+    assert kept == "diff --git a/ok b/ok\n+fine\n"
+    assert dropped == ["deploy/.env"]
+    assert unparseable == 0
+
+
+def test_repo_diff_drops_and_counts_sections_outside_the_screened_set(
+    monkeypatch, tmp_path,
+):
+    repo = _secret_repo(tmp_path)
+    real = git_tools._checked_git
+
+    def racy(root, arguments, **kwargs):
+        result = real(root, arguments, **kwargs)
+        if kwargs.get("operation") == "diff":
+            result = dict(result)
+            result["stdout"] += (
+                "diff --git a/raced/.env b/raced/.env\n"
+                "+++ b/raced/.env\n+STRIPE=sk_live_race\n"
+                "diff --git a/mismatch b/other\n+sk_live_mismatch\n"
+            )
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", racy)
+    result = _diff(repo, context=0)
+    assert "sk_live_" not in result["diff"]
+    assert "config/app.txt" in result["diff"]
+    assert result["withheld"] == 4 + 1 + 1
+
+
+def test_repo_diff_refuses_unknown_status_token_and_truncated_listing(
+    monkeypatch, tmp_path,
+):
+    repo = _secret_repo(tmp_path)
+    real = git_tools._checked_git
+
+    def bad_status(root, arguments, **kwargs):
+        result = dict(real(root, arguments, **kwargs))
+        if kwargs.get("operation") == "diff path listing":
+            result["stdout"] = "Z" + chr(0) + "ordinary.txt" + chr(0)
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", bad_status)
+    with pytest.raises(ValueError, match="unparseable"):
+        _diff(repo)
+
+    def truncated(root, arguments, **kwargs):
+        result = dict(real(root, arguments, **kwargs))
+        if kwargs.get("operation") == "diff path listing":
+            result["truncated"] = True
+        return result
+
+    monkeypatch.setattr(git_tools, "_checked_git", truncated)
+    with pytest.raises(ValueError, match="too many paths"):
+        _diff(repo)
+
+
+def test_repo_diff_section_parser_handles_quoting_and_fails_closed():
+    quoted = 'diff --git "a/tab\\there" "b/tab\\there"'
+    assert git_tools._section_path(quoted) == "tab\there"
+    octal = 'diff --git "a/caf\\303\\251" "b/caf\\303\\251"'
+    assert git_tools._section_path(octal) == "café"
+    assert git_tools._section_path("diff --git a/with space b/with space") == "with space"
+    assert git_tools._section_path("diff --cc plain.txt") == "plain.txt"
+    assert git_tools._section_path("diff --git a/x b/y") is None
+    assert git_tools._section_path('diff --git "a/x" b/x') is None
+    assert git_tools._section_path('diff --git "a/\\q" "b/\\q"') is None
+    text = (
+        "diff --git a/ok b/ok\n+1\n"
+        "diff --git a/deploy/.env b/deploy/.env\n+secret\n"
+    )
+    kept, dropped, bad = git_tools._filter_diff_sections(text, {"ok"})
+    assert kept == "diff --git a/ok b/ok\n+1\n"
+    assert dropped == ["deploy/.env"] and bad == 0
+

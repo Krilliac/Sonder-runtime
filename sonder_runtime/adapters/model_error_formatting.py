@@ -17,6 +17,12 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
             if error.retry_after_seconds is not None else ""
         )
         return _ERROR_PREFIX + f" model request rate admission refused: {error.detail.rstrip('.')}.{retry}"
+    if error.kind == "admission":
+        retry = (
+            f" Retry after about {max(1, round(error.retry_after_seconds))}s."
+            if error.retry_after_seconds is not None else ""
+        )
+        return _ERROR_PREFIX + f" {error.detail.rstrip('.')}.{retry}"
     if error.kind == "http":
         retry_hint = ""
         if error.cloud and error.status in TRANSIENT_MODEL_HTTP_CODES:

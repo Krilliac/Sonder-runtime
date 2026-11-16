@@ -573,6 +573,8 @@ def build_application(
             capability_probe_batch_size=config.ollama.worker_capability_probe_batch_size,
             status_page_size=config.ollama.worker_status_page_size,
         )
+        from ..adapters.inference import gpu_admission
+        gpu_admission.configure_typed_gpu_admission(config.gpu_admission)
         from ..adapters.inference.static_membership import StaticMembershipSource
         from ..application.inference_membership.controller import MembershipController
         membership_clock = lambda: datetime.now(timezone.utc)
