@@ -38,6 +38,7 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -2420,7 +2421,7 @@ def _dangerous_http_slash(content):
     if not stripped.startswith("/"):
         return False
     pieces = stripped.split(None, 2)
-    command = pieces[0].lower()
+    command = _slash_head(pieces[0])
     if command in ("/autopilot", "/auto"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
@@ -3190,7 +3191,7 @@ def _slash_system_operation(command, argument):
     choke point prevents a role declaration from becoming decorative merely
     because a command has two spellings.
     """
-    command = str(command or "").strip().lower()
+    command = _slash_head(command)
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
@@ -3296,7 +3297,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return None
 
     parts = stripped.split(None, 1)
-    cmd = parts[0].lower() if parts[0].isascii() else parts[0]
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
     _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).

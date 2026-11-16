@@ -37,6 +37,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
+from sonder_runtime.application.command_surface.command_text import ascii_lower, slash_head
 from sonder_runtime.application.ports.command_catalog import (
     CatalogCommand,
     CatalogInvocation,
@@ -1210,7 +1211,7 @@ def narrow_branch_tools(cmd, argument, tools):
     support that operation, and the union is kept so the surface refuses it
     as it always did.
     """
-    command = str(cmd or "").strip().lower()
+    command = slash_head(cmd)
     words = str(argument or "").strip().split(None, 1)
     action = words[0].lower() if words else ""
     union = tuple(tools or ())
@@ -2321,7 +2322,7 @@ def unknown_command(cmd: str, width: int = 80, sep: str = " · ",
 
 
 def help_category(name: str) -> str:
-    key = str(name or "").strip().lower().lstrip("/")
+    key = ascii_lower(str(name or "").strip()).lstrip("/")
     grouped = categories()
     if key not in grouped:
         close = [k for k in grouped if k.startswith(key) or key in k]
@@ -2418,7 +2419,7 @@ def help_text(topic: str = "") -> str:
     try:
         if not key:
             return help_overview()
-        if key.lstrip("/").lower() in categories():
+        if ascii_lower(key.lstrip("/")) in categories():
             return help_category(key)
         return help_command(key)
     except CatalogUnavailable as exc:
