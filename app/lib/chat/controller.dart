@@ -145,6 +145,10 @@ class ChatController extends ChangeNotifier {
   /// warns that chats are not being saved.
   ValueListenable<bool> get persistFailed => ChatStore.persistFailed;
 
+  /// True when saved chats could not be read at all this session (so the
+  /// warning is about unread history, not a refused write).
+  bool get historyUnread => ChatStore.keepUnknownFiles;
+
   Map<String, int> _sessions = <String, int>{};
 
   // -- Turn ---------------------------------------------------------------

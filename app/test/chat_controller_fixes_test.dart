@@ -103,6 +103,31 @@ void main() {
     c.dispose();
   });
 
+  testWidgets(
+      'W8: cancelling a later turn in a background thread keeps history',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final a = c.currentThreadId;
+    final one = c.send('q1');
+    await tester.pump();
+    backend.lastTurn.done('a1');
+    await one;
+    await tester.pump();
+    final two = c.send('q2');
+    await tester.pump();
+    c.newChat();
+    await tester.pump();
+    c.cancel();
+    await tester.pump();
+    await two;
+    expect(
+        c.threads.firstWhere((t) => t.id == a).messages.map((m) => m.content),
+        ['q1', 'a1']);
+    expect(c.sessionFor(a), a, reason: 'a later turn does not rotate');
+    c.dispose();
+  });
+
   testWidgets('loadThreads falls back to a fresh thread when the store throws',
       (tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});

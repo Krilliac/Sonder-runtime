@@ -124,6 +124,14 @@ class ChatStore {
   /// Forget per-process caches (tests swap the backend between cases).
   static void resetCache() {
     _written.clear();
+    _wroteThisSession.clear();
+    _protectedNames.clear();
+    _migrationPending = false;
+    keepUnknownFiles = false;
+    // Tests swap zones and backends; do not wait on an earlier run's work.
+    _queued = null;
+    _queuedDone = null;
+    _saving = false;
     persistFailed.value = false;
   }
 
@@ -137,6 +145,18 @@ class ChatStore {
   /// Cleared by the next successful [load].
   static bool keepUnknownFiles = false;
 
+  /// Thread files this session wrote. After a failed read only these may be
+  /// deleted; files that were never read stay.
+  static final Set<String> _wroteThisSession = <String>{};
+
+  /// Files that could not be read or parsed and could not be set aside
+  /// either. They are never overwritten or deleted by a save.
+  static final Set<String> _protectedNames = <String>{};
+
+  /// A v1 history was only partly migrated: the first fully successful save
+  /// completes the migration (marker written, legacy key removed).
+  static bool _migrationPending = false;
+
   static String _nameFor(String id) {
     final safe = id.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
     return 'thread-$safe.json';
@@ -145,6 +165,8 @@ class ChatStore {
   static Future<List<ChatThread>> load() async {
     _written.clear();
     keepUnknownFiles = false;
+    _wroteThisSession.clear();
+    _protectedNames.clear();
     final unmigrated = await _migrateLegacy();
     final names = await backend.list();
     final threads = <ChatThread>[];
@@ -188,7 +210,9 @@ class ChatStore {
     try {
       await _setAside(name);
     } catch (_) {
-      // Cannot even be moved: leave it in place and carry on.
+      // Cannot even be moved: leave it in place, and keep every save away
+      // from it.
+      _protectedNames.add(name);
     }
   }
 
@@ -202,12 +226,15 @@ class ChatStore {
     await backend.rename(name, target);
   }
 
-  /// Migrate the v1 blob once. Returns the legacy threads when they could
-  /// not be saved (the kept legacy key and the missing marker make the next
-  /// start retry); empty otherwise.
+  /// Migrate the v1 blob once. Returns the legacy threads that could not be
+  /// written (the kept legacy key and the missing marker make the next start
+  /// retry); empty otherwise.
+  ///
+  /// A retry never overwrites a thread file that already exists (the person
+  /// may have edited it since), and never deletes anything.
   static Future<List<ChatThread>> _migrateLegacy() async {
     final names = await backend.list();
-    if (names.contains(_migratedName)) return const [];
+    if (names.contains(_migratedName)) return const <ChatThread>[];
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(legacyKey);
     if (raw != null && raw.trim().isNotEmpty) {
@@ -224,19 +251,44 @@ class ChatStore {
         await prefs.setString('$legacyKey.corrupt', raw);
         await prefs.remove(legacyKey);
       }
-      if (threads.isNotEmpty) {
-        // A save failure is not a corrupt blob: keep the legacy key, write
-        // no marker, and let the next start retry.
-        if (!await save(threads)) return threads;
-        await prefs.remove(legacyKey);
+      final unsaved = <ChatThread>[];
+      for (final t in threads) {
+        final name = _nameFor(t.id);
+        if (names.contains(name)) continue;
+        try {
+          await backend.write(name, jsonEncode(capThread(t).toJson()));
+          _wroteThisSession.add(name);
+        } catch (_) {
+          unsaved.add(t);
+        }
       }
+      if (unsaved.isNotEmpty) {
+        // A write failure is not a corrupt blob: keep the legacy key,
+        // write no marker, and retry (see [_migrationPending]).
+        _migrationPending = true;
+        persistFailed.value = true;
+        return unsaved;
+      }
+      await prefs.remove(legacyKey);
     }
+    _migrationPending = false;
     try {
       await backend.write(_migratedName, DateTime.now().toIso8601String());
     } catch (_) {
       // Retried next start; the legacy key is already gone.
     }
-    return const [];
+    return const <ChatThread>[];
+  }
+
+  static Future<void> _completeMigration() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await backend.write(_migratedName, DateTime.now().toIso8601String());
+      await prefs.remove(legacyKey);
+      _migrationPending = false;
+    } catch (_) {
+      // Still pending: the next successful save tries again.
+    }
   }
 
   static ChatThread _redactThread(ChatThread thread) {
@@ -356,11 +408,16 @@ class ChatStore {
         var ok = false;
         try {
           ok = await _saveNow(threads);
+          if (ok && _migrationPending) await _completeMigration();
         } catch (_) {
           ok = false;
         }
-        persistFailed.value = !ok;
+        // Complete first: a throwing listener must not strand the callers.
         done.complete(ok);
+        try {
+          // Never clear the warning while history was never read.
+          persistFailed.value = !ok || keepUnknownFiles;
+        } catch (_) {}
       }
     } finally {
       _saving = false;
@@ -381,6 +438,7 @@ class ChatStore {
         final data = jsonEncode(capThread(thread).toJson());
         if (_written[thread.id] == data) continue;
         await backend.write(name, data);
+        _wroteThisSession.add(name);
         _written[thread.id] = data;
       } catch (_) {
         ok = false;
@@ -388,13 +446,15 @@ class ChatStore {
       }
     }
     try {
-      for (final name
-          in keepUnknownFiles ? const <String>[] : await backend.list()) {
+      for (final name in await backend.list()) {
         if (name.startsWith('thread-') &&
             name.endsWith('.json') &&
-            !keepNames.contains(name)) {
+            !keepNames.contains(name) &&
+            !_protectedNames.contains(name) &&
+            (!keepUnknownFiles || _wroteThisSession.contains(name))) {
           try {
             await backend.delete(name);
+            _wroteThisSession.remove(name);
           } catch (_) {
             ok = false;
           }
