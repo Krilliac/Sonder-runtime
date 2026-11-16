@@ -246,6 +246,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   ModelCatalog? _modelCatalog;
   Object? _ecosystemError;
   bool _loadingExtras = false;
+
+  /// Bumped when the server, key or account changes. An extras load that
+  /// started under an older generation is discarded and re-run.
+  int _extrasGeneration = 0;
   PermissionMode? _mode;
   Object? _modeError;
   bool _modeLoaded = false;
@@ -318,6 +322,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _mode = null;
       _modeError = null;
       _modeLoaded = false;
+      _extrasGeneration++;
       unawaited(_loadExtras());
     }
   }
@@ -374,6 +379,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   /// permission mode: the reads beyond `/v1/sonder/status` on each cycle.
   Future<void> _loadExtras() async {
     if (_loadingExtras) return;
+    final generation = _extrasGeneration;
     setState(() => _loadingExtras = true);
     List<WorkRun>? runs;
     Object? runsError;
@@ -432,6 +438,13 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       readMode(),
     ]);
     if (!mounted) return;
+    if (generation != _extrasGeneration) {
+      // The identity changed while this load was in flight: its result
+      // belongs to the old server/account. Drop it and load again.
+      setState(() => _loadingExtras = false);
+      unawaited(_loadExtras());
+      return;
+    }
     setState(() {
       _loadingExtras = false;
       _workRuns = runs ??
