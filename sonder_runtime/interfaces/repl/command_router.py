@@ -159,7 +159,12 @@ def _structured_catalog_match(value):
     if not match:
         return None
     name = "/" + (match.group("name") or "").lstrip("/")
-    command = command_catalog.by_name(name)
+    try:
+        command = command_catalog.by_name(name)
+    except command_catalog.CatalogUnavailable:
+        # No catalog, no structured match: the turn goes to the rules and chat
+        # instead of ending the REPL loop.
+        return None
     if command is None:
         return None
     arg = (match.group("arg") or "").strip()

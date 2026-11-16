@@ -841,7 +841,7 @@ def _wrapper_tools(module: str, name: str, tool_names: frozenset, seen: set) -> 
     return found
 
 
-def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
+def _branch_tool_calls(path: str, function: str, tool_names: frozenset, keep_empty: bool = False) -> dict:
     """``{"/write": ("file_write",)}`` for one hand-written dispatch chain.
 
     Read out of the source rather than hand-listed, for the same reason the
@@ -858,18 +858,40 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
     (``do_refactor`` -> ``ensemble_answer``) and keeping only names that are
     actually registered MCP tools, so ``_open_db`` and friends drop out.
     """
+    # Fail closed: an empty map reads as "this chain fronts no tool", which the
+    # gates answer with "allowed" for everything.
     try:
         with open(_source_path(path), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
-    except (OSError, SyntaxError):
-        return {}
+    except (OSError, SyntaxError) as exc:
+        raise CatalogUnavailable(
+            "the %s dispatch source could not be parsed: %s" % (path, exc)
+        ) from exc
     functions = {
         node.name: node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     scope = functions.get(function)
     if scope is None:
-        return {}
+        raise CatalogUnavailable("%s has no function %s" % (path, function))
+    for node in ast.walk(scope):
+        if not (
+            isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+            and node.left.id == "cmd" and node.comparators
+        ):
+            continue
+        comparator = node.comparators[0]
+        literal = isinstance(comparator, ast.Constant) or (
+            isinstance(comparator, (ast.Tuple, ast.List, ast.Set))
+            and all(isinstance(item, ast.Constant) for item in comparator.elts)
+        )
+        if not literal:
+            # ``_branch_names`` reads only literals, so this branch would be
+            # silently ungated; refuse to build a map that omits it.
+            raise CatalogUnavailable(
+                "%s.%s compares cmd to a non-literal (%s); the gate cannot "
+                "enumerate it" % (path, function, ast.unparse(node))
+            )
 
     def _called_tools(node, depth: int, seen: set) -> set:
         found: set = set()
@@ -925,7 +947,7 @@ def _branch_tool_calls(path: str, function: str, tool_names: frozenset) -> dict:
             continue
         body = ast.Module(body=node.body, type_ignores=[])
         tools = sorted(_called_tools(body, 0, set()) & tool_names)
-        if not tools:
+        if not tools and not keep_empty:
             continue
         for name in names:
             found[name] = tuple(sorted(set(found.get(name, ())) | set(tools)))
@@ -1354,6 +1376,37 @@ _HTTP_SCOPED_TASK_ALIAS_TOOLS = (
 
 
 @functools.lru_cache(maxsize=1)
+def _http_slash_chain() -> tuple:
+    """``(http_slash_tools, http_slash_untooled)`` from one walk of the chain.
+
+    One function so the root-server reach stays a single pinned site and the
+    two answers cannot drift: every literal chain command is in exactly one.
+    """
+    server = importlib.import_module("server")  # lazy compatibility edge
+
+    names = _registered_tool_names(server)
+    delegated = _branch_tool_calls("server.py", "control_command", names)
+    own = _branch_tool_calls(
+        "sonder_serve.py", "_handle_slash", names | {_DELEGATION}, keep_empty=True,
+    )
+    merged: dict = {}
+    untooled = set()
+    for slash, tools in own.items():
+        resolved = set(tools)
+        if _DELEGATION in resolved:
+            resolved.discard(_DELEGATION)
+            resolved |= set(delegated.get(slash, ()))
+        if resolved:
+            merged[slash] = tuple(sorted(resolved))
+        else:
+            untooled.add(slash)
+    for slash in ("/todo", "/task", "/tasks"):
+        merged[slash] = _HTTP_SCOPED_TASK_ALIAS_TOOLS
+    mapped = _with_unregistered_work(merged)
+    return mapped, frozenset(untooled - set(mapped))
+
+
+@functools.lru_cache(maxsize=1)
 def http_slash_tools() -> dict:
     """Every app/HTTP slash command mapped to the MCP tools it can invoke.
 
@@ -1378,24 +1431,17 @@ def http_slash_tools() -> dict:
     attributing it nothing would have left those ten as ungated as the chain
     was -- they inherit ``control_command``'s own branch of the same name.
     """
-    server = importlib.import_module("server")  # lazy compatibility edge
+    return _http_slash_chain()[0]
 
-    names = _registered_tool_names(server)
-    delegated = _branch_tool_calls("server.py", "control_command", names)
-    own = _branch_tool_calls(
-        "sonder_serve.py", "_handle_slash", names | {_DELEGATION},
-    )
-    merged: dict = {}
-    for slash, tools in own.items():
-        resolved = set(tools)
-        if _DELEGATION in resolved:
-            resolved.discard(_DELEGATION)
-            resolved |= set(delegated.get(slash, ()))
-        if resolved:
-            merged[slash] = tuple(sorted(resolved))
-    for slash in ("/todo", "/task", "/tasks"):
-        merged[slash] = _HTTP_SCOPED_TASK_ALIAS_TOOLS
-    return _with_unregistered_work(merged)
+
+@functools.lru_cache(maxsize=1)
+def http_slash_untooled() -> frozenset:
+    """``_handle_slash`` chain commands whose branch resolves to no tool.
+
+    Same walk as ``http_slash_tools`` (which omits them). The role gate refuses
+    these for a ``user`` unless the shipped untooled allowlist names them.
+    """
+    return _http_slash_chain()[1]
 
 
 @functools.lru_cache(maxsize=1)
@@ -1838,7 +1884,9 @@ def reset_cache() -> None:
     http_native_names.cache_clear()
     console_tools.cache_clear()
     console_disarmed_tools.cache_clear()
+    _http_slash_chain.cache_clear()
     http_slash_tools.cache_clear()
+    http_slash_untooled.cache_clear()
     _module_level_functions.cache_clear()
     # Was cleared by nothing anywhere. `_help_summaries` parses the HELP block
     # out of `sonder_repl.py`, so a live reload that edited a one-liner kept
