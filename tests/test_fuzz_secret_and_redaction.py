@@ -22,6 +22,7 @@ Replay a failure with ``FUZZ_SEED=<seed> pytest <this file>``.
 """
 from __future__ import annotations
 
+import copy
 import os
 import random
 import string
@@ -31,10 +32,13 @@ from dataclasses import dataclass
 import pytest
 
 from sonder_runtime.application.security.secrets_and_fuzz import CredentialScanner
+from sonder_runtime.domain.security import redaction as domain_redaction
 from sonder_runtime.domain.security.credential_formats import (
+    AWS_KEY_RUN,
     CREDENTIAL_FORMATS,
     JWT,
     KNOWN_CREDENTIAL,
+    REDACTION_FORMATS,
 )
 from sonder_runtime.domain.security.redaction import (
     MAX_WALK_DEPTH,
@@ -44,6 +48,7 @@ from sonder_runtime.domain.security.redaction import (
     redact_structure,
     redact_text,
 )
+from sonder_runtime.platform import logging as platform_logging
 
 SEED = int(os.environ.get("FUZZ_SEED", "20261116"))
 PLANT_ITERATIONS = 1500
@@ -205,6 +210,36 @@ def _fail(msg: str) -> str:
     return f"seed={SEED}: {msg}"
 
 
+def _platform_redact(text: str) -> str:
+    out = platform_logging.Redactor(env={}).redact(text)
+    # Redactor.redact turns every exception into this marker, which contains no
+    # secret: without the check a crash would read as "nothing leaked".
+    assert out != platform_logging.REDACTION_FAILED, _fail(f"platform Redactor failed on {text[:200]!r}")
+    return out
+
+
+# The patterns, the pass loop and _sub_pem exist twice (domain ``redact_text`` and
+# the platform ``Redactor`` copy). Each copy needs its own run of these tests.
+BOTH_COPIES = pytest.mark.parametrize(
+    ("module", "redact"),
+    [
+        pytest.param(domain_redaction, redact_text, id="domain"),
+        pytest.param(platform_logging, _platform_redact, id="platform"),
+    ],
+)
+
+
+def _changing_passes(module, text: str, limit: int = 200) -> int:
+    count = 0
+    while count < limit:
+        after = module._apply_patterns(text)
+        if after == text:
+            break
+        text = after
+        count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # 1. Known-positive planting
 # ---------------------------------------------------------------------------
@@ -289,6 +324,10 @@ def test_format_regexes_match_generated_instances() -> None:
             m = pattern.fullmatch(secret.text)
             assert m, _fail(f"generated {kind} instance {secret.text!r} is not a documented shape")
     assert set(CREDENTIAL_FORMATS) == {KNOWN_CREDENTIAL, JWT}
+    # The redactors add the adjacent-AWS-key rule, and only after the shared formats.
+    assert REDACTION_FORMATS == (*CREDENTIAL_FORMATS, AWS_KEY_RUN)
+    assert domain_redaction.PATTERNS[-3:] == REDACTION_FORMATS
+    assert platform_logging._PATTERNS[-3:] == REDACTION_FORMATS
 
 
 # ---------------------------------------------------------------------------
@@ -328,16 +367,6 @@ def _gen_tree(rng: random.Random, depth: int, secrets: list, sens_values: list) 
     return tuple(items) if roll < 0.82 else items
 
 
-def _shape(value):
-    if isinstance(value, dict):
-        return ("d", tuple((k, _shape(v)) for k, v in value.items()))
-    if isinstance(value, (list, tuple)):
-        return ("t" if isinstance(value, tuple) else "l", tuple(_shape(v) for v in value))
-    if isinstance(value, str):
-        return "s"
-    return ("v", type(value).__name__, value)
-
-
 def _strip_strings(value):
     """Shape with string leaves collapsed (sensitive replacement may alter strings only)."""
     if isinstance(value, dict):
@@ -356,7 +385,7 @@ def test_redact_structure_no_secret_survives_and_shape_preserved() -> None:
         secrets: list[Secret] = []
         sens_values: list[str] = []
         tree = _gen_tree(rng, rng.randint(1, 6), secrets, sens_values)
-        shape_before = _shape(tree)
+        snapshot = copy.deepcopy(tree)
         for sensitive in (True, False):
             out = timer.run(redact_structure, tree, label=repr(tree), sensitive_keys=sensitive)
             blob = repr(out)
@@ -366,8 +395,8 @@ def test_redact_structure_no_secret_survives_and_shape_preserved() -> None:
             if sensitive:
                 for v in sens_values:
                     assert v not in blob, _fail(f"sensitive-key value {v!r} survived: {tree!r} -> {out!r}")
-        # Input is not mutated.
-        assert _shape(tree) == shape_before
+        # Input is not mutated (repr also separates True from 1 and a list from a tuple).
+        assert tree == snapshot and repr(tree) == repr(snapshot), _fail(f"input mutated: {snapshot!r} -> {tree!r}")
     timer.check()
 
 
@@ -565,50 +594,229 @@ def test_regression_redact_text_scheme_scan_is_not_quadratic() -> None:
     assert elapsed < P99_LIMIT_S, f"16 KB took {elapsed * 1000:.0f} ms"
 
 
-def test_regression_redact_text_not_idempotent_after_adjacent_substitution() -> None:
+def _aws_keys(count: int) -> list[str]:
+    # Alternating AKIA / ASIA ids with distinct bodies, assembled at runtime.
+    return [("AK" if i % 2 else "AS") + "IA" + f"{i:016d}" for i in range(1, count + 1)]
+
+
+@BOTH_COPIES
+def test_regression_redact_text_not_idempotent_after_adjacent_substitution(module, redact) -> None:
     """SUSPECT: a replaced credential makes ``[REDACTED]`` adjacent to text a later pass then matches."""
     adjacent = "AKIA0000000000000000Cookie: a=b"
-    once = redact_text(adjacent)
+    assert _changing_passes(module, adjacent) == 2  # the cookie only matches once the key is gone
+    once = redact(adjacent)
     assert "a=b" not in once, f"{adjacent!r} -> {once!r}"
-    assert redact_text(once) == once, f"{adjacent!r} -> {once!r} -> {redact_text(once)!r}"
+    assert redact(once) == once, f"{adjacent!r} -> {once!r} -> {redact(once)!r}"
     stray_quote = "token = 'abcdefgh\"sk"
-    once = redact_text(stray_quote)
-    assert redact_text(once) == once, f"{stray_quote!r} -> {once!r} -> {redact_text(once)!r}"
+    once = redact(stray_quote)
+    assert redact(once) == once, f"{stray_quote!r} -> {once!r} -> {redact(once)!r}"
 
 
-def test_regression_adjacent_aws_keys_redacted_in_one_pass() -> None:
-    """The AKIA/ASIA lookbehind saw the previous key's last character, so chains survived."""
+@BOTH_COPIES
+def test_pass_bound_never_undoes_the_first_pass(module, redact) -> None:
+    """No finite bound settles every text: each ``x'`` unit here costs one more pass.
+
+    Past the bound the text is still safe, because a pass only swaps matched text for
+    the marker; what is given up is idempotence for that text.
+    """
+    text = "token='hunter2secret'" + "x'" * (module._MAX_PASSES * 3) + " AKIA0000000000000000"
+    assert _changing_passes(module, text) > module._MAX_PASSES  # otherwise this test checks nothing
+    first = module._apply_patterns(text)
+    out = redact(text)
+    for secret in ("hunter2secret", "AKIA0000000000000000"):
+        assert secret not in first and secret not in out
+    assert len(out) < len(first)  # the later passes ran, and only removed text
+    again = redact(out)
+    assert len(again) < len(out) and "hunter2secret" not in again
+
+
+@BOTH_COPIES
+def test_regression_adjacent_aws_keys_redacted_in_one_pass(module, redact) -> None:
+    """``KNOWN_CREDENTIAL`` takes the first key of a run and ``AWS_KEY_RUN`` the rest, in the same pass."""
+    for count in (2, 8, 1000):
+        keys = _aws_keys(count)
+        for prefix in ("aws=", "", " ", "k:"):
+            text = prefix + "".join(keys)
+            single = module._apply_patterns(text)
+            assert "AKIA" not in single and "ASIA" not in single, f"{count} keys after {prefix!r}: {single[:120]!r}"
+            out = redact(text)
+            assert out == single == prefix + REDACTED + REDACTED
+            assert redact(out) == out
+
+
+def test_regression_scan_reports_adjacent_aws_keys() -> None:
     scanner = CredentialScanner()
-    chains = {
-        "akia8": "aws=" + "".join(f"AKIA{i:016d}" for i in range(1, 9)),
-        "mixed": "k:" + "".join(f"{'AKIA' if i % 2 else 'ASIA'}{i:016d}" for i in range(1, 9)),
-    }
-    for name, text in chains.items():
-        out = redact_text(text)
-        assert "AKIA" not in out and "ASIA" not in out, f"{name}: {out!r}"
-        assert redact_text(out) == out, f"{name}: {out!r}"
     akia = "".join(f"AKIA{i:016d}" for i in range(1, 9))
     assert any(f.kind == "aws_access_key" for f in scanner.scan(akia))
     assert any(f.kind == "aws_access_key" for f in scanner.scan("x " + akia))
 
 
+def _jwts_carrying_credential_shapes() -> dict[str, str]:
+    key = "AK" + "IA" + "Q" * 16
+    key2 = "AS" + "IA" + "R" * 16
+    head = "eyJhbGciOiJIUzI1NiJ9"
+    return {
+        "payload-key-then-ghp": f"{head}.eyJzdWIi{key}{'gh' + 'p_'}{'P' * 18}x.SIGNATUREsecretsig123",
+        "payload-key-chain": f"{head}.eyJzdWIi{key}{key2}tail.SIGNATUREsecretsig123",
+        "signature-key-then-hf": f"{head}.eyJzdWIiOiIx.SIGsecret{key}{'h' + 'f_'}{'Z' * 14}-restofsignature",
+        "signature-key-chain": f"{head}.eyJzdWIiOiIx.SIGsecret{key}{key2}{key}",
+    }
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("case", sorted(_jwts_carrying_credential_shapes()))
+def test_regression_jwt_carrying_credential_shapes_is_redacted_whole(module, redact, case: str) -> None:
+    """A credential shape inside a longer token is not free-standing; matching it there cuts the JWT apart."""
+    token = _jwts_carrying_credential_shapes()[case]
+    assert JWT.fullmatch(token)
+    assert KNOWN_CREDENTIAL.search(token) is None
+    assert AWS_KEY_RUN.search(token) is None
+    assert module._apply_patterns("jwt=" + token) == "jwt=" + REDACTED
+    assert redact("jwt=" + token) == "jwt=" + REDACTED
+
+
+@BOTH_COPIES
+def test_aws_key_run_is_applied_after_the_jwt_rule(module, redact) -> None:
+    """Taking the whole key run before ``JWT`` exposes an earlier JWT start, and that match
+    stops one segment short of the one the single-key rule leaves for ``JWT`` to take."""
+    first, second = _aws_keys(2)
+    text = first + second + "eyJaaaaaaaa.eyJbbbbbbbb.cccccccc.dddddddd"
+    single = module._apply_patterns(text)
+    out = redact(text)
+    for kept in ("dddddddd", "cccccccc", "eyJbbbbbbbb", second):
+        assert kept not in single and kept not in out, f"{kept}: {single!r} / {out!r}"
+
+
 @pytest.mark.parametrize("size", [64 * 1024])
-@pytest.mark.parametrize("unit", ["-----BEGIN RSA PRIVATE KEY-----", "-eyJ"])
-def test_regression_repeated_unit_is_linear(unit: str, size: int) -> None:
+@pytest.mark.parametrize("unit", ["-----BEGIN RSA PRIVATE KEY-----", "-eyJ", "AKIA0000000000000000", "-----END "])
+@pytest.mark.parametrize(
+    "fn",
+    [
+        pytest.param(redact_text, id="domain"),
+        pytest.param(_platform_redact, id="platform"),
+        pytest.param(CredentialScanner().scan, id="scan"),
+    ],
+)
+def test_regression_repeated_unit_is_linear(fn, unit: str, size: int) -> None:
     text = (unit * (size // len(unit) + 1))[:size]
-    for fn in (redact_text, CredentialScanner().scan):
+    t0 = time.perf_counter()
+    fn(text)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.2, f"{unit!r} x {size}: {elapsed:.3f}s"
+
+
+def test_regression_scan_jwt_after_dash_is_detected_in_linear_time() -> None:
+    """The scanner is a detector: ``-eyJ...`` is reported, and a long ``-eyJ`` run stays cheap."""
+    scanner = CredentialScanner()
+
+    def found(text: str) -> bool:
+        return any(f.kind == "jwt" for f in scanner.scan(text))
+
+    jwt = "eyJaaaaaaaa.bbbbbbbb.cccccccc"
+    rest = jwt[12:]  # the two segments after the header
+    dash_run = "-eyJ" * 50
+    detected = [
+        "-" + jwt,
+        "key-" + jwt,
+        "eyJ-" + jwt,
+        "a-b-" + jwt,
+        "x -" + jwt + "-",
+        dash_run + "." + rest,
+    ]
+    for text in detected:
+        assert found(text), text
+    # "eyJ" glued to a word character does not start a JWT, and short segments are not one.
+    ignored = [
+        "x" + jwt,
+        "_" + jwt,
+        "9" + jwt,
+        "-eyJaaaa.bbbbbbbb.cccccccc",
+        "-" + jwt[:-2],
+        dash_run,
+    ]
+    for text in ignored:
+        assert not found(text), text
+    run = "-eyJ" * (256 * 1024 // 4)
+    for text, expected in ((run, False), (run + "." + rest, True), ("x" + run[1:] + "." + rest, True)):
         t0 = time.perf_counter()
-        fn(text)
+        assert found(text) is expected
         elapsed = time.perf_counter() - t0
-        assert elapsed < 0.2, f"{fn.__name__} on {unit!r} x {size}: {elapsed:.3f}s"
+        assert elapsed < 0.5, f"256 KB '-eyJ' run: {elapsed:.3f}s"
 
 
-def test_pem_block_semantics_unchanged() -> None:
+@BOTH_COPIES
+def test_pem_block_semantics_unchanged(module, redact) -> None:
     body = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----"
     tail = "-----BEGIN RSA PRIVATE KEY-----\nunterminated"
-    out = redact_text("a " + body + " b " + tail)
+    text = "a " + body + " b " + tail
+    assert module._sub_pem(text) == "a " + REDACTED + " b " + tail
+    out = redact(text)
     assert "MIIEow" not in out
     assert out.endswith(tail)
+
+
+@BOTH_COPIES
+def test_sub_pem_redacts_every_block_in_a_single_pass(module, redact) -> None:
+    """Cutting the text at the first END marker instead of the last leaves the later blocks."""
+    count = module._MAX_PASSES + 4  # more blocks than the pass loop could mop up one by one
+    blocks = [
+        f"-----BEGIN RSA PRIVATE KEY-----\r\nMIIbody{i:04d}\r\n-----END RSA PRIVATE KEY-----" for i in range(count)
+    ]
+    text = " mid ".join(blocks) + " tail -----BEGIN PRIVATE KEY-----\nunterminated"
+    single = module._sub_pem(text)
+    assert single == module._PEM.sub(REDACTED, text)
+    assert single.count(REDACTED) == count and "MIIbody" not in single
+    out = redact(text)
+    assert "MIIbody" not in out and out.endswith("unterminated"), out
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-----BEGIN RSA PRIVATE KEY-----END PRIVATE KEY-----END PRIVATE KEY-----",
+        "-----END PRIVATE KEY-----BEGIN PRIVATE KEY-----END PRIVATE KEY-----END PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----END SECRETBODY -----END PRIVATE KEY-----END PRIVATE KEY-----",
+        "x -----BEGIN EC PRIVATE KEY-----END RSA PRIVATE KEY-----END EC PRIVATE KEY-----\r\n",
+    ],
+)
+def test_regression_pem_end_marker_sharing_dashes_is_redacted(module, redact, text: str) -> None:
+    """An END marker may start inside the five dashes that close the header or marker before it."""
+    want = module._PEM.sub(REDACTED, text)
+    assert want != text
+    assert module._sub_pem(text) == want
+    out = redact(text)
+    assert "BEGIN" not in out and "SECRETBODY" not in out, out
+
+
+@BOTH_COPIES
+def test_sub_pem_equals_plain_substitution_on_marker_soup(module, redact) -> None:
+    rng = random.Random(SEED + 14)
+    fragments = (
+        "-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----", "-----END EC PRIVATE KEY-----", "-----", "END PRIVATE KEY-----",
+        "BEGIN PRIVATE KEY-----", "-----END ", "-----BEGIN ", "PRIVATE KEY", "END ", "\n", "\r\n", "AB", "x", " ", "-",
+    )
+    redacted = 0
+    for _ in range(20_000):
+        text = "".join(rng.choice(fragments) for _ in range(rng.randint(1, 10)))
+        want = module._PEM.sub(REDACTED, text)
+        redacted += want != text
+        assert module._sub_pem(text) == want, _fail(repr(text))
+        assert redact(text) == redact(want), _fail(repr(text))
+    assert redacted > 1000  # the soup really produces PEM blocks
+
+
+@BOTH_COPIES
+def test_apply_patterns_sends_the_pem_pattern_through_sub_pem(module, redact, monkeypatch) -> None:
+    """Not left to a timing test: ``_PEM.sub`` gives the same text, only in quadratic time."""
+    patterns = module.PATTERNS if module is domain_redaction else module._PATTERNS
+    assert sum(pattern is module._PEM for pattern in patterns) == 1
+    seen: list[str] = []
+    real = module._sub_pem
+    monkeypatch.setattr(module, "_sub_pem", lambda text: seen.append(text) or real(text))
+    assert redact("plain text") == "plain text"
+    assert seen == ["plain text"]
 
 
 # ---------------------------------------------------------------------------

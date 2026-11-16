@@ -23,7 +23,7 @@ import re
 
 # Provider-issued API keys and tokens with a recognisable prefix.
 KNOWN_CREDENTIAL = re.compile(
-    r"(?:(?<![A-Za-z0-9])|(?<=A[KS]IA[A-Z0-9]{16}))(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
+    r"(?<![A-Za-z0-9])(?:sk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
     r"github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
     r"glpat-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|"
     r"npm_[A-Za-z0-9]{12,}|pypi-[A-Za-z0-9_-]{16,}|"
@@ -39,6 +39,26 @@ JWT = re.compile(
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
 
+# A run of AWS access key ids written back to back. ``KNOWN_CREDENTIAL``
+# takes only the first key of such a run, because every later key follows an
+# alphanumeric character. Do not widen the ``KNOWN_CREDENTIAL`` lookbehind to
+# reach them: that lets every alternative start inside a longer token and
+# cuts a JWT apart before the ``JWT`` rule sees it. The redactors apply this
+# pattern after ``JWT`` instead; by then the first key is the ``[REDACTED]``
+# marker, so the rest of the run starts at a boundary and goes in one match.
+AWS_KEY_RUN = re.compile(r"(?<![A-Za-z0-9])(?:A(?:KI|SI)A[0-9A-Z]{16})+")
+
 CREDENTIAL_FORMATS: tuple[re.Pattern[str], ...] = (KNOWN_CREDENTIAL, JWT)
 
-__all__ = ["CREDENTIAL_FORMATS", "JWT", "KNOWN_CREDENTIAL"]
+# What the two redactors apply, in this order. ``AWS_KEY_RUN`` must stay
+# after ``CREDENTIAL_FORMATS``: everything before it then matches exactly as
+# it would without it, so it can only add redaction.
+REDACTION_FORMATS: tuple[re.Pattern[str], ...] = (*CREDENTIAL_FORMATS, AWS_KEY_RUN)
+
+__all__ = [
+    "AWS_KEY_RUN",
+    "CREDENTIAL_FORMATS",
+    "JWT",
+    "KNOWN_CREDENTIAL",
+    "REDACTION_FORMATS",
+]

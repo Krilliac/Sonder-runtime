@@ -17,11 +17,19 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from sonder_runtime.domain.security.credential_formats import CREDENTIAL_FORMATS
+from sonder_runtime.domain.security.credential_formats import REDACTION_FORMATS
 
 REDACTED = "[REDACTED]"
 REDACTION_FAILED = "[REDACTION_FAILED]"
 WORKSPACE_LABEL = "[WORKSPACE]"
+
+# A PEM private-key block. Do not call ``_PEM.sub`` on untrusted text: with
+# many BEGIN headers and no END after them it is quadratic, because each
+# header scans lazily to the end of the text. Go through ``_sub_pem``.
+_PEM = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
 
 # Ordering note: value replacement happens before pattern replacement in
 # redact_text, so a known secret value is scrubbed even where no pattern
@@ -43,38 +51,49 @@ PATTERNS: tuple[re.Pattern, ...] = (
         r"(?i)([?&](?:access[-_]?token|api[-_]?key|auth[-_]?secret|"
         r"password|credential)=)([^&#\s]+)"
     ),
-    re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
-        re.DOTALL,
-    ),
+    _PEM,
     # Free-standing provider keys (AKIA..., ghp_..., sk-..., JWTs), shared
-    # with the contribution privacy classifier.
-    *CREDENTIAL_FORMATS,
+    # with the contribution privacy classifier, then runs of adjacent AWS keys.
+    *REDACTION_FORMATS,
 )
 
-_PEM = PATTERNS[6]
-_MAX_PASSES = 4
+# Upper bound on pattern passes over one text. A substitution can expose a
+# match for the next pass (``AKIA...Cookie: a=b`` needs two), so the passes
+# repeat until one changes nothing. Ordinary text settles in one or two, and
+# 420k random hostile texts never needed more than six changing passes. No
+# finite bound covers every input, though: each ``x'`` unit after
+# ``token='abcd'`` costs one more pass. A text cut off at the bound is still
+# safe. A pass only replaces matched text with the marker and never restores
+# a character, so later passes can only remove more, and the result never
+# keeps anything the first pass removed. What is lost at the bound is
+# idempotence for that text only: a second call redacts further.
+_MAX_PASSES = 8
 
-# The PEM pattern is quadratic on repeated BEGIN headers with no matching END
-# (each BEGIN lazily scans to the end of the text). A BEGIN after the last
-# complete END can never match, so the pattern is applied only to the prefix
-# that ends at the last complete END marker: identical output, linear scan.
-_PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+# Every END marker, including one that shares its leading dashes with the
+# marker or header before it: the match consumes only ``-----END `` and looks
+# ahead for the rest, so ``finditer`` still reports the overlapping ones.
+_PEM_END = re.compile(r"-----END (?=([A-Z ]*PRIVATE KEY-----))")
 
 
-def _sub_pem(pattern, text):
+def _sub_pem(text):
+    """Same result as ``_PEM.sub(REDACTED, text)``, in linear time.
+
+    Every ``_PEM`` match ends at the end of an END marker, so nothing after
+    the last END marker can be part of a match, and cutting the text there
+    changes no match before it (the pattern has no lookahead).
+    """
     limit = 0
     for m in _PEM_END.finditer(text):
-        limit = m.end()
+        limit = m.end(1)
     if not limit:
         return text
-    return pattern.sub(REDACTED, text[:limit]) + text[limit:]
+    return _PEM.sub(REDACTED, text[:limit]) + text[limit:]
 
 
 def _apply_patterns(text):
     for pattern in PATTERNS:
         if pattern is _PEM:
-            text = _sub_pem(pattern, text)
+            text = _sub_pem(text)
         elif pattern.groups >= 2:
             text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
         else:
@@ -99,7 +118,7 @@ def redact_text(
         if value in text:
             text = text.replace(value, REDACTED)
     # A substitution can create a new word boundary (``[REDACTED]Cookie: a=b``),
-    # so repeat the pattern passes until the text is stable (bounded).
+    # so repeat the pattern passes until the text is stable (see _MAX_PASSES).
     for _ in range(_MAX_PASSES):
         before = text
         text = _apply_patterns(text)

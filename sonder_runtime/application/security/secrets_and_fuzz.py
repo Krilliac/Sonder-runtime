@@ -21,7 +21,16 @@ class CredentialScanner:
         ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
         ("aws_access_key", re.compile(r"(?:\b|(?<=AKIA[0-9A-Z]{16}))AKIA[0-9A-Z]{16}(?:\b|(?=AKIA))")),
         ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
-        ("jwt", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")),
+        # One attempt per run of base64url characters keeps this linear on
+        # hostile input such as a long run of "-eyJ": the lookahead checks
+        # once that the run is followed by two more segments, then the lazy
+        # prefix finds an "eyJ" at the start of the run or after a "-" in it
+        # (to a detector "-eyJ..." is still a JWT) with 8 more characters.
+        ("jwt", re.compile(
+            r"(?<![A-Za-z0-9_-])"
+            r"(?=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+            r"(?:[A-Za-z0-9_-]*?-)?eyJ[A-Za-z0-9_-]{8}"
+        )),
         ("credential_assignment", re.compile(r"(?i)\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;]+")),
     )
 
