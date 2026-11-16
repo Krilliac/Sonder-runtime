@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
+from collections import deque
 from collections.abc import Iterable, Iterator
 from itertools import chain
 
@@ -64,6 +65,7 @@ _RUN_IT_PATH_RE = re.compile(
     r"(?:[\"']([^\"']+)[\"']|(`[^`]+`)|([^\s,;:.!?]+\.[A-Za-z0-9]{1,12}))",
     re.IGNORECASE,
 )
+_FUTURE_RUN_RE = re.compile(r"\b(?:once|when|if|after)\b[^.?!]{0,40}\brun\b")
 _RUN_DIRECT_PATH_RE = re.compile(
     r"\brun\s+(?:(?:python(?:\.exe)?|py(?:\.exe)?)\s+)?"
     r"(?:[\"'`]([^\"'`]+)[\"'`]|"
@@ -287,12 +289,95 @@ def _claim_paths(text: str, scan: _ClaimScan | None = None) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _is_future_run(text: str, path: str) -> bool:
-    marker = re.search(re.escape(path), text, re.IGNORECASE)
-    if marker is None:
+def _case_key(char: str) -> str:
+    """Key of ``char``'s class under re.IGNORECASE literal matching.
+
+    Two characters match each other under re.IGNORECASE exactly when their
+    keys are equal; tests check this over every code point.
+    """
+
+    return char.lower()[0].upper().lower()
+
+
+def _first_occurrences(text: str, needles: Iterable[str]) -> dict[str, int]:
+    """Offset of each needle's first case-insensitive occurrence, or -1.
+
+    Gives what re.search(re.escape(needle), text, re.IGNORECASE).start()
+    gives for each needle, but in one Aho-Corasick pass over ``text``:
+    searching from the start once per needle is quadratic when a reply names
+    many distinct paths.  Characters are first mapped to one representative
+    per case class, so plain string equality matches re.IGNORECASE.  Cost is
+    O(len(text) + total needle length); pure, no shared state.
+    """
+
+    distinct = list(dict.fromkeys(needles))
+    if not distinct:
+        return {}
+    chars = set(text)
+    for needle in distinct:
+        chars.update(needle)
+    representative: dict[str, str] = {}
+    table: dict[int, str] = {}
+    for char in chars:
+        rep = representative.setdefault(_case_key(char), char)
+        if rep != char:
+            table[ord(char)] = rep
+    keyed = {needle: needle.translate(table) for needle in distinct}
+    first: dict[str, int] = {}
+    goto: list[dict[str, int]] = [{}]
+    ends: list[str | None] = [None]
+    for key in set(keyed.values()):
+        if not key:
+            first[key] = 0
+            continue
+        node = 0
+        for char in key:
+            child = goto[node].get(char)
+            if child is None:
+                child = len(goto)
+                goto.append({})
+                ends.append(None)
+                goto[node][char] = child
+            node = child
+        ends[node] = key
+    # fail: longest proper suffix in the trie; out: nearest node on the fail
+    # chain that ends a needle (0 for none).
+    fail = [0] * len(goto)
+    out = [0] * len(goto)
+    queue = deque(goto[0].values())
+    while queue:
+        node = queue.popleft()
+        for char, child in goto[node].items():
+            link = fail[node]
+            while link and char not in goto[link]:
+                link = fail[link]
+            fail[child] = goto[link].get(char, 0)
+            out[child] = fail[child] if ends[fail[child]] is not None else out[fail[child]]
+            queue.append(child)
+    remaining = sum(1 for end in ends if end is not None)
+    node = 0
+    for index, char in enumerate(text.translate(table)):
+        if not remaining:
+            break
+        while node and char not in goto[node]:
+            node = fail[node]
+        node = goto[node].get(char, 0)
+        hit = node if ends[node] is not None else out[node]
+        # Once a needle is found, every needle on its out chain was found at
+        # the same time, so the walk stops at the first one already found.
+        while hit and ends[hit] not in first:
+            key = ends[hit]
+            first[key] = index + 1 - len(key)
+            remaining -= 1
+            hit = out[hit]
+    return {needle: first.get(keyed[needle], -1) for needle in distinct}
+
+
+def _is_future_run(text: str, marker: int) -> bool:
+    if marker < 0:
         return False
-    prefix = text[max(0, marker.start() - 40) : marker.start()].casefold()
-    return bool(re.search(r"\b(?:once|when|if|after)\b[^.?!]{0,40}\brun\b", prefix))
+    prefix = text[max(0, marker - 40) : marker].casefold()
+    return bool(_FUTURE_RUN_RE.search(prefix))
 
 
 def guard_unsaved_file_claim(
@@ -315,12 +400,10 @@ def guard_unsaved_file_claim(
     scan = _ClaimScan(visible)
     claim = _has_file_claim(visible, scan)
     claim_paths = _claim_paths(visible, scan)
+    unwritten_runs = [path for path in _run_paths(visible) if not _written(path, written)]
+    markers = _first_occurrences(visible, unwritten_runs)
     run_path = next(
-        (
-            path
-            for path in _run_paths(visible)
-            if not _written(path, written) and not _is_future_run(visible, path)
-        ),
+        (path for path in unwritten_runs if not _is_future_run(visible, markers[path])),
         None,
     )
     if not claim and run_path is None:
