@@ -7,10 +7,12 @@ permissions, and nothing at this layer can change that.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ...domain.common.errors import Conflict, ConcurrencyConflict, InvalidInput
 from ...domain.runtime_policy import rules
+from ...domain.tool_lane_models import ToolLaneFloor
 from ..context import OperationContext
 from ..ports.repositories import PolicyRepository
 
@@ -24,8 +26,8 @@ class PolicyView:
     source: str
 
     @classmethod
-    def from_raw(cls, raw: dict) -> "PolicyView":
-        normalized = rules.normalize(raw)
+    def from_raw(cls, raw: dict, *, floor: ToolLaneFloor) -> "PolicyView":
+        normalized = rules.normalize(raw, floor=floor)
         return cls(
             revision=normalized["revision"],
             local_models=normalized["local_models"],
@@ -36,12 +38,15 @@ class PolicyView:
 
 
 class RuntimePolicyService:
-    def __init__(self, repository: PolicyRepository) -> None:
+    def __init__(
+        self, repository: PolicyRepository, floor_provider: Callable[[], ToolLaneFloor],
+    ) -> None:
         self._repository = repository
+        self._floor_provider = floor_provider
 
     def get(self, context: OperationContext) -> PolicyView:
         del context  # read access is unprivileged for the local owner
-        return PolicyView.from_raw(self._repository.load())
+        return PolicyView.from_raw(self._repository.load(), floor=self._floor_provider())
 
     def update(
         self,
@@ -71,7 +76,7 @@ class RuntimePolicyService:
             if "concurrently" in message or "revision" in message:
                 raise ConcurrencyConflict(message) from exc
             raise Conflict(message) from exc
-        return PolicyView.from_raw(raw)
+        return PolicyView.from_raw(raw, floor=self._floor_provider())
 
     def npu_mode(self, context: OperationContext, capability: str) -> str:
         del context

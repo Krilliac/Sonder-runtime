@@ -17,6 +17,7 @@ from sonder_runtime.domain.agents.roles import AgentRole
 from sonder_runtime.domain.routing.capability_profiles import CapabilityProfile, Capability
 from sonder_runtime.domain.routing.route_planner import AvailableModels, RoutePlanner, RoutingRequest
 from sonder_runtime.domain.runtime_policy.rules import default_policy
+from tests.support.tool_lane import FLOOR
 from sonder_runtime.domain.common.errors import Conflict, Forbidden, InvalidInput
 
 
@@ -32,7 +33,7 @@ def _boundary(healthy=True):
         selections,
         AttendedRouteActivationBoundary(
             RoutePlanner(), DeploymentRollbackService(deployments, health),
-            selections, policy=default_policy(env={}), available=available,
+            selections, policy=default_policy(env={}, floor=FLOOR), available=available,
         ),
     )
 

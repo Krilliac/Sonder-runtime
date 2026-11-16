@@ -21,6 +21,8 @@ import threading
 import time
 from pathlib import Path
 
+import sonder_runtime.adapters.model_tool_grants as _model_tool_grants
+import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.reference_lookup_state as _lookup_state
 from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
 from sonder_runtime.domain.runtime_policy import rules as _rules
@@ -41,9 +43,27 @@ DEFAULT_NPU = _rules.DEFAULT_NPU
 DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
 _MODEL_RE = _rules._MODEL_RE
-tool_lane_deny_list = _rules.tool_lane_deny_list
-reference_lookup_rule = _rules.reference_lookup_rule
 _LOCK = threading.RLock()
+
+
+def tool_lane_deny_list(policy):
+    """The deny list in force: shipped floor, overlay file, then the legacy policy section.
+
+    The ``tool_lane_denied_models`` section of ``runtime_policy.json`` is
+    deprecated in favour of the operator overlay (``model_tool_policy.json``)
+    but still read and unioned (add-only).  An overlay that exists but cannot
+    be used refuses every model in tool lanes (``overlay_problem``).
+    """
+    config = _model_tool_policy.load()
+    return _rules.tool_lane_deny_list(
+        policy, floor=config.floor, extra=config.overlay_section(),
+        extra_readable=config.readable_overlay, overlay_problem=config.overlay_problem,
+    )
+
+
+def reference_lookup_rule(policy):
+    """The lookup rule for a loaded policy (the shipped floor always included)."""
+    return _rules.reference_lookup_rule(policy, floor=_model_tool_policy.shipped_floor())
 
 
 @contextlib.contextmanager
@@ -79,13 +99,22 @@ def transition_path(path=None) -> Path:
 _is_cloud_name = _rules.is_cloud_name
 _is_reserved_personal_alias = _rules.is_reserved_personal_alias
 _model = _rules.validate_model
-_seed_model = _rules.seed_model
 _seed_embedding_model = _rules.seed_embedding_model
 _normalize_npu = _rules.normalize_npu
-normalize = _rules.normalize
 bound_tiers = _rules.bound_tiers
-_disk_payload = _rules.disk_payload
 _write_json_atomic = _atomic_json.write_json_atomic
+
+
+def _seed_model(env, tier: str) -> str:
+    return _rules.seed_model(env, tier, floor=_model_tool_policy.shipped_floor())
+
+
+def normalize(payload, defaults=None) -> dict:
+    return _rules.normalize(payload, defaults, floor=_model_tool_policy.shipped_floor())
+
+
+def _disk_payload(policy: dict) -> dict:
+    return _rules.disk_payload(policy, floor=_model_tool_policy.shipped_floor())
 
 
 def configured_tiers(policy, bindings) -> tuple:
@@ -99,7 +128,9 @@ def configured_tiers(policy, bindings) -> tuple:
 
 
 def default_policy(env=None) -> dict:
-    return _rules.default_policy(os.environ if env is None else env)
+    return _rules.default_policy(
+        os.environ if env is None else env, floor=_model_tool_policy.shipped_floor(),
+    )
 
 
 def long_context_overflow(policy=None, env=None) -> dict:
@@ -320,7 +351,20 @@ def update(
                 )
             # An explicit request to bind a blocked model is refused outright;
             # only a file that already names one loads with that tier dropped.
-            blocked = _rules.denied_local_bindings(local_models, _rules.tool_lane_deny_list(candidate))
+            deny = tool_lane_deny_list(candidate)
+            if not deny.floor.available:
+                # Without the shipped floor no binding can be judged, so none is written.
+                raise ValueError(
+                    "runtime policy local_models cannot be changed while the shipped "
+                    "model tool policy is unavailable: %s" % deny.floor.detail
+                )
+            if deny.overlay_problem:
+                # Nor without a usable overlay: it may restrict the model asked for.
+                raise ValueError(
+                    "runtime policy local_models cannot be changed while the operator "
+                    "model tool policy overlay cannot be used: %s" % deny.overlay_problem
+                )
+            blocked = _rules.denied_local_bindings(local_models, deny)
             if blocked:
                 tier, model = blocked[0]
                 raise ValueError(
@@ -412,6 +456,10 @@ def format_policy(policy=None) -> str:
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
     lines.append("  " + format_tool_lane_denied_models(policy))
+    lines.extend("  " + line for line in _model_tool_policy.describe())
+    lines.extend("  " + line for line in _model_tool_grants.describe_lines(
+        legacy_section=policy.get("tool_lane_denied_models"),
+    ))
     lines.append("  " + format_reference_lookup(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
@@ -425,7 +473,11 @@ def format_tool_lane_denied_models(policy=None) -> str:
     line = "tool-lane blocked models (chat by name only; %s): names=%s prefixes=%s" % (
         source, ", ".join(sorted(deny.names)) or "-", ", ".join(deny.prefixes) or "-",
     )
-    if not deny.readable:
+    if not deny.floor.available:
+        line += " [shipped model tool policy unavailable: every tool-using lane refuses every model]"
+    elif deny.overlay_problem:
+        line += " [operator overlay unusable: every tool-using lane refuses every model]"
+    elif not deny.readable:
         line += " [policy file unreadable: caller-named models refused in tool lanes]"
     return line
 

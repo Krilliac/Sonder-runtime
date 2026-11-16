@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "model_profiles": [
+    {
+      "id": "security-advisers",
+      "floor": true,
+      "match": {
+        "names": [],
+        "prefixes": [
+          "astra-cyber-",
+          "hf.co/mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "huggingface.co/mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "mradermacher/qwen3.8-cyber-redteam-surgical-abliterated-gguf",
+          "hf.co/duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "huggingface.co/duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "duoneural/cyber-ornith-1.5-9b-obliterated-gguf",
+          "qwen3.8-cyber-redteam-surgical-abliterated",
+          "cyber-ornith-1.5-9b-obliterated"
+        ]
+      },
+      "tools": [],
+      "lanes": []
+    }
+  ],
+  "undetermined_served_models": ["", "default"],
+  "restricted_tool_ceiling": [
+    "text_search",
+    "repository_symbol_index",
+    "file_read_range",
+    "directory_tree",
+    "context_pack"
+  ],
+  "restricted_secret_path_globs": [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.pfx",
+    "*.p12",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
+    ".ssh/**",
+    "**/secrets/**",
+    "*credential*",
+    "*token*",
+    "*secret*",
+    ".git/config",
+    ".netrc",
+    ".npmrc",
+    ".pypirc"
+  ]
+}

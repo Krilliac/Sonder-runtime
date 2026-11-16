@@ -8,6 +8,12 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+from sonder_runtime.adapters.model_tool_policy import shipped_floor
+
+# The shipped floor (adapters/data/model_tool_policy.json), for tests that need a deny
+# list but do not pin its content (tests/test_model_tool_policy.py does).
+FLOOR = shipped_floor()
+
 DENIED = "astra-cyber-27b"
 DENIED_SMALL = "astra-cyber-9b"
 ALLOWED = "qwen3.5:4b"
@@ -86,7 +92,7 @@ RUNNABLE = (
 
 
 def clear_environment(monkeypatch) -> None:
-    for name in PROVIDER_ENV + TIER_ENV:
+    for name in PROVIDER_ENV + TIER_ENV + ("SONDER_MODEL_TOOL_POLICY",):
         monkeypatch.delenv(name, raising=False)
 
 
