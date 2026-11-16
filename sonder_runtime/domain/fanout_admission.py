@@ -14,14 +14,33 @@ import json
 import math
 
 
+def _bounded_number(raw, key, default, low, high, cast):
+    """One optional numeric limit; junk or non-finite input falls back to ``default``."""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return max(low, min(cast(value), high))
+
+
 def fanout_limits(run):
     try:
         raw = json.loads(run.get("limits_json") or "{}")
     except (TypeError, ValueError):
         raw = {}
+    # A batch child run carries its job id; only it may exceed the plain
+    # fanout timeout ceiling, up to the per-job cap persisted with the run.
+    batch_job_id = str(raw.get("batch_job_id") or "").strip()[:80]
+    timeout_cap = _bounded_number(raw, "timeout_cap", 300, 5, 3600, int) if batch_job_id else 300
+    think = raw.get("think")
     return {
         "num_predict": max(32, min(int(raw.get("num_predict", 512)), 4096)),
-        "timeout": max(5, min(int(raw.get("timeout", 45)), 300)),
+        "timeout": max(5, min(int(raw.get("timeout", 45)), timeout_cap)),
+        "temperature": _bounded_number(raw, "temperature", 0.2, 0.0, 2.0, float),
+        "num_ctx": _bounded_number(raw, "num_ctx", 4096, 0, 1_048_576, int),
+        "think": think if isinstance(think, bool) else None,
+        "sealed_answers": raw.get("sealed_answers") is True,
+        "answer_max_chars": _bounded_number(raw, "answer_max_chars", 64_000, 1024, 1_000_000, int),
+        "batch_job_id": batch_job_id,
         "cloud_workers": max(1, min(int(raw.get("cloud_workers", 2)), 2)),
         "resident_before": [str(name) for name in raw.get("resident_before", []) if str(name)],
         # Legacy receipts have no trustworthy snapshot provenance.  Conserving
