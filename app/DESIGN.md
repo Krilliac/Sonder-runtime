@@ -63,7 +63,7 @@ Status glyphs Plex lacks (❯ ◈ ⊘ ✗ ▸ ● …) come from `assets/fonts/S
 Shape is soft and named for its use (`SonderRadius`): control 8, row 10, menu 12, card 16, sheet 20, bubble 20, composer 26, and `pill` for chips and round buttons.
 
 ## Status vocabulary
-The app and the REPL speak one status vocabulary and share one palette: the terminal's truecolor roles in style.py are the app's text tones (`muted`, `accentText`, `info`, `ok`, `warn`, `danger`). The source is `sonder_runtime/interfaces/repl/style.py` (`GLYPHS`, `NOTICE_KINDS`, `mode_roles`, `status_line`, `live_line`, `footer`) and `docs/wiki/20-terminal-ui-conventions.md`; the app ports its words, order and glyphs, not its ANSI styling. `lib/ui/status_vocab.dart` holds the table and `test/status_vocab_test.dart` pins it against style.py.
+The app and the REPL speak one status vocabulary and share one palette: the terminal's truecolor roles in style.py are the app's text tones (`muted`, `accentText`, `info`, `ok`, `warn`, `danger`), and `tests/repl/test_style.py` reads `lib/theme.dart` to hold them equal. The source is `sonder_runtime/interfaces/repl/style.py` (`GLYPHS`, `NOTICE_KINDS`, `mode_roles`, `status_line`, `live_line`, `footer`) and `docs/wiki/20-terminal-ui-conventions.md`; the app ports its words, order and glyphs, not its ANSI styling. `lib/ui/status_vocab.dart` holds the table and `test/status_vocab_test.dart` pins it against style.py.
 
 | Kind | Glyph | Word | Token | Used for |
 |---|---|---|---|---|

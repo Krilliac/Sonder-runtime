@@ -55,6 +55,7 @@ from sonder_runtime.adapters.content_services import feedback
 from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.adapters.web import listener_probe
 from sonder_runtime.platform import debug_dump
+from sonder_runtime.platform.version import runtime_version as _runtime_version
 from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
@@ -366,7 +367,7 @@ def _read_input(prompt, *, history=None, composer=False, argument_completer=None
                 return slash_menu.read_line(
                     "" if composer else prompt,
                     history=history, frame=prompt if composer else "",
-                    frame_style="",
+                    frame_style="", styles=_composer_styles(),
                     argument_completer=argument_completer,
                     fallback_prompt=prompt,
                     **extra,
@@ -376,6 +377,16 @@ def _read_input(prompt, *, history=None, composer=False, argument_completer=None
         except Exception:
             pass  # a menu problem must never cost the user their prompt
     return input(prompt)
+
+
+def _composer_styles():
+    """Tints for the raw composer: a quiet frame, the prompt mark in accent.
+
+    The picked palette row takes the accent too.  Every value is empty when
+    colour is off, and the text being typed is never tinted.
+    """
+    quiet, mark = S.sgr("muted"), S.sgr("accent", "strong")
+    return {"edge": quiet, "marker": mark, "row": quiet, "selected": mark}
 
 
 def _cycle_mode():
@@ -1404,6 +1415,30 @@ def _mode_cycle_key():
     return bool(getattr(slash_menu, "supports_mode_cycle", False)) and _composer_available()
 
 
+def _version_label():
+    """The running build's version label for the banner; never raises."""
+    try:
+        return str(_runtime_version() or "")
+    except Exception:
+        return ""
+
+
+def _cwd_label():
+    """The working directory for the banner, with the home folder as ``~``."""
+    try:
+        cwd = os.getcwd()
+        home = os.path.expanduser("~")
+    except Exception:
+        return ""
+    here, base = os.path.normcase(cwd), os.path.normcase(home or "")
+    if base and base != os.path.normcase("~"):
+        if here == base:
+            return "~"
+        if here.startswith(base.rstrip("\\/") + os.sep):
+            return "~" + cwd[len(home.rstrip("\\/")):]
+    return cwd
+
+
 def _banner_state(strict, persona, project, tier=None, *, session_id="",
                   model_override=None, notices=None):
     """Everything the banner and ``/about`` show, read live from the runtime.
@@ -1431,7 +1466,7 @@ def _banner_state(strict, persona, project, tier=None, *, session_id="",
         mode_cycle_key=_mode_cycle_key(), notices=int(notices or 0),
         elevated=elevated, elevated_reason=reason, strict=bool(strict),
         project=str(project or ""), session_id=str(session_id or ""),
-        mode_blurb=blurb,
+        mode_blurb=blurb, version=_version_label(), cwd=_cwd_label(),
     )
 
 
@@ -2309,25 +2344,18 @@ def _parse_activity_events(text):
 
 
 def _tool_row_lines(events, width):
-    """Tool rows (spec 2.6), aligned with ``style.table``; always shown.
+    """Tool calls (spec 2.6): each call, then its result line; always shown.
 
-    ``▸ ✓ ok       Read File src/a.py   12ms`` -- the status glyph always
-    carries its word, and a failed or refused call is never hidden, even
-    when the whole turn errored (P1-4).
+    ``▸ Read File src/a.py`` over ``└ ✓ ok · 12ms`` -- the status glyph
+    always carries its word, and a failed or refused call is never hidden,
+    even when the whole turn errored (P1-4).
     """
-    if not events:
-        return []
-    rows = []
-    for ev in events:
-        ok = ev.get("ok", True)
-        glyph, word, role = ("ok", "ok", "success") if ok else ("fail", "failed", "danger")
-        status = _paint("%s %s" % (S.g(glyph), word), role)
-        title = S.safe_text(" ".join(str(ev.get("title") or "tool").split()))
-        elapsed = ev.get("elapsed_ms")
-        timing = _paint(S.duration_label(elapsed), "muted") if elapsed else ""
-        rows.append((_paint(S.g("tool"), "muted"), status, title, timing))
-    return S.table(rows, [(1, 1, "<"), (8, 9, "<"), (8, None, "<"), (0, 8, ">")],
-                   width, indent="  ")
+    lines = []
+    for ev in events or ():
+        lines.extend(S.tool_call(
+            str(ev.get("title") or "tool"), ok=bool(ev.get("ok", True)),
+            elapsed_ms=ev.get("elapsed_ms"), width=width))
+    return lines
 
 
 def _render_tool_rows(events, width=None):
@@ -2349,9 +2377,13 @@ _RATE_OFFERS = [0]
 
 
 def _print_body(text, width):
-    """Answer body: sanitized; prose soft-wrapped on a terminal only."""
+    """Answer body: sanitized, soft-wrapped, its Markdown drawn in colour.
+
+    Only a terminal reaches this; without colour (``NO_COLOR``, a dumb
+    terminal, plain mode) the text is the source text, wrapped.
+    """
     clean = S.safe_text(text)
-    for line in S.wrap(clean, width - 1):
+    for line in S.markdown(clean, width - 1):
         print(line)
 
 
@@ -2400,6 +2432,8 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     width = _cols()
     clean_answer, events, stats = _parse_activity_events(answer)
     clean_answer = _strip_activity(clean_answer)
+    # One empty line sets the reply apart from the line that asked for it.
+    print()
     print(S.turn_header("error" if error else "answer", width))
     rows = _tool_row_lines(events, width)
     for line in rows:
@@ -4132,7 +4166,9 @@ def main(*, machine_output=False):
                     project=project,
                 )
                 if _composer_available():
-                    # The raw composer draws the status line as its frame.
+                    # The raw composer draws the status line as its frame; one
+                    # empty line keeps the frame clear of what was printed last.
+                    print()
                     prompt = _status_text(active_tier, width=_composer_frame_width(),
                                           **status_kwargs)
                 else:
