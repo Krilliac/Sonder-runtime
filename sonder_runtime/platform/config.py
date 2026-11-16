@@ -881,6 +881,21 @@ def _is_loopback_host(host: object) -> bool:
         return False
 
 
+def _redact_url_userinfo(value: object) -> str:
+    """Return ``value`` as text with any authority userinfo replaced by ``***``."""
+    text = str(value)
+    start = text.find("//") + 2 if "//" in text else 0
+    end = len(text)
+    for marker in "/?#":
+        position = text.find(marker, start)
+        if position != -1:
+            end = min(end, position)
+    at = text.rfind("@", start, end)
+    if at == -1:
+        return text
+    return text[:start] + "***" + text[at:]
+
+
 def _canonical_ollama_origin(value: object) -> str | None:
     """Return a comparison identity for one syntactically valid Ollama origin."""
     if not isinstance(value, str):
@@ -2020,7 +2035,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         parts = None
         ollama_port = None
     if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
-        errors.append(f"[ollama].url invalid: {config.ollama.url!r}")
+        errors.append(f"[ollama].url invalid: {_redact_url_userinfo(config.ollama.url)!r}")
     elif parts.username is not None or parts.password is not None:
         errors.append("[ollama].url must not contain inline credentials")
     elif ollama_port is None:
@@ -2055,7 +2070,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             worker_parts = urlsplit(worker)
             worker_port = worker_parts.port
         except ValueError:
-            errors.append(f"[ollama].workers entry {worker!r} is malformed")
+            errors.append(f"[ollama].workers entry {_redact_url_userinfo(worker)!r} is malformed")
             continue
         if worker_parts.scheme not in ("http", "https"):
             errors.append("[ollama].workers entries must use http or https")
@@ -2068,7 +2083,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             continue
         if not worker_parts.hostname or worker_port is None:
             errors.append(
-                f"[ollama].workers entry {worker!r} must include a host and explicit port"
+                f"[ollama].workers entry {_redact_url_userinfo(worker)!r} must include a host and explicit port"
             )
             continue
         if worker_parts.path not in ("", "/") or worker_parts.query or worker_parts.fragment:

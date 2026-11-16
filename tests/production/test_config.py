@@ -750,6 +750,19 @@ def test_ollama_origins_reject_ambiguous_or_credential_bearing_urls(
     assert any(expected in error for error in excinfo.value.errors)
 
 
+@pytest.mark.parametrize("variable", ["OLLAMA_HOST", "SONDER_OLLAMA_WORKERS"])
+@pytest.mark.parametrize("value", [
+    "https://user:secretpw@127.0.0.1:not-a-port",
+    "ftp://user:secretpw@",
+])
+def test_ollama_url_errors_never_echo_userinfo(variable, value):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(env={variable: value})
+    text = "\n".join(excinfo.value.errors) + str(excinfo.value)
+    assert "secretpw" not in text
+    assert "user:" not in text
+
+
 def test_redacted_dump_never_contains_secret_values():
     secret = "extremely-secret-api-key-value-123"
     config = load_config(env={"SONDER_API_KEY": secret,

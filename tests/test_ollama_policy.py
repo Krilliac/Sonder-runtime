@@ -1,3 +1,5 @@
+import logging
+
 from sonder_runtime.domain import ollama_policy
 
 
@@ -26,11 +28,11 @@ def test_domain_policy_matches_endpoint_adapter_surface():
 
 
 def test_policy_error_never_logs_inline_credentials(caplog):
-    import logging
-
-    secret = "https://user:secretpw@127.0.0.1:11434"
-    with caplog.at_level(logging.DEBUG):
-        assert ollama_policy.policy_error(secret)
+    name = "sonder_runtime.domain.ollama_policy"
+    with caplog.at_level(logging.DEBUG, logger=name):
+        assert ollama_policy.policy_error("https://user:secretpw@127.0.0.1:11434")
+        assert ollama_policy.policy_error("http://127.0.0.1:11434") == ""
+    assert [r for r in caplog.records if r.name == name]
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "secretpw" not in text
     assert "user:" not in text

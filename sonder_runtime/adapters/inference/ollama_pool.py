@@ -2716,8 +2716,13 @@ def configure_typed_pool(pool: OllamaWorkerPool) -> None:
 
 def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
     """Build the pool from consented, bounded environment configuration."""
-    logger.debug(f"from_environment: primary_origin={primary_origin!r}")
-    logger.info(f"building Ollama worker pool from environment, primary_origin={primary_origin!r}")
+    try:
+        primary_parts = urlsplit(ollama_policy.normalize(primary_origin))
+        safe_primary = f"{primary_parts.scheme}://{primary_parts.hostname}:{primary_parts.port}"
+    except ValueError:
+        safe_primary = "<unparseable>"
+    logger.debug(f"from_environment: primary_origin={safe_primary!r}")
+    logger.info(f"building Ollama worker pool from environment, primary_origin={safe_primary!r}")
     env = os.environ if environment is None else environment
     with _configuration_lock:
         if environment is None and _configured_pool is not None:
