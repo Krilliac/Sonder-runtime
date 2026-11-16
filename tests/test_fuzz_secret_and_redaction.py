@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import os
 import random
+import re
 import string
 import time
 from dataclasses import dataclass
@@ -326,8 +327,9 @@ def test_format_regexes_match_generated_instances() -> None:
     assert set(CREDENTIAL_FORMATS) == {KNOWN_CREDENTIAL, JWT}
     # The redactors add the adjacent-AWS-key rule, and only after the shared formats.
     assert REDACTION_FORMATS == (*CREDENTIAL_FORMATS, AWS_KEY_RUN)
-    assert domain_redaction.PATTERNS[-3:] == REDACTION_FORMATS
-    assert platform_logging._PATTERNS[-3:] == REDACTION_FORMATS
+    assert domain_redaction.PATTERNS[-4:-1] == REDACTION_FORMATS
+    assert domain_redaction.PATTERNS[-1] is domain_redaction._URL_USERINFO_ANY
+    assert platform_logging._PATTERNS[-4:-1] == REDACTION_FORMATS
 
 
 # ---------------------------------------------------------------------------
@@ -867,3 +869,84 @@ def test_regression_url_userinfo_after_scheme_run_punctuation_is_redacted(text):
     out = redact_text(text)
     secret = text.split("://", 1)[1].split("@", 1)[0]
     assert secret not in out, (text, out)
+
+
+# The URL-userinfo rule as it stood before the fuzz fixes. Quadratic on long
+# scheme-character runs, so only ever run here on short texts.
+_OLDER_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@")
+_URL_PIECES = (
+    "a", "Z", "1", "_", "\u00e9", "\u212a", "\u017f", "\u0130", "+", ".", "-", "://", ":", "@",
+    "/", " ", "u", "pw", "?password=x", "&api_key=y", "\n", "http", "s3",
+)
+
+
+@BOTH_COPIES
+def test_url_userinfo_slot_matches_the_older_anchor_exactly(module, redact) -> None:
+    """The linear slot-5 rule redacts exactly where the older ``\\b`` rule did.
+
+    A wider match there would consume a ``?password=`` that the query rule
+    after it must see, so redacting *more* in this slot is a leak too.
+    """
+    rng = random.Random(SEED)
+    differ = 0
+    run_chars = ("a", "Z", "1", "+", ".", "-", "K", "ſ", "İ", "ı")
+    for _ in range(20_000):
+        if rng.random() < 0.5:
+            text = "".join(rng.choice(_URL_PIECES) for _ in range(rng.randint(1, 24)))
+        else:  # a URL with userinfo, after a random scheme run and context
+            run = "".join(rng.choice(run_chars) for _ in range(rng.randint(1, 6)))
+            text = (
+                "".join(rng.choice(_URL_PIECES) for _ in range(rng.randint(0, 3)))
+                + run + "://u" + rng.choice(("", "x", "?password=")) + ":p" + rng.choice(("", "&api_key=z", ";")) + "@h"
+                + "".join(rng.choice(_URL_PIECES) for _ in range(rng.randint(0, 3)))
+            )
+        want = _OLDER_URL_USERINFO.sub(lambda m: m.group(1) + REDACTED, text)
+        got = module._sub_url_userinfo(text)
+        assert got == want, f"seed={SEED} {text!r}: {got!r} != {want!r}"
+        differ += want != text
+    assert differ > 2_000  # the oracle saw real matches, not only misses
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("1http://u:?password=abcd;p@ssTOPSECRET", "TOPSECRET"),
+        ("backup_s3://key:?api_key=abcd,p@ssw0rd-TOPSECRET rest", "TOPSECRET"),
+        ('2fa://u:&credential="abcd"x@SECRETTAIL', "SECRETTAIL"),
+        ("_x://u:?password=abcd;p@ssTOPSECRET", "TOPSECRET"),
+    ],
+)
+def test_regression_url_rule_does_not_preempt_the_query_rule(module, redact, text, secret) -> None:
+    out = redact(text)
+    assert secret not in out, (text, out)
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize(
+    "text", ["1http://u:hunter2@h", "backup_s3://key:hunter2@h", "_x://u:hunter2@h", "\u00e9s://u:hunter2@h"]
+)
+def test_url_userinfo_after_a_scheme_the_older_anchor_skips_is_redacted(module, redact, text) -> None:
+    out = redact(text)
+    assert "hunter2" not in out, (text, out)
+
+
+@BOTH_COPIES
+def test_url_rules_are_ordered_around_the_query_rule(module, redact, monkeypatch) -> None:
+    patterns = module.PATTERNS if module is domain_redaction else module._PATTERNS
+    query = next(i for i, p in enumerate(patterns) if "password|credential)=" in p.pattern)
+    assert [i for i, p in enumerate(patterns) if p is module._URL_USERINFO] == [query - 1]
+    assert patterns[-1] is module._URL_USERINFO_ANY
+    assert sum(p is module._URL_USERINFO_ANY for p in patterns) == 1
+    seen: list[str] = []
+    real = module._sub_url_userinfo
+    monkeypatch.setattr(module, "_sub_url_userinfo", lambda text: seen.append(text) or real(text))
+    assert redact("plain text") == "plain text"
+    assert seen == ["plain text"]
+
+
+@pytest.mark.parametrize("text", ["a." * 200_000, "a+" * 200_000 + "b://u:p@", "_" + "a-" * 200_000 + "://u:p@h"])
+def test_url_userinfo_scan_is_linear(text) -> None:
+    t0 = time.perf_counter()
+    redact_text(text)
+    assert time.perf_counter() - t0 < HARD_LIMIT_S

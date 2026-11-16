@@ -31,6 +31,52 @@ _PEM = re.compile(
     re.DOTALL,
 )
 
+# URL userinfo, ``scheme://user:pass@``. The scheme run is matched whole from
+# its first character, one attempt per run, so the scan is linear. The older
+# ``\b([a-z][a-z0-9+.-]*://)`` form retried the run from every inner word
+# boundary and was quadratic on ``a.a.a...``. Go through ``_sub_url_userinfo``,
+# which redacts only where that older form matched: a wider match here would
+# consume a ``?password=`` the query-parameter rule after it must see.
+_URL_USERINFO = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+)://([^/@\s:]+:[^/@\s]+)@")
+# The same shape for any scheme run, applied after every other rule.
+_URL_USERINFO_ANY = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+://)([^/@\s:]+:[^/@\s]+)@")
+_SCHEME_LETTER = re.compile(r"(?i)[a-z]")
+_WORD_CHAR = re.compile(r"\w")
+
+
+def _older_scheme_start(text, start, run):
+    r"""Whether ``\b[a-z]`` (the older anchor) holds anywhere in ``run``.
+
+    ``run`` begins at ``text[start]``. Inside the run the only non-word
+    characters are ``+``, ``.`` and ``-``, so a word boundary before a letter
+    falls either at the run start (after a non-word character or the start of
+    the text) or right after one of those three.
+    """
+    if _SCHEME_LETTER.match(run[0]) and not (start and _WORD_CHAR.match(text[start - 1])):
+        return True
+    return any(
+        run[i - 1] in "+.-" and _SCHEME_LETTER.match(run[i]) for i in range(1, len(run))
+    )
+
+
+def _sub_url_userinfo(text):
+    """Redact URL userinfo where the older anchor matched, in linear time.
+
+    The older match started at some letter inside the same scheme run, so it
+    ended at the same ``@`` and kept the run before it; keeping the whole run
+    gives the same text. A match skipped here holds no other candidate: the
+    userinfo cannot contain ``://``.
+    """
+
+    def replace(m):
+        run = m.group(1)
+        if _older_scheme_start(m.string, m.start(), run):
+            return run + "://" + REDACTED
+        return m.group(0)
+
+    return _URL_USERINFO.sub(replace, text)
+
+
 # Ordering note: value replacement happens before pattern replacement in
 # redact_text, so a known secret value is scrubbed even where no pattern
 # would match its surroundings.
@@ -46,7 +92,7 @@ PATTERNS: tuple[re.Pattern, ...] = (
         r"[\"']?\s*[:=]\s*)"
         r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
-    re.compile(r"(?i)(?<![a-z0-9+.-])([a-z0-9+.-]+://)([^/@\s:]+:[^/@\s]+)@"),
+    _URL_USERINFO,
     re.compile(
         r"(?i)([?&](?:access[-_]?token|api[-_]?key|auth[-_]?secret|"
         r"password|credential)=)([^&#\s]+)"
@@ -55,6 +101,9 @@ PATTERNS: tuple[re.Pattern, ...] = (
     # Free-standing provider keys (AKIA..., ghp_..., sk-..., JWTs), shared
     # with the contribution privacy classifier, then runs of adjacent AWS keys.
     *REDACTION_FORMATS,
+    # URL userinfo after a scheme run the rule above skips (``1http://``,
+    # ``backup_s3://``). Last, so it cannot take text an earlier rule needs.
+    _URL_USERINFO_ANY,
 )
 
 # Upper bound on pattern passes over one text. A substitution can expose a
@@ -94,6 +143,8 @@ def _apply_patterns(text):
     for pattern in PATTERNS:
         if pattern is _PEM:
             text = _sub_pem(text)
+        elif pattern is _URL_USERINFO:
+            text = _sub_url_userinfo(text)
         elif pattern.groups >= 2:
             text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
         else:
