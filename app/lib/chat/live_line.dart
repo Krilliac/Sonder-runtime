@@ -89,10 +89,15 @@ class _LiveLineViewState extends State<LiveLineView> {
     final prev = _turn;
     if (next != null) {
       final newTurn = prev == null || next.startedAt != prev.startedAt;
-      // A status comment is the server explaining the wait, not progress, so
-      // it leaves the stall clock alone.
-      final progressed = (next.elapsedSeconds == prev?.elapsedSeconds &&
-              next.waitStatus == prev?.waitStatus) ||
+      // A status comment is the server explaining the wait, never progress:
+      // a change of waitStatus (new text or a clear) is not a server event
+      // here. A status that merely repeats the current text never reaches
+      // this listener, because the controller drops it without touching
+      // [LiveTurn] (a repeat is value-identical to a re-stated phase and
+      // could not be told apart here).
+      final tick = next.elapsedSeconds != prev?.elapsedSeconds;
+      final statusChanged = next.waitStatus != prev?.waitStatus;
+      final progressed = (!tick && !statusChanged) ||
           next.phase != prev?.phase ||
           next.tokensIn != prev?.tokensIn;
       if (newTurn || progressed) _lastProgress = next.elapsedSeconds;

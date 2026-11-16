@@ -117,7 +117,8 @@ def test_hook_does_not_block_the_caller():
 
 
 def test_hook_is_a_no_op_under_the_suite_default(monkeypatch):
-    # pytest.ini sets SONDER_PREWARM=0, so the real switch reads off.
+    # tests/conftest.py (_no_incidental_prewarm) sets SONDER_PREWARM=0, so the
+    # real switch reads off; the monkeypatch below pins it for this test.
     monkeypatch.setenv("SONDER_PREWARM", "0")
     calls = []
     _start(True, lambda tier: calls.append(tier) or True, server.sonder_speculation.prewarm_enabled)
@@ -150,11 +151,121 @@ def test_load_outcome_lines(caplog):
     assert "not loaded (ValueError)" in text
 
 
+def test_per_request_prewarm_outcome_is_logged_at_debug_only(caplog):
+    with caplog.at_level(logging.DEBUG, logger="sonder.prewarm"):
+        startup_prewarm.load_finished("m1", announce=False)
+        startup_prewarm.load_failed("m1", ValueError("x"), announce=False)
+    assert {r.levelno for r in caplog.records} == {logging.DEBUG}
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sonder.prewarm"):
+        startup_prewarm.load_finished("m1", announce=False)
+        startup_prewarm.load_failed("m1", ValueError("x"), announce=False)
+    assert caplog.records == []
+
+
+def test_prewarm_model_announces_only_when_asked(monkeypatch, caplog):
+    seen = []
+    monkeypatch.setattr(server.sonder_speculation, "prewarm_enabled", lambda: True)
+    monkeypatch.setattr(server._tool_lane_guard, "chat_target",
+                        lambda target, tier, extra: ("m", False, False, "local"))
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda label: None)
+    monkeypatch.setattr(server, "_post", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_build_system", lambda *a, **k: "")
+    monkeypatch.setattr(server, "_platform_local_model_options", lambda *a, **k: {})
+    monkeypatch.setattr(server, "_auto_model_context", lambda model: 4096)
+    monkeypatch.setattr(server._startup_prewarm, "load_finished",
+                        lambda model, *, announce=True: seen.append(announce))
+    monkeypatch.setattr(server, "owned_runtime_thread",
+                        lambda *, target, daemon, name: _InlineThread(target=target))
+    assert server.prewarm_model("") is True
+    assert server.prewarm_model("", announce=True) is True
+    assert seen == [False, True]
+
+
 # -- the visible admission wait -----------------------------------------------
 
 def test_describe_wait_names_the_numbers():
     line = wait_status.describe_wait("qwen", int(4.2 * GIB), int(6.5 * GIB))
     assert line == "waiting for memory to load qwen: 4.2 GiB free, needs ~6.5 GiB"
+
+
+def test_describe_wait_names_the_ram_floor():
+    line = wait_status.describe_wait(
+        "qwen", int(4.2 * GIB), int(6.5 * GIB), "detail", reason="host_ram_floor",
+        floor_bytes=4 * GIB)
+    assert line == "waiting for memory to load qwen: need ~6.5 GiB + 4.0 GiB floor, 4.2 GiB free"
+
+
+def test_describe_wait_names_the_commit_floor():
+    line = wait_status.describe_wait(
+        "qwen", int(7.0 * GIB), int(6.5 * GIB), "detail", reason="commit_floor",
+        floor_bytes=2 * GIB)
+    assert line == ("waiting for commit headroom to load qwen: "
+                    "need ~6.5 GiB + 2.0 GiB floor, 7.0 GiB commit free")
+
+
+def test_describe_wait_falls_back_to_the_detail_without_numbers():
+    line = wait_status.describe_wait("qwen", None, None, "the detail", reason="commit_floor")
+    assert line == "waiting to load qwen: the detail"
+
+
+def _commit_bound_service(tmp_path, monkeypatch, state):
+    fake = FakeOllama()
+    service = make_service(tmp_path, fake, host=(64 * GIB, 10 * GIB), on_host_floor="queue",
+                           host_recheck_interval_ms=100)
+    domain_reading = type(service._host_reader())
+    service._host_reader = lambda: domain_reading(
+        available_physical_bytes=64 * GIB, total_physical_bytes=64 * GIB,
+        commit_limit_bytes=96 * GIB, commit_available_bytes=state["commit"],
+        commit_enforced=True)
+    wire(monkeypatch, server, fake, service)
+    service.record_footprint(DIGEST, 16384, 17 * GIB, 17 * GIB)
+    return fake, service
+
+
+def test_commit_floor_wait_names_commit_headroom_not_ram(monkeypatch, tmp_path):
+    state = {"commit": 18 * GIB}  # 18 - 17 private < the commit floor; RAM is ample
+    _fake, service = _commit_bound_service(tmp_path, monkeypatch, state)
+    lines = []
+    reporter = wait_status.AdmissionWaitReporter(lines.append, interval_seconds=0)
+    threading.Timer(0.35, lambda: state.update(commit=64 * GIB)).start()
+    with wait_status.armed(reporter):
+        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+    assert lines
+    assert lines[0].startswith("waiting for commit headroom to load ")
+    assert "need ~17.0 GiB + " in lines[0] and "18.0 GiB commit free" in lines[0]
+    assert "64.0 GiB free" not in lines[0]
+
+
+def test_busy_slot_wait_is_reported_and_cleared_on_admission(tmp_path):
+    origin = "http://127.0.0.1:11434"
+    fake = FakeOllama()
+    service = make_service(tmp_path, fake, gpu_slots=1)
+    lines = []
+    reporter = wait_status.AdmissionWaitReporter(lines.append, interval_seconds=0)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with service.admit("/api/chat", chat_body(4096), origin=origin):
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(5)
+        threading.Timer(0.4, release.set).start()
+        with wait_status.armed(reporter):
+            with service.admit("/api/chat", chat_body(4096), origin=origin):
+                pass
+    finally:
+        release.set()
+        holder.join(5)
+    assert lines[0].startswith("waiting to load ")
+    assert lines[0].endswith(": every gpu GPU slot is busy")
+    assert lines[-1] == wait_status.CLEAR, "admission ends a sent status with the clear line"
+    assert reporter.waiting is False
 
 
 def test_reporter_emits_at_most_once_per_interval():
@@ -167,6 +278,32 @@ def test_reporter_emits_at_most_once_per_interval():
     now[0] += 10
     assert reporter.report("c") is True
     assert lines == ["a", "c"]
+
+
+def test_reporter_clears_once_after_a_status_was_sent():
+    lines = []
+    reporter = wait_status.AdmissionWaitReporter(lines.append, interval_seconds=0)
+    reporter.admitted()  # nothing was sent: nothing to clear
+    assert lines == []
+    reporter.report("a")
+    reporter.admitted()
+    reporter.admitted()
+    assert lines == ["a", wait_status.CLEAR]
+
+
+def test_reporter_does_not_clear_through_a_dropped_sink():
+    sent = []
+
+    def flaky(line):
+        sent.append(line)
+        if len(sent) > 1:
+            raise OSError("gone")
+
+    reporter = wait_status.AdmissionWaitReporter(flaky, interval_seconds=0)
+    reporter.report("a")
+    reporter.admitted()  # the clear raises: swallowed, sink dropped
+    assert sent == ["a", wait_status.CLEAR]
+    assert reporter.report("b") is False
 
 
 def test_reporter_drops_a_failing_sink():
@@ -202,9 +339,11 @@ def test_admission_queue_wait_is_reported_and_stops_when_admitted(monkeypatch, t
 
     assert len(fake.chat_bodies) == 1
     assert lines, "a queued load must say why it waits"
-    assert all(line.startswith("waiting for memory to load ") and "GiB free, needs ~" in line
-               for line in lines)
-    assert "12.0 GiB free" in lines[0]
+    waits, clear = lines[:-1], lines[-1]
+    assert all(line.startswith("waiting for memory to load ") and " GiB floor, " in line
+               for line in waits)
+    assert "need ~17.0 GiB + " in waits[0] and "12.0 GiB free" in waits[0]
+    assert clear == wait_status.CLEAR  # admitted: the status is cleared once
     assert reporter.waiting is False  # admitted: no later wait line
     count = len(lines)
     server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
@@ -233,6 +372,25 @@ def test_wait_line_is_written_as_an_sse_comment():
     out = handler.wfile.getvalue().decode()
     assert out.startswith(": sonder-status waiting for memory to load qwen: 4.0 GiB free")
     assert out.endswith("\n\n")
+
+
+def test_clear_frame_is_an_empty_status_comment():
+    assert live_stream.wait_status_frame("") == b": sonder-status\n\n"
+    assert live_stream.wait_status_frame("  ") == b": sonder-status\n\n"
+    assert live_stream.wait_status_frame("a  b") == b": sonder-status a b\n\n"
+
+
+def test_admission_writes_a_clear_frame_after_a_status_frame():
+    handler = _Handler(_Early())
+    reporter = live_stream.arm_wait_status(handler, interval_seconds=0)
+    with wait_status.armed(reporter):
+        wait_status.report_admitted()  # nothing sent yet
+        assert handler.wfile.getvalue() == b""
+        wait_status.report_wait("qwen", 4 * GIB, 6 * GIB)
+        wait_status.report_admitted()
+    frames = handler.wfile.getvalue().decode().split("\n\n")
+    assert frames[0].startswith(": sonder-status waiting for memory to load qwen")
+    assert frames[1] == ": sonder-status"
 
 
 def test_no_reporter_without_an_early_stream():

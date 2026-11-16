@@ -106,7 +106,8 @@ class ChatStreamKeepAlive extends ChatStreamEvent {
 
 /// The server says why the turn is waiting (`: sonder-status …` comment, for
 /// example while GPU admission queues it). [text] is plain text, at most
-/// [maxStatusChars] long; never render it as markup.
+/// [maxStatusChars] long; never render it as markup. An empty [text] is the
+/// clearing frame: the wait is over, drop any status shown.
 class ChatStreamStatus extends ChatStreamEvent {
   final String text;
   const ChatStreamStatus(this.text);
@@ -133,7 +134,8 @@ class SseFrame {
   final bool comment;
   final String data;
 
-  /// Text of a `: sonder-status ` comment; null for any other frame.
+  /// Text of a `: sonder-status` comment ('' for the clearing frame); null for
+  /// any other frame.
   final String? status;
   const SseFrame.comment()
       : comment = true,
@@ -172,13 +174,14 @@ class SseFrameParser {
     if (line.startsWith(':')) {
       var body = line.substring(1);
       if (body.startsWith(' ')) body = body.substring(1);
-      const prefix = 'sonder-status ';
-      if (body.startsWith(prefix)) {
-        var text = body.substring(prefix.length).trim();
+      const name = 'sonder-status';
+      if (body.trimRight() == name || body.startsWith('$name ')) {
+        var text = body.substring(name.length).trim();
         if (text.length > maxStatusChars) {
           text = text.substring(0, maxStatusChars).trimRight();
         }
-        if (text.isNotEmpty) return [SseFrame.statusComment(text)];
+        // An empty text is the server's clearing frame (the wait is over).
+        return [SseFrame.statusComment(text)];
       }
       return const [SseFrame.comment()];
     }

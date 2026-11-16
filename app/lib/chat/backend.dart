@@ -99,7 +99,8 @@ class TurnPhase extends TurnEvent {
 }
 
 /// Why the turn is waiting, in the server's words (plain text), for example
-/// "waiting for memory to load <model>". Cleared by the first answer text.
+/// "waiting for memory to load <model>". An empty [text] clears it, as does
+/// the first answer text.
 class TurnStatus extends TurnEvent {
   final String text;
   const TurnStatus(this.text);

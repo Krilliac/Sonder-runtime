@@ -5531,7 +5531,7 @@ def _post(
 _PREWARM_LOAD_TIMEOUT = 60
 
 
-def prewarm_model(tier: str = "") -> bool:
+def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     """Speculatively load the tier's local model while context is assembled.
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
@@ -5566,9 +5566,9 @@ def prewarm_model(tier: str = "") -> bool:
                 _platform_local_model_options(0.2, 1, _auto_model_context(model),
                     native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
-            _startup_prewarm.load_finished(model)
+            _startup_prewarm.load_finished(model, announce=announce)
         except Exception as exc:
-            _startup_prewarm.load_failed(model, exc)
+            _startup_prewarm.load_failed(model, exc, announce=announce)
         finally:
             prewarm_gate.finish(model)
 

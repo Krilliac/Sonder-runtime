@@ -67,6 +67,7 @@ _MEMORY_REPLICATION_RECEIVER = None
 _MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 from sonder_runtime.platform import context_policy
+from sonder_runtime.platform.config_environment import env_bool
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -893,7 +894,7 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # Interval of SSE keep-alive comment frames while a streamed turn generates.
 STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
 # [server].prewarm_on_start: load the default chat model once the listener is bound.
-PREWARM_ON_START = os.environ.get("SONDER_PREWARM_ON_START", "1").strip().lower() not in {"0", "false", "no", "off"}
+PREWARM_ON_START = env_bool(os.environ.get("SONDER_PREWARM_ON_START", "1"))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -8263,7 +8264,8 @@ def main(
         ).start()
         BOUND_PORT = port
         startup_prewarm.start_default_model_prewarm(
-            setting=PREWARM_ON_START, prewarm=server.prewarm_model,
+            setting=PREWARM_ON_START,
+            prewarm=lambda tier: server.prewarm_model(tier, announce=True),
             enabled=lambda: server.sonder_speculation.prewarm_enabled(),
             thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)

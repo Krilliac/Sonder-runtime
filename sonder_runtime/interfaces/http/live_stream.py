@@ -69,9 +69,13 @@ def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None
 
 
 def wait_status_frame(line: str) -> bytes:
-    """An SSE comment carrying ``line``; clients ignore it, raw viewers read it."""
+    """An SSE comment carrying ``line``; clients ignore it, raw viewers read it.
+
+    An empty ``line`` is the clearing frame (``: sonder-status`` and nothing
+    after it): the wait is over and the client drops the status text.
+    """
     text = " ".join(str(line).split())[:300]
-    return (": sonder-status " + text + "\n\n").encode("utf-8")
+    return (": sonder-status" + (" " + text if text else "") + "\n\n").encode("utf-8")
 
 
 def arm_wait_status(handler, *, interval_seconds: float = wait_status.DEFAULT_INTERVAL_SECONDS,

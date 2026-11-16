@@ -781,7 +781,18 @@ class ChatController extends ChangeNotifier {
           case TurnPhase(:final phase, :final tokensIn):
             live.value = live.value?.copyWith(phase: phase, tokensIn: tokensIn);
           case TurnStatus(:final text):
-            live.value = live.value?.copyWith(waitStatus: text);
+            final current = live.value;
+            if (current == null) break;
+            if (text.isEmpty) {
+              // The server's clearing frame: the wait is over.
+              if (current.waitStatus != null) {
+                live.value = current.copyWith(clearWaitStatus: true);
+              }
+            } else if (current.waitStatus != text) {
+              // The same text again is not news and must not touch the live
+              // value (a status is never progress).
+              live.value = current.copyWith(waitStatus: text);
+            }
           case TurnDelta(:final text):
             if (live.value?.waitStatus != null) {
               live.value = live.value?.copyWith(clearWaitStatus: true);

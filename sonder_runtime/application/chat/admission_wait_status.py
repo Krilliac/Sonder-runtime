@@ -23,12 +23,28 @@ from typing import Callable, Iterator
 
 DEFAULT_INTERVAL_SECONDS = 15.0
 _GIB = 1024.0 ** 3
+# The empty line: "the wait is over, drop the status" (sent once on admission).
+CLEAR = ""
 
 
 def describe_wait(model: str, free_bytes: int | None, needed_bytes: int | None,
-                  detail: str = "") -> str:
-    """One line a person can read, with the numbers when they are known."""
+                  detail: str = "", *, reason: str = "", floor_bytes: int | None = None) -> str:
+    """One line a person can read, with the numbers when they are known.
+
+    ``reason`` is the admission refusal reason (``host_ram_floor`` or
+    ``commit_floor``) with ``floor_bytes`` the floor that applies: the line then
+    names the binding constraint (need + floor, against what is free) instead of
+    a bare "free vs needs" that contradicts the wait when memory looks ample.
+    """
     name = model or "the model"
+    if (reason in ("host_ram_floor", "commit_floor") and free_bytes is not None
+            and needed_bytes is not None and floor_bytes is not None):
+        what = "memory" if reason == "host_ram_floor" else "commit headroom"
+        free = "free" if reason == "host_ram_floor" else "commit free"
+        return "waiting for %s to load %s: need ~%.1f GiB + %.1f GiB floor, %.1f GiB %s" % (
+            what, name, needed_bytes / _GIB, floor_bytes / _GIB, free_bytes / _GIB, free)
+    if reason in ("host_ram_floor", "commit_floor") and detail:
+        return "waiting to load %s: %s" % (name, detail)
     if free_bytes is not None and needed_bytes is not None:
         return "waiting for memory to load %s: %.1f GiB free, needs ~%.1f GiB" % (
             name, free_bytes / _GIB, needed_bytes / _GIB)
@@ -52,6 +68,7 @@ class AdmissionWaitReporter:
         self._clock = clock
         self._last: float | None = None
         self._dead = False
+        self._sent = False
         self.waiting = False
 
     def report(self, line: str) -> bool:
@@ -68,12 +85,23 @@ class AdmissionWaitReporter:
         except Exception:
             self._dead = True
             return False
+        self._sent = True
         return True
 
     def admitted(self) -> None:
-        """The wait is over; later waits of the same turn start a fresh cadence."""
+        """The wait is over; later waits of the same turn start a fresh cadence.
+
+        When a status line was actually sent, an empty line (``CLEAR``) goes to
+        the sink once, so the client drops the stale "waiting" text.
+        """
         self.waiting = False
         self._last = None
+        if self._sent and not self._dead:
+            self._sent = False
+            try:
+                self._emit(CLEAR)
+            except Exception:
+                self._dead = True
 
 
 _REPORTER: ContextVar[AdmissionWaitReporter | None] = ContextVar(
@@ -91,12 +119,13 @@ def armed(reporter: AdmissionWaitReporter | None) -> Iterator[AdmissionWaitRepor
 
 
 def report_wait(model: str, free_bytes: int | None = None, needed_bytes: int | None = None,
-                detail: str = "") -> bool:
+                detail: str = "", *, reason: str = "", floor_bytes: int | None = None) -> bool:
     """Called by admission on every queued iteration; a no-op unless armed."""
     reporter = _REPORTER.get()
     if reporter is None:
         return False
-    return reporter.report(describe_wait(model, free_bytes, needed_bytes, detail))
+    return reporter.report(describe_wait(
+        model, free_bytes, needed_bytes, detail, reason=reason, floor_bytes=floor_bytes))
 
 
 def report_admitted() -> None:
@@ -107,6 +136,6 @@ def report_admitted() -> None:
 
 
 __all__ = [
-    "AdmissionWaitReporter", "DEFAULT_INTERVAL_SECONDS", "armed", "describe_wait",
+    "AdmissionWaitReporter", "CLEAR", "DEFAULT_INTERVAL_SECONDS", "armed", "describe_wait",
     "report_admitted", "report_wait",
 ]

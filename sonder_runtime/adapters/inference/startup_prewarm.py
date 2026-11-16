@@ -26,18 +26,23 @@ from sonder_runtime.adapters.inference.gpu_admission import GpuAdmissionRefused
 logger = logging.getLogger("sonder.prewarm")
 
 
-def load_finished(model: str) -> None:
-    """The prewarm worker's load request completed."""
-    logger.info("prewarm: %s loaded", model)
+def load_finished(model: str, *, announce: bool = True) -> None:
+    """The prewarm worker's load request completed.
+
+    ``announce`` is true for the start-up prewarm (INFO); the per-request
+    prewarm of every chat logs at DEBUG so it adds no line per chat.
+    """
+    logger.log(logging.INFO if announce else logging.DEBUG, "prewarm: %s loaded", model)
 
 
-def load_failed(model: str, error: BaseException) -> None:
+def load_failed(model: str, error: BaseException, *, announce: bool = True) -> None:
     """The prewarm worker's load request failed; admission refusals say why."""
+    level = logging.WARNING if announce else logging.DEBUG
     if isinstance(error, GpuAdmissionRefused):
-        logger.warning("prewarm: %s refused by GPU admission (%s): %s", model,
-                       error.refusal.reason.value, error.refusal.detail)
+        logger.log(level, "prewarm: %s refused by GPU admission (%s): %s", model,
+                   error.refusal.reason.value, error.refusal.detail)
     else:
-        logger.warning("prewarm: %s not loaded (%s)", model, type(error).__name__)
+        logger.log(level, "prewarm: %s not loaded (%s)", model, type(error).__name__)
 
 
 def run_default_model_prewarm(prewarm: Callable[[str], bool],

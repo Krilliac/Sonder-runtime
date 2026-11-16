@@ -74,8 +74,16 @@ void main() {
       expect(status.status,
           'waiting for memory to load m: 4.2 GiB free, needs ~6.5 GiB');
       expect(p.addLine(': keep-alive').single.status, isNull);
-      expect(p.addLine(':sonder-status').single.status, isNull);
       expect(p.addLine(': sonder-statusX y').single.status, isNull);
+    });
+
+    test('an empty sonder-status comment is the clearing frame', () {
+      final p = SseFrameParser();
+      for (final line in [': sonder-status', ':sonder-status', ': sonder-status ']) {
+        final frame = p.addLine(line).single;
+        expect(frame.comment, isTrue, reason: line);
+        expect(frame.status, '', reason: line);
+      }
     });
 
     test('an overlong status is trimmed; markup stays plain text', () {
@@ -97,6 +105,7 @@ void main() {
       return _streamed([
         ': keep-alive\n\n',
         ': sonder-status every pool GPU slot is busy\n\n',
+        ': sonder-status\n\n',
         'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
         'data: [DONE]\n\n',
       ]);
@@ -104,8 +113,8 @@ void main() {
     final (events, error) = result;
     expect(error, isNull);
     expect(events.whereType<ChatStreamKeepAlive>(), hasLength(1));
-    expect(events.whereType<ChatStreamStatus>().single.text,
-        'every pool GPU slot is busy');
+    expect(events.whereType<ChatStreamStatus>().map((e) => e.text),
+        ['every pool GPU slot is busy', '']);
   });
 
   test('content + finish + usage + [DONE]: deltas then the reply', () async {
