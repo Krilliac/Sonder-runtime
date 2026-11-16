@@ -116,7 +116,7 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
     final keyStyle = tokens.mono(13, color: tokens.muted);
     final valueStyle = tokens.mono(13, color: tokens.text);
     Widget argRow(String key, String value, {Color? color}) => Padding(
-          padding: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.only(bottom: SonderSpace.xs),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             SizedBox(width: 76, child: Text(key, style: keyStyle)),
             Expanded(
@@ -152,9 +152,9 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
       children: [
         for (final (key, value) in request.arguments) argRow(key, value),
         argRow(SonderStrings.approvalRefusedLabel, request.refusedLine),
-        const SizedBox(height: 12),
+        const SizedBox(height: SonderSpace.md),
         Text(SonderStrings.approvalExplainer(_ttl, request.mode)),
-        const SizedBox(height: 12),
+        const SizedBox(height: SonderSpace.md),
         if (widget.consoleFallback)
           WorkspaceNotice(
             kind: StatusKind.note,
@@ -178,7 +178,7 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
           Row(children: [
             Text(SonderStrings.validFor,
                 style: text.bodyMedium?.copyWith(color: tokens.text2)),
-            const SizedBox(width: 12),
+            const SizedBox(width: SonderSpace.md),
             DropdownButton<Duration>(
               key: const Key('approval-ttl'),
               value: _ttl,
@@ -197,7 +197,7 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
             ),
           ]),
         if (widget.error != null) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: SonderSpace.md),
           WorkspaceNotice(kind: StatusKind.fail, title: widget.error!),
         ],
       ],

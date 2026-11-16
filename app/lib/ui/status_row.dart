@@ -105,7 +105,7 @@ class StatusRow extends StatelessWidget {
                         overflow: TextOverflow.ellipsis)),
               ]),
               Padding(
-                padding: const EdgeInsets.only(left: markWidth, top: 2),
+                padding: const EdgeInsets.only(left: markWidth, top: SonderSpace.xxs),
                 child: Text(value, style: valueStyle),
               ),
             ]);
@@ -126,12 +126,12 @@ class StatusRow extends StatelessWidget {
       }
       final trailing = this.trailing;
       return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(vertical: SonderSpace.tight),
         child: Row(children: [
           Expanded(
               child: Semantics(
                   label: semantics, excludeSemantics: true, child: content)),
-          if (trailing != null) ...[const SizedBox(width: 8), trailing],
+          if (trailing != null) ...[const SizedBox(width: SonderSpace.sm), trailing],
         ]),
       );
     });

@@ -383,12 +383,33 @@ abstract final class SonderRadius {
   static const pill = 999.0;
 }
 
+/// The mark's own colours: the brand gradient and the navy tile under it.
+/// They belong to the mark (`ui/sonder_mark.dart` is their only reader), not
+/// to the interface, and they live here so this file stays the one place a
+/// colour value is written.
+abstract final class SonderMarkColors {
+  static const gradient = [
+    Color(0xFFB56CF7),
+    Color(0xFF8A85FB),
+    Color(0xFF4FA6FF),
+  ];
+  static const tileTop = Color(0xFF16173D);
+  static const tileBottom = Color(0xFF0B0C22);
+}
+
 /// The spacing scale: a 4-point grid. Layout gaps and padding come from here
 /// rather than one-off literals (7, 9, 11...), so rhythm stays consistent.
+///
+/// [tight] and [snug] are half steps for the inside of dense controls only (a
+/// glyph beside its label in a chip, the inset of a compact row); layout gaps
+/// use the 4-point steps. [hair] is a one-pixel optical nudge, never a gap.
 abstract final class SonderSpace {
+  static const hair = 1.0;
   static const xxs = 2.0;
   static const xs = 4.0;
+  static const tight = 6.0;
   static const sm = 8.0;
+  static const snug = 10.0;
   static const md = 12.0;
   static const lg = 16.0;
   static const xl = 20.0;

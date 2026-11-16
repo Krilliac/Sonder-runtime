@@ -25,7 +25,8 @@ class StatusPill extends StatelessWidget {
         child: AnimatedContainer(
           duration: SonderMotion.of(context, SonderMotion.fast),
           padding: EdgeInsets.symmetric(
-              horizontal: dense ? 6 : SonderSpace.sm, vertical: dense ? 1 : 2),
+              horizontal: dense ? SonderSpace.tight : SonderSpace.sm,
+              vertical: dense ? SonderSpace.hair : SonderSpace.xxs),
           decoration: BoxDecoration(
             color: color.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(SonderRadius.pill),
@@ -68,7 +69,7 @@ class CountBadge extends StatelessWidget {
       child: ExcludeSemantics(
         child: Container(
           constraints: const BoxConstraints(minWidth: 20),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: SonderSpace.tight, vertical: SonderSpace.hair),
           decoration: BoxDecoration(
             color: color.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(SonderRadius.pill),

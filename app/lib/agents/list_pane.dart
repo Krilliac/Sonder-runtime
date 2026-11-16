@@ -398,7 +398,7 @@ class _AgentRowFrame extends StatelessWidget {
                   if (trailing != null) ...[
                     const SizedBox(width: SonderSpace.sm),
                     Padding(
-                      padding: const EdgeInsets.only(top: 2),
+                      padding: const EdgeInsets.only(top: SonderSpace.xxs),
                       child: trailing!,
                     ),
                   ],
@@ -566,7 +566,7 @@ class SegmentedProgress extends StatelessWidget {
                         Expanded(
                           flex: part.count,
                           child: Container(
-                            margin: const EdgeInsets.only(right: 1),
+                            margin: const EdgeInsets.only(right: SonderSpace.hair),
                             color: part.color,
                           ),
                         ),

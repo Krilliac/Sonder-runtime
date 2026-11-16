@@ -218,7 +218,9 @@ class _CodeBlockViewState extends State<CodeBlockView> {
             children: [
               Container(
                 height: SonderSpace.x4,
-                padding: const EdgeInsets.only(left: SonderSpace.lg, right: 96),
+                // Room on the right for the copy control: two 48px targets.
+                padding: const EdgeInsets.only(
+                    left: SonderSpace.lg, right: SonderSpace.x5 + SonderSpace.x5),
                 alignment: Alignment.centerLeft,
                 // The header bar: one tone below the code, inside the
                 // frame's top corners.

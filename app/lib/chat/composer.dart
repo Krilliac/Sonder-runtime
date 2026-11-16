@@ -793,7 +793,7 @@ class CommandRow extends StatelessWidget {
               if (usage != command.displayName || aliases.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(
-                      left: 24 + SonderSpace.sm, top: SonderSpace.xxs),
+                      left: SonderSpace.xxl + SonderSpace.sm, top: SonderSpace.xxs),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
