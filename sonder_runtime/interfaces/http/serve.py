@@ -3296,7 +3296,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return None
 
     parts = stripped.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = parts[0].lower() if parts[0].isascii() else parts[0]
     arg = parts[1] if len(parts) > 1 else ""
     _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).

@@ -149,8 +149,14 @@ def _test_runner_action(match):
     return "/test %s" % runner if runner else None
 
 
-def _rule(pattern, action):
-    return (re.compile(pattern, re.IGNORECASE | re.ASCII), action)
+def _rule(pattern, action, flags=re.ASCII):
+    """Compile a rule; ``flags=0`` is for rules whose capture is free data.
+
+    Such rules wrap their command keywords in an ASCII-only ``(?a:...)``
+    group so only the captured argument sees Unicode word classes and case
+    folding (U+212A, U+017F, U+0130 and U+0131 cannot spell a keyword).
+    """
+    return (re.compile(pattern, re.IGNORECASE | flags), action)
 
 
 def _structured_catalog_match(value):
@@ -333,8 +339,8 @@ _RULES = [
           r"(?P<arg>.+?)\s*[?!.]*$", _weather_action),
     _rule(r"^(?:weather|forecast)\s+(?:for|in)\s+(?P<arg>.+?)\s*[?!.]*$",
           _weather_action),
-    _rule(r"^(?:weather|forecast)\s+(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
-          _weather_action),
+    _rule(r"^(?a:(?:weather|forecast)\s+)(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
+          _weather_action, 0),
     _rule(r"^(?:weather|forecast)\s*[?!.]*$", _weather_action),
 
     # --- developer tools ---
@@ -415,7 +421,7 @@ _RULES = [
     _rule(r"^(?:find|list|search)\s+files?\b(?:\s+(?:matching|named|like)?\s*(?P<arg>.+))?",
           lambda m: ("/files %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:read|open|show\s+me)\s+(?:the\s+)?file\s+(?P<arg>\S+)", _with_arg("/read")),
-    _rule(r"^read\s+(?P<arg>\S+\.\w+)\s*$", _with_arg("/read")),
+    _rule(r"^(?a:read\s+)(?P<arg>\S+\.\w+)\s*$", _with_arg("/read"), 0),
     _rule(r"^append\s+to\s+(?:file\s+)?(?P<arg>.+)$", _with_arg("/append")),
     _rule(r"^(?:write|save)\s+(?:to\s+)?file\s+(?P<arg>.+)$", _with_arg("/write")),
     _rule(r"^edit\s+file\s+(?P<arg>.+)$", _with_arg("/edit")),
@@ -468,10 +474,10 @@ _RULES = [
     _rule(r"^run\s+the\s+project\b", _fixed("/runproject")),
 
     # --- generation ---
-    _rule(r"^(?:create|make|start|scaffold|generate)\s+(?:a\s+|an\s+)?(?:new\s+)?"
-          r"(?P<kind>[\w+#.-]+)\s+(?:console\s+)?project"
-          r"(?:\s+(?:named|called)\s+(?P<name>[\w.-]+))?\s*$",
-          _scaffold_action),
+    _rule(r"^(?a:(?:create|make|start|scaffold|generate)\s+(?:a\s+|an\s+)?(?:new\s+)?)"
+          r"(?P<kind>[\w+#.-]+)(?a:\s+(?:console\s+)?project)"
+          r"(?:(?a:\s+(?:named|called)\s+)(?P<name>[\w.-]+))?\s*$",
+          _scaffold_action, 0),
     _rule(r"^(?:generate|make|create|build)\s+a\s+game\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/game %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:game\s+)?(?:forge|reference\s+suite|game\s+suite)\b(?:\s+(?P<arg>.+))?",
@@ -480,8 +486,8 @@ _RULES = [
           r"(?:\s+(?P<arg>.+))?", lambda m: ("/asset %s" % (m.group("arg") or "")).strip()),
 
     # --- model / persona ---
-    _rule(r"^(?:switch\s+to|use|select|set)\s+(?:the\s+)?(?P<arg>(?!the\b|a\b)[\w.:-]+)\s+"
-          r"(?:tier|model)\b", _with_arg("/model")),
+    _rule(r"^(?a:(?:switch\s+to|use|select|set)\s+(?:the\s+)?)(?P<arg>(?!the\b|a\b)[\w.:-]+)"
+          r"(?a:\s+(?:tier|model)\b)", _with_arg("/model"), 0),
     _rule(r"^set\s+(?:the\s+)?(?:persona|voice)\s+to\s+(?P<arg>.+)$", _with_arg("/persona")),
     _rule(r"^set\s+(?:the\s+)?model\s+to\s+(?P<arg>.+)$", _with_arg("/model")),
 
@@ -893,7 +899,7 @@ def _canonical_single_name_present(value, command):
     name = command.name.lstrip("/")
     if len(_tokenize(name)) != 1:
         return False
-    return name.lower() in re.findall(r"[a-z0-9]+", str(value).lower())
+    return name.lower() in [t.lower() for t in _WORD.findall(str(value))]
 
 
 def _single_word_argument(value, matched):
