@@ -4,8 +4,8 @@ Pure decision rule: callers supply the rule (built from the runtime policy
 section) and the kill-switch state, and act on the typed result.  Names are
 judged with the same normalisation and path-segment matching as the
 tool-lane block list, so the two lists agree on what a model name means.  The
-built-in defaults are always part of every rule: the policy section can add
-entries but never remove one.  No I/O happens here.
+shipped floor (passed in) is always part of every rule: the policy section can
+add entries but never remove one.  No I/O happens here.
 """
 from __future__ import annotations
 
@@ -15,17 +15,15 @@ from enum import Enum
 from typing import Any
 
 from ..tool_lane_models import (
-    DEFAULT_DENIED_NAMES,
-    DEFAULT_DENIED_PREFIXES,
+    ToolLaneFloor,
     name_candidates,
     normalize_name,
     policy_candidates,
 )
 
-# The built-in models are the tool-lane deny list's: the same prefixes (so every
-# quantisation of the two source repositories, tagged or not) and names.
-DEFAULT_PREFIXES = DEFAULT_DENIED_PREFIXES
-DEFAULT_NAMES = DEFAULT_DENIED_NAMES
+# The floor models are the tool-lane deny list's: the same prefixes (so every
+# quantisation of the two source repositories, tagged or not) and names.  The
+# floor is passed in; no model name is written here.
 
 SECTION_KEYS = frozenset({"enabled", "names", "prefixes"})
 PATH_KEY = "path"
@@ -60,28 +58,28 @@ def _clean_entries(values: Any) -> list[str]:
 
 @dataclass(frozen=True)
 class AppliesRule:
-    """Defaults unioned with the policy section."""
+    """The floor unioned with the policy section."""
 
     enabled: bool
     names: frozenset[str]
     prefixes: tuple[str, ...]
+    floor: ToolLaneFloor = ToolLaneFloor()
 
     @classmethod
-    def from_policy(cls, section: Mapping[str, Any] | None) -> AppliesRule:
+    def from_policy(cls, section: Mapping[str, Any] | None, *, floor: ToolLaneFloor) -> AppliesRule:
         raw = section if isinstance(section, Mapping) else {}
-        names = frozenset(DEFAULT_NAMES) | frozenset(_clean_entries(raw.get("names")))
-        prefixes = list(DEFAULT_PREFIXES)
+        names = floor.names | frozenset(_clean_entries(raw.get("names")))
+        prefixes = list(floor.prefixes)
         for prefix in _clean_entries(raw.get("prefixes")):
             if prefix not in prefixes:
                 prefixes.append(prefix)
         return cls(enabled=raw.get("enabled", True) is not False,
-                   names=names, prefixes=tuple(prefixes))
+                   names=names, prefixes=tuple(prefixes), floor=floor)
 
     @property
     def extended(self) -> bool:
-        """True when the rule holds anything beyond the built-in defaults."""
-        return (self.names != frozenset(DEFAULT_NAMES)
-                or self.prefixes != DEFAULT_PREFIXES)
+        """True when the rule holds anything beyond the shipped floor."""
+        return self.names != self.floor.names or self.prefixes != self.floor.prefixes
 
 
 def decide(model: Any, rule: AppliesRule, *, kill_switch_off: bool = False) -> AppliesDecision:
@@ -104,7 +102,7 @@ def decide(model: Any, rule: AppliesRule, *, kill_switch_off: bool = False) -> A
             return AppliesDecision(True, AppliesReason.MATCHED_NAME, candidate)
         for prefix in rule.prefixes:
             if candidate.startswith(prefix) and (
-                prefix in DEFAULT_PREFIXES or candidate in original_candidates
+                prefix in rule.floor.prefixes or candidate in original_candidates
             ):
                 return AppliesDecision(True, AppliesReason.MATCHED_PREFIX, prefix)
     return AppliesDecision(False, AppliesReason.NOT_CONFIGURED)

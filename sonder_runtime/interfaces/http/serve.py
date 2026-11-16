@@ -2964,10 +2964,17 @@ def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
     """
     try:
         tools = command_catalog.http_slash_tools().get(cmd, ())
+        untooled = cmd in command_catalog.http_slash_untooled()
     except command_catalog.CatalogUnavailable as exc:
         # Fail closed on ignorance: an empty map would answer "allowed" for
         # every command in this chain.
         return "refused %s: %s" % (cmd, exc)
+    if untooled:
+        # No tool to grade, so the per-tool role check below would see nothing.
+        role = _restricted_tool_role(context)
+        reason = role_tool_policy.untooled_refusal_reason(cmd, role) if role else ""
+        if reason:
+            return "refused %s: %s" % (cmd, reason)
     # The catalog deliberately reports the union of a slash alias' branches.
     # These aliases contain both an inspection and a process-wide mutation, so
     # applying the mutation's admin gate to `/emotion status` or `/prefer
@@ -3187,6 +3194,13 @@ def _slash_system_operation(command, argument):
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
+        return "runtime_policy_change"
+    # ``/runtime tools allow|revoke|deny|undeny`` would write the model tool
+    # overlay; server.control_command refuses it on this surface anyway (no
+    # console operator), and this keeps the role check from reading it as a read.
+    if command in ("/runtime", "/models") and action == "tools" and (
+        parts[1:] and parts[1].split()[0].lower() in ("allow", "revoke", "deny", "undeny")
+    ):
         return "runtime_policy_change"
     if command in ("/runtime", "/models") and action == "overflow" and (
         parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")

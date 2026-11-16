@@ -18,10 +18,9 @@ import re
 from ..openrouter_policy import OpenRouterPolicyError, validate_model_id
 from ..reference_lookup import applies as _lookup_applies
 from ..tool_lane_models import (
-    DEFAULT_DENIED_NAMES,
-    DEFAULT_DENIED_PREFIXES,
     ToolLaneDenyList,
-    decide,
+    ToolLaneFloor,
+    decide_listed,
     normalize_name,
 )
 
@@ -135,7 +134,7 @@ def validate_model(value, fallback: str, *, allow_unset: bool = False) -> str:
     return model
 
 
-def seed_model(env, tier: str) -> str:
+def seed_model(env, tier: str, *, floor: ToolLaneFloor) -> str:
     """Seed one tier's model from an explicit environment mapping.
 
     ``SONDER_REASONING=none`` / ``SONDER_VISION=off`` seed an optional tier as
@@ -151,8 +150,11 @@ def seed_model(env, tier: str) -> str:
         configured = ""
     if configured and not is_cloud_name(configured):
         model = validate_model(configured, DEFAULT_MODELS[tier])
-        # A model blocked from tool lanes is never seeded into a tier.
-        if decide(model, ToolLaneDenyList.from_policy(None), free_form=False).denied:
+        # A model blocked from tool lanes is never seeded into a tier, and
+        # without the shipped floor no model can be judged, so none is.
+        if not floor.available or decide_listed(
+            model, ToolLaneDenyList.from_policy(None, floor=floor), free_form=False,
+        ).denied:
             return DEFAULT_MODELS[tier]
         return model
     return DEFAULT_MODELS[tier]
@@ -166,11 +168,11 @@ def seed_embedding_model(env) -> str:
     return DEFAULT_EMBEDDING_MODEL
 
 
-def default_tool_lane_denied_models() -> dict:
-    """The built-in tool-lane deny list in policy-section shape."""
+def default_tool_lane_denied_models(floor: ToolLaneFloor) -> dict:
+    """The shipped tool-lane floor in policy-section shape."""
     return {
-        "names": sorted(DEFAULT_DENIED_NAMES),
-        "prefixes": list(DEFAULT_DENIED_PREFIXES),
+        "names": sorted(floor.names),
+        "prefixes": list(floor.prefixes),
     }
 
 
@@ -179,18 +181,18 @@ def default_reference_lookup() -> dict:
     return _lookup_applies.default_section()
 
 
-def default_policy(env) -> dict:
+def default_policy(env, *, floor: ToolLaneFloor) -> dict:
     """Built-in policy seeded from an explicit environment mapping."""
     return {
         "version": VERSION,
         "revision": 0,
-        "local_models": {tier: seed_model(env, tier) for tier in LOCAL_TIERS},
+        "local_models": {tier: seed_model(env, tier, floor=floor) for tier in LOCAL_TIERS},
         "embedding_model": seed_embedding_model(env),
         "routing": dict(DEFAULT_ROUTING),
         "npu": dict(DEFAULT_NPU),
         "long_context_overflow": dict(DEFAULT_LONG_CONTEXT_OVERFLOW),
         "provider_models": {},
-        "tool_lane_denied_models": default_tool_lane_denied_models(),
+        "tool_lane_denied_models": default_tool_lane_denied_models(floor),
         "reference_lookup": default_reference_lookup(),
         "updated_ts": 0,
         "source": "environment seed",
@@ -370,11 +372,13 @@ def normalize_provider_models(raw) -> dict:
     return result
 
 
-def normalize_tool_lane_denied_models(raw) -> dict:
+def normalize_tool_lane_denied_models(raw, *, floor: ToolLaneFloor) -> dict:
     """Validate ``tool_lane_denied_models``: ``{"names": [...], "prefixes": [...]}``.
 
-    Entries must look like model names.  The built-in defaults are always
-    present in the result, so the section can add entries but never remove one.
+    Entries must look like model names.  The shipped floor is always present
+    in the result, so the section can add entries but never remove one.  The
+    section is the deprecated way to add entries; the operator overlay file
+    (``model_tool_policy.json``) replaces it.
     """
     if raw in (None, ""):
         raw = {}
@@ -401,7 +405,7 @@ def normalize_tool_lane_denied_models(raw) -> dict:
                 )
             entries.append(normalize_name(text))
         cleaned[key] = entries
-    deny = ToolLaneDenyList.from_policy(cleaned)
+    deny = ToolLaneDenyList.from_policy(cleaned, floor=floor)
     return {
         "names": sorted(deny.names),
         "prefixes": list(deny.prefixes),
@@ -450,23 +454,46 @@ def normalize_reference_lookup(raw) -> dict:
     }
 
 
-def reference_lookup_rule(policy) -> _lookup_applies.AppliesRule:
-    """The lookup rule for a loaded policy (defaults always included)."""
+def reference_lookup_rule(policy, *, floor: ToolLaneFloor) -> _lookup_applies.AppliesRule:
+    """The lookup rule for a loaded policy (the floor always included)."""
     section = policy.get("reference_lookup") if isinstance(policy, dict) else None
-    return _lookup_applies.AppliesRule.from_policy(section)
+    return _lookup_applies.AppliesRule.from_policy(section, floor=floor)
 
 
-def tool_lane_deny_list(policy) -> ToolLaneDenyList:
-    """The deny list in force for a loaded policy (defaults always included).
+def _merged_section(base, extra) -> dict:
+    """``names``/``prefixes`` of ``base`` followed by those of ``extra`` (add-only)."""
+    merged = {"names": [], "prefixes": []}
+    for section in (base, extra):
+        if isinstance(section, dict):
+            for key in merged:
+                values = section.get(key)
+                if isinstance(values, (list, tuple)):
+                    merged[key].extend(values)
+    return merged
+
+
+def tool_lane_deny_list(
+    policy, *, floor: ToolLaneFloor, extra=None, extra_readable: bool = True,
+    overlay_problem: str = "",
+) -> ToolLaneDenyList:
+    """The deny list in force for a loaded policy (the floor always included).
 
     A policy that loaded with an ``error`` fell back to built-in defaults, so
     the list is marked unreadable and caller-named models fail closed.
+    ``extra`` is a ``names``/``prefixes`` section from the operator overlay
+    file, unioned in; ``extra_readable=False`` (the overlay could not be read)
+    marks the list unreadable the same way.  ``overlay_problem`` names an
+    overlay that exists but cannot be used; every model is then refused in
+    tool lanes (``tool_lane_models.decide``).
     """
     if not isinstance(policy, dict):
-        return ToolLaneDenyList.from_policy(None, readable=False)
-    readable = not str(policy.get("error") or "").strip()
+        return ToolLaneDenyList.from_policy(
+            extra, floor=floor, readable=False, overlay_problem=overlay_problem,
+        )
+    readable = not str(policy.get("error") or "").strip() and bool(extra_readable)
     return ToolLaneDenyList.from_policy(
-        policy.get("tool_lane_denied_models"), readable=readable,
+        _merged_section(policy.get("tool_lane_denied_models"), extra),
+        floor=floor, readable=readable, overlay_problem=overlay_problem,
     )
 
 
@@ -474,7 +501,7 @@ def denied_local_bindings(local_models, deny: ToolLaneDenyList) -> list:
     """``(tier, model)`` for each tier binding that names a model on ``deny``."""
     return [
         (tier, model) for tier, model in (local_models or {}).items()
-        if decide(model, deny, free_form=False).denied
+        if decide_listed(model, deny, free_form=False).denied
     ]
 
 
@@ -487,14 +514,14 @@ def tool_lane_binding_notice(tier, model) -> str:
     )
 
 
-def normalize(payload, defaults=None) -> dict:
+def normalize(payload, defaults=None, *, floor: ToolLaneFloor) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("runtime policy must be a JSON object")
     # Environment variables seed a file only when it is first created. Once
     # a shared policy exists, normalization and recovery use stable
     # built-ins so separately launched surfaces cannot drift with their
     # inherited env.
-    base = default_policy(env={}) if defaults is None else defaults
+    base = default_policy(env={}, floor=floor) if defaults is None else defaults
     raw_models = payload.get("local_models") or {}
     raw_routing = payload.get("routing") or {}
     if not isinstance(raw_models, dict) or not isinstance(raw_routing, dict):
@@ -508,12 +535,14 @@ def normalize(payload, defaults=None) -> dict:
         for tier in LOCAL_TIERS
     }
     tool_lane_denied = normalize_tool_lane_denied_models(
-        payload.get("tool_lane_denied_models")
+        payload.get("tool_lane_denied_models"), floor=floor,
     )
     # A blocked model in one tier binding drops that binding only (the tier
     # keeps its default); an upgrade must not invalidate an otherwise good
     # file.  A malformed deny section above still invalidates it.
-    dropped = denied_local_bindings(local_models, ToolLaneDenyList.from_policy(tool_lane_denied))
+    dropped = denied_local_bindings(
+        local_models, ToolLaneDenyList.from_policy(tool_lane_denied, floor=floor),
+    )
     for tier, _model in dropped:
         local_models[tier] = base["local_models"].get(tier, DEFAULT_MODELS[tier])
     embedding_model = validate_model(
@@ -580,7 +609,7 @@ def npu_mode(capability, policy) -> str:
     return mode if mode in NPU_MODES else "off"
 
 
-def disk_payload(policy: dict) -> dict:
+def disk_payload(policy: dict, *, floor: ToolLaneFloor) -> dict:
     payload = {key: policy[key] for key in (
         "version", "revision", "local_models", "embedding_model", "routing", "npu",
         "long_context_overflow", "updated_ts", "source",
@@ -589,9 +618,9 @@ def disk_payload(policy: dict) -> dict:
     # policy file that never used it keeps its existing shape.
     if policy.get("provider_models"):
         payload["provider_models"] = policy["provider_models"]
-    # Written only when it adds to the built-in defaults.
+    # Written only when it adds to the shipped floor.
     section = policy.get("tool_lane_denied_models")
-    if section and section != default_tool_lane_denied_models():
+    if section and section != default_tool_lane_denied_models(floor):
         payload["tool_lane_denied_models"] = section
     lookup = policy.get("reference_lookup")
     if lookup and lookup != default_reference_lookup():
