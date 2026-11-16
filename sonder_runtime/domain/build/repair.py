@@ -9,7 +9,10 @@ Why the scan normalizes first (F7): the preprocessor splices
 backslash-newlines, maps ``%:`` to ``#`` and ``??=`` to ``#``, and strips
 comments before it sees a directive, so ``%:include``, ``#inc\\<newline>lude``
 and ``# /**/ include`` are all real directives. The scan runs on the same
-logical lines the compiler would see.
+logical lines the compiler would see. Compilers disagree on some of this
+(trigraphs on or off, raw strings in C, whether blanks may sit between the
+backslash and the newline of a splice), so ``scan_added_lexings`` scans
+every reading and refuses what any of them refuses.
 """
 from __future__ import annotations
 
@@ -166,13 +169,21 @@ def _glob_match(rel: str, glob: str) -> bool:
 _TRIGRAPHS = {"=": "#", "/": "\\", "'": "^", "(": "[", ")": "]", "!": "|", "<": "{", ">": "}", "-": "~"}
 _TRIGRAPH_RE = re.compile(r"\?\?([=/'()!<>-])")
 # gcc and clang accept blanks (space, tab, form feed, vertical tab) between the
-# backslash and the newline of a line splice. CRLF/CR are already folded to LF.
+# backslash and the newline of a line splice; MSVC does not splice there (the
+# next line stays a line of its own). CRLF/CR are already folded to LF.
 _SPLICE_RE = re.compile(r"\\[ \t\f\v]*\n")
+_STRICT_SPLICE = "\\\n"
+_LEGACY_SPLICE_RE = re.compile(r"\\[ \t]*\n")
+# A backslash (or its trigraph) with blanks before the newline: the only text
+# the splice readings lex differently.
+_BLANK_SPLICE_RE = re.compile(r"(?:\\|\?\?/)([ \t\f\v]+)\n")
+_DIGRAPH_PAIRS = ("<:", ":>", "<%", "%>", "%:")
 _RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 
 
 def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool = True,
-                       digraphs: bool = True) -> str:
+                       digraphs: bool = True, strict_splices: bool = False,
+                       legacy: bool = False) -> str:
     """Translation phases 1-3 as far as the scan needs them.
 
     All nine trigraphs are replaced, backslash-newline splices (blanks between
@@ -189,19 +200,34 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool =
     ``trigraphs=False`` leaves ``??/`` and friends alone, as gcc, clang and
     MSVC do by default (only ``-trigraphs``/``-std=c++14`` and older apply
     them); ``digraphs=False`` leaves ``<:``/``<%`` alone so a header-name
-    such as ``<:/../x.h>`` is seen as written. Neither reading is safe to
-    assume, so ``scan_added_lexings`` scans every combination and unions
+    such as ``<:/../x.h>`` is seen as written. ``strict_splices=True`` joins
+    only a backslash directly followed by the newline, as MSVC does: with a
+    blank in between, the lenient (gcc/clang) reading lets a ``//`` comment
+    swallow the next line while MSVC compiles that line. No reading is safe
+    to assume, so ``scan_added_lexings`` scans every combination and unions
     the reasons.
+    ``legacy=True`` is the one reading this scanner had before those modes
+    existed (only ``??=`` and ``??/``, splices across space and tab, ``%:``
+    as the only digraph); it overrides the three mode flags. No compiler
+    reads a file that way, but it is scanned too so that nothing the old
+    scanner refused is accepted now.
     A ``'`` inside a pp-number (``1'000``) is a C++14 digit separator, not
     the start of a character literal (which could otherwise swallow a
     string's quote and start a phantom comment that hides later lines).
     """
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if trigraphs:
-        value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
-    value = _SPLICE_RE.sub("", value)
-    if digraphs:
+    if legacy:
+        value = value.replace("??=", "#").replace("??/", "\\")
+        value = _LEGACY_SPLICE_RE.sub("", value)
         value = value.replace("%:%:", "##").replace("%:", "#")
+        digraphs = False  # the other digraphs stay as written
+    else:
+        if trigraphs:
+            value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
+        value = value.replace(_STRICT_SPLICE, "") if strict_splices \
+            else _SPLICE_RE.sub("", value)
+        if digraphs:
+            value = value.replace("%:%:", "##").replace("%:", "#")
     out: list[str] = []
     i = 0
     n = len(value)
@@ -289,9 +315,19 @@ _PRAGMA_BAD_RE = re.compile(
 )
 _PRAGMA_OP_RE = re.compile(r"\b_Pragma\s*\(")
 _MS_PRAGMA_RE = re.compile(r"\b__pragma\s*\(")
-_HAS_RE = re.compile(r"\b__has_(?:include(?:_next)?|embed)\s*\(\s*(\S?)")
-_HAS_SHIM_RE = re.compile(r"#\s*define\s+$")
+# ``__has_include__``/``__has_include_next__`` are the spellings older GCC used.
+_HAS_TOKEN_RE = re.compile(r"\b__has_(?:include(?:_next)?(?:__)?|embed)\b")
+# The operand must open on the token's own logical line: ``(`` then ``<`` or ``"``.
+_HAS_OPERAND_RE = re.compile(r"[ \t\f\v]*\([ \t\f\v]*([<\"])")
+# Directives whose first operand is a macro *name*: there the token is defined,
+# removed or tested, never evaluated. Matched from the start of the logical
+# line, so text before the ``#`` (``#if 0 #define __has_include(P)``, a
+# stringized or pasted ``#define``) is not a directive head.
+_HAS_NAME_HEAD_RE = re.compile(r"\s*(?:#|%:)\s*(?:define|undef|ifdef|ifndef|elifdef|elifndef)\s+")
+_HAS_IF_HEAD_RE = re.compile(r"\s*(?:#|%:)\s*(?:if|elif)\b")
+_HAS_COMPUTED = "__has_include/__has_embed: computed operand (not a literal header-name)"
 _HEADER_NAME_LIMIT = 4096
+_BLANKS = " \t\f\v"
 _ASM_RE = re.compile(r"\b(?:asm|__asm__|__asm)\b")
 # An assembler directive anywhere in added code: in an asm body, a string
 # literal, a macro that later feeds asm (``#define X .incbin "f"``) or a
@@ -433,14 +469,164 @@ def _include_target(rest: str) -> tuple[str, bool] | None:
     return None
 
 
+class _CallDepth:
+    """Whether a position on an ``#if``/``#elif`` line sits inside call-like parentheses.
+
+    An ``(`` that follows an identifier or a ``)`` may open a macro invocation,
+    and macro arguments are expanded before ``__has_include`` sees them. The
+    line is walked once, left to right (every character charged), so the work
+    is linear however many tokens it holds. A ``'`` (character literal or
+    digit separator: which one decides where parentheses pair) or an
+    unterminated string makes the rest of the line count as inside a call.
+    """
+
+    __slots__ = ("calls", "end", "pos", "previous", "stack", "text", "unsure")
+
+    def __init__(self, text: str, start: int, end: int) -> None:
+        self.text = text
+        self.pos = start
+        self.end = end
+        self.stack: list[bool] = []
+        self.calls = 0
+        self.previous = ""
+        self.unsure = False
+
+    def inside_call(self, upto: int, budget: _Budget) -> bool:
+        text = self.text
+        i = self.pos
+        budget.charge(max(0, upto - i) + 1)
+        while i < upto and not self.unsure:
+            ch = text[i]
+            if ch == '"':
+                i += 1
+                while i < self.end and text[i] != '"':
+                    i += 2 if text[i] == "\\" else 1
+                if i >= self.end:
+                    self.unsure = True
+            elif ch == "'":
+                self.unsure = True
+            elif ch == "(":
+                call = self.previous in (")", "$", "_") or self.previous.isalnum()
+                self.stack.append(call)
+                self.calls += call
+            elif ch == ")" and self.stack:
+                self.calls -= self.stack.pop()
+            if ch not in _BLANKS:
+                self.previous = ch
+            i += 1
+        self.pos = max(self.pos, i)
+        return self.unsure or self.calls > 0
+
+    def skip_operand(self, after: int) -> None:
+        """Resume after a header-name: its characters are not parentheses or quotes."""
+        if after > self.pos:
+            self.pos = after
+            self.previous = ">"
+            self.stack.append(False)  # the operator's own ``(``; its ``)`` pops this
+
+
+def _is_defined_operand(text: str, line_start: int, start: int, end: int, line_end: int,
+                        budget: _Budget) -> bool:
+    """``defined(TOKEN)`` or ``defined TOKEN`` (the token is tested, not evaluated)."""
+    j = start
+    while j > line_start and text[j - 1] in _BLANKS:
+        j -= 1
+    paren = j > line_start and text[j - 1] == "("
+    if paren:
+        j -= 1
+        while j > line_start and text[j - 1] in _BLANKS:
+            j -= 1
+    k = end
+    while k < line_end and text[k] in _BLANKS:
+        k += 1
+    budget.charge(start - j + k - end + 1)
+    if j - 7 < line_start or text[j - 7:j] != "defined":
+        return False
+    if j - 7 > line_start and (text[j - 8].isalnum() or text[j - 8] in "_$"):
+        return False
+    following = text[k] if k < line_end else ""
+    return following == ")" if paren else following != "("
+
+
+def _scan_has_include(text: str, *, include_ok: Callable[[str], bool], budget: _Budget,
+                      refuse: Callable[[str], None]) -> None:
+    """Refuse every ``__has_include``-family token whose operand cannot be checked.
+
+    The compiler probes the file system for the operand, so only a literal
+    header-name that passes the include rules is accepted. ``#define P "C:/x"``
+    with ``__has_include(P)``, an alias (``#define H __has_include`` then
+    ``H(P)``) and a parenthesis that comes from a macro all probe a computed
+    path, so a token not directly followed by ``(`` and ``<`` or ``"`` on its
+    own logical line is refused. Not a use, and accepted: the macro name of
+    ``#define``/``#undef``/``#ifdef``/``#ifndef`` when that directive starts
+    the logical line (the fallback shim ``#define __has_include(x) 0``), and
+    ``defined(__has_include)``/``defined __has_include`` in ``#if``/``#elif``.
+
+    A ``<...>`` operand is a header-name only where the compiler lexes it as
+    one: written in an ``#if``/``#elif`` line outside any macro call. In a
+    macro body or argument its tokens are macro-expanded first (clang and
+    MSVC both do this), so there it is a computed operand too. A quoted
+    operand is a string literal and is never expanded.
+
+    Each logical line is located once and its directive head matched once;
+    every per-token walk is charged, so the work stays linear.
+    """
+    line_start = 0
+    line_end = -1
+    name_at = -1
+    in_if = False
+    depth: _CallDepth | None = None
+    size = len(text)
+    for match in _HAS_TOKEN_RE.finditer(text):
+        budget.charge(1)
+        start, end = match.span()
+        if start > line_end:  # first token of the next logical line
+            line_start = text.rfind("\n", max(line_end, 0), start) + 1
+            line_end = text.find("\n", end)
+            if line_end < 0:
+                line_end = size
+            head = _HAS_NAME_HEAD_RE.match(text, line_start, line_end)
+            name_at = head.end() if head else -1
+            head = _HAS_IF_HEAD_RE.match(text, line_start, line_end)
+            in_if = head is not None
+            depth = _CallDepth(text, head.end(), line_end) if head else None
+        if start == name_at:
+            continue
+        if in_if and _is_defined_operand(text, line_start, start, end, line_end, budget):
+            continue
+        operand = _HAS_OPERAND_RE.match(text, end, line_end)
+        if operand is None:
+            refuse(_HAS_COMPUTED)
+            continue
+        quoted = operand.group(1) == '"'
+        name_start = operand.end()
+        limit = min(line_end, name_start + _HEADER_NAME_LIMIT)
+        close = text.find('"' if quoted else ">", name_start, limit)
+        budget.charge((limit if close < 0 else close) - name_start + 1)
+        path = text[name_start:close] if close > name_start else ""
+        problem = include_path_problem(path, quoted=quoted) if path else "computed __has_include"
+        if not problem and quoted and not include_ok(path):
+            problem = "include escapes the project root"
+        nested = True
+        if depth is not None and close >= 0:
+            nested = depth.inside_call(start, budget)
+            depth.skip_operand(close + 1)
+        if not problem and not quoted and nested:
+            problem = "<...> operand outside a plain #if/#elif (macro-expanded, so computed)"
+        if problem:
+            refuse("__has_include/__has_embed: " + problem)
+
+
 def scan_hostile_directives(added_text: str, *,
                             include_ok: Callable[[str], bool]) -> tuple[str, ...]:
     """Reasons the added (already normalized) logical lines are refused.
 
     ``include_ok(path)`` decides containment of a quoted include relative to
     the edited file (it must refuse ``..`` escaping the project root).
+    ``__has_include``/``__has_include_next``/``__has_embed`` are refused unless
+    the operand is a checkable literal header-name (see ``_scan_has_include``).
     Every opener scan (``_Pragma(``, ``__pragma(``, ``__attribute__((``, ``asm``,
-    ``[[``, ``__has_include(``) charges the characters it walks to a budget of
+    ``[[``, ``__has_include``) charges the characters it walks to a budget of
     a fixed base plus 8 steps per input character, and each walk is capped
     (4096 characters, 1026 for ``[[``), so the total work is linear in the
     input. An input that exhausts the budget (thousands of unterminated
@@ -501,30 +687,8 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
     for match in _MS_PRAGMA_RE.finditer(text):
         if _PRAGMA_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__pragma with a linker/section directive is refused")
-    for match in _HAS_RE.finditer(text):
-        budget.charge(1)
-        opener = match.group(1)
-        if opener not in ("<", '"'):
-            # ``#define P "C:/x"`` then ``__has_include(P)`` makes the compiler
-            # probe an arbitrary file; only a literal header-name is checkable.
-            # ``#define __has_include(x) 0`` (the usual fallback shim) is not a use.
-            prefix = text[max(0, match.start() - 256): match.start()]
-            budget.charge(len(prefix) + 1)
-            if not _HAS_SHIM_RE.search(prefix.rpartition("\n")[2]):
-                refuse("__has_include/__has_embed: computed operand (not a literal header-name)")
-            continue
-        quoted = opener == '"'
-        closer = '"' if quoted else ">"
-        start = match.end()
-        limit = min(len(text), start + _HEADER_NAME_LIMIT)
-        end = text.find(closer, start, limit)
-        budget.charge((limit if end < 0 else end) - start + 1)
-        path = text[start:end] if end > start else ""
-        problem = include_path_problem(path, quoted=quoted) if path else "computed __has_include"
-        if not problem and quoted and not include_ok(path):
-            problem = "include escapes the project root"
-        if problem:
-            refuse("__has_include/__has_embed: " + problem)
+    _scan_has_include(text, include_ok=include_ok, budget=budget, refuse=refuse)
+
     def _asm_text(chunk: str) -> str:
         return chunk.replace("\\n", "\n").replace("\\t", " ")
 
@@ -574,12 +738,15 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
 
 
 def added_logical_lines(before: str, after: str, *, raw_strings: bool = True,
-                        trigraphs: bool = True, digraphs: bool = True) -> str:
+                        trigraphs: bool = True, digraphs: bool = True,
+                        strict_splices: bool = False, legacy: bool = False) -> str:
     """Normalized logical lines present in ``after`` but not in ``before`` (multiset)."""
     old = normalize_for_scan(before, raw_strings=raw_strings, trigraphs=trigraphs,
-                             digraphs=digraphs).split("\n")
+                             digraphs=digraphs, strict_splices=strict_splices,
+                             legacy=legacy).split("\n")
     new = normalize_for_scan(after, raw_strings=raw_strings, trigraphs=trigraphs,
-                             digraphs=digraphs).split("\n")
+                             digraphs=digraphs, strict_splices=strict_splices,
+                             legacy=legacy).split("\n")
     counts: dict[str, int] = {}
     for line in old:
         counts[line] = counts.get(line, 0) + 1
@@ -592,14 +759,30 @@ def added_logical_lines(before: str, after: str, *, raw_strings: bool = True,
     return "\n".join(added)
 
 
-def _may_hold_digraph_header(text: str) -> bool:
-    """True when ``<:``/``<%`` could appear once splices (and trigraphs) are applied."""
+def _may_hold_digraph(text: str) -> bool:
+    """True when a digraph could appear once splices (and trigraphs) are applied.
+
+    Any of the five spellings counts: read as written, ``<:``/``<%`` open a
+    header-name, and ``:>``/``%>``/``%:`` are operator characters that the
+    digraph reading turns into ``]``/``}``/``#``.
+    """
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     for candidate in (value, _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)):
         joined = _SPLICE_RE.sub("", candidate)
-        if "<:" in joined or "<%" in joined:
+        if any(pair in joined for pair in _DIGRAPH_PAIRS):
             return True
     return False
+
+
+def _blank_splices(text: str) -> tuple[bool, bool]:
+    """(a backslash-blanks-newline exists, one of them holds a form feed or vertical tab)."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    found = False
+    for match in _BLANK_SPLICE_RE.finditer(value):
+        found = True
+        if "\f" in match.group(1) or "\v" in match.group(1):
+            return True, True
+    return found, False
 
 
 def scan_added_lexings(before: str, after: str, *,
@@ -608,21 +791,39 @@ def scan_added_lexings(before: str, after: str, *,
 
     The lexings that change what the scanner sees: C++ raw strings versus C
     (``R"(`` is an identifier and a string), trigraphs applied (``-trigraphs``,
-    ``-std=c++14``) versus ignored (the gcc/clang/MSVC default), and
-    digraphs normalised versus left as written (a header-name such as
-    ``<:/../x.h>`` is never digraph-translated by the compiler). Each scan has
-    its own bounded budget, so the total stays linear in the input.
+    ``-std=c++14``) versus ignored (the gcc/clang/MSVC default), digraphs
+    normalised versus left as written (a header-name such as ``<:/../x.h>``
+    is never digraph-translated by the compiler), and a backslash-blanks-newline
+    spliced (gcc, clang) versus left alone (MSVC). The legacy reading (see
+    ``normalize_for_scan``) is scanned as well, so nothing it refused is
+    accepted now.
+
+    The digraph, splice and legacy readings only differ from the others when
+    the old or new text holds a digraph, a backslash-blanks-newline or ``??``,
+    so those lexings run only then; the old text counts because it decides
+    which lines are new. At most 18 scans run, each with its own bounded
+    budget, so the total stays linear in the input.
     """
-    digraph_modes = (True, False) if _may_hold_digraph_header(after) else (True,)
+    blank_before, odd_before = _blank_splices(before)
+    blank_after, odd_after = _blank_splices(after)
+    digraph_modes = (True, False) if _may_hold_digraph(before) or _may_hold_digraph(after) \
+        else (True,)
+    splice_modes = (False, True) if blank_before or blank_after else (False,)
+    legacy = odd_before or odd_after or len(digraph_modes) == 2 \
+        or "??" in str(before or "") or "??" in str(after or "")
     found: list[str] = []
     for raw_strings in (True, False):
-        for trigraphs in (True, False):
-            for digraphs in digraph_modes:
-                added = added_logical_lines(before, after, raw_strings=raw_strings,
-                                            trigraphs=trigraphs, digraphs=digraphs)
-                for reason in scan_hostile_directives(added, include_ok=include_ok):
-                    if reason not in found:
-                        found.append(reason)
+        lexings: list[dict[str, bool]] = [
+            {"trigraphs": trigraphs, "digraphs": digraphs, "strict_splices": strict_splices}
+            for trigraphs in (True, False) for digraphs in digraph_modes
+            for strict_splices in splice_modes]
+        if legacy:
+            lexings.append({"legacy": True})
+        for lexing in lexings:
+            added = added_logical_lines(before, after, raw_strings=raw_strings, **lexing)
+            for reason in scan_hostile_directives(added, include_ok=include_ok):
+                if reason not in found:
+                    found.append(reason)
     return tuple(found)
 
 
@@ -767,8 +968,8 @@ def validate_patch(
         if len(new_text.encode("utf-8", "replace")) > scope.max_file_bytes:
             reasons.append("FILE_TOO_LARGE: %s" % rel)
         changed_total += _changed_lines(before, new_text)
-        # Every lexing (raw strings, trigraphs, digraphs): none can hide a
-        # directive that a compiler reading the file the other way would see.
+        # Every lexing (raw strings, trigraphs, digraphs, splice blanks): none can
+        # hide a directive that a compiler reading the file the other way would see.
         found = scan_added_lexings(before, new_text, include_ok=include_checker(scope, rel))
         reasons.extend("HOSTILE_DIRECTIVE: %s: %s" % (rel, reason) for reason in found)
     touched = set(loop_files_used) | {rel for rel, text in texts.items() if text != current.get(rel)}
