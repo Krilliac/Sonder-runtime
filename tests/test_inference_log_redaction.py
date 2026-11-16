@@ -683,3 +683,171 @@ def test_sonder_inference_invalid_base_url_error_has_no_chained_url_text():
     assert SECRET not in _chain_text(caught.value)
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+# --- percent-encoded userinfo in the authority, and no chained http.client text ---
+
+_PCT_SECRET = "S3CRETX"
+_PCT_URLS = [
+    ("http://apikey%3AS3CRETX%40api.example.com/v1", _PCT_SECRET),
+    ("https://apikey%3AS3CRETX%40api.example.com/v1", _PCT_SECRET),
+    ("http://[fe80::1%25eth0]:8080/v1", "eth0"),
+    ("https://[fe80::1%25eth0]:8080/v1", "eth0"),
+]
+
+
+def _assert_error_leaks_nothing(error: BaseException, needle: str) -> None:
+    import traceback
+
+    from sonder_runtime.platform.logging import JsonFormatter
+
+    assert needle not in str(error)
+    assert needle not in "".join(traceback.format_exception(error))
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    probe = logging.getLogger("test_pct_probe")
+    probe.addHandler(handler)
+    probe.propagate = False
+    try:
+        probe.error("caller saw a failure", exc_info=error)
+    finally:
+        probe.removeHandler(handler)
+    assert stream.getvalue(), "the probe record was not formatted"
+    assert needle not in stream.getvalue()
+
+
+def _recording_gateways():
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
+
+    sent: list[str] = []
+
+    def post(url, payload, headers, timeout):
+        sent.append(url)
+        return {"ok": True}
+
+    def get(url, headers, timeout):
+        sent.append(url)
+        return 200, b"{}"
+
+    openai = OpenAICompatibleGateway(None, transport=post, get_transport=get)
+    sonder = SonderInferenceGateway(transport=post, get_transport=get)
+    return sent, [("openai", openai), ("sonder", sonder)]
+
+
+@pytest.mark.parametrize("base_url, needle", _PCT_URLS)
+def test_percent_encoded_authority_is_refused_before_any_transport_call(base_url, needle):
+    sent, gateways = _recording_gateways()
+    cfg = OpenAICompatibleConfig(base_url=base_url, api_key="k", model="m")
+    for name, gateway in gateways:
+        with pytest.raises(SonderError) as post_error:
+            gateway._post("/v1/chat/completions", {"model": "m", "messages": []}, cfg, 2)
+        _assert_error_leaks_nothing(post_error.value, needle)
+        with pytest.raises(SonderError) as get_error:
+            gateway.get_json("/v1/models", timeout=2, cfg=cfg)
+        _assert_error_leaks_nothing(get_error.value, needle)
+        assert "percent-encoding" in str(post_error.value), name
+        assert "percent-encoding" in str(get_error.value), name
+    assert sent == []
+
+
+@pytest.mark.parametrize("base_url, needle", _PCT_URLS)
+def test_sonder_inference_normalize_base_url_refuses_a_percent_encoded_authority(base_url, needle):
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import normalize_base_url
+
+    with pytest.raises(InvalidInput) as caught:
+        normalize_base_url(base_url)
+    _assert_error_leaks_nothing(caught.value, needle)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "percent-encoding" in str(caught.value)
+
+
+def test_openai_compat_forbidden_for_plaintext_never_renders_a_raw_host():
+    cfg = OpenAICompatibleConfig(base_url="http://api.example.com/v1", model="m")
+    with pytest.raises(Forbidden) as caught:
+        OpenAICompatibleGateway(cfg)._require_secure_transport(cfg)
+    assert "http://api.example.com/v1" in str(caught.value)
+
+
+def test_a_percent_sign_in_the_path_is_still_accepted():
+    cfg = OpenAICompatibleConfig(base_url="https://api.example.com/v1/a%40b", model="m")
+    OpenAICompatibleGateway(cfg)._require_secure_transport(cfg)
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import normalize_base_url
+
+    assert normalize_base_url("https://api.example.com/v1/a%40b") == "https://api.example.com/v1/a%40b"
+
+
+def test_openai_compat_netloc_userinfo_message_is_pinned():
+    cfg = OpenAICompatibleConfig(base_url="https://user:s3cret@api.example.com/v1", model="m")
+    with pytest.raises(InvalidInput) as caught:
+        OpenAICompatibleGateway(cfg)._require_secure_transport(cfg)
+    assert "must not contain credentials" in str(caught.value)
+    assert "set the API key instead" in str(caught.value)
+    assert SECRET not in _chain_text(caught.value)
+
+
+def _invalid_url_error():
+    import http.client
+
+    return http.client.InvalidURL("nonnumeric port: 'S3CRETX@api.example.com'")
+
+
+def test_openai_compat_http_client_errors_are_not_chained():
+    cfg = OpenAICompatibleConfig(base_url="https://api.example.com/v1", model="m")
+
+    def post(url, payload, headers, timeout):
+        raise _invalid_url_error()
+
+    def get(url, headers, timeout):
+        raise _invalid_url_error()
+
+    gateway = OpenAICompatibleGateway(cfg, transport=post, get_transport=get)
+    with pytest.raises(DependencyUnavailable) as post_error:
+        gateway._post("/v1/chat/completions", {"model": "m", "messages": []}, cfg, 2)
+    with pytest.raises(DependencyUnavailable) as get_error:
+        gateway.get_json("/v1/models", timeout=2, cfg=cfg)
+    for error in (post_error.value, get_error.value):
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        assert "InvalidURL" in str(error)
+        _assert_error_leaks_nothing(error, _PCT_SECRET)
+
+
+def test_sonder_inference_exchange_does_not_chain_http_client_errors(monkeypatch):
+    from sonder_runtime.adapters.inference import sonder_inference_gateway as module
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            raise _invalid_url_error()
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *handlers: _Opener())
+    with pytest.raises(DependencyUnavailable) as caught:
+        module._exchange("GET", "https://api.example.com/v1", {}, None, 2.0, 1024)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    _assert_error_leaks_nothing(caught.value, _PCT_SECRET)
+
+
+@pytest.mark.parametrize("base_url, needle", _PCT_URLS)
+def test_ollama_endpoint_refuses_a_percent_encoded_authority(base_url, needle, caplog):
+    caplog.set_level(logging.DEBUG)
+    origin = base_url.rsplit("/v1", 1)[0]
+    for call in (
+        lambda: ollama_endpoint.configure_typed_endpoint(origin),
+        lambda: ollama_endpoint.open_url(origin + "/api/tags", timeout=1, allow_remote=True),
+    ):
+        with pytest.raises(ValueError) as caught:
+            call()
+        _assert_error_leaks_nothing(caught.value, needle)
+    ollama_endpoint.reset_typed_endpoint()
+    for record in caplog.records:
+        assert needle not in record.getMessage()
+
+
+def test_origin_without_userinfo_never_carries_a_path_or_query():
+    assert gpu_admission._origin_without_userinfo("http://h:1/p?k=SECRET") == "http://h:1"
+    assert gpu_admission._origin_without_userinfo("http://h:1") == "http://h:1"
+    assert gpu_admission._origin_without_userinfo("http://u:p@h:1/p?k=SECRET") == "http://h:1"
+    for value in ("http://h:1/p?k=SECRET", "http://u%3ASECRET%40h:1", "SECRET", ""):
+        assert "SECRET" not in gpu_admission._origin_without_userinfo(value)

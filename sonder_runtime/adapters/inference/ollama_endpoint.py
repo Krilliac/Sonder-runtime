@@ -5,7 +5,6 @@ from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
-import re
 import ssl  # noqa: F401 - tests patch ollama_endpoint.ssl.create_default_context
 import threading
 import weakref
@@ -13,7 +12,11 @@ import urllib.parse
 import urllib.request
 
 from sonder_runtime.adapters.tls_contexts import bundle_https_context
-from sonder_runtime.adapters.inference.log_safe import redact_url, urlsplit_or_none
+from sonder_runtime.adapters.inference.log_safe import (
+    UNSENDABLE_URL_CHARS as _UNSENDABLE_URL_CHARS,
+    redact_url,
+    urlsplit_or_none,
+)
 from sonder_runtime.domain import ollama_policy
 
 logger = logging.getLogger(__name__)
@@ -105,6 +108,8 @@ def configure_typed_endpoint(value: str | None) -> None:
     setter is deliberately tiny: validation remains at the configuration
     boundary and this adapter only stores the already-typed startup choice.
     """
+    if value is not None:
+        _require_no_percent_authority(str(value))
     logger.debug(
         f"configure_typed_endpoint: value={redact_url(value) if value is not None else None!r}"
     )
@@ -186,6 +191,7 @@ def policy_error(value=None, *, allow_remote=None) -> str:
 
 def configured_origin(value=None, *, allow_remote=None) -> str:
     origin = normalize(value)
+    _require_no_percent_authority(origin)
     error = policy_error(origin, allow_remote=allow_remote)
     if error:
         logger.debug(f"configured_origin: policy error for {redact_url(origin)!r}: {error}")
@@ -248,6 +254,8 @@ def safe_display(value=None) -> str:
         port = parsed.port
     except ValueError:
         return "<invalid Ollama endpoint>"
+    if "%" in parsed.netloc:
+        return "<invalid Ollama endpoint>"
     if not host or parsed.scheme.lower() not in {"http", "https"}:
         return "<invalid Ollama endpoint>"
     rendered_host = "[%s]" % host if ":" in host else host
@@ -256,14 +264,27 @@ def safe_display(value=None) -> str:
 
 
 _MALFORMED_REQUEST_URL = "Ollama request URL is malformed or has an invalid port"
-# What http.client refuses in a request target; its InvalidURL quotes the text.
-_UNSENDABLE_URL_CHARS = re.compile(r"[\x00-\x20\x7f]")
+_PERCENT_IN_HOST = "Ollama endpoint host must not contain percent-encoding"
+
+
+def _require_no_percent_authority(url: str) -> None:
+    """Refuse a "%" in the authority with fixed text that holds none of ``url``.
+
+    urllib unquotes the host, so an encoded ":" or "@" turns into a port or
+    userinfo that http.client later quotes in its own error; an IPv6 zone id
+    is refused with them. A "%" in the path or query is fine.
+    """
+    parts = urlsplit_or_none(url)
+    if parts is not None and "%" in parts.netloc:
+        raise ValueError(_PERCENT_IN_HOST)
 
 
 def _origin_from_url(url: str) -> str:
     parsed = urlsplit_or_none(url)
     if parsed is None:
         raise ValueError(_MALFORMED_REQUEST_URL)
+    if "%" in parsed.netloc:
+        raise ValueError(_PERCENT_IN_HOST)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Ollama request URL must not contain inline credentials")
     host = parsed.hostname

@@ -13,6 +13,8 @@ import re
 from urllib.parse import SplitResult, urlsplit
 
 _INVALID_URL = "<invalid url>"
+# What http.client refuses in a request target; its InvalidURL quotes the text.
+UNSENDABLE_URL_CHARS = re.compile(r"[\x00-\x20\x7f]")
 _REDACTED_PATH = "/<redacted>"
 _MAX_LENGTH = 2048
 _SCHEMES = frozenset({"http", "https"})
@@ -134,4 +136,4 @@ def urlsplit_or_none(value: str) -> SplitResult | None:
     return parts if isinstance(parts, SplitResult) else None
 
 
-__all__ = ["redact_url", "safe_origin", "urlsplit_or_none"]
+__all__ = ["UNSENDABLE_URL_CHARS", "redact_url", "safe_origin", "urlsplit_or_none"]

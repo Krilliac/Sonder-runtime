@@ -34,7 +34,6 @@ import http.client
 import ipaddress
 import json
 import logging
-import re
 import socket
 import ssl
 import time
@@ -45,8 +44,7 @@ from dataclasses import dataclass
 from typing import Sequence
 from urllib.parse import urlsplit
 
-logger = logging.getLogger(__name__)
-
+from .log_safe import UNSENDABLE_URL_CHARS as _UNSENDABLE_URL_CHARS
 from .log_safe import redact_url, urlsplit_or_none
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -87,6 +85,8 @@ from ..tls_contexts import default_https_context
 from ..provider_bindings import provider_id_for_label
 from .telemetry import from_openai_compatible
 
+logger = logging.getLogger(__name__)
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
 # Error bodies and GET responses are read with a hard bound: an error page is
@@ -102,8 +102,7 @@ _MALFORMED_BASE_URL = (
     "OpenAI-compatible base URL is not a valid http:// or https:// URL "
     "(check the host, the port, and for spaces or control characters)"
 )
-# What http.client refuses in a request target; its InvalidURL quotes the text.
-_UNSENDABLE_URL_CHARS = re.compile(r"[\x00-\x20\x7f]")
+_PERCENT_IN_HOST = "OpenAI-compatible base URL host must not contain percent-encoding"
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -306,6 +305,11 @@ class OpenAICompatibleGateway:
                 "OpenAI-compatible base URL must not contain credentials "
                 "(user:password@); set the API key instead"
             )
+        if "%" in parts.netloc:
+            # urllib unquotes the host, so "%3A" and "%40" become a port and
+            # userinfo that http.client then quotes back in its InvalidURL; an
+            # IPv6 zone id ("%25") is refused with them. A "%" in the path is fine.
+            raise InvalidInput(_PERCENT_IN_HOST)
         if "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]:
             # A password with an unescaped "/" parses as a path, so an "@" in
             # the path cannot be told apart from credentials.
@@ -327,7 +331,7 @@ class OpenAICompatibleGateway:
             "OpenAI-compatible endpoint %s is not loopback and uses plaintext "
             "http; use an https:// base URL, or list its private network in %s "
             "to allow http to that private IP address"
-            % (parts.hostname or redact_url(cfg.base_url), ENV_ALLOW_HTTP_NETWORKS)
+            % (redact_url(cfg.base_url), ENV_ALLOW_HTTP_NETWORKS)
         )
 
     @staticmethod
@@ -555,6 +559,7 @@ class OpenAICompatibleGateway:
                 f"retry after about {admission.retry_after:.3f}s"
             )
         headers = self._headers(cfg, context)
+        malformed: str | None = None
         try:
             if path == "/v1/chat/completions":
                 data = dispatch_provider(
@@ -620,13 +625,14 @@ class OpenAICompatibleGateway:
         except http.client.HTTPException as exc:
             # A peer that is not speaking HTTP (or cut the response short) is
             # a dependency failure, never "unreachable": bytes were sent.
+            # http.client's InvalidURL quotes the URL text it rejected, so the
+            # exception is neither logged nor chained: only its class name
+            # leaves this block, and the error is raised after it.
+            malformed = type(exc).__name__
             logger.warning(
                 f"OpenAI-compatible endpoint sent a malformed HTTP response: "
-                f"url={safe_url!r}, error={type(exc).__name__}"
+                f"url={safe_url!r}, error={malformed}"
             )
-            raise DependencyUnavailable(
-                "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
-            ) from exc
         except OSError as exc:
             classified = self._classified_connect_error(exc)
             if classified is not None:
@@ -636,6 +642,10 @@ class OpenAICompatibleGateway:
                 exc_info=True,
             )
             raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
+        if malformed is not None:
+            raise DependencyUnavailable(
+                "endpoint sent a malformed HTTP response (%s)" % malformed
+            )
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")
         return data
@@ -661,6 +671,7 @@ class OpenAICompatibleGateway:
         headers.pop("Content-Type", None)
         headers["Accept"] = "application/json"
         transport = self._get_transport or self._default_get_transport
+        malformed: str | None = None
         try:
             status, body = transport(url, headers, float(timeout))
         except (socket.timeout, TimeoutError) as exc:
@@ -676,14 +687,16 @@ class OpenAICompatibleGateway:
                 raise classified from exc
             raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
         except http.client.HTTPException as exc:
-            raise DependencyUnavailable(
-                "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
-            ) from exc
+            malformed = type(exc).__name__  # not chained: InvalidURL quotes the URL
         except OSError as exc:
             classified = self._classified_connect_error(exc)
             if classified is not None:
                 raise classified from exc
             raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
+        if malformed is not None:
+            raise DependencyUnavailable(
+                "endpoint sent a malformed HTTP response (%s)" % malformed
+            )
         if not isinstance(body, (bytes, bytearray)) or len(body) > GET_BODY_LIMIT:
             raise DependencyUnavailable("endpoint returned an oversized or invalid body")
         try:

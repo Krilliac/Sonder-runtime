@@ -389,6 +389,11 @@ def _exchange(
             urllib.request.ProxyHandler({}), _NoRedirect(),
             _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
         )
+        # http.client's InvalidURL quotes the URL text it rejected, so an
+        # HTTPException is never chained: the class name is kept in this
+        # variable and the error is raised after the except block.
+        malformed: str | None = None
+        expired_cause: Exception | None = None
         try:
             try:
                 with opener.open(request, timeout=budget_seconds) as response:
@@ -403,16 +408,24 @@ def _exchange(
                     exc.close()
                 error_headers = dict(exc.headers or {})
         except Exception as exc:
+            if isinstance(exc, http.client.HTTPException):
+                malformed = type(exc).__name__
+            elif budget.expired:
+                expired_cause = exc
+            else:
+                raise
+        if malformed is not None:
             if budget.expired:
                 raise TimeoutError(
                     "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
-                ) from exc
-            if isinstance(exc, http.client.HTTPException):
-                raise DependencyUnavailable(
-                    "sonder-inference sent a malformed HTTP response (%s)"
-                    % type(exc).__name__
-                ) from exc
-            raise
+                )
+            raise DependencyUnavailable(
+                "sonder-inference sent a malformed HTTP response (%s)" % malformed
+            )
+        if expired_cause is not None:
+            raise TimeoutError(
+                "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
+            ) from expired_cause
         if budget.expired:
             raise TimeoutError(
                 "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
@@ -519,6 +532,11 @@ def normalize_base_url(value: str) -> str:
         raise InvalidInput(
             "sonder-inference base URL %r is not a valid URL" % redact_url(raw)
         )
+    if "%" in parts.netloc:
+        # urllib unquotes the host, so an encoded ":" or "@" becomes a port or
+        # userinfo that http.client later quotes in its own error; an IPv6 zone
+        # id is refused with them. A "%" in the path is fine.
+        raise InvalidInput("sonder-inference base URL host must not contain percent-encoding")
     host = parts.hostname
     port = parts.port
     if (parts.scheme not in ("http", "https") or not host

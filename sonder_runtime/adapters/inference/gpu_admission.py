@@ -228,18 +228,15 @@ _UNPARSABLE_ORIGIN = "http://<redacted>"
 
 
 def _origin_without_userinfo(origin: str) -> str:
-    """``origin`` with any userinfo removed: ``scheme://host[:port]``.
+    """``origin`` rebuilt as ``scheme://host[:port]`` from allowlisted text only.
 
-    Admission keys, caches and logs every origin it sees, so credentials are
-    dropped here for every caller. An origin with no ``@`` is returned as is.
-    One with an ``@`` is rebuilt by ``log_safe.safe_origin`` from allowlisted
-    text only. When that declines (no http(s) scheme, a malformed host or
-    port, an ``@`` after the authority) the origin becomes
-    ``_UNPARSABLE_ORIGIN``: never "", which ``ollama_policy`` reads as the
-    default loopback host, and never loopback itself.
+    Admission keys, caches and logs every origin it sees, so userinfo, path and
+    query are dropped here for every caller and both key shapes are identical.
+    ``log_safe.safe_origin`` does the rebuilding. When it declines (no http(s)
+    scheme, a malformed host or port, an ``@`` after the authority) the origin
+    becomes ``_UNPARSABLE_ORIGIN``: never "", which ``ollama_policy`` reads as
+    the default loopback host, and never loopback itself.
     """
-    if "@" not in origin:
-        return origin
     return safe_origin(origin) or _UNPARSABLE_ORIGIN
 
 
