@@ -297,3 +297,22 @@ def test_doctor_warns_when_fallback_lacks_the_model(monkeypatch):
     result = _doctor(monkeypatch, {NODE: ["nomic-embed-text:latest"], LOCAL: []})
     assert result["status"] == "warn"
     assert "fallback" in result["detail"]
+
+
+def test_an_admission_refusal_does_not_trip_the_embed_circuit(monkeypatch):
+    from sonder_runtime.adapters.inference import gpu_admission as adapter
+    from sonder_runtime.domain import gpu_admission as domain
+
+    class Refusing:
+        def admit(self, *_args, **_kwargs):
+            raise adapter.GpuAdmissionRefused(domain.Refused(
+                domain.RefusalReason.STORE_UNAVAILABLE, "store down", retry_after_seconds=5.0))
+
+    _dedicate(monkeypatch, fallback="local")
+    calls = []
+    monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", _opener(calls))
+    monkeypatch.setattr(embeddings.gpu_admission, "process_service", Refusing)
+
+    assert embeddings.embed("hi", model="nomic-embed-text:latest") is None
+    assert not embeddings._circuit_open()
+    assert calls == []

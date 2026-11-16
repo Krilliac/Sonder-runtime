@@ -63,6 +63,9 @@ from sonder_runtime.platform.memory_replication_config import (
 from sonder_runtime.platform.spanda_config import SpandaConfig, spanda_errors
 from sonder_runtime.platform.claim_check_config import ClaimCheckConfig, claim_check_errors
 from sonder_runtime.platform.playbooks_config import PlaybooksConfig, playbooks_errors
+from sonder_runtime.platform.gpu_admission_config import (
+    GpuAdmissionConfig, apply_gpu_admission_environment, gpu_admission_errors,
+)
 from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
@@ -661,6 +664,7 @@ class SonderConfig:
     playbooks: PlaybooksConfig = field(default_factory=PlaybooksConfig)
     claim_check: ClaimCheckConfig = field(default_factory=ClaimCheckConfig)
     build_tools: BuildToolsConfig = field(default_factory=BuildToolsConfig)
+    gpu_admission: GpuAdmissionConfig = field(default_factory=GpuAdmissionConfig)
 
     def as_redacted_dict(self) -> dict:
         out: dict = {
@@ -685,6 +689,7 @@ class SonderConfig:
             "backup",
             "spanda",
             "playbooks",
+            "gpu_admission",
             "claim_check",
         ):
             value = getattr(self, section)
@@ -995,6 +1000,7 @@ _SECTION_TYPES = {
     "backup": BackupConfig,
     "spanda": SpandaConfig,
     "playbooks": PlaybooksConfig,
+    "gpu_admission": GpuAdmissionConfig,
     "claim_check": ClaimCheckConfig,
 }
 
@@ -1743,6 +1749,7 @@ def _apply_environment(
         secrets=secrets,
         child_storage=apply_child_storage_environment(config.child_storage, env, errors),
         build_tools=build_tools_config_from_env(env, errors),
+        gpu_admission=apply_gpu_admission_environment(config.gpu_admission, env, errors),
     )
 
 
@@ -1831,6 +1838,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(control_state_rehearsal_errors(config))
     errors.extend(spanda_errors(config))
     errors.extend(playbooks_errors(config))
+    errors.extend(gpu_admission_errors(config))
     errors.extend(claim_check_errors(config))
     errors.extend(deployment_errors(config))
     if config.schema_version != 1:
