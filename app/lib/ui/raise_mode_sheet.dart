@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart' show SonderSpace;
 import 'sheet.dart';
 import 'status_vocab.dart';
 import 'strings.dart';
@@ -63,7 +64,7 @@ class RaiseModeSheet extends StatelessWidget {
       ],
       children: [
         Text(SonderStrings.raiseEffect(to, host)),
-        const SizedBox(height: 8),
+        const SizedBox(height: SonderSpace.sm),
         const Text(SonderStrings.raiseDestructiveNote),
       ],
     );

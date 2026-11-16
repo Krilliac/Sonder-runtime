@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart' show SonderMarkColors;
+
 /// The product mark: Sonder's split S on a navy tile, the same composition
 /// as the launcher icons (`app/assets/brand/`, rendered by
 /// `scripts/generate_app_icons.py`). Drawn as a vector so it stays crisp at
 /// every size without an image asset or an SVG dependency.
 ///
-/// The brand purple-to-blue lives only here; teal remains the functional
-/// accent everywhere else in the UI.
+/// The purple-to-blue gradient is painted only here. The interface's accent,
+/// Iris, is the tone at the middle of it, tuned for contrast in each theme.
 class SonderMark extends StatelessWidget {
   final double size;
   const SonderMark({super.key, this.size = 22});
@@ -23,9 +25,9 @@ class SonderMarkPainter extends CustomPainter {
   const SonderMarkPainter();
 
   /// Brand gradient along the mark's diagonal (matches the banner SVGs).
-  static const gradient = [Color(0xFFB56CF7), Color(0xFF8A85FB), Color(0xFF4FA6FF)];
-  static const tileTop = Color(0xFF16173D);
-  static const tileBottom = Color(0xFF0B0C22);
+  static const gradient = SonderMarkColors.gradient;
+  static const tileTop = SonderMarkColors.tileTop;
+  static const tileBottom = SonderMarkColors.tileBottom;
 
   /// Bounds of [glyph] in its 420-unit source grid.
   static const glyphBounds = Rect.fromLTRB(38, 32, 382, 388);

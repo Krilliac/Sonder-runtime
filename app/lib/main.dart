@@ -110,10 +110,12 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp>
       debugShowCheckedModeBanner: false,
       theme: SonderTheme.light,
       darkTheme: SonderTheme.dark,
+      // Light and dark are both first-class: the app follows the platform
+      // until Settings > Appearance picks one.
       themeMode: switch (settings?.themeMode) {
         'light' => ThemeMode.light,
-        'system' => ThemeMode.system,
-        _ => ThemeMode.dark,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
       },
       home: _Boot(
         child: settings == null

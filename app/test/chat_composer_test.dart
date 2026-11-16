@@ -8,6 +8,7 @@ import 'package:sonder_runtime/chat/composer.dart';
 import 'package:sonder_runtime/chat/model_picker.dart';
 import 'package:sonder_runtime/runtime/model_routing.dart';
 import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/workspace_ui.dart' show conversationWidth;
 
 import 'chat_fakes.dart';
 import 'goldens/golden_fonts.dart';
@@ -214,6 +215,161 @@ void main() {
       await _settle(tester);
       expect(find.byKey(const Key('command-browser')), findsOneWidget);
       await unmountChat(tester);
+    });
+  });
+
+  group('frame', () {
+    testWidgets(
+        'one rounded, lifted card in the reading column holds the field '
+        'and every control', (tester) async {
+      for (final mode in [ThemeMode.dark, ThemeMode.light]) {
+        final backend = FakeChatBackend()
+          ..mode = permissionModeFor('manual')
+          ..models = const ['sonder', 'general']
+          ..statusInfo = _context(2100, 8192);
+        await pumpChat(tester, backend,
+            size: const Size(1440, 900), themeMode: mode);
+        await _settle(tester);
+        final tokens =
+            mode == ThemeMode.dark ? SonderTokens.dark : SonderTokens.light;
+        final frame = find.byKey(const Key('composer-surface'));
+        BoxDecoration decoration() =>
+            tester.widget<AnimatedContainer>(frame).decoration!
+                as BoxDecoration;
+        expect(decoration().color, tokens.panel, reason: '$mode');
+        expect(decoration().borderRadius,
+            BorderRadius.circular(SonderRadius.composer));
+        expect(tokens.lift, isNotEmpty);
+        expect(decoration().boxShadow, tokens.lift);
+
+        // The same centred column as the conversation above it.
+        final rect = tester.getRect(frame);
+        expect(rect.width, conversationWidth);
+        expect(rect.center.dx, 1440 / 2);
+        // The field and the whole bar are inside the frame.
+        expect(rect.contains(tester.getCenter(find.byType(TextField))), isTrue);
+        Rect control(String key) => tester.getRect(find.byKey(Key(key)));
+        const bar = [
+          'composer-actions',
+          'permission-mode-chip',
+          'model-picker',
+          'context-ring',
+          'composer-send',
+        ];
+        for (final key in bar) {
+          expect(rect.contains(control(key).center), isTrue, reason: key);
+        }
+        // In reading order: more actions, mode, model, context; Send last.
+        for (var i = 1; i < bar.length; i++) {
+          expect(control(bar[i]).left, greaterThan(control(bar[i - 1]).left),
+              reason: '${bar[i]} follows ${bar[i - 1]}');
+        }
+        expect(tester.getSize(find.byKey(const Key('composer-send'))),
+            const Size(48, 48));
+
+        // Its edge takes the accent while the box has focus, and only then;
+        // the accent edge is 3:1 against the page (WCAG 1.4.11).
+        final field = tester.widget<TextField>(find.byType(TextField));
+        field.focusNode!.unfocus();
+        await _settle(tester);
+        expect(decoration().border, Border.all(color: tokens.hairline));
+        field.focusNode!.requestFocus();
+        await _settle(tester);
+        expect(decoration().border, Border.all(color: tokens.accentText));
+        expect(SonderContrast.ratio(tokens.accentText, tokens.canvas),
+            greaterThanOrEqualTo(SonderContrast.control));
+        await unmountChat(tester);
+      }
+    });
+
+    testWidgets('the field grows with its text, up to eight lines',
+        (tester) async {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend, size: const Size(1440, 900));
+      await _settle(tester);
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.minLines, 1);
+      expect(field.maxLines, 8);
+      final frame = find.byKey(const Key('composer-surface'));
+      final one = tester.getSize(frame).height;
+      await tester.enterText(find.byType(TextField), 'a\nb\nc');
+      await _settle(tester);
+      final three = tester.getSize(frame).height;
+      expect(three, greaterThan(one));
+      await tester.enterText(
+          find.byType(TextField), List.filled(30, 'line').join('\n'));
+      await _settle(tester);
+      // Eight 26 px lines at most; the rest scrolls inside the field.
+      expect(tester.getSize(find.byType(TextField)).height,
+          lessThanOrEqualTo(8 * 26 + SonderSpace.lg + SonderSpace.xs));
+      expect(tester.takeException(), isNull);
+      await unmountChat(tester);
+    });
+
+    testWidgets(
+        'the + menu holds what the bar has no room for, and rises above '
+        'its button', (tester) async {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend, size: const Size(1440, 900));
+      await _settle(tester);
+      final button = find.byKey(const Key('composer-actions'));
+      expect(find.byTooltip('More actions'), findsOneWidget);
+      await tester.tap(button);
+      await _settle(tester);
+      const labels = {
+        'commands': 'Browse commands',
+        'project': 'Set project',
+        'server-conversations': 'Server conversations',
+      };
+      for (final e in labels.entries) {
+        final item = find.byKey(Key('composer-action-${e.key}'));
+        expect(find.descendant(of: item, matching: find.text(e.value)),
+            findsOneWidget);
+        // Clear of the words being written.
+        expect(tester.getRect(item).bottom,
+            lessThanOrEqualTo(tester.getRect(button).top + 1),
+            reason: e.key);
+      }
+      await tester.tap(find.byKey(const Key('composer-action-commands')));
+      await _settle(tester);
+      expect(find.byKey(const Key('command-browser')), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+      expect(find.byKey(const Key('command-browser')), findsNothing);
+
+      await tester.tap(button);
+      await _settle(tester);
+      await tester.tap(find.byKey(const Key('composer-action-project')));
+      await _settle(tester);
+      expect(find.text('Project name'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await _settle(tester);
+      await unmountChat(tester);
+    });
+
+    testWidgets(
+        'the + menu opens on the medium step, and at once with reduced '
+        'motion', (tester) async {
+      addTearDown(
+          tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+      for (final reduce in [false, true]) {
+        tester.platformDispatcher.accessibilityFeaturesTestValue =
+            FakeAccessibilityFeatures(disableAnimations: reduce);
+        final backend = FakeChatBackend();
+        await pumpChat(tester, backend, size: const Size(1440, 900));
+        await _settle(tester);
+        await tester.tap(find.byKey(const Key('composer-actions')));
+        await _settle(tester);
+        final item = find.byKey(const Key('composer-action-commands'));
+        // Material's own menu takes 300 ms to open.
+        expect(ModalRoute.of(tester.element(item))!.transitionDuration,
+            reduce ? Duration.zero : SonderMotion.medium,
+            reason: 'reduced motion: $reduce');
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await _settle(tester);
+        expect(item, findsNothing);
+        await unmountChat(tester);
+      }
     });
   });
 

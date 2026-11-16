@@ -343,14 +343,15 @@ class ToolCallRow {
   const ToolCallRow(this.title, {this.ok = true, this.elapsedMs});
 }
 
-/// `ran 3 tools · 2.1s · 1 refused`: the one-line summary of a turn's tool
-/// calls. The time is the sum of the calls that reported one.
+/// `Used 3 tools · 2.1s · 1 refused`: the one-line summary of a turn's tool
+/// calls, as the collapsed row above an answer says it. The time is the sum
+/// of the calls that reported one.
 String toolCallsSummary(List<ToolCallRow> calls) {
   final ran = calls.where((c) => c.ok).length;
   final refused = calls.length - ran;
   final timed = calls.where((c) => c.ok && c.elapsedMs != null);
   final parts = <String>[
-    if (ran > 0) 'ran $ran tool${ran == 1 ? '' : 's'}',
+    if (ran > 0) 'Used $ran tool${ran == 1 ? '' : 's'}',
     if (ran > 0 && timed.isNotEmpty)
       durationLabel(timed.fold<int>(0, (sum, c) => sum + c.elapsedMs!)),
     if (refused > 0) '$refused refused',
@@ -418,6 +419,10 @@ class _FooterMetrics extends StatelessWidget {
 /// (immutable) message, so a row rebuilt after scrolling still shows it.
 final Expando<Set<String>> _feedbackGiven = Expando<Set<String>>();
 
+/// Columns at least this wide leave a generous margin beside a user
+/// bubble; a phone keeps most of its width for the text.
+const _roomyAbove = 560.0;
+
 /// Whether this device has no hover: action rows then stay visible instead
 /// of waiting for a pointer.
 bool _touchFirst(BuildContext context) => switch (Theme.of(context).platform) {
@@ -428,11 +433,12 @@ bool _touchFirst(BuildContext context) => switch (Theme.of(context).platform) {
       _ => false,
     };
 
-/// One turn: a gutter glyph (❯ you, ◈ Sonder, ⊘/✗ refusal or failure) and
-/// the content in the reading column. Your messages sit on a faint surface
-/// so a long conversation scans by turn; answers carry their details and
+/// One turn in the reading column. Your message is a soft bubble on the
+/// right; an answer is unboxed prose on the left, with what Sonder did
+/// (reasoning, tool calls) folded into one quiet line above it and its
 /// actions underneath, revealed by hover or focus on pointer devices (the
-/// newest answer always shows them).
+/// newest answer always shows them). A refusal or a failure is a notice
+/// with its glyph and word, never colour alone.
 class TranscriptTurn extends StatefulWidget {
   final ChatEntry entry;
   final ValueListenable<LiveTurn?> live;
@@ -479,15 +485,7 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
     } else if (message.pending) {
       body = _pendingContent();
     } else {
-      final glyph = switch (kind) {
-        ReplyKind.error => '✗',
-        ReplyKind.refused => '⊘',
-        _ => '◈',
-      };
-      final glyphColor = kind == ReplyKind.error || kind == ReplyKind.refused
-          ? tokens.danger
-          : tokens.accent;
-      final content = switch (kind) {
+      body = switch (kind) {
         ReplyKind.error => _errorContent(context, tokens),
         ReplyKind.refused => _refusalContent(context, parsed!),
         ReplyKind.workRun => WorkRunCard(
@@ -499,14 +497,6 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
           ),
         ReplyKind.answer => _answerContent(context, tokens, parsed!),
       };
-      body = Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Gutter(glyph: glyph, color: glyphColor),
-          const SizedBox(width: transcriptGutterGap),
-          Expanded(child: content),
-        ],
-      );
     }
 
     return MouseRegion(
@@ -519,7 +509,8 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
         child: Semantics(
           label: speaker,
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: SonderSpace.sm),
+            padding: EdgeInsets.symmetric(
+                vertical: isUser ? SonderSpace.md : SonderSpace.sm),
             child: body,
           ),
         ),
@@ -531,39 +522,50 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
 
   Widget _userRow(BuildContext context, SonderTokens tokens) {
     final message = entry.message;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _Gutter(glyph: '❯', color: tokens.accent, top: SonderSpace.sm),
-        const SizedBox(width: transcriptGutterGap),
-        Flexible(
-          child: Container(
-            key: const Key('user-turn-surface'),
-            padding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.md, vertical: SonderSpace.sm),
-            decoration: BoxDecoration(
-              color: tokens.raised,
-              borderRadius: BorderRadius.circular(SonderRadius.card),
+    // The bubble hugs its text and keeps to the right; the space on its
+    // left is what tells the two speakers apart at a glance.
+    return LayoutBuilder(builder: (context, constraints) {
+      final lead = constraints.maxWidth >= _roomyAbove
+          ? SonderSpace.x6
+          : SonderSpace.lg;
+      return Padding(
+        padding: EdgeInsets.only(left: lead),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // On touch, long press selects the text; the button shows on
+            // hover or keyboard focus.
+            _Reveal(
+              visible: _hover || _focusWithin,
+              child: _CopyAction(
+                key: const Key('user-turn-copy'),
+                text: message.content,
+                label: '',
+                semanticLabel: 'Copy message',
+                toast: 'Message copied',
+                // Centred on the bubble's first line, not on the 48 dp
+                // target.
+                alignment: const Alignment(0, -0.3),
+              ),
             ),
-            child: SelectableText(message.content,
-                style: Theme.of(context).textTheme.bodyMedium),
-          ),
+            Flexible(
+              child: Container(
+                key: const Key('user-turn-surface'),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: SonderSpace.lg, vertical: SonderSpace.sm),
+                decoration: BoxDecoration(
+                  color: tokens.bubble,
+                  borderRadius: BorderRadius.circular(SonderRadius.bubble),
+                ),
+                child: SelectableText(message.content,
+                    style: Theme.of(context).textTheme.bodyLarge),
+              ),
+            ),
+          ],
         ),
-        // On touch, long press selects the text; the button shows on
-        // hover or keyboard focus.
-        _Reveal(
-          visible: _hover || _focusWithin,
-          child: _CopyAction(
-            key: const Key('user-turn-copy'),
-            text: message.content,
-            label: '',
-            semanticLabel: 'Copy message',
-            toast: 'Message copied',
-            alignment: const Alignment(0, -0.3),
-          ),
-        ),
-      ],
-    );
+      );
+    });
   }
 
   // -- Live turn -----------------------------------------------------------
@@ -575,9 +577,7 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
       children: [
         if (message.content.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(
-                left: transcriptGutter + transcriptGutterGap,
-                bottom: SonderSpace.sm),
+            padding: const EdgeInsets.only(bottom: SonderSpace.sm),
             child: ConversationContent(
                 key: const Key('streaming-text'),
                 content: message.content,
@@ -686,12 +686,13 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
     final m = message.responseMetadata;
     final footer = footerStateFor(entry, parsed);
     final showActions = message.content.isNotEmpty;
-    final details = <_Detail>[
+    // What Sonder did before it answered: shown above the answer, folded.
+    final work = <_Detail>[
       if (message.reasoning.trim().isNotEmpty)
         _Detail(
           id: 'reasoning',
           icon: Icons.psychology_outlined,
-          label: 'Model reasoning',
+          label: 'Reasoning',
           body: message.reasoning.trim(),
         ),
       if (parsed.toolCalls.isNotEmpty)
@@ -709,6 +710,9 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
           label: 'Activity evidence',
           body: parsed.activityRaw,
         ),
+    ];
+    // The receipt of the response: shown with the actions underneath.
+    final receipt = <_Detail>[
       if (m != null && m.diagnosticText.isNotEmpty)
         _Detail(
           id: 'details',
@@ -719,86 +723,78 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
           body: m.diagnosticText,
         ),
     ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (m?.overflow != null) ...[
-          Align(
-            alignment: Alignment.centerLeft,
-            child: RouteOverflowChip(overflow: m!.overflow!),
-          ),
-          const SizedBox(height: SonderSpace.sm),
+    return LayoutBuilder(builder: (context, constraints) {
+      // A phone gets one disclosure for everything (one 48 dp row), where
+      // the work line would be; a wider column splits work from receipt.
+      final fold = constraints.maxWidth < _DetailsBarState.foldBelow &&
+          work.isNotEmpty &&
+          receipt.isNotEmpty;
+      final above = fold ? [...work, ...receipt] : work;
+      final below = fold ? const <_Detail>[] : receipt;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (m?.overflow != null) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: RouteOverflowChip(overflow: m!.overflow!),
+            ),
+            const SizedBox(height: SonderSpace.sm),
+          ],
+          if (m?.agentLane != null) ...[
+            _AgentLaneAck(
+              receipt: m!.agentLane!,
+              onOpen: actions.onOpenAgentLane,
+            ),
+            const SizedBox(height: SonderSpace.md),
+          ],
+          if (m?.orchestration != null &&
+              m!.orchestration!.choices.isNotEmpty) ...[
+            _OrchestrationChoices(
+              receipt: m.orchestration!,
+              onSend: actions.onSendCommand,
+            ),
+            const SizedBox(height: SonderSpace.md),
+          ],
+          if (above.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: SonderSpace.xs),
+              child: _DetailsBar(details: above),
+            ),
+          ConversationContent(content: parsed.answer, fullWidthCode: true),
+          if (footer != null || showActions || below.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: SonderSpace.xs),
+              // One footer row: the actions, the receipt's disclosure and
+              // what the turn cost. It is quiet until asked for, so older
+              // answers stay clean and the newest keeps it in view.
+              child: _DetailsBar(
+                details: below,
+                rowKey: const Key('answer-footer'),
+                rowVisible: _revealed(context),
+                leading: [
+                  if (showActions)
+                    _AnswerActions(
+                      message: message,
+                      onFeedback: actions.onFeedback,
+                      onRetry: widget.isLast
+                          ? () => actions.onRetry(entry.id)
+                          : null,
+                    ),
+                ],
+                trailing: [
+                  if (footer != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: SonderSpace.sm),
+                      child: _FooterMetrics(state: footer),
+                    ),
+                ],
+              ),
+            ),
         ],
-        if (m?.agentLane != null) ...[
-          _AgentLaneAck(
-            receipt: m!.agentLane!,
-            onOpen: actions.onOpenAgentLane,
-          ),
-          const SizedBox(height: SonderSpace.md),
-        ],
-        if (m?.orchestration != null &&
-            m!.orchestration!.choices.isNotEmpty) ...[
-          _OrchestrationChoices(
-            receipt: m.orchestration!,
-            onSend: actions.onSendCommand,
-          ),
-          const SizedBox(height: SonderSpace.md),
-        ],
-        ConversationContent(content: parsed.answer, fullWidthCode: true),
-        if (details.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: SonderSpace.xs),
-            child: _DetailsBar(details: details),
-          ),
-        if (footer != null || showActions)
-          Wrap(
-            key: const Key('answer-footer'),
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (footer != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: SonderSpace.sm),
-                  child: _FooterMetrics(state: footer),
-                ),
-              if (showActions)
-                _Reveal(
-                  visible: _revealed(context),
-                  child: _AnswerActions(
-                    message: message,
-                    onFeedback: actions.onFeedback,
-                    onRetry:
-                        widget.isLast ? () => actions.onRetry(entry.id) : null,
-                  ),
-                ),
-            ],
-          ),
-      ],
-    );
-  }
-}
-
-/// The turn's glyph, centred in the gutter on the first line of text.
-class _Gutter extends StatelessWidget {
-  final String glyph;
-  final Color color;
-  final double top;
-  const _Gutter({required this.glyph, required this.color, this.top = 0});
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
-    return SizedBox(
-      width: transcriptGutter,
-      child: Padding(
-        padding: EdgeInsets.only(top: top),
-        child: ExcludeSemantics(
-          child: Text(glyph,
-              textAlign: TextAlign.center,
-              style: tokens.mono(14,
-                  color: color, weight: FontWeight.w600, height: 22)),
-        ),
-      ),
-    );
+      );
+    });
   }
 }
 
@@ -983,7 +979,28 @@ class _Detail {
 /// row of quiet disclosures; each opens its panel underneath.
 class _DetailsBar extends StatefulWidget {
   final List<_Detail> details;
-  const _DetailsBar({required this.details});
+
+  /// Controls that share the row with the disclosures, drawn before them
+  /// (an answer's actions).
+  final List<Widget> leading;
+
+  /// Drawn after the disclosures (what the turn cost).
+  final List<Widget> trailing;
+
+  /// Whether the row shows; null always shows it. A row with an open panel
+  /// stays in view whatever this says, so a panel never loses its handle.
+  final bool? rowVisible;
+
+  /// Names the row, for tests.
+  final Key? rowKey;
+
+  const _DetailsBar({
+    required this.details,
+    this.leading = const <Widget>[],
+    this.trailing = const <Widget>[],
+    this.rowVisible,
+    this.rowKey,
+  });
 
   @override
   State<_DetailsBar> createState() => _DetailsBarState();
@@ -994,17 +1011,25 @@ class _DetailsBarState extends State<_DetailsBar> {
 
   /// Below this width several details share one disclosure, so a phone
   /// gets one 48 dp row instead of one per detail.
-  static const _foldBelow = 480.0;
+  static const foldBelow = 480.0;
 
   @override
   Widget build(BuildContext context) {
     final details = widget.details;
     if (details.length < 2) return _inline(details);
     return LayoutBuilder(
-      builder: (context, constraints) => constraints.maxWidth < _foldBelow
+      builder: (context, constraints) => constraints.maxWidth < foldBelow
           ? _folded(details)
           : _inline(details),
     );
+  }
+
+  /// The row of controls, faded out while [_DetailsBar.rowVisible] is false
+  /// and nothing is open.
+  Widget _row(Widget row) {
+    final visible = widget.rowVisible;
+    if (visible == null) return row;
+    return _Reveal(visible: visible || _open.isNotEmpty, child: row);
   }
 
   Widget _folded(List<_Detail> details) {
@@ -1016,19 +1041,25 @@ class _DetailsBarState extends State<_DetailsBar> {
       label: tools?.label ?? 'Details',
       refused: tools?.refused ?? 0,
     );
+    final chip = _DisclosureChip(
+      key: const Key('detail-all'),
+      detail: summary,
+      open: open,
+      onToggle: () => setState(() {
+        if (!_open.remove('all')) _open.add('all');
+      }),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: _DisclosureChip(
-            key: const Key('detail-all'),
-            detail: summary,
-            open: open,
-            onToggle: () => setState(() {
-              if (!_open.remove('all')) _open.add('all');
-            }),
-          ),
+        _row(
+          widget.leading.isEmpty && widget.trailing.isEmpty
+              ? Align(alignment: Alignment.centerLeft, child: chip)
+              : Wrap(
+                  key: widget.rowKey,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [...widget.leading, chip, ...widget.trailing],
+                ),
         ),
         SonderReveal(
           visible: open,
@@ -1051,18 +1082,24 @@ class _DetailsBarState extends State<_DetailsBar> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Wrap(
-          children: [
-            for (final d in details)
-              _DisclosureChip(
-                key: Key('detail-${d.id}'),
-                detail: d,
-                open: _open.contains(d.id),
-                onToggle: () => setState(() {
-                  if (!_open.remove(d.id)) _open.add(d.id);
-                }),
-              ),
-          ],
+        _row(
+          Wrap(
+            key: widget.rowKey,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              ...widget.leading,
+              for (final d in details)
+                _DisclosureChip(
+                  key: Key('detail-${d.id}'),
+                  detail: d,
+                  open: _open.contains(d.id),
+                  onToggle: () => setState(() {
+                    if (!_open.remove(d.id)) _open.add(d.id);
+                  }),
+                ),
+              ...widget.trailing,
+            ],
+          ),
         ),
         for (final d in details)
           SonderReveal(
@@ -1140,9 +1177,8 @@ class _DetailPanel extends StatelessWidget {
       padding: const EdgeInsets.symmetric(
           horizontal: SonderSpace.md, vertical: SonderSpace.md),
       decoration: BoxDecoration(
-        color: tokens.panel,
-        borderRadius: BorderRadius.circular(SonderRadius.row),
-        border: Border.all(color: tokens.hairline),
+        color: tokens.sunken,
+        borderRadius: BorderRadius.circular(SonderRadius.menu),
       ),
       child: !titled
           ? body

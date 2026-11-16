@@ -63,14 +63,14 @@ repo-wide required compile gate (cited across the evidence docs in
 
 | File | Contents | When to install |
 |---|---|---|
-| `requirements-runtime.txt` | `mcp==2.0.0`, `cryptography==50.0.0` — exact pins | Pulled in by `-dev`; alone only for a runtime-only env |
+| `requirements-runtime.txt` | `mcp==2.2.0`, `cryptography==50.0.0` — exact pins | Pulled in by `-dev`; alone only for a runtime-only env |
 | `requirements-dev.txt` | `-r requirements-runtime.txt` + `pytest` + `pytest-xdist` | **Default.** Any dev or test work |
 | `requirements-train.txt` | torch/transformers/accelerate/peft/datasets/bitsandbytes with security-floor ranges | **Never by default.** Only before actually running `qlora_train.py` (see `TRAINING.md`) |
 | `requirements-update.txt` | `tuf==7.0.0`, `securesystemslib==1.4.0`, `cryptography==50.0.0` | Optional. Only when a bundle carries TUF metadata (signed-update path) |
 
 Rules the files themselves state — do not fight them:
 
-- **`mcp==2.0.0` is a hard pin, not a floor.** Bootstrap is unattended, so
+- **`mcp==2.2.0` is a hard pin, not a floor.** Bootstrap is unattended, so
   runtime deps must be the exact releases CI exercised. MCP 2.x renamed
   `mcp.server.fastmcp` to `mcp.server.mcpserver` and `FastMCP` to `MCPServer`;
   Sonder imports the 2.x names, so **MCP 1.x will not satisfy this repo**. An
@@ -241,7 +241,7 @@ tooling: match the file you are editing; comments explain *why*
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ModuleNotFoundError: mcp.server.mcpserver` | MCP 1.x installed (unpinned install, stale venv) | `pip install -r requirements-dev.txt` into a fresh venv; the `==2.0.0` pin is load-bearing |
+| `ModuleNotFoundError: mcp.server.mcpserver` | MCP 1.x installed (unpinned install, stale venv) | `pip install -r requirements-dev.txt` into a fresh venv; the `==2.2.0` pin is load-bearing |
 | `No module named pytest` | Installed `requirements-runtime.txt` instead of `-dev` | Runtime file has no test deps; install `requirements-dev.txt` |
 | Collection errors / import failures on a machine where the code is fine | pytest launched outside the repo root | Run from repo root; root `conftest.py` inserts it into `sys.path` |
 | `No Python at '"C:\...'` (stray quote in path) | Quoting failure across bash → cmd → venv redirector | Use `scripts\run-tests.cmd` or one explicit quoted interpreter path; not a missing file, not a sandbox denial |

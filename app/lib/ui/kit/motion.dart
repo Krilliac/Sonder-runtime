@@ -88,11 +88,23 @@ class SonderReveal extends StatelessWidget {
 /// Paints a hover/press surface behind [child] on pointer devices and keeps
 /// keyboard focus visible, without changing layout. Use for list rows and
 /// tiles that are tappable as a whole.
+///
+/// The fill is a soft pill of the raised tone: full for the selected row,
+/// a third as strong under the pointer. Selection is also known by its
+/// accent icon and heavier label, which the hover never carries. [inset] pulls the pill in from the hit area,
+/// so a 48 px target can draw a lighter row; keyboard focus adds a ring in
+/// the accent, drawn on the pill itself.
 class HoverSurface extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
   final bool selected;
+
+  /// Whether [selected] is drawn. It is always reported to semantics.
+  final bool showSelected;
   final BorderRadius borderRadius;
+
+  /// Space between the hit area and the painted pill.
+  final EdgeInsets inset;
   final String? semanticLabel;
   final FocusNode? focusNode;
 
@@ -101,7 +113,9 @@ class HoverSurface extends StatefulWidget {
     required this.child,
     this.onTap,
     this.selected = false,
+    this.showSelected = true,
     this.borderRadius = const BorderRadius.all(Radius.circular(SonderRadius.row)),
+    this.inset = EdgeInsets.zero,
     this.semanticLabel,
     this.focusNode,
   });
@@ -112,23 +126,34 @@ class HoverSurface extends StatefulWidget {
 
 class _HoverSurfaceState extends State<HoverSurface> {
   bool _hover = false;
+  bool _focus = false;
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final background = widget.selected
+    final background = widget.selected && widget.showSelected
         ? tokens.raised
         : _hover && widget.onTap != null
-            ? tokens.raised.withValues(alpha: 0.6)
+            ? tokens.raised.withValues(alpha: 0.35)
             : Colors.transparent;
-    final surface = AnimatedContainer(
-      duration: SonderMotion.of(context, SonderMotion.fast),
-      curve: SonderMotion.standard,
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: widget.borderRadius,
+    final surface = Padding(
+      padding: widget.inset,
+      child: AnimatedContainer(
+        duration: SonderMotion.of(context, SonderMotion.fast),
+        curve: SonderMotion.standard,
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: widget.borderRadius,
+        ),
+        foregroundDecoration: BoxDecoration(
+          borderRadius: widget.borderRadius,
+          border: Border.all(
+            color: _focus ? tokens.accentText : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: widget.child,
       ),
-      child: widget.child,
     );
     if (widget.onTap == null) return surface;
     return Semantics(
@@ -143,6 +168,15 @@ class _HoverSurfaceState extends State<HoverSurface> {
           child: InkWell(
             focusNode: widget.focusNode,
             borderRadius: widget.borderRadius,
+            // The pill above is the hover, press and focus feedback.
+            overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+            onFocusChange: (focused) {
+              // Only keyboard focus draws the ring, as with every control.
+              final keyboard = FocusManager.instance.highlightMode ==
+                  FocusHighlightMode.traditional;
+              final show = focused && keyboard;
+              if (show != _focus) setState(() => _focus = show);
+            },
             onTap: widget.onTap,
             child: surface,
           ),

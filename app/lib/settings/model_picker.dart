@@ -294,8 +294,7 @@ class _Heading extends StatelessWidget {
             SonderSpace.sm, SonderSpace.md, SonderSpace.sm, SonderSpace.xs),
         child: Semantics(
           header: true,
-          child: Text(text.toUpperCase(),
-              style: Theme.of(context).textTheme.labelSmall),
+          child: Text(text, style: Theme.of(context).textTheme.labelSmall),
         ),
       );
 }

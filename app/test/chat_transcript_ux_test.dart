@@ -11,6 +11,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/transcript.dart';
 import 'package:sonder_runtime/models.dart';
+import 'package:sonder_runtime/theme.dart';
+import 'package:sonder_runtime/workspace_ui.dart' show conversationWidth;
 
 import 'chat_fakes.dart';
 import 'goldens/golden_fonts.dart';
@@ -74,6 +76,15 @@ List<String> _recordClipboard(WidgetTester tester) {
   addTearDown(() => tester.binding.defaultBinaryMessenger
       .setMockMethodCallHandler(SystemChannels.platform, null));
   return copied;
+}
+
+/// The style the first run of text in [span] is drawn with.
+TextStyle _leafStyle(InlineSpan span, [TextStyle base = const TextStyle()]) {
+  if (span is! TextSpan) return base;
+  final style = base.merge(span.style);
+  final children = span.children;
+  if (span.text != null || children == null || children.isEmpty) return style;
+  return _leafStyle(children.first, style);
 }
 
 Future<void> _settle(WidgetTester tester) async {
@@ -212,12 +223,12 @@ void main() {
           ToolCallRow('b', elapsedMs: 1840),
           ToolCallRow('c', ok: false),
         ]),
-        'ran 2 tools · 2.0s · 1 refused');
+        'Used 2 tools · 2.0s · 1 refused');
     final chip = find.byKey(const Key('detail-tools'));
     expect(
         find.descendant(
             of: chip,
-            matching: find.textContaining('ran 2 tools · 2.0s · ',
+            matching: find.textContaining('Used 2 tools · 2.0s · ',
                 findRichText: true)),
         findsOneWidget);
     expect(
@@ -281,6 +292,163 @@ void main() {
     await mouse.removePointer();
     await unmountChat(tester);
     debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+      'your turn is a soft bubble on the right; the answer is plain prose '
+      'from the left edge of the same reading column', (tester) async {
+    for (final mode in [ThemeMode.dark, ThemeMode.light]) {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend,
+          size: const Size(1440, 900),
+          themeMode: mode,
+          prefs: _seed(_twoTurns));
+      await _settle(tester);
+      final tokens =
+          mode == ThemeMode.dark ? SonderTokens.dark : SonderTokens.light;
+      final bubble = find.byKey(const Key('user-turn-surface')).first;
+      final decoration =
+          tester.widget<Container>(bubble).decoration! as BoxDecoration;
+      expect(decoration.color, tokens.bubble, reason: '$mode');
+      expect(decoration.borderRadius,
+          BorderRadius.circular(SonderRadius.bubble));
+      expect(decoration.border, isNull);
+
+      // One centred reading column for both speakers.
+      const left = (1440 - conversationWidth) / 2;
+      const right = left + conversationWidth;
+      final turn = tester.getRect(bubble);
+      expect(turn.right, right);
+      // It hugs its text, well clear of the answer's edge.
+      expect(turn.left, greaterThan(left + conversationWidth / 2));
+      final answer = find.text('The driver compiles the PSO on first bind.',
+          findRichText: true);
+      expect(tester.getRect(answer).left, left);
+      // The answer is type on the page: no filled surface stands behind it.
+      final boxed = find.ancestor(
+          of: answer,
+          matching: find.byWidgetPredicate((w) =>
+              (w is Container && (w.color != null || w.decoration != null)) ||
+              w is Card));
+      expect(
+          find.descendant(
+              of: find.byKey(const Key('chat-transcript')), matching: boxed),
+          findsNothing);
+      // Reading size: 16 px on a 26 px line, in the text tone.
+      final prose = tester.widget<SelectableText>(find
+          .ancestor(of: answer, matching: find.byType(SelectableText))
+          .first);
+      final style = _leafStyle(prose.textSpan!);
+      expect(style.fontSize, 16);
+      expect(style.fontSize! * style.height!, closeTo(26, 0.01));
+      expect(style.color, tokens.text);
+      await unmountChat(tester);
+    }
+  });
+
+  testWidgets(
+      'the work row sits above the answer; the receipt shares one footer '
+      'row with the actions and the cost line', (tester) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend,
+        size: const Size(1440, 900), prefs: _seed(_twoTurns));
+    await _settle(tester);
+    final answer = tester.getRect(find.text(
+        'The driver compiles the PSO on first bind.',
+        findRichText: true));
+    // What Sonder did before it answered reads first, folded to one line.
+    final work = tester.getRect(find.byKey(const Key('detail-tools')));
+    expect(work.bottom, lessThanOrEqualTo(answer.top));
+
+    final footer = find.byKey(const Key('answer-footer')).first;
+    Rect inFooter(String key) => tester.getRect(
+        find.descendant(of: footer, matching: find.byKey(Key(key))));
+    final copy = inFooter('answer-copy');
+    final receipt = inFooter('detail-details');
+    final cost = inFooter('answer-footer-text');
+    expect(copy.top, greaterThanOrEqualTo(answer.bottom));
+    // One row, in reading order: actions, receipt, cost.
+    expect(receipt.center.dy, closeTo(copy.center.dy, 0.5));
+    expect(cost.center.dy, closeTo(copy.center.dy, 0.5));
+    expect(copy.left, lessThan(receipt.left));
+    expect(receipt.right, lessThanOrEqualTo(cost.left));
+    await unmountChat(tester);
+  });
+
+  testWidgets(
+      'with a mouse, an older answer keeps its footer while its receipt '
+      'is open', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend,
+        size: const Size(1440, 900), prefs: _seed(_twoTurns));
+    await _settle(tester);
+    final footer = find.byKey(const Key('answer-footer')).first;
+    double footerOpacity() => tester
+        .widget<AnimatedOpacity>(find
+            .ancestor(of: footer, matching: find.byType(AnimatedOpacity))
+            .first)
+        .opacity;
+    final receiptBody = find.textContaining('request: req_1');
+    expect(footerOpacity(), 0);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.text(
+        'The driver compiles the PSO on first bind.',
+        findRichText: true)));
+    await _settle(tester);
+    expect(footerOpacity(), 1);
+    final receipt = find.descendant(
+        of: footer, matching: find.byKey(const Key('detail-details')));
+    await tester.tap(receipt);
+    await _settle(tester);
+    expect(receiptBody, findsOneWidget);
+
+    // The pointer leaves: the open panel keeps its handle in view.
+    await mouse.moveTo(tester.getCenter(find.byType(TextField)));
+    await _settle(tester);
+    expect(footerOpacity(), 1);
+    expect(receiptBody, findsOneWidget);
+
+    // Closed again (from the keyboard or by hand), the footer goes quiet.
+    await mouse.moveTo(tester.getCenter(receipt));
+    await _settle(tester);
+    await tester.tap(receipt);
+    await _settle(tester);
+    await mouse.moveTo(tester.getCenter(find.byType(TextField)));
+    await _settle(tester);
+    expect(receiptBody, findsNothing);
+    expect(footerOpacity(), 0);
+    await mouse.removePointer();
+    await unmountChat(tester);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+      'a footer too long for its column wraps, the cost line first, and '
+      'stays inside the column', (tester) async {
+    final backend = FakeChatBackend();
+    await pumpChat(tester, backend,
+        size: const Size(640, 900), prefs: _seed(_twoTurns));
+    await _settle(tester);
+    // The newest answer carries Retry as well, so its footer is the widest.
+    final footer = find.byKey(const Key('answer-footer')).last;
+    Rect inFooter(String key) => tester.getRect(
+        find.descendant(of: footer, matching: find.byKey(Key(key))));
+    final row = tester.getRect(footer);
+    final copy = inFooter('answer-copy');
+    final retry = inFooter('answer-retry');
+    final cost = inFooter('answer-footer-text');
+    // The actions keep the first line; the cost line takes the next one.
+    expect(retry.center.dy, closeTo(copy.center.dy, 0.5));
+    expect(cost.top, greaterThanOrEqualTo(copy.bottom));
+    for (final part in [copy, retry, cost]) {
+      expect(part.left, greaterThanOrEqualTo(row.left));
+      expect(part.right, lessThanOrEqualTo(row.right));
+    }
+    expect(tester.takeException(), isNull);
+    await unmountChat(tester);
   });
 
   testWidgets('a phone at text scale 2 lays out without overflow',

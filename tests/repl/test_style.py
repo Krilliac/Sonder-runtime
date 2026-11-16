@@ -52,7 +52,23 @@ BANNERS = {
                           mode="auto", live=False, behind=12, restart_required=True,
                           elevated=True, elevated_reason="admin session for selfmod deploy",
                           strict=True, notices=1, mode_cycle_key=True),
+    "header": S.BannerState(persona="coder", model="sonder:latest", tier="code",
+                            mode="manual", live=True, version="0.9.0.dev0",
+                            cwd="~/code/engine/renderer/pipeline-cache"),
 }
+ANSWER = (
+    "## Plan\n\n"
+    "Warm the cache with `PrecompilePipelines()` **before the first draw**, then "
+    "verify it with a capture so the stall is measured and not guessed.\n\n"
+    "- Record every pipeline created in a session.\n"
+    "- Replay the list at startup.\n"
+    "1. Keep the work off the render thread.\n\n"
+    "> Driver caches survive a restart.\n\n"
+    "---\n\n"
+    "```python\n"
+    "cache.precompile()\n"
+    "```\n"
+)
 STATUS = {
     "plain": S.StatusState(mode="manual", tier="code", model="sonder:latest",
                            ctx_used=64, ctx_limit=8192),
@@ -85,6 +101,10 @@ def _render_all(c, width):
     yield "notice:long", S.notice("error", "x" * 90, "detail " * 30, None, width=width, c=c)
     yield "header", S.turn_header("answer", width, c)
     yield "header:error", S.turn_header("error", width, c)
+    yield "tool:ok", "\n".join(S.tool_call("Read File src/render/pso_cache.cpp", True, 12, width, c))
+    yield "tool:failed", "\n".join(S.tool_call(
+        "Write File src/render/pipeline_state_object_cache_warmup.cpp", False, 1840, width, c))
+    yield "markdown", "\n".join(S.markdown(ANSWER, width - 1, c=c))
     yield "rule", S.rule(width, c=c)
     yield "table", "\n".join(S.table(
         [("/model [tier|name]", "switch model or tier", ""),
@@ -162,11 +182,48 @@ def test_token_contrast_at_least_4_5(theme, role):
 
 
 def test_palette_escapes_follow_theme_and_level():
-    assert S.s("x", "accent", c=_caps("truecolor", "dark", "unicode")).startswith("\x1b[38;2;99;214;200m")
-    assert S.s("x", "accent", c=_caps("256", "light", "unicode")).startswith("\x1b[38;5;23m")
+    # The accent is Iris, the app's blue-violet, at every colour level.
+    assert S.s("x", "accent", c=_caps("truecolor", "dark", "unicode")).startswith("\x1b[38;2;182;176;250m")
+    assert S.s("x", "accent", c=_caps("truecolor", "light", "unicode")).startswith("\x1b[38;2;77;69;181m")
+    assert S.s("x", "accent", c=_caps("256", "dark", "unicode")).startswith("\x1b[38;5;147m")
+    assert S.s("x", "accent", c=_caps("256", "light", "unicode")).startswith("\x1b[38;5;62m")
     # Unknown theme falls back to the ANSI-16 roles the terminal theme adapts.
-    assert S.s("x", "accent", c=_caps("truecolor", "unknown", "unicode")).startswith("\x1b[36m")
+    assert S.s("x", "accent", c=_caps("truecolor", "unknown", "unicode")).startswith("\x1b[94m")
+    assert S.s("x", "accent", c=_caps("16", "dark", "unicode")).startswith("\x1b[94m")
+    assert S.s("x", "info", c=_caps("16", "dark", "unicode")).startswith("\x1b[36m")
     assert S.s("x", "accent", c=_caps("none", "dark", "unicode")) == "x"
+
+
+def test_truecolor_values_are_the_apps_text_tones():
+    """One palette for the terminal and the app: ``app/lib/theme.dart``."""
+    theme = Path(__file__).resolve().parents[2] / "app" / "lib" / "theme.dart"
+    if not theme.exists():
+        pytest.skip("the app is not in this checkout")
+    source = theme.read_text(encoding="utf-8")
+    token_of = {"muted": "muted", "accent": "accentText", "info": "info",
+                "success": "ok", "warning": "warn", "danger": "danger"}
+    assert sorted(token_of) == sorted(S._TRUE)
+    for index, name in enumerate(("dark", "light")):
+        block = re.search(r"static const %s = SonderTokens\((.*?)\n  \);" % name, source, re.S)
+        assert block, name
+        tokens = dict(re.findall(r"(\w+): Color\(0xFF([0-9A-Fa-f]{6})\)", block.group(1)))
+        for role, token in token_of.items():
+            value = tokens[token]
+            rgb = tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+            assert S._TRUE[role][index] == rgb, (role, name, token, "#" + value)
+
+
+def test_accent_is_not_the_old_teal_and_roles_stay_distinct():
+    """Iris sits in the blue-violet range; no two roles share a colour."""
+    for index in (0, 1):
+        r, g, b = S._TRUE["accent"][index]
+        assert b > r > g, (index, (r, g, b))
+        cells = [S._C256[role][index] for role in sorted(S._C256)]
+        assert len(set(cells)) == len(cells), cells
+        values = [S._TRUE[role][index] for role in sorted(S._TRUE)]
+        assert len(set(values)) == len(values), values
+    colours = {role: S._SGR16[role] for role in ("accent", "info", "success", "warning", "danger")}
+    assert len(set(colours.values())) == len(colours), colours
 
 
 def test_nested_styles_restore_outer_role():
@@ -278,6 +335,24 @@ def test_status_line_same_before_and_after_a_turn():
     assert before.replace("ctx 0/", "ctx 64/") == after
 
 
+def test_about_names_the_terminal_and_how_to_get_the_app_palette():
+    state = S.BannerState(model="m")
+
+    def row(c):
+        lines = [S.strip_ansi(line) for line in S.about_lines(state, 200, c)]
+        return [line.split(None, 1)[1] for line in lines if line.strip().startswith("terminal")]
+
+    assert row(_caps("none", "unknown", "unicode")) == ["no colour"]
+    assert row(_caps("none", "unknown", "ascii")) == ["no colour | ASCII glyphs"]
+    assert row(_caps("16", "unknown", "unicode")) == ["16 colours"]
+    assert row(_caps("truecolor", "dark", "unicode")) == ["24-bit colour · dark theme · app palette"]
+    assert row(_caps("256", "light", "unicode")) == ["256 colours · light theme · app palette"]
+    # The case that needs explaining: colour to spare, background unknown.
+    assert row(_caps("truecolor", "unknown", "unicode")) == [
+        "24-bit colour · theme unknown, so the terminal's own 16 colours"
+        " · SONDER_THEME=dark or light uses the app palette"]
+
+
 # ---------------------------------------------------------------------------
 # Banner and /about
 # ---------------------------------------------------------------------------
@@ -290,6 +365,27 @@ def test_banner_default_is_two_lines_and_has_no_rule():
         "  /help commands · /mode to switch · /about details · Ctrl-D quits",
     ]
     assert "─" not in text and "installed" not in text
+
+
+def test_banner_header_names_version_and_working_directory():
+    c = _caps("none", "unknown", "unicode")
+    state = S.BannerState(persona="coder", model="sonder:latest", tier="code", live=True,
+                          version="0.9.0.dev0", cwd="~/code/engine")
+    assert S.banner(state, 100, c).split("\n") == [
+        "◈ sonder 0.9.0.dev0 · coder · sonder:latest (code) · manual · http://127.0.0.1:11435",
+        "  cwd ~/code/engine",
+        "  /help commands · /mode to switch · /about details · Ctrl-D quits",
+    ]
+    # A narrow terminal gives up the scheme, then the version, before the
+    # persona, tier or model; the directory keeps its end.
+    narrow = S.banner(state, 76, c).split("\n")
+    assert narrow[0] == "◈ sonder · coder · sonder:latest (code) · manual · 127.0.0.1:11435"
+    deep = S.BannerState(model="m", live=True, cwd="/srv/projects/engine/renderer/pipeline-cache")
+    line = S.banner(deep, 30, c).split("\n")[1]
+    assert line == "  cwd …enderer/pipeline-cache" and S.cell_width(line) == 29
+    about = S.about_lines(state, 80, c)
+    assert about[1].split() == ["version", "0.9.0.dev0"]
+    assert about[2].split() == ["cwd", "~/code/engine"]
 
 
 def test_banner_mockup_at_80_with_notices():
@@ -389,10 +485,200 @@ def test_footer_forms():
     assert S.footer(S.FooterState(elapsed_ms=1200, rate="short"), 80, c) == "  done 1.2s · /pass /fail"
 
 
-def test_turn_header_never_doubles_label():
+def test_turn_header_is_a_speaker_label_with_no_rule():
     c = _caps("none", "unknown", "unicode")
-    assert S.turn_header("error", 40, c).startswith("✗ error ─")
-    assert S.turn_header("answer", 200, c).count("─") == 100 - len("◈ answer ")
+    assert S.turn_header("answer", 80, c) == "◈ Sonder"
+    assert S.turn_header("", 200, c) == "◈ Sonder"
+    assert S.turn_header("error", 40, c) == "✗ error"
+    assert S.turn_header("review", 80, c) == "◈ review"
+    assert S.turn_header("answer", 80, _caps("none", "unknown", "ascii")) == "# Sonder"
+    painted = S.turn_header("answer", 80, _caps("16", "unknown", "unicode"))
+    assert painted == "\x1b[94;1m◈ Sonder\x1b[0m"
+    assert S.turn_header("error", 80, _caps("16", "unknown", "unicode")) == "\x1b[31;1m✗ error\x1b[0m"
+
+
+# ---------------------------------------------------------------------------
+# Tool calls
+# ---------------------------------------------------------------------------
+
+def test_tool_call_is_a_call_line_and_a_result_line():
+    c = _caps("none", "unknown", "unicode")
+    assert S.tool_call("Read File src/a.py", True, 12, 80, c) == [
+        "  ▸ Read File src/a.py",
+        "    └ ✓ ok · 12ms",
+    ]
+    assert S.tool_call("Write File src/a.py", False, 1840, 80, c) == [
+        "  ▸ Write File src/a.py",
+        "    └ ✗ failed · 1.8s",
+    ]
+    # No timing, no separator; an empty title still names a tool.
+    assert S.tool_call("", True, None, 80, c) == ["  ▸ tool", "    └ ✓ ok"]
+    assert S.tool_call("Read File src/a.py", False, 5, 80, _caps("none", "unknown", "ascii")) == [
+        "  - Read File src/a.py",
+        "    +- x failed | 5ms",
+    ]
+
+
+def test_tool_call_status_never_relies_on_colour():
+    c = _caps("16", "unknown", "unicode")
+    call, result = S.tool_call("Read File src/a.py", False, 12, 80, c)
+    assert "\x1b[31;1m✗ failed\x1b[0m" in result
+    assert S.strip_ansi(result) == "    └ ✗ failed · 12ms"
+    ok = S.tool_call("Read File src/a.py", True, 12, 80, c)[1]
+    assert "\x1b[32m✓ ok\x1b[0m" in ok
+
+
+def test_tool_call_title_is_sanitised_and_fits():
+    c = _caps("none", "unknown", "unicode")
+    call, result = S.tool_call("Read\x1b[2J File\n" + "x" * 200, True, 3, 40, c)
+    assert "\x1b" not in call and "\n" not in call
+    assert S.cell_width(call) <= 39 and call.endswith("…")
+    assert S.cell_width(result) <= 39
+
+
+# ---------------------------------------------------------------------------
+# Markdown
+# ---------------------------------------------------------------------------
+
+def test_markdown_without_colour_is_exactly_wrap():
+    for c in (_caps("none", "unknown", "unicode"), _caps("none", "dark", "ascii"),
+              _caps("256", "dark", "unicode", plain=True)):
+        for width in WIDTHS:
+            assert S.markdown(ANSWER, width - 1, c=c) == S.wrap(ANSWER, width - 1, c=c)
+            assert S.markdown(ANSWER, width - 1, indent="  ", c=c) == S.wrap(
+                ANSWER, width - 1, indent="  ", c=c)
+
+
+def test_markdown_draws_structure_and_drops_only_style_markers():
+    c = _caps("256", "dark", "unicode")
+    lines = [S.strip_ansi(line) for line in S.markdown(ANSWER, 60, c=c)]
+    assert lines == [
+        "Plan",
+        "",
+        "Warm the cache with PrecompilePipelines() before the first",
+        "draw, then verify it with a capture so the stall is measured",
+        "and not guessed.",
+        "",
+        "• Record every pipeline created in a session.",
+        "• Replay the list at startup.",
+        "1. Keep the work off the render thread.",
+        "",
+        "│ Driver caches survive a restart.",
+        "",
+        "─" * 60,
+        "",
+        "── python " + "─" * 50,
+        "cache.precompile()",
+        "─" * 60,
+        "",
+    ]
+    # Every word of the answer is still there, in order.
+    words = " ".join(lines).split()
+    for word in ("PrecompilePipelines()", "before", "first", "cache.precompile()"):
+        assert word in words
+
+
+def test_markdown_styles_are_closed_on_every_line():
+    c = _caps("16", "unknown", "unicode")
+    text = "Use **a bold phrase that is long enough to wrap onto the next line** here."
+    lines = S.markdown(text, 30, c=c)
+    assert len(lines) > 1
+    for line in lines:
+        # Each painted word carries its own reset, so no line leaves a
+        # style open for the next one.
+        assert line.count("\x1b[1m") == line.count("\x1b[0m"), line
+    assert S.markdown("a **b c** d", 60, c=c) == ["a \x1b[1mb\x1b[0m \x1b[1mc\x1b[0m d"]
+    assert S.markdown("run `sonder bench`", 60, c=c) == ["run \x1b[36msonder\x1b[0m \x1b[36mbench\x1b[0m"]
+    assert S.markdown("# Title", 60, c=c) == ["\x1b[94;1mTitle\x1b[0m"]
+    assert S.markdown("### Deeper", 60, c=c) == ["\x1b[1mDeeper\x1b[0m"]
+    # A quote is marked by a quiet bar; its text keeps the reading colour.
+    assert S.markdown("> quoted words", 60, c=c) == ["\x1b[2m│\x1b[0m quoted words"]
+
+
+def test_markdown_code_spans_close_on_the_same_number_of_backticks():
+    c = _caps("16", "unknown", "unicode")
+    info = "\x1b[36m{}\x1b[0m"
+
+    def md(text):
+        return S.markdown(text, 80, c=c)
+
+    # One and two backticks; the marker run is never drawn.
+    assert md("`code`") == [info.format("code")]
+    assert md("``code``") == [info.format("code")]
+    assert md("a ``code`` b") == ["a " + info.format("code") + " b"]
+    # A span may hold shorter runs of backticks, verbatim.
+    assert md("`` ` ``") == [info.format("`")]
+    assert md("``a`b``") == [info.format("a`b")]
+    assert md("x ``` `` ```") == ["x " + info.format("``")]
+    # One space is stripped from each side when both are there.
+    assert md("`` `x` ``") == [info.format("`x`")]
+    # A run with no closer of its own length is plain text.
+    assert md("``a`") == ["``a`"]
+    assert md("`a``") == ["`a``"]
+    # Bold and code still sit side by side.
+    assert md("**b** ``c`d``") == ["\x1b[1mb\x1b[0m " + info.format("c`d")]
+
+
+def test_markdown_inline_stays_linear_on_pathological_lines():
+    import time
+
+    c = _caps("16", "unknown", "unicode")
+    n = 20000
+    lines = [
+        "`" * n,
+        "`a" * n,
+        "`` `" * (n // 4),
+        "".join("`" * k + "x" for k in range(1, 200)) * 5,
+        "**a*" * n,
+        "`a` **b** " * (n // 10),
+    ]
+    for text in lines:
+        start = time.perf_counter()
+        S.markdown(text, 80, c=c)
+        assert time.perf_counter() - start < 2.0, text[:20]
+
+
+def test_markdown_never_recolours_or_rewraps_code_and_tables():
+    c = _caps("truecolor", "dark", "unicode")
+    code = "x" * 120
+    text = "```\n%s\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n    indented **stays**" % code
+    lines = S.markdown(text, 40, c=c)
+    assert code in lines
+    assert "| a | b |" in lines and "| 1 | 2 |" in lines
+    assert "    indented **stays**" in lines
+    # An unfinished block (an answer cut short) still closes nothing early.
+    cut = S.markdown("```sh\nls **x**", 40, c=c)
+    assert cut[1] == "ls **x**"
+
+
+def test_markdown_ascii_glyphs_and_list_hang():
+    c = _caps("16", "unknown", "ascii")
+    lines = [S.strip_ansi(line) for line in S.markdown(
+        "- a list item that is long enough to wrap around the edge\n> quoted", 30, c=c)]
+    assert lines[0].startswith("- a list item")
+    assert all(line.startswith("  ") for line in lines[1:-1])
+    assert lines[-1] == "| quoted"
+    assert all(ord(ch) < 128 for line in lines for ch in line)
+
+
+def test_sgr_is_the_opening_escape_of_a_role_and_empty_without_colour():
+    dark = S.Caps(color="truecolor", theme="dark")
+    assert S.sgr("muted", c=dark) == "\x1b[38;2;158;154;146m"
+    assert S.sgr("accent", "strong", c=dark) == "\x1b[38;2;182;176;250;1m"
+    # What it opens is what ``s`` paints with.
+    assert S.s("x", "accent", "strong", c=dark) == S.sgr("accent", "strong", c=dark) + "x\x1b[0m"
+    assert S.sgr("muted", c=S.Caps(color="none")) == ""
+    assert S.sgr(c=dark) == ""
+    with pytest.raises(ValueError):
+        S.sgr("no-such-role", c=dark)
+
+
+def test_layout_glyphs_stay_out_of_the_tables_the_app_mirrors():
+    """status_vocab.dart mirrors _UNICODE_GLYPHS/_ASCII_GLYPHS token for token."""
+    for name in ("result", "bullet", "quote"):
+        assert name not in S._UNICODE_GLYPHS and name not in S._ASCII_GLYPHS
+        assert S.GLYPHS["unicode"][name] and S.GLYPHS["ascii"][name].isascii()
+    assert set(S.GLYPHS["unicode"]) == set(S.GLYPHS["ascii"])
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +771,22 @@ def test_windows_vt_failure_means_no_colour_and_ascii():
     assert legacy.glyphs == "ascii" and legacy.color == "16"
     raising = _detect({"WT_SESSION": "1"}, platform="nt", vt=lambda: 1 / 0)
     assert raising.color == "none"
+
+
+def test_windows_terminal_is_truecolor_without_colorterm():
+    wt = _detect({"WT_SESSION": "1"}, platform="nt", vt=lambda: True)
+    assert wt.color == "truecolor"
+    # Its background is still unknown, so the roles stay on its own 16
+    # colours until the theme is named.
+    assert wt.palette == "16"
+    assert S.s("x", "accent", c=wt) == "\x1b[94mx\x1b[0m"
+    themed = _detect({"WT_SESSION": "1", "SONDER_THEME": "dark"}, platform="nt", vt=lambda: True)
+    assert themed.palette == "truecolor"
+    assert S.s("x", "accent", c=themed) == "\x1b[38;2;182;176;250mx\x1b[0m"
+    # NO_COLOR still wins, and elsewhere the variable alone proves nothing
+    # (WSL passes it through to a different terminal stack).
+    assert _detect({"WT_SESSION": "1", "NO_COLOR": "1"}, platform="nt", vt=lambda: True).color == "none"
+    assert _detect({"TERM": "xterm", "WT_SESSION": "1"}).color == "16"
 
 
 def test_theme_detection():

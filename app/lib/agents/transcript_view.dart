@@ -31,7 +31,7 @@ class _Gutter extends StatelessWidget {
     return SizedBox(
       width: transcriptGutter,
       child: Padding(
-        padding: const EdgeInsets.only(top: 2),
+        padding: const EdgeInsets.only(top: SonderSpace.xxs),
         child: ExcludeSemantics(
           child: Text(glyph,
               textAlign: TextAlign.center,

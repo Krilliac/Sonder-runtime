@@ -137,12 +137,12 @@ class ModelPickerButton extends StatelessWidget {
             child: Center(
               widthFactor: 1,
               child: Container(
-                constraints: const BoxConstraints(minHeight: 28),
+                constraints: const BoxConstraints(minHeight: 30),
                 padding: const EdgeInsets.fromLTRB(
-                    SonderSpace.md, 0, SonderSpace.xs, 0),
+                    SonderSpace.md, 0, SonderSpace.sm, 0),
                 decoration: BoxDecoration(
+                  color: tokens.sunken,
                   borderRadius: BorderRadius.circular(SonderRadius.pill),
-                  border: Border.all(color: tokens.hairlineStrong),
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   Flexible(
@@ -260,10 +260,12 @@ class _PopoverRoute extends PopupRoute<String> {
       child: Material(
         type: MaterialType.card,
         color: tokens.panel,
-        elevation: 0,
+        elevation: 8,
+        shadowColor: tokens.shadow,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(SonderRadius.card),
-          side: BorderSide(color: tokens.hairlineStrong),
+          side: BorderSide(color: tokens.hairline),
         ),
         clipBehavior: Clip.antiAlias,
         child: child,

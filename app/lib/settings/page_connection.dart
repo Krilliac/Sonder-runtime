@@ -288,7 +288,7 @@ class _DiagnosisView extends StatelessWidget {
         return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(padding: const EdgeInsets.only(top: 2), child: mark),
+            Padding(padding: const EdgeInsets.only(top: SonderSpace.xxs), child: mark),
             const SizedBox(width: SonderSpace.md),
             Expanded(child: body),
           ],

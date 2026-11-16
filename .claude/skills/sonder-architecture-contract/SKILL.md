@@ -290,7 +290,7 @@ directions of the ratchet tighten; neither loosens.
 - **Stale agent branches**: 99 `origin/agent/*` remote branches at
   verification (`git branch -r | grep -c "agent/"`).
   `scripts/cleanup_merged_branches.py` exists; adoption is the gap.
-- **The `mcp==2.0.0` exact pin** (`requirements-runtime.txt` line 6): the
+- **The `mcp==2.2.0` exact pin** (`requirements-runtime.txt` line 6): the
   reload machinery (`ReloadableMCPServer`) subclasses the MCP server class,
   so any upgrade is a deliberate migration, not a routine bump. Candidate
   risk, not a current failure.
@@ -312,4 +312,4 @@ from the repo root on that date; re-run them before trusting volatile numbers.
 - server.py churn: `git log --since=2025-08-22 --oneline -- server.py | wc -l` (697)
 - Stale agent branches: `git branch -r | grep -c "agent/"` (99)
 - Evidence-ledger gap: `grep -n "_none yet_" docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md` (line 671)
-- MCP pin: `grep -n "mcp==" requirements-runtime.txt` (mcp==2.0.0)
+- MCP pin: `grep -n "mcp==" requirements-runtime.txt` (mcp==2.2.0)

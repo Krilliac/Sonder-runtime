@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../ui/approval_sheet.dart'
     show ApprovalReceipt, ApprovalRequest, showApprovalSheet;
 import '../api/approvals.dart' show PendingApproval;
+import '../theme.dart' show SonderSpace;
 import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'backend.dart';
 import 'classify.dart';
@@ -126,7 +127,7 @@ class _RefusalNoticeState extends State<RefusalNotice> {
           ],
         ),
         if (outcome != null) ...[
-          const SizedBox(height: 10),
+          const SizedBox(height: SonderSpace.snug),
           _outcomeView(context, outcome, r),
         ],
       ],
