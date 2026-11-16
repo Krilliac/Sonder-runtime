@@ -222,7 +222,8 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool =
     ``separators`` picks how a ``'`` right after a pp-number is lexed (a
     wrong guess lets a character literal swallow a quote or a ``/*`` and
     hide later lines): ``"cxx14"`` (C++14, C23: a digit separator when an
-    ASCII digit, letter or ``_`` follows, as gcc, clang and MSVC agree),
+    ASCII digit, letter or ``_`` follows, as gcc and clang read it; where
+    MSVC reads it otherwise the input is refused, see ``_mask_literals``),
     ``"none"`` (C17, C++11: always a character literal) and ``"legacy"``
     (the masking before these modes: any ``'`` inside a pp-number, whose
     start was any Unicode digit). See ``_mask_literals``.
@@ -264,6 +265,26 @@ _IDENT_OR_DOLLAR = _ASCII_IDENT | {"$"}
 _UNSURE_IN_NUMBER = frozenset("\\$")  # a UCN or ``$``: gcc continues a pp-number over it
 _EXPONENTS = frozenset("eEpP")
 _SIGNS = frozenset("+-")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+# The literal part of a pp-number as MSVC 19.44 lexes it: digits with separators, a fraction, an
+# exponent, then an optional trailing ``'``. MSVC reads a ``'`` as a separator only right after a
+# digit of this part, and its number token ends where the part ends (``1x.R"(`` is ``1x``, ``.``
+# and a raw string to it), while gcc and clang continue the pp-number over every identifier
+# character, ``.``, ``'`` and exponent sign. Matched once per number, only when needed.
+_DEC_RUN = r"[0-9](?:'?[0-9])*"
+_HEX_RUN = r"[0-9A-Fa-f](?:'?[0-9A-Fa-f])*"
+_LITERAL_PART_RE = re.compile(
+    rf"(?:0[xX](?:{_HEX_RUN})?(?:\.(?:{_HEX_RUN})?)?(?:[pP][+-]?(?:{_DEC_RUN})?)?"
+    rf"|0[bB](?:{_DEC_RUN})?"
+    rf"|(?:{_DEC_RUN}(?:\.(?:{_DEC_RUN})?)?|\.{_DEC_RUN})(?:[eE][+-]?(?:{_DEC_RUN})?)?)'?")
+
+
+def _literal_part_end(value: str, start: int) -> int:
+    """End of the literal part of the number starting at ``start`` (see ``_LITERAL_PART_RE``)."""
+    match = _LITERAL_PART_RE.match(value, start)
+    return start if match is None else match.end()
+
+
 _SEPARATOR_MODES = ("cxx14", "none", "legacy")
 # What one ``_mask_literals`` pass saw (``events``); ``scan_added_lexings`` acts on them.
 _EVENT_SEPARATOR = "separator"  # a ``'`` the C++14 reading took as a digit separator
@@ -272,8 +293,8 @@ _EVENT_AMBIGUOUS = "ambiguous"  # a ``'`` after a pp-number that compilers lex d
 _EVENT_BAD_RAW = "bad_raw"      # a raw-string prefix whose delimiter some compiler rejects
 _AMBIGUOUS_SEPARATOR = ("a quote after a number that compilers lex differently (digit separator "
                         "or character literal) is refused")
-_BAD_RAW_DELIMITER = ("a raw string whose delimiter some compiler rejects (each recovers "
-                      "differently) is refused")
+_BAD_RAW_DELIMITER = ("a raw string prefix that compilers lex differently (a delimiter some compiler "
+                      "rejects, or a prefix inside a number) is refused")
 
 
 def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators: str = "cxx14",
@@ -284,17 +305,26 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     gcc 16, clang 22 and MSVC 19.44: in C++14 and C23 modes gcc and clang take
     it as a digit separator only when an ASCII digit, letter or ``_`` follows
     (gcc also across ``''``), in C17 and C++11 never, and MSVC in every mode
-    takes it always. ``separators`` picks the reading (see
+    exactly when it follows a digit of the number's literal part
+    (``_LITERAL_PART_RE``: ``1'/`` yes, ``1x'2``, ``1.'2``, ``1e+'2`` no).
+    The exponent sign is not uniform either: clang (C++) and g++
+    ``-std=c++14`` end the number before a sign after ``p`` in a decimal
+    number, clang in MS mode before a sign after ``e`` in a hex one.
+    ``separators`` picks the reading (see
     ``normalize_for_scan``); every reading follows the same text up to the
     first ``'`` it decides differently, so ``events`` (when given) records
     whether another reading can differ at all: ``"separator"`` (the C++14
     reading took a separator, so the C17 one differs), ``"legacy"`` (the
     legacy reading decides a ``'`` or a raw prefix differently) and the two
     that no reading covers: ``"ambiguous"`` (a ``'`` after a pp-number
-    followed by anything else, or a pp-number holding a character compilers
-    disagree on: non-ASCII, ``\\``, ``$``) and ``"bad_raw"`` (a raw prefix
-    whose delimiter some compiler rejects, or one after a non-ASCII
-    character or a backslash).
+    followed by anything else, one gcc and clang take as a separator but
+    MSVC does not, one after a sign after ``p`` or in a hex number, or a
+    pp-number holding a character compilers disagree on: non-ASCII, ``\\``,
+    ``$``; taken from the C++14 pass) and ``"bad_raw"`` (a raw prefix whose
+    delimiter some compiler rejects, one after a non-ASCII character or a
+    backslash, or one inside a pp-number that some compiler ends before it).
+    A raw prefix inside a pp-number every compiler continues (``1.R"(``,
+    ``1'R"(``, ``1e+R"(``) is no raw string: ``1.R`` is part of the number.
 
     Pure; ``events`` is the only argument it mutates. Linear in ``value``.
     """
@@ -305,6 +335,9 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     n = len(value)
     pp_number = False  # C++14 reading: inside a pp-number (started by an ASCII digit)
     unsure = False  # ... and it holds a character compilers lex differently
+    number_start = 0  # ... where it starts
+    hex_number = False  # ... and whether it starts with ``0x``
+    literal_end = -1  # ... end of its literal part (``_LITERAL_PART_RE``), -1 until needed
     legacy_pp = False  # the legacy tracker: started by any Unicode digit, ' always continues it
     while i < n:
         ch = value[i]
@@ -328,6 +361,14 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
             if events is not None:
                 if pp_number and not separator:
                     events.add(_EVENT_AMBIGUOUS)
+                elif separator and separators == "cxx14":
+                    # MSVC takes it only after a digit of the literal part. Matched in the C++14
+                    # pass alone (where a number's literal part does not run into the next number).
+                    if literal_end < 0:
+                        literal_end = _literal_part_end(value, number_start)
+                    if i - 1 >= literal_end \
+                            or value[i - 1] not in (_HEX_DIGITS if hex_number else _ASCII_DIGITS):
+                        events.add(_EVENT_AMBIGUOUS)
                 if separator:
                     events.add(_EVENT_SEPARATOR)
                 if separator != legacy_pp:
@@ -344,8 +385,12 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 ch.isdigit() or (ch == "." and i + 1 < n and value[i + 1].isdigit())):
             legacy_pp = True
         if pp_number:
-            if ch in _ASCII_IDENT or ch == "." or (ch in _SIGNS and previous in _EXPONENTS):
+            if ch in _ASCII_IDENT or ch == ".":
                 pass
+            elif ch in _SIGNS and previous in _EXPONENTS:
+                # gcc and clang disagree whether the number goes on after ``p+`` or a hex ``e+``.
+                if previous in "pP" or hex_number:
+                    unsure = True
             elif ch in _UNSURE_IN_NUMBER or not ch.isascii():
                 unsure = True
             else:
@@ -357,6 +402,9 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
             # unsure whether the digit starts a number or continues an identifier.
             pp_number = True
             unsure = previous != "" and (previous in _UNSURE_IN_NUMBER or not previous.isascii())
+            number_start = i
+            hex_number = value.startswith(("0x", "0X"), i)
+            literal_end = -1
         if ch == "/" and i + 1 < n and value[i + 1] == "/":
             end = value.find("\n", i)
             out.append(" ")
@@ -372,6 +420,16 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 else _LEGACY_RAW_PREFIX_RE.match(value, i)
             if previous in _IDENT_OR_DOLLAR:
                 raw = None  # ``xR"`` and ``$R"`` are identifiers to every compiler
+            elif pp_number:
+                # ``1.R"(``, ``1'R"(``, ``1e+R"(``: the prefix continues the number. Unless some
+                # compiler ends the number before it (an unsure number, or past MSVC's literal
+                # part); a delimiter some compiler rejects stays refused here too, as before.
+                raw = None
+                if events is not None:
+                    if literal_end < 0:
+                        literal_end = _literal_part_end(value, number_start)
+                    if unsure or i - 1 >= literal_end or _RAW_PREFIX_RE.match(value, i) is None:
+                        events.add(_EVENT_BAD_RAW)
             else:
                 raw = _RAW_PREFIX_RE.match(value, i)
                 # After a non-ASCII character or a stray backslash it is unsure whether an
@@ -444,10 +502,11 @@ _DIRECTIVE_SHAPE_RE = re.compile(r"([^\x21-\x7e]*)(?:#|%:)([^\x21-\x7e]*)([A-Za-
 _LINE_BLANKS = frozenset(" \t\f\v\r")
 _ODD_DIRECTIVE = ("a non-ASCII or control character before, after or inside a directive's '#' "
                   "and name is refused (compilers disagree whether the line is a directive)")
-# U+FEFF is skipped as a byte order mark at the start of a file by gcc and clang;
+# U+FEFF is skipped as a byte order mark at the start of a file by gcc, clang and MSVC;
 # clang 22 takes U+180E as a blank before a ``#`` (not between ``_Pragma`` and its
 # ``(``). ``\s`` matches neither; both are refused anywhere in added text, one
-# rule instead of a guess per construct.
+# rule instead of a guess per construct (``scan_added_lexings`` drops the one
+# byte order mark at offset 0 of a file before scanning).
 _ODD_BLANKS_RE = re.compile("[\ufeff\u180e]")
 _ODD_BLANKS = "U+FEFF (byte order mark) or U+180E in added text is refused (a compiler reads it as a blank)"
 _PRAGMA_BAD_RE = re.compile(
@@ -942,6 +1001,11 @@ _LEXING_REFUSAL = ("too many distinct readings for a file this large "
                    "(lexing work budget exceeded); the input is refused")
 
 
+def _without_bom(text: str) -> str:
+    """``text`` without one U+FEFF at offset 0 (the byte order mark every compiler skips)."""
+    return str(text or "").removeprefix("\ufeff")
+
+
 def _digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
@@ -979,7 +1043,13 @@ def scan_added_lexings(before: str, after: str, *,
     ``_LEXING_WORK_CHARS`` characters (old plus new text, per reading)
     through the scanner, the input is refused, never accepted. The quote
     readings found while scanning count against the same bound.
+
+    gcc, clang and MSVC skip one U+FEFF (byte order mark) at the very start of
+    a file, so exactly one there is dropped from the old and the new text
+    first; any other U+FEFF stays and is refused by the scan.
     """
+    before = _without_bom(before)
+    after = _without_bom(after)
     blank_before, odd_before = _blank_splices(before)
     blank_after, odd_after = _blank_splices(after)
     digraph_modes = (True, False) if _may_hold_digraph(before) or _may_hold_digraph(after) \

@@ -2262,6 +2262,7 @@ def _union_of_every_lexing(before: str, after: str) -> set[str]:
     from sonder_runtime.domain.build import repair as repair_module
 
     found: set[str] = set()
+    before, after = repair_module._without_bom(before), repair_module._without_bom(after)
     modes: list[dict[str, bool]] = [{"trigraphs": t, "digraphs": d, "strict_splices": s}
                                     for t in (True, False) for d in (True, False) for s in (True, False)]
     modes.append({"legacy": True})
@@ -2315,7 +2316,7 @@ def test_skipping_equal_readings_never_changes_the_reasons():
 _SECRET = '#include "../../../../secret.h"\n'
 _ESCAPES_ROOT = "include escapes the project root"
 _AMBIGUOUS_QUOTE = "compilers lex differently"
-_BAD_RAW = "raw string whose delimiter"
+_BAD_RAW = "raw string prefix that compilers lex differently"
 _ODD_LINE = "non-ASCII or control character"
 _ODD_BLANK = "U+FEFF (byte order mark) or U+180E"
 
@@ -2381,6 +2382,8 @@ def test_regression_quote_after_a_number_that_compilers_disagree_on_is_refused(t
     "int a = 1'000'000;\nlong b = 0x1F'FF'u;\ndouble c = 1.5e+3'0;\n",
     "char c = '1', d = L'x', e = u8'y', f = U'z';\nint g = x1'2';\n",
     "unsigned long long m = 0b1010'0101ull;\n",
+    # A separator after a digit of the literal part (after an exponent sign too): MSVC agrees.
+    "double e = 1e+1'000, f = 6.022'140e23, g = .5'0, h = 0x1.8'0p3;\nauto i = 0xDEAD'BEEFu, j = 0'7;\n",
 ])
 def test_digit_separators_and_character_literals_stay_clean(text):
     assert _scan_every_lexing(text) == (), text
@@ -2429,11 +2432,14 @@ def test_regression_invisible_character_before_a_directive_is_refused(lead):
 
 
 def test_regression_byte_order_mark_added_at_the_start_of_the_file_is_refused():
-    """gcc and clang skip a leading U+FEFF, so the include on the patched first line is live."""
+    """gcc, clang and MSVC skip a leading U+FEFF, so the include on the patched first line is live.
+
+    The scan drops that one byte order mark too and checks the include as the compilers read it.
+    """
     patch = CandidatePatch(hunks=(PatchHunk("src/core/math.cpp", "float normalized_length",
                                             "\ufeff" + _SECRET + "float normalized_length"),), model_id="fake")
     texts, reasons = validate_patch(patch, scope=SCOPE, current={"src/core/math.cpp": _MATH_SOURCE})
-    assert not texts and any(_ODD_BLANK in reason for reason in reasons), reasons
+    assert not texts and any(_ESCAPES_ROOT in reason for reason in reasons), reasons
     assert any(_ODD_BLANK in reason for reason in _scan("\ufeff" + _SECRET)), "per-reading scan"
     # Refused anywhere in added text, mid-line too: one rule instead of a per-construct guess
     # (clang 22 rejects ``_Pragma`` + U+180E + ``(``, but takes U+180E before ``#include`` as a blank).
@@ -2461,3 +2467,100 @@ def test_raw_strings_with_valid_delimiters_stay_clean(text):
     assert _scan_every_lexing(text) == (), text
     texts, reasons = _validate_replacement("length(v);\n" + text)
     assert texts and reasons == (), (text, reasons, TAG)
+
+
+# --- round 6 review: raw prefixes inside numbers, exponent signs, MSVC separators, byte order marks ---
+# Every hostile text below was preprocessed with gcc 16.1, clang 22 and MSVC 19.44: at least one of
+# them opens ../../../../secret.h, while the scan accepted the text before.
+
+_RAW_LINE = 'auto s = R"x(" /* )x";\n'
+
+
+def _raw_after(number: str) -> str:
+    """A raw-string prefix right after ``number``; read as a raw string, its body hides the include."""
+    return _RAW_LINE + "double a = " + number + 'R"(" ;\n' + _SECRET + '*/ )";\n'
+
+
+@pytest.mark.parametrize("text", [
+    _raw_after("1."), _raw_after("1e+"),
+    # C++14 and later: ``1'R`` is a number and the include is live (C17/C++11: ``'R"('`` and a comment)
+    _RAW_LINE + "int a = 1'R\"(' /* \";\n" + _SECRET + "*/ )\";\n",
+])
+def test_regression_raw_prefix_inside_a_number_is_not_a_raw_string(text):
+    """``1.R"(`` is the pp-number ``1.R`` and an ordinary string to gcc, clang and MSVC (``1'R`` in
+    C++14 and later), so the include is live. Read as a raw string, the body ran on to ``)"`` and
+    hid it."""
+    assert any(_ESCAPES_ROOT in reason for reason in _scan(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _scan_every_lexing(text)), text
+    assert any(_ESCAPES_ROOT in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("number", ["1p+", "1p+.", "0x1p+", "0x1e+", "1x.", "1..", "1e+1."])
+def test_regression_raw_prefix_where_some_compiler_ends_the_number_is_refused(number):
+    """Some compiler ends the number before the prefix and reads a raw string that hides the include:
+    clang (C++) and g++ ``-std=c++14`` before the sign of ``1p+``, clang in MS mode before the sign of
+    ``0x1e+``, MSVC at the dot of ``1x.``, ``1..`` and ``1e+1.``. The others read ``R`` as part of
+    the number and include the file. No reading covers both, so the prefix is refused."""
+    text = _raw_after(number)
+    assert any(_BAD_RAW in reason for reason in _scan_every_lexing(text)), text
+    assert any(_BAD_RAW in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("text", [
+    "int a = 1e+'1, b = 1p+'2 ; /* '\n" + _SECRET + "*/\n",  # clang, g++ c++14: 1p + '2 ; /* '
+    "int a = 1e+'1, b = 0x1e+'2 ; /* '\n" + _SECRET + "*/\n",  # clang (MS mode): 0x1e + '2 ; /* '
+    "int a = 1e+x'1, b = 1p+x'2 ; /* '\n" + _SECRET + "*/\n",  # clang, g++ c++14: 1p + x '2 ; /* '
+    "int a = 1e+x'1, b = 0x1e+x'2 ; /* '\n" + _SECRET + "*/\n",
+])
+def test_regression_quote_after_an_exponent_sign_compilers_disagree_on_is_refused(text):
+    """gcc and clang disagree whether ``p+`` (and ``e+`` in a hex number) continue the number, and
+    MSVC never takes a quote right after a sign as a separator: one quote is a separator to some
+    compiler and opens a character literal to another, which a second quote then turns around."""
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _scan_every_lexing(text)), text
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _refused_end_to_end(text)), text
+
+
+@pytest.mark.parametrize("number", ["1x", "1.", "1ul", "1e", "1_1"])
+def test_regression_separator_msvc_reads_as_a_character_literal_is_refused(number):
+    """MSVC takes a quote as a separator only right after a digit of the number's literal part:
+    ``1x'1`` is ``1x`` and a character literal to it, a separator to gcc and clang (C++14), while
+    ``2'x`` is a separator to MSVC and a character literal in C17. Neither the C++14 nor the C17
+    reading sees the include MSVC opens, so the quote is refused."""
+    text = "int a = " + number + "'1 /* ', b = 2'x '/*' ;\n" + _SECRET + "*/\n"
+    assert _scan(text) == () and _scan(text, separators="none") == (), "both readings hide the include"
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _scan_every_lexing(text)), text
+    assert any(_AMBIGUOUS_QUOTE in reason for reason in _refused_end_to_end(text)), text
+
+
+def test_regression_first_line_of_a_file_with_a_byte_order_mark_can_be_changed():
+    """gcc, clang and MSVC skip one U+FEFF at offset 0, so changing line 1 of a UTF-8-with-BOM file
+    is an ordinary edit (it was refused as an invisible character). That line is still checked, and
+    a U+FEFF anywhere else is still refused."""
+    source = '\ufeff#include "pch.h"\nint a;\n'
+
+    def edit_line_one(replacement: str) -> tuple[dict[str, str], tuple[str, ...]]:
+        patch = CandidatePatch(hunks=(PatchHunk("src/core/math.cpp", '#include "pch.h"', replacement),),
+                               model_id="fake")
+        return validate_patch(patch, scope=SCOPE, current={"src/core/math.cpp": source})
+
+    texts, reasons = edit_line_one('#include "stdafx.h"')
+    assert reasons == () and texts == {"src/core/math.cpp": '\ufeff#include "stdafx.h"\nint a;\n'}, reasons
+    texts, reasons = edit_line_one(_SECRET.rstrip("\n"))
+    assert not texts and any(_ESCAPES_ROOT in reason for reason in reasons), reasons
+    for after in ('\ufeff\ufeff#include "stdafx.h"\nint a;\n', '\ufeff#include "pch.h"\n\ufeffint a;\n',
+                  '#include "pch.h"\ufeff\nint a;\n'):
+        reasons = scan_added_lexings(source, after, include_ok=OK)
+        assert any(_ODD_BLANK in reason for reason in reasons), (ascii(after), reasons)
+
+
+@pytest.mark.parametrize("line", ["#if$ defined(__has_include)", "\x1c#if defined(__has_include)",
+                                  "#if\u00e9 defined(__has_include)"])
+def test_regression_defined_exemption_needs_an_if_line_every_compiler_reads_as_one(line):
+    """``defined(__has_include)`` is exempt only on a real ``#if``/``#elif`` line: not when ``if``
+    runs on into an identifier character (``$`` or non-ASCII; ``#if$`` is an unknown directive to
+    gcc, clang and MSVC), nor when a control character gcc lexes as a stray token precedes the
+    ``#``. There the token is evaluated, so with no literal operand it is refused."""
+    text = line + "\n#endif\n"
+    assert any(_COMPUTED in reason for reason in _scan(text)), ascii(text)
+    assert any(_COMPUTED in reason for reason in _refused_end_to_end(text)), ascii(text)
+    assert _scan_every_lexing("#if defined(__has_include)\n#endif\n") == ()
