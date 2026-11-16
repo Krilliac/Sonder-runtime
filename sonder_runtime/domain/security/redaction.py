@@ -35,9 +35,10 @@ PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"[\"']?\s*[:=]\s*)([\"']?[^\s\"',;}{]{4,}[\"']?)"
+        r"[\"']?\s*[:=]\s*)"
+        r"(\"[^\s\"',;}{]{4,}\"?|'[^\s\"',;}{]{4,}'?|[^\s\"',;}{]{4,})"
     ),
-    re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
+    re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
     re.compile(
         r"(?i)([?&](?:access[-_]?token|api[-_]?key|auth[-_]?secret|"
         r"password|credential)=)([^&#\s]+)"
@@ -50,6 +51,8 @@ PATTERNS: tuple[re.Pattern, ...] = (
     # with the contribution privacy classifier.
     *CREDENTIAL_FORMATS,
 )
+
+_MAX_PASSES = 4
 
 
 def redact_text(
@@ -68,11 +71,17 @@ def redact_text(
     for value in sorted({v for v in secret_values if v}, key=len, reverse=True):
         if value in text:
             text = text.replace(value, REDACTED)
-    for pattern in PATTERNS:
-        if pattern.groups >= 2:
-            text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
-        else:
-            text = pattern.sub(REDACTED, text)
+    # A substitution can create a new word boundary (``[REDACTED]Cookie: a=b``),
+    # so repeat the pattern passes until the text is stable (bounded).
+    for _ in range(_MAX_PASSES):
+        before = text
+        for pattern in PATTERNS:
+            if pattern.groups >= 2:
+                text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
+            else:
+                text = pattern.sub(REDACTED, text)
+        if text == before:
+            break
     for prefix in path_prefixes:
         if prefix and prefix in text:
             text = text.replace(prefix, WORKSPACE_LABEL)

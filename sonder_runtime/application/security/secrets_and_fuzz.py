@@ -21,7 +21,7 @@ class CredentialScanner:
         ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
         ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
         ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
-        ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
+        ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")),
         ("credential_assignment", re.compile(r"(?i)\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;]+")),
     )
 

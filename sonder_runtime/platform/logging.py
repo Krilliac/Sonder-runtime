@@ -74,9 +74,10 @@ _PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"[\"']?\s*[:=]\s*)([\"']?[^\s\"',;}{]{4,}[\"']?)"
+        r"[\"']?\s*[:=]\s*)"
+        r"(\"[^\s\"',;}{]{4,}\"?|'[^\s\"',;}{]{4,}'?|[^\s\"',;}{]{4,})"
     ),
-    re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
+    re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^/@\s:]+:[^/@\s]+)@"),
     re.compile(
         r"(?i)([?&](?:access[-_]?token|api[-_]?key|auth[-_]?secret|"
         r"password|credential)=)([^&#\s]+)"
@@ -117,11 +118,17 @@ class Redactor:
             for value in self._values:
                 if value in text:
                     text = text.replace(value, REDACTED)
-            for pattern in _PATTERNS:
-                if pattern.groups >= 2:
-                    text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
-                else:
-                    text = pattern.sub(REDACTED, text)
+            # A substitution can create a new word boundary, so repeat the
+            # pattern passes until stable (bounded; mirrors the domain layer).
+            for _ in range(4):
+                before = text
+                for pattern in _PATTERNS:
+                    if pattern.groups >= 2:
+                        text = pattern.sub(lambda m: m.group(1) + REDACTED, text)
+                    else:
+                        text = pattern.sub(REDACTED, text)
+                if text == before:
+                    break
             for prefix in self._path_prefixes:
                 if prefix in text:
                     text = text.replace(prefix, "[WORKSPACE]")
