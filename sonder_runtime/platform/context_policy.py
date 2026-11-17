@@ -1,5 +1,6 @@
 """Environment-backed native and virtual context sizing policy."""
 
+import math
 import os
 import re
 
@@ -205,9 +206,11 @@ def parse_strict(value):
 def parse_size(value, default=None):
     if default is None:
         default = default_context()
-    if value is None:
+    if value is None or isinstance(value, bool):
         return int(default)
     if isinstance(value, (int, float)):
+        if not math.isfinite(value) or int(value) <= 0:
+            return int(default)
         return max(1, int(value))
     text = str(value).strip().lower().replace("_", "").replace(",", "")
     if not text:
@@ -220,7 +223,8 @@ def parse_size(value, default=None):
         number *= 1000
     elif match.group(2) == "m":
         number *= 1000000
-    return max(1, int(number))
+    parsed = int(number)
+    return parsed if parsed > 0 else int(default)
 
 
 def native_max():
@@ -240,7 +244,16 @@ def default_requested():
 
 
 def requested(value=None):
-    raw = default_requested() if value in (None, "") else parse_size(value, default_requested())
+    is_unset_number = (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and (not math.isfinite(value) or value <= 0)
+    )
+    raw = (
+        default_requested()
+        if value in (None, "") or isinstance(value, bool) or is_unset_number
+        else parse_size(value, default_requested())
+    )
     return max(1, min(raw, virtual_max()))
 
 

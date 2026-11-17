@@ -87,6 +87,12 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
+from ...domain.native_tool_policy import (
+    MAX_ARGUMENT_CHARS as MAX_TOOL_SCHEMA_CHARS,
+    TOOL_NAME_RE,
+    _value_depth_within,
+    native_tool_call_decision,
+)
 from ...domain.routing.backend_conformance import BackendIdentity
 from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
@@ -99,7 +105,7 @@ from .openai_compat_gateway import (
     OpenAICompatibleGateway,
     shared_https_context,
 )
-from .request_tuning import thinking_supported, tune_request
+from .request_tuning import advertised_features, thinking_supported, tune_request
 from .sse_stream import post_streaming
 from .telemetry import from_openai_compatible
 
@@ -191,7 +197,11 @@ _FORWARDED_OPTIONS = {
 _INTEGER_OPTIONS = frozenset({"top_k", "seed", "repeat_last_n", "num_ctx", "num_predict"})
 # Requests Inference v1 rejects with 400 unsupported_parameter.  Refusing them
 # here keeps the failure local, loud and free of a wasted network round trip.
-_UNSUPPORTED_OPTIONS = ("format", "tools", "tool_choice", "functions", "response_format")
+_UNSUPPORTED_OPTIONS = ("format", "functions", "response_format")
+MAX_TOOLS = 64
+MAX_TOOL_SCHEMA_DEPTH = 16
+ENV_TOOLS = "SONDER_INFERENCE_TOOLS"
+MIN_THINKING_RETRY_SECONDS = 2.0
 
 
 class SonderInferenceUnreachable(DependencyUnavailable):
@@ -231,6 +241,7 @@ class SonderInferenceResponse(ModelResponse):
     # Scheme and host of the endpoint that served it, when private workers
     # are configured (never a path, query or credential).
     endpoint: str | None = None
+    tool_calls: tuple[Mapping[str, object], ...] | None = None
 
 
 # -- transport ---------------------------------------------------------------
@@ -1525,11 +1536,101 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     # -- generate ----------------------------------------------------------
 
     @staticmethod
-    def _payload_options(options: Mapping[str, object]) -> dict[str, object]:
+    def _validate_tools(raw_tools: object) -> list[dict[str, object]]:
+        if not isinstance(raw_tools, (list, tuple)) or not 1 <= len(raw_tools) <= MAX_TOOLS:
+            raise InvalidInput("option 'tools' must be a list of 1-%d tool definitions" % MAX_TOOLS)
+        validated: list[dict[str, object]] = []
+        for idx, item in enumerate(raw_tools):
+            if not isinstance(item, Mapping) or item.get("type") != "function":
+                raise InvalidInput("option 'tools[%d]' must be a function tool object" % idx)
+            fn = item.get("function")
+            if not isinstance(fn, Mapping):
+                raise InvalidInput("option 'tools[%d].function' must be an object" % idx)
+            name = fn.get("name")
+            if not isinstance(name, str) or not TOOL_NAME_RE.fullmatch(name.strip()):
+                raise InvalidInput("option 'tools[%d].function.name' is invalid" % idx)
+            entry = dict(item)
+            entry["function"] = dict(fn, name=name.strip())
+            if not _value_depth_within(entry, MAX_TOOL_SCHEMA_DEPTH):
+                raise InvalidInput("option 'tools[%d]' exceeds nesting limit" % idx)
+            validated.append(entry)
+        try:
+            encoded = json.dumps(validated, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise InvalidInput("option 'tools' must be finite JSON: %s" % exc) from None
+        if len(encoded) > MAX_TOOL_SCHEMA_CHARS:
+            raise InvalidInput("option 'tools' exceeds %d characters" % MAX_TOOL_SCHEMA_CHARS)
+        return validated
+
+    @staticmethod
+    def _validate_tool_choice(raw_choice: object) -> object:
+        if isinstance(raw_choice, str):
+            if raw_choice in ("auto", "none", "required"):
+                return raw_choice
+            raise InvalidInput("option 'tool_choice' string must be auto, none, or required")
+        if isinstance(raw_choice, Mapping) and raw_choice.get("type") == "function":
+            fn = raw_choice.get("function")
+            name = fn.get("name") if isinstance(fn, Mapping) else None
+            if isinstance(name, str) and TOOL_NAME_RE.fullmatch(name.strip()):
+                return {"type": "function", "function": {"name": name.strip()}}
+        raise InvalidInput("option 'tool_choice' is invalid")
+
+    @staticmethod
+    def _tools_supported(
+        document: Mapping[str, object] | None,
+        *,
+        model: str,
+        env: Mapping[str, str] | None = None,
+    ) -> bool:
+        source = os.environ if env is None else env
+        flag = str(source.get(ENV_TOOLS, "") or "").strip().lower()
+        if flag in ("1", "on", "true", "yes"):
+            return True
+        if flag in ("0", "off", "false", "no"):
+            return False
+        if not isinstance(document, Mapping):
+            return False
+        models = document.get("models")
+        if isinstance(models, list):
+            for entry in models:
+                if not isinstance(entry, Mapping):
+                    continue
+                matches = (
+                    entry.get("id") == model
+                    or (model == DEFAULT_MODEL and entry.get("default") is True)
+                )
+                if not matches:
+                    continue
+                caps = entry.get("capabilities")
+                feats = entry.get("features")
+                if caps is not None or feats is not None:
+                    names = {
+                        str(x).strip().lower()
+                        for src in (caps, feats)
+                        for x in (
+                            [k for k, v in src.items() if v]
+                            if isinstance(src, Mapping)
+                            else (src if isinstance(src, (list, tuple, set, frozenset)) else ())
+                        )
+                        if isinstance(x, str)
+                    }
+                    return "tools" in names
+        return "tools" in advertised_features(document)
+
+    @classmethod
+    def _payload_options(cls, options: Mapping[str, object]) -> dict[str, object]:
         for name in _UNSUPPORTED_OPTIONS:
             if options.get(name) not in (None, False, "", [], {}):
                 raise InvalidInput("sonder-inference v1 does not support the %r option" % name)
         payload: dict[str, object] = {}
+        raw_tools = options.get("tools")
+        if raw_tools not in (None, False, "", [], {}):
+            payload["tools"] = cls._validate_tools(raw_tools)
+        raw_choice = options.get("tool_choice")
+        if raw_choice not in (None, ""):
+            if "tools" not in payload:
+                raise InvalidInput("option 'tool_choice' requires 'tools'")
+            payload["tool_choice"] = cls._validate_tool_choice(raw_choice)
         for option, wire in _FORWARDED_OPTIONS.items():
             if option not in options or options[option] is None:
                 continue
@@ -1871,10 +1972,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             payload["prompt_cache_key"] = cache_key
         self._call.settings = settings
         snap = self._require_ready(settings, timeout)
+        if "tools" in payload and not self._tools_supported(snap.document, model=model, env=self._env):
+            raise InvalidInput(
+                "sonder-inference does not advertise 'tools' capability for model %r" % model
+            )
         tune_request(payload, think, snap.document, self._env)
         started = time.monotonic()
-        data = self._post_with_busy_retry(payload, cfg, settings, context, live)
-        self._check_liveness(context, phase="during model call")
 
         def served_model(result: dict) -> str:
             extension = result.get("sonder")
@@ -1891,86 +1994,133 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 )
             return served
 
-        served = served_model(data)
-        choices = data.get("choices")
-        choice = choices[0] if isinstance(choices, list) and choices else None
-        message = choice.get("message") if isinstance(choice, dict) else None
-        empty_length = (
-            isinstance(choice, dict) and choice.get("finish_reason") == "length"
-            and isinstance(message, dict)
-            and (message.get("content") is None
-                 or isinstance(message.get("content"), str)
-                 and not message["content"].strip())
-        )
-        repaired = False
-        if (empty_length and think is None
-                and thinking_supported(snap.document, self._env)
-                and (live is None or not live.generated and not live.cancelled)):
-            # The model used its entire cap on private reasoning. No answer
-            # reached the caller, so one non-thinking retry can recover it.
-            # Keep this within the original transport and operation deadlines.
-            remaining = min(self._call_timeout(settings, context),
-                            timeout - (time.monotonic() - started))
-            if remaining > 0:
-                retry = dict(payload)
-                retry["stream"] = False
-                retry.pop("stream_options", None)
-                template = dict(retry.get("chat_template_kwargs") or {})
-                template["enable_thinking"] = False
-                retry["chat_template_kwargs"] = template
-                data = self._post("/v1/chat/completions", retry, cfg, remaining,
-                                  context=context)
-                self._check_liveness(context, phase="during model call")
-                served = served_model(data)
-                repaired = True
-        text = self._extract_text(data)
-        usage = data.get("usage")
-        if usage is None:
-            usage = {}
-        if not isinstance(usage, dict):
-            raise DependencyUnavailable("sonder-inference returned an invalid usage object")
-        timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-        extension = usage.get("sonder")
-        nested = extension.get("timings") if isinstance(extension, dict) else None
-        if isinstance(nested, dict):
-            timings = {**timings, **nested}
-        measured = _response_timings(timings, usage)
-        telemetry = from_openai_compatible({**data, "timings": timings}, with_usage=True)
-        prompt_count = usage.get("prompt_tokens")
-        if prompt_count is None:
-            prompt_count = timings.get("prompt_n")
-        output_count = usage.get("completion_tokens")
-        if output_count is None:
-            output_count = timings.get("predicted_n")
-        choices = data.get("choices")
-        finish = choices[0].get("finish_reason") if (
-            isinstance(choices, list) and choices and isinstance(choices[0], dict)
-        ) else None
-        finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
-        self._call.response_meta = {key: value for key, value in (
-            ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
-            ("empty_length_recovered", True if repaired else None),
-        ) if value is not None}
-        # The public activity projection retains summary, while the owning
-        # span also gets structured measurements. Never attach response text.
-        activity_tracker.record_event(
-            "inference_outcome", provider=PROVIDER_ID,
-            summary=json.dumps(self._call.response_meta, sort_keys=True),
-            **self._call.response_meta,
-        )
-        response = SonderInferenceResponse(
-            text=require_model_text(text),
-            model=served,
-            tier=request.tier or PROVIDER_ID,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=optional_token_count(prompt_count, "prompt token count"),
-            tokens_out=optional_token_count(output_count, "completion token count"),
-            telemetry=telemetry,
-            timings=measured,
-            finish_reason=finish,
-        )
-        default_registry().observe_inference(PROVIDER_ID, telemetry)
-        return response
+        try:
+            data = self._post_with_busy_retry(payload, cfg, settings, context, live)
+            self._check_liveness(context, phase="during model call")
+
+            served = served_model(data)
+            choices = data.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            message = choice.get("message") if isinstance(choice, dict) else None
+            empty_length = (
+                isinstance(choice, dict) and choice.get("finish_reason") == "length"
+                and isinstance(message, dict)
+                and (message.get("content") is None
+                     or isinstance(message.get("content"), str)
+                     and not message["content"].strip())
+                and not (isinstance(message.get("tool_calls"), list) and message["tool_calls"])
+            )
+            repaired = False
+            if (empty_length and think is None
+                    and thinking_supported(snap.document, self._env)
+                    and (live is None or not live.generated and not live.cancelled)):
+                # The model used its entire cap on private reasoning. No answer
+                # reached the caller, so one non-thinking retry can recover it.
+                # Keep this within the original transport and operation deadlines.
+                elapsed = max(0.0, time.monotonic() - started)
+                remaining = min(self._call_timeout(settings, context), timeout - elapsed)
+                if remaining >= MIN_THINKING_RETRY_SECONDS:
+                    retry = dict(payload)
+                    retry["stream"] = False
+                    retry.pop("stream_options", None)
+                    template = dict(retry.get("chat_template_kwargs") or {})
+                    template["enable_thinking"] = False
+                    retry["chat_template_kwargs"] = template
+                    usage_first = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+                    first_tokens = usage_first.get("completion_tokens")
+                    if (
+                        isinstance(first_tokens, int)
+                        and first_tokens >= 16
+                        and elapsed > 0
+                        and isinstance(retry.get("max_tokens"), int)
+                    ):
+                        affordable = max(64, int((first_tokens / elapsed) * remaining * 0.8))
+                        if retry["max_tokens"] > affordable:
+                            retry["max_tokens"] = affordable
+                    with trust_scope(settings.ca_bundle):
+                        data = self._post("/v1/chat/completions", retry, cfg, remaining,
+                                          context=context)
+                    self._check_liveness(context, phase="during model call")
+                    served = served_model(data)
+                    repaired = True
+            choices = data.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            message = choice.get("message") if isinstance(choice, dict) else None
+            raw_tool_calls = (
+                tuple(tc for tc in message["tool_calls"] if isinstance(tc, Mapping))
+                if "tools" in payload and isinstance(message, dict)
+                and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
+                else None
+            )
+            if raw_tool_calls and isinstance(message, dict) and (
+                message.get("content") is None
+                or (isinstance(message.get("content"), str) and not message["content"].strip())
+            ):
+                text = native_tool_call_decision(message) or json.dumps(
+                    {"tool_calls": [dict(tc) for tc in raw_tool_calls]}, ensure_ascii=False,
+                )
+            else:
+                text = self._extract_text(data)
+            usage = data.get("usage")
+            if usage is None:
+                usage = {}
+            if not isinstance(usage, dict):
+                raise DependencyUnavailable("sonder-inference returned an invalid usage object")
+            timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+            extension = usage.get("sonder")
+            nested = extension.get("timings") if isinstance(extension, dict) else None
+            if isinstance(nested, dict):
+                timings = {**timings, **nested}
+            measured = _response_timings(timings, usage)
+            telemetry = from_openai_compatible({**data, "timings": timings}, with_usage=True)
+            prompt_count = usage.get("prompt_tokens")
+            if prompt_count is None:
+                prompt_count = timings.get("prompt_n")
+            output_count = usage.get("completion_tokens")
+            if output_count is None:
+                output_count = timings.get("predicted_n")
+            finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+            finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
+            self._call.response_meta = {key: value for key, value in (
+                ("model", served), ("served_model", served),
+                ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
+                ("empty_length_recovered", True if repaired else None),
+            ) if value is not None}
+            # The public activity projection retains summary, while the owning
+            # span also gets structured measurements. Never attach response text.
+            activity_tracker.record_event(
+                "inference_outcome", provider=PROVIDER_ID,
+                summary=json.dumps(self._call.response_meta, sort_keys=True),
+                **self._call.response_meta,
+            )
+            response = SonderInferenceResponse(
+                text=require_model_text(text),
+                model=served,
+                tier=request.tier or PROVIDER_ID,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                tokens_in=optional_token_count(prompt_count, "prompt token count"),
+                tokens_out=optional_token_count(output_count, "completion token count"),
+                telemetry=telemetry,
+                timings=measured,
+                finish_reason=finish,
+                tool_calls=raw_tool_calls or None,
+            )
+            default_registry().observe_inference(PROVIDER_ID, telemetry)
+            return response
+        except Exception as exc:
+            failure_meta = {
+                "ok": False,
+                "model": model,
+                "error_kind": type(exc).__name__,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+            self._call.response_meta = {}
+            activity_tracker.record_event(
+                "inference_outcome", provider=PROVIDER_ID,
+                summary=json.dumps(failure_meta, sort_keys=True),
+                **failure_meta,
+            )
+            raise
 
     # -- embed -------------------------------------------------------------
 
