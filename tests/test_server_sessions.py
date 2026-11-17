@@ -8,6 +8,7 @@ import server
 def stub(monkeypatch, tmp_path):
     """Point the DB at a temp file, stub Ollama /api/chat, and disable embeddings."""
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(tmp_path / "sessions.db"))
     # No sonder alias -> resolve to the base coder model (no network needed).
     monkeypatch.setattr(server, "_get", lambda path: {"models": [{"name": "qwen2.5:3b"}]})
     monkeypatch.setattr(embeddings, "embed", lambda text: None)  # no recall, no vectors

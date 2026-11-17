@@ -38,6 +38,31 @@ def test_build_prompt_injects_language_specific_run_compat_for_cpp():
     assert "/runwindow" in p
 
 
+def test_build_prompt_does_not_hijack_slash_commands_or_paths():
+    for prompt in (
+        "/run",
+        "/run python",
+        "/run_code print(1)",
+        "/run_code import pygame; pygame.init()",
+        "/runwindow",
+        "please use /run_code on the snippet",
+        "check /runwindow or /var/run/app.sock",
+        "see https://example.com/run for details",
+    ):
+        p = o.build_prompt(prompt, [])
+        assert o.RUN_COMPAT_HEADER not in p, f"unexpectedly hijacked {prompt!r}: {p!r}"
+        assert p == prompt
+
+
+def test_build_prompt_injects_run_compat_for_standalone_run_token():
+    for prompt in (
+        "write a python script for `/run`.",
+        "build a python timer I can /run",
+    ):
+        p = o.build_prompt(prompt, [])
+        assert o.RUN_COMPAT_HEADER in p, f"missing compat header for {prompt!r}"
+
+
 def test_run_with_learning_captures_and_returns_id():
     c = ms.connect(":memory:")
     seen = {}

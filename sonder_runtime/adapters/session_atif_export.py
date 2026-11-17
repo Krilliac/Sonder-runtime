@@ -1,8 +1,9 @@
 """ATIF rendering for the remembered-conversation ``session_export`` tool.
 
 The ``session_export`` MCP tool's default output (readable transcript text)
-is unchanged; ``format="atif"`` routes here.  Turns are read from the same
-interactions rows, oldest first, with the same ``limit`` tail, and projected
+is unchanged; ``format="atif"`` routes here.  Turns are the same merged list
+the text export uses (interaction rows plus the session event log, withheld
+bodies as placeholders), oldest first, with the same ``limit`` tail, projected
 by :func:`sonder_runtime.application.session.atif.interaction_turns_to_atif`,
 which applies the export redaction to every string.
 """
@@ -12,6 +13,7 @@ import json
 from collections.abc import Mapping
 
 from ..application.session.atif import AtifAgent, interaction_turns_to_atif
+from ..application.session.event_turns import fuller_turns
 from ..domain.common.errors import InvalidInput
 from ..platform.version import runtime_version
 
@@ -36,12 +38,21 @@ def _turn_records(conn, session_id: str) -> list[dict[str, object]]:
 
 
 def interaction_session_atif(conn, session_id: str, session: Mapping[str, object],
-                             *, limit: int) -> str:
-    """Render one remembered session's last ``limit`` turns as ATIF JSON."""
-    turns = _turn_records(conn, session_id)[-limit:]
+                             *, limit: int, get_repository=None) -> str:
+    """Render one remembered session's last ``limit`` turns as ATIF JSON.
+
+    With a session event repository getter the turn list merges the interaction
+    rows with the event log (which also holds selected-model and cloud turns the
+    learning store never records).
+    """
+    records = _turn_records(conn, session_id)
+    merged = records if get_repository is None else fuller_turns(get_repository, session_id, records)
+    turns = merged[-limit:]
     if not turns:
         raise InvalidInput("session has no turns to export as ATIF")
     extra: dict[str, object] = {}
+    if merged is not records:
+        extra["sonder_source"] = "session_events"
     if session.get("title"):
         extra["title"] = session["title"]
     if session.get("project"):
