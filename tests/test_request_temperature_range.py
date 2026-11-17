@@ -234,3 +234,87 @@ def test_int_too_large_to_repr_is_still_refused_as_invalid_input():
         validate_request_temperature(10 ** 5000)
     assert "temperature must be a finite number from 0 to 2" in str(raised.value)
     assert len(str(raised.value)) < 200
+
+
+@pytest.mark.parametrize("bad_temp", [-0.1, 2.5, 1e308, True, "0.4"])
+def test_http_chat_and_responses_reject_invalid_request_temperature(monkeypatch, bad_temp):
+    import json
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import threading
+    import sonder_runtime.interfaces.http.serve as serve
+
+    called = []
+    monkeypatch.setattr(server, "answer_with_history", lambda *a, **k: called.append(a) or "OK")
+    monkeypatch.setenv("SONDER_HTTP_ALLOW_LOCAL_OPEN", "1")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        for path, body in (
+            ("/v1/chat/completions", {"model": "sonder", "messages": [{"role": "user", "content": "hi"}], "temperature": bad_temp}),
+            ("/v1/responses", {"model": "sonder", "input": "hi", "temperature": bad_temp}),
+        ):
+            req = urllib.request.Request(
+                base + path,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(req, timeout=5)
+            assert exc.value.code == 400
+            payload = json.loads(exc.value.read().decode("utf-8"))
+            assert payload["error"]["type"] == "invalid_request"
+        assert called == []
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_http_chat_and_responses_forward_valid_temperature_and_honor_session_slider(monkeypatch):
+    import json
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import threading
+    import sonder_runtime.interfaces.http.serve as serve
+    from sonder_runtime.interfaces.http.serve_policy import serve_temperature
+
+    seen_temps = []
+
+    def fake_answer(prompt, history=None, **kwargs):
+        seen_temps.append(serve_temperature())
+        return "OK"
+
+    monkeypatch.setattr(server, "answer_with_history", fake_answer)
+    monkeypatch.setenv("SONDER_HTTP_ALLOW_LOCAL_OPEN", "1")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        for path, body in (
+            ("/v1/chat/completions", {"model": "sonder", "messages": [{"role": "user", "content": "hi"}], "temperature": 0.35}),
+            ("/v1/responses", {"model": "sonder", "input": "hi", "temperature": 1.25}),
+            ("/v1/chat/completions", {
+                "model": "sonder",
+                "session": "temp-slider-sess",
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 0.2,
+                "session_temperature": 0.9,
+            }),
+        ):
+            req = urllib.request.Request(
+                base + path,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                assert resp.status == 200
+        assert seen_temps == [pytest.approx(0.35), pytest.approx(1.25), None]
+    finally:
+        srv.shutdown()
+        srv.server_close()

@@ -10,8 +10,10 @@ from sonder_runtime.adapters.chat_run_backend import ChatRunBackend
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import permission_receipts, role_tool_policy
 from sonder_runtime.adapters.security import powershell_gate as _powershell_gate
+from sonder_runtime.application.agents import delegation_runtime as _delegation
 from sonder_runtime.application.chat.tool_loop import ChatToolTurn, build_tool_turn_manifest
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools
+from sonder_runtime.domain.agents.delegation import DELEGATION_TOOLS
 from sonder_runtime.domain.chat_tools import (
     CORE_CHAT_TOOL_DEFINITIONS,
     chat_tools_payload,
@@ -114,16 +116,24 @@ def build_http_chat_tool_turn(
     permission_policy: Any,
     handler: Any,
     chunk_fn: Callable[..., str],
-    write_tool_chunk_fn: Callable[..., bool],
-    wait_for_approval_fn: Callable[..., str],
+    write_tool_chunk_fn: Callable[..., bool] | None = None,
+    wait_for_approval_fn: Callable[..., str] | None = None,
     model: str,
     project: str,
     stream: bool,
     authorized_tools: bool,
+    write_agent_chunk_fn: Callable[..., bool] | None = None,
+    write_agent_board_chunk_fn: Callable[..., bool] | None = None,
+    stream_module: Any = None,
     wait_timeout_seconds: float = 120.0,
     allow_system_tools: bool = False,
 ) -> ChatToolTurn | None:
     """Build a ``ChatToolTurn`` for an HTTP chat completion if enabled and capable."""
+    if stream_module is not None:
+        write_tool_chunk_fn = write_tool_chunk_fn or getattr(stream_module, "write_tool_chunk", None)
+        write_agent_chunk_fn = write_agent_chunk_fn or getattr(stream_module, "write_agent_chunk", None)
+        write_agent_board_chunk_fn = write_agent_board_chunk_fn or getattr(stream_module, "write_agent_board_chunk", None)
+        wait_for_approval_fn = wait_for_approval_fn or getattr(stream_module, "wait_for_approval", None)
     flag = str(os.environ.get("SONDER_CHAT_TOOLS", "1")).strip().lower()
     if flag in {"0", "false", "no", "off"} or not authorized_tools:
         return None
@@ -133,9 +143,11 @@ def build_http_chat_tool_turn(
         mode = ""
     if mode == "plan" or not _model_supports_tools(server, model):
         return None
+    depth = _delegation.current_depth()
     admitted = [
         item.name for item in CORE_CHAT_TOOL_DEFINITIONS
         if not role_tool_policy.agent_refusal(item.name)
+        and (depth == 0 or item.name not in DELEGATION_TOOLS)
     ]
     if not admitted:
         return None
@@ -158,8 +170,16 @@ def build_http_chat_tool_turn(
     iid = str(getattr(early, "completion_id", "") or "") or uuid.uuid4().hex[:12]
 
     def on_event(payload: dict[str, Any]) -> None:
-        if stream:
+        if stream and write_tool_chunk_fn is not None:
             write_tool_chunk_fn(handler, chunk_fn, iid=iid, model=model, payload=payload)
+
+    def on_agent_ev(payload: dict[str, Any]) -> None:
+        if stream and write_agent_chunk_fn is not None:
+            write_agent_chunk_fn(handler, chunk_fn, iid=iid, model=model, payload=payload)
+
+    def on_board_ev(payload: dict[str, Any]) -> None:
+        if stream and write_agent_board_chunk_fn is not None:
+            write_agent_board_chunk_fn(handler, chunk_fn, iid=iid, model=model, payload=payload)
 
     def wait_hook(tool_name: str, call_id: str, _decision: Any, preview: dict[str, Any]) -> str:
         ledger = permission_policy.approval_ledger()
@@ -174,6 +194,8 @@ def build_http_chat_tool_turn(
             str(getattr(pending, "digest", "") or "")
             or str(server.permission_modes.call_digest(tool_name, preview.get("arguments") or {}))
         )
+        if wait_for_approval_fn is None:
+            return "expired"
         return wait_for_approval_fn(
             ledger,
             tool_name,
@@ -185,12 +207,14 @@ def build_http_chat_tool_turn(
 
     return ChatToolTurn(
         manifest=manifest,
-        tools_payload=chat_tools_payload(allowed_names=admitted),
+        tools_payload=chat_tools_payload(allowed_names=admitted, depth=depth),
         backend=backend,
         permission_policy=permission_policy,
         blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
-        on_tool_event=on_event if stream else None,
-        wait_for_approval=wait_hook if stream else None,
+        on_tool_event=on_event if (stream and write_tool_chunk_fn is not None) else None,
+        on_agent_event=on_agent_ev if (stream and write_agent_chunk_fn is not None) else None,
+        on_board_event=on_board_ev if (stream and write_agent_board_chunk_fn is not None) else None,
+        wait_for_approval=wait_hook if (stream and wait_for_approval_fn is not None) else None,
         role_refusal=role_tool_policy.agent_refusal,
         allow_system_tools=allow_system_tools,
     )
@@ -214,9 +238,11 @@ def maybe_open_mcp_chat_tool_turn(
         mode = ""
     if mode == "plan" or not _model_supports_tools(server, model):
         return None
+    depth = _delegation.current_depth()
     admitted = [
         item.name for item in CORE_CHAT_TOOL_DEFINITIONS
         if not role_tool_policy.agent_refusal(item.name)
+        and (depth == 0 or item.name not in DELEGATION_TOOLS)
     ]
     if not admitted:
         return None
@@ -237,7 +263,7 @@ def maybe_open_mcp_chat_tool_turn(
     )
     return ChatToolTurn(
         manifest=manifest,
-        tools_payload=chat_tools_payload(allowed_names=admitted),
+        tools_payload=chat_tools_payload(allowed_names=admitted, depth=depth),
         backend=backend,
         permission_policy=permission_policy,
         blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),

@@ -152,6 +152,7 @@ sonder_runtime/application/agent_registry/workbench_review.py
 sonder_runtime/application/agents/__init__.py
 sonder_runtime/application/agents/durable_lineage.py
 sonder_runtime/application/agents/lineage_delegation.py
+sonder_runtime/application/agents/delegation_runtime.py
 sonder_runtime/application/agents/presets.py
 sonder_runtime/application/agents/recursive_delegation.py
 sonder_runtime/application/agents/workflow_integration.py
@@ -402,6 +403,8 @@ sonder_runtime/bootstrap/chat_tools_wiring.py
 sonder_runtime/bootstrap/claim_check_agent_tools.py
 sonder_runtime/bootstrap/container.py
 sonder_runtime/bootstrap/control_state_rehearsal.py
+sonder_runtime/bootstrap/delegation_agent_tools.py
+sonder_runtime/bootstrap/delegation_wiring.py
 sonder_runtime/bootstrap/diagnostics.py
 sonder_runtime/bootstrap/doctor_checks.py
 sonder_runtime/bootstrap/doctor_formatting.py
@@ -417,6 +420,7 @@ sonder_runtime/bootstrap/typed_tools.py
 sonder_runtime/domain/__init__.py
 sonder_runtime/domain/adaptive_batcher.py
 sonder_runtime/domain/agents/__init__.py
+sonder_runtime/domain/agents/delegation.py
 sonder_runtime/domain/agents/policy_refusal_guard.py
 sonder_runtime/domain/agents/roles.py
 sonder_runtime/domain/anthropic_policy.py

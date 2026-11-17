@@ -523,6 +523,12 @@
       "summary": "Start an agent conversation: /delegate <task>. Uses the selected project or a creations folder."
     },
     {
+      "category": "diagnostics",
+      "name": "/delegate_task",
+      "risk": "ask",
+      "summary": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only)."
+    },
+    {
       "category": "filesystem",
       "name": "/delete",
       "risk": "safe",
@@ -1357,6 +1363,12 @@
       "summary": "Preflight the direct-MCP permission gate for one registered tool without running it."
     },
     {
+      "category": "diagnostics",
+      "name": "/post_to_board",
+      "risk": "safe",
+      "summary": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board."
+    },
+    {
       "category": "persona",
       "name": "/prefer",
       "risk": "ask",
@@ -1448,6 +1460,12 @@
     },
     {
       "category": "diagnostics",
+      "name": "/read_board",
+      "risk": "safe",
+      "summary": "Read recent messages from the shared peer coordination board."
+    },
+    {
+      "category": "diagnostics",
       "name": "/reasoning_show",
       "risk": "safe",
       "summary": "Show the reasoning the model emitted for the current/last turn, if enabled."
@@ -1529,6 +1547,12 @@
       "name": "/report",
       "risk": "safe",
       "summary": "Show the latest grounded end report and replayable action transcript."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/report_progress",
+      "risk": "safe",
+      "summary": "Post a concise status or thinking update to the live agent progress board."
     },
     {
       "category": "dev",
@@ -1769,6 +1793,12 @@
       "name": "/sonder_stats",
       "risk": "safe",
       "summary": "Report what sonder has learned so far."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/spawn_agents",
+      "risk": "ask",
+      "summary": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only)."
     },
     {
       "category": "data",
