@@ -8,9 +8,25 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import threading
 import urllib.parse
 
 logger = logging.getLogger(__name__)
+_LOG_LOCK = threading.Lock()
+_LOGGED_ORIGINS: set[tuple[str, str]] = set()
+_MAX_LOGGED_ORIGINS = 256
+
+
+def _first_acceptance_log(origin: str, kind: str) -> bool:
+    """Emit acceptance INFO/WARNING logs at most once per canonical origin."""
+    key = (origin, kind)
+    with _LOG_LOCK:
+        if key in _LOGGED_ORIGINS:
+            return False
+        if len(_LOGGED_ORIGINS) >= _MAX_LOGGED_ORIGINS:
+            _LOGGED_ORIGINS.clear()
+        _LOGGED_ORIGINS.add(key)
+        return True
 
 
 DEFAULT_HOST = "127.0.0.1:11434"
@@ -156,7 +172,10 @@ def policy_error(value=None, *, allow_remote=False) -> str:
     if port is None:
         return "OLLAMA_HOST must include an explicit port"
     if is_loopback(origin):
-        logger.info("ollama origin accepted (loopback)")
+        if _first_acceptance_log(origin, "loopback"):
+            logger.info("ollama origin accepted (loopback)")
+        else:
+            logger.debug("ollama origin accepted (loopback)")
         logger.debug("policy_error: origin is loopback, accepted")
         return ""
     consent = allow_remote is True
@@ -172,6 +191,9 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         logger.warning("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts in transit")
         logger.info("ollama origin rejected: non-loopback origin requires https")
         return "non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit"
-    logger.warning("remote Ollama origin accepted -- prompts and embeddings will leave this machine")
-    logger.info("ollama origin accepted (remote, https)")
+    if _first_acceptance_log(origin, "remote"):
+        logger.warning("remote Ollama origin accepted -- prompts and embeddings will leave this machine")
+        logger.info("ollama origin accepted (remote, https)")
+    else:
+        logger.debug("remote Ollama origin accepted (cached)")
     return ""

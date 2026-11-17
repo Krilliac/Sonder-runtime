@@ -66,3 +66,32 @@ def test_route_without_availability_names_the_preferred_tier():
     r = tr.route("recall the exact enum values")
     assert r["tier"] == "cloud-general"
     assert not r["fallback_used"]
+
+
+def test_route_never_selects_cloud_when_cloud_allowed_is_false(monkeypatch):
+    r = tr.route(
+        "What is 2 + 2?",
+        available_tiers={"fast", "code", "general", "reasoning", "cloud-general"},
+        cloud_allowed=False,
+    )
+    assert r["tier"] in {"fast", "code", "general", "reasoning"}
+    assert not r["tier"].startswith("cloud-")
+    assert r["fallback_used"] is True
+
+    r_no_avail = tr.route("What is 2 + 2?", cloud_allowed=False)
+    assert not r_no_avail["tier"].startswith("cloud-")
+    assert r_no_avail["fallback_used"] is True
+
+    from sonder_runtime.adapters.inference import production_tier_router
+
+    monkeypatch.delenv("SONDER_ALLOW_CLOUD", raising=False)
+    monkeypatch.setenv("SONDER_CAPABILITY_ROUTING", "off")
+    tiers = {"code": "m-code", "cloud-general": "m-cloud", "reasoning": "m-reason"}
+    prod = production_tier_router.route(
+        "What is 2 + 2?",
+        set(tiers),
+        router=tr.route,
+        tier_models=tiers,
+    )
+    assert prod["tier"] in {"code", "reasoning"}
+    assert not prod["tier"].startswith("cloud-")

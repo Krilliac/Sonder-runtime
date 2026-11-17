@@ -108,9 +108,39 @@ def _fit(payload: dict, caller_payload: object, model: object, timeout_seconds: 
 
 
 def room_to_retry(payload: dict, with_headroom: dict, caller_payload: object, model: object,
-                  timeout_seconds: object) -> dict:
-    """The retry for a reply that was all thought, or ``payload`` itself when there is no more room to give."""
-    return retry_with_room(payload, with_headroom, caller_payload, *_affordable(model, timeout_seconds))
+                  timeout_seconds: object, *, elapsed_seconds: float | None = None) -> dict:
+    """The retry for a reply that was all thought, or ``payload`` itself when there is no more room to give.
+
+    When ``elapsed_seconds`` is supplied, only the remaining budget is counted
+    so a slow model's retry cannot outlast the outer request timeout; and a
+    retry budget is never left larger than what ``rate(model)`` can write in
+    that timeout.
+    """
+    effective_timeout = timeout_seconds
+    if (
+        elapsed_seconds is not None
+        and not isinstance(elapsed_seconds, bool)
+        and isinstance(elapsed_seconds, (int, float))
+        and elapsed_seconds > 0
+        and not isinstance(timeout_seconds, bool)
+        and isinstance(timeout_seconds, (int, float))
+    ):
+        effective_timeout = float(timeout_seconds) - float(elapsed_seconds)
+        if effective_timeout <= 0:
+            return payload
+    at_fastest, at_slowest = _affordable(model, effective_timeout)
+    retried = retry_with_room(payload, with_headroom, caller_payload, at_fastest, at_slowest)
+    if retried is not payload and at_fastest is not None:
+        retried_options = retried.get("options") if isinstance(retried, dict) else None
+        current_options = payload.get("options") if isinstance(payload, dict) else None
+        retried_budget = retried_options.get("num_predict") if isinstance(retried_options, dict) else None
+        current_budget = current_options.get("num_predict") if isinstance(current_options, dict) else None
+        if isinstance(retried_budget, int) and not isinstance(retried_budget, bool) and retried_budget > at_fastest:
+            if isinstance(current_budget, int) and not isinstance(current_budget, bool) and at_fastest <= current_budget:
+                return payload
+            retried = dict(retried)
+            retried["options"] = dict(retried_options, num_predict=at_fastest)
+    return retried
 
 
 def up_front(payload: dict, caller_payload: object, model: object, timeout_seconds: object,

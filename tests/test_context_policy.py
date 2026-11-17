@@ -234,3 +234,14 @@ def test_residency_ceiling_never_overrides_an_operator_pin(monkeypatch):
     plan = context_policy.auto_context_plan(262144, "7B", residency_ceiling=4096)
     assert plan["context"] == 4096
     assert "observed-spill" in plan["clamps"]
+
+
+@pytest.mark.parametrize("sentinel", [0, -1, 0.0, "0", None, "", False])
+def test_zero_and_unset_sentinels_resolve_to_default_never_one(monkeypatch, sentinel):
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE", raising=False)
+    expected = context_policy.default_context()
+    assert context_policy.parse_size(sentinel) == expected
+    assert context_policy.requested(sentinel) == expected
+    assert context_policy.native(sentinel) == expected
