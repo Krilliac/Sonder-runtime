@@ -68,6 +68,11 @@ def tool_advertised(name):
     return names is None or name in names
 
 
+def has_active_scope() -> bool:
+    """Return True when an explicit ``advertised_scope`` is bound on this context."""
+    return _SCOPE.get() is not None
+
+
 def _knob(name):
     return name in {"extra_roots", "token", "approval", "wait_seconds"} or name.startswith(
         ("max_", "timeout", "include_"))
@@ -166,17 +171,21 @@ def build_agent_tool_help(
 ) -> str:
     """Combine static/generated help lines, close admit-then-deny, and size for ``num_ctx``."""
     help_text = base_text.rstrip() + "\n" + "\n".join(generated_lines) + "\n" if generated_lines else base_text
-    denied = frozenset(name for name in advertised_names if is_refused(name))
+    catalog_map = dict(catalog or {})
+    denied = frozenset(name for name in (set(advertised_names) | set(catalog_map)) if is_refused(name))
     filtered = help_text if not denied else "\n".join(
         line for line in help_text.splitlines()
         if not any(line.lstrip().startswith(f"- {name}:") for name in denied)
     )
+    filtered_catalog = None if catalog is None else {
+        name: row for name, row in catalog_map.items() if name not in denied
+    }
     compact = bool(num_ctx and 0 < int(num_ctx) <= 8192)
     return render_tool_help(
         filtered,
         allowlist=None if allowlist is None else set(allowlist) - denied,
         task_kind=task_kind,
-        catalog=catalog,
+        catalog=filtered_catalog,
         compact=compact,
     )
 

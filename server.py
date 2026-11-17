@@ -26,7 +26,6 @@ import atexit
 import base64
 import contextlib
 import logging
-import datetime
 import functools
 import hashlib
 import contextvars
@@ -44,8 +43,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from pathlib import Path
+from sonder_runtime.application.agents.delegation_runtime import can_delegate as _delegation_can_delegate
 
 from pydantic import StrictBool, StrictInt, StrictStr
 
@@ -107,19 +107,12 @@ from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
 from sonder_runtime.platform.environment_options import (
-    cpu_thread_default as _cpu_thread_default,
     env_int_option as _env_int_option,
     local_model_options as _platform_local_model_options,
 )
-from sonder_runtime.platform.location_consent import (
-    location_consent as _location_consent,
-)
-from sonder_runtime.platform.reasoning_policy import (
-    exposure_enabled as _reasoning_exposure_enabled_policy,
-)
-from sonder_runtime.platform.private_cot_policy import (
-    opt_in_enabled as _private_cot_opt_in_enabled_policy,
-)
+from sonder_runtime.platform.location_consent import location_consent as _location_consent
+from sonder_runtime.platform.reasoning_policy import exposure_enabled as _reasoning_exposure_enabled_policy
+from sonder_runtime.platform.private_cot_policy import opt_in_enabled as _private_cot_opt_in_enabled_policy
 from sonder_runtime.platform.version import (
     running_source_commit_at_import as _running_source_commit,
     runtime_version as _runtime_version,
@@ -17316,6 +17309,11 @@ AGENT_TOOL_HELP = """Available tools:
 - learn_preference: {"text": "User prefers concise status updates.", "scope": "global"}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
+- report_progress: {"summary": "<milestone update>", "thinking": "", "phase": "progress"}
+- post_to_board: {"text": "<update or @handle message>", "kind": "chat|status|handoff|praise|complaint|joke|result"}
+- read_board: {"since_seq": 0, "limit": 20, "mentions_only": false}
+- delegate_task: {"task": "<bounded subtask>", "name": "coder|scout|security|skeptic", "tier": "", "model": "", "project": "", "cwd": "", "max_steps": 8} -- depth 0 only; child runs independently and cannot delegate further
+- spawn_agents: {"tasks": [{"task": "<subtask 1>", "name": "scout"}, {"task": "<subtask 2>", "name": "coder"}], "tier": "", "model": "", "project": "", "max_steps": 8} -- depth 0 only; parallel across Main and Node1
 - offload: {"prompt": "...", "tier": "fast|code|general|reasoning|vision|cloud-code|cloud-general"}
 
 Reply with exactly one JSON object and no markdown:
@@ -17343,6 +17341,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
     "tool_inventory", "output_digest",
     "emotion_vector_status", "preferences_status", "tool_manifest",
+    "report_progress", "post_to_board", "read_board",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
     # test_discover / find_references / diff_files / secret_scan are
@@ -17425,6 +17424,9 @@ an exact symbol named by the task; do not default to Python or server.py.
 - emotion_vector_status: {}
 - preferences_status: {"include_disabled": false, "limit": 20}
 - tool_manifest: {}
+- report_progress: {"summary": "<milestone update>", "thinking": "", "phase": "progress"}
+- post_to_board: {"text": "<update or @handle message>", "kind": "chat|status|handoff|praise|complaint|joke|result"}
+- read_board: {"since_seq": 0, "limit": 20, "mentions_only": false}
 
 Reply with exactly one JSON object and no markdown:
 {"tool": "tool_name", "args": {...}, "reason": "short reason"}
@@ -17461,7 +17463,7 @@ def _agent_tool_help(
     return build_agent_tool_help(
         help_text, generated_lines=generated, advertised_names=advertised,
         is_refused=_refused, allowlist=allowlist, task_kind=kind,
-        catalog=_agent_help_tools.catalog_for(mcp), num_ctx=num_ctx,
+        catalog=_agent_help_tools.catalog_for(mcp, advertised), num_ctx=num_ctx,
     )
 
 
@@ -18197,6 +18199,8 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
     if role_refusal := _role_tool_policy.agent_refusal(name):
         return role_refusal
+    if mode is None and rule_lookup is None and permission_modes.consume_preapproved_decision(name) is not None:
+        return ""
     call_args = args if isinstance(args, dict) else None
     decision = permission_modes.decide(
         name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
@@ -18385,9 +18389,15 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
+    if tool_name in ("delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board"):
+        from sonder_runtime.bootstrap import delegation_wiring as _dw
+        return _dw.dispatch_agent_tool(sys.modules[__name__], tool_name, args, read_only=read_only, repository_extra_roots=repository_extra_roots)
     if tool_name in ("tool_help", "tool_search"):
         search_args = {**args, "query": args.get("q", "")} if ("query" not in args and "q" in args) else args
-        return _agent_help_tools.dispatch_tool_help(mcp, search_args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
+        advertised_names = None if _agent_help_tools.has_active_scope() else _agent_help_advertised_tools(
+            _agent_tool_help(read_only=read_only, project_bound=False, allow_web=allow_web, allow_location=allow_location)
+        )
+        return _agent_help_tools.dispatch_tool_help(mcp, search_args, advertised_names)
     if tool_name == "file_check":
         from sonder_runtime.bootstrap.code_check_agent_tools import dispatch_file_check
         return dispatch_file_check(args.get("path", ""), args.get("max_items", 30), project_root=repository_extra_roots or None)
@@ -19516,6 +19526,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "system_improvement_report", "master_status",
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
+        "delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board",
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest",
         "process_list", "process_memory_risk_inspect",
@@ -19523,6 +19534,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
 )
 _CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
+    "delegate_task", "spawn_agents",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     "ensemble_codegen_build_loop",
 })
@@ -19583,6 +19595,8 @@ def _agent_run_tool_refusal(
             return "an active local write-enabled standalone controller"
     if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
         return "system operation"
+    if _canonical_agent_tool_name(tool_name) in ("delegate_task", "spawn_agents") and not _delegation_can_delegate():
+        return "delegation depth limit"
     if unsafe:
         # unsafe_lab resets read_only/allow_web/allow_location/project in
         # _agent_impl, so only hosted policy still applies.
@@ -20764,6 +20778,8 @@ def _agent_turn(
     # inspections (see sonder_speculation.FilePrefetcher).
     _spec_prefetcher = sonder_speculation.FilePrefetcher()
     _last_tool_name = None
+    from sonder_runtime.bootstrap import delegation_wiring as _dw
+    _delegation_bridge = _dw.open_agent_run(sys.modules[__name__], prompt=prompt, model=model, max_steps=max_steps, cloud=cloud, read_only=read_only, project_scope=project_scope)
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
@@ -20795,6 +20811,8 @@ def _agent_turn(
             "own workspace. Use paths relative to the project root." % project_scope
         )
     transcript += "\n\n" + _agent_verification_standing_notice()
+    if _preamble := _delegation_bridge.maybe_preamble(transcript_chars=len(transcript), num_ctx=agent_num_ctx or 0):
+        transcript += "\n\n" + _preamble
     pre_model_context_rendered = False
     pre_model_context_response_observed = False
     if pre_model_context is not None:
@@ -20823,7 +20841,7 @@ def _agent_turn(
                 cloud=cloud,
             )
 
-    def _teardown_speculation():
+    def _teardown_speculation(*, ok: bool = True, summary: str = ""):
         # Squash anything in flight and persist the learned predictor so it
         # warms across runs. Never fatal to the agent result.
         try:
@@ -20831,6 +20849,7 @@ def _agent_turn(
             _predictor.save()
         except Exception:
             pass
+        _delegation_bridge.close(ok=ok, summary=summary)
 
     def _attach_tool_evidence(text):
         """Append exactly one host-owned evidence section.
@@ -20864,7 +20883,7 @@ def _agent_turn(
 
     def finish_final(final, *, failed=False):
         nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
-        _teardown_speculation()
+        _teardown_speculation(ok=not failed, summary=str(final or ""))
         final = str(final or "")
         controller = _standalone_lanes.current()
         managed_plan = getattr(controller, '_escalation', None)
@@ -21063,7 +21082,7 @@ def _agent_turn(
         if controller is not None and (controller._managed_factory is not None
                 or controller.delegated_work or controller._escalation is not None):
             return finish_final(text, failed=True)
-        _teardown_speculation()
+        _teardown_speculation(ok=False, summary=str(text or ""))
         text = str(text or "")
         # Early exits are still auditable outcomes.  A worker may have already
         # collected valid, host-observed repository evidence before the model
@@ -21230,6 +21249,7 @@ def _agent_turn(
                 )
         _spec_decision_t0 = time.monotonic()
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        _delegation_bridge.observe_decision(step, raw, decision)
         if pre_model_context_rendered and raw:
             pre_model_context_response_observed = True
         _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
@@ -21596,13 +21616,15 @@ def _agent_turn(
                 if allow_location:
                     dispatch_options["allow_location"] = True
                 tool_dispatched = True
-                with _agent_help_tools.help_scope(mcp, allowed_tools, _agent_run_tool_refusal, cloud=cloud, read_only=read_only, unsafe=unsafe, project_bound=bool(project_scope), allow_web=allow_web, allow_location=allow_location):
+                _delegation_bridge.observe_tool_start(step, tool_name)
+                with _agent_help_tools.help_scope(mcp, allowed_tools, _agent_run_tool_refusal, cloud=cloud, read_only=read_only, unsafe=unsafe, project_bound=project_bound, allow_web=allow_web, allow_location=allow_location):
                     observation = _agent_dispatch_observed(
                         tool_name, policy_tool_args, project=project_scope,
                         **dispatch_options,
                     )
         observation_text = str(observation) + ("\nargument normalization: " + "; ".join(normalization_notes).replace("\n", " ").replace("\r", " ")[:600] if normalization_notes else "")
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
+        _delegation_bridge.observe_tool_done(step, tool_name, ok=tool_ok, observation=observation_text)
         abort_observation = None
         if tool_ok:
             failed_call_counts.pop(call_signature, None)
@@ -21872,6 +21894,8 @@ def _agent_turn(
                 model_observation,
             )
         )
+        if _peer_updates := _delegation_bridge.drain_peer_updates():
+            observations.append(_peer_updates)
         if batch_refusal is not None and batch_refusal.exhausted:
             if auto_checklist:
                 _agent_checklist_fail(
@@ -23425,15 +23449,12 @@ def _pin_endpoint_record(selector):
 
 
 def _resolve_model_pin(selector):
-    """Resolve a model pin against this host, then the pool's routable members."""
-    return resolve_model_pin(
-        selector,
-        endpoint_record=lambda s: _pin_endpoint_record(s),
-        pool=OLLAMA_POOL,
-        fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
-        nonchat_reason=lambda r: _fanout_nonchat_reason(r),
-        cache=_POOL_PIN_CATALOG,
-    )
+    """Resolve a model pin against this host, pool members, and healthy private workers."""
+    pin = resolve_model_pin(selector, endpoint_record=_pin_endpoint_record, pool=OLLAMA_POOL, fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS), nonchat_reason=_fanout_nonchat_reason, cache=_POOL_PIN_CATALOG)
+    if not pin.ok:
+        from sonder_runtime.bootstrap import delegation_wiring as _dw
+        return _dw.resolve_sonder_inference_pin(sys.modules[__name__], selector, fallback_pin=pin)
+    return pin
 
 
 def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:

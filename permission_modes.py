@@ -332,7 +332,37 @@ _MODE_SCOPE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.Contex
 _AGENT_APPROVAL_HOOK: contextvars.ContextVar[object] = contextvars.ContextVar(
     "sonder_agent_approval_hook", default=None,
 )
+_PREAPPROVED_EXECUTION: contextvars.ContextVar[tuple[str, object] | None] = contextvars.ContextVar(
+    "sonder_preapproved_execution", default=None,
+)
 _SCOPED_MODES: dict[str, str] = {}
+
+
+@contextlib.contextmanager
+def preapproved_scope(tool_name: str, decision):
+    """Allow the immediately following dispatch of ``tool_name`` without double-spending a one-shot approval."""
+    canonical = str(tool_name or "").strip().lstrip("/")
+    if not canonical or decision is None or not getattr(decision, "allowed", False):
+        yield decision
+        return
+    token = _PREAPPROVED_EXECUTION.set((canonical, decision))
+    try:
+        yield decision
+    finally:
+        _PREAPPROVED_EXECUTION.reset(token)
+
+
+def consume_preapproved_decision(tool_name: str):
+    """Pop and return the pre-approved decision iff it matches ``tool_name``."""
+    entry = _PREAPPROVED_EXECUTION.get()
+    if entry is None:
+        return None
+    _PREAPPROVED_EXECUTION.set(None)
+    canonical = str(tool_name or "").strip().lstrip("/")
+    expected_name, decision = entry
+    if canonical and canonical == expected_name and getattr(decision, "allowed", False):
+        return decision
+    return None
 
 
 @contextlib.contextmanager
