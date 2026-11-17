@@ -1,0 +1,254 @@
+"""Pure HTTP chat-tool SSE frame/waiter, slash message, and permission-mode helpers."""
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable, Mapping
+from typing import Any
+
+from sonder_runtime.application.chat.bidi import detect_bidi_chars
+
+DEFAULT_APPROVAL_WAIT_SECONDS = 120.0
+_WAIT_POLL_INTERVAL_SECONDS = 0.25
+_WAITER_LOCK = threading.Lock()
+_CALL_WAITERS: dict[str, threading.Event] = {}
+
+
+def slash_messages(
+    messages: Any,
+    history: Any,
+    history_from_messages: Callable[[Any], Any],
+) -> Any:
+    """The transcript a slash command reads: the request's, else the session's."""
+    if history and not history_from_messages(messages):
+        return [*history, *(messages or ())]
+    return messages
+
+
+def handle_permission_mode_get(
+    handler: Any,
+    *,
+    permission_policy: Any,
+    principal_of: Callable[[Any], str],
+    authority_error: Callable[[str, Any], str],
+    observe_state: Callable[[], None],
+    mode_data: Callable[[], dict[str, Any]],
+) -> None:
+    """Serve ``GET /v1/permission-mode`` with principal/session scope and ``can_bypass``."""
+    context = handler._request_auth_context()
+    if not context["authorized"]:
+        handler._send_auth_error()
+        return
+    session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
+    can_bypass = not bool(authority_error("permission_mode_change", context))
+    with permission_policy.mode_scope(principal_of(context), session_id):
+        observe_state()
+        payload = dict(mode_data())
+    payload["can_bypass"] = can_bypass
+    handler._send_json_payload(payload)
+
+
+def handle_permission_mode_post(
+    handler: Any,
+    req: Any,
+    context: Any,
+    *,
+    permission_policy: Any,
+    principal_of: Callable[[Any], str],
+    idempotent_action: Callable[..., Any],
+    send_idempotency_refusal: Callable[[Any, Any], bool],
+    observe_state: Callable[[], None],
+    mode_data: Callable[[], dict[str, Any]],
+    approver_of: Callable[[Any], str],
+    audit_transition: Callable[..., None] | None = None,
+) -> None:
+    """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit."""
+    wanted = ""
+    confirm_bypass = False
+    session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
+    if isinstance(req, dict):
+        wanted = str(req.get("mode") or "").strip()
+        confirm_bypass = req.get("confirm_bypass") is True
+        if not session_id:
+            session_id = str(req.get("session_id") or "").strip()
+    if not wanted:
+        handler._send_json_payload(
+            {"error": "mode is required", "modes": list(permission_policy.modes())},
+            status=400,
+        )
+        return
+    try:
+        resolved = permission_policy.resolve_mode(wanted)
+    except ValueError as exc:
+        handler._send_json_payload(
+            {"error": str(exc), "modes": list(permission_policy.modes())},
+            status=400,
+        )
+        return
+    if resolved == getattr(permission_policy, "BYPASS", "bypass") and not confirm_bypass:
+        handler._send_json_payload(
+            {
+                "error": "bypass mode requires explicit confirmation (confirm_bypass: true)",
+                "code": "BYPASS_CONFIRMATION_REQUIRED",
+                "modes": list(permission_policy.modes()),
+            },
+            status=400,
+        )
+        return
+    principal = principal_of(context)
+    try:
+        with permission_policy.mode_scope(principal, session_id):
+            previous = permission_policy.current_mode()
+            result = idempotent_action(
+                context,
+                handler.headers.get("Idempotency-Key", ""),
+                f"permission-mode\0{principal}\0{session_id}\0{resolved}",
+                lambda: permission_policy.set_mode(resolved),
+            )
+    except ValueError as exc:
+        handler._send_json_payload(
+            {"error": str(exc), "modes": list(permission_policy.modes())},
+            status=400,
+        )
+        return
+    if send_idempotency_refusal(handler, result):
+        return
+    if audit_transition is not None and previous != resolved and (previous == "bypass" or resolved == "bypass"):
+        audit_transition(
+            previous, resolved, surface="http", actor=approver_of(context),
+            confirmed=confirm_bypass,
+        )
+    with permission_policy.mode_scope(principal, session_id):
+        observe_state()
+        payload = dict(mode_data())
+    payload["can_bypass"] = True
+    handler._send_json_payload(payload)
+
+
+def turn_refusal_receipt(
+    refusals: Any,
+    permission_policy: Any,
+    refusal_receipt_fn: Callable[..., Any],
+) -> Any:
+    """Build the structured refusal receipt for the last nameable refusal of a turn."""
+    if not refusals:
+        return None
+    decision = refusals[-1]
+    try:
+        label = permission_policy.mode_label(decision.mode)
+    except Exception:
+        label = str(decision.mode or "")
+    try:
+        modes = list(permission_policy._modes_allowing(decision.risk))
+    except Exception:
+        modes = []
+    return refusal_receipt_fn(decision, mode_label=label, modes_allowing=modes, count=len(refusals))
+
+
+def register_call_waiter(call_id: str) -> threading.Event:
+    """Register an event woken when ``call_id`` is approved or denied over HTTP."""
+    key = str(call_id or "").strip().lower()
+    event = threading.Event()
+    if key:
+        with _WAITER_LOCK:
+            _CALL_WAITERS[key] = event
+    return event
+
+
+def unregister_call_waiter(call_id: str, event: threading.Event | None = None) -> None:
+    key = str(call_id or "").strip().lower()
+    if not key:
+        return
+    with _WAITER_LOCK:
+        if event is None or _CALL_WAITERS.get(key) is event:
+            _CALL_WAITERS.pop(key, None)
+
+
+def notify_call_decision(call_id: str) -> None:
+    """Wake any chat-tool turn waiting on ``call_id``."""
+    key = str(call_id or "").strip().lower()
+    if not key:
+        return
+    with _WAITER_LOCK:
+        event = _CALL_WAITERS.get(key)
+    if event is not None:
+        event.set()
+
+
+def write_tool_chunk(
+    handler: Any,
+    chunk: Callable[..., str],
+    *,
+    iid: str,
+    model: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Write one ``sonder_tool`` SSE frame through ``early.lock``."""
+    early = getattr(handler, "_early_stream", None)
+    if early is None or early.client_gone:
+        return False
+    frame_id = getattr(early, "completion_id", None) or iid
+    if not getattr(early, "completion_id", None):
+        early.completion_id = frame_id
+    frame = chunk(frame_id, model, {}, sonder_tool=dict(payload)).encode("utf-8")
+    with early.lock:
+        if early.client_gone:
+            return False
+        try:
+            handler.wfile.write(frame)
+            flush = getattr(handler.wfile, "flush", None)
+            if callable(flush):
+                flush()
+        except (OSError, ValueError):
+            early.client_gone = True
+            return False
+    return True
+
+
+def wait_for_approval(
+    ledger: Any,
+    tool: str,
+    digest: str,
+    call_id: str,
+    *,
+    timeout_seconds: float = DEFAULT_APPROVAL_WAIT_SECONDS,
+    is_aborted: Callable[[], bool] | None = None,
+    poll_interval: float = _WAIT_POLL_INTERVAL_SECONDS,
+) -> str:
+    """Wait up to ``timeout_seconds`` for ``call_id`` approval or denial."""
+    if ledger.open_for(tool, digest):
+        return "approved"
+    if ledger.denied_for(tool, digest):
+        return "denied"
+    event = register_call_waiter(call_id)
+    deadline = time.monotonic() + max(0.05, float(timeout_seconds))
+    try:
+        while True:
+            if is_aborted is not None and is_aborted():
+                return "aborted"
+            if ledger.open_for(tool, digest):
+                return "approved"
+            if ledger.denied_for(tool, digest):
+                return "denied"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "expired"
+            event.wait(min(poll_interval, remaining))
+            event.clear()
+    finally:
+        unregister_call_waiter(call_id, event)
+
+
+__all__ = [
+    "DEFAULT_APPROVAL_WAIT_SECONDS",
+    "detect_bidi_chars",
+    "handle_permission_mode_get",
+    "handle_permission_mode_post",
+    "notify_call_decision",
+    "register_call_waiter",
+    "slash_messages",
+    "turn_refusal_receipt",
+    "unregister_call_waiter",
+    "wait_for_approval",
+    "write_tool_chunk",
+]

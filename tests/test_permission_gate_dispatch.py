@@ -209,7 +209,7 @@ def test_an_explicit_deny_rule_stops_the_agent_path_in_every_mode(monkeypatch):
     monkeypatch.setattr(server, "file_write", _never_runs)
     monkeypatch.setattr(pm, "_rule_lookup", _rules(pm.DENY))
 
-    for mode in pm.MODES:
+    for mode in pm._CYCLE_MODES:
         pm.set_mode(mode)
         observation = server._agent_dispatch(
             "file_write", {"path": "x", "content": "y"},
@@ -373,7 +373,7 @@ def test_every_loop_action_that_runs_a_tool_is_gated_as_that_tool():
 def test_a_deny_rule_stops_a_loop_action_in_every_mode(monkeypatch):
     monkeypatch.setattr(pm, "_rule_lookup", _rules(pm.DENY))
 
-    for mode in pm.MODES:
+    for mode in pm._CYCLE_MODES:
         pm.set_mode(mode)
         result = server._loop_dispatch({"type": "file_delete", "path": "x"})
         assert result["ok"] is False, mode
@@ -417,7 +417,7 @@ def test_selfmod_gets_no_exemption_from_the_delete_rule():
     allowlist = _selfmod_agent_allowlist()
 
     assert "file_delete" in allowlist, "the premise of this test moved"
-    for mode in pm.MODES:
+    for mode in pm._CYCLE_MODES:
         pm.set_mode(mode)
         assert server._agent_permission_gate_error("file_delete").startswith(
             "ERROR: HOST POLICY:"

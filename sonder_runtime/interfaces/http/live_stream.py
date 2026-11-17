@@ -21,9 +21,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 import uuid
 
 from sonder_runtime.application.chat import stream_sink
+
+try:
+    from sonder_runtime.application.chat import admission_wait_status as _wait_status
+except ImportError:  # sibling w2/inference-pool owns admission_wait_status.py
+    _wait_status = None  # type: ignore[assignment]
 
 _logger = logging.getLogger("sonder.serve")
 # The chat code gate verifies fenced code after generation; code is held
@@ -72,10 +78,54 @@ def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None
     return live
 
 
+def wait_status_frame(line: str) -> bytes:
+    """An SSE comment carrying ``line``; clients ignore it, raw viewers read it.
+
+    An empty ``line`` is the clearing frame (``: sonder-status`` and nothing
+    after it): the wait is over and the client drops the status text.
+    """
+    text = " ".join(str(line).split())[:300]
+    return (": sonder-status" + (" " + text if text else "") + "\n\n").encode("utf-8")
+
+
+def arm_wait_status(handler, *, interval_seconds: float | None = None,
+                    clock=time.monotonic):
+    """A reporter that writes GPU-admission wait lines to ``handler``'s early SSE."""
+    if _wait_status is None:
+        return None
+    early = getattr(handler, "_early_stream", None)
+    if early is None or early.client_gone:
+        return None
+    interval = (
+        _wait_status.DEFAULT_INTERVAL_SECONDS
+        if interval_seconds is None else interval_seconds
+    )
+
+    def emit(line: str) -> None:
+        frame = wait_status_frame(line)
+        with early.lock:
+            if early.client_gone:
+                return
+            try:
+                handler.wfile.write(frame)
+                flush = getattr(handler.wfile, "flush", None)
+                if callable(flush):
+                    flush()
+            except (OSError, ValueError):
+                early.client_gone = True
+
+    return _wait_status.AdmissionWaitReporter(
+        emit, interval_seconds=interval, clock=clock)
+
+
 @contextlib.contextmanager
 def armed_for(handler, chunk, *, hold_code: bool):
     """Arm a live stream for the enclosed turn when the response is early SSE."""
-    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live:
+    wait_ctx = (
+        _wait_status.armed(arm_wait_status(handler))
+        if _wait_status is not None else contextlib.nullcontext()
+    )
+    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live, wait_ctx:
         yield live
 
 
@@ -126,4 +176,7 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
     return True
 
 
-__all__ = ["CODE_FENCE", "arm", "armed_for", "response_id", "write_stream_body"]
+__all__ = [
+    "CODE_FENCE", "arm", "arm_wait_status", "armed_for", "response_id",
+    "wait_status_frame", "write_stream_body",
+]

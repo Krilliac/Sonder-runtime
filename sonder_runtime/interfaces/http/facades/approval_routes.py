@@ -179,6 +179,9 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
         body = result.body or {}
         approval = {**(body.get("approval") or body.get("denial") or {}), "actor": approver}
         ports.audit(action, approval, started)
+        from sonder_runtime.interfaces.http.chat_tool_stream import notify_call_decision
+
+        notify_call_decision(str(approval.get("call_id") or target))
     handler._send_json_payload(dict(result.body), status=result.status)
 
 

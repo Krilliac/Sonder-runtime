@@ -1010,6 +1010,25 @@ def _mode_command(argument):
             break
     # The console is the attended surface: a person typed this, so it may
     # raise autonomy (unattended callers may only lower it).
+    if wanted and not explain:
+        try:
+            resolved = permission_policy.resolve_mode(wanted)
+        except ValueError:
+            resolved = ""
+        if resolved == getattr(permission_policy, "BYPASS", "bypass"):
+            if not _console_has_operator():
+                return "refused: entering bypass mode requires an interactive operator prompt"
+            try:
+                answer = input(
+                    "Bypass mode disables all confirmation prompts and root containment. "
+                    "Type 'yes' to confirm: "
+                )
+            except (EOFError, KeyboardInterrupt):
+                return "bypass mode cancelled."
+            if answer.strip().lower() != "yes":
+                return "bypass mode cancelled."
+            with permission_policy.attended_mode_change(), permission_policy.attended_bypass_confirm():
+                return server.permission_mode(mode=wanted, explain=False)
     with permission_policy.attended_mode_change():
         return server.permission_mode(mode=wanted, explain=explain)
 
