@@ -67,7 +67,21 @@ def _substance(text):
     "0ms" versus "31ms", and a judge reply carrying it is no longer the one
     line :func:`_judge_verdict` accepts.  The answers shown keep the footer.
     """
-    return _ENSEMBLE_FOOTER_RE.sub("", str(text or "")).strip()
+    out = str(text or "")
+    # Trailing whitespace goes before the match (the footer must end the text) but leading
+    # whitespace stays until the end: the footer's own leading newline is part of the match.
+    # A footer row cannot hold a newline, so only the LAST header can start a footer that runs to
+    # the end. Stacked footers peel from the right, one rfind and one anchored match each, on a
+    # moving end index (no slicing), so the total work stays linear in the text length.
+    end = len(out)
+    while True:
+        while end and out[end - 1].isspace():
+            end -= 1
+        start = out.rfind("\n=== ENSEMBLE (", 0, end)
+        if start < 0 or _ENSEMBLE_FOOTER_RE.match(out, start, end) is None:
+            break
+        end = start
+    return out[:end].strip()
 
 
 def _ask(ask_fn, prompt, tier):
