@@ -672,6 +672,7 @@ def test_atomic_outcome_duplicate_preserves_usage_time_but_reclaims_retryable():
     assert first == {
         "outcome_inserted": True,
         "usage_rows_updated": 1,
+        "usage_rows_kept": 0,
         "distillation_state": ms.DISTILLATION_CLAIMED,
         "claimed": True,
         "claim_token": "claim-1",

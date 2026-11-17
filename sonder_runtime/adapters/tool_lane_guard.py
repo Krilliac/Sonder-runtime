@@ -542,7 +542,7 @@ def default_route_reach(
     ``_local_tier_rung``).  A policy that cannot be read starts on the
     fallback chat tier over every local tier in ``bindings`` (fails closed).
     """
-    from sonder_runtime.application.routing import tier_escalation
+    import sonder_runtime.adapters.tier_escalation as tier_escalation
 
     try:
         loaded = policy or _policy.load(create=False)

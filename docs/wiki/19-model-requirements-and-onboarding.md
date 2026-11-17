@@ -28,7 +28,7 @@ the matching capability:
 
 The base tiers `fast`, `code`, and `general` all default to the same
 `sonder:latest` alias
-([`rules.DEFAULT_MODELS`](../../sonder_runtime/domain/runtime_policy/rules.py)),
+([`model_lists.json`: `default_local_models`](../../sonder_runtime/adapters/data/model_lists.json)),
 so one model covers all three until you decide otherwise. `reasoning` and
 `vision` ship **unbound** — an unbound tier is not offered anywhere and the
 capability router degrades that work to a base tier.

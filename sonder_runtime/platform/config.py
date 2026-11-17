@@ -841,31 +841,52 @@ _ALLOWED_HOST_NAME = re.compile(
 
 
 def _valid_allowed_host(entry: object) -> bool:
-    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive)."""
-    if not _is_exact_string(entry) or not 1 <= len(entry) <= 260:
+    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive).
+
+    Mirrors ``interfaces.http.host_policy.normalize_allowed_host``, the source
+    of truth (platform may not import interfaces, so the rules are repeated):
+    ASCII-only, no IPv6 zone id, ASCII-digit ports in 1..65535. Never raises.
+    """
+    if not _is_exact_string(entry):
         return False
-    entry = entry.lower()
+    entry = entry.strip(" 	")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in entry):
+        return False
+    if not entry or len(entry) > 1024:
+        return False
     port = ""
     if entry.startswith("["):
-        name, sep, rest = entry[1:].partition("]")
-        if not sep or (rest and not rest.startswith(":")):
+        end = entry.find("]")
+        if end < 0:
             return False
-        port = rest[1:] if rest else ""
+        name = entry[1:end]
+        rest = entry[end + 1:]
+        if rest:
+            if not rest.startswith(":"):
+                return False
+            port = rest[1:]
+        if "%" in name:
+            return False
         try:
             if ipaddress.ip_address(name).version != 6:
                 return False
         except ValueError:
             return False
     else:
+        if entry.count(":") > 1 or not entry.isascii():
+            return False
         name, sep, port = entry.partition(":")
         if sep and not port:
             return False
+        name = name.strip().lower()
+        if name.endswith(".") and not name.endswith(".."):
+            name = name[:-1]
         try:
             ipaddress.ip_address(name)
         except ValueError:
-            if len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
+            if not name or len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
                 return False
-    if port and not (port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+    if port and (not (port.isascii() and port.isdigit()) or len(port) > 5 or not 1 <= int(port) <= 65535):
         return False
     return True
 
@@ -1379,7 +1400,7 @@ def normalize_origin(value: str) -> str:
         host, _sep, port = authority.partition(":")
         if ":" in port:
             return text
-    if port and not port.isdigit():
+    if not host or (port and not port.isdigit()):
         return text
     if port and _DEFAULT_PORTS.get(scheme) == port:
         port = ""
@@ -2374,7 +2395,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             % LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT
         )
     for origin in obs.live_export_origins:
-        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://[^/\s]+", origin):
+        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://(?!:)[^/\s]+", origin):
             errors.append(
                 "[observability].live_export_origins entries must be exact "
                 "origins (scheme://host[:port]), not %r" % origin
