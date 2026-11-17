@@ -36,6 +36,7 @@ def test_memory_export_is_json(monkeypatch, tmp_path):
 
 def test_session_export_by_id(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(tmp_path / "sessions.db"))
     conn = server._open_db()
     try:
         memory_store.touch_session(conn, "S1", "proj")
