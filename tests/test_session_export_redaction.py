@@ -24,6 +24,7 @@ def _legacy_format(session_id, sess, turns):
 
 def _seed(monkeypatch, tmp_path, turns, *, title="demo", project="proj"):
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setenv("SONDER_SESSIONS_DB", str(tmp_path / "sessions.db"))
     conn = server._open_db()
     try:
         memory_store.touch_session(conn, "S1", project)
