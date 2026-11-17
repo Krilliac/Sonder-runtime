@@ -31,7 +31,7 @@ def extract_agent_json(text):
         text = text.strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
     start = text.find("{")
     if start == -1:
@@ -61,6 +61,6 @@ def extract_agent_json(text):
             if depth == 0:
                 try:
                     return json.loads(text[start:index + 1])
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, RecursionError):
                     break
     raise ValueError("agent response was not JSON: %s" % text[:300])

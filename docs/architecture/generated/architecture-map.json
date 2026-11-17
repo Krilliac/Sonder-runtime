@@ -516,7 +516,7 @@
       ]
     },
     {
-      "file_count": 423,
+      "file_count": 424,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -576,6 +576,7 @@
         "sonder_runtime/application/chat/stream_sink.py",
         "sonder_runtime/application/chat/tool_intent.py",
         "sonder_runtime/application/command_surface/__init__.py",
+        "sonder_runtime/application/command_surface/command_text.py",
         "sonder_runtime/application/command_surface/mcp.py",
         "sonder_runtime/application/compaction/__init__.py",
         "sonder_runtime/application/compaction/append_service.py",

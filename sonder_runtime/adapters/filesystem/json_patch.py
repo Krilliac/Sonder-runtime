@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -10,6 +11,7 @@ import threading
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.domain.common.bounded_json import JsonBoundsExceeded, check_depth
 
 
 MAX_DOCUMENT_BYTES = 256_000
@@ -32,6 +34,13 @@ def _reject_constant(value):
     raise ValueError("non-finite JSON number is not allowed: %s" % value)
 
 
+def _reject_non_finite_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number is not allowed: {text}")
+    return value
+
+
 def _reject_duplicate_object(pairs):
     result = {}
     for key, value in pairs:
@@ -43,12 +52,18 @@ def _reject_duplicate_object(pairs):
 
 def _loads_strict(text: str, label: str):
     try:
+        # Match json.loads' byte decoding before scanning the JSON text.
+        depth_text = (text.decode(json.detect_encoding(text), "surrogatepass")
+                      if isinstance(text, (bytes, bytearray)) else text)
+        check_depth(depth_text, max_depth=MAX_JSON_DEPTH)
         return json.loads(
-            text, parse_constant=_reject_constant,
+            text, parse_constant=_reject_constant, parse_float=_reject_non_finite_float,
             object_pairs_hook=_reject_duplicate_object,
         )
-    except (TypeError, ValueError) as exc:
+    except (JsonBoundsExceeded, TypeError, ValueError) as exc:
         raise ValueError("%s must be strict UTF-8 JSON: %s" % (label, exc)) from exc
+    except RecursionError as exc:
+        raise ValueError(f"{label} must be strict UTF-8 JSON: nesting is too deep") from exc
 
 
 def _json_depth(value) -> int:
@@ -67,7 +82,7 @@ def _json_depth(value) -> int:
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(path).expanduser()
+    candidate = Path(file_ops._reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = file_ops.workspace_root() / candidate
     return candidate.absolute()
@@ -76,6 +91,7 @@ def _requested_path(path: str) -> Path:
 def _guard_target(path: str, *, extra_roots: str, bypass: bool, apply: bool):
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path must be a non-empty string")
+    path = file_ops._reject_network_path(path)
     if file_ops._foreign_absolute(path.strip()):
         raise PermissionError("path uses a non-native absolute form")
     requested = _requested_path(path)
@@ -137,6 +153,7 @@ def _parse_operations(operations):
             raise ValueError("patch operations exceed max input bytes (%d)" % MAX_OPERATIONS_BYTES)
         operations = _loads_strict(operations, "operations_json")
     else:
+        _json_depth(operations)
         try:
             encoded = json.dumps(
                 operations, ensure_ascii=False, separators=(",", ":"),
@@ -144,6 +161,8 @@ def _parse_operations(operations):
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise ValueError("patch operations must be strict JSON: %s" % exc) from exc
+        except RecursionError as exc:
+            raise ValueError("patch operations must be strict JSON: nesting is too deep") from exc
         if len(encoded) > MAX_OPERATIONS_BYTES:
             raise ValueError("patch operations exceed max input bytes (%d)" % MAX_OPERATIONS_BYTES)
         # A caller may reuse a Python-list patch. Parse the serialized form so
