@@ -9,8 +9,11 @@ fetch, non-chat check) so this module performs no network I/O itself.
 from __future__ import annotations
 
 import http.client
+import logging
+import socket
 import threading
 import time
+import urllib.error
 from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +24,8 @@ from ...domain.model_catalog import catalog_records, resolve_record
 # Transport-shaped failures of a per-member tag read (URLError is an OSError;
 # a bad JSON body is a ValueError).  Programming errors are deliberately absent.
 _TRANSPORT_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+logger = logging.getLogger(__name__)
 
 
 class PinStatus(str, Enum):
@@ -93,6 +98,76 @@ class PoolCatalogCache:
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+
+
+def _is_unreachable_error(error: BaseException) -> bool:
+    """True only when the primary host could not be reached, never when busy."""
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return False
+    name = type(error).__name__
+    if name in ("GpuAdmissionRefused", "WorkerPoolBackpressure", "WorkerPoolDraining"):
+        return False
+    if isinstance(error, urllib.error.URLError):
+        if name == "WorkerPoolUnavailable":
+            return True
+        reason = getattr(error, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return False
+        if isinstance(reason, str) and "timed out" in reason.lower():
+            return False
+        return True
+    return isinstance(
+        error,
+        (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+    )
+
+
+def discovery_tags(
+    pool: Any,
+    get_tags: Callable[[], object],
+    fetch_member_tags: Callable[[str], object],
+    *,
+    host_origin: str | None = None,
+) -> object:
+    """The ``/api/tags`` payload that decides which models are *known*.
+
+    A pooled ``get_tags`` read describes whichever single member the scheduler
+    picked, so a busy member's models would flicker out of the catalog.  With
+    the pool enabled and ``host_origin is None``, read the union over every
+    routable member (skipping open-circuit workers); the primary wins a name
+    several members hold.
+
+    ``host_origin`` narrows a pooled read to that one member (this host), which
+    keeps lanes that must not gain a worker-only name deterministic.  When that
+    member is not an admissible pool member (e.g. an external roster without
+    ``local_fallback``), or its read fails because the host is unreachable
+    (connection refused/reset, ``WorkerPoolUnavailable``), the pooled
+    ``get_tags`` read is used.  Busy errors (``TimeoutError``,
+    ``GpuAdmissionRefused``, ``WorkerPoolBackpressure``) are NEVER treated as
+    unreachable and re-raise directly so a busy primary does not fall back to a
+    worker's narrower catalog.
+    """
+    if pool is not None and pool.enabled:
+        if host_origin is None:
+            union = pool.catalog_union(fetch_member_tags, routable_only=True)
+            if isinstance(union, Mapping) and union.get("models"):
+                return union
+            return {"models": []}
+        if pool.catalog_member(host_origin):
+            try:
+                return fetch_member_tags(host_origin)
+            except Exception as error:
+                if not _is_unreachable_error(error):
+                    raise
+                logger.warning(
+                    "host catalog read failed (%s); falling back to pooled read",
+                    type(error).__name__,
+                )
+        else:
+            logger.info(
+                "host origin is not an admissible pool member; using pooled catalog read",
+            )
+    return get_tags()
 
 
 def resolve_model_pin(

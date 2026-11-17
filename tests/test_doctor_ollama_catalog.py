@@ -108,3 +108,24 @@ def test_empty_catalog_rolls_up_to_warn_not_fail(monkeypatch):
     )
 
     assert report["overall"] == sonder_doctor.STATUS_WARN
+
+
+def test_missing_configured_tier_model_warns_instead_of_reporting_ok(monkeypatch, tmp_path):
+    policy_path = tmp_path / "runtime_policy.json"
+    policy_path.write_text(
+        json.dumps({"local_models": {"reasoning": "qwen3.6:35b"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(policy_path))
+    monkeypatch.delenv("SONDER_MODEL_BACKEND", raising=False)
+    monkeypatch.delenv("SONDER_REASONING_PROVIDER", raising=False)
+    _install(
+        monkeypatch,
+        {"models": [{"name": "sonder:latest"}, {"name": "nomic-embed-text"}]},
+    )
+
+    result = sonder_doctor._check_ollama()
+
+    assert result["status"] == sonder_doctor.STATUS_WARN
+    assert "qwen3.6:35b" in result["detail"]
+    assert "reasoning" in result["detail"]

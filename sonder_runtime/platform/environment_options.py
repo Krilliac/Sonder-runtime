@@ -1,5 +1,6 @@
 """Policies for environment-backed runtime options."""
 
+import math
 import os
 
 
@@ -45,11 +46,22 @@ def local_model_options(
     """
     values = environ if environ is not None else os.environ
     normalize_context = native_context or (lambda value: value)
+    effective_ctx = (
+        None
+        if num_ctx is None
+        or isinstance(num_ctx, bool)
+        or (isinstance(num_ctx, (int, float)) and (not math.isfinite(num_ctx) or num_ctx <= 0))
+        or (isinstance(num_ctx, str) and num_ctx.strip() in ("", "0"))
+        else num_ctx
+    )
+    normalized_ctx = normalize_context(effective_ctx)
     options = {
         "temperature": temperature,
         "num_predict": num_predict,
-        "num_ctx": normalize_context(num_ctx),
+        "num_ctx": normalized_ctx,
     }
+    if normalized_ctx is None:
+        del options["num_ctx"]
     if temperature is None:
         # "auto": send no temperature so the model's preset applies.
         del options["temperature"]

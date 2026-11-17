@@ -68,6 +68,7 @@ sonder_runtime/adapters/inference/openai_protocol_probe.py
 sonder_runtime/adapters/inference/prewarm_gate.py
 sonder_runtime/adapters/inference/runner_footprint.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
+sonder_runtime/adapters/inference/startup_prewarm.py
 sonder_runtime/adapters/inference_telemetry.py
 sonder_runtime/adapters/learning_tier_formatting.py
 sonder_runtime/adapters/live_checkout.py
@@ -169,6 +170,7 @@ sonder_runtime/application/capabilities/__init__.py
 sonder_runtime/application/capabilities/lifecycle.py
 sonder_runtime/application/capabilities/observability.py
 sonder_runtime/application/chat/__init__.py
+sonder_runtime/application/chat/admission_wait_status.py
 sonder_runtime/application/chat/handoff_receipts.py
 sonder_runtime/application/chat/honesty.py
 sonder_runtime/application/chat/reference_lookup.py

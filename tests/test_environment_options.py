@@ -96,3 +96,21 @@ def test_local_model_options_omits_unpinned_gpu():
         environ={},
     )
     assert "num_gpu" not in options
+
+
+def test_local_model_options_treats_zero_num_ctx_as_default_not_one(monkeypatch):
+    from sonder_runtime.platform import context_policy
+
+    monkeypatch.delenv("SONDER_CONTEXT_SIZE", raising=False)
+    monkeypatch.delenv("SONDER_SESSION_NUM_CTX", raising=False)
+    monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE", raising=False)
+    options = local_model_options(
+        0.2,
+        64,
+        0,
+        native_context=context_policy.native,
+        environ={},
+    )
+    assert options["num_ctx"] == context_policy.default_context()
+    assert options["num_ctx"] > 1
+    assert "num_ctx" not in local_model_options(0.2, 64, 0, environ={})

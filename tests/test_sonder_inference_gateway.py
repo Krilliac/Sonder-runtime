@@ -1753,3 +1753,87 @@ def test_a3_activity_detailed_feed_preserves_content_free_measurements():
         assert summary["finish_reason"] == "stop"
         assert summary["timings"] == {"prompt_n": 4, "predicted_n": 6}
         assert "never publish this" not in repr(public)
+
+
+def test_tools_option_requires_capability_and_forwards_bounded_schemas():
+    tool_def = [{"type": "function", "function": {"name": "run_code", "parameters": {"type": "object"}}}]
+
+    # Server without tools capability refuses before any POST.
+    no_tools_fake = FakeInference()
+    with pytest.raises(InvalidInput, match="tools"):
+        _gateway(no_tools_fake).generate(
+            ModelRequest(prompt="run it", tier="code", options={"tools": tool_def}),
+            _ctx(),
+        )
+    assert no_tools_fake.posts == []
+
+    # Server advertising tools capability forwards tools & returns tool_calls cleanly.
+    with_tools_health = {
+        "status": "ready",
+        "api_version": 1,
+        "version": "0.1.0",
+        "models": [{"id": "Qwen3.8-27B", "capabilities": ["completion", "tools"], "default": True}],
+    }
+
+    def tool_reply(_url, body, _headers):
+        assert body["tools"][0]["function"]["name"] == "run_code"
+        return {
+            "model": "Qwen3.8-27B",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_code", "arguments": '{"code":"print(1)"}'},
+                    }],
+                },
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    tools_fake = FakeInference(health=with_tools_health, chat=tool_reply)
+    gw = _gateway(tools_fake, tier_models={"reasoning": "Qwen3.8-27B"})
+    resp = gw.generate(
+        ModelRequest(prompt="run it", tier="reasoning", options={"tools": tool_def, "tool_choice": "auto"}),
+        _ctx(),
+    )
+    assert resp.model == "Qwen3.8-27B"
+    assert gw.last_response_meta["served_model"] == "Qwen3.8-27B"
+    assert gw.last_response_meta["model"] == "Qwen3.8-27B"
+    assert resp.finish_reason == "tool_calls"
+    assert resp.tool_calls is not None and len(resp.tool_calls) == 1
+
+
+def test_thinking_only_failure_records_terminal_inference_outcome_and_skips_short_retry():
+    from sonder_runtime.adapters.observability import activity_tracker
+
+    thinking_health = {
+        "status": "ready",
+        "api_version": 1,
+        "version": "0.1.0",
+        "capabilities": ["thinking"],
+        "models": [{"id": "Qwen3.8-27B", "default": True}],
+    }
+
+    def empty_length_reply(*_args):
+        return {
+            "model": "Qwen3.8-27B",
+            "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1024},
+        }
+
+    fake = FakeInference(health=thinking_health, chat=empty_length_reply)
+    gw = _gateway(fake)
+    with activity_tracker.response_span("term-test") as span:
+        with pytest.raises((ModelCallError, DependencyUnavailable)):
+            gw.generate(ModelRequest(prompt="x", tier="fast"), _ctx(timeout=1.0))
+        public = activity_tracker.public_response(span, include_detail=True)
+        outcomes = [e for e in public["events"] if e["kind"] == "inference_outcome"]
+        assert outcomes
+        summary = json.loads(outcomes[-1]["summary"])
+        assert summary["ok"] is False
+        assert len(fake.posts) == 1  # remaining < MIN_THINKING_RETRY_SECONDS skipped second hang

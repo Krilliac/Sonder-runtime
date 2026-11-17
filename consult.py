@@ -50,13 +50,24 @@ def _failure(text):
 
 
 def _judge_verdict(text):
-    """Return YES/NO only for one-line, internally consistent judge output."""
+    """Return YES/NO for an internally consistent judge output."""
     value = str(text or "").strip()
-    match = re.fullmatch(r"(YES|NO)\b[^\r\n]*", value, re.IGNORECASE)
+    if not value:
+        return None
+    match = re.match(r"^(?:\*{1,2}|`|_)?(YES|NO)\b", value, re.IGNORECASE)
     if match is None:
         return None
-    verdicts = re.findall(r"\b(?:YES|NO)\b", value, re.IGNORECASE)
-    return match.group(1).upper() if len(verdicts) == 1 else None
+    verdict = match.group(1).upper()
+    opposite = "NO" if verdict == "YES" else "YES"
+    # Reject explicit contradictory verdicts (e.g. "YES... NO..." or a new
+    # sentence starting with "No."/"Yes:"), without rejecting ordinary prose
+    # like "YES. There is no contradiction."
+    if re.search(r"\b%s\b" % opposite, value):
+        return None
+    if re.search(r"(?:^|[.!?\r\n]\s*)(?:\*{1,2}|`|_)?%s\b(?:\s*$|[.,:;!])" % opposite,
+                 value, re.IGNORECASE):
+        return None
+    return verdict
 
 
 def _substance(text):
@@ -103,14 +114,42 @@ def _judge_prompt(prompt, answers):
     )
 
 
+_NEGATION_TOKENS = frozenset({"no", "not", "never", "neither", "nor", "false", "wrong", "disagree"})
+
+
+def _concise_result_tokens(text):
+    """Extract normalized tokens for an equation RHS or trailing scalar answer."""
+    cleaned = str(text or "").strip()
+    if "=" in cleaned:
+        rhs = cleaned.rsplit("=", 1)[1].strip()
+        rhs_tokens = _TOKEN_RE.findall(rhs.lower())
+        if rhs_tokens:
+            return rhs_tokens
+    return _TOKEN_RE.findall(cleaned.lower())
+
+
 def _token_overlap(answer_a, answer_b):
     tokens_a = set(_TOKEN_RE.findall(answer_a.lower()))
     tokens_b = set(_TOKEN_RE.findall(answer_b.lower()))
     if not tokens_a or not tokens_b:
         return False
-    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b) >= (
+    if len(tokens_a & tokens_b) / len(tokens_a | tokens_b) >= (
         _HEURISTIC_AGREEMENT_THRESHOLD
-    )
+    ):
+        return True
+    rhs_a = _concise_result_tokens(answer_a)
+    rhs_b = _concise_result_tokens(answer_b)
+    if rhs_a and rhs_a == rhs_b and not (
+        (tokens_a | tokens_b) & _NEGATION_TOKENS
+    ):
+        return True
+    seq_a = _TOKEN_RE.findall(answer_a.lower())
+    seq_b = _TOKEN_RE.findall(answer_b.lower())
+    if len(seq_a) == 1 and seq_b and seq_b[-1] == seq_a[0] and not (tokens_b & _NEGATION_TOKENS):
+        return True
+    if len(seq_b) == 1 and seq_a and seq_a[-1] == seq_b[0] and not (tokens_a & _NEGATION_TOKENS):
+        return True
+    return False
 
 
 def _all_overlap(texts):

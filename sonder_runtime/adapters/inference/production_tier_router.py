@@ -5,11 +5,14 @@ This adapter owns store and identity I/O; it never imports the root server.
 """
 from __future__ import annotations
 
+import os
+
 import sonder_runtime.adapters.inference.capability_evidence as capability_evidence
 import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
 
 from sonder_runtime.application.routing.identity_cache import IdentityObservationCache
 from sonder_runtime.application.routing.request_capabilities import request_requirements
+from sonder_runtime.domain.cloud_access import cloud_allowed as _cloud_allowed_policy
 
 from ..provider_bindings import provider_bindings_from_env
 
@@ -19,7 +22,13 @@ _identity_cache = IdentityObservationCache()
 def route(prompt, available_tiers=None, *, router, tier_models, request_payload=None, **route_options):
     """Keep lexical/semantic choice unless a requested capability measured a failure."""
     mode = capability_evidence.capability_routing_mode()
+    cloud_allowed = route_options.pop("cloud_allowed", None)
+    if cloud_allowed is None:
+        cloud_allowed = _cloud_allowed_policy(os.environ)
     available = list(tier_models) if available_tiers is None else list(available_tiers)
+    if not cloud_allowed:
+        available = [tier for tier in available if not str(tier).startswith("cloud-")]
+    route_options["cloud_allowed"] = bool(cloud_allowed)
     if mode == "off":
         return router(prompt, available, capability_routing=mode, **route_options)
     required = request_requirements(
