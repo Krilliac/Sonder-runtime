@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import sonder_runtime.adapters.process_tree as process_tree
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 
@@ -34,12 +34,11 @@ class ProcessAdapter:
             "cwd": cwd, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
             "text": False, "shell": False, "env": allowed,
         }
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            kwargs["start_new_session"] = True
+        kwargs.update(process_tree.group_popen_kwargs())
+        tree = None
         try:
             process = subprocess.Popen(list(command), **kwargs)
+            tree = process_tree.ProcessTree.owning(process)
             stdout_buffer = bytearray()
             stderr_buffer = bytearray()
             overflow = threading.Event()
@@ -71,49 +70,31 @@ class ProcessAdapter:
                     break
                 time.sleep(0.01)
             if timed_out:
-                self._terminate(process)
+                self._terminate(process, tree)
                 for reader in readers:
                     reader.join(timeout=5)
                 return ProcessResult(None, self._decode(stdout_buffer), self._decode(stderr_buffer), True, "TimeoutExpired")
-            if overflow.is_set():
-                self._terminate(process)
+            if overflow.is_set() or tree.has_survivors():
+                # Also covers a command that exited but left descendants.
+                self._terminate(process, tree)
             for reader in readers:
                 reader.join(timeout=5)
             return ProcessResult(process.returncode, self._decode(stdout_buffer), self._decode(stderr_buffer), False, "OutputLimitExceeded" if overflow.is_set() else "")
         except (OSError, ValueError) as exc:
             process = locals().get("process")
             if process is not None:
-                self._terminate(process)
+                self._terminate(process, tree)
             return ProcessResult(None, "", "", False, type(exc).__name__)
+        finally:
+            if tree is not None:
+                tree.close()
 
     @staticmethod
-    def _terminate(process) -> None:
-        if os.name == "nt":
-            try:
-                stopped = subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True, text=True, check=False, timeout=5,
-                )
-                if stopped.returncode == 0:
-                    process.wait(timeout=5)
-                    return
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-                return
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        try:
-            process.kill()
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+    def _terminate(process, tree=None) -> None:
+        """Remove the command's whole tree and reap it (see ``process_tree``)."""
+        if tree is None:
+            tree = process_tree.ProcessTree.adopt(process)
+        tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
 
     @staticmethod
     def _decode(value: bytearray) -> str:
