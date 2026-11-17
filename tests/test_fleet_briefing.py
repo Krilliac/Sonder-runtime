@@ -285,3 +285,38 @@ def test_slash_handler_preserves_prefix_until_master(server, queued, surface, mo
     scope["route"](f"{mode} {count} make me something cool")
     assert queued[0][0] == "make me something cool"
     assert queued[0][1]["agents"] == expected
+
+
+def test_subtask_prompts_splits_16_numbered_items_without_cloning():
+    items = [f"Topic {i}: inspect subsystem {i}" for i in range(1, 17)]
+    task = "Analyze all 16 subsystems:\n" + "\n".join(f"{i}. {item}" for i, item in enumerate(items, 1))
+    prompts = fleet_briefing.subtask_prompts(task, 16)
+    assert len(prompts) == 16
+    for idx, (prompt, item) in enumerate(zip(prompts, items, strict=True), 1):
+        assert prompt.startswith("=== AUTHORITATIVE MASTER TASK ===")
+        assert f"Assigned subtask {idx}/16: Focus specifically on: {item}" in prompt
+        assert f"Angle {idx}/16:" in prompt
+
+
+@pytest.mark.parametrize("task,expected", [
+    ("- alpha\n- beta\n- gamma", ("alpha", "beta", "gamma")),
+    ("Handle (1) parser, (2) planner, (3) executor", ("parser", "planner", "executor")),
+    ("Audit auth; check billing; verify search", ("Audit auth", "check billing", "verify search")),
+    ("Review subsystems: auth, billing, search, and cache", ("auth", "billing", "search", "cache")),
+    ("make me something cool\nPreserve this exact line.", ()),
+])
+def test_extract_subtasks_formats_and_plain_task_unchanged(task, expected):
+    assert fleet_briefing.extract_subtasks(task) == expected
+
+
+def test_subtask_prompts_slices_more_items_than_agents_and_wraps_fewer():
+    six_items = "\n".join(f"{i}. Item {i}" for i in range(1, 7))
+    sliced = fleet_briefing.subtask_prompts(six_items, 2)
+    assert "Item 1; Item 2; Item 3" in sliced[0]
+    assert "Item 4; Item 5; Item 6" in sliced[1]
+
+    two_items = "1. Alpha\n2. Beta"
+    wrapped = fleet_briefing.subtask_prompts(two_items, 4)
+    assert "Alpha" in wrapped[0] and "Beta" in wrapped[1]
+    assert "Alpha" in wrapped[2] and "Beta" in wrapped[3]
+    assert wrapped[0] != wrapped[2]  # distinct angles prevent duplicate clones

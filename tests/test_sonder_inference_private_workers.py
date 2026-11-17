@@ -24,7 +24,14 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
-from sonder_runtime.domain.common.errors import DependencyUnavailable, Forbidden, InvalidInput
+from sonder_runtime.domain.common.errors import (
+    Cancelled,
+    CapacityExceeded,
+    DeadlineExceeded,
+    DependencyUnavailable,
+    Forbidden,
+    InvalidInput,
+)
 
 PRIMARY = "http://127.0.0.1:11437"
 WORKER = "https://10.77.0.2:8443/sonder-inference"
@@ -443,3 +450,188 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         assert seen == [ca_bundle, None, ca_bundle]
     finally:
         tls_contexts.reset_https_contexts()
+
+
+def test_host_queue_enforces_per_endpoint_max_inflight_across_16_callers(ca_bundle):
+    """16 concurrent callers must queue cleanly on host without stacking > max_inflight."""
+    import time as _time
+
+    active = {PRIMARY: 0, WORKER: 0}
+    peaks = {PRIMARY: 0, WORKER: 0}
+    counter_lock = threading.Lock()
+
+    def make_handler(base):
+        def handle(payload):
+            with counter_lock:
+                active[base] += 1
+                peaks[base] = max(peaks[base], active[base])
+            _time.sleep(0.03)
+            with counter_lock:
+                active[base] -= 1
+            return _chat(payload["model"])
+        return handle
+
+    hosts = Hosts(chat={PRIMARY: make_handler(PRIMARY), WORKER: make_handler(WORKER)})
+    gateway = _gateway(hosts, _env(ca_bundle))  # primary=1, worker=1
+    results, errors = [], []
+
+    def run(i):
+        try:
+            results.append(gateway.generate(ModelRequest(prompt=f"p{i}", tier="fast"), _ctx()))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+
+    assert errors == []
+    assert len(results) == 16
+    assert peaks[PRIMARY] <= 1 and peaks[WORKER] <= 1
+    assert len(hosts.posts) == 16
+    assert gateway._inflight == {}
+
+
+def test_host_queue_honors_higher_worker_max_inflight(ca_bundle):
+    import time as _time
+
+    active = {PRIMARY: 0, WORKER: 0}
+    peaks = {PRIMARY: 0, WORKER: 0}
+    counter_lock = threading.Lock()
+
+    def make_handler(base):
+        def handle(payload):
+            with counter_lock:
+                active[base] += 1
+                peaks[base] = max(peaks[base], active[base])
+            _time.sleep(0.04)
+            with counter_lock:
+                active[base] -= 1
+            return _chat(payload["model"])
+        return handle
+
+    hosts = Hosts(chat={PRIMARY: make_handler(PRIMARY), WORKER: make_handler(WORKER)})
+    gateway = _gateway(hosts, _env(ca_bundle, **{ENV_PRIVATE_WORKERS: _workers(ca_bundle, max_inflight=2)}))
+    errors = []
+    threads = [
+        threading.Thread(target=lambda idx=i: gateway.generate(ModelRequest(prompt=f"p{idx}", tier="fast"), _ctx()))
+        for i in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    assert errors == []
+    assert peaks[PRIMARY] <= 1
+    assert peaks[WORKER] == 2
+    assert len(hosts.posts) == 8
+
+
+def test_health_timeout_or_overload_does_not_failover_onto_saturated_endpoint(ca_bundle):
+    """If the other endpoint is saturated, a health-timeout/503-overloaded must not cascade."""
+    import io
+    from urllib.error import HTTPError
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    def block_worker(payload):
+        worker_entered.set()
+        release_worker.wait(5)
+        return _chat(payload["model"])
+
+    def overloaded_primary(payload):
+        return HTTPError(PRIMARY, 503, "overloaded", {}, io.BytesIO(b'{"error":{"code":"overloaded"}}'))
+
+    hosts = Hosts(chat={WORKER: block_worker, PRIMARY: overloaded_primary})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    gateway.provider_status()  # warm both health caches
+
+    first_done = []
+    t1 = threading.Thread(
+        target=lambda: first_done.append(
+            gateway.generate(ModelRequest(prompt="occupy", tier="fast"), _ctx())
+        )
+    )
+    t1.start()
+    assert worker_entered.wait(5)
+
+    # Worker is now saturated (1/1). Primary is picked for the 2nd caller and returns 503 overloaded.
+    # It must NOT block/cascade onto the already-saturated Worker.
+    with pytest.raises(CapacityExceeded):
+        gateway.generate(ModelRequest(prompt="second", tier="fast"), _ctx())
+
+    release_worker.set()
+    t1.join(5)
+    assert len(first_done) == 1
+    worker_posts = [b for b, _h, _ca in hosts.posts if b == WORKER]
+    assert len(worker_posts) == 1
+
+
+def test_post_read_timeout_does_not_failover_onto_peer(ca_bundle):
+    hosts = Hosts(chat={PRIMARY: TimeoutError("read timed out"), WORKER: TimeoutError("read timed out")})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    with pytest.raises(DeadlineExceeded):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert len(hosts.posts) == 1
+
+
+def test_overloaded_endpoint_fails_over_when_peer_has_free_capacity(ca_bundle):
+    import io
+    from urllib.error import HTTPError
+
+    def overloaded(payload):
+        return HTTPError(PRIMARY, 503, "overloaded", {}, io.BytesIO(b'{"error":{"code":"overloaded"}}'))
+
+    hosts = Hosts(chat={PRIMARY: overloaded})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    response = gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert response.text == "ok"
+    assert response.endpoint == "https://10.77.0.2:8443"
+
+
+def test_cancelled_caller_exits_host_slot_queue_cleanly(ca_bundle):
+    entered = threading.Event()
+    release = threading.Event()
+    cancel_event = threading.Event()
+
+    def hold_slot(payload):
+        entered.set()
+        release.wait(5)
+        return _chat(payload["model"])
+
+    hosts = Hosts(chat={PRIMARY: hold_slot, WORKER: hold_slot})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    gateway.provider_status()
+
+    holders = [
+        threading.Thread(target=lambda idx=i: gateway.generate(ModelRequest(prompt=f"h{idx}", tier="fast"), _ctx()))
+        for i in range(2)
+    ]
+    for h in holders:
+        h.start()
+    # Wait until both endpoints are occupied.
+    deadline_wait = threading.Event()
+    for _ in range(100):
+        with gateway._lock:
+            if sum(gateway._inflight.values()) == 2:
+                break
+        deadline_wait.wait(0.02)
+    assert sum(gateway._inflight.values()) == 2
+
+    def trigger_cancel():
+        deadline_wait.wait(0.05)
+        cancel_event.set()
+
+    threading.Thread(target=trigger_cancel, daemon=True).start()
+    with pytest.raises(Cancelled):
+        gateway.generate(
+            ModelRequest(prompt="queued", tier="fast", options={"cancel_token": cancel_event}),
+            _ctx(),
+        )
+    assert len(hosts.posts) == 2  # queued caller never dispatched
+    release.set()
+    for h in holders:
+        h.join(5)
