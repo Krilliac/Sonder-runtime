@@ -9,15 +9,6 @@ from sonder_runtime.domain.model_capabilities import fanout_capabilities
 logger = logging.getLogger(__name__)
 
 
-_KNOWN_VISION_ONLY_MODEL_FAMILIES = frozenset(
-    {
-        "bakllava",
-        "llama3.2-vision",
-        "llava",
-        "minicpm-v",
-        "moondream",
-    }
-)
 _GENERATIVE_CAPABILITIES = frozenset(
     {"completion", "chat", "generate", "text-generation"}
 )
@@ -33,7 +24,7 @@ def _normalized_values(raw: object) -> set[str]:
     return {str(value).strip().lower() for value in values if str(value).strip()}
 
 
-def nonchat_reason(record: object) -> str:
+def nonchat_reason(record: object, *, vision_only_model_families) -> str:
     """Return why a catalog record must not be used as a chat target.
 
     The policy is deliberately explicit-input and side-effect free. Catalog
@@ -42,6 +33,7 @@ def nonchat_reason(record: object) -> str:
     are rejected before fanout spends a model slot.
     """
     record = record if isinstance(record, dict) else {}
+    vision_only = {str(family).casefold() for family in vision_only_model_families}
     model_name = record.get("name") or record.get("model") or "?"
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     capabilities = fanout_capabilities(record)
@@ -63,8 +55,8 @@ def nonchat_reason(record: object) -> str:
     if not families:
         name = str(record.get("name") or record.get("model") or "").strip().casefold()
         families = {name.rsplit("/", 1)[-1].split(":", 1)[0]}
-    if families & _KNOWN_VISION_ONLY_MODEL_FAMILIES:
-        logger.warning(f"model {model_name!r} excluded from fanout: belongs to known vision-only family {families & _KNOWN_VISION_ONLY_MODEL_FAMILIES}")
+    if families & vision_only:
+        logger.warning(f"model {model_name!r} excluded from fanout: belongs to known vision-only family {families & vision_only}")
         logger.debug(f"nonchat_reason: rejecting {model_name!r}, family in vision-only list")
         return "known vision-only model family"
     return ""

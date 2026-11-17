@@ -131,14 +131,13 @@ PATTERNS: tuple[re.Pattern, ...] = (
 
 # Upper bound on pattern passes over one text. A substitution can expose a
 # match for the next pass (``AKIA...Cookie: a=b`` needs two), so the passes
-# repeat until one changes nothing. Ordinary text settles in one or two, and
-# 420k random hostile texts never needed more than six changing passes. No
+# repeat until one changes nothing or the finite bound below is reached. No
 # finite bound covers every input, though: each ``x'`` unit after
-# ``token='abcd'`` costs one more pass. A text cut off at the bound is still
-# safe. A pass only replaces matched text with the marker and never restores
-# a character, so later passes can only remove more, and the result never
-# keeps anything the first pass removed. What is lost at the bound is
-# idempotence for that text only: a second call redacts further.
+# ``token='abcd'`` costs one more pass. Each pass replaces matched text with
+# the marker, so reaching the bound preserves redactions from earlier
+# passes. The bound does not guarantee that all newly exposed matches have
+# been redacted: the result may be non-idempotent, and a second call can
+# redact further.
 _MAX_PASSES = 8
 
 _PEM_BEGIN_MARK = "-----BEGIN "

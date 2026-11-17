@@ -1,5 +1,6 @@
 """SPEC-3 M1/M2: composition root, operation context, policy use cases."""
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import threading
 
@@ -266,10 +267,22 @@ def test_policy_cannot_widen_permissions(application):
 
 def test_domain_rules_reject_cloud_and_personal_aliases():
     with pytest.raises(ValueError, match="cloud"):
-        rules.validate_model("qwen-cloud:latest", "fallback")
+        rules.validate_model(
+            "qwen-cloud:latest",
+            "fallback",
+            reserved_personal_model=_test_model_lists.load().values[
+                "reserved_personal_model"
+            ],
+        )
     assert (
-        rules.validate_model("sonder-personal", "x")
-        == rules.RESERVED_PERSONAL_MODEL
+        rules.validate_model(
+            "sonder-personal",
+            "x",
+            reserved_personal_model=_test_model_lists.load().values[
+                "reserved_personal_model"
+            ],
+        )
+        == _test_model_lists.load().document()["reserved_personal_model"]
     )
     assert rules.npu_mode("routing", {"npu": {"mode": "prefer"}}) == "prefer"
     assert rules.npu_mode("unknown-capability", {"npu": {"mode": "prefer"}}) == "off"

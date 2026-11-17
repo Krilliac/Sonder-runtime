@@ -164,6 +164,7 @@ from sonder_runtime.application.ports.work_narration import route_reason as _nar
 import creative_router
 import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
+from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
@@ -194,7 +195,7 @@ from sonder_runtime.application.session.model_steps import (
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
-from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.adapters import tier_escalation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
@@ -222,7 +223,6 @@ from sonder_runtime.domain.distillation_policy import (
 )
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
-    nonchat_reason as _fanout_nonchat_reason,
 )
 from sonder_runtime.domain.campaign_formatting import (
     campaign_headline as _campaign_headline,
@@ -323,8 +323,8 @@ from sonder_runtime.domain.context.pack_arguments import (
     pack_paths as _context_pack_paths,
     pack_utf8_prefix as _context_pack_utf8_prefix,
 )
+from sonder_runtime.adapters.model_list_consumers import model_capability_error as _runtime_model_capability_error
 from sonder_runtime.domain.runtime_model_binding import (
-    model_capability_error as _runtime_model_capability_error,
     model_is_installed as _runtime_model_is_installed,
 )
 from sonder_runtime.domain.updates.stash_formatting import format_stash as _runtime_stash_format
@@ -507,11 +507,8 @@ from sonder_runtime.adapters.inference.pool_model_catalog import (
     resolve_model_pin,
 )
 from sonder_runtime.domain import ollama_policy
-from sonder_runtime.domain.runtime_model_configuration import (
-    RuntimeModelConfiguration,
-)
-from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
-from sonder_runtime.domain.cloud_tier_policy import (
+from sonder_runtime.adapters.model_list_consumers import live_cloud_model as _live_cloud_model, nonchat_reason as _fanout_nonchat_reason  # noqa: F401 - public compatibility names
+from sonder_runtime.adapters.model_list_consumers import (
     refresh_live_cloud_tiers as _refresh_live_cloud_tiers_policy,
 )
 from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
@@ -625,7 +622,7 @@ def _keep_alive_for(model):
 
 
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ, floor=_model_tool_policy.shipped_floor())
+_RUNTIME_MODEL_CONFIGURATION = _model_list_consumers.startup_configuration(os.environ, floor=_model_tool_policy.shipped_floor())
 SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
 LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
 DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model
@@ -672,7 +669,7 @@ def _context_native(value=None):
     return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = _tool_lane_guard.seed_bindings(_RUNTIME_MODEL_CONFIGURATION.tier_map())
+TIERS = _model_list_consumers.startup_seed(_RUNTIME_MODEL_CONFIGURATION.tier_map(), _tool_lane_guard.seed_bindings)
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
@@ -946,7 +943,7 @@ def _chat_request_with_cloud_fallback(
     )
 
 
-if _is_cloud_model_name(TIERS["code"]):
+if _is_cloud_model_name(TIERS.get("code", "")):
     TIERS["code"] = LOCAL_CODE_MODEL
 
 
@@ -976,7 +973,7 @@ def _configured_local_tiers():
     return runtime_policy.configured_tiers(_RUNTIME_POLICY or _refresh_runtime_policy(create=True), TIERS)
 
 
-_refresh_runtime_policy(create=True)
+_model_list_consumers.startup_refresh(_refresh_runtime_policy)
 
 
 def _runtime_lane_tier(lane: str, requested: str = "") -> str:
@@ -2762,6 +2759,8 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "models":
+        return _model_lists_editor.command(rest, operator_attended=bool(operator_approved))
     if action == "tools":  # writes only with the console operator attending
         return _model_tool_policy_editor.command(rest, operator_attended=bool(operator_approved), policy=_RUNTIME_POLICY)
     if action == "overflow":
@@ -2815,7 +2814,7 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
             "  /runtime tools [allow|revoke|deny|undeny ...]   (per-model tool lists; /runtime tools help)\n"
-            "  /runtime reset\n"
+            "  /runtime models [set <key> <json>|reset <key>]\n  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
             "Execution lanes route to fast/code/general only."
@@ -23172,7 +23171,7 @@ def _capability_refined_tier(
         available = _configured_local_tiers() or runtime_policy.BASE_LOCAL_TIERS
         specialists = set(runtime_policy.OPTIONAL_LOCAL_TIERS) & set(available)
         if specialists:
-            route = _caprouter.route(prompt, available, has_image=has_image)
+            route = _caprouter.route(prompt, available, has_image=has_image, config=_model_list_consumers.values()["capability_router"])
             if route.tier == "vision" and not has_image:
                 return selected_tier, reason
             if route.tier in specialists and route.tier != selected_tier:
@@ -23519,6 +23518,7 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    data["model_lists"] = _model_lists_editor.command("", operator_attended=False)
     data["model_tool_policy"] = _model_tool_grants.status_payload(legacy_section=policy.get("tool_lane_denied_models"))
     _remember_runtime_readiness(data)
     return data
@@ -23637,8 +23637,7 @@ def runtime_policy_status() -> str:
     """
     # Not the default ``create_policy=True``: that would write a missing
     # policy file (and its lock) from a read graded ``safe``.
-    _maybe_live_reload(create_policy=False)
-    return _format_runtime_policy_status(_runtime_policy_cached_data())
+    return _model_list_consumers.policy_status(_runtime_policy_cached_data, _maybe_live_reload, _format_runtime_policy_status)
 
 
 def _runtime_policy_refresh_status() -> str:
@@ -24169,7 +24168,7 @@ def runtime_source_stash(action: str) -> str:
 ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
-ENSEMBLE_SKIP_TIERS = ("vision",)
+ENSEMBLE_SKIP_TIERS = _model_list_consumers.startup_ensemble_skip_tiers()
 
 
 def _fanout_profile_scope(profile):

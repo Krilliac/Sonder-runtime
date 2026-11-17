@@ -226,6 +226,10 @@ def normalize_base_url(value: object) -> str:
             "%s must be https://host[:port][/path] without credentials, query or fragment"
             % ENV_BASE_URL
         )
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in parts.netloc):
+        raise InvalidInput(
+            ENV_BASE_URL + " host must not contain whitespace or control characters"
+        )
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
