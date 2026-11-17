@@ -9,6 +9,8 @@ composition root and must never fall back to the identity redactor.
 """
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from sonder_runtime.adapters.runtime_capabilities import RuntimeCapabilities
@@ -36,6 +38,36 @@ def test_platform_patterns_are_byte_identical_to_domain_patterns():
     domain = [(p.pattern, p.flags) for p in redaction.PATTERNS]
     platform = [(p.pattern, p.flags) for p in platform_logging._PATTERNS]
     assert domain == platform
+    assert redaction._MAX_PASSES == platform_logging._MAX_PASSES
+    # The PEM block is bound by name in both copies, not by tuple position:
+    # the same pattern, once, at the same place in each tuple.
+    domain_pem, platform_pem = redaction._PEM, platform_logging._PEM
+    assert (domain_pem.pattern, domain_pem.flags) == (platform_pem.pattern, platform_pem.flags)
+    assert [p is domain_pem for p in redaction.PATTERNS] == [
+        p is platform_pem for p in platform_logging._PATTERNS
+    ]
+    assert sum(p is domain_pem for p in redaction.PATTERNS) == 1
+
+
+def test_domain_and_platform_redaction_agree_on_hostile_text():
+    """The pass loop and ``_sub_pem`` are copied as well as the patterns, so
+    compare what the two copies do, not only what they list."""
+    rng = random.Random(20261116)
+    key = "AK" + "IA" + "0" * 16
+    fragments = [
+        key, key + key, "bearer xxxxxxxx", "Cookie: a=b", "password='abcd\"", "token='abcd'", "x'",
+        "http://u:p@h", "-x.https://a:b@c", "[REDACTED]", "pwd=", "eyJaaaaaaaa.bbbbbbbb.cccccccc-",
+        "-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----", "END PRIVATE KEY-----",
+        "sk-", "zz", " ", "\n", "\r\n",
+    ]
+    redactor = platform_logging.Redactor(env={})
+    changed = 0
+    for _ in range(4000):
+        text = "".join(rng.choice(fragments) for _ in range(rng.randint(1, 12)))
+        want = redaction.redact_text(text)
+        changed += want != text
+        assert redactor.redact(text) == want, text
+    assert changed > 2000
 
 
 def test_redacted_markers_agree_across_layers():
