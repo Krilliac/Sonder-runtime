@@ -11,6 +11,8 @@ class DirectoryChatStoreBackend implements ChatStoreBackend {
   DirectoryChatStoreBackend(Directory base)
       : root = Directory('${base.path}${Platform.pathSeparator}chats');
 
+  static int _tmpCounter = 0;
+
   File _file(String name) => File('${root.path}${Platform.pathSeparator}$name');
 
   @override
@@ -34,9 +36,18 @@ class DirectoryChatStoreBackend implements ChatStoreBackend {
   Future<void> write(String name, String data) async {
     await root.create(recursive: true);
     // Write-then-rename so a crash mid-write never leaves a torn thread.
-    final tmp = _file('$name.tmp');
-    await tmp.writeAsString(data, flush: true);
-    await tmp.rename(_file(name).path);
+    // The temp name is unique per write so overlapping writes never share
+    // (and truncate) one file.
+    final tmp = _file('$name.${pid}_${_tmpCounter++}.tmp');
+    try {
+      await tmp.writeAsString(data, flush: true);
+      await tmp.rename(_file(name).path);
+    } catch (_) {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   @override
