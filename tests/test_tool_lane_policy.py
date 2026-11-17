@@ -5,6 +5,7 @@ clears the provider and tier variables, so the result does not depend on the
 machine's environment.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import json
 import logging
@@ -295,16 +296,31 @@ def test_update_refuses_to_bind_a_denied_model(policy_file):
 @pytest.mark.parametrize("variable", ["SONDER_FAST", "SONDER_CODE", "SONDER_GENERAL", "SONDER_REASONING"])
 def test_a_denied_model_in_an_environment_tier_seed_is_not_bound(variable):
     tier = variable[len("SONDER_"):].lower()
-    seeded = rules.default_policy({variable: DENIED}, floor=FLOOR)
-    assert seeded["local_models"][tier] == rules.DEFAULT_MODELS[tier]
+    seeded = rules.default_policy(
+        {variable: DENIED}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
+    assert (
+        seeded["local_models"][tier]
+        == _test_model_lists.load().document()["default_local_models"][tier]
+    )
     assert DENIED not in seeded["local_models"].values()
-    other = rules.default_policy({variable: ALLOWED}, floor=FLOOR)
+    other = rules.default_policy(
+        {variable: ALLOWED}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert other["local_models"][tier] == ALLOWED  # an allowed seed is still honoured, so the filter is not blanket
 
 
 def test_environment_seeds_filter_every_default_spelling():
     for name in ("Astra-Cyber-27B", " astra-cyber-9b:latest ", "library/astra-cyber-27b", HF_QWEN, HF_ORNITH):
-        assert rules.seed_model({"SONDER_CODE": name}, "code", floor=FLOOR) == rules.DEFAULT_MODELS["code"], name
+        assert (
+            rules.seed_model(
+                {"SONDER_CODE": name},
+                "code",
+                floor=FLOOR,
+                lists=_test_model_lists.load().values,
+            )
+            == _test_model_lists.load().document()["default_local_models"]["code"]
+        ), name
 
 
 def test_the_seed_into_a_fresh_policy_file_is_filtered(policy_file, monkeypatch):
@@ -318,28 +334,44 @@ def test_the_seed_into_a_fresh_policy_file_is_filtered(policy_file, monkeypatch)
 
 @pytest.mark.parametrize("value", [DENIED, "Astra-Cyber-27B:latest", " astra-cyber-9b ", "library/astra-cyber-9b", HF_ORNITH, HF_QWEN])
 def test_a_denied_sonder_code_local_falls_back_to_the_stable_alias(value):
-    configuration = RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": value}, floor=FLOOR)
+    configuration = RuntimeModelConfiguration.from_environment(
+        {"SONDER_CODE_LOCAL": value}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert configuration.local_code_model == configuration.stable_alias
     assert configuration.local_code_model not in (value, value.strip())
 
 
 def test_an_allowed_or_unset_sonder_code_local_is_kept(caplog):
     with caplog.at_level(logging.WARNING):
-        kept = RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": ALLOWED}, floor=FLOOR)
+        kept = RuntimeModelConfiguration.from_environment(
+            {"SONDER_CODE_LOCAL": ALLOWED},
+            floor=FLOOR,
+            lists=_test_model_lists.load().values,
+        )
     assert kept.local_code_model == ALLOWED
-    unset = RuntimeModelConfiguration.from_environment({}, floor=FLOOR)
+    unset = RuntimeModelConfiguration.from_environment(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert unset.local_code_model == unset.stable_alias
     assert not [r for r in caplog.records if "blocked from tool-using" in r.getMessage()]
 
 
 def test_the_sonder_code_local_fallback_is_logged(caplog):
     with caplog.at_level(logging.WARNING):
-        RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": DENIED}, floor=FLOOR)
+        RuntimeModelConfiguration.from_environment(
+            {"SONDER_CODE_LOCAL": DENIED},
+            floor=FLOOR,
+            lists=_test_model_lists.load().values,
+        )
     assert any("blocked from tool-using" in r.getMessage() and DENIED in r.getMessage() for r in caplog.records)
 
 
 def test_the_tier_map_the_server_seeds_from_is_filtered():
-    configuration = RuntimeModelConfiguration.from_environment({"SONDER_CODE": DENIED, "SONDER_FAST": ALLOWED}, floor=FLOOR)
+    configuration = RuntimeModelConfiguration.from_environment(
+        {"SONDER_CODE": DENIED, "SONDER_FAST": ALLOWED},
+        floor=FLOOR,
+        lists=_test_model_lists.load().values,
+    )
     seeded = guard.seed_bindings(configuration.tier_map())
     assert DENIED not in seeded.values()
     assert seeded["fast"] == ALLOWED
@@ -360,7 +392,7 @@ def test_seed_bindings_replace_a_denied_model_and_drop_a_tier_without_a_default(
 
 
 def policy_dict(**local_models):
-    base = rules.default_policy({}, floor=FLOOR)
+    base = rules.default_policy({}, floor=FLOOR, lists=_test_model_lists.load().values)
     base["local_models"] = {**base["local_models"], **local_models}
     return base
 

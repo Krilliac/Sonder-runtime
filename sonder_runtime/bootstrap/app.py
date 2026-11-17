@@ -62,6 +62,7 @@ from ..adapters.process_termination import ProcessTreeSupervisor
 from ..adapters.provider_bindings import ProviderBindings, provider_bindings_from_env
 from ..adapters.recall_gateway import LegacyRecallGateway
 from ..adapters.model_tool_policy import shipped_floor
+from ..adapters.model_list_consumers import values as model_list_values
 from ..adapters.runtime_policy_repository import RuntimePolicyRepository
 from ..adapters.security import permission_receipts
 from ..adapters.subagents import LocalSubagentProvider
@@ -2053,7 +2054,7 @@ def build_application(
     logger.debug(f"assembling Application graph for profile={profile!r}")
     application = Application(
         profile=profile,
-        runtime_policy=RuntimePolicyService(RuntimePolicyRepository(), shipped_floor),
+        runtime_policy=RuntimePolicyService(RuntimePolicyRepository(), shipped_floor, model_list_values),
         provider_bindings=provider_bindings,
         model_gateway=raw_gateway,  # text consumers only (see above)
         provider_registry=provider_registry,

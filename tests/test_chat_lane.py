@@ -1,4 +1,5 @@
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -94,18 +95,28 @@ def test_chat_service_refuses_execution_lanes_at_the_model_boundary():
 
 
 def test_runtime_policy_has_a_chat_lane_with_legacy_policy_fallback():
-    policy = rules.default_policy({}, floor=FLOOR)
+    policy = rules.default_policy(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert policy["routing"]["chat"] == "general"
 
-    legacy = rules.default_policy({}, floor=FLOOR)
+    legacy = rules.default_policy(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     legacy["routing"].pop("chat")
-    normalized = rules.normalize(legacy, floor=FLOOR)
+    normalized = rules.normalize(
+        legacy, floor=FLOOR, lists=_test_model_lists.load().values
+    )
     assert normalized["routing"]["chat"] == "general"
 
 
 def test_route_planner_keeps_ordinary_chat_on_the_policy_general_lane():
-    policy = rules.default_policy({}, floor=FLOOR)
-    route = RoutePlanner().select(
+    policy = rules.default_policy(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    )
+    route = RoutePlanner(
+        config=_test_model_lists.load().values["capability_router"]
+    ).select(
         RoutingRequest(lane="chat", prompt="hello there"),
         policy,
         RoutePlanner.from_policy(policy),

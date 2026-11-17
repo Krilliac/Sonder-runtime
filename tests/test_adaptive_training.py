@@ -2150,3 +2150,165 @@ def test_programmatic_start_rejects_negative_gpu_index():
     ok, message = adaptive_training.start_training(plan, confirmed=True)
     assert not ok
     assert "GPU index" in message
+
+
+
+def _change_training_catalog(monkeypatch, tmp_path):
+    from sonder_runtime.adapters import model_lists
+    path = tmp_path / "changed-model-lists.json"
+    monkeypatch.setenv("SONDER_MODEL_LISTS", str(path))
+    path.write_text(json.dumps({
+        "version": 1, "reserved_personal_model": "other-personal:latest",
+        "stable_alias": "other-rollback:latest",
+    }), encoding="utf-8")
+    model_lists.clear_cache()
+
+
+def test_deploy_pins_catalog_when_overlay_changes_after_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
+    adapter, _ = _trusted_adapter(monkeypatch, tmp_path)
+    converter = _converter(tmp_path)
+    _stub_promotion(monkeypatch)
+    personal = adaptive_training.PERSONAL_MODEL
+    calls = []
+    def intercept(command, models):
+        if command[1:2] == ["cp"] and command[2] == personal:
+            _change_training_catalog(monkeypatch, tmp_path)
+            models["other-personal:latest"] = "foreign-id"
+        return None
+    runner, models = _ollama_runner(converter, calls, intercept=intercept)
+    ok, message = adaptive_training.deploy(adapter, converter=str(converter), runner=runner)
+    assert ok, message
+    assert models["other-personal:latest"] == "foreign-id"
+    assert models[personal].startswith("candidate-id:")
+    assert runtime_policy.load(create=False)["local_models"]["code"] == personal
+
+
+def test_recovery_uses_journal_aliases_after_overlay_changes(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
+    adapter, _ = _trusted_adapter(monkeypatch, tmp_path)
+    converter = _converter(tmp_path)
+    _stub_promotion(monkeypatch)
+    personal = adaptive_training.PERSONAL_MODEL
+    calls = []
+    class Crash(BaseException):
+        pass
+    crashed = False
+    def intercept(command, models):
+        nonlocal crashed
+        if not crashed and command[1:2] == ["cp"] and command[3] == personal:
+            models[personal] = models[command[2]]
+            crashed = True
+            raise Crash()
+        return None
+    runner, models = _ollama_runner(converter, calls, intercept=intercept)
+    with pytest.raises(Crash):
+        adaptive_training.deploy(adapter, converter=str(converter), runner=runner)
+    journal = json.loads(adaptive_training._deployment_journal_path().read_text(encoding="utf-8"))
+    assert journal["model_catalog"]["personal_model"] == personal
+    _change_training_catalog(monkeypatch, tmp_path)
+    models["other-personal:latest"] = "foreign-id"
+    ok, message = adaptive_training._reconcile_pending_deployment(ollama="ollama", runner=runner)
+    assert ok, message
+    assert models[personal] == "previous-personal-id"
+    assert models["other-personal:latest"] == "foreign-id"
+    assert not adaptive_training._deployment_journal_path().exists()
+
+
+def test_rollback_pins_catalog_before_alias_verification(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
+    rollback = adaptive_training.ROLLBACK_MODEL
+    converter = _converter(tmp_path)
+    calls = []
+    changed = False
+    def intercept(command, models):
+        nonlocal changed
+        if not changed and command[1:3] == ["show", rollback]:
+            changed = True
+            _change_training_catalog(monkeypatch, tmp_path)
+            models["other-rollback:latest"] = "foreign-rollback-id"
+        return None
+    runner, models = _ollama_runner(converter, calls, intercept=intercept)
+    models[rollback] = "rollback-id"
+    ok, message = adaptive_training.rollback(ollama="ollama", runner=runner)
+    assert ok, message
+    assert runtime_policy.load(create=False)["local_models"]["code"] == rollback
+    assert models["other-rollback:latest"] == "foreign-rollback-id"
+
+
+
+def test_legacy_transition_without_pinned_catalog_refuses_without_mutation(tmp_path):
+    path = adaptive_training._deployment_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = json.dumps({"schema": 1, "operation": "deploy", "deployment_id": "legacy"})
+    path.write_text(raw, encoding="utf-8")
+    calls = []
+    ok, message = adaptive_training._reconcile_pending_deployment(
+        ollama="ollama", runner=lambda *args, **kwargs: calls.append(args),
+    )
+    assert not ok and "pinned model catalog" in message and "operator recovery" in message
+    assert calls == []
+    assert path.read_text(encoding="utf-8") == raw
+
+
+
+@pytest.mark.parametrize("tier", ["code", "reasoning"])
+@pytest.mark.parametrize("spelling", ["exact", "untagged", "uppercase", "library", "library-uppercase", "registry", "registry-uppercase"])
+def test_owner_release_uses_recorded_alias_after_overlay_change(monkeypatch, tmp_path, tier, spelling):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    personal = adaptive_training.PERSONAL_MODEL
+    adaptive_training._write_shared_alias_owner(
+        deployment_id="original-owner", identity="a" * 64, digest="b" * 64,
+    )
+    bound = personal if spelling == "exact" else personal.removesuffix(":latest")
+    if spelling.startswith("library"):
+        bound = "library/" + bound
+    elif spelling.startswith("registry"):
+        bound = "registry.ollama.ai/library/" + bound
+    if "uppercase" in spelling:
+        bound = bound.upper()
+    _activate_personal_policy({tier: bound})
+    owner_path = adaptive_training._shared_alias_paths()["owner"]
+    before = owner_path.read_bytes()
+    _change_training_catalog(monkeypatch, tmp_path)
+    runtime_policy.update(local_models={tier: bound})
+    assert runtime_policy.load(create=False)["local_models"][tier] == bound
+    released, message = adaptive_training.release_personal_owner(confirmed=True)
+    assert not released and "roll every tier off" in message
+    assert owner_path.read_bytes() == before
+    runtime_policy.update(local_models={tier: "qwen3.5:4b"})
+    released, message = adaptive_training.release_personal_owner(confirmed=True)
+    assert released, message
+    assert not owner_path.exists()
+
+
+@pytest.mark.parametrize("alias", [None, 42, {}, [], "", "bad alias", "bad\nalias", "remote:cloud"])
+def test_owner_release_refuses_malformed_recorded_alias(monkeypatch, tmp_path, alias):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    adaptive_training._write_shared_alias_owner(
+        deployment_id="malformed-owner", identity="a" * 64, digest="b" * 64,
+    )
+    path = adaptive_training._shared_alias_paths()["owner"]
+    owner = json.loads(path.read_text(encoding="utf-8"))
+    owner["model"] = alias
+    raw = json.dumps(owner)
+    path.write_text(raw, encoding="utf-8")
+    released, message = adaptive_training.release_personal_owner(confirmed=True)
+    assert not released and "owner" in message.lower()
+    assert path.read_text(encoding="utf-8") == raw
+
+
+
+def test_owner_release_preserves_distinct_explicit_model_tags(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "runtime-policy.json"))
+    personal = adaptive_training.PERSONAL_MODEL
+    adaptive_training._write_shared_alias_owner(
+        deployment_id="different-tag", identity="a" * 64, digest="b" * 64,
+    )
+    _change_training_catalog(monkeypatch, tmp_path)
+    different = "registry.ollama.ai/library/" + personal.removesuffix(":latest") + ":other"
+    runtime_policy.update(local_models={"code": different})
+    released, message = adaptive_training.release_personal_owner(confirmed=True)
+    assert released, message
+    assert not adaptive_training._shared_alias_paths()["owner"].exists()
+    assert runtime_policy.load(create=False)["local_models"]["code"] == different

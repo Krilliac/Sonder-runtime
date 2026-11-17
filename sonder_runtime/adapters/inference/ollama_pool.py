@@ -325,6 +325,10 @@ def validate_worker_origin(
     trusted_origins: tuple[str, ...] = (),
 ) -> str:
     """Normalize one worker origin under the Ollama trust policy."""
+    # Decided on the text as given; normalize() never removes these characters.
+    reason = ollama_policy.text_error(origin)
+    if reason:
+        raise ValueError("worker endpoint " + reason)
     normalized = ollama_policy.normalize(origin)
     parsed = urlsplit(normalized)
     try:
@@ -337,6 +341,8 @@ def validate_worker_origin(
         raise ValueError("worker endpoint must not contain inline credentials")
     if not parsed.hostname or port is None:
         raise ValueError("worker endpoint must include a host and explicit port")
+    if "%" in parsed.hostname:
+        raise ValueError("worker endpoint must not contain a zone id or percent escape")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
         raise ValueError(
             "worker endpoint must be an origin without a path, query, or fragment"

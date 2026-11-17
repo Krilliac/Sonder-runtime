@@ -362,6 +362,10 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
         if tool_policy_override
         else state(OVERLAY_FILE_NAME)
     )
+    from ..model_lists import OVERLAY_ENV as lists_env, OVERLAY_FILE_NAME as lists_file
+
+    lists_override = os.environ.get(lists_env, "").strip()
+    atomic.append(_canonical(Path(lists_override).expanduser()) if lists_override else state(lists_file))
     from .unsafe_lab import _audit_path
 
     catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()

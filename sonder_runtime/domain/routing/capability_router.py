@@ -30,61 +30,7 @@ TASK_CLASSES = ("simple", "search", "code", "reasoning", "vision", "long_context
 # Escalation reasons the caller may report to step up a tier.
 ESCALATION_REASONS = ("failed", "low_confidence", "empty_response", "explicit_hard")
 
-# Preferred tier per task class (strongest-fit first choice).
-_PREFERRED = {
-    "simple": "fast",
-    "search": "fast",
-    "code": "code",
-    "reasoning": "reasoning",
-    "vision": "vision",
-    "long_context": "general",
-}
-
-# Ascending-strength ladder per class. Filtered to available tiers at runtime;
-# ``oracle`` is appended only when the caller allows it.
-_LADDER = {
-    "simple": ("fast", "general", "reasoning"),
-    "search": ("fast", "general"),
-    "code": ("code", "general", "reasoning"),
-    "reasoning": ("reasoning", "general", "code"),
-    "vision": ("vision", "general"),
-    "long_context": ("general", "reasoning"),
-}
-
-# Fallback order when a preferred/ladder tier is not configured. Everything can
-# fall back to one of these, which are the always-present base tiers.
-_FALLBACK = ("general", "code", "fast")
-
 _LONG_CONTEXT_TOKENS = 6000  # a request bigger than this is a long-context job
-
-_KEYWORDS = {
-    "code": (
-        "code", "function", "implement", "bug", "refactor", "compile", "traceback",
-        "exception", "stack trace", "unit test", "pytest", "regex", "algorithm",
-        "python", "javascript", "typescript", "rust", "golang", " java ", "c++",
-        "sql", "api", "class ", "def ", "async", "docker", "kubernetes",
-    ),
-    "reasoning": (
-        "prove", "proof", "theorem", "derive", "step by step", "reason through",
-        "think carefully", "think hard", "plan the", "trade-off", "tradeoff",
-        "analyze", "why does", "why is", "explain the reasoning", "complexity",
-        "optimi", "strategy", "design a system", "architecture for",
-    ),
-    "search": (
-        "latest", "current", "today", "right now", "this week", "news",
-        "look up", "search for", "who won", "weather", "price of", "release date",
-        "recent", "up to date", "what happened",
-    ),
-    "vision": (
-        "image", "screenshot", "photo", "picture", "diagram", "this chart",
-        "what's in this", "describe the", "ocr", "read the text in",
-    ),
-    "long_context": (
-        "summarize this", "summarise this", "this document", "the whole repo",
-        "this codebase", "these files", "the attached", "this transcript",
-        "tl;dr of", "condense",
-    ),
-}
 
 _HARD_CUES = ("think hard", "think carefully", "step by step", "this is hard",
               "be rigorous", "reason through")
@@ -100,9 +46,9 @@ class Route:
     signals: dict = field(default_factory=dict)
 
 
-def _score(text: str) -> dict:
+def _score(text: str, config) -> dict:
     low = " " + (text or "").lower() + " "
-    return {cls: sum(1 for kw in kws if kw in low) for cls, kws in _KEYWORDS.items()}
+    return {cls: sum(1 for kw in kws if kw in low) for cls, kws in config["keywords"].items()}
 
 
 def classify_task(
@@ -111,6 +57,7 @@ def classify_task(
     has_image: bool = False,
     approx_tokens: int = 0,
     explicit: str | None = None,
+    config,
 ) -> tuple[str, float]:
     """Return ``(task_class, confidence)`` for a request.
 
@@ -127,7 +74,7 @@ def classify_task(
     if has_image:
         logger.debug("classify_task: image present, classifying as vision")
         return "vision", 1.0
-    scores = _score(prompt)
+    scores = _score(prompt, config)
     # Size dominates: a genuinely large payload is a long-context job regardless
     # of surface keywords.
     if approx_tokens >= _LONG_CONTEXT_TOKENS:
@@ -149,33 +96,33 @@ def classify_task(
     return best, round(confidence, 2)
 
 
-def _resolve(tier: str, available) -> str:
+def _resolve(tier: str, available, config) -> str:
     if tier in available:
         return tier
-    for fb in _FALLBACK:
+    for fb in config["fallback"]:
         if fb in available:
             logger.warning(f"preferred tier {tier!r} unavailable, falling back to {fb!r} (available={available})")
             logger.debug(f"_resolve: tier {tier!r} unavailable, falling back to {fb!r}")
             return fb
     # Nothing matched (misconfigured policy) — return the requested tier as-is
     # so the caller surfaces a clear "unknown tier" error rather than silence.
-    logger.critical(f"routing policy has no usable tier: requested={tier!r}, none of {_FALLBACK} available in {available} -- all inference routing will fail")
+    logger.critical(f"routing policy has no usable tier: requested={tier!r}, none of {config['fallback']} available in {available} -- all inference routing will fail")
     logger.error(f"no fallback tier found for {tier!r}, routing policy is misconfigured (available={available})")
     logger.warning(f"no fallback tier found for {tier!r}, policy may be misconfigured (available={available})")
     logger.debug(f"_resolve: no fallback found for tier {tier!r}, returning as-is (available={available})")
     return tier
 
 
-def recommend_tier(task: str, available) -> str:
+def recommend_tier(task: str, available, *, config) -> str:
     """Best available tier for a task class, degrading to a base tier."""
     available = set(available or ())
-    preferred = _PREFERRED.get(task, "general")
-    resolved = _resolve(preferred, available)
+    preferred = config["preferred"].get(task, config["preferred"]["long_context"])
+    resolved = _resolve(preferred, available, config)
     logger.debug(f"recommend_tier: task={task!r}, preferred={preferred!r}, resolved={resolved!r}")
     return resolved
 
 
-def escalation_ladder(task: str, available, *, allow_oracle: bool = False) -> tuple[str, ...]:
+def escalation_ladder(task: str, available, *, allow_oracle: bool = False, config) -> tuple[str, ...]:
     """Ordered, de-duplicated ladder of available tiers to try for a task.
 
     Strongest-fit first, then progressively more capable base tiers, then the
@@ -183,7 +130,7 @@ def escalation_ladder(task: str, available, *, allow_oracle: bool = False) -> tu
     cloud model, the last resort for the genuinely hard minority.
     """
     available = set(available or ())
-    raw = list(_LADDER.get(task, ("general", "code")))
+    raw = list(config["ladder"].get(task, config["fallback"][:2]))
     if allow_oracle:
         raw.append("oracle")
     out: list[str] = []
@@ -193,7 +140,7 @@ def escalation_ladder(task: str, available, *, allow_oracle: bool = False) -> tu
             out.append(resolved)
     if not out:  # ensure a non-empty ladder even on a sparse policy
         logger.warning(f"escalation ladder empty for task={task!r}, falling back to single recommended tier (available={available})")
-        out.append(recommend_tier(task, available))
+        out.append(recommend_tier(task, available, config=config))
     logger.debug(f"escalation_ladder: task={task!r}, allow_oracle={allow_oracle}, ladder={tuple(out)}")
     return tuple(out)
 
@@ -232,15 +179,16 @@ def route(
     has_image: bool = False,
     approx_tokens: int = 0,
     explicit: str | None = None,
+    config,
     allow_oracle: bool = False,
 ) -> Route:
     """One-call capability route: classify, pick a tier, build the ladder."""
     logger.debug(f"route: available_tiers={set(available or ())}, allow_oracle={allow_oracle}")
     task, confidence = classify_task(
-        prompt, has_image=has_image, approx_tokens=approx_tokens, explicit=explicit
+        prompt, has_image=has_image, approx_tokens=approx_tokens, explicit=explicit, config=config
     )
-    tier = recommend_tier(task, available)
-    ladder = escalation_ladder(task, available, allow_oracle=allow_oracle)
+    tier = recommend_tier(task, available, config=config)
+    ladder = escalation_ladder(task, available, allow_oracle=allow_oracle, config=config)
     # A low-confidence classification starts one rung down the ladder's stronger
     # end is not automatic; we keep the recommended tier but flag it so the live
     # router can choose to pre-escalate.
