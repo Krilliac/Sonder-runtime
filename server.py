@@ -169,7 +169,7 @@ import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
-from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi, chat_temperature as _chat_temperature
+from sonder_runtime.adapters import chat_observers as _chat_observers, chat_tool_manifest as _chat_tool_manifest, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi, chat_temperature as _chat_temperature
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -507,6 +507,7 @@ from sonder_runtime.interfaces.http.serve_policy import (
 )
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
+import sonder_runtime.adapters.inference.pool_model_catalog as _pool_model_catalog
 from sonder_runtime.adapters.inference.pool_model_catalog import (
     PoolCatalogCache,
     resolve_model_pin,
@@ -737,6 +738,18 @@ def _valid_tier_names():
     return _valid_tier_names_policy(available_tiers())
 
 
+def _discovery_tags(host_only=False):
+    """Known-model catalog: the pool's union (or just this host when ``host_only``)."""
+    fn = getattr(_pool_model_catalog, "discovery_tags", None)
+    if fn is None:
+        return _get("/api/tags")
+    return fn(
+        OLLAMA_POOL, lambda: _get("/api/tags"),
+        lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
+        host_origin=BASE if host_only else None,
+    )
+
+
 def discovered_models():
     """Return the live Ollama catalog as canonical, deduplicated model names.
 
@@ -744,7 +757,7 @@ def discovered_models():
     operator's Ollama endpoint currently advertises, but cannot turn an
     arbitrary string into a backend request.
     """
-    return _catalog_names(_get("/api/tags"))
+    return _catalog_names(_discovery_tags())
 
 
 def discovered_model_records():
@@ -754,7 +767,7 @@ def discovered_model_records():
     Unknown records deliberately remain eligible; fanout excludes only models
     which the operator's catalog positively identifies as non-generative.
     """
-    return _catalog_records(_get("/api/tags"))
+    return _catalog_records(_discovery_tags())
 
 
 def _cache_model_revision(model):
@@ -783,11 +796,12 @@ def _inventory_rows(payload, endpoint):
 
 
 def resolve_discovered_model_record(selector):
-    """Resolve an exact live catalog record case-insensitively, or return None."""
+    """Resolve an exact record in this host's catalog (primary member when pooled), or None."""
     wanted = str(selector or "").strip().casefold()
     if not wanted:
         return None
-    return _resolve_catalog_record(wanted, discovered_model_records())
+    records = _catalog_records(_discovery_tags(True)) if OLLAMA_POOL.enabled else discovered_model_records()
+    return _resolve_catalog_record(wanted, records)
 
 
 def resolve_discovered_model(selector):
@@ -1031,12 +1045,11 @@ def _default_route_plan(prompt, start, *, has_image=False):
 
 def _gate_answer_code(response, *, iid, prompt, history, model, system,
                       temperature, num_predict, num_ctx, cloud, tier_label):
-    """Run the code gate on one chat answer with a repair bound to its model.
-
-    Returns ``(response, verified, repaired, repair_usage)`` so the caller can
-    persist a verified repair or, when the code still fails, step to the
-    next rung.
-    """
+    """Run the code gate on one chat answer with a repair bound to its model."""
+    from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
+    active_turn = _chat_tool_loop.current_turn()
+    if active_turn is not None and active_turn.manifest.tools:
+        return response, None, False, {}
     if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):  # never auto-run; a user's /run or /runproject is their explicit approval
         return response, None, False, {}  # a blocked model's reply is never run or repaired
     captured = response
@@ -1740,6 +1753,25 @@ def _model_context_metadata(model):
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
+
+
+_CHAT_FITNESS_INSTANCE = None
+
+
+def chat_model_unfit_reason(model):
+    """Why a local model cannot serve chat, or "" (cloud models are not probed)."""
+    if _is_cloud_model_name(model):
+        return ""
+    global _CHAT_FITNESS_INSTANCE
+    if _CHAT_FITNESS_INSTANCE is None:
+        try:
+            from sonder_runtime.application.chat import model_fitness as _chat_model_fitness
+            _CHAT_FITNESS_INSTANCE = _chat_model_fitness.ChatModelFitness(
+                lambda m: _post("/api/show", {"model": m, "name": m}, timeout=10)
+            )
+        except ImportError:
+            return ""
+    return _CHAT_FITNESS_INSTANCE.unfit_reason(model)
 
 
 def _residency_feedback():
@@ -4135,9 +4167,18 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
-    effective_system, playbook_selection = playbook_context.augment(
-        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    handled, tool_reply = _chat_run_backend.maybe_answer_chat_tools(
+        chat_request=_chat_request, model=model, cloud=cloud, temperature=temperature,
+        num_predict=num_predict, num_ctx=num_ctx, keep_alive=_keep_alive_for(model),
+        local_options_fn=lambda t, np, nc: _platform_local_model_options(t, np, nc, native_context=context_policy.native, environ=os.environ),
+        system=effective_system, prompt=prompt, history=history,
     )
+    if handled:
+        return tool_reply, None, None
+    effective_system, playbook_selection = _chat_tool_manifest.manifest_last(effective_system, playbook_context.augment(  # the turn's own tools block stays last
+        effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
+    ))
     gen = _reference_lookup_lanes.chat_generate(  # passages frame the user turn; the stored task stays raw
         _make_generate, prompt, model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback, text_only=True,
@@ -4714,33 +4755,52 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
     failure = (
         result.get("stderr") or result.get("stdout") or "exited with an error"
     ).strip()
+    summary = "exited with an error"
+    for line in reversed(failure.splitlines()):
+        if line.strip():
+            summary = line.strip()
+            break
+    if "ModuleNotFoundError: No module named " in failure or "ImportError: No module named " in failure:
+        # An external package missing in the isolated check environment (e.g. pygame)
+        # is not a code error; never prompt-rewrite away from user-requested libraries.
+        return (
+            "%s\n\nNOT VERIFIED: missing dependency in the isolated check environment (%s)."
+            % (reply, summary[:300]),
+            None,
+            False,
+        )
     if regenerate is not None:
         repair_prompt = (
             "The Python code block in your previous answer fails when run:\n"
             "%s\n\nReturn the corrected complete answer with a fixed, "
-            "runnable Python code block." % failure[:1200]
+            "runnable Python code block. Keep any libraries or packages requested by the user." % failure[:1200]
         )
         try:
             repaired = str(regenerate(repair_prompt) or "")
         except Exception:
             repaired = ""
-        repaired_code = _code_gate_target(repaired) if repaired else None
-        if repaired_code:
-            try:
-                retry = grounding.run_code_detail(
-                    repaired_code, timeout=_CODE_GATE_TIMEOUT,
-                    compile_first=True,
-                )
-            except Exception:
-                retry = {"ok": False, "timed_out": False}
-            if retry.get("ok"):
-                return repaired, True, True
-            if retry.get("timed_out"):
-                failure = "%s (repair verification timed out)" % failure
+        if not repaired.strip():
+            failure = "%s (repair returned empty output)" % summary
+        else:
+            repaired_code = _code_gate_target(repaired)
+            if repaired_code:
+                try:
+                    retry = grounding.run_code_detail(
+                        repaired_code, timeout=_CODE_GATE_TIMEOUT,
+                        compile_first=True,
+                    )
+                except Exception:
+                    retry = {"ok": False, "timed_out": False}
+                if retry.get("ok"):
+                    return repaired, True, True
+                if retry.get("timed_out"):
+                    failure = "%s (repair verification timed out)" % failure
+                else:
+                    failure = (
+                        retry.get("stderr") or retry.get("stdout") or failure
+                    ).strip() or failure
             else:
-                failure = (
-                    retry.get("stderr") or retry.get("stdout") or failure
-                ).strip() or failure
+                failure = "%s (repair omitted runnable code)" % summary
     summary = "exited with an error"
     for line in reversed(failure.splitlines()):
         if line.strip():
@@ -5197,7 +5257,11 @@ def _chat_request(
     _reasoning_deadline: float | None = None,
     text_only: bool = False,
     _caller_payload: dict | None = None,
-) -> tuple[dict, str]:
+    _thinking_deadline: float | None = None,
+    tools: list | None = None,
+    tool_choice: str | dict | None = None,
+    return_message: bool = False,
+):
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
     if single_send and (cloud or reasoning_continuation or payload.get("think") is not False):
@@ -5240,6 +5304,13 @@ def _chat_request(
     # The request as the caller sized it, before any thinking headroom is added:
     # the ask without thinking (below) goes back to this reply budget.
     caller_payload = payload if _caller_payload is None else _caller_payload
+    request_deadline = (
+        _thinking_deadline
+        if _thinking_deadline is not None
+        else _reasoning_deadline
+        if _reasoning_deadline is not None
+        else time.monotonic() + _bound_request_timeout(timeout, TIMEOUT)
+    )
     if (
         not cloud
         and _known_thinking_model(model)
@@ -5260,6 +5331,10 @@ def _chat_request(
             and _think_option_supported(model)
         ):
             payload["think"] = True
+    if tools and not text_only:
+        payload = {**payload, "tools": list(tools)}
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     out, attempts = _post_model(
         "/api/chat",
         payload,
@@ -5297,6 +5372,8 @@ def _chat_request(
     if inline_thinking:
         _remember_thinking_model(model)
     if not isinstance(content, str) or not content.strip():
+        if return_message and isinstance(message, dict) and message.get("tool_calls"):
+            return out, message
         if accept_native_tool_calls:
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
@@ -5412,18 +5489,27 @@ def _chat_request(
             # message.thinking and returning no assistant content. Preserve the
             # quality-first initial request, then retry the same idempotent turn
             # once with thinking disabled so the caller receives an answer.
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ModelCallError(
+                    "timeout",
+                    "thinking retry exceeded request timeout",
+                    attempts=attempts,
+                    cloud=cloud,
+                )
             fallback_payload = dict(payload)
             fallback_payload["think"] = False
             return _chat_request(
                 fallback_payload,
                 model=model,
                 cloud=True,
-                timeout=timeout,
+                timeout=max(1, math.floor(remaining)),
                 cancel_check=cancel_check,
                 accept_native_tool_calls=accept_native_tool_calls,
                 idempotent=idempotent,
                 local_only=local_only,
                 _budget_retried=True, text_only=text_only,
+                _thinking_deadline=request_deadline,
             )
         thought = message.get("thinking") if isinstance(message, dict) else None
         if (
@@ -5431,20 +5517,30 @@ def _chat_request(
             # all thought and no answer: cut at the budget, or ended by the model itself
             and (exhausted_thinking or inline_thinking or (isinstance(thought, str) and bool(thought.strip())))
         ):
-            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT))
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ModelCallError(
+                    "timeout",
+                    "thinking retry exceeded request timeout",
+                    attempts=attempts,
+                    cloud=cloud,
+                )
+            retry_timeout = max(1, math.floor(remaining))
+            roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, retry_timeout)
             if exhausted_thinking and not _budget_retried and roomier != payload:
                 # The model reasoned right up to the cap and never got to an answer.
                 # Now that the response has identified it, retry once with the
                 # headroom it needed rather than reporting an empty response.
                 return _chat_request(
                     roomier, model=model, cloud=cloud,
-                    timeout=timeout,
+                    timeout=retry_timeout,
                     cancel_check=cancel_check,
                     accept_native_tool_calls=accept_native_tool_calls,
                     idempotent=idempotent,
                     local_only=local_only,
                     _budget_retried=True, text_only=text_only,
                     _caller_payload=caller_payload,
+                    _thinking_deadline=request_deadline,
                 )
             if _think_option_supported(model):
                 # The headroom went on thought too (seen live: 4096 tokens of
@@ -5452,7 +5548,8 @@ def _chat_request(
                 # answered in seconds), or the model thought and then stopped by
                 # itself.  More of the same request will not help, so ask once with
                 # thinking off and the reply budget the caller chose.  If that fails
-                # too, the thinking-only reply below stays the failure; a cancellation stays one.
+                # too, the thinking-only reply below stays the failure; a cancellation
+                # or timeout stays one.
                 fallback_payload = dict(caller_payload)
                 fallback_payload["think"] = False
                 activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
@@ -5462,12 +5559,13 @@ def _chat_request(
                         fallback_payload,
                         model=model,
                         cloud=cloud,
-                        timeout=timeout,
+                        timeout=retry_timeout,
                         cancel_check=cancel_check,
                         accept_native_tool_calls=accept_native_tool_calls,
                         idempotent=idempotent,
                         local_only=local_only,
                         _budget_retried=True, text_only=text_only,
+                        _thinking_deadline=request_deadline,
                     )
                 except ModelCallError as fallback_error:
                     if fallback_error.kind == "cancelled":
@@ -5482,6 +5580,8 @@ def _chat_request(
             attempts=attempts,
             cloud=cloud,
         )
+    if return_message:
+        return out, (message if isinstance(message, dict) else {"role": "assistant", "content": content})
     return out, content
 
 
@@ -5544,7 +5644,7 @@ def _post(
 _PREWARM_LOAD_TIMEOUT = 60
 
 
-def prewarm_model(tier: str = "") -> bool:
+def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     """Speculatively load the tier's local model while context is assembled.
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
@@ -5579,8 +5679,17 @@ def prewarm_model(tier: str = "") -> bool:
                 _platform_local_model_options(0.2, 1, _auto_model_context(model),
                     native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
-        except Exception:
-            pass
+            try:
+                from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
+                _startup_prewarm.load_finished(model, announce=announce)
+            except ImportError:
+                pass
+        except Exception as exc:
+            try:
+                from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
+                _startup_prewarm.load_failed(model, exc, announce=announce)
+            except ImportError:
+                pass
         finally:
             prewarm_gate.finish(model)
 
@@ -5834,8 +5943,8 @@ def _offload_tier_impl(
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
-    if not cloud and provider is None and (num_ctx is None or int(num_ctx or 0) <= 0):
-        num_ctx = _auto_model_context(model)
+    if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
+        num_ctx = _auto_model_context(model) if provider is None else None
 
     if not _should_learn(tier, learn):
         messages = []
@@ -6725,8 +6834,12 @@ def _sonder_impl_serialized(
         ctx = pinned_ctx
         if ctx is None:
             ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
+        built_system = _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider)
+        built_system = _chat_tool_manifest.chat_system(
+            built_system, prompt, file_guidance=not rung.cloud and not explicit_target,
+        )
         return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay), only the caller's
-            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
+            _reference_lookup_lanes.system_for(rung.model, built_system, system),
             ctx,
         )
 
@@ -6755,6 +6868,13 @@ def _sonder_impl_serialized(
             rung_scope.close()
             provider = None if model_override else _bridge_provider_for_tier(tier_label, cloud)
             rung_scope.enter_context(_provider_bridge.bind_rung(provider, tier_label))
+            from sonder_runtime.bootstrap import chat_tools_wiring as _chat_tools_wiring
+            from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
+            _mcp_turn = _chat_tools_wiring.maybe_open_mcp_chat_tool_turn(
+                server=sys.modules[__name__], permission_policy=permission_modes,
+                model=tgt_model, cloud=cloud, project=project,
+            )
+            rung_scope.enter_context(_chat_tool_loop.bind_turn(_mcp_turn))
             effective_system, num_ctx_eff = _generation_context(rung)
             following = escalation_plan.next_rung(attempt)
             detail = ""
@@ -7126,11 +7246,16 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _reference_lookup_lanes.system_for(model, _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))))
-            if not cloud and not _explicit_serve_selection(tier, ""):
-                from sonder_runtime.application.chat.honesty import no_tools_system
-                effective_system = _reference_lookup_lanes.system_for(model, no_tools_system(effective_system, prompt))
+            from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
+            from sonder_runtime.application.chat.honesty import no_verification_claims_system
+            _active_tool_turn = _chat_tool_loop.current_turn()
+            _has_chat_tools = _active_tool_turn is not None and bool(_active_tool_turn.manifest.tools)
+            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+            if not _has_chat_tools:
+                effective_system = no_verification_claims_system(effective_system)
+            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
+                effective_system, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, "")))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -7142,7 +7267,16 @@ def _answer_with_history_impl(
             )
             req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
             try:
-                if learn:
+                from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+                _handled_tools, _tool_resp = _chat_run_backend.maybe_answer_chat_tools(
+                    chat_request=_chat_request, model=model, cloud=cloud, temperature=temperature,
+                    num_predict=1024, num_ctx=req_ctx, keep_alive=_keep_alive_for(model),
+                    local_options_fn=lambda t, np, nc: _platform_local_model_options(t, np, nc, native_context=context_policy.native, environ=os.environ),
+                    system=effective_system, prompt=prompt, history=history,
+                )
+                if _handled_tools:
+                    response, iid, trace_ctx = _tool_resp, None, None
+                elif learn:
                     # Augmentation policy controls what the model sees, not provenance.
                     # Even clean/cloud teacher turns retain their explicit project so a
                     # later grounded outcome cannot become an unscoped raw recall.
@@ -7418,8 +7552,8 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
-        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+    system = _chat_tool_manifest.chat_system(_build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(  # served chat too: one tools block, last
+        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))), prompt, file_guidance=False)
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
@@ -8891,47 +9025,15 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
 def _permission_mode_context(mode: str) -> str:
     """The state a rule table cannot show: which mode is in force, and privilege."""
     return _render_permission_mode_context(
-        mode,
-        permission_modes.MODE_LABELS,
-        permission_modes.MODE_BLURBS,
-        permission_modes.ASK_CAVEAT,
-        _elevation_status_text(),
+        mode, permission_modes.MODE_LABELS, permission_modes.MODE_BLURBS,
+        permission_modes.ASK_CAVEAT, _elevation_status_text(),
     )
 
 
 def _permission_policy_text(tool_name: str = "") -> str:
-    """The effective policy: the rule, the mode, and which one governs.
-
-    Printing the rule alone was honest only while nothing enforced it. Now that
-    ``permission_modes.decide()`` combines rules with a mode, the rule column
-    can disagree with what happens -- ``status`` shows ``allow`` while ``plan``
-    is in force, and a ``deny`` rule beats ``auto``. So the mode is pinned and
-    the rules loaded exactly once here, and both are pushed into the renderer:
-
-    * once, so the whole table describes one consistent policy rather than
-      re-reading a file that can change between rows, and
-    * injected, so the render honours *this* home instead of the one
-      ``decide()``'s default lookup would resolve for itself.
-
-    ``interactive=True`` is the operator's view: ``ask`` means "you will be
-    asked". The line under the mode says what a caller with nobody to ask gets
-    instead, rather than silently rendering that caller's answer here.
-    """
-    home = sonder_paths.default_home()
-    rules, report = permission_rules.load_report(home)
-    mode = permission_modes.current_mode()
-    lookup = permission_rules.rule_lookup(rules)
-
-    def decide(name: str):
-        return permission_modes.decide(
-            name, interactive=True, mode=mode, rule_lookup=lookup,
-        )
-
-    table = permission_rules.format_policy(
-        home, tool_name, decide=decide, snapshot=(rules, report),
-    )
-    return "%s\n\n%s\n  %s" % (
-        table, _permission_mode_context(mode), permission_modes.unattended_summary(),
+    """The effective policy: the rule, the mode, and which one governs."""
+    return permission_modes.render_policy_text(
+        sonder_paths.default_home(), tool_name, _permission_mode_context, permission_rules,
     )
 
 
@@ -9155,20 +9257,25 @@ def permission_approve(
             raise approval_ledger_module.ApprovalLedgerError(
                 "give a call id from /approvals, or a tool with its arguments_json"
             )
+        # Only the console may knowingly approve a call an operator denied.
+        overrode = surface == "console" and ledger.denied_for(target, digest)
         approval = ledger.issue(
             target, digest, approver=approver, surface=surface,
             ttl_seconds=ttl_seconds, preview=preview,
+            override_denial=surface == "console",
         )
     except approval_ledger_module.ApprovalLedgerError as exc:
         error = "ERROR: %s" % exc
         return error
     _record_direct_tool(
         "permission_approve",
-        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds)},
+        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
-        "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        ("overrode a denial: " if overrode else "")
+        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (
@@ -11373,8 +11480,15 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
                     summary="unattended escalation refused",
                 )
                 return refusal
-            permission_modes.set_mode(wanted)
+            previous = permission_modes.current_mode()
+            new_mode = permission_modes.set_mode(wanted)
             output = permission_modes.describe()
+            if previous != new_mode and (previous == "bypass" or new_mode == "bypass"):
+                from sonder_runtime.adapters.security import permission_receipts
+                permission_receipts.emit_mode_transition(
+                    previous, new_mode, surface="console", actor="operator",
+                    confirmed=(new_mode == "bypass"),
+                )
     except ValueError as exc:
         _record_direct_tool(
             "permission_mode", {"mode": wanted}, ok=False, started=started,
@@ -14295,16 +14409,28 @@ def sonder_sessions(limit: int = 20) -> str:
     """
     _maybe_live_reload()
     conn = _open_db()
+    logged = {}
     try:
         sessions = memory_store.list_sessions(conn, limit=limit)
+        try:
+            from sonder_runtime.application.session import event_turns as _event_turns
+            _repo_of = getattr(_event_turns, "repository_of", lambda app: app.session_repository())
+            _turn_rows = getattr(memory_store, "session_turn_rows", memory_store.session_turns)
+            logged = _event_turns.merged_turn_counts(
+                lambda: _repo_of(_application()),
+                lambda sid: _turn_rows(conn, sid),
+                [s["session_id"] for s in sessions],
+            )
+        except ImportError:
+            pass
     finally:
         conn.close()
     if not sessions:
         return "no conversation sessions yet."
     lines = ["sonder sessions (most recent first):"]
     for s in sessions:
-        lines.append("  %s  [%d turns]  %s  (updated %s)" % (
-            s["session_id"], s["turn_count"], s.get("title") or "(untitled)",
+        lines.append("  %s  [%s turns]  %s  (updated %s)" % (
+            s["session_id"], logged.get(s["session_id"], s.get("turn_count", "?")), s.get("title") or "(untitled)",
             s.get("updated_ts") or "?",
         ))
     return "\n".join(lines)
@@ -16525,14 +16651,29 @@ def _safe_limit(limit, default=10, max_value=100):
 @mcp.tool()
 def memory_search(query: str, limit: int = 10) -> str:
     """Search local lessons, facts, sessions, and recent interactions."""
-    _maybe_live_reload()
     query = (query or "").strip()
     if not query:
         return "ERROR: empty query."
+    return _memory_search_scoped(query, limit)
+
+
+def _memory_search_scoped(query, limit, bound_project=""):
+    """``bound_project`` is the host-selected project root of a bound agent
+    (never a model argument); empty is the operator's all-project view."""
+    query = (query or "").strip()
+    if not query:
+        return memory_search(query)
+    _maybe_live_reload()
     limit = _safe_limit_policy(limit, 10, 50)
-    like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
+    try:
+        from sonder_runtime.adapters.memory_search import search_memory
+    except ImportError:
+        search_memory = None
     conn = _open_db()
     try:
+        if search_memory is not None:
+            return search_memory(conn, memory_store, query, limit, bound_project=bound_project)
+        like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
         lesson_ids = memory_store.fts_search(conn, query, limit=limit)
         lessons = []
         for lesson_id in lesson_ids:
@@ -16720,8 +16861,28 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         if sess is None:
             return "ERROR: no session '%s'." % session
         if export_format == "atif":
-            return atif_export.interaction_session_atif(conn, session_id, sess, limit=limit)
-        turns = memory_store.session_turns(conn, session_id)[-limit:]
+            try:
+                from sonder_runtime.application.session import event_turns as _event_turns
+                _repo_of = getattr(_event_turns, "repository_of", lambda app: app.session_repository())
+            except ImportError:
+                _repo_of = lambda app: app.session_repository()  # noqa: E731
+            try:
+                return atif_export.interaction_session_atif(
+                    conn, session_id, sess, limit=limit,
+                    get_repository=lambda: _repo_of(_application()),
+                )
+            except TypeError:
+                return atif_export.interaction_session_atif(conn, session_id, sess, limit=limit)
+        _turn_rows = getattr(memory_store, "session_turn_rows", memory_store.session_turns)
+        base_turns = _turn_rows(conn, session_id)
+        try:
+            from sonder_runtime.application.session import event_turns as _event_turns
+            _repo_of = getattr(_event_turns, "repository_of", lambda app: app.session_repository())
+            turns = _event_turns.fuller_turns(
+                lambda: _repo_of(_application()), session_id, base_turns,
+            )[-limit:]
+        except ImportError:
+            turns = base_turns[-limit:]
     finally:
         conn.close()
     # Same value-aware redactor durable capture uses (graph config or env secrets).
@@ -17252,34 +17413,31 @@ or
 def _agent_tool_help(
     read_only=False, cloud=False, unsafe=False,
     project_bound=False, allow_web=True, allow_location=False,
-    allowlist=None, kind=None,
+    allowlist=None, kind=None, num_ctx=0,
 ):
-    """Advertise the run's admitted tools, sized by task kind when allowlisted."""
-    from sonder_runtime.domain.agents.tool_help import render_tool_help
+    """Advertise the run's admitted tools, compacting for small context windows."""
+    from sonder_runtime.domain.agents.tool_help import build_agent_tool_help
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     existing = _agent_help_advertised_tools(help_text)
     generated = _generic_agent_dispatch.generated_help_lines(mcp, existing, _AGENT_SYSTEM_OPERATOR_TOOLS)
-    help_text = help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
-    denied = frozenset(
-        name for name in _agent_help_advertised_tools(help_text)
+    advertised = _agent_help_advertised_tools(
+        help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
+    )
+
+    def _refused(name):
         if _agent_run_tool_refusal(
-            name,
-            read_only=read_only,
-            cloud=cloud,
-            unsafe=unsafe,
-            project_bound=project_bound,
-            allow_web=allow_web,
-            allow_location=allow_location,
-        )
+            name, read_only=read_only, cloud=cloud, unsafe=unsafe,
+            project_bound=project_bound, allow_web=allow_web, allow_location=allow_location,
+        ) or _role_tool_policy.agent_refusal(name):
+            return True
+        decision = permission_modes.decide(name, interactive=False, record=False)
+        return not decision.allowed and decision.source in ("mode", "rule")
+
+    return build_agent_tool_help(
+        help_text, generated_lines=generated, advertised_names=advertised,
+        is_refused=_refused, allowlist=allowlist, task_kind=kind,
+        catalog=_agent_help_tools.catalog_for(mcp), num_ctx=num_ctx,
     )
-    filtered = help_text if not denied else "\n".join(
-        line for line in help_text.splitlines()
-        if not any(
-            line.lstrip().startswith("- %s:" % name)
-            for name in denied
-        )
-    )
-    return render_tool_help(filtered, allowlist=None if allowlist is None else set(allowlist) - denied, task_kind=kind, catalog=_agent_help_tools.catalog_for(mcp))
 
 
 def _tool_capability_shadow_surfaces():
@@ -18008,121 +18166,43 @@ def _agent_negative_claim_review(
 
 def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup=None,
                                  record=True):
-    """Refusal text when the operator's permission gate forbids this dispatch.
-
-    ``args`` are the proposed call's own arguments. They reach the decider
-    and are never stored: an unattended refusal of an effect class names the
-    call (a call id an operator can approve exactly once with ``/approve``),
-    and such an approval answers the next unchanged proposal. The current
-    effect fence, if this thread is an autopilot worker's, is consulted too:
-    a worker whose lease is gone is refused every effect, whatever the mode.
-
-    ``mode``, ``rule_lookup`` and ``record`` are per-call overrides for the
-    evaluation lane (``eval_harness`` ``tool_policy`` scenarios), which asks
-    this gate what an agent would get under a stated mode and rule set
-    without changing the operator's own and without leaving a receipt. The
-    agent loop never passes them.
-
-    ``permission_modes.decide()`` was written as a pure function that call
-    sites opt into, and until now nothing did: the mode matrix and the
-    per-tool ``permission_rules`` policy both decided nothing. This is the
-    opt-in for the agent/workbench/autopilot path.
-
-    ``interactive=False`` is the whole reason this does not break flows that
-    have always worked. Nobody is at a keyboard behind an autonomous run, so
-    ``decide()`` degrades ``ask`` to ``allow`` here -- which means the default
-    ``manual`` mode refuses nothing it did not refuse yesterday. Only two
-    things can actually stop a dispatch: ``plan`` mode (whose entire purpose
-    is to hold still) and an explicit per-tool ``deny`` rule. Both are a
-    deliberate, written-down operator decision.
-
-    ``decide()`` never returns ``ask`` when ``interactive=False``: with no
-    human attached, file changes, host programs and destructive tools are
-    refused unless a rule or the mode allows them, and ask-class tools
-    proceed on the record. The answer to "what should ``ask`` mean with no
-    human attached?" is therefore refusal, never silent self-approval by the
-    loop.
-
-    This gate is additional to -- never a replacement for -- the read-only
-    filter, the project-bound tool set and the cloud/host policies below it.
-    The refusal is shaped like the loop's other ``HOST POLICY`` observations
-    so ``_agent_observation_ok`` counts it as a failed step and the model is
-    told to change course rather than retry.
-    """
+    """Refusal text when the operator's permission gate forbids this dispatch."""
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    from sonder_runtime.bootstrap import chat_tools_wiring as _chat_tools_wiring
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
-    if role_refusal := _role_tool_policy.agent_refusal(name):  # an HTTP caller's role binds every agent dispatch
+    if role_refusal := _role_tool_policy.agent_refusal(name):
         return role_refusal
+    call_args = args if isinstance(args, dict) else None
     decision = permission_modes.decide(
         name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
-        record=record, arguments=args if isinstance(args, dict) else None, fence=effect_fence.current())
+        record=record, arguments=call_args, fence=effect_fence.current())
     if decision.allowed:
         return ""
-    # Assigned rather than returned as a literal: scripts/check_error_signals.py
-    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
-    # own policy chain builds its HOST POLICY strings the same way.
-    if decision.source == "fence":
-        refusal = (
-            "ERROR: HOST POLICY: tool '%s' is refused because this worker's "
-            "authority to produce effects is gone (%s). Stop and report what "
-            "was and was not done; do not retry."
-            % (name, decision.reason)
+    if record and decision.source == "unattended" and decision.call_id:
+        from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt as _refusal_receipt
+        from sonder_runtime.interfaces.http.work_runs import current_run_id as _current_work_run_id
+        run_id = _current_work_run_id()
+        _chat_tools_wiring.record_work_run_pending_refusal(
+            run_id, decision, name, call_args,
+            refusal_receipt_fn=_refusal_receipt,
+            mode_label=permission_modes.mode_label(decision.mode),
+            modes_allowing=permission_modes._modes_allowing(decision.risk),
         )
-        return refusal
-    remedy = ""
-    if decision.call_id and decision.source == "unattended":
-        remedy = (
-            " This exact call is recorded as pending call %s; an operator can "
-            "approve it once at the console (/approve %s), after which one "
-            "unchanged retry runs." % (decision.call_id, decision.call_id)
-        )
-    refusal = (
-        "ERROR: HOST POLICY: tool '%s' is refused by the active permission "
-        "gate (%s, mode=%s, risk=%s). This is the host's standing policy, not "
-        "a transient failure: retrying it unchanged will be refused again. "
-        "Choose a different tool or finalize with what you have.%s"
-        % (name, decision.reason, decision.mode, decision.risk, remedy)
-    )
-    return refusal
+        hook = permission_modes.current_agent_approval_hook()
+        if hook is not None and hook(decision, name, call_args) == "approved":
+            decision = permission_modes.decide(
+                name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
+                record=record, arguments=call_args, fence=effect_fence.current())
+            if decision.allowed:
+                _chat_tools_wiring.clear_work_run_pending_refusal(run_id)
+                return ""
+    return _chat_run_backend.format_agent_gate_refusal(name, decision)
 
 
 def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):
-    """Refusal text when a read-only run reaches a dev tool with no project.
-
-    ``_agent_project_scope("")`` returns ``("", "")`` with no error, so
-    ``project=""`` produced a read-only run bound to nothing -- and every path
-    check in ``_agent_dispatch``'s read-only block is conditional on
-    ``repository_extra_roots`` being set.  For these 23 that meant no
-    confinement at all, which is how ``secret_scan`` came to read a canary
-    outside the repository and print the key back to a read-only "observe"
-    agent.  Their whole contract is "work on a project", so with no project
-    there is nothing legitimate for them to do and refusing costs nothing.
-
-    Second lock, not the lock: ``harness_tools._resolve_root`` is where the
-    class is actually closed, because it also covers the direct MCP callers
-    and the 19 of these that ``_agent_dispatch`` never sees (the read-only
-    policy refuses them for not being in ``REPOSITORY_READ_ONLY_TOOLS``).
-    This one stands in front of it so that adding a tool to that set cannot
-    silently re-open the door -- and it is genuinely load-bearing rather than
-    belt-and-braces: with no project bound, ``root="."`` resolves to Sonder's
-    own cwd, which *is* in ``file_ops.allowed_roots()``, so ``_resolve_root``
-    admits it.  Removing this branch lets ``secret_scan(root=".")`` run and
-    print matched credentials back to the model.
-
-    The refusal lives here, beside its condition, rather than inline in
-    ``_agent_dispatch``: the dispatcher already forwards
-    ``_agent_permission_gate_error`` and ``_repository_read_only_error`` the
-    same way, so one more gate that owns its own message keeps every refusal
-    reachable from exactly one place instead of restated at the call site --
-    the drift shape ``dfad7ce`` removed from ``_agent_run_tool_refusal``.
-    """
-    if not read_only or repository_extra_roots:
+    """Refusal text when a read-only run reaches a dev tool with no project."""
+    if not read_only or repository_extra_roots or tool_name not in _DEVELOPER_WORKFLOW_TOOLS:
         return ""
-    if tool_name not in _DEVELOPER_WORKFLOW_TOOLS:
-        return ""
-    # Assigned rather than returned as a literal: scripts/check_error_signals.py
-    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
-    # own policy chain builds its HOST POLICY strings the same way (see
-    # ``_agent_permission_gate_error`` directly above).
     refusal = (
         "ERROR: read-only agent run has no host-selected project root, "
         "so developer-workflow tool '%s' has no project to work on. "
@@ -18280,8 +18360,9 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
-    if tool_name == "tool_help":
-        return _agent_help_tools.dispatch_tool_help(mcp, args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
+    if tool_name in ("tool_help", "tool_search"):
+        search_args = {**args, "query": args.get("q", "")} if ("query" not in args and "q" in args) else args
+        return _agent_help_tools.dispatch_tool_help(mcp, search_args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
     if tool_name == "file_check":
         from sonder_runtime.bootstrap.code_check_agent_tools import dispatch_file_check
         return dispatch_file_check(args.get("path", ""), args.get("max_items", 30), project_root=repository_extra_roots or None)
@@ -18398,7 +18479,10 @@ def _agent_dispatch(
             )
         return approximate_location_lookup(bool(args.get("consent", False)))
     if tool_name == "memory_search":
-        return memory_search(args.get("query", ""), args.get("limit", 10))
+        return _memory_search_scoped(
+            args.get("query", ""), args.get("limit", 10),
+            bound_project=repository_extra_roots,
+        )
     if tool_name == "file_policy":
         return file_policy(
             token=args.get("token", ""),
@@ -19120,6 +19204,20 @@ def _agent_dispatch(
             scope=args.get("scope", "global"),
         )
     if tool_name == "preferences_status":
+        if repository_extra_roots:
+            _maybe_live_reload()
+            try:
+                from sonder_runtime.adapters import preference_adapters as _pref_adapters
+                _scoped = getattr(_pref_adapters, "preferences_status_scoped", None)
+                if _scoped is not None:
+                    return _scoped(
+                        _application(),
+                        include_disabled=args.get("include_disabled", False),
+                        limit=args.get("limit", 50),
+                        bound_project=repository_extra_roots,
+                    )
+            except ImportError:
+                pass
         return preferences_status(
             include_disabled=args.get("include_disabled", False),
             limit=args.get("limit", 50),
@@ -20215,32 +20313,15 @@ def _local_agent_brief(project_scope: str = "") -> str:
         return environment_probe.agent_brief()
 
 
+def _http_chat_tools():
+    from sonder_runtime.bootstrap import chat_tools_wiring
+    return chat_tools_wiring
+
+
 def _agent_project_scope(project):
     """Resolve a project directory while preserving bare checklist namespaces."""
-    text = str(project or "").strip()
-    if not text:
-        return "", ""
-    try:
-        expanded = os.path.expanduser(text)
-        candidate = os.path.realpath(os.path.abspath(expanded))
-        if os.path.isdir(candidate):
-            return candidate, ""
-        path_like = (
-            os.path.isabs(expanded)
-            or bool(re.match(r"^[A-Za-z]:", expanded))
-            or expanded.startswith((".", "~"))
-            or "/" in expanded
-            or "\\" in expanded
-            or os.path.exists(candidate)
-        )
-        if path_like:
-            return "", (
-                "ERROR: invalid agent project root: path does not name an "
-                "existing directory: %s" % candidate
-            )
-    except (OSError, ValueError) as exc:
-        return "", "ERROR: invalid agent project root: %s" % exc
-    return "", ""
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    return _chat_run_backend.resolve_agent_project_scope(project)
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
@@ -20372,6 +20453,8 @@ def _agent_turn(
     pre_model_context=None,
     require_guarded_project: bool = False,
     tool_help_kind=None, restricted_lane=None,
+    cwd: str = "",
+    strict_project_tools: bool = True,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -20437,8 +20520,10 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud), task=prompt)
-    project_scope, scope_error = _agent_project_scope(project)
+    work_root = cwd or project
+    work_root, project_error = prepare_loop_project(work_root, writing=not (read_only or cloud), task=prompt)
+    project_scope, scope_error = _agent_project_scope(work_root)
+    project_bound = bool(project_scope) and bool(strict_project_tools) and not (bool(cwd) and not bool(project))
     project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
@@ -20668,10 +20753,11 @@ def _agent_turn(
             read_only=read_only,
             cloud=cloud,
             unsafe=unsafe,
-            project_bound=bool(project_scope),
+            project_bound=project_bound,
             allow_web=allow_web,
             allow_location=allow_location,
             allowlist=allowed_tools, kind=tool_help_kind,
+            num_ctx=agent_num_ctx or (0 if cloud else _auto_model_context(model)),
         ),
     )
     if unsafe:
@@ -21336,7 +21422,7 @@ def _agent_turn(
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
             )
-        if not policy_error and project_scope and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
+        if not policy_error and project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
             policy_error = (
                 "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
                 "contract and is disabled for a project-bound agent."
@@ -21907,6 +21993,8 @@ def agent(
     checklist: bool = True,
     allow_location: bool = False,
     session: str | None = None,
+    cwd: str = "",
+    strict_project_tools: bool = True,
 ) -> str:
     """Run a visible local tool-using agent loop with checklist/reporting.
 
@@ -21941,6 +22029,8 @@ def agent(
                 allow_location=bool(allow_location),
                 session=session,
                 restricted_lane=restricted_lane,
+                cwd=cwd,
+                strict_project_tools=bool(strict_project_tools),
             )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another
@@ -23302,11 +23392,17 @@ _PIN_CATALOG_TIMEOUT_SECONDS = 3
 _POOL_PIN_CATALOG = PoolCatalogCache()
 
 
+def _pin_endpoint_record(selector):
+    """Pin lookup tier one: the single pooled read (workers are the next tier)."""
+    wanted = str(selector or "").strip().casefold()
+    return _resolve_catalog_record(wanted, _catalog_records(_get("/api/tags"))) if wanted else None
+
+
 def _resolve_model_pin(selector):
     """Resolve a model pin against this host, then the pool's routable members."""
     return resolve_model_pin(
         selector,
-        endpoint_record=lambda s: resolve_discovered_model_record(s),
+        endpoint_record=lambda s: _pin_endpoint_record(s),
         pool=OLLAMA_POOL,
         fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
         nonchat_reason=lambda r: _fanout_nonchat_reason(r),
@@ -25070,9 +25166,10 @@ def ensemble_answer(
                 except Exception:
                     pass
         if text:
+            served = (getattr(gen, "last_response_meta", None) or {}).get("served_model") or model
             answers.append({
                 "tier": tier,
-                "model": model,
+                "model": served,
                 "answer": text,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             })
@@ -25205,7 +25302,14 @@ def route_request(prompt: str, request_payload: dict | None = None) -> str:
     is legible rather than magic. It is a suggestion; the caller may override.
     """
     _maybe_live_reload()
-    decision = production_tier_router.route(prompt, set(TIERS), router=tier_router.route, tier_models=TIERS, request_payload=request_payload)
+    allowed_tiers = {
+        name: target for name, target in TIERS.items()
+        if cloud_allowed() or not _is_cloud_tier(name, target)
+    }
+    decision = production_tier_router.route(
+        prompt, set(allowed_tiers), router=tier_router.route,
+        tier_models=allowed_tiers, request_payload=request_payload,
+    )
     return (
         "kind: %s\ntier: %s\nreason: %s"
         % (decision["kind"], decision["tier"], decision["reason"])
@@ -25651,7 +25755,7 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
     cloud = _is_cloud_tier(tier, model)
     gen = _make_tier_generate(
         tier, model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud or _bridge_provider_for_tier(tier) else num_ctx if num_ctx is not None else _auto_model_context(model),
+        None if _bridge_provider_for_tier(tier) else 0 if cloud else num_ctx if num_ctx is not None else _auto_model_context(model),
         cloud=cloud, think=False if single_send else None,
         single_send=single_send, timeout=timeout,
     )

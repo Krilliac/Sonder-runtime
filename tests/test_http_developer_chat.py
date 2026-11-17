@@ -279,16 +279,18 @@ def test_manual_mode_refuses_a_chat_run_at_the_chain_gate_but_not_its_reads(monk
 @pytest.mark.parametrize("line", ["/test pytest", "/build run game", "/fix-build game"])
 def test_a_run_the_modes_refuse_is_refused_at_the_chain_gate_naming_no_call(
         monkeypatch, mode, line):
-    # The real permission modes never let one of these lines reach the
-    # gateway only to be refused there: the chain gate refuses it first, with
-    # no arguments, so the reply names no call_id. Approving one run by its
-    # call_id goes through the HTTP route instead.
+    # The chain gate extracts canonical arguments via _slash_call_arguments so
+    # manual/acceptEdits refusals emit a call_id an operator can approve once,
+    # while plan still refuses without a call_id.
     pm.set_mode(mode)
     gateway = SpyGateway()
     _serve_gateway(monkeypatch, gateway)
     reply = ts._handle_slash(line, context=ADMIN)
     assert reply.startswith("refused %s:" % line.split()[0])
-    assert "call_id" not in reply
+    if mode == pm.PLAN:
+        assert "call_id" not in reply
+    else:
+        assert "/approve " in reply
     assert gateway.requests == []
 
 

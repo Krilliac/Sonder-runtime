@@ -62,6 +62,14 @@ class PermissionPolicyProvider:
         """Context for a mode change a present person makes (console only)."""
         return _engine().attended_mode_change()
 
+    def attended_bypass_confirm(self):
+        """Context for explicit attended confirmation of bypass mode."""
+        return _engine().attended_bypass_confirm()
+
+    def mode_scope(self, principal: str = "", session: str = ""):
+        """Context binding principal/session permission-mode scope."""
+        return _engine().mode_scope(principal, session)
+
     def current_mode(self) -> str:
         return _engine().current_mode()
 

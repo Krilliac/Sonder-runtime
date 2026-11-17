@@ -40,6 +40,9 @@ class SSEKeepAlive:
         self._stop = threading.Event()
         self.lock = threading.Lock()
         self.client_gone = False
+        # The ``chatcmpl-`` id of the completion this response carries, once a
+        # frame has used one (``live_stream.arm``); later frames reuse it.
+        self.completion_id: str | None = None
         self._thread: threading.Thread | None = None
 
     def _run(self) -> None:

@@ -122,14 +122,15 @@ def _example(name, row, raw=""):
     return value
 
 
-def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None):
-    """Preserve legacy help verbatim unless this run supplied an allowlist."""
+def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None, compact=False):
+    """Preserve legacy help verbatim unless allowlisted or ``compact=True``."""
     original = help_lines if isinstance(help_lines, str) else "\n".join(help_lines)
-    if allowlist is None:
+    if allowlist is None and not compact:
         return original
     raw = {m.group(1): m.group(2) for line in original.splitlines() if (m := _LINE.match(line))}
     catalog = catalog or {}
-    admitted = set(allowlist) & (set(raw) | set(catalog))
+    scope_names = set(raw) | set(catalog) if allowlist is None else set(allowlist)
+    admitted = scope_names & (set(raw) | set(catalog))
     core = [name for name in _CORE.get(task_kind, _INSPECT) if name in admitted]
     lines = ["Available tools: find the relevant file or symbol.",
              "Workflow: find -> read -> edit -> run tests -> final.",
@@ -150,6 +151,34 @@ def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None
         lines.append('other tools (same JSON shape; ask tool_help {"name": ...}): ' + ", ".join(other))
     lines.append(_FOOTER)
     return "\n".join(lines)
+
+
+def build_agent_tool_help(
+    base_text: str,
+    *,
+    generated_lines: list[str],
+    advertised_names: set[str] | frozenset[str],
+    is_refused,
+    allowlist=None,
+    task_kind=None,
+    catalog=None,
+    num_ctx: int = 0,
+) -> str:
+    """Combine static/generated help lines, close admit-then-deny, and size for ``num_ctx``."""
+    help_text = base_text.rstrip() + "\n" + "\n".join(generated_lines) + "\n" if generated_lines else base_text
+    denied = frozenset(name for name in advertised_names if is_refused(name))
+    filtered = help_text if not denied else "\n".join(
+        line for line in help_text.splitlines()
+        if not any(line.lstrip().startswith(f"- {name}:") for name in denied)
+    )
+    compact = bool(num_ctx and 0 < int(num_ctx) <= 8192)
+    return render_tool_help(
+        filtered,
+        allowlist=None if allowlist is None else set(allowlist) - denied,
+        task_kind=task_kind,
+        catalog=catalog,
+        compact=compact,
+    )
 
 
 def tool_help_text(*, name="", query="", catalog=None):
