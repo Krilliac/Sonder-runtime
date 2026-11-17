@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterator, Mapping, NoReturn, Protocol, cast
 from sonder_runtime.adapters.inference.gpu_admission_store import (
     FULL, HELD, GpuAdmissionStore, StoreUnavailable,
 )
+from sonder_runtime.adapters.inference.log_safe import redact_url, safe_origin
 from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
@@ -223,6 +224,22 @@ def policy_from_config(config: GpuAdmissionConfig) -> GpuAdmissionPolicy:
     )
 
 
+_UNPARSABLE_ORIGIN = "http://<redacted>"
+
+
+def _origin_without_userinfo(origin: str) -> str:
+    """``origin`` rebuilt as ``scheme://host[:port]`` from allowlisted text only.
+
+    Admission keys, caches and logs every origin it sees, so userinfo, path and
+    query are dropped here for every caller and both key shapes are identical.
+    ``log_safe.safe_origin`` does the rebuilding. When it declines (no http(s)
+    scheme, a malformed host or port, an ``@`` after the authority) the origin
+    becomes ``_UNPARSABLE_ORIGIN``: never "", which ``ollama_policy`` reads as
+    the default loopback host, and never loopback itself.
+    """
+    return safe_origin(origin) or _UNPARSABLE_ORIGIN
+
+
 def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any] | None:
     """GET one control-plane document through the policy-enforcing transport."""
     ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
@@ -233,8 +250,10 @@ def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any
         if len(raw) > _READ_LIMIT:
             return None
         value = json.loads(raw.decode("utf-8"))
-    except Exception:  # a failed read means "unknown", never a failed request
-        logger.debug("gpu admission could not read %s%s", origin, path, exc_info=True)
+    except Exception as exc:  # a failed read means "unknown", never a failed request
+        # No traceback: transport exception text can repeat the request URL.
+        logger.debug("gpu admission could not read %s%s: %s", redact_url(origin), path,
+                     type(exc).__name__)
         return None
     return value if isinstance(value, Mapping) else None
 
@@ -404,8 +423,10 @@ class GpuAdmission:
                 headers={"Content-Type": "application/json"}, method="POST")
             with ollama_endpoint.open_url(request, timeout=5.0) as response:
                 value = json.loads(response.read(_READ_LIMIT).decode("utf-8"))
-        except Exception:
-            logger.debug("gpu admission could not read /api/show for %s", model, exc_info=True)
+        except Exception as exc:
+            # No traceback: transport exception text can repeat the request URL.
+            logger.debug("gpu admission could not read /api/show for %s: %s", model,
+                         type(exc).__name__)
             return None
         return value if isinstance(value, Mapping) else None
 
@@ -417,6 +438,7 @@ class GpuAdmission:
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
     ) -> Iterator[AdmissionTicket]:
         """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
+        origin = _origin_without_userinfo(origin)
         mode = self.config.mode
         if mode == "off":
             yield passthrough_ticket(payload)
@@ -471,6 +493,7 @@ class GpuAdmission:
         is thread-agnostic and idempotent: only its first call frees the slot,
         so a caller may hand it to whichever thread finishes the read.
         """
+        origin = _origin_without_userinfo(origin)
         if self.config.mode == "off" or not ollama_policy.is_loopback(origin):
             return _no_release
         wait = self.config.probe_wait_ms / 1000.0
@@ -738,7 +761,7 @@ class GpuAdmission:
                           window_seconds=self._policy.repin_window_seconds)
             logger.warning(
                 "num_ctx repin: model=%s origin=%s requested=%d replaces the pinned window; "
-                "the model reloads once (%s)", key, origin, requested, plan.ctx.detail)
+                "the model reloads once (%s)", key, redact_url(origin), requested, plan.ctx.detail)
         elif action in (CtxAction.SERVE_PINNED, CtxAction.INHERIT_PINNED):
             if served is None:  # resolve_num_ctx serves a pin only with its window
                 _inconsistent_ctx_decision(plan.ctx)
@@ -756,7 +779,8 @@ class GpuAdmission:
                 if first:
                     logger.warning(
                         "num_ctx pinned: model=%s requested=%d is served at the loaded window "
-                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served, origin)
+                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served,
+                        redact_url(origin))
             else:
                 logger.debug("num_ctx inherited: model=%s request named no window; using pinned=%d",
                              key, served)
@@ -831,7 +855,7 @@ class GpuAdmission:
                 logger.error(
                     "num_ctx mismatch: model=%s origin=%s sent=%d effective=%d; the server runs "
                     "the model at a different window than was requested",
-                    entry.model_key, entry.origin, sent, row.context_length)
+                    entry.model_key, redact_url(entry.origin), sent, row.context_length)
                 if self._metrics is not None:
                     self._metrics.observe_num_ctx_mismatch()
         elif verdict is CtxCheck.UNVERIFIABLE:
@@ -843,7 +867,8 @@ class GpuAdmission:
             if first:
                 logger.info(
                     "num_ctx unverifiable: model=%s origin=%s; /api/ps reports no context_length, "
-                    "so the sent window %s cannot be compared", entry.model_key, entry.origin, sent)
+                    "so the sent window %s cannot be compared",
+                    entry.model_key, redact_url(entry.origin), sent)
 
     def _maybe_measure(self, entry: _Entry) -> None:
         if not ollama_policy.is_loopback(entry.origin) or self._store is None:
