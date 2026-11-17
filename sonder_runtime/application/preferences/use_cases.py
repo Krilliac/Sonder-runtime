@@ -101,13 +101,30 @@ class PreferenceService:
         return ToolResult(ok=True, output=output)
 
     def status(
-        self, include_disabled: bool = False, limit: int = 50
+        self,
+        include_disabled: bool = False,
+        limit: int = 50,
+        *,
+        bound_project: str = "",
     ) -> ToolResult:
-        try:
-            rows = self._repository.list(
-                limit=_bounded_limit(limit, 50, 200),
-                include_disabled=include_disabled is True,
+        if bound_project and not isinstance(bound_project, str):
+            return _failure(
+                "INVALID_INPUT", "bound_project must be a project root path string."
             )
+        bounded = _bounded_limit(limit, 50, 200)
+        disabled = include_disabled is True
+        try:
+            if bound_project:
+                rows = self._repository.list(
+                    limit=bounded,
+                    include_disabled=disabled,
+                    bound_project=bound_project,
+                )
+            else:
+                rows = self._repository.list(
+                    limit=bounded,
+                    include_disabled=disabled,
+                )
         except Exception:
             return _storage_failure()
         try:

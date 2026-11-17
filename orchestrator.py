@@ -4,8 +4,13 @@ The current turn is augmented with facts (durable), lessons (distilled tips), an
 recalls (similar past solutions), then answered. `history` (prior conversation turns)
 is passed to the model as real chat messages, not folded into the prompt text.
 """
+import re
+
 import sonder_runtime.adapters.memory_store as memory_store
 import retriever
+
+_SLASH_COMMAND_PREFIX_RE = re.compile(r"^/[a-z][a-z0-9_]*(?:\s|$)")
+_RUN_TOKEN_RE = re.compile(r"(?:^|[\s(\[\"'`])/run(?=$|[\s.,!?:;)\]}\"'`])")
 
 MEMORY_HEADER = "# Relevant lessons from past work (may help):"
 RECALL_HEADER = "# Similar things solved before (for reference):"
@@ -129,7 +134,10 @@ def _token_usage(generate_fn, augmented_prompt, history, response):
 
 def _needs_run_compatible_code(task):
     text = (task or "").lower()
-    if "/run" in text:
+    stripped = text.lstrip()
+    if _SLASH_COMMAND_PREFIX_RE.match(stripped):
+        return False
+    if _RUN_TOKEN_RE.search(text):
         return True
     language_request = any(
         word in text
