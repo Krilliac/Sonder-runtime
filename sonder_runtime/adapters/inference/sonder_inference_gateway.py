@@ -1004,6 +1004,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         env: Mapping[str, str] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] | None = None,
+        ollama_pool=None,
     ) -> None:
         super().__init__(
             None,
@@ -1019,6 +1020,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._env = env
         self._monotonic = monotonic
         self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
+        self._ollama_pool = ollama_pool
         self._lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._health_cache: HealthSnapshot | None = None
@@ -1531,7 +1533,104 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 ))
                 identity = None
             entry["identity"] = identity.to_dict() if identity is not None else None
+        if self._ollama_pool is not None:
+            unified = self.unified_worker_status()
+            entry["ollama_pool"] = unified["pool"]
+            entry["pool_workers"] = unified["workers"]
         return {PROVIDER_ID: entry}
+
+    def attach_ollama_pool(self, ollama_pool) -> None:
+        """Bind or replace the cached OllamaWorkerPool used for unified discovery."""
+        with self._lock:
+            self._ollama_pool = ollama_pool
+
+    def register_ollama_worker(
+        self,
+        origin: str,
+        *,
+        allow_remote: bool | None = None,
+        ollama_pool=None,
+        refresh: bool = True,
+    ):
+        """Register/refresh a peer worker on the bound OllamaWorkerPool."""
+        pool = ollama_pool if ollama_pool is not None else self._ollama_pool
+        if pool is None:
+            raise InvalidInput("no OllamaWorkerPool is attached to SonderInferenceGateway")
+        return pool.register_worker(origin, allow_remote=allow_remote, refresh=refresh)
+
+    def unified_worker_status(self, *, ollama_pool=None) -> dict[str, object]:
+        """Unify private gateway worker status with cached ``OLLAMA_POOL`` snapshots."""
+        pool = ollama_pool if ollama_pool is not None else self._ollama_pool
+        settings = self.settings()
+        gateway_rows = self._workers_status(settings) if settings.workers else []
+        pool_summary = (
+            pool.pool_capacity_summary()
+            if pool is not None and callable(getattr(pool, "pool_capacity_summary", None))
+            else None
+        )
+        unified_workers: list[dict[str, object]] = []
+        available_models: set[str] = set()
+        resident_models: set[str] = set()
+        model_contexts: dict[str, int] = {}
+        tool_capable_models: set[str] = set()
+        healthy_count = 0
+
+        if pool is not None and callable(getattr(pool, "snapshots", None)):
+            for snap in pool.snapshots():
+                snap_dict = snap.to_dict() if callable(getattr(snap, "to_dict", None)) else {}
+                row = {
+                    "source": "ollama_pool",
+                    "worker_id": getattr(snap, "worker_id", snap_dict.get("worker_id")),
+                    "base_url": getattr(snap, "origin", snap_dict.get("origin")),
+                    "origin": getattr(snap, "origin", snap_dict.get("origin")),
+                    "state": getattr(snap, "state", snap_dict.get("state")),
+                    "healthy": bool(getattr(snap, "healthy", False)),
+                    "inflight": getattr(snap, "inflight", 0),
+                    "capacity": getattr(snap, "capacity", 0),
+                    "latency_ewma_ms": getattr(snap, "latency_ewma_ms", None),
+                    "models": list(getattr(snap, "models", ()) or ()),
+                    "loaded_models": list(getattr(snap, "loaded_models", ()) or ()),
+                    "model_contexts": dict(getattr(snap, "model_contexts", {}) or {}),
+                    "vram_bytes": getattr(snap, "vram_bytes", None),
+                    "ram_bytes": getattr(snap, "ram_bytes", None),
+                    "kv_cache_type": getattr(snap, "kv_cache_type", None),
+                    "supports_tools": dict(getattr(snap, "supports_tools", {}) or {}),
+                    "model_active_billions": dict(getattr(snap, "model_active_billions", {}) or {}),
+                }
+                unified_workers.append(row)
+                if row["healthy"]:
+                    healthy_count += 1
+                    available_models.update(row["models"])
+                    resident_models.update(row["loaded_models"])
+                    for m_name, ctx in row["model_contexts"].items():
+                        prev = model_contexts.get(m_name)
+                        if prev is None or ctx > prev:
+                            model_contexts[m_name] = ctx
+                    for m_name, supported in row["supports_tools"].items():
+                        if supported:
+                            tool_capable_models.add(m_name)
+
+        for gw_row in gateway_rows:
+            tagged = {"source": "sonder_inference_worker", **gw_row}
+            unified_workers.append(tagged)
+            if gw_row.get("healthy"):
+                healthy_count += 1
+                raw_models = gw_row.get("models")
+                if isinstance(raw_models, list):
+                    available_models.update(str(m) for m in raw_models if m)
+
+        return {
+            "worker_count": len(unified_workers),
+            "healthy_worker_count": healthy_count,
+            "workers": unified_workers,
+            "pool": pool_summary,
+            "gateway_workers": gateway_rows,
+            "available_models": sorted(available_models),
+            "resident_models": sorted(resident_models),
+            "model_contexts": dict(sorted(model_contexts.items())),
+            "tool_capable_models": sorted(tool_capable_models),
+            "total_vram_bytes": pool_summary.get("total_vram_bytes") if pool_summary else None,
+        }
 
     # -- generate ----------------------------------------------------------
 

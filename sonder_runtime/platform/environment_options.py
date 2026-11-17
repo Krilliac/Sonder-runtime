@@ -37,12 +37,17 @@ def local_model_options(
     *,
     native_context=None,
     environ=None,
+    remote=False,
 ):
     """Build the runtime options sent with a local Ollama model request.
 
     The context normalizer is injected so this platform policy does not depend
     on the domain context policy.  ``environ`` is likewise injectable for
     deterministic tests while callers may still observe live process changes.
+    When ``remote`` is true (targeting a remote pool worker rather than the
+    coordinator host), the coordinator's ``os.cpu_count()`` ``num_thread`` is
+    omitted unless ``SONDER_NUM_THREAD`` is explicitly configured, letting the
+    remote node pick its own physical thread count.
     """
     values = environ if environ is not None else os.environ
     normalize_context = native_context or (lambda value: value)
@@ -65,9 +70,12 @@ def local_model_options(
     if temperature is None:
         # "auto": send no temperature so the model's preset applies.
         del options["temperature"]
+    explicit_thread = env_int_option("SONDER_NUM_THREAD", environ=values)
     runtime = {
-        "num_thread": env_int_option(
-            "SONDER_NUM_THREAD", cpu_thread_default(), environ=values
+        "num_thread": (
+            explicit_thread
+            if remote
+            else (explicit_thread if explicit_thread is not None else cpu_thread_default())
         ),
         # Let Ollama select the available accelerator unless the operator
         # explicitly pins one.
