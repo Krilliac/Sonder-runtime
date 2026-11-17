@@ -46,12 +46,21 @@ def test_python_runs_isolated_only_with_limits(monkeypatch):
     seen = _capture_cmd(monkeypatch)
 
     code_runner.run_code("print(1)", limits=code_runner.RunLimits())
-    assert seen["cmd"][:2] == [sys.executable, "-I"]
+    assert seen["cmd"][:4] == [sys.executable, "-I", "-X", "utf8"]
     assert isinstance(seen["limits"], code_runner.RunLimits)
 
     code_runner.run_code("print(1)")
     assert "-I" not in seen["cmd"]
     assert seen["limits"] is None
+
+
+def test_limited_run_preserves_utf8_output():
+    out = code_runner.run_code(
+        'import sys\nprint("🎲 café", sys.flags.isolated)\n',
+        limits=code_runner.RunLimits(),
+    )
+    assert out["ok"] is True, out
+    assert "🎲 café 1" in out["stdout"]
 
 
 def test_isolation_can_be_turned_off_explicitly(monkeypatch):

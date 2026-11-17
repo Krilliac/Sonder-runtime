@@ -31,6 +31,8 @@ try:  # POSIX only: RunLimits sets the child's rlimits through it
 except ImportError:
     _resource = None
 
+_REAL_POPEN = subprocess.Popen
+
 
 SUPPORTED_LANGUAGES = {
     "python": {
@@ -966,6 +968,11 @@ def _run_process(cmd, cwd, stdin, timeout, language, limits=None):
         _abort_process(proc)
         raise
     finally:
+        if os.name != "nt" and isinstance(proc, _REAL_POPEN):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
         _release_job(proc)
     if status == "output":
         return {
@@ -1499,7 +1506,9 @@ def run_code(
         if limits is None:
             return _run_process(cmd, cwd, stdin, timeout, language)
         if limits.isolated_python and language == "python":
-            cmd = [cmd[0], "-I", *cmd[1:]]
+            # -I implies -E (ignore PYTHONIOENCODING), which drops Windows
+            # children back to cp1252; -X utf8 keeps UTF-8 I/O enabled.
+            cmd = [cmd[0], "-I", "-X", "utf8", *cmd[1:]]
         return _run_process(cmd, cwd, stdin, timeout, language, limits=limits)
 
 
