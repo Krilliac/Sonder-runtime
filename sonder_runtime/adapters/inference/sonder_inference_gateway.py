@@ -525,6 +525,10 @@ def normalize_base_url(value: str) -> str:
             "sonder-inference base URL must be http(s)://host[:port][/path] "
             "without credentials, query or fragment"
         )
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in parts.netloc):
+        raise InvalidInput(
+            "sonder-inference base URL host must not contain whitespace or control characters"
+        )
     host = _BIND_ADDRESS_REWRITES.get(host.lower(), host.lower())
     try:
         address = ipaddress.ip_address(host)

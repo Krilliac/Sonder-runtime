@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.domain.common.bounded_json import JsonBoundsExceeded, check_depth
 
 
 MAX_DOCUMENT_BYTES = 256_000
@@ -51,11 +52,15 @@ def _reject_duplicate_object(pairs):
 
 def _loads_strict(text: str, label: str):
     try:
+        # Match json.loads' byte decoding before scanning the JSON text.
+        depth_text = (text.decode(json.detect_encoding(text), "surrogatepass")
+                      if isinstance(text, (bytes, bytearray)) else text)
+        check_depth(depth_text, max_depth=MAX_JSON_DEPTH)
         return json.loads(
             text, parse_constant=_reject_constant, parse_float=_reject_non_finite_float,
             object_pairs_hook=_reject_duplicate_object,
         )
-    except (TypeError, ValueError) as exc:
+    except (JsonBoundsExceeded, TypeError, ValueError) as exc:
         raise ValueError("%s must be strict UTF-8 JSON: %s" % (label, exc)) from exc
     except RecursionError as exc:
         raise ValueError(f"{label} must be strict UTF-8 JSON: nesting is too deep") from exc
@@ -148,6 +153,7 @@ def _parse_operations(operations):
             raise ValueError("patch operations exceed max input bytes (%d)" % MAX_OPERATIONS_BYTES)
         operations = _loads_strict(operations, "operations_json")
     else:
+        _json_depth(operations)
         try:
             encoded = json.dumps(
                 operations, ensure_ascii=False, separators=(",", ":"),

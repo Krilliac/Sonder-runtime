@@ -4,6 +4,7 @@ Ported from open PRs #558/#560. Before the fix, a substring scan planned
 ``27b`` as ``7b``, an MoE ``35b-a3b`` as ``3b``, and let a repository name
 such as ``custom-7b-model:3b`` override its tag.
 """
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -91,7 +92,11 @@ def test_bootstrap_dry_run_plans_a_large_tag_by_its_own_size(monkeypatch, capsys
     captured = {}
 
     def plan(observed_hardware, options):
-        captured["plan"] = build_plan(observed_hardware, options)
+        captured["plan"] = build_plan(
+            observed_hardware,
+            options,
+            specs=_test_model_lists.load().values["training_model_specs"],
+        )
         return captured["plan"]
 
     monkeypatch.setattr(bootstrap_engine, "_load_bundle", lambda args: None)

@@ -841,31 +841,52 @@ _ALLOWED_HOST_NAME = re.compile(
 
 
 def _valid_allowed_host(entry: object) -> bool:
-    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive)."""
-    if not _is_exact_string(entry) or not 1 <= len(entry) <= 260:
+    """``name``, ``name:port``, ``ip:port`` or ``[v6]:port`` (case-insensitive).
+
+    Mirrors ``interfaces.http.host_policy.normalize_allowed_host``, the source
+    of truth (platform may not import interfaces, so the rules are repeated):
+    ASCII-only, no IPv6 zone id, ASCII-digit ports in 1..65535. Never raises.
+    """
+    if not _is_exact_string(entry):
         return False
-    entry = entry.lower()
+    entry = entry.strip(" 	")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in entry):
+        return False
+    if not entry or len(entry) > 1024:
+        return False
     port = ""
     if entry.startswith("["):
-        name, sep, rest = entry[1:].partition("]")
-        if not sep or (rest and not rest.startswith(":")):
+        end = entry.find("]")
+        if end < 0:
             return False
-        port = rest[1:] if rest else ""
+        name = entry[1:end]
+        rest = entry[end + 1:]
+        if rest:
+            if not rest.startswith(":"):
+                return False
+            port = rest[1:]
+        if "%" in name:
+            return False
         try:
             if ipaddress.ip_address(name).version != 6:
                 return False
         except ValueError:
             return False
     else:
+        if entry.count(":") > 1 or not entry.isascii():
+            return False
         name, sep, port = entry.partition(":")
         if sep and not port:
             return False
+        name = name.strip().lower()
+        if name.endswith(".") and not name.endswith(".."):
+            name = name[:-1]
         try:
             ipaddress.ip_address(name)
         except ValueError:
-            if len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
+            if not name or len(name) > 253 or not _ALLOWED_HOST_NAME.fullmatch(name):
                 return False
-    if port and not (port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+    if port and (not (port.isascii() and port.isdigit()) or len(port) > 5 or not 1 <= int(port) <= 65535):
         return False
     return True
 
@@ -879,6 +900,22 @@ def _is_loopback_host(host: object) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _redact_url_userinfo(value: object) -> str:
+    """Return ``value`` as text with everything up to its last ``@`` replaced by ``***``.
+
+    These values are meant to be bare origins, so an ``@`` anywhere after the
+    scheme is treated as the end of userinfo. That over-redacts a path holding
+    ``@``, but it also covers a password with an unencoded ``/``, ``?`` or ``#``,
+    which a parse that stops the authority at those characters would echo.
+    """
+    text = str(value)
+    start = text.find("//") + 2 if "//" in text else 0
+    at = text.rfind("@", start)
+    if at == -1:
+        return text
+    return text[:start] + "***" + text[at:]
 
 
 def _canonical_ollama_origin(value: object) -> str | None:
@@ -1363,7 +1400,7 @@ def normalize_origin(value: str) -> str:
         host, _sep, port = authority.partition(":")
         if ":" in port:
             return text
-    if port and not port.isdigit():
+    if not host or (port and not port.isdigit()):
         return text
     if port and _DEFAULT_PORTS.get(scheme) == port:
         port = ""
@@ -2020,7 +2057,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         parts = None
         ollama_port = None
     if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
-        errors.append(f"[ollama].url invalid: {config.ollama.url!r}")
+        errors.append(f"[ollama].url invalid: {_redact_url_userinfo(config.ollama.url)!r}")
     elif parts.username is not None or parts.password is not None:
         errors.append("[ollama].url must not contain inline credentials")
     elif ollama_port is None:
@@ -2055,7 +2092,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             worker_parts = urlsplit(worker)
             worker_port = worker_parts.port
         except ValueError:
-            errors.append(f"[ollama].workers entry {worker!r} is malformed")
+            errors.append(f"[ollama].workers entry {_redact_url_userinfo(worker)!r} is malformed")
             continue
         if worker_parts.scheme not in ("http", "https"):
             errors.append("[ollama].workers entries must use http or https")
@@ -2068,7 +2105,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             continue
         if not worker_parts.hostname or worker_port is None:
             errors.append(
-                f"[ollama].workers entry {worker!r} must include a host and explicit port"
+                f"[ollama].workers entry {_redact_url_userinfo(worker)!r} must include a host and explicit port"
             )
             continue
         if worker_parts.path not in ("", "/") or worker_parts.query or worker_parts.fragment:
@@ -2358,7 +2395,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             % LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT
         )
     for origin in obs.live_export_origins:
-        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://[^/\s]+", origin):
+        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://(?!:)[^/\s]+", origin):
             errors.append(
                 "[observability].live_export_origins entries must be exact "
                 "origins (scheme://host[:port]), not %r" % origin

@@ -749,6 +749,8 @@ def _parse_endpoint(endpoint: str) -> urllib.parse.SplitResult:
         raise ValueError("external MCP endpoint query and fragment are not allowed")
     if "%" in parsed.hostname:
         raise ValueError("scoped or percent-encoded endpoint hosts are not allowed")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in parsed.hostname):
+        raise ValueError("whitespace or control characters in endpoint hosts are not allowed")
     host = parsed.hostname.rstrip(".")
     parts = host.split(".")
     if (
