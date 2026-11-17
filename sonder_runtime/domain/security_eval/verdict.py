@@ -12,21 +12,27 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.bounded_json import JsonBoundsExceeded, check_container_depth
 from .errors import DatasetRecordError
 from .records import LineRange, parse_line_range
 
 VERDICTS = ("CONFIRMED", "REFUTED", "UNCERTAIN")
 MAX_REASON_CHARS = 500
 MAX_TEXT_CHARS = 200_000
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 _LABEL_RE = re.compile(r"^[ \t>*_#-]*VERDICT[ \t*_]*[:=][ \t*_]*(CONFIRMED|REFUTED|UNCERTAIN)\b",
                        re.IGNORECASE | re.MULTILINE)
+_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think>", re.IGNORECASE)
 _DECODER = json.JSONDecoder()
 
 
 class VerdictParseError(ValueError):
     """The reply holds no usable verdict; the runner records it as UNPARSED."""
+
+
+class _JsonScanRefused(VerdictParseError):
+    """A bounded scan could not establish the reply's complete JSON contents."""
 
 
 @dataclass(frozen=True)
@@ -46,14 +52,34 @@ class ParsedHypothesis:
     severity: str
 
 
+def _strip_think(text: str) -> str:
+    """Drop each ``<think>...</think>`` block (any case); an unterminated ``<think>`` drops the rest.
+
+    One left-to-right pass over the original text (case-insensitive searches, so indices stay
+    aligned even for characters whose lowercase form has a different length, such as U+0130):
+    every position is examined a bounded number of times, so a run of openers or closers cannot
+    go quadratic.
+    """
+    parts: list[str] = []
+    position = 0
+    while True:
+        opener = _THINK_OPEN.search(text, position)
+        if opener is None:
+            parts.append(text[position:])
+            break
+        parts.append(text[position:opener.start()])
+        closer = _THINK_CLOSE.search(text, opener.end())
+        if closer is None:
+            break
+        position = closer.end()
+    return "".join(parts)
+
+
 def _clean(text: str) -> str:
     if not isinstance(text, str):
         raise VerdictParseError("the reply is not text")
     text = text[:MAX_TEXT_CHARS]
-    text = _THINK_RE.sub("", text)
-    start = text.lower().find("<think>")
-    if start >= 0:
-        text = text[:start]
+    text = _strip_think(text)
     if not text.strip():
         raise VerdictParseError("the reply is empty")
     return text
@@ -63,17 +89,51 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
     return [match.span(1) for match in _FENCE_RE.finditer(text)]
 
 
+_MAX_FAILED_DECODES = 64
+_OBJECT_START = frozenset('"}')
+_ARRAY_START = frozenset('"-0123456789[{tfn]')
+_WHITESPACE = " \t\n\r"
+
+
+def _plausible(text: str, index: int, opener: str) -> bool:
+    """Whether the character after the opener (past JSON whitespace) can begin that value's content.
+
+    Non-standard NaN/Infinity array starts are skipped, which fails closed.
+    """
+    following = index + 1
+    while following < len(text) and text[following] in _WHITESPACE:
+        following += 1
+    if following >= len(text):
+        return False
+    return text[following] in (_OBJECT_START if opener == "{" else _ARRAY_START)
+
+
 def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right."""
     index = text.find(opener)
+    failures = 0
+    bounds_refused = False
     while index >= 0:
+        if not _plausible(text, index, opener):
+            index = text.find(opener, index + 1)
+            continue
         try:
+            check_container_depth(text, index)
             value, end = _DECODER.raw_decode(text, index)
-        except ValueError:
+        except (JsonBoundsExceeded, ValueError, RecursionError) as exc:
+            if isinstance(exc, (JsonBoundsExceeded, RecursionError)):
+                bounds_refused = True
+            # A legitimate reply has a handful of brace groups; 64 failed
+            # decodes bound the scan so a long run of openers stays linear.
+            failures += 1
+            if failures >= _MAX_FAILED_DECODES:
+                raise _JsonScanRefused("the reply exceeds the JSON scan failure limit") from None
             index = text.find(opener, index + 1)
             continue
         yield index, value
         index = text.find(opener, end)
+    if bounds_refused:
+        raise _JsonScanRefused("the reply holds JSON refused by the nesting bound")
 
 
 def _reason(value: object) -> str:
@@ -137,14 +197,24 @@ def parse_hypotheses(text: str, max_items: int = 50) -> tuple[ParsedHypothesis, 
     """Return the hypotheses a model listed for a source chunk (a JSON array, or ``{"hypotheses": [...]}``)."""
     cleaned = _clean(text)
     candidates = []
-    for _start, value in _objects(cleaned, "["):
-        candidates.append(value)
-    for _start, value in _objects(cleaned, "{"):
-        if isinstance(value, dict) and isinstance(value.get("hypotheses"), list):
-            candidates.append(value["hypotheses"])
+    scan_refusal: _JsonScanRefused | None = None
+    try:
+        for _start, value in _objects(cleaned, "["):
+            candidates.append(value)
+    except _JsonScanRefused as exc:
+        scan_refusal = exc
+    try:
+        for _start, value in _objects(cleaned, "{"):
+            if isinstance(value, dict) and isinstance(value.get("hypotheses"), list):
+                candidates.append(value["hypotheses"])
+    except _JsonScanRefused as exc:
+        if scan_refusal is None:
+            scan_refusal = exc
     for value in candidates:
         if isinstance(value, list):
             found = [parsed for parsed in (_hypothesis(item) for item in value) if parsed is not None]
             if found or not value:
                 return tuple(found[:max_items])
+    if scan_refusal is not None:
+        raise scan_refusal
     raise VerdictParseError("the reply holds no hypothesis list")
