@@ -80,6 +80,39 @@ def check_depth(text: str, max_depth: int = DEFAULT_MAX_DEPTH) -> int:
     return deepest
 
 
+def check_container_depth(text: str, start: int,
+                          max_depth: int = DEFAULT_MAX_DEPTH) -> int:
+    """Bound the first container at ``start``, without scanning later values.
+
+    Strings, including unterminated ones, are skipped with the same linear
+    matcher as ``check_depth``. Only structural tokens are walked in Python;
+    no suffix is copied. Malformed syntax remains the decoder's responsibility.
+    """
+    value = _as_text(text)
+    if start < 0 or start >= len(value) or value[start] not in "[{":
+        raise JsonBoundsExceeded("JSON container does not start at the supplied offset")
+    limit = max(1, int(max_depth))
+    position, depth, deepest = start, 0, 0
+    while (match := _STRUCTURAL.search(value, position)) is not None:
+        position = match.end()
+        token = match.group()
+        if token == '"':
+            string = _STRING_TO_END.match(value, match.start())
+            if string is None:
+                return deepest
+            position = string.end()
+        elif token in "[{":
+            depth += 1
+            if depth > limit:
+                raise JsonBoundsExceeded(f"JSON nesting exceeds depth {limit}")
+            deepest = max(deepest, depth)
+        elif token in "]}":
+            depth -= 1
+            if depth == 0:
+                return deepest
+    return deepest
+
+
 def loads_bounded(text: object, *, max_bytes: int, max_depth: int = DEFAULT_MAX_DEPTH):
     """``json.loads`` with a byte cap, a depth pre-scan and bounded failures."""
     if isinstance(text, (bytes, bytearray, memoryview)) and len(text) > int(max_bytes):
@@ -320,5 +353,5 @@ def iter_array_objects(chunks: Iterable[object], *, key: str | None = "traceEven
 
 __all__ = [
     "ArrayObjectScan", "DEFAULT_MAX_DEPTH", "DEFAULT_MAX_ITEM_BYTES",
-    "JsonBoundsExceeded", "check_depth", "iter_array_objects", "loads_bounded",
+    "JsonBoundsExceeded", "check_container_depth", "check_depth", "iter_array_objects", "loads_bounded",
 ]

@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.bounded_json import JsonBoundsExceeded, check_container_depth
 from .errors import DatasetRecordError
 from .records import LineRange, parse_line_range
 
@@ -28,6 +29,10 @@ _DECODER = json.JSONDecoder()
 
 class VerdictParseError(ValueError):
     """The reply holds no usable verdict; the runner records it as UNPARSED."""
+
+
+class _JsonScanRefused(VerdictParseError):
+    """A bounded scan could not establish the reply's complete JSON contents."""
 
 
 @dataclass(frozen=True)
@@ -107,22 +112,28 @@ def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right."""
     index = text.find(opener)
     failures = 0
+    bounds_refused = False
     while index >= 0:
         if not _plausible(text, index, opener):
             index = text.find(opener, index + 1)
             continue
         try:
+            check_container_depth(text, index)
             value, end = _DECODER.raw_decode(text, index)
-        except (ValueError, RecursionError):
+        except (JsonBoundsExceeded, ValueError, RecursionError) as exc:
+            if isinstance(exc, (JsonBoundsExceeded, RecursionError)):
+                bounds_refused = True
             # A legitimate reply has a handful of brace groups; 64 failed
             # decodes bound the scan so a long run of openers stays linear.
             failures += 1
             if failures >= _MAX_FAILED_DECODES:
-                return
+                raise _JsonScanRefused("the reply exceeds the JSON scan failure limit") from None
             index = text.find(opener, index + 1)
             continue
         yield index, value
         index = text.find(opener, end)
+    if bounds_refused:
+        raise _JsonScanRefused("the reply holds JSON refused by the nesting bound")
 
 
 def _reason(value: object) -> str:
@@ -186,14 +197,24 @@ def parse_hypotheses(text: str, max_items: int = 50) -> tuple[ParsedHypothesis, 
     """Return the hypotheses a model listed for a source chunk (a JSON array, or ``{"hypotheses": [...]}``)."""
     cleaned = _clean(text)
     candidates = []
-    for _start, value in _objects(cleaned, "["):
-        candidates.append(value)
-    for _start, value in _objects(cleaned, "{"):
-        if isinstance(value, dict) and isinstance(value.get("hypotheses"), list):
-            candidates.append(value["hypotheses"])
+    scan_refusal: _JsonScanRefused | None = None
+    try:
+        for _start, value in _objects(cleaned, "["):
+            candidates.append(value)
+    except _JsonScanRefused as exc:
+        scan_refusal = exc
+    try:
+        for _start, value in _objects(cleaned, "{"):
+            if isinstance(value, dict) and isinstance(value.get("hypotheses"), list):
+                candidates.append(value["hypotheses"])
+    except _JsonScanRefused as exc:
+        if scan_refusal is None:
+            scan_refusal = exc
     for value in candidates:
         if isinstance(value, list):
             found = [parsed for parsed in (_hypothesis(item) for item in value) if parsed is not None]
             if found or not value:
                 return tuple(found[:max_items])
+    if scan_refusal is not None:
+        raise scan_refusal
     raise VerdictParseError("the reply holds no hypothesis list")

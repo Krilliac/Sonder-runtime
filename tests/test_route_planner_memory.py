@@ -1,3 +1,4 @@
+from sonder_runtime.adapters import model_lists as _test_model_lists
 from sonder_runtime.domain.inference_profiles import (
     build_hardware_capabilities,
     default_30b_profile,
@@ -28,7 +29,9 @@ def test_route_planner_exposes_measured_memory_mode_without_changing_target():
         model_profiles={model.model: model},
     )
 
-    route = RoutePlanner().select(
+    route = RoutePlanner(
+        config=_test_model_lists.load().values["capability_router"]
+    ).select(
         RoutingRequest(lane="workbench", prompt="implement this function"),
         {"routing": {"workbench": "code"}},
         available,
@@ -41,7 +44,9 @@ def test_route_planner_exposes_measured_memory_mode_without_changing_target():
 
 
 def test_route_planner_without_profile_preserves_full_memory_mode():
-    route = RoutePlanner().select(
+    route = RoutePlanner(
+        config=_test_model_lists.load().values["capability_router"]
+    ).select(
         RoutingRequest(lane="workbench", prompt="implement this function"),
         {"routing": {"workbench": "code"}},
         AvailableModels(tier_models={"code": "qwen3:8b"}),
