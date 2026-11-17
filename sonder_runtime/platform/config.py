@@ -1400,7 +1400,7 @@ def normalize_origin(value: str) -> str:
         host, _sep, port = authority.partition(":")
         if ":" in port:
             return text
-    if port and not port.isdigit():
+    if not host or (port and not port.isdigit()):
         return text
     if port and _DEFAULT_PORTS.get(scheme) == port:
         port = ""
@@ -2395,7 +2395,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             % LIVE_EXPORT_MAX_SUBSCRIBERS_LIMIT
         )
     for origin in obs.live_export_origins:
-        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://[^/\s]+", origin):
+        if origin == "*" or not re.fullmatch(r"[a-z][a-z0-9+.-]*://(?!:)[^/\s]+", origin):
             errors.append(
                 "[observability].live_export_origins entries must be exact "
                 "origins (scheme://host[:port]), not %r" % origin

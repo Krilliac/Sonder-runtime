@@ -1,5 +1,6 @@
 """Capability-aware routing rules (pure domain)."""
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 from sonder_runtime.domain.routing import capability_router as cr
 
@@ -8,68 +9,143 @@ MODEST = ("fast", "code", "general")  # no reasoning/vision configured
 
 
 def test_code_request_routes_to_code():
-    task, conf = cr.classify_task("Implement a Python function to parse this regex")
+    task, conf = cr.classify_task(
+        "Implement a Python function to parse this regex",
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert task == "code"
-    assert cr.recommend_tier(task, FULL) == "code"
+    assert (
+        cr.recommend_tier(
+            task, FULL, config=_test_model_lists.load().values["capability_router"]
+        )
+        == "code"
+    )
 
 
 def test_reasoning_request_routes_to_reasoning_when_available():
-    task, _ = cr.classify_task("Prove step by step why this algorithm is O(n log n)")
+    task, _ = cr.classify_task(
+        "Prove step by step why this algorithm is O(n log n)",
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert task == "reasoning"
-    assert cr.recommend_tier(task, FULL) == "reasoning"
+    assert (
+        cr.recommend_tier(
+            task, FULL, config=_test_model_lists.load().values["capability_router"]
+        )
+        == "reasoning"
+    )
 
 
 def test_reasoning_falls_back_to_general_when_no_reasoning_tier():
-    assert cr.recommend_tier("reasoning", MODEST) == "general"
+    assert (
+        cr.recommend_tier(
+            "reasoning",
+            MODEST,
+            config=_test_model_lists.load().values["capability_router"],
+        )
+        == "general"
+    )
 
 
 def test_vision_forced_by_image_signal():
-    task, conf = cr.classify_task("what is this", has_image=True)
+    task, conf = cr.classify_task(
+        "what is this",
+        has_image=True,
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert task == "vision" and conf == 1.0
-    assert cr.recommend_tier(task, FULL) == "vision"
+    assert (
+        cr.recommend_tier(
+            task, FULL, config=_test_model_lists.load().values["capability_router"]
+        )
+        == "vision"
+    )
     # No vision tier -> degrades to a base tier, never silently drops.
-    assert cr.recommend_tier(task, MODEST) in MODEST
+    assert (
+        cr.recommend_tier(
+            task, MODEST, config=_test_model_lists.load().values["capability_router"]
+        )
+        in MODEST
+    )
 
 
 def test_search_request_sets_want_web():
-    r = cr.route("what's the latest news on the release date", FULL)
+    r = cr.route(
+        "what's the latest news on the release date",
+        FULL,
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert r.task == "search" and r.want_web is True
     assert r.tier == "fast"
 
 
 def test_long_context_by_size_beats_keywords():
-    task, _ = cr.classify_task("implement a function", approx_tokens=9000)
+    task, _ = cr.classify_task(
+        "implement a function",
+        approx_tokens=9000,
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert task == "long_context"
-    assert cr.recommend_tier(task, FULL) == "general"
+    assert (
+        cr.recommend_tier(
+            task, FULL, config=_test_model_lists.load().values["capability_router"]
+        )
+        == "general"
+    )
 
 
 def test_explicit_override_wins():
-    task, conf = cr.classify_task("anything at all", explicit="vision")
+    task, conf = cr.classify_task(
+        "anything at all",
+        explicit="vision",
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert task == "vision" and conf == 1.0
 
 
 def test_simple_default_for_unmarked_short_request():
-    task, _ = cr.classify_task("hello there")
+    task, _ = cr.classify_task(
+        "hello there", config=_test_model_lists.load().values["capability_router"]
+    )
     assert task == "simple"
-    assert cr.recommend_tier(task, FULL) == "fast"
+    assert (
+        cr.recommend_tier(
+            task, FULL, config=_test_model_lists.load().values["capability_router"]
+        )
+        == "fast"
+    )
 
 
 def test_escalation_ladder_is_ascending_and_deduped():
-    ladder = cr.escalation_ladder("code", FULL)
+    ladder = cr.escalation_ladder(
+        "code", FULL, config=_test_model_lists.load().values["capability_router"]
+    )
     assert ladder[0] == "code"
     assert len(set(ladder)) == len(ladder)
     assert all(t in FULL for t in ladder)
 
 
 def test_oracle_only_appears_with_consent():
-    no = cr.escalation_ladder("code", FULL, allow_oracle=False)
-    yes = cr.escalation_ladder("code", FULL, allow_oracle=True)
+    no = cr.escalation_ladder(
+        "code",
+        FULL,
+        allow_oracle=False,
+        config=_test_model_lists.load().values["capability_router"],
+    )
+    yes = cr.escalation_ladder(
+        "code",
+        FULL,
+        allow_oracle=True,
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert "oracle" not in no
     assert yes[-1] == "oracle"
 
 
 def test_ladder_filters_to_available_tiers():
-    ladder = cr.escalation_ladder("code", MODEST)
+    ladder = cr.escalation_ladder(
+        "code", MODEST, config=_test_model_lists.load().values["capability_router"]
+    )
     assert "reasoning" not in ladder  # not configured
     assert set(ladder).issubset(set(MODEST))
 
@@ -85,7 +161,12 @@ def test_next_tier_steps_up_only_on_escalation_reason():
 
 
 def test_route_end_to_end_shape():
-    r = cr.route("refactor this class and fix the failing pytest", FULL, allow_oracle=True)
+    r = cr.route(
+        "refactor this class and fix the failing pytest",
+        FULL,
+        allow_oracle=True,
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert r.task == "code"
     assert r.tier == "code"
     assert r.ladder[0] == "code" and r.ladder[-1] == "oracle"
@@ -94,5 +175,9 @@ def test_route_end_to_end_shape():
 
 def test_sparse_policy_still_yields_nonempty_ladder():
     # Only 'general' configured — every task must still get a usable ladder.
-    ladder = cr.escalation_ladder("vision", ("general",))
+    ladder = cr.escalation_ladder(
+        "vision",
+        ("general",),
+        config=_test_model_lists.load().values["capability_router"],
+    )
     assert ladder and ladder[0] == "general"

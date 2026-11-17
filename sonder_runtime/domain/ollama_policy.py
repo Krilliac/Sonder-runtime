@@ -29,9 +29,47 @@ def _candidate(value=None) -> str:
     return raw if "://" in raw else "http://%s" % raw
 
 
+def _has_space_or_control(text: str) -> bool:
+    return any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in text)
+
+
+def text_error(value=None) -> str:
+    """Return why the configured text can never name an origin, or ``""``.
+
+    Every gate (``policy_error``, worker validation) asks this about the text
+    as configured, trimmed once at both ends like ``_candidate`` does.  The
+    answer is the same before and after ``normalize``, which never removes an
+    interior whitespace, control or backslash character.
+    """
+    raw = str(DEFAULT_HOST if value is None else value).strip()
+    if "\\" in raw:
+        return "must not contain a backslash"
+    if _has_space_or_control(raw):
+        return "is malformed or contains whitespace or control characters"
+    return ""
+
+
+def _trim_slashes(text: str) -> str:
+    """Drop trailing "/" only, never past the first ``://``."""
+    floor = text.find("://") + 3
+    return text[:max(floor, len(text.rstrip("/")))]
+
+
 def normalize(value=None) -> str:
-    """Return a canonical origin and rewrite exact bind-all hosts to loopback."""
-    candidate = _candidate(value).rstrip("/")
+    """Return a canonical origin and rewrite exact bind-all hosts to loopback.
+
+    Only the two ends are trimmed: whitespace, then trailing "/".  Text holding
+    whitespace or a control character anywhere else is returned as it is, so a
+    later gate still sees it; other text that is not a recognisable origin is
+    returned with its trailing "/" removed.  Every return value is a fixed
+    point: ``normalize(normalize(x)) == normalize(x)``.
+    """
+    candidate = _candidate(value)
+    if _has_space_or_control(candidate):
+        # urlparse silently deletes tab/CR/LF and int() accepts padded ports;
+        # canonicalising here would launder the text for whoever gates next.
+        return candidate
+    candidate = _trim_slashes(candidate)
     try:
         parsed = urllib.parse.urlparse(candidate)
         host = parsed.hostname
@@ -79,6 +117,8 @@ def is_loopback(value=None) -> bool:
         host = urllib.parse.urlparse(normalize(value)).hostname
         if not host:
             return False
+        if "%" in host:
+            return False
         if host.casefold().rstrip(".") == "localhost":
             return True
         return ipaddress.ip_address(host).is_loopback
@@ -88,6 +128,9 @@ def is_loopback(value=None) -> bool:
 
 def policy_error(value=None, *, allow_remote=False) -> str:
     """Return a security error, or ``""`` for an accepted origin."""
+    reason = text_error(value)
+    if reason:
+        return "OLLAMA_HOST " + reason
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -99,37 +142,36 @@ def policy_error(value=None, *, allow_remote=False) -> str:
         return "OLLAMA_HOST must use http or https"
     if not host:
         return "OLLAMA_HOST must include a hostname"
+    if "%" in host:
+        return "OLLAMA_HOST must not contain a zone id or percent escape"
     if parsed.username is not None or parsed.password is not None:
-        logger.critical(f"OLLAMA_HOST contains inline credentials -- credential exposure risk, origin rejected for security")
-        logger.error(f"OLLAMA_HOST contains inline credentials, origin rejected for security")
+        logger.critical("OLLAMA_HOST contains inline credentials -- credential exposure risk, origin rejected for security")
+        logger.error("OLLAMA_HOST contains inline credentials, origin rejected for security")
         return "OLLAMA_HOST must not contain inline credentials"
     if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
         return "OLLAMA_HOST must be an origin without a path, query, or fragment"
     # Logged only once the value is a bare origin: a password with an unencoded
     # "/" parses as host and port with the rest in the path, rejected above.
-    logger.debug(
-        f"policy_error: checking scheme={parsed.scheme!r}, host={host!r}, "
-        f"port={port!r}, allow_remote={allow_remote}"
-    )
+    logger.debug("policy_error: checking a bare origin, allow_remote=%s", allow_remote is True)
     if port is None:
         return "OLLAMA_HOST must include an explicit port"
     if is_loopback(origin):
-        logger.info(f"ollama origin accepted: {origin!r} (loopback)")
-        logger.debug(f"policy_error: origin {origin!r} is loopback, accepted")
+        logger.info("ollama origin accepted (loopback)")
+        logger.debug("policy_error: origin is loopback, accepted")
         return ""
     consent = allow_remote is True
     if not consent:
-        logger.info(f"ollama origin rejected: non-loopback origin {origin!r}, remote access not enabled")
-        logger.debug(f"policy_error: non-loopback origin {origin!r} blocked, remote not allowed")
+        logger.info("ollama origin rejected: non-loopback origin, remote access not enabled")
+        logger.debug("policy_error: non-loopback origin blocked, remote not allowed")
         return (
             "non-loopback OLLAMA_HOST is blocked because prompts and embeddings "
             "would leave this machine; set %s=1 to opt in explicitly" % REMOTE_OPT_IN
         )
     if parsed.scheme.lower() != "https":
-        logger.error(f"non-loopback OLLAMA_HOST {origin!r} rejected: plain HTTP would expose prompts and embeddings in transit")
-        logger.warning(f"non-loopback OLLAMA_HOST {origin!r} rejected: plain HTTP would expose prompts in transit")
-        logger.info(f"ollama origin rejected: non-loopback origin {origin!r} requires https")
+        logger.error("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts and embeddings in transit")
+        logger.warning("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts in transit")
+        logger.info("ollama origin rejected: non-loopback origin requires https")
         return "non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit"
-    logger.warning(f"remote Ollama origin accepted: {origin!r} -- prompts and embeddings will leave this machine")
-    logger.info(f"ollama origin accepted: {origin!r} (remote, https)")
+    logger.warning("remote Ollama origin accepted -- prompts and embeddings will leave this machine")
+    logger.info("ollama origin accepted (remote, https)")
     return ""

@@ -7,13 +7,10 @@ from collections.abc import Collection
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_RETIRED_CLOUD_MODELS = frozenset({"qwen3-coder:480b-cloud"})
-
-
 def live_cloud_model(
     configured: object,
     default: str,
-    retired_models: Collection[str] = DEFAULT_RETIRED_CLOUD_MODELS,
+    retired_models: Collection[str],
 ) -> object:
     """Return a configured cloud model unless it is empty or retired.
 
@@ -35,4 +32,4 @@ def live_cloud_model(
     return configured
 
 
-__all__ = ["DEFAULT_RETIRED_CLOUD_MODELS", "live_cloud_model"]
+__all__ = ["live_cloud_model"]
