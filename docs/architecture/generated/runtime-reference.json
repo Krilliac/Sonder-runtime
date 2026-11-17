@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
+    "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
+      "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -2166,6 +2166,60 @@
             "type": "object"
           },
           "name": "debug_inspect"
+        },
+        {
+          "description": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "role": {
+                "default": "",
+                "title": "Role",
+                "type": "string"
+              },
+              "task": {
+                "title": "Task",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task"
+            ],
+            "title": "delegate_taskArguments",
+            "type": "object"
+          },
+          "name": "delegate_task"
         },
         {
           "description": "Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager. Pass packages as a JSON array.",
@@ -5552,6 +5606,30 @@
           "name": "policy_explain"
         },
         {
+          "description": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "kind": {
+                "default": "chat",
+                "title": "Kind",
+                "type": "string"
+              },
+              "text": {
+                "title": "Text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "title": "post_to_boardArguments",
+            "type": "object"
+          },
+          "name": "post_to_board"
+        },
+        {
           "description": "List learned user preferences that shape future responses.",
           "effects": [],
           "execution_class": "pure",
@@ -5707,6 +5785,33 @@
             "type": "object"
           },
           "name": "project_detect"
+        },
+        {
+          "description": "Read recent messages from the shared peer coordination board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mentions_only": {
+                "default": false,
+                "title": "Mentions Only",
+                "type": "boolean"
+              },
+              "since_seq": {
+                "default": 0,
+                "title": "Since Seq",
+                "type": "integer"
+              }
+            },
+            "title": "read_boardArguments",
+            "type": "object"
+          },
+          "name": "read_board"
         },
         {
           "description": "Show the reasoning the model emitted for the current/last turn, if enabled.\n\nTwo gates, both of which must pass. The operator gate\n(SONDER_EXPOSE_REASONING) decides whether reasoning is captured at all --\nwith it off Sonder never asks the model for its thinking. The caller gate\ndecides who may read it: on a deployment that authenticates callers this\nneeds a developer token, because the reasoning belongs to whoever's turn\nproduced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.\n\nadmin_private_chain_of_thought serves this same record, and only where the\noperator has separately opted that surface in. It is a second door onto\nthis data, not a door onto more of it -- there is no hidden store beyond\nwhat this shows.",
@@ -6079,6 +6184,35 @@
             "type": "object"
           },
           "name": "repo_status"
+        },
+        {
+          "description": "Post a concise status or thinking update to the live agent progress board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "phase": {
+                "default": "progress",
+                "title": "Phase",
+                "type": "string"
+              },
+              "summary": {
+                "title": "Summary",
+                "type": "string"
+              },
+              "thinking": {
+                "default": "",
+                "title": "Thinking",
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary"
+            ],
+            "title": "report_progressArguments",
+            "type": "object"
+          },
+          "name": "report_progress"
         },
         {
           "description": "Build a bounded read-only declaration index inside one guarded repository.\n\nUses Python AST and conservative stdlib-only extraction for JavaScript,\nTypeScript, C, C++, C#, Rust, and Go. It never executes repository content,\nfollows symlinks, shells out, or accesses the network.",
@@ -6936,6 +7070,50 @@
             "type": "object"
           },
           "name": "sonder_stats"
+        },
+        {
+          "description": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "tasks_json": {
+                "title": "Tasks Json",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tasks_json"
+            ],
+            "title": "spawn_agentsArguments",
+            "type": "object"
+          },
+          "name": "spawn_agents"
         },
         {
           "description": "Preview-rollback or atomically apply one parameterized SQLite DML statement.",
@@ -10834,6 +11012,65 @@
       "risk": "execution",
       "summary": "Start an agent conversation: /delegate <task>. Uses the selected project or a creations folder.",
       "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/delegate_task",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "task",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "role",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "tier",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "model",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "project",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "cwd",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 8,
+          "name": "max_steps",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+      "tool": "delegate_task"
     },
     {
       "aliases": [],
@@ -14951,6 +15188,29 @@
       "tool": "policy_explain"
     },
     {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/post_to_board",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "text",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "chat",
+          "name": "kind",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+      "tool": "post_to_board"
+    },
+    {
       "aliases": [
         "/preference",
         "/preferences"
@@ -15225,6 +15485,35 @@
       "risk": "ask",
       "summary": "Read a guarded file.",
       "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/read_board",
+      "native": false,
+      "params": [
+        {
+          "default": 0,
+          "name": "since_seq",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 20,
+          "name": "limit",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": false,
+          "name": "mentions_only",
+          "required": false,
+          "type": "bool"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Read recent messages from the shared peer coordination board.",
+      "tool": "read_board"
     },
     {
       "aliases": [],
@@ -15701,6 +15990,35 @@
       "risk": "safe",
       "summary": "Show the latest grounded end report and replayable action transcript.",
       "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/report_progress",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "summary",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "thinking",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "progress",
+          "name": "phase",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Post a concise status or thinking update to the live agent progress board.",
+      "tool": "report_progress"
     },
     {
       "aliases": [],
@@ -16751,6 +17069,53 @@
       "risk": "safe",
       "summary": "Report what sonder has learned so far.",
       "tool": "sonder_stats"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/spawn_agents",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "tasks_json",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "tier",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "model",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "project",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "cwd",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 8,
+          "name": "max_steps",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+      "tool": "spawn_agents"
     },
     {
       "aliases": [],
@@ -20505,15 +20870,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 241,
-    "commands": 360,
+    "capabilities": 246,
+    "commands": 365,
     "configuration": 317,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
-    "tools": 241
+    "tools": 246
   },
-  "digest": "b781e2c0f1a71bff150d91034419c189175b6c3604060ec67cf3fe64ffe3e04b",
+  "digest": "1c8aa58b548403b6a0ba227eec387b83564fde3c5b5d55090f0a53ff517237e0",
   "events": [
     {
       "name": "session.started",
@@ -23225,9 +23590,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
+    "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
     "client": {
-      "digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
+      "digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
       "events": [
         {
           "name": "approval.denied",
@@ -24455,6 +24820,7 @@
           "data_inspect",
           "data_query",
           "debug_inspect",
+          "delegate_task",
           "dependency_add",
           "dependency_audit",
           "dependency_inventory",
@@ -24552,11 +24918,13 @@
           "playbook_note",
           "playbook_read",
           "policy_explain",
+          "post_to_board",
           "preferences_status",
           "process_list",
           "process_memory_risk_inspect",
           "program_search",
           "project_detect",
+          "read_board",
           "reasoning_show",
           "record_outcome",
           "reference_search",
@@ -24566,6 +24934,7 @@
           "repo_log",
           "repo_show",
           "repo_status",
+          "report_progress",
           "repository_symbol_index",
           "route_request",
           "run_code",
@@ -24592,6 +24961,7 @@
           "sonder_remember_fact",
           "sonder_sessions",
           "sonder_stats",
+          "spawn_agents",
           "sqlite_mutate",
           "status",
           "system_improvement_report",
@@ -24947,6 +25317,11 @@
             "name": "debug_inspect",
             "schema_available": true,
             "summary": "Developer/admin inspection bundle without hidden chain-of-thought."
+          },
+          {
+            "name": "delegate_task",
+            "schema_available": true,
+            "summary": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only)."
           },
           {
             "name": "dependency_add",
@@ -25434,6 +25809,11 @@
             "summary": "Preflight the direct-MCP permission gate for one registered tool without running it."
           },
           {
+            "name": "post_to_board",
+            "schema_available": true,
+            "summary": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board."
+          },
+          {
             "name": "preferences_status",
             "schema_available": true,
             "summary": "List learned user preferences that shape future responses."
@@ -25457,6 +25837,11 @@
             "name": "project_detect",
             "schema_available": true,
             "summary": "Inventory guarded project manifests and evidence-backed command candidates."
+          },
+          {
+            "name": "read_board",
+            "schema_available": true,
+            "summary": "Read recent messages from the shared peer coordination board."
           },
           {
             "name": "reasoning_show",
@@ -25502,6 +25887,11 @@
             "name": "repo_status",
             "schema_available": true,
             "summary": "Inspect bounded read-only Git branch and worktree status at a repo root."
+          },
+          {
+            "name": "report_progress",
+            "schema_available": true,
+            "summary": "Post a concise status or thinking update to the live agent progress board."
           },
           {
             "name": "repository_symbol_index",
@@ -25632,6 +26022,11 @@
             "name": "sonder_stats",
             "schema_available": true,
             "summary": "Report what sonder has learned so far.\n\nRead-only observability into the learning loop's SQLite memory: how many\ninteractions have been logged, how outcomes break down by signal, and the\nmost recently distilled lessons. Makes no model call and needs no Ollama \u2014\nit only reads memory.db, so it works even if the Ollama server is down."
+          },
+          {
+            "name": "spawn_agents",
+            "schema_available": true,
+            "summary": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only)."
           },
           {
             "name": "sqlite_mutate",
@@ -27933,6 +28328,60 @@
             "type": "object"
           },
           "name": "debug_inspect"
+        },
+        {
+          "description": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "role": {
+                "default": "",
+                "title": "Role",
+                "type": "string"
+              },
+              "task": {
+                "title": "Task",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task"
+            ],
+            "title": "delegate_taskArguments",
+            "type": "object"
+          },
+          "name": "delegate_task"
         },
         {
           "description": "Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager. Pass packages as a JSON array.",
@@ -31319,6 +31768,30 @@
           "name": "policy_explain"
         },
         {
+          "description": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "kind": {
+                "default": "chat",
+                "title": "Kind",
+                "type": "string"
+              },
+              "text": {
+                "title": "Text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "title": "post_to_boardArguments",
+            "type": "object"
+          },
+          "name": "post_to_board"
+        },
+        {
           "description": "List learned user preferences that shape future responses.",
           "effects": [],
           "execution_class": "pure",
@@ -31474,6 +31947,33 @@
             "type": "object"
           },
           "name": "project_detect"
+        },
+        {
+          "description": "Read recent messages from the shared peer coordination board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mentions_only": {
+                "default": false,
+                "title": "Mentions Only",
+                "type": "boolean"
+              },
+              "since_seq": {
+                "default": 0,
+                "title": "Since Seq",
+                "type": "integer"
+              }
+            },
+            "title": "read_boardArguments",
+            "type": "object"
+          },
+          "name": "read_board"
         },
         {
           "description": "Show the reasoning the model emitted for the current/last turn, if enabled.\n\nTwo gates, both of which must pass. The operator gate\n(SONDER_EXPOSE_REASONING) decides whether reasoning is captured at all --\nwith it off Sonder never asks the model for its thinking. The caller gate\ndecides who may read it: on a deployment that authenticates callers this\nneeds a developer token, because the reasoning belongs to whoever's turn\nproduced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.\n\nadmin_private_chain_of_thought serves this same record, and only where the\noperator has separately opted that surface in. It is a second door onto\nthis data, not a door onto more of it -- there is no hidden store beyond\nwhat this shows.",
@@ -31846,6 +32346,35 @@
             "type": "object"
           },
           "name": "repo_status"
+        },
+        {
+          "description": "Post a concise status or thinking update to the live agent progress board.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "phase": {
+                "default": "progress",
+                "title": "Phase",
+                "type": "string"
+              },
+              "summary": {
+                "title": "Summary",
+                "type": "string"
+              },
+              "thinking": {
+                "default": "",
+                "title": "Thinking",
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary"
+            ],
+            "title": "report_progressArguments",
+            "type": "object"
+          },
+          "name": "report_progress"
         },
         {
           "description": "Build a bounded read-only declaration index inside one guarded repository.\n\nUses Python AST and conservative stdlib-only extraction for JavaScript,\nTypeScript, C, C++, C#, Rust, and Go. It never executes repository content,\nfollows symlinks, shells out, or accesses the network.",
@@ -32703,6 +33232,50 @@
             "type": "object"
           },
           "name": "sonder_stats"
+        },
+        {
+          "description": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "tasks_json": {
+                "title": "Tasks Json",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tasks_json"
+            ],
+            "title": "spawn_agentsArguments",
+            "type": "object"
+          },
+          "name": "spawn_agents"
         },
         {
           "description": "Preview-rollback or atomically apply one parameterized SQLite DML statement.",
@@ -37284,6 +37857,58 @@
           "name": "debug_inspect"
         },
         {
+          "description": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+          "inputSchema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "role": {
+                "default": "",
+                "title": "Role",
+                "type": "string"
+              },
+              "task": {
+                "title": "Task",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task"
+            ],
+            "title": "delegate_taskArguments",
+            "type": "object"
+          },
+          "name": "delegate_task"
+        },
+        {
           "description": "Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager. Pass packages as a JSON array.",
           "inputSchema": {
             "properties": {
@@ -40474,6 +41099,28 @@
           "name": "policy_explain"
         },
         {
+          "description": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+          "inputSchema": {
+            "properties": {
+              "kind": {
+                "default": "chat",
+                "title": "Kind",
+                "type": "string"
+              },
+              "text": {
+                "title": "Text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "title": "post_to_boardArguments",
+            "type": "object"
+          },
+          "name": "post_to_board"
+        },
+        {
           "description": "List learned user preferences that shape future responses.",
           "inputSchema": {
             "properties": {
@@ -40619,6 +41266,31 @@
             "type": "object"
           },
           "name": "project_detect"
+        },
+        {
+          "description": "Read recent messages from the shared peer coordination board.",
+          "inputSchema": {
+            "properties": {
+              "limit": {
+                "default": 20,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "mentions_only": {
+                "default": false,
+                "title": "Mentions Only",
+                "type": "boolean"
+              },
+              "since_seq": {
+                "default": 0,
+                "title": "Since Seq",
+                "type": "integer"
+              }
+            },
+            "title": "read_boardArguments",
+            "type": "object"
+          },
+          "name": "read_board"
         },
         {
           "description": "Show the reasoning the model emitted for the current/last turn, if enabled.\n\nTwo gates, both of which must pass. The operator gate\n(SONDER_EXPOSE_REASONING) decides whether reasoning is captured at all --\nwith it off Sonder never asks the model for its thinking. The caller gate\ndecides who may read it: on a deployment that authenticates callers this\nneeds a developer token, because the reasoning belongs to whoever's turn\nproduced it. The HTTP path gates the same way via SONDER_REASONING_AUDIENCE.\n\nadmin_private_chain_of_thought serves this same record, and only where the\noperator has separately opted that surface in. It is a second door onto\nthis data, not a door onto more of it -- there is no hidden store beyond\nwhat this shows.",
@@ -40973,6 +41645,33 @@
             "type": "object"
           },
           "name": "repo_status"
+        },
+        {
+          "description": "Post a concise status or thinking update to the live agent progress board.",
+          "inputSchema": {
+            "properties": {
+              "phase": {
+                "default": "progress",
+                "title": "Phase",
+                "type": "string"
+              },
+              "summary": {
+                "title": "Summary",
+                "type": "string"
+              },
+              "thinking": {
+                "default": "",
+                "title": "Thinking",
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary"
+            ],
+            "title": "report_progressArguments",
+            "type": "object"
+          },
+          "name": "report_progress"
         },
         {
           "description": "Build a bounded read-only declaration index inside one guarded repository.\n\nUses Python AST and conservative stdlib-only extraction for JavaScript,\nTypeScript, C, C++, C#, Rust, and Go. It never executes repository content,\nfollows symlinks, shells out, or accesses the network.",
@@ -41778,6 +42477,48 @@
             "type": "object"
           },
           "name": "sonder_stats"
+        },
+        {
+          "description": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+          "inputSchema": {
+            "properties": {
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
+              "max_steps": {
+                "default": 8,
+                "title": "Max Steps",
+                "type": "integer"
+              },
+              "model": {
+                "default": "",
+                "title": "Model",
+                "type": "string"
+              },
+              "project": {
+                "default": "",
+                "title": "Project",
+                "type": "string"
+              },
+              "tasks_json": {
+                "title": "Tasks Json",
+                "type": "string"
+              },
+              "tier": {
+                "default": "",
+                "title": "Tier",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tasks_json"
+            ],
+            "title": "spawn_agentsArguments",
+            "type": "object"
+          },
+          "name": "spawn_agents"
         },
         {
           "description": "Preview-rollback or atomically apply one parameterized SQLite DML statement.",
@@ -45296,6 +46037,61 @@
         },
         {
           "function": {
+            "description": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+            "name": "delegate_task",
+            "parameters": {
+              "properties": {
+                "cwd": {
+                  "default": "",
+                  "title": "Cwd",
+                  "type": "string"
+                },
+                "max_steps": {
+                  "default": 8,
+                  "title": "Max Steps",
+                  "type": "integer"
+                },
+                "model": {
+                  "default": "",
+                  "title": "Model",
+                  "type": "string"
+                },
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "project": {
+                  "default": "",
+                  "title": "Project",
+                  "type": "string"
+                },
+                "role": {
+                  "default": "",
+                  "title": "Role",
+                  "type": "string"
+                },
+                "task": {
+                  "title": "Task",
+                  "type": "string"
+                },
+                "tier": {
+                  "default": "",
+                  "title": "Tier",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task"
+              ],
+              "title": "delegate_taskArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Install packages (pip, npm, pnpm, yarn, cargo, go) with auto-detected package manager. Pass packages as a JSON array.",
             "name": "dependency_add",
             "parameters": {
@@ -48777,6 +49573,31 @@
         },
         {
           "function": {
+            "description": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+            "name": "post_to_board",
+            "parameters": {
+              "properties": {
+                "kind": {
+                  "default": "chat",
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "text": {
+                  "title": "Text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "title": "post_to_boardArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "List learned user preferences that shape future responses.",
             "name": "preferences_status",
             "parameters": {
@@ -48932,6 +49753,34 @@
                 }
               },
               "title": "project_detectArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Read recent messages from the shared peer coordination board.",
+            "name": "read_board",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "default": 20,
+                  "title": "Limit",
+                  "type": "integer"
+                },
+                "mentions_only": {
+                  "default": false,
+                  "title": "Mentions Only",
+                  "type": "boolean"
+                },
+                "since_seq": {
+                  "default": 0,
+                  "title": "Since Seq",
+                  "type": "integer"
+                }
+              },
+              "title": "read_boardArguments",
               "type": "object"
             }
           },
@@ -49313,6 +50162,36 @@
                 }
               },
               "title": "repo_statusArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Post a concise status or thinking update to the live agent progress board.",
+            "name": "report_progress",
+            "parameters": {
+              "properties": {
+                "phase": {
+                  "default": "progress",
+                  "title": "Phase",
+                  "type": "string"
+                },
+                "summary": {
+                  "title": "Summary",
+                  "type": "string"
+                },
+                "thinking": {
+                  "default": "",
+                  "title": "Thinking",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "summary"
+              ],
+              "title": "report_progressArguments",
               "type": "object"
             }
           },
@@ -50196,6 +51075,51 @@
             "parameters": {
               "properties": {},
               "title": "sonder_statsArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+            "name": "spawn_agents",
+            "parameters": {
+              "properties": {
+                "cwd": {
+                  "default": "",
+                  "title": "Cwd",
+                  "type": "string"
+                },
+                "max_steps": {
+                  "default": 8,
+                  "title": "Max Steps",
+                  "type": "integer"
+                },
+                "model": {
+                  "default": "",
+                  "title": "Model",
+                  "type": "string"
+                },
+                "project": {
+                  "default": "",
+                  "title": "Project",
+                  "type": "string"
+                },
+                "tasks_json": {
+                  "title": "Tasks Json",
+                  "type": "string"
+                },
+                "tier": {
+                  "default": "",
+                  "title": "Tier",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tasks_json"
+              ],
+              "title": "spawn_agentsArguments",
               "type": "object"
             }
           },
@@ -51703,7 +52627,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "37fa2d9266a23d9167d05adf5fdd90a322a5a9a8e02afb1d9ec56d29a21ed59d",
+    "server.py": "899159718ef4ec89ebdd3ee918864ed6dbd626560ee4130dabaaf8d571147ca2",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -53672,6 +54596,58 @@
           }
         },
         "title": "debug_inspectArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Delegate one bounded subtask to a depth-1 child agent (depth 0 only).",
+      "name": "delegate_task",
+      "parameters": {
+        "properties": {
+          "cwd": {
+            "default": "",
+            "title": "Cwd",
+            "type": "string"
+          },
+          "max_steps": {
+            "default": 8,
+            "title": "Max Steps",
+            "type": "integer"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          },
+          "role": {
+            "default": "",
+            "title": "Role",
+            "type": "string"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          },
+          "tier": {
+            "default": "",
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "delegate_taskArguments",
         "type": "object"
       }
     },
@@ -56866,6 +57842,28 @@
       }
     },
     {
+      "description": "Post a peer-to-peer coordination message (with optional @handle mentions) to the run board.",
+      "name": "post_to_board",
+      "parameters": {
+        "properties": {
+          "kind": {
+            "default": "chat",
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "post_to_boardArguments",
+        "type": "object"
+      }
+    },
+    {
       "description": "List learned user preferences that shape future responses.",
       "name": "preferences_status",
       "parameters": {
@@ -57009,6 +58007,31 @@
           }
         },
         "title": "project_detectArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read recent messages from the shared peer coordination board.",
+      "name": "read_board",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 20,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "mentions_only": {
+            "default": false,
+            "title": "Mentions Only",
+            "type": "boolean"
+          },
+          "since_seq": {
+            "default": 0,
+            "title": "Since Seq",
+            "type": "integer"
+          }
+        },
+        "title": "read_boardArguments",
         "type": "object"
       }
     },
@@ -57363,6 +58386,33 @@
           }
         },
         "title": "repo_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Post a concise status or thinking update to the live agent progress board.",
+      "name": "report_progress",
+      "parameters": {
+        "properties": {
+          "phase": {
+            "default": "progress",
+            "title": "Phase",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "thinking": {
+            "default": "",
+            "title": "Thinking",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary"
+        ],
+        "title": "report_progressArguments",
         "type": "object"
       }
     },
@@ -58168,6 +59218,48 @@
       "parameters": {
         "properties": {},
         "title": "sonder_statsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only).",
+      "name": "spawn_agents",
+      "parameters": {
+        "properties": {
+          "cwd": {
+            "default": "",
+            "title": "Cwd",
+            "type": "string"
+          },
+          "max_steps": {
+            "default": 8,
+            "title": "Max Steps",
+            "type": "integer"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          },
+          "tasks_json": {
+            "title": "Tasks Json",
+            "type": "string"
+          },
+          "tier": {
+            "default": "",
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tasks_json"
+        ],
+        "title": "spawn_agentsArguments",
         "type": "object"
       }
     },
