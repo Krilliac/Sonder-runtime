@@ -171,6 +171,7 @@ sonder_runtime/application/chat/reference_lookup.py
 sonder_runtime/application/chat/stream_sink.py
 sonder_runtime/application/chat/tool_intent.py
 sonder_runtime/application/command_surface/__init__.py
+sonder_runtime/application/command_surface/command_text.py
 sonder_runtime/application/command_surface/mcp.py
 sonder_runtime/application/compaction/append_service.py
 sonder_runtime/application/compaction/engine.py
