@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "050b5642ae453af78bb5ddc5fc08d2c40b9c61e184dca680502fbf179cdf0055",
+    "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "050b5642ae453af78bb5ddc5fc08d2c40b9c61e184dca680502fbf179cdf0055",
+      "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -311,6 +311,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -336,6 +341,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -18155,6 +18165,18 @@
           "name": "session",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": "",
+          "name": "cwd",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": true,
+          "name": "strict_project_tools",
+          "required": false,
+          "type": "bool"
         }
       ],
       "risk": "ask",
@@ -20403,6 +20425,12 @@
       "type": "int"
     },
     {
+      "default": true,
+      "field": "prewarm_on_start",
+      "section": "server",
+      "type": "bool"
+    },
+    {
       "default": false,
       "field": "enabled",
       "section": "spanda",
@@ -20479,13 +20507,13 @@
   "counts": {
     "capabilities": 241,
     "commands": 360,
-    "configuration": 316,
+    "configuration": 317,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
     "tools": 241
   },
-  "digest": "560aee5b99fc280dbb5624b7eb788caa29c8d4b6091ba870444259ba4116d305",
+  "digest": "b781e2c0f1a71bff150d91034419c189175b6c3604060ec67cf3fe64ffe3e04b",
   "events": [
     {
       "name": "session.started",
@@ -23197,9 +23225,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "050b5642ae453af78bb5ddc5fc08d2c40b9c61e184dca680502fbf179cdf0055",
+    "catalog_digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
     "client": {
-      "digest": "050b5642ae453af78bb5ddc5fc08d2c40b9c61e184dca680502fbf179cdf0055",
+      "digest": "d2c4a6987519bb1ef66e4fad227259003822febc0047063acf4b96e36737c0e0",
       "events": [
         {
           "name": "approval.denied",
@@ -26050,6 +26078,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -26075,6 +26108,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -35491,6 +35529,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -35516,6 +35559,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -43338,6 +43386,11 @@
                   "title": "Checklist",
                   "type": "boolean"
                 },
+                "cwd": {
+                  "default": "",
+                  "title": "Cwd",
+                  "type": "string"
+                },
                 "max_steps": {
                   "default": 6,
                   "title": "Max Steps",
@@ -43363,6 +43416,11 @@
                   ],
                   "default": null,
                   "title": "Session"
+                },
+                "strict_project_tools": {
+                  "default": true,
+                  "title": "Strict Project Tools",
+                  "type": "boolean"
                 },
                 "tier": {
                   "default": "code",
@@ -51645,13 +51703,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "b5bdbd9f2dc1ac2324840cfdae6762fbbc25116945bb2940da28e184b4fddd0d",
+    "server.py": "37fa2d9266a23d9167d05adf5fdd90a322a5a9a8e02afb1d9ec56d29a21ed59d",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "1d4741e7959bf4e3fcc42209b956bffb11f12be35242311f26df56a06c2586c8",
+    "sonder_runtime/platform/config.py": "464cec387fab8d80d8492b6fbbf669c4f6238ff36c0bce3945ceba66dd7d1683",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -51864,6 +51922,11 @@
             "title": "Checklist",
             "type": "boolean"
           },
+          "cwd": {
+            "default": "",
+            "title": "Cwd",
+            "type": "string"
+          },
           "max_steps": {
             "default": 6,
             "title": "Max Steps",
@@ -51889,6 +51952,11 @@
             ],
             "default": null,
             "title": "Session"
+          },
+          "strict_project_tools": {
+            "default": true,
+            "title": "Strict Project Tools",
+            "type": "boolean"
           },
           "tier": {
             "default": "code",

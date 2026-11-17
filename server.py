@@ -505,7 +505,10 @@ from sonder_runtime.adapters.model_error_formatting import (
 from sonder_runtime.interfaces.http.serve_policy import (
     serve_temperature as _serve_temperature, serve_temperature_override_value as _serve_temperature_request, serve_lane_temperature as _serve_lane_temperature,
 )
-from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prewarm_gate
+from sonder_runtime.adapters.inference import (
+    ollama_endpoint, ollama_pool, prewarm_gate, startup_prewarm as _startup_prewarm,
+)
+from sonder_runtime.bootstrap import pool_wiring as _pool_wiring
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
 import sonder_runtime.adapters.inference.pool_model_catalog as _pool_model_catalog
 from sonder_runtime.adapters.inference.pool_model_catalog import (
@@ -1615,6 +1618,16 @@ _MODEL_GEOMETRY_CACHE = {}
 _MODEL_CONTEXT_MEMORY = model_context_memory.ModelContextMemory()
 _RESIDENCY_FEEDBACK = None
 _RESIDENCY_FEEDBACK_LOCK = threading.Lock()
+_PINNED_OLLAMA_ORIGIN = contextvars.ContextVar("sonder_pinned_ollama_origin", default=None)
+
+
+@contextlib.contextmanager
+def _pinned_ollama_origin(origin):
+    token = _PINNED_OLLAMA_ORIGIN.set(str(origin).strip().rstrip("/") if origin else None)
+    try:
+        yield
+    finally:
+        _PINNED_OLLAMA_ORIGIN.reset(token)
 
 _MODEL_PROMPT_IDENTITY_CACHE = {}
 _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
@@ -1775,13 +1788,7 @@ def chat_model_unfit_reason(model):
 
 
 def _residency_feedback():
-    """Return the process residency tracker, or ``None`` when unsound.
-
-    ``/api/ps`` describes one server.  Like reusable prompt prefixes, the
-    feedback is only attributable when exactly one Ollama origin is
-    configured; with a worker pool the probe could read a different host than
-    the one that served the request.  ``SONDER_RESIDENCY_FEEDBACK=0`` opts out.
-    """
+    """Return the per-(origin, model) residency tracker, or ``None`` if disabled."""
     global _RESIDENCY_FEEDBACK
     if str(os.environ.get("SONDER_RESIDENCY_FEEDBACK", "1")).strip().lower() in (
         "0", "false", "no", "off",
@@ -1789,36 +1796,36 @@ def _residency_feedback():
         return None
     try:
         primary = ollama_policy.normalize(BASE).rstrip("/")
-        if tuple(OLLAMA_POOL.configured_origins) != (primary,):
-            _RESIDENCY_FEEDBACK = None
-            return None
     except Exception:
         return None
     with _RESIDENCY_FEEDBACK_LOCK:
-        if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary:
+        if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary.casefold():
             _RESIDENCY_FEEDBACK = _ResidencyFeedback(
-                lambda: _get("/api/ps"), minimum_context=context_policy.MIN_CONTEXT, origin=primary,
+                lambda: _get("/api/ps"),
+                minimum_context=context_policy.MIN_CONTEXT,
+                origin=primary,
+                fetch_ps_for_origin=lambda o: _pool_wiring.fetch_ps_for_origin(
+                    OLLAMA_POOL, o, primary_origin=BASE,
+                    get_primary_ps=lambda: _get("/api/ps"),
+                    admitted_get_fn=ollama_pool.admitted_get,
+                    read_bytes_fn=_read_ollama_response_bytes,
+                ),
             )
         return _RESIDENCY_FEEDBACK
 
 
 def _auto_model_context(model):
-    """Select a native window for the resolved model when no pin was supplied.
-
-    Metadata and the declared KV cache type give the starting window; a
-    measured spill to system RAM (``/api/ps``) lowers it until the model is
-    GPU-resident again.  See ``adapters.inference.residency_feedback``.
-    """
+    """Select a native window for ``model`` using node/MoE capabilities and residency."""
     context_length, parameter_size = _model_context_metadata(model)
     cloud_name = _is_cloud_model_name(model)
-    feedback = None if cloud_name else _residency_feedback()
-    ceiling = None
-    if feedback is not None:
-        with _MODEL_CONTEXT_CACHE_LOCK:
-            geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
-        feedback.refresh(model, geometry=geometry, kv_type=context_policy.kv_cache_type()[0])
-        ceiling = feedback.ceiling(model)
-    return _MODEL_CONTEXT_MEMORY.auto_window(model, context_length, parameter_size, ceiling, cloud=cloud_name)
+    with _MODEL_CONTEXT_CACHE_LOCK:
+        geometry = _MODEL_GEOMETRY_CACHE.get(str(model or "").strip().casefold())
+    return _pool_wiring.auto_window_for_model(
+        OLLAMA_POOL, model, origin=_PINNED_OLLAMA_ORIGIN.get(), default_origin=BASE,
+        context_length=context_length, parameter_size=parameter_size, cloud=cloud_name,
+        geometry=geometry, kv_default=context_policy.kv_cache_type()[0],
+        feedback=None if cloud_name else _residency_feedback(), memory=_MODEL_CONTEXT_MEMORY,
+    )
 
 
 def _make_generate(
@@ -1894,12 +1901,16 @@ def _make_generate(
         if cloud:
             options = {"num_predict": prediction_limit, **({} if temperature is None else {"temperature": temperature})}
         else:
+            target_origin = _PINNED_OLLAMA_ORIGIN.get() or _pool_wiring.selected_origin_for_model(
+                OLLAMA_POOL, model, default_origin=BASE,
+            )
             options = _platform_local_model_options(
                 temperature,
                 prediction_limit,
                 num_ctx,
                 native_context=context_policy.native,
                 environ=os.environ,
+                remote=not ollama_endpoint.is_loopback(target_origin),
             )
         payload = {"model": model, "messages": messages, "stream": False,
                    "options": options}
@@ -2041,6 +2052,7 @@ def _application():
         # the graph itself or an entrypoint handed one over (the handoff also
         # installs it; adding the same observer again is a no-op).
         _install_typed_build_feed(_APP_GRAPH)
+        _pool_wiring.attach_pool_to_gateway(getattr(_APP_GRAPH, "model_gateway", None), OLLAMA_POOL)
         return _APP_GRAPH
 
 
@@ -2562,7 +2574,7 @@ def _serve_target(tier, strict, *, chat_only=False):
         found = resolve_discovered_model_record(tier)
     except Exception:
         found = None
-    if not found and chat_only:  # text lanes only: a model another pool member holds
+    if not found:  # pool-wide lookup; chat_only gate enforced below
         try:
             pin = _resolve_model_pin(tier)
             found = (pin.model, pin.record) if pin.ok else None
@@ -5270,11 +5282,18 @@ def _chat_request(
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
+    pool_reroute_allowed = bool(
+        getattr(OLLAMA_POOL, "enabled", False)
+        and getattr(OLLAMA_POOL, "has_remote_workers", False)
+        and not local_only
+    )
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
-        loopback_endpoint=ollama_endpoint.is_loopback(BASE), context_probe=lambda: _auto_model_context(model))
-    if rerouted is not None:  # SONDER_INFERENCE_FALLBACK=ollama: served below on loopback Ollama only (never the pool)
-        payload, bridged_rung, local_only = rerouted, None, True
+        loopback_endpoint=ollama_endpoint.is_loopback(BASE),
+        context_probe=lambda: _auto_model_context(model),
+        allow_pool_workers=pool_reroute_allowed)
+    if rerouted is not None:  # SONDER_INFERENCE_FALLBACK=ollama: loopback unless private pool permitted
+        payload, bridged_rung, local_only = rerouted, None, (False if pool_reroute_allowed else True)
     if bridged_rung is not None:
         # Delegation hook: this rung's tier is bound to a non-Ollama provider.
         # Every Ollama-only probe below (thinking budget, think support) is
@@ -5609,10 +5628,14 @@ def _post(
     deadline = time.monotonic() + request_timeout
 
     def send(origin):
+        effective_payload, stripped = _pool_wiring.strip_default_num_thread_for_remote(
+            payload, origin=origin, is_loopback_fn=ollama_endpoint.is_loopback, env_int_fn=_env_int_option,
+        )
+        send_data = json.dumps(effective_payload).encode("utf-8") if stripped else data
         # Once per selected pool worker, inside all payload transformations and
         # local retries; admission may queue, or serve the model's pinned num_ctx.
-        with ollama_pool.admitted(OLLAMA_POOL, path, payload, origin, deadline=deadline) as ticket:
-            body = ticket.body(data)
+        with ollama_pool.admitted(OLLAMA_POOL, path, effective_payload, origin, deadline=deadline) as ticket:
+            body = ticket.body(send_data)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Ollama worker pool request timeout expired")
@@ -5622,7 +5645,10 @@ def _post(
             )
             def transport():
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
-                    _record_residency_dispatch(path, json.loads(body), _residency_feedback, _is_cloud_model_name)
+                    _record_residency_dispatch(
+                        path, json.loads(body), _residency_feedback, _is_cloud_model_name,
+                        origin=origin if getattr(OLLAMA_POOL, "enabled", False) else None,
+                    )
                     raw = _read_ollama_response_bytes(resp)
                     return json.loads(raw.decode("utf-8"))
 
@@ -5633,6 +5659,9 @@ def _post(
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
     model_hint = payload.get("model") if isinstance(payload, dict) else None
+    pinned_origin = _PINNED_OLLAMA_ORIGIN.get()
+    if pinned_origin and not local_only:
+        return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
     if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
@@ -5679,17 +5708,9 @@ def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
                 _platform_local_model_options(0.2, 1, _auto_model_context(model),
                     native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
-            try:
-                from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
-                _startup_prewarm.load_finished(model, announce=announce)
-            except ImportError:
-                pass
+            _startup_prewarm.load_finished(model, announce=announce)
         except Exception as exc:
-            try:
-                from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
-                _startup_prewarm.load_failed(model, exc, announce=announce)
-            except ImportError:
-                pass
+            _startup_prewarm.load_failed(model, exc, announce=announce)
         finally:
             prewarm_gate.finish(model)
 
@@ -5954,12 +5975,16 @@ def _offload_tier_impl(
         if cloud:
             options = {"temperature": temperature, "num_predict": num_predict}
         else:
+            target_origin = _PINNED_OLLAMA_ORIGIN.get() or _pool_wiring.selected_origin_for_model(
+                OLLAMA_POOL, model, default_origin=BASE,
+            )
             options = _platform_local_model_options(
                 temperature,
                 num_predict,
                 num_ctx,
                 native_context=context_policy.native,
                 environ=os.environ,
+                remote=not ollama_endpoint.is_loopback(target_origin),
             )
         payload = {
             "model": model,
@@ -20502,9 +20527,10 @@ def _agent_turn(
         tool_allowlist = prepared_tool_allowlist(tool_allowlist)
     model, cloud, augment, tier_label = pinned_target if pinned_target is not None else _serve_target(tier, None)
     restricted, refusal = _restricted_tool_lane.admit(restricted_lane, tier, tier_label, _RUNTIME_POLICY, unsafe=unsafe, prepared=pinned_target is not None, resolve=lambda: _serve_target(tier, None, chat_only=True), provider_for=_bridge_provider_for_tier)
-    if restricted is not None:  # granted tools only, read-only, no web or location (restricted_tool_lane)
+    if restricted is not None:  # granted tools only, read-only unless explicit admin_open
         (model, cloud, _augment, tier_label), tool_allowlist, tool_policy = restricted.target, restricted.allowlist(tool_allowlist), restricted.tool_policy(tool_policy, _project_scope_args)
-        allow_web, allow_location, read_only, lane_read_only = False, False, True, True
+        if not getattr(restricted, "admin_open", False):
+            allow_web, allow_location, read_only, lane_read_only = False, False, True, True
     elif refusal := refusal or _tool_lane_guard.resolved_refusal(tier, model, tier_label, _RUNTIME_POLICY):
         return refusal  # before any model call or tool dispatch
     if tier_label == "cloud-disabled":
@@ -23988,6 +24014,11 @@ def status() -> str:
     ))
 
 
+def register_pool_worker(origin: str, *, allow_remote: bool | None = None, refresh: bool = True):
+    gw = _APP_GRAPH.model_gateway if _APP_GRAPH is not None else None
+    return _pool_wiring.register_pool_worker(OLLAMA_POOL, gw, origin, allow_remote=allow_remote, refresh=refresh, invalidate_cache=_POOL_PIN_CATALOG.clear)
+
+
 def _ollama_pool_admin_status_data(*, principal: str, refresh=False, cursor="", page_size=32):
     """Internal page operation; the calling surface must authorize first."""
     if type(refresh) is not bool:
@@ -23996,7 +24027,12 @@ def _ollama_pool_admin_status_data(*, principal: str, refresh=False, cursor="", 
         OLLAMA_POOL.validate_status_request(cursor=cursor, page_size=page_size, principal=principal)
         if refresh:
             OLLAMA_POOL.refresh_capabilities()
-        return OLLAMA_POOL.status(cursor=cursor, page_size=page_size, principal=principal)
+        page = OLLAMA_POOL.status(cursor=cursor, page_size=page_size, principal=principal)
+        gw = _APP_GRAPH.model_gateway if _APP_GRAPH is not None else None
+        extra = _pool_wiring.pool_unified_status(OLLAMA_POOL, gw)
+        if isinstance(page, dict) and extra:
+            page = {**page, **extra}
+        return page
     except ValueError:
         return {"error": "invalid_request"}
     except Exception:
@@ -25137,44 +25173,14 @@ def ensemble_answer(
     except (TypeError, ValueError):
         requested_ctx = 0
     poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 0
-    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)))  # one shared reference lookup
-
-    answers, failures = [], []
-    for tier, model in targets:
-        started = time.monotonic()
-        try:
-            target_num_ctx = lookup.num_ctx(tier, model)
-            gen = _make_tier_generate(
-                tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx, text_only=True,
-            )
-            text = (lookup.ask(tier, gen, question) or "").strip()  # under lookup: the shared framed turn, cleaned
-        except ModelCallError as error:
-            if error.kind == "cancelled":
-                raise
-            failures.append((tier, model, render_model_error(error)))
-            continue
-        except Exception as exc:  # a bad tier must not sink the whole ensemble
-            failures.append((tier, model, str(exc)))
-            continue
-        finally:
-            # Free the card before loading the next one. Best effort: a failed
-            # unload costs VRAM, not correctness. Cloud models hold no local
-            # VRAM, so there is nothing to free.
-            if not _is_cloud_tier(tier, model) and _bridge_provider_for_tier(tier) is None:
-                try:
-                    _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
-                except Exception:
-                    pass
-        if text:
-            served = (getattr(gen, "last_response_meta", None) or {}).get("served_model") or model
-            answers.append({
-                "tier": tier,
-                "model": served,
-                "answer": text,
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
-            })
-        else:
-            failures.append((tier, model, "empty response"))
+    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)))
+    answers, failures = _pool_wiring.execute_ensemble_poll(
+        targets=targets, pool=OLLAMA_POOL, default_origin=BASE, is_cloud_fn=_is_cloud_tier,
+        bridge_provider_fn=_bridge_provider_for_tier, pin_origin_fn=_pinned_ollama_origin, lookup=lookup,
+        make_tier_generate_fn=_make_tier_generate, num_predict=num_predict, question=question,
+        render_model_error_fn=render_model_error, model_call_error_cls=ModelCallError,
+        post_fn=_post, pool_factory=owned_runtime_pool, max_workers=ENSEMBLE_MAX_MODELS,
+    )
 
     if not answers:
         return "ERROR: no model produced an answer.\n%s" % "\n".join(

@@ -109,7 +109,18 @@ class ModelContextMemory:
             )
         return True
 
-    def auto_window(self, model, context_length, parameter_size, residency_ceiling, *, cloud) -> int:
+    def auto_window(
+        self,
+        model,
+        context_length,
+        parameter_size,
+        residency_ceiling,
+        *,
+        cloud,
+        active_billions=None,
+        node_vram_bytes=None,
+        node_kv_cache_type=None,
+    ) -> int:
         """Choose the native window for a model the caller did not size.
 
         The context policy picks the automatic window (with the never-probed
@@ -124,7 +135,13 @@ class ModelContextMemory:
             model, context_length, parameter_size, cloud=cloud, pinned=pinned,
         )
         auto = context_policy.auto_context(
-            context_length, parameter_size, residency_ceiling, unavailable,
+            context_length,
+            parameter_size,
+            residency_ceiling,
+            unavailable,
+            active_billions=active_billions,
+            node_vram_bytes=node_vram_bytes,
+            node_kv_cache_type=node_kv_cache_type,
         )
         if cloud or pinned:
             return auto

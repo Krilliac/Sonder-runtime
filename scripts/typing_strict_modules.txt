@@ -410,6 +410,7 @@ sonder_runtime/bootstrap/legacy_seams.py
 sonder_runtime/bootstrap/main.py
 sonder_runtime/bootstrap/managed_http.py
 sonder_runtime/bootstrap/model_gateways.py
+sonder_runtime/bootstrap/pool_wiring.py
 sonder_runtime/bootstrap/provider_bindings.py
 sonder_runtime/bootstrap/security_eval_agent_tools.py
 sonder_runtime/bootstrap/typed_tools.py

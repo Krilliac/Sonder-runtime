@@ -214,6 +214,7 @@ _FALLBACK_HINT = (
 def ollama_only_reroute(
     gateway: object, payload: dict, rung, *, model: str, graph: object,
     loopback_endpoint: bool, context_probe: Callable[[], object],
+    allow_pool_workers: bool = False,
 ) -> dict | None:
     """The payload to serve on local Ollama instead of the bridge, or None.
 
@@ -265,7 +266,7 @@ def ollama_only_reroute(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on a local "
             "Ollama model, and this tier's model is hosted" % message
         )
-    if not loopback_endpoint:
+    if not loopback_endpoint and not allow_pool_workers:
         raise refuse(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on the "
             "loopback Ollama endpoint, and this one is remote" % message
