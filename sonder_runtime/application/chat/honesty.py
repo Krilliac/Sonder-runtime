@@ -209,7 +209,7 @@ class _ClaimScan:
             if noun is not None:
                 space = spaces.get(noun)
                 run = quoted.get(space) if space is not None else None
-                if run is not None:
+                if run is not None and space is not None:
                     candidates.append(self._first_boundary(max(run, resume), space))
                 if noun >= resume and _BOUNDARY_RE.match(text, noun):
                     candidates.append(noun)
@@ -366,8 +366,10 @@ def _first_occurrences(text: str, needles: Iterable[str]) -> dict[str, int]:
         # Once a needle is found, every needle on its out chain was found at
         # the same time, so the walk stops at the first one already found.
         while hit and ends[hit] not in first:
-            key = ends[hit]
-            first[key] = index + 1 - len(key)
+            end_key = ends[hit]
+            if end_key is None:
+                break
+            first[end_key] = index + 1 - len(end_key)
             remaining -= 1
             hit = out[hit]
     return {needle: first.get(keyed[needle], -1) for needle in distinct}
