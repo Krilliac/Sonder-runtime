@@ -415,6 +415,7 @@ sonder_runtime/domain/build/__init__.py
 sonder_runtime/domain/build/attribution.py
 sonder_runtime/domain/build/compile_db.py
 sonder_runtime/domain/build/tool_targets.py
+sonder_runtime/domain/campaign_corpus.py
 sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py
