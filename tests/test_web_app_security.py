@@ -417,7 +417,9 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
     * ``starved-first-reader``: the first bundle load stalls before it reads anything.
     * ``swap-mid-load``: at three swaps a load reads the pointer, then holds until the
       next swap has landed, then finishes, so the pointer changes under a load in
-      progress in both directions (r2 to r1 and r1 to r2).
+      progress in both directions (r2 to r1 and r1 to r2). Before arming each
+      hold, new requests pause and active requests drain so the cache is cleared
+      before a reader can hold its lock. Readers remain concurrent during loads.
     """
     from tests.web_app_fixtures import point_to
     web_app.clear_cache()
@@ -436,6 +438,10 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
     newest_began = [0]  # max "began" over observed, so the writer's wait stays O(1)
     errors: list[str] = []
     stop = threading.Event()
+    admission = threading.Condition()
+    admission_paused = [False]
+    active_requests = [0]
+    reader_waiting = threading.Event()
 
     hold_at = {3, 10, 21} if schedule == "swap-mid-load" else set()
     # Generation at which the next pointer read must hold its load. -1 = disarmed:
@@ -484,35 +490,50 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
         monkeypatch.setattr(web_app, "_read_json", read_pointer_then_hold)
 
     def request() -> None:
-        local.held = None
-        with swaps:
-            began = landed[0]
-        load = web_app.cached_bundle(tmp_path)
-        if not load.ok:
-            # Windows can refuse the read while os.replace is in flight; that
-            # failure is transient and never cached (test below).
-            if not load.transient:
-                errors.append(load.message)
-            return
-        assert load.bundle is not None
-        release = load.bundle.release_dir
-        result = web_app.resolve_request("/app/main.dart.js", load)
-        if result.kind != "file" or result.path is None:
-            errors.append(result.kind)
-        else:
-            body = result.path.read_bytes()
-            if (not result.path.is_relative_to(release)
-                    or body != main_js.get(release.name)
-                    or hashlib.sha256(body).hexdigest()
-                    != load.bundle.files["main.dart.js"].sha256):
-                errors.append(f"{release.name} served main.dart.js from {result.path} "
-                              "that does not match the answering bundle's manifest")
-        with swaps:
-            observed.append((began, begun[0], release.name))
-            if local.held is not None:
-                straddles.append((*local.held, began, begun[0], release.name))
-            newest_began[0] = max(newest_began[0], began)
-            swaps.notify_all()
+        with admission:
+            if admission_paused[0]:
+                reader_waiting.set()
+            if not admission.wait_for(
+                    lambda: not admission_paused[0] or stop.is_set(), timeout=10):
+                errors.append("request admission did not resume")
+                return
+            if stop.is_set():
+                return
+            active_requests[0] += 1
+        try:
+            local.held = None
+            with swaps:
+                began = landed[0]
+            load = web_app.cached_bundle(tmp_path)
+            if not load.ok:
+                # Windows can refuse the read while os.replace is in flight; that
+                # failure is transient and never cached (test below).
+                if not load.transient:
+                    errors.append(load.message)
+                return
+            assert load.bundle is not None
+            release = load.bundle.release_dir
+            result = web_app.resolve_request("/app/main.dart.js", load)
+            if result.kind != "file" or result.path is None:
+                errors.append(result.kind)
+            else:
+                body = result.path.read_bytes()
+                if (not result.path.is_relative_to(release)
+                        or body != main_js.get(release.name)
+                        or hashlib.sha256(body).hexdigest()
+                        != load.bundle.files["main.dart.js"].sha256):
+                    errors.append(f"{release.name} served main.dart.js from {result.path} "
+                                  "that does not match the answering bundle's manifest")
+            with swaps:
+                observed.append((began, begun[0], release.name))
+                if local.held is not None:
+                    straddles.append((*local.held, began, begun[0], release.name))
+                newest_began[0] = max(newest_began[0], began)
+                swaps.notify_all()
+        finally:
+            with admission:
+                active_requests[0] -= 1
+                admission.notify_all()
 
     def reader() -> None:
         while not stop.is_set():
@@ -550,12 +571,25 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
                     raise AssertionError(
                         f"no request completed after swap {generation} to {name}: {errors[:3]}")
             if generation in hold_at:
-                # Swap `generation` has been observed.  Now make the next load read this
-                # pointer and hold, and make the next swap while it holds.  The cache is
-                # cleared outside the condition because a held load owns the cache lock.
-                with swaps:
-                    armed[0] = generation
-                web_app.clear_cache()
+                # Drain active loads before clearing and arming: an armed reader owns
+                # the cache lock while it waits for the writer's next swap. A reader
+                # attempts admission during preparation, proving this gate is exercised.
+                with admission:
+                    reader_waiting.clear()
+                    admission_paused[0] = True
+                try:
+                    with admission:
+                        if not admission.wait_for(lambda: active_requests[0] == 0, timeout=10):
+                            raise AssertionError(f"active requests did not drain after swap {generation}")
+                    if not reader_waiting.wait(10):
+                        raise AssertionError(f"no reader attempted paused admission after swap {generation}")
+                    web_app.clear_cache()
+                    with swaps:
+                        armed[0] = generation
+                finally:
+                    with admission:
+                        admission_paused[0] = False
+                        admission.notify_all()
                 with swaps:
                     if not swaps.wait_for(
                             lambda generation=generation: held[0] == generation, timeout=10):
@@ -563,6 +597,9 @@ def test_concurrent_requests_during_swap_never_see_a_half_loaded_bundle(
                             f"no load read the pointer after swap {generation}: {errors[:3]}")
     finally:
         stop.set()
+        with admission:
+            admission_paused[0] = False
+            admission.notify_all()
         for thread in threads:
             thread.join(10)
     assert not any(thread.is_alive() for thread in threads)
