@@ -641,6 +641,17 @@ class ChatController extends ChangeNotifier {
 
   bool _rotated(String threadId) => (_sessions[threadId] ?? 0) > 0;
 
+  /// The loaded conversation whose thread id or server session id is
+  /// [sessionId] (a shared link or code names the session), else null.
+  ChatThread? threadForSession(String sessionId) {
+    for (final thread in _threads) {
+      if (thread.id == sessionId || sessionFor(thread.id) == sessionId) {
+        return thread;
+      }
+    }
+    return null;
+  }
+
   Future<void> _rotateSession(String threadId) async {
     _sessions[threadId] = (_sessions[threadId] ?? 0) + 1;
     try {
