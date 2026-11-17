@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from sonder_runtime.domain.ensemble_synthesis import (
+    is_code_synthesis_prompt,
+    strip_code_fences,
+)
+
 
 SUMMARY_TRUNCATED_MARKER = "(summary truncated at the output limit)"
 DEFAULT_SYNTHESIS_NUM_PREDICT = 2048
@@ -93,7 +98,10 @@ def generate_synthesis(
     generator: Callable[[str], str], prompt: str,
 ) -> str:
     """Call a generator already configured with its bounded output budget."""
-    return append_truncation_marker(generator(prompt), generator=generator)
+    text = generator(prompt)
+    if is_code_synthesis_prompt(prompt):
+        text = strip_code_fences(text)
+    return append_truncation_marker(text, generator=generator)
 
 
 __all__ = [

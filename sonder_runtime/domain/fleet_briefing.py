@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+
+
+_NUMBERED_LINE_RE = re.compile(r"^\s*(?:\((\d+)\)|(\d+)[.)])\s+(.+?)\s*$")
+_BULLET_LINE_RE = re.compile(r"^\s*[-*\u2022]\s+(.+?)\s*$")
+_INLINE_NUMBER_RE = re.compile(r"(?:(?<=^)|(?<=[\s:;,-]))(?:\((\d+)\)|(\d+)[.)])\s+")
 
 
 _ROUTING_PREFIX = re.compile(
@@ -112,11 +118,110 @@ def format_plan(
     return summary
 
 
+def extract_subtasks(task: str) -> tuple[str, ...]:
+    """Extract explicit list/sub-topic items from *task* when >= 2 distinct items exist."""
+    raw = str(task or "").strip()
+    if not raw:
+        return ()
+
+    # 1. Multi-line numbered items (1. / 1) / (1)), with optional indented continuations.
+    numbered: list[str] = []
+    in_list = False
+    for line in raw.splitlines():
+        match = _NUMBERED_LINE_RE.match(line)
+        if match:
+            numbered.append(match.group(3).strip())
+            in_list = True
+        elif in_list and numbered and line.strip() and line[:1].isspace():
+            numbered[-1] = f"{numbered[-1]} {line.strip()}"
+        else:
+            in_list = False
+    if len(numbered) >= 2:
+        return tuple(numbered)
+
+    # 2. Multi-line bulleted items (- / * / •).
+    bullets: list[str] = []
+    in_bullets = False
+    for line in raw.splitlines():
+        match = _BULLET_LINE_RE.match(line)
+        if match:
+            bullets.append(match.group(1).strip())
+            in_bullets = True
+        elif in_bullets and bullets and line.strip() and line[:1].isspace():
+            bullets[-1] = f"{bullets[-1]} {line.strip()}"
+        else:
+            in_bullets = False
+    if len(bullets) >= 2:
+        return tuple(bullets)
+
+    # 3. Inline consecutive numbered items: "(1) A, (2) B, (3) C" or "1. A 2. B".
+    matches = list(_INLINE_NUMBER_RE.finditer(raw))
+    if len(matches) >= 2:
+        nums = [int(m.group(1) or m.group(2)) for m in matches]
+        if nums == list(range(1, len(nums) + 1)):
+            inline: list[str] = []
+            for idx, m in enumerate(matches):
+                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+                chunk = raw[m.end():end].strip().rstrip(",;")
+                if chunk:
+                    inline.append(chunk)
+            if len(inline) >= 2:
+                return tuple(inline)
+
+    # 4. Semicolon-separated list (single-line or after an intro colon).
+    body = raw.split(":", 1)[1].strip() if ":" in raw and "\n" not in raw else raw
+    if ";" in body and "\n" not in body:
+        semi = [part.strip() for part in body.split(";") if part.strip()]
+        if len(semi) >= 2 and all(len(part) <= 200 for part in semi):
+            return tuple(semi)
+
+    # 5. Colon-introduced comma/and list on one line: "Audit: auth, billing, and search".
+    if ":" in raw and "\n" not in raw:
+        tail = raw.rsplit(":", 1)[1].strip().rstrip(".")
+        if "," in tail and "://" not in tail and "." not in tail:
+            raw_parts = [part.strip() for part in tail.split(",") if part.strip()]
+            if len(raw_parts) >= 2:
+                last = raw_parts[-1]
+                if last.lower().startswith("and "):
+                    raw_parts[-1] = last[4:].strip()
+                elif " and " in last and len(raw_parts) >= 2:
+                    head_part, tail_part = last.split(" and ", 1)
+                    raw_parts[-1:] = [head_part.strip(), tail_part.strip()]
+                cleaned = [part for part in raw_parts if part and len(part) <= 80]
+                if len(cleaned) >= 2 and len(cleaned) == len(raw_parts):
+                    return tuple(cleaned)
+
+    return ()
+
+
+def assign_subtasks(items: Sequence[str], count: int) -> tuple[str, ...]:
+    """Distribute *items* deterministically across *count* workers."""
+    if count <= 1 or len(items) < 2:
+        return ()
+    total = len(items)
+    if total >= count:
+        base, extra = divmod(total, count)
+        assigned: list[str] = []
+        cursor = 0
+        for index in range(count):
+            size = base + (1 if index < extra else 0)
+            chunk = items[cursor:cursor + size]
+            cursor += size
+            assigned.append(chunk[0] if len(chunk) == 1 else "; ".join(chunk))
+        return tuple(assigned)
+    return tuple(items[index % total] for index in range(count))
+
+
 def subtask_prompts(
     task: str, count: int, *, tool_access: bool = False, project: str = "",
     objective_contracts=(), protected: bool = False, build_projects=(),
 ) -> list[str]:
     """Keep protected/single-worker bytes stable; vary ordinary shared tasks."""
+    subtasks = (
+        assign_subtasks(extract_subtasks(task), count)
+        if count > 1 and not protected and not objective_contracts
+        else ()
+    )
     prompts = []
     for i in range(count):
         if build_projects:
@@ -185,6 +290,11 @@ def subtask_prompts(
                 angle = f"{_ANGLES[i % len(_ANGLES)]} {_LENSES[(i // len(_ANGLES)) % len(_LENSES)]}"
             prompt = (
                 block + "\n\n" + instructions
+                + (
+                    f"\n\nAssigned subtask {i + 1}/{count}: Focus specifically on: {subtasks[i]} "
+                    "(cover your assigned item(s) thoroughly without duplicating other workers' assigned items)."
+                    if subtasks else ""
+                )
                 + f"\n\nAngle {i + 1}/{count}: {angle}"
                 + " Follow this angle only where compatible with the authoritative task."
                 + boundary
