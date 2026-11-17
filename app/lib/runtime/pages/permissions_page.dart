@@ -84,6 +84,24 @@ class _PermissionModeSection extends StatelessWidget {
         description: mode.blurb.isEmpty ? null : mode.blurb,
         value: mode.displayLabel,
       ));
+      if (mode.mode == PermissionMode.bypass) {
+        rows.add(const RuntimePanelNote(
+          key: Key('permission-bypass-active'),
+          status: StatusKind.warn,
+          word: 'bypass',
+          text: 'Bypass mode is active — tool confirmations and filesystem '
+              'root restrictions are bypassed for this session.',
+        ));
+      }
+      if (mode.canBypass) {
+        rows.add(ValueRow(
+          key: const Key('permission-bypass-row'),
+          label: 'Bypass mode',
+          description: 'Admin-only mode that skips confirmations and root '
+              'containment; requires explicit confirmation to enable.',
+          value: mode.mode == PermissionMode.bypass ? 'Active' : 'Available',
+        ));
+      }
       rows.add(ValueRow(
         key: const Key('permission-privilege'),
         label: 'Privilege',
@@ -104,16 +122,22 @@ class _PermissionModeSection extends StatelessWidget {
         ));
       }
     }
+    final isUserAccount = mode != null &&
+        !mode.canBypass &&
+        s._approvalsError is SonderException &&
+        (s._approvalsError as SonderException).httpStatus == 403;
     rows.add(SettingRow(
       label: 'Change the mode',
-      description: change != null
-          ? 'Raising it asks you to confirm first.'
-          : 'Use the mode chip under the chat composer, Shift+Tab in Chat, '
-              'or /mode. Raising it asks you to confirm first.',
+      description: isUserAccount
+          ? 'Only an administrator can change the mode.'
+          : change != null
+              ? 'Raising it asks you to confirm first.'
+              : 'Use the mode chip under the chat composer, Shift+Tab in Chat, '
+                  'or /mode. Raising it asks you to confirm first.',
       trailing: change != null
           ? OutlinedButton(
               key: const Key('permission-mode-change'),
-              onPressed: change,
+              onPressed: isUserAccount ? null : change,
               child: const Text('Change mode…'),
             )
           : shell != null
