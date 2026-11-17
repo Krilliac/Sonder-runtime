@@ -975,3 +975,21 @@ def test_a_local_response_records_a_rate_that_fits_the_next_call(monkeypatch):
 
     assert seen[0][0] == MINIMUM and seen[0][1] is not False
     assert seen[1] == (900, False)
+
+
+def test_room_to_retry_caps_4096_retry_to_remaining_timeout_budget():
+    # Observed 2026-11-17: 1024-token first attempt at 11.3 tok/s took ~98s;
+    # retrying at 4096 tokens exceeded the 300s timeout (~362s).
+    model_pace.observe("slow35b", {"eval_count": 1024, "eval_duration": 90_619_469_026})
+    caller = _payload(1024)
+    headroom = _payload(4096)
+
+    retried = model_pace.room_to_retry(caller, headroom, caller, "slow35b", 300, elapsed_seconds=98)
+
+    assert retried is not caller
+    assert retried["options"]["num_predict"] < 4096
+    assert retried["options"]["num_predict"] == int(11.3 * 202 * PACE_MARGIN)
+
+    # When remaining time cannot even exceed current budget, do not retry with more tokens.
+    no_room = model_pace.room_to_retry(caller, headroom, caller, "slow35b", 300, elapsed_seconds=250)
+    assert no_room is caller

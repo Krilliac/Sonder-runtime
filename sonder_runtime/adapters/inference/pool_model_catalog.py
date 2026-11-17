@@ -9,8 +9,11 @@ fetch, non-chat check) so this module performs no network I/O itself.
 from __future__ import annotations
 
 import http.client
+import logging
+import socket
 import threading
 import time
+import urllib.error
 from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +24,8 @@ from ...domain.model_catalog import catalog_records, resolve_record
 # Transport-shaped failures of a per-member tag read (URLError is an OSError;
 # a bad JSON body is a ValueError).  Programming errors are deliberately absent.
 _TRANSPORT_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+logger = logging.getLogger(__name__)
 
 
 class PinStatus(str, Enum):
@@ -95,6 +100,76 @@ class PoolCatalogCache:
             self._entries.clear()
 
 
+def _is_unreachable_error(error: BaseException) -> bool:
+    """True only when the primary host could not be reached, never when busy."""
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return False
+    name = type(error).__name__
+    if name in ("GpuAdmissionRefused", "WorkerPoolBackpressure", "WorkerPoolDraining"):
+        return False
+    if isinstance(error, urllib.error.URLError):
+        if name == "WorkerPoolUnavailable":
+            return True
+        reason = getattr(error, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return False
+        if isinstance(reason, str) and "timed out" in reason.lower():
+            return False
+        return True
+    return isinstance(
+        error,
+        (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+    )
+
+
+def discovery_tags(
+    pool: Any,
+    get_tags: Callable[[], object],
+    fetch_member_tags: Callable[[str], object],
+    *,
+    host_origin: str | None = None,
+) -> object:
+    """The ``/api/tags`` payload that decides which models are *known*.
+
+    A pooled ``get_tags`` read describes whichever single member the scheduler
+    picked, so a busy member's models would flicker out of the catalog.  With
+    the pool enabled and ``host_origin is None``, read the union over every
+    routable member (skipping open-circuit workers); the primary wins a name
+    several members hold.
+
+    ``host_origin`` narrows a pooled read to that one member (this host), which
+    keeps lanes that must not gain a worker-only name deterministic.  When that
+    member is not an admissible pool member (e.g. an external roster without
+    ``local_fallback``), or its read fails because the host is unreachable
+    (connection refused/reset, ``WorkerPoolUnavailable``), the pooled
+    ``get_tags`` read is used.  Busy errors (``TimeoutError``,
+    ``GpuAdmissionRefused``, ``WorkerPoolBackpressure``) are NEVER treated as
+    unreachable and re-raise directly so a busy primary does not fall back to a
+    worker's narrower catalog.
+    """
+    if pool is not None and pool.enabled:
+        if host_origin is None:
+            union = pool.catalog_union(fetch_member_tags, routable_only=True)
+            if isinstance(union, Mapping) and union.get("models"):
+                return union
+            return {"models": []}
+        if pool.catalog_member(host_origin):
+            try:
+                return fetch_member_tags(host_origin)
+            except Exception as error:
+                if not _is_unreachable_error(error):
+                    raise
+                logger.warning(
+                    "host catalog read failed (%s); falling back to pooled read",
+                    type(error).__name__,
+                )
+        else:
+            logger.info(
+                "host origin is not an admissible pool member; using pooled catalog read",
+            )
+    return get_tags()
+
+
 def resolve_model_pin(
     selector: object,
     *,
@@ -148,3 +223,55 @@ def resolve_model_pin(
             return PinResolution(PinStatus.CATALOG_UNAVAILABLE)
         return PinResolution(endpoint_verdict)
     return verdict
+
+
+def pool_model_capabilities(pool: Any) -> dict[str, dict[str, Any]]:
+    """Aggregate per-model capability metadata from cached pool snapshots.
+
+    Collects known origins, currently resident origins, highest advertised
+    context window, tool-calling support, and MoE active-parameter counts
+    without triggering synchronous probes.
+    """
+    if pool is None or not callable(getattr(pool, "snapshots", None)):
+        return {}
+    aggregated: dict[str, dict[str, Any]] = {}
+    for snap in pool.snapshots():
+        if not getattr(snap, "healthy", False):
+            continue
+        models = getattr(snap, "models", ()) or ()
+        loaded_keys = {
+            str(m).strip().casefold()
+            for m in (getattr(snap, "loaded_models", ()) or ())
+            if str(m).strip()
+        }
+        contexts = getattr(snap, "model_contexts", {}) or {}
+        tools_map = getattr(snap, "supports_tools", {}) or {}
+        active_map = getattr(snap, "model_active_billions", {}) or {}
+        for model_name in models:
+            entry = aggregated.setdefault(
+                model_name,
+                {
+                    "origins": [],
+                    "resident_origins": [],
+                    "max_context": None,
+                    "supports_tools": None,
+                    "active_billions": None,
+                },
+            )
+            if snap.origin not in entry["origins"]:
+                entry["origins"].append(snap.origin)
+            if model_name.strip().casefold() in loaded_keys and snap.origin not in entry["resident_origins"]:
+                entry["resident_origins"].append(snap.origin)
+            ctx = contexts.get(model_name)
+            if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+                if entry["max_context"] is None or ctx > entry["max_context"]:
+                    entry["max_context"] = ctx
+            if model_name in tools_map and isinstance(tools_map[model_name], bool):
+                entry["supports_tools"] = (
+                    True if entry["supports_tools"] is True or tools_map[model_name] else False
+                )
+            active_val = active_map.get(model_name)
+            if isinstance(active_val, (int, float)) and not isinstance(active_val, bool) and active_val > 0:
+                if entry["active_billions"] is None:
+                    entry["active_billions"] = float(active_val)
+    return aggregated

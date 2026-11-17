@@ -464,6 +464,103 @@ def _bind_ollama_ca_bundle(config, ollama_endpoint) -> str | None:
     return None
 
 
+def _canonical_ollama_model_names(payload: Mapping[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for item in payload.get("models") or ():
+        if not isinstance(item, Mapping):
+            continue
+        raw = str(item.get("name") or item.get("model") or "").strip().casefold()
+        if not raw:
+            continue
+        names.add(raw)
+        if raw.endswith(":latest"):
+            names.add(raw[:-7])
+    return names
+
+
+def _missing_ollama_tier_models(payload: Mapping[str, Any], *, env=None) -> list[str]:
+    """Return ``['tier (model)', ...]`` for configured Ollama tiers missing from ``payload``."""
+    import os
+
+    source = os.environ if env is None else env
+    try:
+        from sonder_runtime.adapters import runtime_policy
+        from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
+        from sonder_runtime.domain.model_routing import is_cloud_model_name
+    except Exception:  # noqa: BLE001 - optional guard
+        return []
+    tier_env = {
+        "fast": "SONDER_FAST",
+        "code": "SONDER_CODE",
+        "general": "SONDER_GENERAL",
+        "reasoning": "SONDER_REASONING",
+        "vision": "SONDER_VISION",
+    }
+    configured: dict[str, str] = {}
+    if runtime_policy.policy_path().is_file():
+        try:
+            policy = runtime_policy.load(create=False)
+        except Exception:  # noqa: BLE001
+            policy = {}
+        local_models = policy.get("local_models") if isinstance(policy, Mapping) else None
+        if isinstance(local_models, Mapping):
+            for tier, model in local_models.items():
+                if isinstance(model, str) and model.strip():
+                    configured[str(tier)] = model.strip()
+    for tier, key in tier_env.items():
+        val = str(source.get(key, "") or "").strip()
+        if val:
+            configured[tier] = val
+    if not configured:
+        return []
+    try:
+        bindings = provider_bindings_from_env(source)
+    except ValueError:
+        return []
+    installed = _canonical_ollama_model_names(payload)
+    missing: list[str] = []
+    for tier, model in sorted(configured.items()):
+        if is_cloud_model_name(model):
+            continue
+        provider = bindings.tier_providers.get(tier, bindings.default_generation_provider)
+        fallback = bindings.fallbacks.get(provider)
+        if provider != "ollama" and fallback != "ollama":
+            continue
+        key = model.casefold()
+        if key not in installed and (":" in key or f"{key}:latest" not in installed):
+            missing.append(f"{tier} ({model})")
+    return missing
+
+
+def _missing_sonder_inference_tier_models(gateway, bindings) -> list[str]:
+    """Return ``['tier (model)', ...]`` for bound Inference tiers absent from health."""
+    try:
+        settings = gateway.settings()
+        snap = gateway.health(settings=settings)
+    except Exception:  # noqa: BLE001
+        return []
+    models = (snap.document or {}).get("models") if snap.document else None
+    if not isinstance(models, list):
+        return []
+    served = {
+        item.get("id")
+        for item in models
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    if not served:
+        return []
+    tier_map = gateway.served_tier_models().get("sonder_inference", {})
+    missing: list[str] = []
+    for tier, model in sorted(tier_map.items()):
+        if bindings.tier_providers.get(tier) != "sonder_inference":
+            continue
+        if not model or model == "default":
+            continue
+        if model not in served:
+            missing.append(f"{tier} ({model})")
+    return missing
+
+
 def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     """Probe Ollama reachability read-only via GET /api/tags."""
     config = config if config is not None else _load_config_or_none()
@@ -511,6 +608,14 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
                     "detail": (
                         "%s: reachable, no models installed "
                         "(run setup_alias.py)" % host
+                    ),
+                }
+            missing_tiers = _missing_ollama_tier_models(payload)
+            if missing_tiers:
+                return {
+                    "status": STATUS_WARN,
+                    "detail": "%s: %d models; missing configured tier model(s): %s" % (
+                        host, models, _bounded_join(missing_tiers),
                     ),
                 }
             return {
@@ -779,6 +884,14 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
                 "status": STATUS_WARN,
                 "detail": detail + " -- MOCK backend: synthetic output, not a "
                 "quality or performance signal",
+            }
+        missing_tiers = _missing_sonder_inference_tier_models(gateway, bindings)
+        if missing_tiers:
+            return {
+                "status": STATUS_WARN,
+                "detail": "%s -- missing configured tier model(s): %s" % (
+                    detail, _bounded_join(missing_tiers),
+                ),
             }
         return {"status": STATUS_OK, "detail": detail}
     if readiness.kind == "overloaded":

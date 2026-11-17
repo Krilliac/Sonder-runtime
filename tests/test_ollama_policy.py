@@ -55,3 +55,16 @@ def test_policy_error_logs_and_messages_never_carry_the_origin(caplog, monkeypat
     assert caplog.records
     for needle in ("secretpw", "user:", "models.test", "127.0.0.1"):
         assert needle not in text
+
+
+def test_remote_acceptance_warning_is_logged_once_per_origin(caplog, monkeypatch):
+    monkeypatch.delenv(ollama_policy.REMOTE_OPT_IN, raising=False)
+    with ollama_policy._LOG_LOCK:
+        ollama_policy._LOGGED_ORIGINS.clear()
+    name = "sonder_runtime.domain.ollama_policy"
+    with caplog.at_level(logging.WARNING, logger=name):
+        assert ollama_policy.policy_error("https://probe.example:8443", allow_remote=True) == ""
+        assert ollama_policy.policy_error("https://probe.example:8443", allow_remote=True) == ""
+        assert ollama_policy.policy_error("https://probe.example:8443", allow_remote=True) == ""
+    warnings = [r for r in caplog.records if "remote Ollama origin accepted" in r.getMessage()]
+    assert len(warnings) == 1

@@ -313,3 +313,36 @@ def test_server_wrapper_uses_active_process_gate_and_current_dispatcher(monkeypa
 
     assert seen[:3] == ["code", "reasoning", "cloud-general"]
     assert "cloud-general" in output
+
+
+def test_trivial_equation_agreement_passes_both_judge_and_heuristic():
+    def ask_with_failed_judge(prompt, tier):
+        if prompt.startswith("Do these answers agree"):
+            return "ERROR: judge unavailable"
+        return {"code": "7 * 8 = 56", "reasoning": "56"}[tier]
+
+    heuristic = consult_module.consult("What is 7 * 8?", _LOCAL_PAIR, ask_fn=ask_with_failed_judge)
+    assert heuristic["agree"] is True
+
+    def ask_with_prose_no(prompt, tier):
+        if prompt.startswith("Do these answers agree"):
+            return "YES.\nThere is no disagreement; both give 56."
+        return {"code": "7 * 8 = 56", "reasoning": "56"}[tier]
+
+    judged = consult_module.consult("What is 7 * 8?", _LOCAL_PAIR, ask_fn=ask_with_prose_no)
+    assert judged["agree"] is True
+    assert judged["confidence"] == "high"
+
+    disagree = consult_module.consult(
+        "What is 7 * 8?",
+        _LOCAL_PAIR,
+        ask_fn=lambda p, t: "ERROR: no judge" if p.startswith("Do these") else {"code": "7 * 8 = 56", "reasoning": "54"}[t],
+    )
+    assert disagree["agree"] is False
+
+    negated = consult_module.consult(
+        "What is 7 * 8?",
+        _LOCAL_PAIR,
+        ask_fn=lambda p, t: "ERROR: no judge" if p.startswith("Do these") else {"code": "The answer is not 56", "reasoning": "56"}[t],
+    )
+    assert negated["agree"] is False
