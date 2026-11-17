@@ -18,12 +18,13 @@ from sonder_runtime.platform.runtime_threads import (
 )
 
 import base64
+from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 import contextvars
 import hashlib
 import hmac
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import http.client
 import importlib
@@ -36,7 +37,8 @@ import re
 import ssl
 import threading
 import time
-from typing import Callable, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
@@ -593,6 +595,40 @@ class WorkerCapabilities:
     models: tuple[str, ...]
     observed_at: float
     effective_max_inflight: int
+    model_contexts: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    loaded_models: tuple[str, ...] = ()
+    vram_bytes: int | None = None
+    ram_bytes: int | None = None
+    kv_cache_type: str | None = None
+    supports_tools: Mapping[str, bool] = field(default_factory=lambda: MappingProxyType({}))
+    model_active_billions: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    model_metadata: Mapping[str, Mapping[str, Any]] = field(default_factory=lambda: MappingProxyType({}))
+
+    @staticmethod
+    def _lookup_mapping(mapping: Mapping[str, Any], model: str | None):
+        if not model or not mapping:
+            return None
+        if model in mapping:
+            return mapping[model]
+        target = _model_key(model)
+        for candidate, value in mapping.items():
+            if _model_key(candidate) == target:
+                return value
+        return None
+
+    def context_for(self, model: str | None) -> int | None:
+        value = self._lookup_mapping(self.model_contexts, model)
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+    def model_supports_tools(self, model: str | None) -> bool | None:
+        value = self._lookup_mapping(self.supports_tools, model)
+        return value if isinstance(value, bool) else None
+
+    def active_billions_for(self, model: str | None) -> float | None:
+        value = self._lookup_mapping(self.model_active_billions, model)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            return float(value)
+        return None
 
 
 @dataclass(frozen=True)
@@ -615,6 +651,14 @@ class WorkerSnapshot:
     trips: int = 0
     probing: bool = False
     inference_ewma_ms: float | None = None
+    model_contexts: dict[str, int] = field(default_factory=dict)
+    loaded_models: tuple[str, ...] = ()
+    vram_bytes: int | None = None
+    ram_bytes: int | None = None
+    kv_cache_type: str | None = None
+    supports_tools: dict[str, bool] = field(default_factory=dict)
+    model_active_billions: dict[str, float] = field(default_factory=dict)
+    model_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def ewma_latency_ms(self):
@@ -641,6 +685,14 @@ class WorkerSnapshot:
             "probing": self.probing,
             "ewma_latency_ms": self.latency_ewma_ms or 0.0,
             "inference_ewma_ms": self.inference_ewma_ms,
+            "model_contexts": dict(self.model_contexts),
+            "loaded_models": list(self.loaded_models),
+            "vram_bytes": self.vram_bytes,
+            "ram_bytes": self.ram_bytes,
+            "kv_cache_type": self.kv_cache_type,
+            "supports_tools": dict(self.supports_tools),
+            "model_active_billions": dict(self.model_active_billions),
+            "model_metadata": dict(self.model_metadata),
         }
 
 
@@ -730,15 +782,164 @@ def _model_names(payload) -> tuple[str, ...]:
     return tuple(sorted(set(names)))
 
 
+_SHOW_CACHE_LIMIT = 512
+_SHOW_FETCHES_PER_PROBE = 8
+_KV_CACHE_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"})
+
+
+def _positive_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and value > 0:
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            parsed = int(text)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _parse_billions(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+        if not math.isfinite(num) or num <= 0:
+            return None
+        return round(num / 1e9, 3) if num >= 1_000_000 else round(num, 3)
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([BM]?)$", text)
+    if not match:
+        return None
+    num = float(match.group(1))
+    unit = match.group(2)
+    if not math.isfinite(num) or num <= 0:
+        return None
+    if unit == "M":
+        return round(num / 1000.0, 3)
+    return round(num, 3)
+
+
+def _parse_moe_active_billions(
+    model_name: str,
+    details: Mapping[str, Any] | None,
+    model_info: Mapping[str, Any] | None,
+) -> float | None:
+    if isinstance(model_info, Mapping):
+        for key, raw in model_info.items():
+            lowered = str(key).casefold()
+            if lowered.endswith((".active_parameters", ".active_parameter_count", ".active_billions")):
+                parsed = _parse_billions(raw)
+                if parsed is not None:
+                    return parsed
+    if isinstance(details, Mapping):
+        parsed = _parse_billions(details.get("active_parameter_size"))
+        if parsed is not None:
+            return parsed
+    moe_tag = re.search(r"(?:^|[:\-_])a(\d+(?:\.\d+)?)b(?=$|[:\-_])", str(model_name or ""), re.IGNORECASE)
+    if moe_tag:
+        parsed = _parse_billions(moe_tag.group(1))
+        if parsed is not None:
+            return parsed
+    if isinstance(model_info, Mapping) and isinstance(details, Mapping):
+        expert_count = None
+        expert_used = None
+        for key, raw in model_info.items():
+            lowered = str(key).casefold()
+            if lowered.endswith(".expert_count"):
+                expert_count = _positive_int_value(raw)
+            elif lowered.endswith(".expert_used_count"):
+                expert_used = _positive_int_value(raw)
+        total = _parse_billions(details.get("parameter_size"))
+        if expert_count and expert_used and expert_count > 1 and total:
+            return round(max(0.5, total * (expert_used / expert_count)), 3)
+    return None
+
+
+def _parse_show_context_length(show_payload: Mapping[str, Any]) -> int | None:
+    model_info = show_payload.get("model_info")
+    if isinstance(model_info, Mapping):
+        for key, raw in model_info.items():
+            if str(key).casefold().endswith(".context_length"):
+                parsed = _positive_int_value(raw)
+                if parsed is not None:
+                    return parsed
+    parameters = show_payload.get("parameters")
+    if isinstance(parameters, str):
+        for line in parameters.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[0].casefold() == "num_ctx":
+                parsed = _positive_int_value(parts[1])
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def _extract_show_metadata(
+    model_name: str,
+    tag_entry: Mapping[str, Any] | None,
+    show_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    details = {}
+    if isinstance(tag_entry, Mapping) and isinstance(tag_entry.get("details"), Mapping):
+        details.update(tag_entry["details"])
+    if isinstance(show_payload, Mapping) and isinstance(show_payload.get("details"), Mapping):
+        details.update(show_payload["details"])
+    model_info = show_payload.get("model_info") if isinstance(show_payload, Mapping) else None
+    capabilities_raw = show_payload.get("capabilities") if isinstance(show_payload, Mapping) else None
+    capabilities = tuple(
+        sorted({str(item).strip().casefold() for item in capabilities_raw if str(item).strip()})
+    ) if isinstance(capabilities_raw, (list, tuple, set, frozenset)) else ()
+    supports_tools: bool | None = ("tools" in capabilities) if capabilities else None
+    context_length = _parse_show_context_length(show_payload) if isinstance(show_payload, Mapping) else None
+    parameter_billions = _parse_billions(details.get("parameter_size"))
+    active_billions = _parse_moe_active_billions(model_name, details, model_info)
+    meta: dict[str, Any] = {}
+    if context_length is not None:
+        meta["context_length"] = context_length
+    if supports_tools is not None:
+        meta["supports_tools"] = supports_tools
+    if capabilities:
+        meta["capabilities"] = list(capabilities)
+    if parameter_billions is not None:
+        meta["parameter_billions"] = parameter_billions
+    if active_billions is not None:
+        meta["active_billions"] = active_billions
+    digest = str(tag_entry.get("digest") or "").strip() if isinstance(tag_entry, Mapping) else ""
+    if digest:
+        meta["digest"] = digest[:96]
+    return meta
+
+
 def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open_url=None):
-    """Build a bounded prober using the same no-proxy/no-redirect transport."""
+    """Build a bounded prober using the same no-proxy/no-redirect transport.
+
+    Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps``, and lazy
+    per-``(origin, model, digest)`` cached ``/api/show`` metadata without
+    failing if optional endpoints are unavailable.
+    """
     ollama_endpoint = importlib.import_module(
         "sonder_runtime.adapters.inference.ollama_endpoint"
     )
+    show_cache: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
+    show_lock = threading.Lock()
 
-    def read(origin: str, path: str) -> dict:
+    def read(
+        origin: str,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Mapping[str, Any] | None = None,
+    ) -> dict:
         transport = open_url or ollama_endpoint.open_url
-        request = urllib.request.Request(origin + path, method="GET")
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"} if data is not None else {}
+        request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
@@ -752,6 +953,36 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             raise ValueError("capability response must be an object")
         return payload
 
+    def read_show_cached(
+        origin: str,
+        model_name: str,
+        *,
+        digest: str = "",
+        tag_entry: Mapping[str, Any] | None = None,
+        allow_fetch: bool = True,
+    ) -> dict[str, Any]:
+        cache_key = (origin, model_name, digest)
+        with show_lock:
+            cached = show_cache.get(cache_key)
+            if cached is not None:
+                show_cache.move_to_end(cache_key)
+                return dict(cached)
+        if not allow_fetch:
+            return _extract_show_metadata(model_name, tag_entry, None)
+        show_payload: dict | None = None
+        try:
+            show_payload = read(origin, "/api/show", method="POST", body={"model": model_name})
+        except Exception:
+            show_payload = None
+        meta = _extract_show_metadata(model_name, tag_entry, show_payload)
+        if show_payload is not None:
+            with show_lock:
+                show_cache[cache_key] = dict(meta)
+                show_cache.move_to_end(cache_key)
+                while len(show_cache) > _SHOW_CACHE_LIMIT:
+                    show_cache.popitem(last=False)
+        return meta
+
     def probe(origin: str) -> dict:
         try:
             version = read(origin, "/api/version")
@@ -762,12 +993,115 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
                 raise
             version = {"version": "unknown"}
         tags = read(origin, "/api/tags")
-        return {
+        models = _model_names(tags)
+        tag_entries: dict[str, Mapping[str, Any]] = {}
+        raw_tags = tags.get("models") if isinstance(tags, Mapping) else None
+        if isinstance(raw_tags, list):
+            for entry in raw_tags:
+                if isinstance(entry, Mapping):
+                    name = str(entry.get("name") or entry.get("model") or "").strip()
+                    if name and name not in tag_entries:
+                        tag_entries[name] = entry
+
+        ps_payload: Mapping[str, Any] | None = None
+        try:
+            ps_payload = read(origin, "/api/ps")
+        except Exception:
+            ps_payload = None
+
+        loaded_models: list[str] = []
+        ps_contexts: dict[str, int] = {}
+        if isinstance(ps_payload, Mapping):
+            ps_rows = ps_payload.get("models")
+            if isinstance(ps_rows, list):
+                for row in ps_rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    name = str(row.get("name") or row.get("model") or "").strip()[:256]
+                    if name:
+                        loaded_models.append(name)
+                        ctx = _positive_int_value(row.get("context_length"))
+                        if ctx is not None:
+                            ps_contexts[name] = ctx
+
+        model_contexts: dict[str, int] = dict(ps_contexts)
+        supports_tools: dict[str, bool] = {}
+        model_active_billions: dict[str, float] = {}
+        model_metadata: dict[str, dict[str, Any]] = {}
+        for name in models:
+            tag_entry = tag_entries.get(name)
+            digest = str(tag_entry.get("digest") or "").strip() if tag_entry else ""
+            # Lazy-cached /api/show: probe(origin) reads cached show metadata and
+            # /api/tags details without firing synchronous /api/show requests during
+            # bulk inventory probes; callers trigger show(origin, model) lazily.
+            meta = read_show_cached(
+                origin,
+                name,
+                digest=digest,
+                tag_entry=tag_entry,
+                allow_fetch=False,
+            )
+            if meta:
+                model_metadata[name] = meta
+            if isinstance(meta.get("context_length"), int):
+                model_contexts[name] = meta["context_length"]
+            if isinstance(meta.get("supports_tools"), bool):
+                supports_tools[name] = meta["supports_tools"]
+            if isinstance(meta.get("active_billions"), (int, float)):
+                model_active_billions[name] = float(meta["active_billions"])
+
+        kv_type_raw = None
+        vram_raw = None
+        ram_raw = None
+        for source in (ps_payload, version):
+            if not isinstance(source, Mapping):
+                continue
+            if kv_type_raw is None:
+                candidate_kv = str(source.get("kv_cache_type") or "").strip().lower()
+                if candidate_kv in _KV_CACHE_TYPES:
+                    kv_type_raw = candidate_kv
+            if vram_raw is None:
+                vram_raw = _positive_int_value(
+                    source.get("vram_bytes") or source.get("gpu_vram_bytes")
+                )
+            if ram_raw is None:
+                ram_raw = _positive_int_value(
+                    source.get("ram_bytes") or source.get("host_ram_bytes")
+                )
+
+        report: dict[str, Any] = {
             "protocol": _PROTOCOL,
             "version": str(version.get("version") or "unknown")[:80],
-            "models": _model_names(tags),
+            "models": models,
         }
+        if model_contexts:
+            report["model_contexts"] = model_contexts
+        if loaded_models:
+            report["loaded_models"] = tuple(sorted(set(loaded_models)))
+        if vram_raw is not None:
+            report["vram_bytes"] = vram_raw
+        if ram_raw is not None:
+            report["ram_bytes"] = ram_raw
+        if kv_type_raw is not None:
+            report["kv_cache_type"] = kv_type_raw
+        if supports_tools:
+            report["supports_tools"] = supports_tools
+        if model_active_billions:
+            report["model_active_billions"] = model_active_billions
+        if model_metadata:
+            report["model_metadata"] = model_metadata
+        return report
 
+    def show(origin: str, model_name: str, *, digest: str = "") -> dict[str, Any]:
+        return read_show_cached(origin, model_name, digest=digest, allow_fetch=True)
+
+    def clear_show_cache() -> None:
+        with show_lock:
+            show_cache.clear()
+
+    probe.show = show  # type: ignore[attr-defined]
+    probe.clear_show_cache = clear_show_cache  # type: ignore[attr-defined]
+    probe._sonder_default_allow_remote = allow_remote  # type: ignore[attr-defined]
     return probe
 
 
@@ -893,6 +1227,8 @@ class OllamaWorkerPool:
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}"
         )
         # Startup authority is independent of the live, drainable roster.
+        self._allow_remote = bool(allow_remote)
+        self._trusted_origins = tuple(trusted_origins)
         self._configured_origins = tuple(normalized_origins)
         self._local_origins = all(_is_local_origin(origin) for origin in normalized_origins)
         self._states = states
@@ -1295,11 +1631,28 @@ class OllamaWorkerPool:
     def _normalize_capabilities(
         self, payload: object, *, now: float, measured_ms: float,
     ) -> tuple[WorkerCapabilities, float]:
+        model_contexts: dict[str, int] = {}
+        loaded_models: tuple[str, ...] = ()
+        vram_bytes: int | None = None
+        ram_bytes: int | None = None
+        kv_cache_type: str | None = None
+        supports_tools: dict[str, bool] = {}
+        model_active_billions: dict[str, float] = {}
+        model_metadata: dict[str, dict[str, Any]] = {}
+
         if isinstance(payload, WorkerCapabilities):
             protocol = payload.protocol
             version = payload.version
             models = payload.models
             advertised = payload.effective_max_inflight
+            model_contexts = dict(payload.model_contexts)
+            loaded_models = tuple(payload.loaded_models)
+            vram_bytes = payload.vram_bytes
+            ram_bytes = payload.ram_bytes
+            kv_cache_type = payload.kv_cache_type
+            supports_tools = dict(payload.supports_tools)
+            model_active_billions = dict(payload.model_active_billions)
+            model_metadata = {k: dict(v) for k, v in payload.model_metadata.items()}
         elif isinstance(payload, Mapping):
             protocol = str(payload.get("protocol") or _PROTOCOL)
             version = _safe_scalar(payload.get("version"), limit=80)
@@ -1325,6 +1678,46 @@ class OllamaWorkerPool:
                 reported_latency = measured_ms
             if math.isfinite(reported_latency) and reported_latency >= 0:
                 measured_ms = reported_latency
+            raw_contexts = payload.get("model_contexts")
+            if isinstance(raw_contexts, Mapping):
+                for name, ctx in list(raw_contexts.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    parsed_ctx = _positive_int_value(ctx)
+                    if clean_name and parsed_ctx is not None:
+                        model_contexts[clean_name] = parsed_ctx
+            raw_loaded = payload.get("loaded_models")
+            if isinstance(raw_loaded, (list, tuple, set, frozenset)):
+                loaded_models = tuple(
+                    sorted({
+                        str(name).strip()[:256]
+                        for name in raw_loaded
+                        if str(name).strip()
+                    })
+                )[:_MAX_MODELS_PER_WORKER]
+            vram_bytes = _positive_int_value(payload.get("vram_bytes"))
+            ram_bytes = _positive_int_value(payload.get("ram_bytes"))
+            raw_kv = str(payload.get("kv_cache_type") or "").strip().lower()
+            if raw_kv in _KV_CACHE_TYPES:
+                kv_cache_type = raw_kv
+            raw_tools = payload.get("supports_tools")
+            if isinstance(raw_tools, Mapping):
+                for name, supported in list(raw_tools.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    if clean_name and isinstance(supported, bool):
+                        supports_tools[clean_name] = supported
+            raw_active = payload.get("model_active_billions")
+            if isinstance(raw_active, Mapping):
+                for name, active_val in list(raw_active.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    parsed_active = _parse_billions(active_val)
+                    if clean_name and parsed_active is not None:
+                        model_active_billions[clean_name] = parsed_active
+            raw_meta = payload.get("model_metadata")
+            if isinstance(raw_meta, Mapping):
+                for name, meta_val in list(raw_meta.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    if clean_name and isinstance(meta_val, Mapping):
+                        model_metadata[clean_name] = dict(meta_val)
         else:
             raise ValueError("capability prober returned an invalid report")
         if protocol != _PROTOCOL:
@@ -1339,7 +1732,75 @@ class OllamaWorkerPool:
             models=models,
             observed_at=now,
             effective_max_inflight=min(self._max_inflight, advertised),
+            model_contexts=MappingProxyType(model_contexts),
+            loaded_models=loaded_models,
+            vram_bytes=vram_bytes,
+            ram_bytes=ram_bytes,
+            kv_cache_type=kv_cache_type,
+            supports_tools=MappingProxyType(supports_tools),
+            model_active_billions=MappingProxyType(model_active_billions),
+            model_metadata=MappingProxyType({
+                k: MappingProxyType(v) for k, v in model_metadata.items()
+            }),
         ), round(measured_ms, 3)
+
+    def register_worker(
+        self,
+        origin: str,
+        *,
+        allow_remote: bool | None = None,
+        trusted_origins: tuple[str, ...] | None = None,
+        refresh: bool = True,
+    ) -> WorkerSnapshot:
+        """Dynamically register or refresh a worker endpoint on the live pool.
+
+        Allows connecting a node (e.g., Node1 over private HTTPS) at runtime
+        without recreating the pool, automatically probing its capabilities
+        and pooling its discovered models and hardware budget when ``refresh``
+        is true.
+        """
+        effective_allow_remote = self._allow_remote if allow_remote is None else bool(allow_remote)
+        effective_trusted = self._trusted_origins if trusted_origins is None else tuple(trusted_origins)
+        normalized = validate_worker_origin(
+            origin,
+            allow_remote=effective_allow_remote,
+            trusted_origins=effective_trusted,
+        )
+        with self._condition:
+            existing = next(
+                (item for item in self._states if item.endpoint.origin == normalized),
+                None,
+            )
+            if existing is None:
+                if len(self._states) >= self._max_workers:
+                    raise ValueError(
+                        "at most %d Ollama workers are supported" % self._max_workers
+                    )
+                existing = _WorkerState(
+                    WorkerEndpoint(normalized, _worker_id(normalized), _metric_label(len(self._states)))
+                )
+                self._states.append(existing)
+                self._roster_generation += 1
+                self._local_origins = all(
+                    _is_local_origin(item.endpoint.origin) for item in self._states
+                )
+                if not _is_loopback(normalized):
+                    self._configured_remote_origins = self._configured_remote_origins | {normalized}
+                    self._allow_remote = self._allow_remote or effective_allow_remote
+                if (
+                    effective_allow_remote
+                    and self._capability_prober is not None
+                    and getattr(self._capability_prober, "_sonder_default_allow_remote", None) is False
+                ):
+                    self._capability_prober = _default_capability_prober(
+                        allow_remote=True, timeout=self._probe_timeout,
+                    )
+                self._condition.notify_all()
+            target_id = id(existing)
+        if refresh and self._capability_prober is not None:
+            self._refresh_capabilities(force=True, _targets=frozenset({target_id}))
+        with self._condition:
+            return self._snapshot(existing, self._clock())
 
     def _worker_metric_label(self, state: _WorkerState) -> str:
         # Reserve only when observed: provisional configured endpoints must
@@ -1938,6 +2399,7 @@ class OllamaWorkerPool:
     def _choose(
         self, *, model: str | None, excluded: set[str], now: float,
         evidence_allowed: set[str] | None = None,
+        required_num_ctx: int | None = None,
     ) -> _WorkerState | None:
         candidates = [
             state for state in self._states
@@ -1969,6 +2431,14 @@ class OllamaWorkerPool:
         by_inference = model is not None and all(
             state.inference_ewma_ms is not None for state in candidates
         )
+        target_model_key = _model_key(model) if model else ""
+        wanted_ctx = (
+            int(required_num_ctx)
+            if isinstance(required_num_ctx, int)
+            and not isinstance(required_num_ctx, bool)
+            and required_num_ctx > 0
+            else None
+        )
 
         def score(state: _WorkerState):
             latency = state.inference_ewma_ms if by_inference else state.latency_ewma_ms
@@ -1976,9 +2446,26 @@ class OllamaWorkerPool:
                 latency = 1000.0
             lacks_model = (
                 1 if model and state.known_models is not None
-                and _model_key(model) not in state.known_models else 0
+                and target_model_key not in state.known_models else 0
             )
-            return (lacks_model, (state.inflight + 1) * latency, state.inflight)
+            caps = state.capabilities
+            if model and caps is not None:
+                loaded_keys = {_model_key(item) for item in caps.loaded_models}
+                not_resident = 0 if target_model_key in loaded_keys else 1
+                worker_ctx = caps.context_for(model)
+                ctx_headroom_miss = (
+                    1 if wanted_ctx is not None and worker_ctx is not None and worker_ctx < wanted_ctx else 0
+                )
+            else:
+                not_resident = 0
+                ctx_headroom_miss = 0
+            return (
+                lacks_model,
+                not_resident,
+                ctx_headroom_miss,
+                (state.inflight + 1) * latency,
+                state.inflight,
+            )
 
         chosen = min(rotated, key=score)
         logger.debug(
@@ -1996,6 +2483,7 @@ class OllamaWorkerPool:
         admission_timeout: float,
         evidence_allowed: set[str] | None = None,
         evidence_reason: str = "",
+        required_num_ctx: int | None = None,
         _lease_box: list | None = None,
         _lease_caller: str = "",
     ) -> _WorkerState:
@@ -2017,7 +2505,8 @@ class OllamaWorkerPool:
                     raise WorkerPoolDraining("Ollama worker pool is draining")
                 now = self._clock()
                 state = self._choose(model=model, excluded=excluded, now=now,
-                                     evidence_allowed=evidence_allowed)
+                                     evidence_allowed=evidence_allowed,
+                                     required_num_ctx=required_num_ctx)
                 if state is not None:
                     if self._metrics_observer is not None:
                         self._worker_metric_label(state)
@@ -2437,9 +2926,15 @@ class OllamaWorkerPool:
         has_image=False,
         approx_tokens=0,
         long_context=False,
+        required_num_ctx: int | None = None,
     ):
         """Admit and send one logical request with pre-response failover only."""
         model = str(model or "").strip() or None
+        effective_num_ctx = required_num_ctx
+        if effective_num_ctx is None and isinstance(payload, Mapping):
+            opts = payload.get("options")
+            if isinstance(opts, Mapping):
+                effective_num_ctx = _positive_int_value(opts.get("num_ctx"))
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
@@ -2577,6 +3072,7 @@ class OllamaWorkerPool:
                         ),
                         evidence_allowed=evidence_allowed,
                         evidence_reason=evidence_reason,
+                        required_num_ctx=effective_num_ctx,
                         _lease_box=leases,
                         _lease_caller=caller,
                     )
@@ -2860,6 +3356,16 @@ class OllamaWorkerPool:
                 None if state.inference_ewma_ms is None
                 else round(state.inference_ewma_ms, 3)
             ),
+            model_contexts=dict(capabilities.model_contexts) if capabilities else {},
+            loaded_models=capabilities.loaded_models if capabilities else (),
+            vram_bytes=capabilities.vram_bytes if capabilities else None,
+            ram_bytes=capabilities.ram_bytes if capabilities else None,
+            kv_cache_type=capabilities.kv_cache_type if capabilities else None,
+            supports_tools=dict(capabilities.supports_tools) if capabilities else {},
+            model_active_billions=dict(capabilities.model_active_billions) if capabilities else {},
+            model_metadata={
+                k: dict(v) for k, v in capabilities.model_metadata.items()
+            } if capabilities else {},
         )
 
     def _encode_status_cursor(self, offset: int, principal: str) -> str:
@@ -2936,6 +3442,10 @@ class OllamaWorkerPool:
             "error_category": OllamaWorkerPool._status_error_category(snapshot),
             "model_count": len(snapshot.models),
             "model_preview": list(previews),
+            "loaded_model_count": len(snapshot.loaded_models),
+            "vram_bytes": snapshot.vram_bytes,
+            "ram_bytes": snapshot.ram_bytes,
+            "kv_cache_type": snapshot.kv_cache_type,
         }
 
     @staticmethod
@@ -3038,6 +3548,166 @@ class OllamaWorkerPool:
             now = self._clock()
             self._reconcile_leases_locked(now)
             return self._summary_locked(now)
+
+    def pool_capacity_summary(self) -> dict[str, Any]:
+        """Return cached pool-wide worker resource, residency, and context summary."""
+        now = self._clock()
+        with self._condition:
+            self._reconcile_leases_locked(now)
+            worker_rows: list[dict[str, Any]] = []
+            available_models: set[str] = set()
+            resident_models: set[str] = set()
+            model_contexts: dict[str, int] = {}
+            tool_capable_models: set[str] = set()
+            total_slots = 0
+            available_slots = 0
+            healthy_count = 0
+            vram_values: list[int] = []
+            ram_values: list[int] = []
+            for state in self._states:
+                snap = self._snapshot(state, now)
+                free_slots = max(0, snap.capacity - snap.inflight) if snap.healthy and not self._draining else 0
+                if snap.healthy:
+                    healthy_count += 1
+                    total_slots += snap.capacity
+                    available_slots += free_slots
+                    available_models.update(snap.models)
+                    resident_models.update(snap.loaded_models)
+                    for model_name, ctx in snap.model_contexts.items():
+                        prev = model_contexts.get(model_name)
+                        if prev is None or ctx > prev:
+                            model_contexts[model_name] = ctx
+                    for model_name, supported in snap.supports_tools.items():
+                        if supported:
+                            tool_capable_models.add(model_name)
+                    if snap.vram_bytes is not None:
+                        vram_values.append(snap.vram_bytes)
+                    if snap.ram_bytes is not None:
+                        ram_values.append(snap.ram_bytes)
+                worker_rows.append({
+                    "worker_id": snap.worker_id,
+                    "origin": snap.origin,
+                    "state": snap.state,
+                    "healthy": snap.healthy,
+                    "inflight": snap.inflight,
+                    "capacity": snap.capacity,
+                    "free_slots": free_slots,
+                    "vram_bytes": snap.vram_bytes,
+                    "ram_bytes": snap.ram_bytes,
+                    "kv_cache_type": snap.kv_cache_type,
+                    "loaded_models": list(snap.loaded_models),
+                    "model_count": len(snap.models),
+                    "model_contexts": dict(snap.model_contexts),
+                })
+        return {
+            "worker_count": len(worker_rows),
+            "healthy_worker_count": healthy_count,
+            "total_slots": total_slots,
+            "available_slots": available_slots,
+            "total_vram_bytes": sum(vram_values) if vram_values else None,
+            "total_ram_bytes": sum(ram_values) if ram_values else None,
+            "resident_models": sorted(resident_models),
+            "available_models": sorted(available_models),
+            "model_contexts": dict(sorted(model_contexts.items())),
+            "tool_capable_models": sorted(tool_capable_models),
+            "workers": worker_rows,
+        }
+
+    def aggregate_context_budget(self, model: str | None = None) -> dict[str, Any]:
+        """Summarize context and residency budgets across healthy pool workers.
+
+        When ``model`` is supplied, restricts per-worker context headroom,
+        residency, tool capability, and MoE active-parameter metadata to
+        healthy admissible workers serving that model. When omitted, returns
+        the pool-wide ``pool_capacity_summary()`` with ``max_context``.
+        """
+        if not model or not str(model).strip():
+            capacity = self.pool_capacity_summary()
+            contexts = list(capacity["model_contexts"].values())
+            capacity["max_context"] = max(contexts) if contexts else None
+            return capacity
+
+        target = str(model).strip()
+        target_key = _model_key(target)
+        now = self._clock()
+        with self._condition:
+            self._reconcile_leases_locked(now)
+            candidates: list[tuple[tuple[int, int, float, int], _WorkerState, WorkerSnapshot]] = []
+            per_worker: dict[str, dict[str, Any]] = {}
+            resident_origins: list[str] = []
+            contexts: list[int] = []
+            kv_cache_types: dict[str, str] = {}
+            tool_flags: list[bool] = []
+            active_billions_val: float | None = None
+
+            for state in self._states:
+                if not (
+                    self._membership_admissible(state, now)
+                    and not state.compatibility_error
+                    and state.cooldown_until <= now
+                    and self._supports_model(state, target)
+                ):
+                    continue
+                snap = self._snapshot(state, now)
+                caps = state.capabilities
+                ctx = caps.context_for(target) if caps is not None else None
+                resident = (
+                    target_key in {_model_key(m) for m in caps.loaded_models}
+                    if caps is not None
+                    else False
+                )
+                supports_tools_val = caps.model_supports_tools(target) if caps is not None else None
+                active_b = caps.active_billions_for(target) if caps is not None else None
+                if active_billions_val is None and active_b is not None:
+                    active_billions_val = active_b
+                if supports_tools_val is not None:
+                    tool_flags.append(supports_tools_val)
+                if ctx is not None:
+                    contexts.append(ctx)
+                if resident:
+                    resident_origins.append(snap.origin)
+                if snap.kv_cache_type:
+                    kv_cache_types[snap.origin] = snap.kv_cache_type
+                free_slots = max(0, snap.capacity - snap.inflight) if snap.healthy and not self._draining else 0
+                per_worker[snap.origin] = {
+                    "worker_id": snap.worker_id,
+                    "healthy": snap.healthy,
+                    "free_slots": free_slots,
+                    "context": ctx,
+                    "resident": resident,
+                    "vram_bytes": snap.vram_bytes,
+                    "ram_bytes": snap.ram_bytes,
+                    "kv_cache_type": snap.kv_cache_type,
+                    "supports_tools": supports_tools_val,
+                    "active_billions": active_b,
+                }
+                if snap.healthy:
+                    latency = state.inference_ewma_ms if state.inference_ewma_ms is not None else (
+                        state.latency_ewma_ms if state.latency_ewma_ms is not None else 1000.0
+                    )
+                    lacks = 1 if state.known_models is not None and target_key not in state.known_models else 0
+                    candidates.append((
+                        (lacks, 0 if resident else 1, (state.inflight + 1) * latency, state.inflight),
+                        state,
+                        snap,
+                    ))
+
+        recommended_origin = min(candidates, key=lambda item: item[0])[2].origin if candidates else None
+        supports_tools_agg: bool | None = None
+        if tool_flags:
+            supports_tools_agg = any(tool_flags)
+        return {
+            "model": target,
+            "eligible_workers": len(per_worker),
+            "max_context": max(contexts) if contexts else None,
+            "min_context": min(contexts) if contexts else None,
+            "recommended_worker_origin": recommended_origin,
+            "resident_origins": resident_origins,
+            "supports_tools": supports_tools_agg,
+            "active_billions": active_billions_val,
+            "kv_cache_types": kv_cache_types,
+            "per_worker": per_worker,
+        }
 
     def status(
         self, *, cursor: str | None = None, page_size: int | None = None,
