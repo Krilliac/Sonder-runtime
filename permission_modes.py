@@ -559,6 +559,18 @@ READ_BRANCH_WORK = {
     "training_status": "safe",  # /training [plan|status|hardware|help]
 }
 
+# Work an HTTP route performs without fronting a registered tool, graded
+# because it was declared. ``POST /v1/recall``
+# (``sonder_runtime/interfaces/http/thin_routes.py``) runs ``RecallHandler``
+# -> ``MemoryFacade.recall``: it pages past interaction episodes out of the
+# memory store and writes nothing -- the same read class as ``memory_search``
+# over the same store. Lending it ``apply_learned``'s name instead made that
+# tool's rules and grade (``ask``, refused under ``plan``) govern a different
+# operation. ``thin_routes.ROUTE_TOOLS`` binds the route to this name, and a
+# drift test pins every entry to a route bound to it and to no registered
+# tool, so this cannot become a list of free-floating exemptions.
+HTTP_ROUTE_WORK = {"recall": "safe"}
+
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
 # start a host process, split out of `ask`/`mutation` so acceptEdits and auto
 # differ by something real.
@@ -1177,6 +1189,8 @@ def _catalog_risk_of(tool_name: str) -> str:
         return NON_TOOL_WORK[name]
     if name in READ_BRANCH_WORK:
         return READ_BRANCH_WORK[name]
+    if name in HTTP_ROUTE_WORK:
+        return HTTP_ROUTE_WORK[name]
     # Nothing knows this name. Not "probably fine, ask someone" -- that
     # answer was indistinguishable from a catalogued ``ask`` and, with nobody
     # to ask, indistinguishable from ``allow``. Say the classifier failed.

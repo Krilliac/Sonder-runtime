@@ -4,9 +4,11 @@
 * ``POST /v1/approvals/<call_id>`` -- approve one refused call once;
 * ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval.
 
-Approving a refused call is the attended answer to the gate's ask, the same
-authority ``/approve`` needs at the console: a developer or administrator
-(the single-user local-open listener counts, exactly as for
+Reviewing the list needs a developer or administrator. Approving or revoking
+issues authority another caller spends later, so it needs exactly what the
+``permission_approve`` tool needs on the chat ``/<tool>`` path: the
+administrator role its system operation is bound to (the single-user
+local-open listener and the deployment API key count, exactly as for
 ``/v1/permission-mode``). The ledger semantics live in ``approvals.py``.
 
 ``handler`` is serve.py's request handler: these functions use its auth
@@ -35,6 +37,8 @@ def _unavailable() -> dict:
 @dataclass(frozen=True)
 class HttpApprovalPorts:
     developer_authorized: Callable[[Any], bool]
+    # "" when the caller may approve or revoke, else the refusal reason.
+    approve_authority_error: Callable[[Any], str]
     error_envelope: Callable[..., Any]
     ledger: Callable[[], Any]
     idempotent_action: Callable[..., Any]
@@ -45,23 +49,34 @@ class HttpApprovalPorts:
     log: Any
 
 
-def _access(handler: Any, context: Any, ports: HttpApprovalPorts) -> tuple[Any, bool]:
-    """(ledger, done): ``done`` when an error response was already sent."""
+def _forbidden(handler: Any, ports: HttpApprovalPorts, message: str) -> None:
+    handler._send_json_payload(
+        ports.error_envelope("FORBIDDEN", message, handler._correlation(), retryable=False),
+        status=403,
+    )
+
+
+def _access(handler: Any, context: Any, ports: HttpApprovalPorts, *,
+            issuing: bool = False) -> tuple[Any, bool]:
+    """(ledger, done): ``done`` when an error response was already sent.
+
+    ``issuing`` (approve or revoke) adds the ``permission_approve`` authority
+    on top of the developer check that reviewing needs.
+    """
     if not context["authorized"]:
         handler._send_auth_error()
         return None, True
     if not ports.developer_authorized(context):
-        handler._send_json_payload(
-            ports.error_envelope(
-                "FORBIDDEN",
-                "developer or administrator authorization is required "
-                "to review or approve calls",
-                handler._correlation(),
-                retryable=False,
-            ),
-            status=403,
-        )
+        _forbidden(handler, ports,
+                   "developer or administrator authorization is required "
+                   "to review or approve calls")
         return None, True
+    if issuing:
+        authority_error = ports.approve_authority_error(context)
+        if authority_error:
+            _forbidden(handler, ports,
+                       "%s to approve or revoke calls" % authority_error)
+            return None, True
     try:
         ledger = ports.ledger()
     except Exception:
@@ -122,7 +137,7 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     else:
         handler._send_not_found()
         return
-    ledger, done = _access(handler, context, ports)
+    ledger, done = _access(handler, context, ports, issuing=True)
     if done:
         return
     approver = ports.approver_of(context)
