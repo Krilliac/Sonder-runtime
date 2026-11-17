@@ -21,10 +21,25 @@ from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.domain import model_sizing
 from sonder_runtime.platform import system_profile
 
+from sonder_runtime.adapters.model_list_consumers import values as _list_values
 
-MODEL_SMALL = "qwen2.5-coder:1.5b"
-MODEL_MEDIUM = "qwen2.5-coder:3b"
-MODEL_LARGE = "qwen2.5-coder:7b"
+
+def _list_value(name):
+    value = _list_values()
+    for key in _LIST_KEYS[name].split("."):
+        value = value[key]
+    return value
+
+
+def __getattr__(name):
+    if name not in _LIST_KEYS:
+        raise AttributeError(name)
+    return _list_value(name)
+
+
+_LIST_KEYS = {'MODEL_SMALL': 'bootstrap_models.small', 'MODEL_MEDIUM': 'bootstrap_models.medium', 'MODEL_LARGE': 'bootstrap_models.large'}
+
+
 ROOT = Path(__file__).resolve().parent
 RUNTIME_REQUIREMENTS_NAME = "requirements-runtime.txt"
 MCPSERVER_IMPORT_PROBE = (
@@ -105,10 +120,10 @@ def choose_model(ram_gb=None):
         return forced
     ram = total_ram_gb() if ram_gb is None else float(ram_gb)
     if ram >= 8:
-        return MODEL_LARGE
+        return _list_value('MODEL_LARGE')
     if ram >= 4:
-        return MODEL_MEDIUM
-    return MODEL_SMALL
+        return _list_value('MODEL_MEDIUM')
+    return _list_value('MODEL_SMALL')
 
 
 def _ollama_executable(explicit: str = "") -> str:
@@ -436,7 +451,7 @@ def main(argv=None):
         "--model",
         model,
         "--embed-model",
-        process_env.get("SONDER_EMBED_MODEL", "nomic-embed-text"),
+        process_env.get("SONDER_EMBED_MODEL", _list_values()["default_embedding_model"]),
         "--ollama",
         ollama,
     ]

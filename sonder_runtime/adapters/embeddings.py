@@ -126,7 +126,10 @@ def configure_typed_endpoint(url: str | None) -> None:
     OLLAMA_HOST = urllib.parse.urlparse(BASE).netloc
 # 0.0.0.0 is a bind-all address (used so `ollama serve` is reachable from a phone
 # on the LAN), not connectable on Windows — dial loopback instead.
-EMBED_MODEL = os.environ.get("SONDER_EMBED_MODEL", "nomic-embed-text")
+import sonder_runtime.adapters.model_lists as _model_lists
+from sonder_runtime.adapters.model_list_consumers import startup_embedding_model
+
+EMBED_MODEL = startup_embedding_model()
 
 # nomic-embed-text (and the other local embedders) have a bounded context —
 # 2048 tokens for nomic. Ollama does NOT truncate for us: an over-length prompt
@@ -601,6 +604,7 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
             selected_base = ollama_endpoint.configured_origin(base or BASE)
         except ValueError:
             return None
+        _model_lists.load()  # unavailable defaults fail this operation, never module import
         selected_model = model or EMBED_MODEL
         explicit_runtime = base is not None or model is not None
         revision_before = (

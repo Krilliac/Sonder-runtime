@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from .tool_lane_models import ToolLaneDenyList, ToolLaneFloor, decide_listed
 
@@ -41,17 +41,17 @@ class RuntimeModelConfiguration:
 
     @classmethod
     def from_environment(
-        cls, env: Mapping[str, str], *, floor: ToolLaneFloor,
+        cls, env: Mapping[str, str], *, floor: ToolLaneFloor, lists: Mapping[str, Any],
     ) -> "RuntimeModelConfiguration":
-        stable_alias = "sonder:latest"
-        default_cloud_code_model = "kimi-k2.7-code:cloud"
-        default_cloud_general_model = "glm-5.2:cloud"
-        retired_cloud_models = frozenset({"qwen3-coder:480b-cloud"})
+        stable_alias = lists["stable_alias"]
+        default_cloud_code_model = lists["default_cloud_models"]["code"]
+        default_cloud_general_model = lists["default_cloud_models"]["general"]
+        retired_cloud_models = frozenset(lists["retired_cloud_models"])
 
         def live_cloud_model(configured: object, default: str) -> str:
             lowered = str(configured or "").strip().lower()
-            if not lowered or lowered in retired_cloud_models:
-                if lowered and lowered in retired_cloud_models:
+            if not lowered or lowered in {name.casefold() for name in retired_cloud_models}:
+                if lowered and lowered in {name.casefold() for name in retired_cloud_models}:
                     logger.warning(f"configured cloud model {configured!r} is retired, falling back to default={default!r}")
                 return default
             return str(configured)
@@ -73,7 +73,7 @@ class RuntimeModelConfiguration:
         )
         empty_local_tiers = [
             tier for tier, variable in OPTIONAL_LOCAL_TIERS
-            if not str(env.get(variable, "")).strip()
+            if not str(env.get(variable, lists["default_local_models"][tier])).strip()
         ]
         if empty_local_tiers:
             # INFO: optional tiers are unset on a default install; /model and
@@ -93,11 +93,11 @@ class RuntimeModelConfiguration:
             cloud_extra_usage_fallback_model=default_cloud_code_model,
             retired_cloud_models=retired_cloud_models,
             tier_bindings=(
-                ("fast", str(env.get("SONDER_FAST", stable_alias))),
-                ("code", str(env.get("SONDER_CODE", stable_alias))),
-                ("general", str(env.get("SONDER_GENERAL", stable_alias))),
-                ("reasoning", str(env.get("SONDER_REASONING", ""))),
-                ("vision", str(env.get("SONDER_VISION", ""))),
+                ("fast", str(env.get("SONDER_FAST", lists["default_local_models"]["fast"]))),
+                ("code", str(env.get("SONDER_CODE", lists["default_local_models"]["code"]))),
+                ("general", str(env.get("SONDER_GENERAL", lists["default_local_models"]["general"]))),
+                ("reasoning", str(env.get("SONDER_REASONING", lists["default_local_models"]["reasoning"]))),
+                ("vision", str(env.get("SONDER_VISION", lists["default_local_models"]["vision"]))),
                 ("cloud-code", cloud_code),
                 ("cloud-general", cloud_general),
             ),

@@ -1,3 +1,4 @@
+from sonder_runtime.adapters import model_lists as _test_model_lists
 import pytest
 import server
 
@@ -20,13 +21,27 @@ from sonder_runtime.domain.fanout_policy import (
     ],
 )
 def test_nonchat_reason_classifies_catalog_records(record, expected):
-    assert nonchat_reason(record) == expected
+    assert (
+        nonchat_reason(
+            record,
+            vision_only_model_families=_test_model_lists.load().values[
+                "vision_only_model_families"
+            ],
+        )
+        == expected
+    )
 
 
 def test_explicit_generative_capability_wins_over_vision_metadata():
-    assert nonchat_reason(
-        {"capabilities": ["chat", "vision"], "details": {"family": "llava"}}
-    ) == ""
+    assert (
+        nonchat_reason(
+            {"capabilities": ["chat", "vision"], "details": {"family": "llava"}},
+            vision_only_model_families=_test_model_lists.load().values[
+                "vision_only_model_families"
+            ],
+        )
+        == ""
+    )
 
 
 @pytest.mark.parametrize(

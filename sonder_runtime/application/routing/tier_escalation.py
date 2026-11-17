@@ -78,8 +78,6 @@ NON_ESCALATING_KINDS = frozenset({
 # the bound models: the quick tier sits below the working tiers, the reasoning
 # tier above them.  An unknown label (the default ``sonder`` route, an exact
 # model pin) counts as a working tier.
-_STRENGTH = {"fast": 0, "code": 1, "general": 1, "vision": 1, "reasoning": 2}
-_WORKING_STRENGTH = 1
 
 
 def enabled(value) -> bool:
@@ -161,6 +159,7 @@ def plan(
     resolve: Callable[[str], Rung | None],
     has_image: bool = False,
     max_escalations: int = MAX_ESCALATIONS,
+    lists,
 ) -> Plan:
     """Build the bounded attempt list for one default-route turn.
 
@@ -174,7 +173,7 @@ def plan(
         return single(start)
     budget = max(0, min(int(max_escalations), MAX_ESCALATIONS))
     bound = tuple(dict.fromkeys(str(tier or "").strip().lower() for tier in available if tier))
-    route = capability_router.route(prompt, bound, has_image=has_image)
+    route = capability_router.route(prompt, bound, has_image=has_image, config=lists["capability_router"])
 
     ordered: list[str] = []
     prerouted_tier = None
@@ -191,13 +190,13 @@ def plan(
     ordered.append("")  # the start rung's slot
     ordered.extend(route.ladder)
 
-    floor = _STRENGTH.get(str(start.tier or "").strip().lower(), _WORKING_STRENGTH)
+    floor = lists["tier_strength"].get(str(start.tier or "").strip().lower(), lists["working_strength"])
     rungs: list[Rung] = []
     for tier in ordered:
         if tier == "":
             rung = start
         else:
-            if not _may_be_rung(tier, floor, has_image=has_image, prerouted=tier == prerouted_tier):
+            if not _may_be_rung(tier, floor, has_image=has_image, prerouted=tier == prerouted_tier, lists=lists):
                 continue
             rung = resolve(tier)
             if rung is None or rung.cloud:
@@ -216,16 +215,16 @@ def plan(
     )
 
 
-def _may_be_rung(tier: str, floor: int, *, has_image: bool, prerouted: bool) -> bool:
+def _may_be_rung(tier: str, floor: int, *, has_image: bool, prerouted: bool, lists) -> bool:
     """The plan's own filter for a ladder tier: vision needs an image, and only
     a prerouted specialist may sit below the start's strength ``floor``."""
     if tier == "vision" and not has_image:
         return False
-    return prerouted or _STRENGTH.get(tier, _WORKING_STRENGTH) >= floor
+    return prerouted or lists["tier_strength"].get(tier, lists["working_strength"]) >= floor
 
 
 def reachable_tiers(
-    start_tier: str, available: Iterable[str], *, has_image: bool = False, escalate: bool = True,
+    start_tier: str, available: Iterable[str], *, has_image: bool = False, escalate: bool = True, lists,
 ) -> tuple[str, ...]:
     """Every tier :func:`plan` can make a rung of from ``start_tier``, for any prompt.
 
@@ -240,14 +239,14 @@ def reachable_tiers(
     start = str(start_tier or "").strip().lower()
     if not escalate:
         return (start,)
-    floor = _STRENGTH.get(start, _WORKING_STRENGTH)
+    floor = lists["tier_strength"].get(start, lists["working_strength"])
     found = [start]
     for tier in available:
         tier = str(tier or "").strip().lower()
         if not tier or tier in found:
             continue
         prerouted = tier in policy_rules.OPTIONAL_LOCAL_TIERS
-        if _may_be_rung(tier, floor, has_image=has_image, prerouted=prerouted):
+        if _may_be_rung(tier, floor, has_image=has_image, prerouted=prerouted, lists=lists):
             found.append(tier)
     return tuple(found)
 

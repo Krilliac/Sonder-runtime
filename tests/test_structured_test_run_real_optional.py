@@ -30,8 +30,8 @@ def _use_bundled_msvc_linker(monkeypatch):
         return
     compiler = shutil.which("rustc")
     assert compiler is not None, "Cargo integration requires its Rust compiler"
-    # The first call of the rustup rustc shim on a loaded Windows CI runner has
-    # exceeded 10 s (PR #750, run 43892199165); a probe timeout is not the subject.
+    # A Windows CI rustc probe exceeded 10 s (PR #750, run 43892199165).
+    # Allow 60 s for toolchain discovery; the test assertions remain unchanged.
     options = {"check": True, "capture_output": True, "text": True,
                "encoding": "utf-8", "timeout": 60}
     version = subprocess.run([compiler, "-vV"], **options).stdout
