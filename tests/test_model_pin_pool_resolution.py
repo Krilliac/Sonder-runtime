@@ -18,7 +18,7 @@ from sonder_runtime.adapters.inference.pool_model_catalog import (
     PoolCatalogCache,
     resolve_model_pin,
 )
-from sonder_runtime.domain.fanout_policy import nonchat_reason
+from sonder_runtime.adapters.model_list_consumers import nonchat_reason
 from sonder_runtime.domain.model_catalog import catalog_records, resolve_record
 
 CHAT = ["completion"]

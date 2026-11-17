@@ -66,7 +66,7 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]+)\}")
 _CMAKE_TARGET_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,128}$")
 _MSBUILD_TARGET_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,128}(?:\\[A-Za-z0-9_.+-]{1,128}){0,8}$")
 _MODEL_FORBIDDEN = frozenset("=;,%\"'`$&|<>^\x00")
-DEFINE_RE = re.compile(r"^-D[A-Za-z_][A-Za-z0-9_]*(?::[A-Z]+)?=[^\x00\n]{0,512}$")
+DEFINE_RE = re.compile(r"^-D[A-Za-z_][A-Za-z0-9_]*(?::[A-Z]+)?=[^\x00-\x1f\x7f-\x9f\u2028\u2029]{0,512}$")
 _BANNED_CMAKE_FLAGS = ("-C", "-P", "-E", "-U", "--graphviz")
 _BANNED_CMAKE_PREFIXES = ("--trace", "-L", "--debugger", "--graphviz")
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9+._-]{1,64}$")
@@ -269,7 +269,7 @@ def validate_placeholder(name: str, value: str, *, template: BuildTemplate) -> s
         return value
     if name == "jobs":
         if not isinstance(value, str) or not value.isascii() or not value.isdigit() \
-                or not 1 <= int(value) <= MAX_JOBS:
+                or len(value) > 4 or not 1 <= int(value) <= MAX_JOBS:
             raise TemplateRejected("jobs must be 1..%d" % MAX_JOBS)
         return str(int(value))
     if name == "config":

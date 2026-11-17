@@ -93,6 +93,9 @@ class RoutePlanner:
     NO Ollama call, NO cloud call, NO permission mutation.
     """
 
+    def __init__(self, config):
+        self._config = config
+
     def select(
         self,
         request: RoutingRequest,
@@ -117,6 +120,7 @@ class RoutePlanner:
             approx_tokens=request.approx_tokens,
             explicit=request.explicit_task,
             allow_oracle=request.allow_oracle,
+            config=self._config,
         )
 
         # 3. Chat is a first-class lane rather than another capability tier.

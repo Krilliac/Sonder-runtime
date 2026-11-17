@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "retired_cloud_models": [
+    "qwen3-coder:480b-cloud"
+  ],
+  "legacy_cloud_general_model": "gpt-oss:120b-cloud",
+  "default_cloud_models": {
+    "code": "kimi-k2.7-code:cloud",
+    "general": "glm-5.2:cloud"
+  },
+  "stable_alias": "sonder:latest",
+  "default_local_models": {
+    "fast": "sonder:latest",
+    "code": "sonder:latest",
+    "general": "sonder:latest",
+    "reasoning": "",
+    "vision": ""
+  },
+  "default_embedding_model": "nomic-embed-text",
+  "reserved_personal_model": "sonder-personal:latest",
+  "default_routing": {
+    "chat": "general",
+    "router": "fast",
+    "workbench": "code",
+    "autopilot": "code",
+    "fleet": "code",
+    "review": "code"
+  },
+  "vision_only_model_families": [
+    "bakllava",
+    "llama3.2-vision",
+    "llava",
+    "minicpm-v",
+    "moondream"
+  ],
+  "tier_strength": {
+    "fast": 0,
+    "code": 1,
+    "general": 1,
+    "vision": 1,
+    "reasoning": 2
+  },
+  "working_strength": 1,
+  "capability_router": {
+    "preferred": {
+      "simple": "fast",
+      "search": "fast",
+      "code": "code",
+      "reasoning": "reasoning",
+      "vision": "vision",
+      "long_context": "general"
+    },
+    "ladder": {
+      "simple": [
+        "fast",
+        "general",
+        "reasoning"
+      ],
+      "search": [
+        "fast",
+        "general"
+      ],
+      "code": [
+        "code",
+        "general",
+        "reasoning"
+      ],
+      "reasoning": [
+        "reasoning",
+        "general",
+        "code"
+      ],
+      "vision": [
+        "vision",
+        "general"
+      ],
+      "long_context": [
+        "general",
+        "reasoning"
+      ]
+    },
+    "fallback": [
+      "general",
+      "code",
+      "fast"
+    ],
+    "keywords": {
+      "code": [
+        "code",
+        "function",
+        "implement",
+        "bug",
+        "refactor",
+        "compile",
+        "traceback",
+        "exception",
+        "stack trace",
+        "unit test",
+        "pytest",
+        "regex",
+        "algorithm",
+        "python",
+        "javascript",
+        "typescript",
+        "rust",
+        "golang",
+        " java ",
+        "c++",
+        "sql",
+        "api",
+        "class ",
+        "def ",
+        "async",
+        "docker",
+        "kubernetes"
+      ],
+      "reasoning": [
+        "prove",
+        "proof",
+        "theorem",
+        "derive",
+        "step by step",
+        "reason through",
+        "think carefully",
+        "think hard",
+        "plan the",
+        "trade-off",
+        "tradeoff",
+        "analyze",
+        "why does",
+        "why is",
+        "explain the reasoning",
+        "complexity",
+        "optimi",
+        "strategy",
+        "design a system",
+        "architecture for"
+      ],
+      "search": [
+        "latest",
+        "current",
+        "today",
+        "right now",
+        "this week",
+        "news",
+        "look up",
+        "search for",
+        "who won",
+        "weather",
+        "price of",
+        "release date",
+        "recent",
+        "up to date",
+        "what happened"
+      ],
+      "vision": [
+        "image",
+        "screenshot",
+        "photo",
+        "picture",
+        "diagram",
+        "this chart",
+        "what's in this",
+        "describe the",
+        "ocr",
+        "read the text in"
+      ],
+      "long_context": [
+        "summarize this",
+        "summarise this",
+        "this document",
+        "the whole repo",
+        "this codebase",
+        "these files",
+        "the attached",
+        "this transcript",
+        "tl;dr of",
+        "condense"
+      ]
+    }
+  },
+  "ensemble_skip_tiers": [
+    "vision"
+  ],
+  "bootstrap_models": {
+    "small": "qwen2.5-coder:1.5b",
+    "medium": "qwen2.5-coder:3b",
+    "large": "qwen2.5-coder:7b"
+  },
+  "training_model_specs": {
+    "1.5b": {
+      "params": 1.5,
+      "hf": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "hf_revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+      "ollama": "qwen2.5-coder:1.5b",
+      "train_vram": 2.8,
+      "train_ram": 6.0,
+      "infer_vram": 1.6,
+      "infer_ram": 3.0
+    },
+    "3b": {
+      "params": 3.0,
+      "hf": "Qwen/Qwen2.5-Coder-3B-Instruct",
+      "hf_revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+      "ollama": "qwen2.5-coder:3b",
+      "train_vram": 5.0,
+      "train_ram": 10.0,
+      "infer_vram": 2.8,
+      "infer_ram": 5.0
+    },
+    "7b": {
+      "params": 7.0,
+      "hf": "Qwen/Qwen2.5-Coder-7B-Instruct",
+      "hf_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+      "ollama": "qwen2.5-coder:7b",
+      "train_vram": 10.0,
+      "train_ram": 18.0,
+      "infer_vram": 5.5,
+      "infer_ram": 9.0
+    }
+  }
+}

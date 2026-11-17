@@ -164,6 +164,7 @@ from sonder_runtime.application.ports.work_narration import route_reason as _nar
 import creative_router
 import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
+from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
@@ -194,7 +195,7 @@ from sonder_runtime.application.session.model_steps import (
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
-from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.adapters import tier_escalation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
@@ -224,7 +225,6 @@ from sonder_runtime.domain.distillation_policy import (
 )
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
-    nonchat_reason as _fanout_nonchat_reason,
 )
 from sonder_runtime.domain.campaign_formatting import (
     campaign_headline as _campaign_headline,
@@ -325,8 +325,8 @@ from sonder_runtime.domain.context.pack_arguments import (
     pack_paths as _context_pack_paths,
     pack_utf8_prefix as _context_pack_utf8_prefix,
 )
+from sonder_runtime.adapters.model_list_consumers import model_capability_error as _runtime_model_capability_error
 from sonder_runtime.domain.runtime_model_binding import (
-    model_capability_error as _runtime_model_capability_error,
     model_is_installed as _runtime_model_is_installed,
 )
 from sonder_runtime.domain.updates.stash_formatting import format_stash as _runtime_stash_format
@@ -368,6 +368,7 @@ from sonder_runtime.adapters.model_response_metadata import (
 )
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
+from sonder_runtime.domain import campaign_corpus as _campaign_corpus
 from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
 from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
 from sonder_runtime.adapters.agent_decision_generation import (
@@ -509,11 +510,8 @@ from sonder_runtime.adapters.inference.pool_model_catalog import (
     resolve_model_pin,
 )
 from sonder_runtime.domain import ollama_policy
-from sonder_runtime.domain.runtime_model_configuration import (
-    RuntimeModelConfiguration,
-)
-from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
-from sonder_runtime.domain.cloud_tier_policy import (
+from sonder_runtime.adapters.model_list_consumers import live_cloud_model as _live_cloud_model, nonchat_reason as _fanout_nonchat_reason  # noqa: F401 - public compatibility names
+from sonder_runtime.adapters.model_list_consumers import (
     refresh_live_cloud_tiers as _refresh_live_cloud_tiers_policy,
 )
 from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
@@ -627,7 +625,7 @@ def _keep_alive_for(model):
 
 
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ, floor=_model_tool_policy.shipped_floor())
+_RUNTIME_MODEL_CONFIGURATION = _model_list_consumers.startup_configuration(os.environ, floor=_model_tool_policy.shipped_floor())
 SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
 LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
 DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model
@@ -674,7 +672,7 @@ def _context_native(value=None):
     return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = _tool_lane_guard.seed_bindings(_RUNTIME_MODEL_CONFIGURATION.tier_map())
+TIERS = _model_list_consumers.startup_seed(_RUNTIME_MODEL_CONFIGURATION.tier_map(), _tool_lane_guard.seed_bindings)
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
@@ -948,7 +946,7 @@ def _chat_request_with_cloud_fallback(
     )
 
 
-if _is_cloud_model_name(TIERS["code"]):
+if _is_cloud_model_name(TIERS.get("code", "")):
     TIERS["code"] = LOCAL_CODE_MODEL
 
 
@@ -978,7 +976,7 @@ def _configured_local_tiers():
     return runtime_policy.configured_tiers(_RUNTIME_POLICY or _refresh_runtime_policy(create=True), TIERS)
 
 
-_refresh_runtime_policy(create=True)
+_model_list_consumers.startup_refresh(_refresh_runtime_policy)
 
 
 def _runtime_lane_tier(lane: str, requested: str = "") -> str:
@@ -1242,6 +1240,7 @@ LIVE_RELOAD_MODULES = [
     "orchestrator",
     "retriever",
     "sonder_runtime.domain.memory.rules",
+    "sonder_runtime.domain.campaign_corpus",
     "reflection",
     "embeddings",
     "ollama_endpoint",
@@ -1376,6 +1375,11 @@ def _maybe_live_reload(*, create_policy=True):
             continue
         if name == "sonder_runtime.adapters.memory_store":
             globals()["memory_store"] = module
+            continue
+        if name == "sonder_runtime.domain.campaign_corpus":
+            globals()["_campaign_corpus"] = module
+            globals()["_CAMPAIGN_TASKS"] = module.CAMPAIGN_TASKS
+            globals()["_REPO_REPAIR_TASKS"] = module.REPO_REPAIR_TASKS
             continue
         if name == "sonder_runtime.domain.memory.rules":
             globals()["reward_rules"] = module
@@ -2765,6 +2769,8 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "models":
+        return _model_lists_editor.command(rest, operator_attended=bool(operator_approved))
     if action == "tools":  # writes only with the console operator attending
         return _model_tool_policy_editor.command(rest, operator_attended=bool(operator_approved), policy=_RUNTIME_POLICY)
     if action == "overflow":
@@ -2818,7 +2824,7 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
             "  /runtime tools [allow|revoke|deny|undeny ...]   (per-model tool lists; /runtime tools help)\n"
-            "  /runtime reset\n"
+            "  /runtime models [set <key> <json>|reset <key>]\n  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
             "Execution lanes route to fast/code/general only."
@@ -4370,6 +4376,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
             "found": True,
             "reward": score,
             "outcome_inserted": recorded["outcome_inserted"],
+            "usage_rows_kept": recorded.get("usage_rows_kept", 0),
             "distillation_state": recorded["distillation_state"],
             "lesson_id": None,
             "distillation_reason": None,
@@ -7496,6 +7503,8 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    if result.get("usage_rows_kept"):
+        msg += " Lesson credit unchanged: stronger runtime evidence exists."
     return msg
 
 
@@ -7823,49 +7832,7 @@ def parallel_generate_run_languages(
     return "\n".join(lines)
 
 
-_CAMPAIGN_TASKS = [
-    ("hello", "print exactly: sonder-ok"),
-    ("sum", "compute 12 + 30 and print exactly: 42"),
-    ("loop", "print the numbers 1, 2, and 3 each on its own line"),
-    ("string", "reverse the string 'sonder' and print exactly: rednos"),
-    ("branch", "if 17 is prime print exactly: prime"),
-    ("list", "compute the sum of [2, 4, 6, 8] and print exactly: 20"),
-    # Harder algorithmic tier: these force the failure classes small local
-    # models actually exhibit (incomplete map initialization, eviction-order
-    # bookkeeping, interval bookkeeping, stack discipline) so campaign
-    # records and distilled lessons carry real signal, not just boilerplate.
-    ("toposort",
-     "topologically sort the directed edges d->a, a->b, b->c, a->c (an edge "
-     "u->v means u comes before v; include every node) and print the only "
-     "valid order as space-separated letters on one line, like: w x y z"),
-    ("lru",
-     "simulate an LRU cache with capacity 2 and operations put(1,10), "
-     "put(2,20), get(1), put(3,30) (this evicts the least recently used "
-     "key), get(2), get(3); print the three get results on one line "
-     "separated by single spaces, using -1 for a miss"),
-    ("intervals",
-     "merge the overlapping intervals [1,3] [2,6] [8,10] [9,12] and print "
-     "the merged intervals on one line as start-end pairs separated by a "
-     "single space, like 5-7 9-11"),
-    ("balanced",
-     # Two harness lessons are baked into this wording. (1) The pass check is
-     # a containment check, so wrong verdicts must not contain the expected
-     # text as a substring: 'ok'/'bad' cannot embed each other the way
-     # 'valid'/'invalid' can. (2) Bracket literals must be quoted and
-     # numbered, never wrapped in bare parentheses — models read those outer
-     # parens as punctuation and silently drop them, then get marked wrong
-     # for answering a different question than the one intended.
-     "decide whether the brackets are balanced in each of these three "
-     "strings, given exactly between the quotes: "
-     "1) \"([]{})\"  2) \"([)]\"  3) \"(((\" . "
-     "Print ok if that string's brackets are balanced or bad if they are "
-     "not, one verdict per line, in that order"),
-    ("wordfreq",
-     "count word frequencies in the sentence 'the quick the lazy the end' "
-     "and print the most frequent word and its count as word:count"),
-    ("fib",
-     "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
-]
+_CAMPAIGN_TASKS: list[tuple[str, str]] = _campaign_corpus.CAMPAIGN_TASKS
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
@@ -8075,124 +8042,7 @@ def campaign_generate_compile_execute_record(
 # Each bug is a class small local models actually exhibit; the fix is judged
 # by the project's own tests, not output matching, so lessons distilled from
 # these interactions reflect real repair work.
-_REPO_REPAIR_TASKS = [
-    ("offbyone",
-     "def total(values):\n"
-     "    result = 0\n"
-     "    for index in range(len(values) - 1):\n"
-     "        result += values[index]\n"
-     "    return result\n",
-     "from module import total\n\n\n"
-     "def test_total_includes_every_value():\n"
-     "    assert total([1, 2, 3, 4]) == 10\n\n\n"
-     "def test_total_single_value():\n"
-     "    assert total([7]) == 7\n\n\n"
-     "def test_total_empty():\n"
-     "    assert total([]) == 0\n"),
-    ("boundary",
-     "def bulk_discount(quantity):\n"
-     "    # spec: orders of 10 or more get the discount\n"
-     "    return 0.1 if quantity > 10 else 0.0\n",
-     "from module import bulk_discount\n\n\n"
-     "def test_discount_at_threshold():\n"
-     "    assert bulk_discount(10) == 0.1\n\n\n"
-     "def test_discount_above_threshold():\n"
-     "    assert bulk_discount(11) == 0.1\n\n\n"
-     "def test_no_discount_below():\n"
-     "    assert bulk_discount(9) == 0.0\n"),
-    ("mutabledefault",
-     "def add_tag(tag, tags=[]):\n"
-     "    tags.append(tag)\n"
-     "    return tags\n",
-     "from module import add_tag\n\n\n"
-     "def test_fresh_list_per_call():\n"
-     "    assert add_tag('a') == ['a']\n"
-     "    assert add_tag('b') == ['b']\n\n\n"
-     "def test_explicit_list_still_appends():\n"
-     "    existing = ['x']\n"
-     "    assert add_tag('y', existing) == ['x', 'y']\n"),
-    ("missingkey",
-     "def word_counts(words):\n"
-     "    counts = {}\n"
-     "    for word in words:\n"
-     "        counts[word] += 1\n"
-     "    return counts\n",
-     "from module import word_counts\n\n\n"
-     "def test_counts_new_words():\n"
-     "    assert word_counts(['a', 'b', 'a']) == {'a': 2, 'b': 1}\n\n\n"
-     "def test_counts_empty():\n"
-     "    assert word_counts([]) == {}\n"),
-    ("numericsort",
-     "def sort_ids(ids):\n"
-     "    # ids arrive as decimal strings; callers need numeric order\n"
-     "    return sorted(ids)\n",
-     "from module import sort_ids\n\n\n"
-     "def test_numeric_not_lexicographic():\n"
-     "    assert sort_ids(['10', '2', '1']) == ['1', '2', '10']\n\n\n"
-     "def test_already_sorted():\n"
-     "    assert sort_ids(['1', '2']) == ['1', '2']\n"),
-    # A second tier of bug classes. The first five became memorised - 10/10 on
-    # every nightly run, which measures recall rather than repair - so these
-    # cover failure modes the originals miss: aliasing a caller's object,
-    # integer division, short-circuit ordering against None, accumulating in
-    # the wrong scope, and an exclusive range boundary.
-    ("aliasing",
-     "def with_defaults(config):\n"
-     "    # must not disturb the caller's dict\n"
-     "    merged = config\n"
-     "    merged.setdefault('retries', 3)\n"
-     "    return merged\n",
-     "from module import with_defaults\n\n\n"
-     "def test_caller_dict_is_untouched():\n"
-     "    original = {'host': 'localhost'}\n"
-     "    result = with_defaults(original)\n"
-     "    assert result == {'host': 'localhost', 'retries': 3}\n"
-     "    assert original == {'host': 'localhost'}\n\n\n"
-     "def test_explicit_value_wins():\n"
-     "    assert with_defaults({'retries': 9})['retries'] == 9\n"),
-    ("intdivision",
-     "def average(values):\n"
-     "    return sum(values) // len(values)\n",
-     "from module import average\n\n\n"
-     "def test_average_is_not_truncated():\n"
-     "    assert average([1, 2]) == 1.5\n\n\n"
-     "def test_exact_average_stays_exact():\n"
-     "    assert average([2, 4]) == 3\n"),
-    ("noneguard",
-     "def name_length(user):\n"
-     "    # user may be None, or may have no name set\n"
-     "    return len(user['name']) if user['name'] else 0\n",
-     "from module import name_length\n\n\n"
-     "def test_missing_user_is_zero():\n"
-     "    assert name_length(None) == 0\n\n\n"
-     "def test_empty_name_is_zero():\n"
-     "    assert name_length({'name': ''}) == 0\n\n\n"
-     "def test_real_name_is_counted():\n"
-     "    assert name_length({'name': 'ada'}) == 3\n"),
-    ("wrongscope",
-     "def group_lengths(words):\n"
-     "    # one bucket per length\n"
-     "    buckets = {}\n"
-     "    found = []\n"
-     "    for word in words:\n"
-     "        found.append(word)\n"
-     "        buckets[len(word)] = found\n"
-     "    return buckets\n",
-     "from module import group_lengths\n\n\n"
-     "def test_each_bucket_holds_only_its_own_words():\n"
-     "    assert group_lengths(['a', 'bb', 'cc']) == {1: ['a'], 2: ['bb', 'cc']}\n\n\n"
-     "def test_empty_input():\n"
-     "    assert group_lengths([]) == {}\n"),
-    ("rangeend",
-     "def inclusive_range(start, end):\n"
-     "    # callers expect both endpoints included\n"
-     "    return list(range(start, end))\n",
-     "from module import inclusive_range\n\n\n"
-     "def test_end_is_included():\n"
-     "    assert inclusive_range(1, 4) == [1, 2, 3, 4]\n\n\n"
-     "def test_single_value_range():\n"
-     "    assert inclusive_range(2, 2) == [2]\n"),
-]
+_REPO_REPAIR_TASKS: list[tuple[str, str, str]] = _campaign_corpus.REPO_REPAIR_TASKS
 
 
 
@@ -18274,6 +18124,8 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
+    # The caller's judgement is the operator's review; a model must not review its own work.
+    "record_outcome",
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
@@ -23180,7 +23032,7 @@ def _capability_refined_tier(
         available = _configured_local_tiers() or runtime_policy.BASE_LOCAL_TIERS
         specialists = set(runtime_policy.OPTIONAL_LOCAL_TIERS) & set(available)
         if specialists:
-            route = _caprouter.route(prompt, available, has_image=has_image)
+            route = _caprouter.route(prompt, available, has_image=has_image, config=_model_list_consumers.values()["capability_router"])
             if route.tier == "vision" and not has_image:
                 return selected_tier, reason
             if route.tier in specialists and route.tier != selected_tier:
@@ -23527,6 +23379,7 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    data["model_lists"] = _model_lists_editor.command("", operator_attended=False)
     data["model_tool_policy"] = _model_tool_grants.status_payload(legacy_section=policy.get("tool_lane_denied_models"))
     _remember_runtime_readiness(data)
     return data
@@ -23645,8 +23498,7 @@ def runtime_policy_status() -> str:
     """
     # Not the default ``create_policy=True``: that would write a missing
     # policy file (and its lock) from a read graded ``safe``.
-    _maybe_live_reload(create_policy=False)
-    return _format_runtime_policy_status(_runtime_policy_cached_data())
+    return _model_list_consumers.policy_status(_runtime_policy_cached_data, _maybe_live_reload, _format_runtime_policy_status)
 
 
 def _runtime_policy_refresh_status() -> str:
@@ -24177,7 +24029,7 @@ def runtime_source_stash(action: str) -> str:
 ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
-ENSEMBLE_SKIP_TIERS = ("vision",)
+ENSEMBLE_SKIP_TIERS = _model_list_consumers.startup_ensemble_skip_tiers()
 
 
 def _fanout_profile_scope(profile):
