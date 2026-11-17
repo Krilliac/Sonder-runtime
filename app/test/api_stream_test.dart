@@ -62,6 +62,59 @@ void main() {
       p.addLine('data:[DONE]');
       expect(p.close().single.isDone, isTrue);
     });
+
+    test('a sonder-status comment carries its text; other comments do not',
+        () {
+      final p = SseFrameParser();
+      final status = p
+          .addLine(': sonder-status waiting for memory to load m: '
+              '4.2 GiB free, needs ~6.5 GiB')
+          .single;
+      expect(status.comment, isTrue);
+      expect(status.status,
+          'waiting for memory to load m: 4.2 GiB free, needs ~6.5 GiB');
+      expect(p.addLine(': keep-alive').single.status, isNull);
+      expect(p.addLine(': sonder-statusX y').single.status, isNull);
+    });
+
+    test('an empty sonder-status comment is the clearing frame', () {
+      final p = SseFrameParser();
+      for (final line in [': sonder-status', ':sonder-status', ': sonder-status ']) {
+        final frame = p.addLine(line).single;
+        expect(frame.comment, isTrue, reason: line);
+        expect(frame.status, '', reason: line);
+      }
+    });
+
+    test('an overlong status is trimmed; markup stays plain text', () {
+      final p = SseFrameParser();
+      final long = p.addLine(': sonder-status ${'x' * 500}').single;
+      expect(long.status, hasLength(maxStatusChars));
+      const markup = '<b>bold</b> **x** [a](http://e.example) <script>';
+      final frame = p.addLine(': sonder-status $markup').single;
+      expect(frame.status, markup);
+    });
+  });
+
+  test('status comments become ChatStreamStatus; keep-alives stay', () async {
+    late (List<ChatStreamEvent>, Object?) result;
+    await recordStreamingClients(() async {
+      result = await _collect(
+          SonderApi(baseUrl: 'http://127.0.0.1:11435').chatStream(_hi));
+    }, (request, body) async {
+      return _streamed([
+        ': keep-alive\n\n',
+        ': sonder-status every pool GPU slot is busy\n\n',
+        ': sonder-status\n\n',
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+    });
+    final (events, error) = result;
+    expect(error, isNull);
+    expect(events.whereType<ChatStreamKeepAlive>(), hasLength(1));
+    expect(events.whereType<ChatStreamStatus>().map((e) => e.text),
+        ['every pool GPU slot is busy', '']);
   });
 
   test('content + finish + usage + [DONE]: deltas then the reply', () async {
@@ -357,6 +410,87 @@ void main() {
       expect(error, isNull);
       expect(events.whereType<ChatStreamDone>().single.reply.text,
           endsWith('PELICAN'));
+    });
+
+    test('sonder_tool SSE chunks emit ChatStreamToolEvent with full fields',
+        () async {
+      final digest = 'a' * 64;
+      final awaitChunk = jsonEncode({
+        'object': 'chat.completion.chunk',
+        'choices': [
+          {'index': 0, 'delta': {}, 'finish_reason': null}
+        ],
+        'sonder_tool': {
+          'id': 'tc_1',
+          'call_id': 'c03cd79321b5f7a2',
+          'digest': digest,
+          'tool': 'run_code',
+          'language': 'python',
+          'code': 'print("hi\u202e")',
+          'args': {'language': 'python'},
+          'preview': 'language=python',
+          'timeout': 10,
+          'backend': 'host',
+          'bidi_warning': true,
+          'bidi_chars': ['U+202E'],
+          'state': 'awaiting_approval',
+          'error': null,
+          'result': null,
+        },
+      });
+      final doneChunk = jsonEncode({
+        'object': 'chat.completion.chunk',
+        'choices': [
+          {'index': 0, 'delta': {}, 'finish_reason': null}
+        ],
+        'sonder_tool': {
+          'id': 'tc_1',
+          'call_id': 'c03cd79321b5f7a2',
+          'digest': digest,
+          'tool': 'run_code',
+          'language': 'python',
+          'code': 'print("hi")',
+          'backend': 'container',
+          'state': 'done',
+          'result': {
+            'ok': true,
+            'returncode': 0,
+            'timed_out': false,
+            'elapsed_ms': 42,
+            'stdout_tail': 'hi\n',
+            'stderr_tail': '',
+            'output': 'hi\n',
+            'truncated': false,
+          },
+        },
+      });
+      final (events, error, _) = await run(
+        req(maxLineChars: 16384),
+        () => _streamed([
+          'data: $awaitChunk\n\n',
+          'data: $doneChunk\n\n',
+          'data: {"choices":[{"delta":{"content":"Done"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ]),
+      );
+      expect(error, isNull);
+      final tools = events.whereType<ChatStreamToolEvent>().toList();
+      expect(tools, hasLength(2));
+      expect(tools.first.id, 'tc_1');
+      expect(tools.first.callId, 'c03cd79321b5f7a2');
+      expect(tools.first.digest, digest);
+      expect(tools.first.tool, 'run_code');
+      expect(tools.first.language, 'python');
+      expect(tools.first.backend, 'host');
+      expect(tools.first.bidiWarning, isTrue);
+      expect(tools.first.bidiChars, ['U+202E']);
+      expect(tools.first.state, 'awaiting_approval');
+      expect(tools.first.isAwaitingApproval, isTrue);
+      expect(tools.last.state, 'done');
+      expect(tools.last.backend, 'container');
+      expect(tools.last.result!.ok, isTrue);
+      expect(tools.last.result!.elapsedMs, 42);
+      expect(tools.last.result!.output, 'hi\n');
     });
   });
 }
