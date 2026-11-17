@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.security import role_tool_policy
 from sonder_runtime.adapters.security.permission_policy import permission_policy
-from sonder_runtime.application.chat import tool_manifest
+from sonder_runtime.application.chat import tool_loop, tool_manifest
 from sonder_runtime.application.chat.honesty import no_tools_system
 
 # permission_modes.PLAN. The provider exposes no accessor for one mode name;
@@ -43,24 +43,22 @@ def user_may_run_code() -> bool:
 
 
 def for_chat_turn() -> tool_manifest.TurnToolManifest:
-    """The manifest for one plain chat turn (phase 0: no callable tools)."""
+    """The manifest for one plain or tool-enabled chat turn."""
+    active = tool_loop.current_turn()
+    if active is not None and isinstance(active.manifest, tool_manifest.TurnToolManifest):
+        return active.manifest
     return tool_manifest.TurnToolManifest(user_run_command=user_may_run_code())
 
 
 def chat_system(system: str, prompt: str, *, file_guidance: bool) -> str:
-    """A plain chat turn's system: file-turn guidance, then the manifest last.
-
-    ``file_guidance`` is the caller's existing condition for the no-tools file
-    guidance (local, default route). The manifest block is added on every
-    route, local, hosted and cloud alike, and replaces any earlier block, so a
-    rebuilt system (an escalation rung) still carries exactly one.
-    """
-    if file_guidance:
+    """A chat turn's system: file-turn guidance when tool-less, then the manifest last."""
+    manifest = for_chat_turn()
+    if file_guidance and not manifest.tools:
         system = no_tools_system(system, prompt)
-    return tool_manifest.with_manifest(system, for_chat_turn())
+    return tool_manifest.with_manifest(system, manifest)
 
 
-def manifest_last(before: object, augmented: tuple) -> tuple:
+def manifest_last(before: object, augmented: tuple[str, object]) -> tuple[object, object]:
     """``(system, extra)`` with the turn's own manifest block put back last.
 
     ``before`` is the system as it was before the step ran; ``augmented`` is

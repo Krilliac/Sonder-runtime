@@ -12,17 +12,25 @@ import sqlite3
 import threading
 import time
 
-import pytest
-
 import permission_modes as pm
+import pytest
 import server
 from sonder_runtime.adapters.security import approval_ledger as ledger_module
 from sonder_runtime.adapters.security.approval_ledger import (
-    DENIAL_TTL_SECONDS, MAX_DETAIL_CHARS, ApprovalDeniedError, ApprovalLedger,
+    DENIAL_TTL_SECONDS,
+    MAX_DETAIL_CHARS,
+    ApprovalDeniedError,
+    ApprovalLedger,
 )
 from sonder_runtime.interfaces.http.facades import approvals as facade
+
 from tests.test_http_approvals import (  # noqa: F401  (fixture)
-    JSON, _http_server, _local_open, _refuse_write, _request, _serve_with_accounts,
+    JSON,
+    _http_server,
+    _local_open,
+    _refuse_write,
+    _request,
+    _serve_with_accounts,
     ledger,
 )
 
@@ -195,16 +203,16 @@ def test_interleaved_approve_and_deny_never_leave_the_call_runnable(tmp_path):
 
 def test_threaded_approve_and_deny_never_end_runnable(tmp_path):
     for round_no in range(8):
-        store = ApprovalLedger(tmp_path / ("t%d.db" % round_no))
+        store = ApprovalLedger(tmp_path / f"t{round_no}.db")
         store.record_pending("run_code", DIGEST, surface="chat-tool")
         barrier = threading.Barrier(2)
         outcome = {}
 
-        def approve():
+        def approve(barrier=barrier, outcome=outcome, store=store):
             barrier.wait()
             outcome["approve"] = facade.approve_call(store, DIGEST[:16], {}, approver="a").status
 
-        def deny():
+        def deny(barrier=barrier, outcome=outcome, store=store):
             barrier.wait()
             outcome["deny"] = facade.deny_call(store, DIGEST[:16], {}).status
 
@@ -280,7 +288,7 @@ def test_detail_is_bounded_with_a_truncation_marker_and_redacted(tmp_path):
     assert "SECRET" not in pending.detail and pending.detail.startswith("x = '***'")
     assert "truncated" in pending.detail and len(pending.detail) < MAX_DETAIL_CHARS + 100
     assert pending.detail_truncated and pending.detail_chars == len(code)
-    assert "of %d chars" % len(code) in pending.detail
+    assert f"of {len(code)} chars" in pending.detail
     short = store.record_pending("run_code", OTHER, detail="print(1)")
     assert short.detail == "print(1)" and not short.detail_truncated
     assert short.detail_chars == 8
@@ -302,7 +310,7 @@ def test_run_code_pending_carries_the_code_and_the_digest_is_unchanged(active):
     pending = active.resolve_call(decision.call_id)
     assert pending.digest == expected_digest
     assert pending.detail == code
-    assert pending.preview == "code=<%d chars>" % len(code)  # the preview is unchanged
+    assert pending.preview == f"code=<{len(code)} chars>"  # the preview is unchanged
     assert pm.call_digest("run_code", args) == expected_digest
     assert pm.run_code_detail("file_write", {"code": "x"}) == ""
     assert pm.run_code_detail("run_code", {"code": 5}) == ""
@@ -400,7 +408,7 @@ def test_deny_route_blocks_consume_and_is_idempotent(active, monkeypatch):
     assert deny_audits, active.audits
     args, kwargs = deny_audits[0]
     assert args[1] == {"deny": decision.call_id, "tool": "file_write", "actor": "local-open"}
-    assert kwargs["summary"] == "denied file_write call %s via http by local-open" % decision.call_id
+    assert kwargs["summary"] == f"denied file_write call {decision.call_id} via http by local-open"
 
 
 def test_deny_route_revokes_an_open_approval_and_leaves_other_calls(active, monkeypatch):

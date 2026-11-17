@@ -128,8 +128,11 @@ def refusal_receipt(decision, *, mode_label: str = "", modes_allowing=(),
 def pending_view(item, *, show_detail: bool = True) -> dict:
     """One pending call. ``detail`` (the exact code of a run_code call) is
     withheld, with ``detail_hidden`` true, when ``show_detail`` is false."""
+    from sonder_runtime.application.chat.bidi import detect_bidi_chars
+
     detail = str(getattr(item, "detail", "") or "")
     chars = int(getattr(item, "detail_chars", 0) or 0)
+    has_bidi, bidi = detect_bidi_chars(detail) if (show_detail and detail) else (False, [])
     return {
         "call_id": str(item.call_id),
         "digest": str(item.digest),
@@ -143,6 +146,8 @@ def pending_view(item, *, show_detail: bool = True) -> dict:
         "detail_hidden": not show_detail,
         "detail_truncated": bool(getattr(item, "detail_truncated", False)),
         "detail_chars": chars,
+        "bidi_warning": has_bidi,
+        "bidi_chars": list(bidi),
         "denied": bool(getattr(item, "denied", False)),
     }
 
