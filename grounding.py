@@ -257,8 +257,11 @@ def run_code_detail(
     # Candidate code can read its own source through __file__. Keep the check
     # and completion token out of that file, while still detecting early exit.
     sentinel = "__SONDER_CHECKS_DONE_%s__" % secrets.token_hex(16) if extra else ""
-    fd, path = tempfile.mkstemp(suffix=".py")
+    # Keep generated scripts and their import root in one owned tree.
+    scratch = _scratch_cwd()
+    path = runner_path = None
     try:
+        fd, path = tempfile.mkstemp(suffix=".py", dir=scratch)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(code)
         try:
@@ -286,34 +289,23 @@ def run_code_detail(
                     "_sonder_sys.__stdout__.flush()\n"
                 ) % (path, extra, "\n" + sentinel + "\n")
                 command = [interp, "-c", runner]
-            runner_path = None
             if sentinel and len(runner) > _MAX_INLINE_RUNNER_CHARS:
                 # Windows caps a command line near 32K characters; a large check
                 # suite runs from a second file instead (readable by the
                 # candidate, so this path only guards against accidental exits).
-                rfd, runner_path = tempfile.mkstemp(suffix=".py")
+                rfd, runner_path = tempfile.mkstemp(suffix=".py", dir=scratch)
                 with os.fdopen(rfd, "w", encoding="utf-8") as rf:
                     rf.write(runner)
                 command = [interp, runner_path]
-            # Generated code is untrusted model output: give it a throwaway
-            # cwd so a relative-path write cannot land wherever this process
-            # happens to be running (for the nightly job, the source tree).
-            scratch = _scratch_cwd()
-            try:
-                p = subprocess.run(
-                    command,
-                    input=stdin or "",
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=scratch,
-                    env=sonder_logging.child_environment(),
-                )
-            finally:
-                shutil.rmtree(scratch, ignore_errors=True)
-                if runner_path:
-                    with contextlib.suppress(OSError):
-                        os.unlink(runner_path)
+            p = subprocess.run(
+                command,
+                input=stdin or "",
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=scratch,
+                env=sonder_logging.child_environment(),
+            )
             stdout, stderr = p.stdout or "", p.stderr or ""
             checks_finished = not sentinel or sentinel in stdout
             if sentinel:
@@ -343,7 +335,11 @@ def run_code_detail(
                 "error": "timed out after %ss" % timeout,
             }
     finally:
-        os.unlink(path)
+        shutil.rmtree(scratch, ignore_errors=True)
+        for script_path in (runner_path, path):
+            if script_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(script_path)
 
 
 def format_run_result(result):
