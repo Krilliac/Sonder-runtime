@@ -18,6 +18,7 @@ from ..domain.cloud_access import LEGACY_ERROR_PREFIX
 # authoritative. The generic path must never create recursive agent runs.
 RECURSIVE_ENTRYPOINTS = frozenset({
     "sonder", "agent", "workbench_agent", "loop", "offload",
+    "delegate_task", "spawn_agents",
     "master_orchestrate", "master_retry", "master_cancel", "master",
     "workflow_run", "agent_lane",
 })
