@@ -259,3 +259,100 @@ def test_run_program_allows_ordinary_option_values(launch, case):
     program, args, stdin = case
     with pytest.raises(_Launched):
         launch(program, args, stdin)
+
+
+REFUSED_NEW_BLOCKERS = [
+    # Unknown-option stdin bypass
+    ("C:/node/node.exe", ["--max-old-space-size", "4096"], "console.log(1)"),
+    ("C:/node/node.exe", ["--unknown-flag", "val"], "console.log(1)"),
+    (PY, ["--unknown-flag", "script.py"], "print(1)"),
+    # node --test-reporter=data:
+    ("C:/node/node.exe", ["--test-reporter=data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--test-reporter", "data:text/javascript,1", "x.js"], ""),
+    ("C:/node/node.exe", ["--test_reporter=DATA:text/javascript,1"], ""),
+    ("C:/node/node.exe", ["--interactive", "x.js"], "console.log(1)"),
+    # deno/bun subcommands & unknown options before subcommand
+    ("C:/deno/deno.exe", ["--ext", "ts", "eval", "console.log(1)"], ""),
+    ("C:/deno/deno.exe", ["--unknown-opt", "val", "eval", "console.log(1)"], ""),
+    ("C:/deno/deno.exe", ["run", "--", "data:text/javascript,1"], ""),
+    ("C:/bun/bun.exe", ["--cwd", ".", "exec", "console.log(1)"], ""),
+    ("C:/bun/bun.exe", ["--unknown-opt", "val", "exec", "console.log(1)"], ""),
+    ("C:/bun/bun.exe", ["--preload", "data:text/javascript,1", "x.js"], ""),
+    ("C:/bun/bun.exe", ["-r", "data:text/javascript,1", "x.js"], ""),
+    ("C:/bun/bun.exe", ["repl"], "console.log(1)"),
+    ("C:/bun/bun.exe", ["run", "--", "https://example.com/x.ts"], ""),
+    # /dev/stdin and fd/0 variants
+    (PY, ["/dev/stdin"], "print(1)"),
+    (PY, ["--", "/dev/stdin"], "print(1)"),
+    (PY, ["/dev/fd/0"], "print(1)"),
+    (PY, ["/proc/self/fd/0"], "print(1)"),
+    (BASH, ["/dev/stdin"], "id"),
+    ("C:/node/node.exe", ["/dev/stdin"], "console.log(1)"),
+    ("C:/deno/deno.exe", ["run", "/dev/stdin"], "console.log(1)"),
+    ("/usr/bin/php", ["-f", "/dev/stdin"], "<?php echo 1;"),
+    (PY, ["file:///dev/stdin"], "print(1)"),
+    # PowerShell inline guard bypasses
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["/c", "Write-Host 1"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["/Command", "Write-Host 1"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["\u2013Command", "Write-Host 1"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-Command:Write-Host 1"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-ec:AA=="], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["Write-Host 1"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-File", "-"], "Write-Host 1"),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile"], "Write-Host 1"),
+    ("C:/Program Files/PowerShell/7/pwsh.exe", ["/ec", "AA=="], ""),
+    # conhost and other launchers
+    ("C:/Windows/System32/conhost.exe", ["--headless", "python", "-c", "print(1)"], ""),
+    ("C:/Windows/System32/conhost.exe", ["--width", "80", "powershell.exe", "-Command", "whoami"], ""),
+    ("C:/Windows/System32/conhost.exe", ["/headless", "cmd.exe", "/c", "echo hi"], ""),
+    ("C:/Windows/System32/conhost.exe", ["--headless", "evil.bat"], ""),
+    ("C:/Windows/System32/conhost.exe", ["--unknown-flag", "python", "-c", "print(1)"], ""),
+    ("C:/Windows/System32/conhost.exe", ["--headless", "env", "python3", "-Ic", "print(1)"], ""),
+    ("/usr/bin/env", ["-i", "FOO=1", "python", "-c", "print(1)"], ""),
+    ("/usr/bin/env", ["-S", "python -c 'print(1)'"], ""),
+    ("C:/Windows/System32/wsl.exe", ["-e", "bash", "-c", "id"], ""),
+    ("C:/Windows/System32/wsl.exe", [], "id"),
+    ("/usr/bin/timeout", ["5", "python3", "-c", "print(1)"], ""),
+    ("/usr/bin/nice", ["-n", "5", "ruby", "-e", "puts 1"], ""),
+    ("/usr/bin/busybox", ["ash", "-c", "id"], ""),
+    # Missing shells
+    ("/bin/ash", ["-c", "id"], ""),
+    ("/bin/ksh", ["-c", "id"], ""),
+    ("/bin/mksh", ["-c", "id"], ""),
+    ("/bin/csh", ["-c", "id"], ""),
+    ("/bin/tcsh", ["-c", "id"], ""),
+    ("/usr/bin/fish", ["-c", "id"], ""),
+    ("/usr/bin/fish", ["-C", "id"], ""),
+    ("/usr/bin/fish", ["--init-command=id", "script.fish"], ""),
+    ("/usr/bin/elvish", ["-c", "echo 1"], ""),
+    ("/usr/bin/nu", ["-c", "1"], ""),
+    ("/usr/bin/nu", ["--commands=1"], ""),
+    ("/usr/bin/nu", ["--stdin", "script.nu"], "1"),
+]
+
+ALLOWED_NEW_CASES = [
+    ("C:/node/node.exe", ["--max-old-space-size", "4096", "script.js"], ""),
+    ("C:/node/node.exe", ["--test-reporter", "spec", "x.test.js"], ""),
+    ("C:/deno/deno.exe", ["--allow-net", "run", "script.ts", "eval"], ""),
+    ("C:/deno/deno.exe", ["--ext", "ts", "run", "script.ts"], ""),
+    ("C:/bun/bun.exe", ["test", "x.test.ts"], ""),
+    ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "script.ps1"], "input data"),
+    ("C:/Windows/System32/conhost.exe", ["--headless", "python", "script.py"], ""),
+    ("/usr/bin/env", ["FOO=1", "python", "script.py"], ""),
+    ("/usr/bin/timeout", ["/T", "5"], ""),
+    ("/usr/bin/fish", ["script.fish"], ""),
+]
+
+
+@pytest.mark.parametrize("case", REFUSED_NEW_BLOCKERS, ids=[_id(c) for c in REFUSED_NEW_BLOCKERS])
+def test_run_program_refuses_new_exec_guard_blockers(launch, case):
+    program, args, stdin = case
+    with pytest.raises(PermissionError, match="script_run"):
+        launch(program, args, stdin)
+
+
+@pytest.mark.parametrize("case", ALLOWED_NEW_CASES, ids=[_id(c) for c in ALLOWED_NEW_CASES])
+def test_run_program_allows_legitimate_new_cases(launch, case):
+    program, args, stdin = case
+    with pytest.raises(_Launched):
+        launch(program, args, stdin)
