@@ -28,16 +28,19 @@ from sonder_runtime.adapters.filesystem import atomic_json as _atomic_json
 from sonder_runtime.domain.reference_lookup.applies import AppliesRule
 from sonder_runtime.domain.runtime_policy import rules as _rules
 from sonder_runtime.platform import paths as runtime_paths
+import sonder_runtime.adapters.model_lists as _model_lists
 
 VERSION = _rules.VERSION
 LOCAL_TIERS = _rules.LOCAL_TIERS
 BASE_LOCAL_TIERS = _rules.BASE_LOCAL_TIERS
 OPTIONAL_LOCAL_TIERS = _rules.OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = _rules.ROUTING_LANES
-DEFAULT_MODELS = _rules.DEFAULT_MODELS
-DEFAULT_EMBEDDING_MODEL = _rules.DEFAULT_EMBEDDING_MODEL
-RESERVED_PERSONAL_MODEL = _rules.RESERVED_PERSONAL_MODEL
-DEFAULT_ROUTING = _rules.DEFAULT_ROUTING
+def __getattr__(name):
+    keys = {"DEFAULT_MODELS": "default_local_models", "DEFAULT_EMBEDDING_MODEL": "default_embedding_model",
+            "RESERVED_PERSONAL_MODEL": "reserved_personal_model", "DEFAULT_ROUTING": "default_routing"}
+    if name not in keys:
+        raise AttributeError(name)
+    return _model_lists.load().document()[keys[name]]
 NPU_MODES = _rules.NPU_MODES
 NPU_CAPABILITIES = _rules.NPU_CAPABILITIES
 DEFAULT_NPU = _rules.DEFAULT_NPU
@@ -98,20 +101,30 @@ def transition_path(path=None) -> Path:
 # Pure rules delegate to the SPEC-3 domain module; names are preserved for
 # existing callers and tests.
 _is_cloud_name = _rules.is_cloud_name
-_is_reserved_personal_alias = _rules.is_reserved_personal_alias
-_model = _rules.validate_model
-_seed_embedding_model = _rules.seed_embedding_model
+def _is_reserved_personal_alias(value):
+    return _rules.is_reserved_personal_alias(value, _model_lists.load().values["reserved_personal_model"])
+
+
+def _model(value, fallback, *, allow_unset=False):
+    return _rules.validate_model(value, fallback, allow_unset=allow_unset,
+                                 reserved_personal_model=_model_lists.load().values["reserved_personal_model"])
+
+
+def _seed_embedding_model(env):
+    return _rules.seed_embedding_model(env, lists=_model_lists.load().values)
+
+
 _normalize_npu = _rules.normalize_npu
 bound_tiers = _rules.bound_tiers
 _write_json_atomic = _atomic_json.write_json_atomic
 
 
 def _seed_model(env, tier: str) -> str:
-    return _rules.seed_model(env, tier, floor=_model_tool_policy.shipped_floor())
+    return _rules.seed_model(env, tier, floor=_model_tool_policy.shipped_floor(), lists=_model_lists.load().values)
 
 
 def normalize(payload, defaults=None) -> dict:
-    return _rules.normalize(payload, defaults, floor=_model_tool_policy.shipped_floor())
+    return _rules.normalize(payload, defaults, floor=_model_tool_policy.shipped_floor(), lists=_model_lists.load().values)
 
 
 def _disk_payload(policy: dict) -> dict:
@@ -130,7 +143,7 @@ def configured_tiers(policy, bindings) -> tuple:
 
 def default_policy(env=None) -> dict:
     return _rules.default_policy(
-        os.environ if env is None else env, floor=_model_tool_policy.shipped_floor(),
+        os.environ if env is None else env, floor=_model_tool_policy.shipped_floor(), lists=_model_lists.load().values,
     )
 
 
@@ -172,6 +185,7 @@ def _load_unlocked(path, create=True) -> dict:
 
 
 def load(create=True) -> dict:
+    _model_lists.load()  # fail before creating/locking a policy without defaults
     path = policy_path().resolve()
     with _LOCK:
         if create and not path.exists():
@@ -435,7 +449,7 @@ def format_policy(policy=None) -> str:
             )
             continue
         lines.append("    %s: %s" % (tier, model))
-    lines.append("  embeddings: %s" % policy.get("embedding_model", DEFAULT_EMBEDDING_MODEL))
+    lines.append("  embeddings: %s" % policy.get("embedding_model", _model_lists.load().values["default_embedding_model"]))
     lines.append("  execution lanes:")
     for lane in ROUTING_LANES:
         tier = policy["routing"][lane]
@@ -457,6 +471,7 @@ def format_policy(policy=None) -> str:
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
     lines.append("  " + format_tool_lane_denied_models(policy))
+    lines.extend("  " + line for line in _model_lists.describe())
     lines.extend("  " + line for line in _model_tool_policy.describe())
     lines.extend("  " + line for line in _model_tool_grants.describe_lines(
         legacy_section=policy.get("tool_lane_denied_models"),

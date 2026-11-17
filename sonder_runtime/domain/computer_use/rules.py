@@ -16,6 +16,8 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from ..common.bounded_json import JsonBoundsExceeded, check_depth
+
 ACTIONS = frozenset({"click", "double_click", "right_click", "move", "type", "key", "scroll"})
 POINTER_ACTIONS = frozenset({"click", "double_click", "right_click", "move", "scroll"})
 COORDINATE_SYSTEMS = frozenset({"pixels", "normalized"})
@@ -245,8 +247,9 @@ def parse_model_step(text) -> dict:
     if not body:
         raise ActionRefused("the model did not return a JSON step")
     try:
+        check_depth(body)
         data = json.loads(body)
-    except (json.JSONDecodeError, RecursionError):
+    except (JsonBoundsExceeded, json.JSONDecodeError, RecursionError):
         raise ActionRefused("the model returned malformed JSON") from None
     if not isinstance(data, dict):
         raise ActionRefused("the model's step must be a JSON object")

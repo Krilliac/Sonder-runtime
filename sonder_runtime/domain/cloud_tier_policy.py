@@ -4,14 +4,12 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableMapping
 
 
-LEGACY_CLOUD_GENERAL_MODEL = "gpt-oss:120b-cloud"
-
-
 def refresh_live_cloud_tiers(
     tiers: MutableMapping[str, object],
     environment: Mapping[str, object],
     *,
     default_cloud_general_model: object,
+    legacy_cloud_general_model: str,
 ) -> None:
     """Repair the retired live ``cloud-general`` binding when appropriate.
 
@@ -25,9 +23,9 @@ def refresh_live_cloud_tiers(
     ).strip().lower() in ("1", "true", "yes", "on")
     if (
         not preserve_legacy
-        and tiers.get("cloud-general") == LEGACY_CLOUD_GENERAL_MODEL
+        and tiers.get("cloud-general") == legacy_cloud_general_model
     ):
         tiers["cloud-general"] = default_cloud_general_model
 
 
-__all__ = ["LEGACY_CLOUD_GENERAL_MODEL", "refresh_live_cloud_tiers"]
+__all__ = ["refresh_live_cloud_tiers"]

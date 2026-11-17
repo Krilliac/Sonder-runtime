@@ -9,6 +9,62 @@ Two layers, deliberately separate:
    selects model aliases, routing lanes, and NPU modes. It can **never**
    widen network, filesystem, credential, or cloud permissions.
 
+## Model lists and defaults
+
+The version 1 catalog in `sonder_runtime/adapters/data/model_lists.json` ships
+the model names and routing lists. An optional `<state home>/model_lists.json`
+overrides it; `SONDER_MODEL_LISTS` selects another overlay path. The overlay is
+a JSON object with `"version": 1`. Lists and scalar values replace the whole
+key; dictionary entries merge by subkey, including nested router and training
+entries. Unknown keys, invalid names, unknown tiers, and unpinned training
+revisions invalidate the entire overlay. The runtime reports the issue, uses
+the shipped catalog, and leaves the invalid file untouched. Missing or invalid
+shipped data raises a configuration error naming the file; there is no Python
+copy of the model defaults. MCP import remains available to report the error.
+
+The catalog keys are `retired_cloud_models`, `legacy_cloud_general_model`,
+`default_cloud_models`, `stable_alias`, `default_local_models`,
+`default_embedding_model`, `reserved_personal_model`, `default_routing`,
+`vision_only_model_families`, `tier_strength`, `working_strength`,
+`capability_router` (`preferred`, `ladder`, `fallback`, `keywords`),
+`ensemble_skip_tiers`, `bootstrap_models`, and `training_model_specs`.
+Training sizes and memory-budget algorithms remain code contracts; each HF
+revision in the catalog must be an exact 40-character commit, never a branch.
+
+Existing environment overrides still win: `SONDER_FAST`, `SONDER_CODE`,
+`SONDER_GENERAL`, `SONDER_REASONING`, `SONDER_VISION`, `SONDER_CODE_LOCAL`,
+`SONDER_CLOUD_CODE`, `SONDER_CLOUD_GENERAL`, and `SONDER_EMBED_MODEL`.
+`SONDER_LEARN_TIERS` continues to override the derived learning-tier set.
+Runtime policy still owns persisted tier bindings; changing a catalog default
+does not replace an operator's existing runtime-policy assignments.
+
+At the console:
+
+```text
+/runtime models
+/runtime models set default_local_models {"code":"custom-coder:7b"}
+/runtime models set bootstrap_models {"small":"custom-coder:1.5b"}
+/runtime models reset default_local_models
+```
+
+Status shows effective defaults, their `shipped`, `overlay`, or `env` sources,
+file paths, and errors. Set/reset accept top-level catalog keys and write only
+the overlay, using a file lock and atomic replacement. They require exactly
+the same attended console authority as `/runtime tools`; MCP/HTTP/model calls
+cannot write the overlay. The overlay, its lock, and atomic temporary siblings
+are protected control-plane paths, including an environment-selected path.
+Invalid existing overlays must be fixed by hand before console edits.
+Loaders notice file identity changes; restart the runtime to apply startup
+bindings such as aliases and ensemble exclusions consistently.
+
+Training, deployment, and rollback pin one immutable catalog for the whole
+lifecycle operation. Editing the overlay takes effect on the next operation;
+it cannot change the alias being validated or published by an operation already
+running. Transition journals record the exact personal/rollback aliases and
+training model revisions, so recovery uses those recorded identities after a
+restart. A pending journal from before identity pinning is left untouched and
+requires operator recovery; it never inherits newly configured aliases.
+
 ## Precedence (production config)
 
 Lowest to highest:

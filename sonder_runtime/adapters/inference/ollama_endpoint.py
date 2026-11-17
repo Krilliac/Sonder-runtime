@@ -181,8 +181,11 @@ def policy_error(value=None, *, allow_remote=None) -> str:
 
 
 def configured_origin(value=None, *, allow_remote=None) -> str:
-    origin = normalize(value)
-    error = policy_error(origin, allow_remote=allow_remote)
+    # The policy decides on the configured text itself, not on what
+    # normalisation made of it.
+    raw = _candidate(value)
+    origin = ollama_policy.normalize(raw)
+    error = policy_error(raw, allow_remote=allow_remote)
     if error:
         logger.debug(f"configured_origin: policy error for {origin!r}: {error}")
         raise ValueError(error)
