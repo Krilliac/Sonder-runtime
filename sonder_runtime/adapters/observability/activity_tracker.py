@@ -774,6 +774,19 @@ def set_result_summary(summary):
         response["result_summary"] = _block(summary, 1000)
 
 
+def set_sampling_note(text: str) -> None:
+    """Record the turn's effective sampling (e.g. its temperature and source).
+
+    Shown on its own ``sampling:`` line of the activity footer, so it is not
+    pushed out by the recent-events window.
+    """
+    response = _current()
+    if response is None:
+        return
+    with _LOCK:
+        response["sampling"] = _short(text, 160)
+
+
 def set_response_status(status, summary=""):
     """Set a bounded host-observed terminal status for the active response.
 
@@ -1606,6 +1619,8 @@ def format_response(response=None):
             response.get("lines_deleted", 0),
         ),
     ]
+    if response.get("sampling"):
+        lines.append("sampling: %s" % response["sampling"])
     files = response.get("files") or []
     if files:
         lines.append("file changes:")

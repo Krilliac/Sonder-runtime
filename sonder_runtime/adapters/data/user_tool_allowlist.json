@@ -38,6 +38,10 @@
     {
       "name": "/strict",
       "why": "Toggles the caller's own per-session strict flag. Acts on nothing outside the session."
+    },
+    {
+      "name": "/temp",
+      "why": "Shows or sets the caller's own per-session sampling temperature (0-2 or auto), kept under the caller's principal-scoped session id. Acts on nothing outside the session."
     }
   ]
 }

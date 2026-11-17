@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/settings/context_size.dart';
+import 'package:sonder_runtime/settings/temperature.dart';
 import 'package:sonder_runtime/settings_screen.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/ui/kit.dart';
@@ -369,6 +370,76 @@ void main() {
     expect(_text(tester, 'context-size'), '16000');
     await saveSettings(tester);
     expect(preferences.getString('sonder_context_size'), '16000');
+  });
+
+  group('temperature', () {
+    Switch autoSwitch(WidgetTester tester) =>
+        tester.widget<Switch>(find.byKey(const Key('settings-temperature-auto')));
+    Slider slider(WidgetTester tester) => tester
+        .widget<Slider>(find.byKey(const Key('settings-temperature-slider')));
+
+    test('normalizes to 0..2 in steps of 0.05; garbled is Auto', () {
+      expect(normalizeTemperature(0.7), 0.7);
+      expect(normalizeTemperature(0.73), 0.75);
+      expect(normalizeTemperature(-1), 0);
+      expect(normalizeTemperature(3), 2);
+      expect(normalizeTemperature(double.nan), isNull);
+      expect(normalizeTemperature(null), isNull);
+      expect(parseTemperature('1.2'), 1.2);
+      expect(parseTemperature('9'), 2);
+      expect(parseTemperature('hot'), isNull);
+      expect(parseTemperature(null), isNull);
+      expect(temperatureLabel(0.7), '0.70');
+      expect(temperatureLabel(null), 'auto');
+    });
+
+    testWidgets('Auto is on by default with the slider disabled',
+        (tester) async {
+      await pumpSettings(tester,
+          connection: FakeConnection(), category: SettingsCategory.general);
+      expect(autoSwitch(tester).value, isTrue);
+      expect(slider(tester).onChanged, isNull);
+      expect(find.text('auto'), findsOneWidget);
+      expect(find.byKey(const Key('settings-save')), findsNothing);
+    });
+
+    testWidgets('Auto off enables the slider; the value saves; Auto saves null',
+        (tester) async {
+      await pumpSettings(tester,
+          connection: FakeConnection(), category: SettingsCategory.general);
+      await tester.tap(find.byKey(const Key('settings-temperature-auto')));
+      await tester.pumpAndSettle();
+      expect(autoSwitch(tester).value, isFalse);
+      expect(slider(tester).onChanged, isNotNull);
+      expect(slider(tester).value, closeTo(0.7, 1e-9));
+      expect(find.text('0.70'), findsOneWidget);
+
+      slider(tester).onChanged!(1.25);
+      await tester.pumpAndSettle();
+      expect(find.text('1.25'), findsOneWidget);
+      await saveSettings(tester);
+      final preferences = await SharedPreferences.getInstance();
+      expect(preferences.getString('sonder_temperature'), '1.25');
+
+      await tester.tap(find.byKey(const Key('settings-temperature-auto')));
+      await tester.pumpAndSettle();
+      expect(slider(tester).onChanged, isNull);
+      await saveSettings(tester);
+      expect(preferences.containsKey('sonder_temperature'), isFalse);
+      expect((await Settings.load()).temperature, isNull);
+    });
+
+    testWidgets('a saved value loads into the slider', (tester) async {
+      SharedPreferences.setMockInitialValues({'sonder_temperature': '0.3'});
+      final saved = await Settings.load();
+      expect(saved.temperature, 0.3);
+      await pumpSettings(tester,
+          connection: FakeConnection(),
+          settings: saved,
+          category: SettingsCategory.general);
+      expect(autoSwitch(tester).value, isFalse);
+      expect(find.text('0.30'), findsOneWidget);
+    });
   });
 
   testWidgets('the model picker lists /v1/models, filters and picks',

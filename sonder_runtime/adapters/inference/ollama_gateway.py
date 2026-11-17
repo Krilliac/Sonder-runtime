@@ -369,7 +369,7 @@ class OllamaGateway:
         effective_timeout = max(1, math.ceil(timeout)) if timeout is not None else None
         logger.debug(
             f"OllamaGateway.generate: building generate fn, model={model!r}, "
-            f"temperature={options.get('temperature', 0.2)}, num_ctx={options.get('num_ctx', self._session_num_ctx)}, "
+            f"temperature={options.get('temperature', 'auto')}, num_ctx={options.get('num_ctx', self._session_num_ctx)}, "
             f"timeout={effective_timeout}"
         )
         generate_options = {}
@@ -390,7 +390,8 @@ class OllamaGateway:
         gen = self._generate_factory(
             model,
             effective_system,
-            float(options.get("temperature", 0.2)),
+            # No temperature set: send none, so the model preset applies.
+            None if options.get("temperature") is None else float(options["temperature"]),
             num_predict,
             int(options.get("num_ctx", self._session_num_ctx)),
             cloud=cloud,
