@@ -17,9 +17,11 @@ import 'strings.dart';
 ///                                   [Cancel]   [Switch to auto]
 /// ```
 ///
-/// The confirm button is danger-toned for `auto` and warn-toned otherwise.
+/// The confirm button is danger-toned for `auto` and `bypass`, and
+/// warn-toned otherwise. Raising to `bypass` requires an explicit checkbox
+/// acknowledgement before the confirm button becomes active.
 /// Presentational only: the parent sends the request.
-class RaiseModeSheet extends StatelessWidget {
+class RaiseModeSheet extends StatefulWidget {
   final String from;
   final String to;
 
@@ -40,32 +42,60 @@ class RaiseModeSheet extends StatelessWidget {
   });
 
   @override
+  State<RaiseModeSheet> createState() => _RaiseModeSheetState();
+}
+
+class _RaiseModeSheetState extends State<RaiseModeSheet> {
+  bool _bypassConfirmed = false;
+
+  bool get _isBypass => resolvePermissionMode(widget.to) == 'bypass';
+
+  @override
   Widget build(BuildContext context) {
+    final isBypass = _isBypass;
+    final canConfirm = !isBypass || _bypassConfirmed;
+    final dangerRole = isBypass || widget.to == 'auto';
     return SonderSheetFrame(
       key: const Key('raise-mode-sheet'),
-      kind: StatusKind.warn,
+      kind: isBypass ? StatusKind.fail : StatusKind.warn,
       word: SonderStrings.raiseModeWord,
-      title: SonderStrings.raiseTitle(from, to),
-      semanticsLabel: '${SonderStrings.raiseModeWord} $from to $to',
+      title: SonderStrings.raiseTitle(widget.from, widget.to),
+      semanticsLabel: '${SonderStrings.raiseModeWord} ${widget.from} to ${widget.to}',
       actions: [
         TextButton(
           key: const Key('raise-mode-cancel'),
-          onPressed: busy ? null : onCancel,
+          onPressed: widget.busy ? null : widget.onCancel,
           style: TextButton.styleFrom(minimumSize: const Size(0, 44)),
           child: const Text(SonderStrings.cancel),
         ),
         ToneButton(
           key: const Key('raise-mode-confirm'),
-          label: SonderStrings.switchTo(to),
-          role: to == 'auto' ? StatusRole.danger : StatusRole.warning,
-          busy: busy,
-          onPressed: onConfirm,
+          label: SonderStrings.switchTo(widget.to),
+          role: dangerRole ? StatusRole.danger : StatusRole.warning,
+          busy: widget.busy,
+          onPressed: canConfirm ? widget.onConfirm : null,
         ),
       ],
       children: [
-        Text(SonderStrings.raiseEffect(to, host)),
+        Text(SonderStrings.raiseEffect(widget.to, widget.host)),
         const SizedBox(height: SonderSpace.sm),
-        const Text(SonderStrings.raiseDestructiveNote),
+        Text(isBypass
+            ? SonderStrings.raiseBypassWarning
+            : SonderStrings.raiseDestructiveNote),
+        if (isBypass) ...[
+          const SizedBox(height: SonderSpace.md),
+          CheckboxListTile(
+            key: const Key('raise-mode-bypass-ack'),
+            value: _bypassConfirmed,
+            onChanged: widget.busy
+                ? null
+                : (checked) =>
+                    setState(() => _bypassConfirmed = checked ?? false),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: const Text(SonderStrings.raiseBypassAck),
+          ),
+        ],
       ],
     );
   }

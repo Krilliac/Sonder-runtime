@@ -203,8 +203,12 @@ ApprovalRequest approvalRequestForPending(
     ApprovalRequest(
       tool: call.tool.isEmpty ? 'call' : call.tool,
       callId: call.callId,
-      arguments:
-          call.preview.isEmpty ? const [] : [('arguments', call.preview)],
+      arguments: [
+        if (call.preview.isNotEmpty) ('arguments', call.preview),
+        if (call.detail.isNotEmpty) ('detail', call.detail),
+        if (call.bidiWarning)
+          ('warning', 'Hidden bidirectional or control characters detected'),
+      ],
       mode: call.mode.isNotEmpty
           ? call.mode
           : (r.mode.isEmpty ? 'the current' : r.mode),

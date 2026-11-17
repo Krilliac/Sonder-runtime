@@ -145,6 +145,9 @@ Color roleColor(SonderTokens tokens, StatusRole role) => switch (role) {
 /// The known permission modes, least to most autonomous.
 const permissionModes = <String>['plan', 'manual', 'acceptEdits', 'auto'];
 
+/// All permission modes including high-privilege `bypass` (admin-only).
+const allPermissionModes = <String>[...permissionModes, 'bypass'];
+
 /// How a mode word is drawn: its role, whether it is strong, and whether it
 /// is a reversed badge (only ELEVATED).
 @immutable
@@ -185,6 +188,7 @@ ModeStyle modeStyle(String mode, {bool elevated = false}) {
     'manual' => const ModeStyle(StatusRole.text),
     'acceptEdits' => const ModeStyle(StatusRole.warning),
     'auto' => const ModeStyle(StatusRole.warning, strong: true),
+    'bypass' => const ModeStyle(StatusRole.danger, strong: true),
     _ => const ModeStyle(StatusRole.text),
   };
 }
@@ -197,8 +201,8 @@ const modeBlurbs = <String, String>{
   'auto': 'edits and programs run without asking',
 };
 
-/// The position of [mode] in [permissionModes], or -1 when unknown.
-int modeRank(String mode) => permissionModes.indexOf(mode);
+/// The position of [mode] in [allPermissionModes], or -1 when unknown.
+int modeRank(String mode) => allPermissionModes.indexOf(mode);
 
 /// The mode [name] selects, resolved exactly as the server's
 /// `permission_modes.resolve_mode` does: case-insensitive, spaces and dashes
@@ -209,11 +213,12 @@ String? resolvePermissionMode(String name) {
   final wanted =
       name.trim().toLowerCase().replaceAll(' ', '').replaceAll('-', '');
   if (wanted.isEmpty) return null;
-  for (final mode in permissionModes) {
+  for (final mode in allPermissionModes) {
     if (mode.toLowerCase() == wanted) return mode;
   }
-  final hits =
-      permissionModes.where((m) => m.toLowerCase().startsWith(wanted)).toList();
+  final hits = allPermissionModes
+      .where((m) => m.toLowerCase().startsWith(wanted))
+      .toList();
   return hits.length == 1 ? hits.single : null;
 }
 

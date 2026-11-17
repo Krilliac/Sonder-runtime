@@ -32,6 +32,12 @@ class FakeTurn implements ChatTurn {
   void phase(String p) => controller.add(TurnPhase(p));
   void delta(String text) => controller.add(TurnDelta(text));
 
+  /// The server's wait status; an empty [text] is its clearing frame.
+  void status(String text) => controller.add(TurnStatus(text));
+
+  /// Emits a `sonder_tool` event during the live turn.
+  void tool(ChatStreamToolEvent event) => controller.add(TurnTool(event));
+
   void done(String text, {ChatResponseMetadata? metadata}) {
     controller.add(TurnDone(ChatReply(text: text, metadata: metadata)));
     controller.close();
@@ -53,9 +59,11 @@ class FakeChatBackend implements ChatBackend {
   final List<FakeTurn> turns = [];
   final List<String> feedback = [];
   final List<String> modePosts = [];
+  final List<(String, bool)> modeRequests = [];
   final List<String> workRunGets = [];
   final List<String> workRunCancels = [];
   final List<(String, Duration)> approvals = [];
+  final List<(String, String, String)> denials = [];
 
   /// `(tool, digest)` sent with each approval, in order.
   final List<(String, String)> approvalBindings = [];
@@ -100,6 +108,8 @@ class FakeChatBackend implements ChatBackend {
   WorkRun Function(String id)? cancelWorkRunResult;
   ApprovalOutcome approvalOutcome =
       const ApprovalOutcome(ApprovalStatus.approved, nonce: 'n_c41a');
+  ApprovalOutcome denialOutcome =
+      const ApprovalOutcome(ApprovalStatus.approved);
 
   FakeTurn get lastTurn => turns.last;
 
@@ -165,11 +175,13 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
-  Future<PermissionMode> setPermissionMode(String next) async {
+  Future<PermissionMode> setPermissionMode(String next,
+      {bool confirmBypass = false}) async {
     modePosts.add(next);
+    modeRequests.add((next, confirmBypass));
     final err = modeWriteError;
     if (err != null) throw err;
-    mode = permissionModeFor(next);
+    mode = permissionModeFor(next, canBypass: mode?.canBypass ?? false);
     return mode!;
   }
 
@@ -214,22 +226,32 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''}) async {
+    denials.add((callId, tool, digest));
+    return denialOutcome;
+  }
+
+  @override
   void dispose() {}
 }
 
 /// A server-shaped permission mode record.
-PermissionMode permissionModeFor(String mode, {bool elevated = false}) {
+PermissionMode permissionModeFor(String mode,
+    {bool elevated = false, bool canBypass = false}) {
   const blurbs = <String, String>{
     'plan': 'reads only - no writes, no commands',
     'manual': 'ask before anything that is not a read',
     'acceptEdits': 'file changes proceed; running programs still asks',
     'auto': 'file changes and programs proceed',
+    'bypass': 'skips all confirmations and filesystem root containment',
   };
   return PermissionMode(
     mode: mode,
     label: mode,
     blurb: blurbs[mode] ?? '',
     elevated: elevated,
+    canBypass: canBypass,
     modes: [
       for (final e in blurbs.entries)
         PermissionModeOption(name: e.key, label: e.key, blurb: e.value),

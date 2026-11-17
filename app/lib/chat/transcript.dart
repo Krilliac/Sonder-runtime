@@ -19,6 +19,7 @@ import 'controller.dart';
 import 'live_line.dart';
 import 'refusal.dart';
 import 'route_overflow_chip.dart';
+import 'tool_run_card.dart';
 import 'work_run_card.dart';
 
 /// Counters for performance tests (P2-17). Debug-only bookkeeping.
@@ -47,6 +48,7 @@ class TranscriptActions {
   final VoidCallback onChangeMode;
   final Future<PendingCallLookup> Function(String callId)? onLookupApproval;
   final ApproveCallback? onApprove;
+  final ToolDecisionCallback? onDeny;
   final Future<WorkRun> Function(String id) fetchWorkRun;
   final Future<WorkRun> Function(String id) cancelWorkRun;
   final Future<List<WorkRun>> Function() listWorkRuns;
@@ -62,6 +64,7 @@ class TranscriptActions {
     required this.onChangeMode,
     this.onLookupApproval,
     required this.onApprove,
+    this.onDeny,
     required this.fetchWorkRun,
     required this.cancelWorkRun,
     required this.listWorkRuns,
@@ -494,6 +497,9 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
             fetch: actions.fetchWorkRun,
             cancel: actions.cancelWorkRun,
             onResolved: (run) => actions.onWorkRunResolved(entry.id, run),
+            onLookupApproval: actions.onLookupApproval,
+            onApprove: actions.onApprove,
+            onChangeMode: actions.onChangeMode,
           ),
         ReplyKind.answer => _answerContent(context, tokens, parsed!),
       };
@@ -572,6 +578,14 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
 
   Widget _pendingContent() {
     final message = entry.message;
+    final inlineApprove = actions.onApprove == null
+        ? null
+        : (String callId, String tool, String digest) => actions.onApprove!(
+              callId,
+              const Duration(minutes: 15),
+              tool,
+              digest,
+            );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -583,6 +597,25 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
                 content: message.content,
                 fullWidthCode: true),
           ),
+        ValueListenableBuilder<LiveTurn?>(
+          valueListenable: widget.live,
+          builder: (context, turn, _) {
+            final tools = turn?.toolCalls ?? const [];
+            if (tools.isEmpty) return const SizedBox.shrink();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final tool in tools)
+                  ToolRunCard(
+                    event: tool,
+                    onApprove: inlineApprove,
+                    onDeny: actions.onDeny,
+                    onChangeMode: actions.onChangeMode,
+                  ),
+              ],
+            );
+          },
+        ),
         // Keyed so its stall clock survives the text appearing above it.
         LiveLineView(
           key: ValueKey<String>('live-${entry.id}'),
@@ -734,6 +767,7 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          for (final tool in entry.toolCalls) ToolRunCard(event: tool),
           if (m?.overflow != null) ...[
             Align(
               alignment: Alignment.centerLeft,
