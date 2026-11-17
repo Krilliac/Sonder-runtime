@@ -37,7 +37,7 @@ def selfmod_test_commands(run, explicit_tests):
             "refusal, not a pass." % (", ".join(run["files"]) or "no files")
         )]
     targeted = shlex.split(explicit_tests[0], posix=os.name != "nt") if explicit_tests else [sys.executable, "-c", "raise SystemExit('explicit reproducing/targeted test required')"]
-    regression = [sys.executable, "-m", "pytest", "-q"]
+    regression = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
     # `smoke` is deliberately NOT built here. It used to be
     #     python -c "import pathlib; assert pathlib.Path('.').is_dir(); ..."
     # run with the candidate workspace as cwd -- a required gate that could not
