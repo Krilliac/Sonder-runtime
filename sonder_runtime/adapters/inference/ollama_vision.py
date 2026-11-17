@@ -154,7 +154,7 @@ class OllamaVisionGateway:
             raise
         except gpu_admission.GpuAdmissionRefused as refused:
             raise Conflict(refused.detail) from refused
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sanitize transport errors before raising
             # No traceback: transport exception text can repeat the request URL.
             logger.warning(
                 f"Ollama vision request failed: url={redact_url(url)!r}, "
@@ -164,7 +164,8 @@ class OllamaVisionGateway:
                 f"Ollama vision inference request failed, url={redact_url(url)!r}, "
                 f"timeout={timeout}, error={type(exc).__name__}"
             )
-            raise DependencyUnavailable("local Ollama vision request failed") from exc
+        # Leave the handler before raising, so the raw response is not context.
+        raise DependencyUnavailable("local Ollama vision request failed")
 
 
 __all__ = ["OllamaVisionGateway"]

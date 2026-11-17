@@ -7,6 +7,7 @@ The provider and tier variables are cleared per test and the runtime policy
 file lives under ``tmp_path``.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import contextlib
 import json
@@ -525,7 +526,11 @@ def test_a_denied_sonder_code_local_never_backs_the_default_route(catalog, monke
         RuntimeModelConfiguration,
     )
 
-    configuration = RuntimeModelConfiguration.from_environment({"SONDER_CODE_LOCAL": DENIED}, floor=FLOOR)
+    configuration = RuntimeModelConfiguration.from_environment(
+        {"SONDER_CODE_LOCAL": DENIED},
+        floor=FLOOR,
+        lists=_test_model_lists.load().values,
+    )
     monkeypatch.setattr(server, "LOCAL_CODE_MODEL", configuration.local_code_model)
     monkeypatch.setattr(server, "_get", lambda *a, **k: {})  # no catalog: the fallback model answers
     monkeypatch.setitem(server.TIERS, "general", "")

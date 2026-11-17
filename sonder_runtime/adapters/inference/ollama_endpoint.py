@@ -113,7 +113,7 @@ def configure_typed_endpoint(value: str | None) -> None:
     logger.debug(
         f"configure_typed_endpoint: value={redact_url(value) if value is not None else None!r}"
     )
-    logger.info(f"Ollama endpoint configured: {safe_display(value) if value is not None else 'reset to default'}")
+    logger.info(f"Ollama endpoint configured: {redact_url(value) if value is not None else 'reset to default'}")
     global _configured_endpoint
     with _configuration_lock:
         _configured_endpoint = None if value is None else str(value)
@@ -190,9 +190,12 @@ def policy_error(value=None, *, allow_remote=None) -> str:
 
 
 def configured_origin(value=None, *, allow_remote=None) -> str:
-    origin = normalize(value)
+    # The policy decides on the configured text itself, not on what
+    # normalisation made of it.
+    raw = _candidate(value)
+    origin = ollama_policy.normalize(raw)
     _require_no_percent_authority(origin)
-    error = policy_error(origin, allow_remote=allow_remote)
+    error = policy_error(raw, allow_remote=allow_remote)
     if error:
         logger.debug(f"configured_origin: policy error for {redact_url(origin)!r}: {error}")
         raise ValueError(error)

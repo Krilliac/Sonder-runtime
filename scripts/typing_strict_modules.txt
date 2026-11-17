@@ -59,6 +59,7 @@ sonder_runtime/adapters/inference/anthropic_gateway.py
 sonder_runtime/adapters/inference/anthropic_spend.py
 sonder_runtime/adapters/inference/gpu_admission.py
 sonder_runtime/adapters/inference/gpu_admission_store.py
+sonder_runtime/adapters/inference/log_safe.py
 sonder_runtime/adapters/inference/model_gateway_factory.py
 sonder_runtime/adapters/inference/ollama.py
 sonder_runtime/adapters/inference/openai_compat.py
@@ -75,6 +76,9 @@ sonder_runtime/adapters/mcp_tool_manifest.py
 sonder_runtime/adapters/memory_replication/__init__.py
 sonder_runtime/adapters/meshgen/__init__.py
 sonder_runtime/adapters/model_bootstrap.py
+sonder_runtime/adapters/model_list_consumers.py
+sonder_runtime/adapters/model_lists.py
+sonder_runtime/adapters/model_lists_editor.py
 sonder_runtime/adapters/model_tool_grants.py
 sonder_runtime/adapters/model_tool_policy.py
 sonder_runtime/adapters/model_tool_policy_editor.py
@@ -124,7 +128,9 @@ sonder_runtime/adapters/system_clock.py
 sonder_runtime/adapters/task_events.py
 sonder_runtime/adapters/task_store.py
 sonder_runtime/adapters/testing/__init__.py
+sonder_runtime/adapters/tier_escalation.py
 sonder_runtime/adapters/training/__init__.py
+sonder_runtime/adapters/training_model_catalog.py
 sonder_runtime/adapters/typed_tool_executor.py
 sonder_runtime/adapters/updates/__init__.py
 sonder_runtime/adapters/updates/activation_journal.py
@@ -410,6 +416,7 @@ sonder_runtime/domain/build/__init__.py
 sonder_runtime/domain/build/attribution.py
 sonder_runtime/domain/build/compile_db.py
 sonder_runtime/domain/build/tool_targets.py
+sonder_runtime/domain/campaign_corpus.py
 sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py

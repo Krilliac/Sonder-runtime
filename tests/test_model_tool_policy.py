@@ -7,6 +7,7 @@ operator overlay (``<state home>/model_tool_policy.json``, or the path in
 packaging, the merge rules and the failure rules.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import json
 import shutil
@@ -205,8 +206,16 @@ def test_missing_shipped_file_seeds_no_tier_from_the_environment(missing_shipped
     floor = mtp.shipped_floor()
     assert not floor.available
     for model in (DENIED, ALLOWED):
-        seeded = policy_rules.seed_model({"SONDER_CODE": model}, "code", floor=floor)
-        assert seeded == policy_rules.DEFAULT_MODELS["code"], model
+        seeded = policy_rules.seed_model(
+            {"SONDER_CODE": model},
+            "code",
+            floor=floor,
+            lists=_test_model_lists.load().values,
+        )
+        assert (
+            seeded
+            == _test_model_lists.load().document()["default_local_models"]["code"]
+        ), model
 
 
 @pytest.mark.parametrize("content", [

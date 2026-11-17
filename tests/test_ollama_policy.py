@@ -36,3 +36,22 @@ def test_policy_error_never_logs_inline_credentials(caplog):
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "secretpw" not in text
     assert "user:" not in text
+
+
+def test_policy_error_logs_and_messages_never_carry_the_origin(caplog, monkeypatch):
+    monkeypatch.delenv(ollama_policy.REMOTE_OPT_IN, raising=False)
+    name = "sonder_runtime.domain.ollama_policy"
+    values = [
+        ("https://user:secretpw@models.test:443", True),
+        ("http://user:secretpw@models.test:11434", True),
+        ("https://models.test:443", False),
+        ("https://models.test:443", True),
+        ("http://models.test:11434", True),
+        ("http://127.0.0.1:11434", False),
+    ]
+    with caplog.at_level(logging.DEBUG, logger=name):
+        results = [ollama_policy.policy_error(v, allow_remote=r) for v, r in values]
+    text = "\n".join([r.getMessage() for r in caplog.records] + results)
+    assert caplog.records
+    for needle in ("secretpw", "user:", "models.test", "127.0.0.1"):
+        assert needle not in text
