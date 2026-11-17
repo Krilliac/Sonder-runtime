@@ -104,6 +104,7 @@ sonder_runtime/adapters/persistence/sqlite/outbox.py
 sonder_runtime/adapters/persistence/sqlite/skill_catalog.py
 sonder_runtime/adapters/persistence/sqlite/updates.py
 sonder_runtime/adapters/process_probe.py
+sonder_runtime/adapters/process_tree.py
 sonder_runtime/adapters/protected_write_scope.py
 sonder_runtime/adapters/provider_bindings.py
 sonder_runtime/adapters/provider_dispatch/__init__.py
@@ -345,6 +346,7 @@ sonder_runtime/application/session/continuity.py
 sonder_runtime/application/session/projections.py
 sonder_runtime/application/session/temperature_settings.py
 sonder_runtime/application/session/transcript_export.py
+sonder_runtime/application/session/transcript_view.py
 sonder_runtime/application/skill_discovery/__init__.py
 sonder_runtime/application/skill_discovery/registry.py
 sonder_runtime/application/skill_refresh.py
@@ -512,6 +514,7 @@ sonder_runtime/domain/security_eval/summary.py
 sonder_runtime/domain/security_eval/verdict.py
 sonder_runtime/domain/selfmod/__init__.py
 sonder_runtime/domain/session_privacy.py
+sonder_runtime/domain/session_ref.py
 sonder_runtime/domain/skills/__init__.py
 sonder_runtime/domain/speculation_policy.py
 sonder_runtime/domain/strategy/__init__.py

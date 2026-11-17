@@ -48,11 +48,12 @@ import functools
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Self
+from typing import Any, Self
 
 from sonder_runtime.platform.process import CancellationToken
 
@@ -151,8 +152,11 @@ def live_group_members(pgid: int) -> tuple[int, ...]:
     scanned = _linux_members(pgid)
     if scanned is not None:
         return scanned
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        return ()
     try:
-        os.killpg(pgid, 0)
+        killpg(pgid, 0)
     except ProcessLookupError:
         return ()
     except PermissionError:
@@ -177,10 +181,12 @@ class _WindowsJob:
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
-    def _kernel32():
+    def _kernel32() -> Any:
         import ctypes
         import ctypes.wintypes as wt
 
+        if sys.platform != "win32":
+            raise OSError("Windows Job Objects are only available on win32")
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [wt.LPVOID, wt.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wt.HANDLE
@@ -202,7 +208,7 @@ class _WindowsJob:
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
-    def _extended_limit_type():
+    def _extended_limit_type() -> Any:
         import ctypes
         import ctypes.wintypes as wt
 
@@ -239,7 +245,7 @@ class _WindowsJob:
         return ExtendedLimit
 
     @classmethod
-    def create_for(cls, proc: subprocess.Popen) -> _WindowsJob | None:
+    def create_for(cls, proc: subprocess.Popen[Any]) -> _WindowsJob | None:
         """Create a job holding *proc*; ``None`` when that is not possible."""
         if os.name != "nt":
             return None
@@ -347,7 +353,7 @@ class ProcessTree:
 
     def __init__(
         self,
-        proc: subprocess.Popen,
+        proc: subprocess.Popen[Any],
         *,
         group_id: int | None,
         job: _WindowsJob | None,
@@ -361,7 +367,7 @@ class ProcessTree:
 
     @classmethod
     def start(
-        cls, argv: Sequence[str], **popen_kwargs: object,
+        cls, argv: Sequence[str], **popen_kwargs: Any,
     ) -> ProcessTree:
         """Start *argv* as the root of a new tree.
 
@@ -375,10 +381,11 @@ class ProcessTree:
             raise ValueError("argv must be non-empty")
         kwargs = dict(popen_kwargs)
         kwargs.update(group_popen_kwargs(int(kwargs.pop("creationflags", 0) or 0)))
-        return cls.owning(_REAL_POPEN(list(argv), **kwargs))
+        popen_factory: Any = _REAL_POPEN
+        return cls.owning(popen_factory(list(argv), **kwargs))
 
     @classmethod
-    def owning(cls, proc: subprocess.Popen) -> ProcessTree:
+    def owning(cls, proc: subprocess.Popen[Any]) -> ProcessTree:
         """Wrap a real ``Popen`` the caller just started with ``group_popen_kwargs()``.
 
         For callers that must keep their own ``Popen`` call (custom pipes,
@@ -397,7 +404,7 @@ class ProcessTree:
         return cls(proc, group_id=proc.pid, job=None)
 
     @classmethod
-    def adopt(cls, proc: subprocess.Popen) -> ProcessTree:
+    def adopt(cls, proc: subprocess.Popen[Any]) -> ProcessTree:
         """Wrap a ``Popen`` that something else started.
 
         POSIX: the tree is the child's process group only when the child is
@@ -407,10 +414,12 @@ class ProcessTree:
         ``taskkill /T`` fallback and cannot prove the tree is empty.
         """
         group_id: int | None = None
-        if os.name != "nt" and proc.poll() is None:
+        getpgid = getattr(os, "getpgid", None)
+        getpgrp = getattr(os, "getpgrp", None)
+        if os.name != "nt" and proc.poll() is None and getpgid is not None and getpgrp is not None:
             try:
-                candidate = os.getpgid(proc.pid)
-                if candidate == proc.pid and candidate != os.getpgrp():
+                candidate = int(getpgid(proc.pid))
+                if candidate == proc.pid and candidate != int(getpgrp()):
                     group_id = candidate
             except OSError:
                 group_id = None
@@ -419,7 +428,7 @@ class ProcessTree:
     # introspection
 
     @property
-    def popen(self) -> subprocess.Popen:
+    def popen(self) -> subprocess.Popen[Any]:
         return self._proc
 
     @property
@@ -563,8 +572,9 @@ class ProcessTree:
 
     def _signal_group(self, sig: int) -> None:
         group = self._group_id
+        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
         if group is None:
-            if sig == signal.SIGKILL and self._proc.poll() is None:
+            if sig == sigkill and self._proc.poll() is None:
                 try:
                     self._proc.kill()
                 except OSError:
@@ -575,14 +585,17 @@ class ProcessTree:
                 except OSError:
                     pass
             return
-        if group == os.getpgrp():
+        getpgrp = getattr(os, "getpgrp", None)
+        if getpgrp is not None and group == int(getpgrp()):
             return
-        try:
-            os.killpg(group, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
-        except OSError:
-            pass
+        killpg = getattr(os, "killpg", None)
+        if killpg is not None:
+            try:
+                killpg(group, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            except OSError:
+                pass
         # Members that left the process group but kept the session.
         for pid in live_group_members(group):
             if pid in (os.getpid(), self._proc.pid):
@@ -595,11 +608,12 @@ class ProcessTree:
     def _reap_adopted_children(self) -> None:
         """Reap orphans re-parented to us (PID 1 in a container, or subreaper)."""
         group = self._group_id
-        if group is None or self._proc.poll() is None:
+        wnohang = getattr(os, "WNOHANG", None)
+        if group is None or self._proc.poll() is None or wnohang is None:
             return
         while True:
             try:
-                pid, _status = os.waitpid(-group, os.WNOHANG)
+                pid, _status = os.waitpid(-group, int(wnohang))
             except ChildProcessError:
                 return
             except OSError:
@@ -632,7 +646,7 @@ class ProcessTree:
         self._signal_group(signal.SIGTERM)
         if not self._group_empty_within(grace_seconds):
             escalated = True
-            self._signal_group(signal.SIGKILL)
+            self._signal_group(getattr(signal, "SIGKILL", signal.SIGTERM))
             empty = self._group_empty_within(kill_wait_seconds)
         else:
             empty = True
@@ -674,7 +688,7 @@ class ProcessTree:
 
 
 def terminate_tree(
-    proc: subprocess.Popen,
+    proc: subprocess.Popen[Any],
     *,
     grace_seconds: float = DEFAULT_GRACE_SECONDS,
     kill_wait_seconds: float = DEFAULT_KILL_WAIT_SECONDS,
