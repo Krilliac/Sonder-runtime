@@ -309,9 +309,13 @@ PLAN = "plan"
 MANUAL = "manual"
 ACCEPT_EDITS = "acceptEdits"
 AUTO = "auto"
+BYPASS = "bypass"
 
 # Cycle order for the keybinding: least autonomy -> most.
-MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
+MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO, BYPASS)
+# Keybindings and unattended switch hints only cycle through non-bypass modes;
+# entering ``bypass`` always requires explicit operator confirmation.
+_CYCLE_MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
 DEFAULT_MODE = MANUAL
 
 # Set only by surfaces where a person is present to make a mode change
@@ -319,6 +323,30 @@ DEFAULT_MODE = MANUAL
 _ATTENDED_MODE_CHANGE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "sonder_attended_mode_change", default=False,
 )
+_BYPASS_CONFIRMED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_bypass_confirmed", default=False,
+)
+_MODE_SCOPE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "sonder_mode_scope", default=None,
+)
+_AGENT_APPROVAL_HOOK: contextvars.ContextVar[object] = contextvars.ContextVar(
+    "sonder_agent_approval_hook", default=None,
+)
+_SCOPED_MODES: dict[str, str] = {}
+
+
+@contextlib.contextmanager
+def agent_approval_hook(hook):
+    """Install a per-turn interactive approval hook for ``agent()`` dispatch refusals."""
+    token = _AGENT_APPROVAL_HOOK.set(hook)
+    try:
+        yield hook
+    finally:
+        _AGENT_APPROVAL_HOOK.reset(token)
+
+
+def current_agent_approval_hook():
+    return _AGENT_APPROVAL_HOOK.get()
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
@@ -327,6 +355,7 @@ MODE_LABELS = {
     MANUAL: "manual",
     ACCEPT_EDITS: "accept edits",
     AUTO: "auto",
+    BYPASS: "bypass",
 }
 
 # The one sentence that keeps every "ask" claim on this module's surfaces
@@ -353,10 +382,11 @@ MODE_BLURBS = {
     # happens and what happens when it cannot, because both are true and only
     # one used to be said.
     AUTO: "file changes and programs proceed; destructive asks at the console, or is refused unattended",
+    BYPASS: "all non-admin tools run without prompts and root containment is bypassed (local operator/admin only)",
 }
 
 # Colour hints for whatever renders the indicator (ANSI 256 palette).
-MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221}
+MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221, BYPASS: 196}
 
 # The grade ``risk_of`` returns when it CANNOT grade: an empty name, a blind
 # catalog, or a name nothing has ever heard of. Deliberately not one of the
@@ -510,6 +540,22 @@ def call_id(digest: str) -> str:
     return str(digest or "")[:CALL_ID_CHARS]
 
 
+def run_code_detail(tool_name: str, arguments) -> str:
+    """The exact ``code`` of a ``run_code`` call, for the operator to read.
+
+    ``argument_preview`` shows ``code`` only by its length (a bulk payload), so
+    an operator approving a ``run_code`` call could not see what they approved.
+    This is the separate view: the raw text, unbounded here (the ledger redacts
+    and bounds what it stores). "" for any other tool or a call without
+    string code. It is display-only and never feeds ``call_digest``.
+    """
+    if str(tool_name or "").strip().lstrip("/") != "run_code":
+        return ""
+    body = _call_body(arguments)
+    code = body.get("code") if body else None
+    return code if isinstance(code, str) else ""
+
+
 def argument_preview(arguments, limit: int = 200) -> str:
     """A bounded, content-free line naming what a call was about.
 
@@ -559,6 +605,18 @@ READ_BRANCH_WORK = {
     "training_status": "safe",  # /training [plan|status|hardware|help]
 }
 
+# Work an HTTP route performs without fronting a registered tool, graded
+# because it was declared. ``POST /v1/recall``
+# (``sonder_runtime/interfaces/http/thin_routes.py``) runs ``RecallHandler``
+# -> ``MemoryFacade.recall``: it pages past interaction episodes out of the
+# memory store and writes nothing -- the same read class as ``memory_search``
+# over the same store. Lending it ``apply_learned``'s name instead made that
+# tool's rules and grade (``ask``, refused under ``plan``) govern a different
+# operation. ``thin_routes.ROUTE_TOOLS`` binds the route to this name, and a
+# drift test pins every entry to a route bound to it and to no registered
+# tool, so this cannot become a list of free-floating exemptions.
+HTTP_ROUTE_WORK = {"recall": "safe"}
+
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
 # start a host process, split out of `ask`/`mutation` so acceptEdits and auto
 # differ by something real.
@@ -577,6 +635,8 @@ _MATRIX = {
                    "execution": ASK, "dangerous": ASK, UNCLASSIFIED: ASK},
     AUTO: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
            "execution": ALLOW, "dangerous": ASK, UNCLASSIFIED: ASK},
+    BYPASS: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
+             "execution": ALLOW, "dangerous": ALLOW, UNCLASSIFIED: ALLOW},
 }
 
 # Tools that start a host process. Kept here rather than imported from server
@@ -844,6 +904,7 @@ def _load() -> None:
         if _LOADED:
             return
         _LOADED = True
+        _SCOPED_MODES.clear()
         try:
             with open(_state_path(), encoding="utf-8") as handle:
                 saved = json.load(handle)
@@ -852,8 +913,15 @@ def _load() -> None:
         if not isinstance(saved, dict):
             return
         mode = str(saved.get("mode", "")).strip()
-        if mode in _MATRIX:
+        if mode in _MATRIX and mode != BYPASS:
             _STATE["mode"] = mode
+        raw_scopes = saved.get("scopes")
+        if isinstance(raw_scopes, dict):
+            for key, value in raw_scopes.items():
+                scope_key = str(key or "").strip()
+                scope_mode = str(value or "").strip()
+                if scope_key and scope_mode in _MATRIX:
+                    _SCOPED_MODES[scope_key] = scope_mode
         # Elevation is deliberately NOT restored from disk. It is a decision
         # about this session made by whoever is at the keyboard now; silently
         # resuming it days later is exactly the surprise to avoid.
@@ -869,7 +937,7 @@ class ModePersistenceError(ValueError):
     """
 
 
-def _write_state(mode: str) -> None:
+def _write_state(mode: str, scopes: dict[str, str] | None = None) -> None:
     """Replace the saved mode atomically; raises ``OSError`` on any failure.
 
     The temporary sibling is named ``<file>.tmp-*``, which the file-tool
@@ -878,12 +946,17 @@ def _write_state(mode: str) -> None:
     path = _state_path()
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
+    # Never persist bypass as the global fallback mode across restarts.
+    persisted_default = DEFAULT_MODE if mode == BYPASS else mode
+    payload: dict = {"mode": persisted_default}
+    if scopes:
+        payload["scopes"] = dict(scopes)
     handle, temporary = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp-", dir=directory,
     )
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"mode": mode}, stream)
+            json.dump(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -906,26 +979,23 @@ def _discard_saved_state() -> bool:
     return True
 
 
-def _save(previous: str) -> None:
-    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed.
-
-    A write that fails used to be ignored, so a lowered mode came back as the
-    old, higher one at the next start. Now:
-
-    * a raise that cannot be saved is rolled back and refused;
-    * a lowering stays in effect for this session (the safe direction), the
-      stale saved mode is removed so the next start falls back to
-      DEFAULT_MODE rather than the higher mode, and the caller is told.
-    """
-    mode = _STATE["mode"]
+def _save(previous: str, *, scope: str | None = None) -> None:
+    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed."""
+    mode = _SCOPED_MODES[scope] if (scope and scope in _SCOPED_MODES) else _STATE["mode"]
     try:
-        _write_state(mode)
+        _write_state(_STATE["mode"], dict(_SCOPED_MODES) if _SCOPED_MODES else None)
         return
     except OSError as exc:
         failure = "%s: %s" % (type(exc).__name__, exc)
     order = {name: index for index, name in enumerate(MODES)}
     if order.get(mode, len(MODES)) > order.get(previous, -1):
-        _STATE["mode"] = previous
+        if scope:
+            if previous in _MATRIX:
+                _SCOPED_MODES[scope] = previous
+            else:
+                _SCOPED_MODES.pop(scope, None)
+        else:
+            _STATE["mode"] = previous
         raise ModePersistenceError(
             "permission mode not changed: saving %s failed (%s); the mode "
             "stays %s" % (mode, failure, previous)
@@ -946,9 +1016,77 @@ def _save(previous: str) -> None:
 # --- mode state -----------------------------------------------------------
 
 
+def _scope_key(principal: str = "", session: str = "") -> str | None:
+    p = str(principal or "").strip()
+    s = str(session or "").strip()
+    if not p and not s:
+        return None
+    return "%s|%s" % (p, s)
+
+
+class mode_scope:
+    """Bind principal/session scope for ``permission_modes`` lookups and writes."""
+
+    def __init__(self, principal: str = "", session: str = ""):
+        p = str(principal or "").strip()
+        s = str(session or "").strip()
+        self._pair: tuple[str, str] | None = (p, s) if (p or s) else None
+        self._token = None
+
+    def __enter__(self):
+        self._token = _MODE_SCOPE.set(self._pair)
+        return self
+
+    def __exit__(self, *exc):
+        if self._token is not None:
+            _MODE_SCOPE.reset(self._token)
+        return False
+
+
+class attended_bypass_confirm:
+    """Context in which an explicit operator confirmation for ``bypass`` was given."""
+
+    def __enter__(self):
+        self._token = _BYPASS_CONFIRMED.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _BYPASS_CONFIRMED.reset(self._token)
+        return False
+
+
+def _reset_for_tests() -> None:
+    """Reset module-level permission-mode caches for isolated unit tests."""
+    global _LOADED
+    with _LOCK:
+        _LOADED = False
+        _STATE.clear()
+        _STATE.update(mode=DEFAULT_MODE, elevated=False, elevation_reason="")
+        _SCOPED_MODES.clear()
+
+
+def _scoped_mode_unlocked(pair: tuple[str, str] | None) -> str | None:
+    if pair is None:
+        return None
+    principal, session = pair
+    if session:
+        key = _scope_key(principal, session)
+        if key and key in _SCOPED_MODES:
+            return _SCOPED_MODES[key]
+    if principal:
+        pkey = _scope_key(principal, "")
+        if pkey and pkey in _SCOPED_MODES:
+            return _SCOPED_MODES[pkey]
+    return None
+
+
 def current_mode() -> str:
     _load()
+    pair = _MODE_SCOPE.get()
     with _LOCK:
+        scoped = _scoped_mode_unlocked(pair)
+        if scoped is not None:
+            return scoped
         return _STATE["mode"]
 
 
@@ -991,6 +1129,12 @@ def unattended_escalation_refusal(target_name: str) -> str:
     """
     target = resolve_mode(target_name)
     current = current_mode()
+    if target == BYPASS and not (mode_change_attended() and _BYPASS_CONFIRMED.get()):
+        return (
+            "refused: bypass mode requires explicit attended confirmation "
+            "(run /mode bypass and confirm 'yes' at the console, or POST /v1/permission-mode "
+            "with confirm_bypass: true as a local operator/admin); unattended callers cannot enter bypass."
+        )
     if mode_change_attended() or not is_unattended_escalation(current, target):
         return ""
     return (
@@ -1033,23 +1177,50 @@ def set_mode(name: str) -> str:
     """
     _load()
     match = resolve_mode(name)
+    pair = _MODE_SCOPE.get()
+    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
     with _LOCK:
-        previous = _STATE["mode"]
-        _STATE["mode"] = match
-        _save(previous)
+        if scope:
+            previous = _scoped_mode_unlocked(pair) or _STATE["mode"]
+            _SCOPED_MODES[scope] = match
+            _save(previous, scope=scope)
+        else:
+            previous = _STATE["mode"]
+            _STATE["mode"] = match
+            _save(previous)
     return match
 
 
 def cycle_mode(step: int = 1) -> str:
-    """Advance to the next mode. Backs the Shift+Tab keybinding."""
+    """Advance to the next non-bypass mode. Backs the Shift+Tab keybinding."""
     _load()
+    pair = _MODE_SCOPE.get()
+    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
     with _LOCK:
-        previous = _STATE["mode"]
-        index = MODES.index(previous)
-        _STATE["mode"] = MODES[(index + step) % len(MODES)]
-        new = _STATE["mode"]
-        _save(previous)
+        previous = (_scoped_mode_unlocked(pair) if pair is not None else None) or _STATE["mode"]
+        if previous in _CYCLE_MODES:
+            index = _CYCLE_MODES.index(previous)
+            new = _CYCLE_MODES[(index + step) % len(_CYCLE_MODES)]
+        else:
+            new = _CYCLE_MODES[0] if step >= 0 else _CYCLE_MODES[-1]
+        if scope:
+            _SCOPED_MODES[scope] = new
+            _save(previous, scope=scope)
+        else:
+            _STATE["mode"] = new
+            _save(previous)
     return new
+
+
+def bypass_root_containment_active() -> bool:
+    """True when ``bypass`` mode is active for an unrestricted (non-user) caller."""
+    if current_mode() != BYPASS:
+        return False
+    try:
+        from sonder_runtime.adapters.security import role_tool_policy
+        return role_tool_policy.agent_refusal("file_write") == ""
+    except Exception:
+        return False
 
 
 # --- privilege axis -------------------------------------------------------
@@ -1177,6 +1348,8 @@ def _catalog_risk_of(tool_name: str) -> str:
         return NON_TOOL_WORK[name]
     if name in READ_BRANCH_WORK:
         return READ_BRANCH_WORK[name]
+    if name in HTTP_ROUTE_WORK:
+        return HTTP_ROUTE_WORK[name]
     # Nothing knows this name. Not "probably fine, ask someone" -- that
     # answer was indistinguishable from a catalogued ``ask`` and, with nobody
     # to ask, indistinguishable from ``allow``. Say the classifier failed.
@@ -1514,8 +1687,12 @@ _EFFECT_NOUNS = {
 
 
 def _modes_allowing(risk: str) -> list:
-    """Modes whose matrix already allows ``risk`` outright, least autonomous first."""
-    return [m for m in MODES if _MATRIX[m].get(risk) == ALLOW]
+    """Standard modes whose matrix allows ``risk`` outright, least autonomous first.
+
+    Excludes ``bypass`` so unattended refusals never suggest escalating into
+    unattended bypass mode without explicit operator confirmation.
+    """
+    return [m for m in _CYCLE_MODES if _MATRIX[m].get(risk) == ALLOW]
 
 
 def _unattended_reason(name: str, active: str, risk: str, call: str = "") -> str:
@@ -1615,8 +1792,10 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
 
     # 1. An explicit deny is a narrower, written-down decision than any mode
     #    dial, so it wins outright -- including over auto, and immune to the
-    #    unattended rule below (a real deny is never softened).
-    if rule_action == DENY:
+    #    unattended rule below. In bypass mode, non-protected tool-level
+    #    permissions.json restrictions (e.g. file_delete: deny) are bypassed,
+    #    while admin_private_chain_of_thought stays guarded.
+    if rule_action == DENY and (active != BYPASS or name == "admin_private_chain_of_thought"):
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
@@ -1632,6 +1811,24 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
     if (name in PRIVILEGED_TOOLS or requires_elevation) and not elevated():
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
                         source="privilege", call_id=call)
+
+    if active == BYPASS and name in DURABLE_AUTHORITY_TOOLS and rule_action != ALLOW:
+        if not interactive:
+            return Decision(
+                DENY, active, risk,
+                "%s grants authority that outlives this call, and there is no "
+                "one here to be told it happened; run it from the console and "
+                "answer the prompt, or write an explicit allow rule with "
+                "/permissions" % (name or "(empty name)"),
+                name,
+                source="durable-authority", call_id=call,
+            )
+        return Decision(
+            ASK, active, risk,
+            mode_reason(ASK, active, risk),
+            name,
+            source="durable-authority", call_id=call,
+        )
 
     mode_action = _MATRIX[active].get(risk, ASK)
 
@@ -1715,9 +1912,11 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                         name, source="approval", call_id=call,
                     )
                 try:
+                    extra = run_code_detail(name, arguments)
                     ledger.record_pending(
                         name, digest, surface=surface,
                         preview=argument_preview(arguments),
+                        **({"detail": extra} if extra else {}),
                     )
                 except Exception:
                     # The ledger is a route out, not the gate: a ledger that
@@ -1739,8 +1938,12 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             name,
             source="non-interactive", call_id=call,
         )
+    decision_source = (
+        "mode:bypass" if active == BYPASS and (risk == "dangerous" or rule_action == DENY)
+        else "mode"
+    )
     return Decision(action, active, risk, mode_reason(action, active, risk), name,
-                    source="mode", call_id=call)
+                    source=decision_source, call_id=call)
 
 
 # Plain words for each risk class, used in the reason an operator reads at an
@@ -1766,6 +1969,19 @@ def mode_reason(action: str, mode: str, risk: str) -> str:
     what = RISK_PLAIN.get(risk, "%s commands" % risk)
     verb = {ALLOW: "allows", ASK: "asks before", DENY: "blocks"}.get(action, action)
     return "%s %s %s" % (label, verb, what)
+
+
+def render_policy_text(home, tool_name: str, mode_context_fn, permission_rules_mod) -> str:
+    """Render the effective rule + mode table for one home snapshot."""
+    rules, report = permission_rules_mod.load_report(home)
+    mode = current_mode()
+    lookup = permission_rules_mod.rule_lookup(rules)
+    table = permission_rules_mod.format_policy(
+        home, tool_name,
+        decide=lambda name: decide(name, interactive=True, mode=mode, rule_lookup=lookup),
+        snapshot=(rules, report),
+    )
+    return "%s\n\n%s\n  %s" % (table, mode_context_fn(mode), unattended_summary())
 
 
 # --- presentation ---------------------------------------------------------
