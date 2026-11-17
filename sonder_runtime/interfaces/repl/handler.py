@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, TextIO
 
+from ...application.command_surface.command_text import ascii_lower
 from ...application.context import local_owner_context
 from ...application.errors import SonderError
 
@@ -30,7 +31,7 @@ class ReplHandler:
         if not parts:
             return ""
 
-        cmd = parts[0].lower()
+        cmd = ascii_lower(parts[0])
         ctx = local_owner_context(
             correlation_id=uuid.uuid4().hex,
             source="repl",
