@@ -148,6 +148,7 @@ from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_
 from sonder_runtime.interfaces.http.facades import observability_stream
 from sonder_runtime.interfaces.http.facades import observatory_routes
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
+from sonder_runtime.interfaces.http import thin_routes
 from sonder_runtime.platform import debug_dump
 
 from . import authority_contract as tool_contract
@@ -2183,9 +2184,11 @@ def _http_approver(context):
         return "local-open"
     account = context.get("account")
     if account:
-        username = str(account.get("username") or "") if isinstance(account, dict) else str(
-            getattr(account, "username", "") or "")
-        return "developer:%s" % (username or "account")
+        # ``role:username``: the audit trail names the role that authorized it.
+        field = account.get if isinstance(account, dict) else (
+            lambda name: getattr(account, name, ""))
+        role, username = (str(field(name) or "").strip() for name in ("role", "username"))
+        return "%s:%s" % (role or "account", username or "account")
     if context.get("api_key"):
         return "admin-key"
     return "http"
@@ -5377,7 +5380,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         except _DuplicateJsonObjectKey:
             raise HTTPRequestError(400, "request JSON must not contain duplicate object keys")
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):  # too deep = malformed
             raise HTTPRequestError(400, "request body must contain valid JSON")
         if not isinstance(payload, dict):
             raise HTTPRequestError(400, "request JSON must be an object")
@@ -5515,7 +5518,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_not_found()
 
     def _handle_ollama_pool_admin(self, method):
+        if self._auth_rate_limited():  # same admission as the compute refresh route
+            return
         context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
         if not _admin_authorized(context):
             self._send_json_payload({"error": "authorization"}, status=403,
                                     headers={"Cache-Control": "no-store"})
@@ -6253,6 +6261,8 @@ class Handler(BaseHTTPRequestHandler):
 
         return HttpApprovalPorts(
             developer_authorized=_developer_authorized,
+            approve_authority_error=lambda context: _system_operation_authority_error(
+                SYSTEM_OPERATION_TOOLS["permission_approve"], context),
             error_envelope=lambda *a, **k: sonder_lifecycle.error_envelope(*a, **k),
             ledger=lambda: permission_policy.approval_ledger(),
             idempotent_action=_idempotent_http_action,
@@ -6275,8 +6285,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_approvals_post(self, path, req, context):
         """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
 
-        An authenticated developer/administrator POST is an attended approval
-        surface, like ``POST /v1/permission-mode``; see
+        An attended approval surface needing the ``permission_approve`` role
+        (administrator), like ``POST /v1/permission-mode``; see
         ``facades/approval_routes.py``.
         """
         from sonder_runtime.interfaces.http.facades import approval_routes
@@ -7133,27 +7143,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         thin_handler = _THIN_HANDLERS.get(path)
         if thin_handler is not None:
-            if not context["authorized"]:
-                self._send_auth_error()
-                return
-            content_lengths = self.headers.get_all("Content-Length") or ()
-            raw_length = content_lengths[0] if content_lengths else "0"
-            length = int(raw_length) if raw_length.strip().isdigit() else 0
-            raw_body = self.rfile.read(length) if length > 0 else b""
-            self._request_body_consumed = True
-            class _Req:
-                method = "POST"
-                def __init__(self, p, b, h):
-                    self._path = p; self._body = b; self._headers = h
-                @property
-                def path(self): return self._path
-                @property
-                def body(self): return self._body
-                @property
-                def headers(self): return self._headers
-            hdrs = {k: v for k, v in self.headers.items()}
-            resp = thin_handler.handle(_Req(path, raw_body, hdrs))
-            self._send_json_payload(resp.body, status=resp.status)
+            thin_routes.serve(self, thin_handler, path, req, context, tool_refusal=_http_tool_refusal)
             return
         if path != "/v1/chat/completions":
             _serve_logger.debug(f"do_POST: unrecognized path={path!r}, returning 404")
@@ -7578,9 +7568,9 @@ class Handler(BaseHTTPRequestHandler):
                             serve_temperature as _live_serve_temperature,
                             serve_temperature_override as _serve_temp_override,
                         )
+                        # The header opt-in multiplies model calls: developer-only, like fanout.
                         _spanda_policy = _resolve_spanda_policy(
-                            _SPANDA_CONFIG, self.headers
-                        )
+                            _SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
                         self._spanda_headers = None
                         if _spanda_policy.active:
                             # Multi-sample exact-match R_sc. Disable request
@@ -7951,7 +7941,7 @@ class Handler(BaseHTTPRequestHandler):
         retain the ordinary pre-header JSON error contract.
         """
         _serve_logger.debug(f"_send_stream: model={model!r}, content_len={len(content or '')}")
-        iid = iid or uuid.uuid4().hex[:12]
+        interaction_id, iid = iid, iid or uuid.uuid4().hex[:12]
         activity = (
             server.activity_tracker.public_response(
                 activity_response, include_detail=False,
@@ -7976,6 +7966,12 @@ class Handler(BaseHTTPRequestHandler):
                 # writable timeout.  The handler's ordinary connection limit
                 # still protects those paths.
                 pass
+        # Live deltas fix this response's chatcmpl id before the turn has an
+        # interaction id; every later frame keeps it, and the receipt names
+        # the interaction so a client can still POST /v1/outcome for it.
+        frame_id = _live_stream.response_id(self, iid)
+        if interaction_id and frame_id != interaction_id:
+            receipt = {**(receipt or {}), "interaction_id": interaction_id}
         try:
             if early is not None:
                 return Handler._write_stream_body(
@@ -8017,7 +8013,7 @@ class Handler(BaseHTTPRequestHandler):
             _serve_logger.error(f"SSE stream response failed after headers_sent={headers_sent}", exc_info=True)
             self.log_error("stream response failed: %s", type(error).__name__)
             if headers_sent:
-                Handler._send_stream_terminal_error(self, iid, model)
+                Handler._send_stream_terminal_error(self, frame_id, model)
             self.close_connection = True
             return None
 
@@ -8092,8 +8088,8 @@ class Handler(BaseHTTPRequestHandler):
         if early.stop():
             with early.lock:
                 Handler._send_stream_terminal_error(
-                    self, uuid.uuid4().hex[:12], model or "sonder",
-                    message=message, error_type=error_type, code=code,
+                    self, getattr(early, "completion_id", None) or uuid.uuid4().hex[:12],
+                    model or "sonder", message=message, error_type=error_type, code=code,
                 )
         return True
 

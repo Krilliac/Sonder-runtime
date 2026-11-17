@@ -32,13 +32,19 @@ CODE_FENCE = "```"
 
 
 def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None:
-    """A live stream bound to ``handler``'s early SSE response, or ``None``."""
+    """A live stream bound to ``handler``'s early SSE response, or ``None``.
+
+    The deltas carry a completion id minted here, before the turn has an
+    interaction id; the early stream keeps it (``completion_id``) so the rest
+    of the same SSE response (remainder, terminal, usage and error frames)
+    reuses it.
+    """
     handler._live_stream = None
     early = getattr(handler, "_early_stream", None)
     if early is None or early.client_gone:
         return None
     model = getattr(handler, "_stream_model", None) or "sonder"
-    iid = uuid.uuid4().hex[:12]
+    iid = early.completion_id = getattr(early, "completion_id", None) or uuid.uuid4().hex[:12]
     first = [True]
 
     def write(text: str) -> bool:
@@ -73,6 +79,22 @@ def armed_for(handler, chunk, *, hold_code: bool):
         yield live
 
 
+def response_id(handler, iid):
+    """The ``chatcmpl-`` id every frame of ``handler``'s streamed response uses.
+
+    Once live deltas went out on the early SSE response they fixed the id
+    (minted in :func:`arm`, before the turn had an interaction id), so the
+    remainder, terminal, usage and any error frame continue under it.  A
+    response that forwarded nothing live uses ``iid``.  Read-only; called on
+    the handler's own thread after the keep-alive writer has stopped.
+    """
+    early = getattr(handler, "_early_stream", None)
+    live = getattr(handler, "_live_stream", None)
+    if early is not None and live is not None and live.forwarded:
+        return getattr(early, "completion_id", None) or iid
+    return iid
+
+
 def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
                       usage, activity, lock=None):
     """Write the answer and terminal frames of a streamed turn; ``True`` when sent."""
@@ -81,6 +103,8 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
         if live is None or not live.forwarded:
             handler.wfile.write(chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
         else:
+            # One completion, one id: continue under the id the deltas used.
+            iid = response_id(handler, iid)
             rest, revised = live.reconcile(content)
             if revised:
                 _logger.warning("streamed answer was revised after generation; sent the final version")
@@ -102,4 +126,4 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
     return True
 
 
-__all__ = ["CODE_FENCE", "arm", "armed_for", "write_stream_body"]
+__all__ = ["CODE_FENCE", "arm", "armed_for", "response_id", "write_stream_body"]
