@@ -203,7 +203,7 @@ def test_stats_are_bounded_counts_only():
 
 def test_serve_temperature_default_and_clamping(monkeypatch):
     monkeypatch.delenv("SONDER_SERVE_TEMPERATURE", raising=False)
-    assert server._serve_temperature() == pytest.approx(0.2)
+    assert server._serve_temperature() is None  # auto: the model preset applies
     monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
     assert server._serve_temperature() == 0.0
     monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "9")
@@ -211,9 +211,9 @@ def test_serve_temperature_default_and_clamping(monkeypatch):
     monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "-1")
     assert server._serve_temperature() == 0.0
     monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "warm")
-    assert server._serve_temperature() == pytest.approx(0.2)
+    assert server._serve_temperature() is None
     monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "nan")
-    assert server._serve_temperature() == pytest.approx(0.2)
+    assert server._serve_temperature() is None
 
 
 # --- server: generation wiring --------------------------------------------

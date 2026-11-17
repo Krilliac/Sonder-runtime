@@ -17,7 +17,7 @@ TEMPERATURE_MAX = 2.0
 _SHOWN_MAX = 80  # an oversized value is not echoed back in full
 
 
-def validate_request_temperature(value):
+def validate_request_temperature(value: object) -> int | float | None:
     """Return ``value`` unchanged if it is ``None`` (unset) or a finite real
     number in [0.0, 2.0]; otherwise raise ``InvalidInput``.
 

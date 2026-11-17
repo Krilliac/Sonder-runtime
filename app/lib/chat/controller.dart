@@ -11,6 +11,7 @@ import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
 import 'permission_rules.dart';
+import 'session_temperature.dart';
 
 /// One transcript row: a stored [message] plus client-only facts that are
 /// never persisted or sent (a stable id for keys, whether Retry applies,
@@ -223,6 +224,10 @@ class ChatController extends ChangeNotifier {
   void updateBackend(ChatBackend next, {required bool identityChanged}) {
     _backend = next;
     if (identityChanged) {
+      _temperatureSync.reset();
+      // A turn still running against the old server must not confirm its
+      // value into the new server's record.
+      _tempInFlight = null;
       _backendGeneration++;
       _pollInFlight = false;
       _modeInFlight = false;
@@ -307,6 +312,8 @@ class ChatController extends ChangeNotifier {
     if (connection.value == next) return;
     final wasOffline = connection.value.isOffline;
     connection.value = next;
+    // Back from offline: the server may have restarted and lost sessions.
+    if (wasOffline && !next.isOffline) _temperatureSync.reset();
     // The chip's enabled state depends on reachability.
     if (wasOffline != next.isOffline) _notify();
   }
@@ -777,6 +784,9 @@ class ChatController extends ChangeNotifier {
       live.value = current.copyWith(elapsedSeconds: wall > next ? wall : next);
     });
 
+    final tempSession = sessionFor(_currentThreadId);
+    final tempSent = _temperatureSync.pending(tempSession, temperature);
+    _tempInFlight = tempSent == null ? null : (tempSession, tempSent);
     final request = TurnRequest(
       history: history,
       model: requestModel,
@@ -784,6 +794,7 @@ class ChatController extends ChangeNotifier {
       sessionId: sessionFor(_currentThreadId),
       project: _project,
       allowApproximateLocation: allowApproximateLocation,
+      sessionTemperature: tempSent,
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
     );
     final done = Completer<void>();
@@ -832,6 +843,19 @@ class ChatController extends ChangeNotifier {
   String contextSize = '8192';
   bool allowApproximateLocation = false;
 
+  /// Sampling temperature (null is Auto). Sent as `session_temperature` on
+  /// a session's first request and whenever it differs from the value the
+  /// server last accepted for it, so a `/temp` typed in chat survives. A
+  /// failed turn resends it next time, which can overwrite a typed `/temp`
+  /// on that session: the server may or may not have stored it, and
+  /// resending the visible setting is the safe side.
+  double? temperature;
+  final SessionTemperatureSync _temperatureSync = SessionTemperatureSync();
+
+  /// The session and `session_temperature` value the live turn carries,
+  /// confirmed when the turn succeeds and forgotten when it does not.
+  (String, Object)? _tempInFlight;
+
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;
     _replace(
@@ -870,6 +894,9 @@ class ChatController extends ChangeNotifier {
   }
 
   void _endTurn() {
+    final unconfirmed = _tempInFlight;
+    _tempInFlight = null;
+    if (unconfirmed != null) _temperatureSync.forget(unconfirmed.$1);
     _liveTimer?.cancel();
     _liveTimer = null;
     _turn = null;
@@ -902,6 +929,9 @@ class ChatController extends ChangeNotifier {
   }
 
   void _finishOk(ChatTurn turn, ChatReply reply) {
+    final sent = _tempInFlight;
+    if (sent != null) _temperatureSync.confirm(sent.$1, sent.$2);
+    _tempInFlight = null;
     final elapsed = _liveElapsedMs();
     if (reply.metadata?.tier.isNotEmpty == true) {
       lastTier = reply.metadata!.tier;
@@ -920,6 +950,10 @@ class ChatController extends ChangeNotifier {
   }
 
   void _finishError(ChatTurn turn, Object e) {
+    // A transport failure says nothing about what the server kept.
+    if (e is! SonderException || e.httpStatus == null) {
+      _temperatureSync.reset();
+    }
     final elapsed = _liveElapsedMs();
     ChatMessage message;
     var retryable = false;

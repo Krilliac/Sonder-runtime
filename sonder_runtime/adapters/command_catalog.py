@@ -345,7 +345,7 @@ _CATEGORY_BY_SLASH = {
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
     "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
-    "/trace": "system", "/strict": "system", "/dump": "system",
+    "/trace": "system", "/strict": "system", "/temp": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/approve": "security", "/approvals": "security",

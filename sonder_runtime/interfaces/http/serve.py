@@ -85,6 +85,7 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -2891,7 +2892,7 @@ def _do_train(n):
     lines = []
     for t in tasks:
         lines.append("  practicing: %s ..." % t["name"])
-        resp = server.sonder(t["prompt"])
+        resp = server.sonder(t["prompt"], temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False
@@ -3292,8 +3293,13 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
-    """Return response text if `content` is a recognized slash command, else None."""
+                  idempotency_key="", workspace_project=None, lane_session="",
+                  storage_session=""):
+    """Return response text if `content` is a recognized slash command, else None.
+
+    ``storage_session`` is the turn's account-scoped session id: ``/temp``
+    keeps its value there, where the turn's own resolution reads it.
+    """
     state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
@@ -3639,6 +3645,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.last_iid = None
             return msg
         return "(nothing to record yet)"
+    if cmd == "/temp":
+        from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
+        return _chat_temperature.temp_command(arg, storage_session, lane=serve_lane_temperature())
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -7371,6 +7380,13 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        try:  # the GUI slider; checked here, stored in the turn's slot after every check
+            apply_session_temperature, session_temperature = _chat_temperature.session_field(
+                req.get("session_temperature"), storage_session)
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_session_temperature")
+            self._send_json_payload({"error": {"message": "session_temperature: %s" % error, "type": "invalid_request"}}, status=400)
+            return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7447,6 +7463,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lifecycle.acquire_request_slot(
                 mutating=True, owner=_admission_request_owner(context)
             ), state.lock:
+                if apply_session_temperature:
+                    _chat_temperature.STORE.set(storage_session, session_temperature)
                 _record_chat("user", prompt, state=state)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
@@ -7474,6 +7492,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                             workspace_project=project, lane_session=session,
+                            storage_session=storage_session,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
@@ -7567,7 +7586,7 @@ class Handler(BaseHTTPRequestHandler):
                             # cache so each draw is independent; force temp>0.
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(_live_serve_temperature()) or 0.0,
+                                float(0.2 if _live_serve_temperature() is None else _live_serve_temperature()),  # auto keeps the old 0.2 floor
                                 0.05,
                             )
                             _samples = []

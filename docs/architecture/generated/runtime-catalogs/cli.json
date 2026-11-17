@@ -1867,6 +1867,12 @@
       "summary": "Update task status/details."
     },
     {
+      "category": "diagnostics",
+      "name": "/temp",
+      "risk": "safe",
+      "summary": "show/set this session's sampling temperature (auto = model preset)"
+    },
+    {
       "category": "dev",
       "name": "/test",
       "risk": "execution",
