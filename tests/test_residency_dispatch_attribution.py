@@ -118,20 +118,21 @@ def test_dispatched_prewarm_invalidates_previous_window_attribution(wire, monkey
     assert calls == [1]
 
 
-def test_pool_routing_invalidates_single_origin_tracker(monkeypatch):
+def test_pool_routing_preserves_and_isolates_per_origin_tracker(monkeypatch):
     primary = "http://127.0.0.1:11434"
+    worker = "https://10.77.0.2:8443"
     monkeypatch.setenv("SONDER_RESIDENCY_FEEDBACK", "1")
     monkeypatch.setattr(server, "BASE", primary)
     monkeypatch.setattr(server, "_RESIDENCY_FEEDBACK", None)
     pool = SimpleNamespace(configured_origins=(primary,))
     monkeypatch.setattr(server, "OLLAMA_POOL", pool)
     first = server._residency_feedback()
-    first.note_selection("qwen:27b", 16384)
+    first.note_selection("qwen:27b", 16384, origin=primary)
 
-    pool.configured_origins = (primary, "http://127.0.0.1:11435")
-    assert server._residency_feedback() is None
-    pool.configured_origins = (primary,)
-    assert server._residency_feedback() is not first
+    pool.configured_origins = (primary, worker)
+    second = server._residency_feedback()
+    assert second is first
+    assert second.ceiling("qwen:27b", origin=worker) is None
 
 
 def test_inflight_probe_cannot_restore_an_invalidated_measurement():

@@ -182,8 +182,15 @@ def _is_env_admin_open() -> bool:
 
 
 def admin_opt_in_active() -> bool:
-    """True when an authorized local-open/admin caller explicitly opted into denied models."""
-    return bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open()
+    """True when an authorized local-open/admin caller opted into denied models or BYPASS."""
+    if bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open():
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
 
 
 @contextlib.contextmanager
@@ -471,6 +478,14 @@ class RestrictedRun:
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
+        if self.admin_open:
+            def admin_check(tool_name: str, args: Any) -> str:
+                if not self.still_granted():
+                    return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
+                return str(inner(tool_name, args) or "") if inner is not None else ""
+
+            return admin_check
+
         def check(tool_name: str, args: Any) -> str:
             if tool_name not in self.tools:
                 return _refusal(
@@ -601,6 +616,8 @@ class RestrictedRun:
         The globs are read again now (:meth:`current_secret_globs`); when they
         cannot be read the whole result is withheld.
         """
+        if self.admin_open:
+            return observation
         if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)

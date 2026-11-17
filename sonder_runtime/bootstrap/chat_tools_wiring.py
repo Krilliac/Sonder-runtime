@@ -64,13 +64,28 @@ def audit_mode_transition(
 
 
 def _model_supports_tools(server: Any, model: str) -> bool:
+    key = str(model or "").strip().casefold()
     extra_models = {
         item.strip().casefold()
         for item in str(os.environ.get("SONDER_CHAT_TOOL_MODELS", "") or "").split(",")
         if item.strip()
     }
-    if str(model or "").strip().casefold() in extra_models:
+    if key in extra_models:
         return True
+    pool = getattr(server, "OLLAMA_POOL", None)
+    snapshots_fn = getattr(pool, "snapshots", None)
+    if callable(snapshots_fn):
+        try:
+            for snap in snapshots_fn():
+                supports = getattr(snap, "supports_tools", None)
+                if isinstance(supports, Mapping):
+                    for name, flag in supports.items():
+                        if str(name or "").strip().casefold() == key and flag is True:
+                            return True
+        except Exception:
+            pass
+    if bool(getattr(pool, "enabled", False)):
+        return False
     try:
         records = server._runtime_installed_model_records()
         return bool(server._runtime_model_has_capability(model, "tools", records))

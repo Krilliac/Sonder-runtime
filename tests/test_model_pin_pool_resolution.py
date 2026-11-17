@@ -450,8 +450,8 @@ def test_real_pool_member_tags_forwards_its_timeout_to_open_url(monkeypatch):
     assert seen["timeout"] == 3
 
 
-def test_serve_target_is_not_widened_to_the_pool_union(monkeypatch):
-    """Deliberate scope limit: only the model_override pin consults the union."""
+def test_serve_target_resolves_non_denied_pool_model_even_when_not_chat_only(monkeypatch):
+    """Non-denied pool models resolve for agent/tool lanes too; endpoint hit stays first."""
     pool = OllamaWorkerPool(LOCAL, (WORKER,), allow_remote=True)
     reads = []
     monkeypatch.setattr(server, "OLLAMA_POOL", pool)
@@ -463,9 +463,10 @@ def test_serve_target_is_not_widened_to_the_pool_union(monkeypatch):
         lambda origin, timeout=15: reads.append(origin) or TAGS[origin],
     )
     assert server._serve_target(LOCAL_ONLY, None)[0] == LOCAL_ONLY  # endpoint hit still works
-    model, _cloud, _augment, label = server._serve_target(WORKER_ONLY, None)
-    assert (model, label) == (None, None), "worker-only names stay unknown to _serve_target"
     assert reads == []
+    model, _cloud, _augment, label = server._serve_target(WORKER_ONLY, None)
+    assert (model, label) == (WORKER_ONLY, f"model:{WORKER_ONLY}")
+    assert reads  # pool union consulted on endpoint miss
 
 
 # ---- review fixes: malformed catalogs, stale-cache refusals ----------------
@@ -660,7 +661,7 @@ def test_ensemble_targets_return_a_local_only_and_a_worker_only_member(text_rig)
 
 def test_ensemble_answer_asks_both_members_each_on_its_own_host(text_rig):
     out = server.ensemble_answer("q", tiers="%s,WORKER-ONLY:7B" % LOCAL_ONLY)
-    assert text_rig.asked[:2] == [(LOCAL_ONLY, LOCAL), ("Worker-Only:7B", WORKER)]
+    assert set(text_rig.asked[:2]) == {(LOCAL_ONLY, LOCAL), ("Worker-Only:7B", WORKER)}
     assert "2 models answered" in out
 
 
@@ -670,13 +671,14 @@ def test_worker_only_model_resolves_in_a_text_lane_under_its_catalog_name(text_r
     assert text_rig.reads, "an unknown name reads the pool union"
 
 
-def test_lanes_that_run_output_do_not_gain_a_worker_only_name(text_rig):
+def test_lanes_that_run_output_resolve_non_denied_worker_model_and_refuse_denied(text_rig):
     model, _cloud, _augment, label = server._serve_target("worker-only:7b", None)
-    assert (model, label) == (None, None)
+    assert (model, label) == ("Worker-Only:7B", "model:Worker-Only:7B")
     target = LegacyModelBootstrapAdapter(SimpleNamespace(_serve_target=server._serve_target)) \
         .resolve_target("worker-only:7b")
-    assert (target.model, target.tier_label) == (None, None)
-    assert text_rig.reads == []
+    assert (target.model, target.tier_label) == ("Worker-Only:7B", "model:Worker-Only:7B")
+    denied_model, _dc, _da, denied_label = server._serve_target(WORKER_DENIED, None)
+    assert (denied_model, denied_label) == (None, "tool-lane-denied")
 
 
 @pytest.mark.parametrize("name", [LOCAL_DENIED, WORKER_DENIED])

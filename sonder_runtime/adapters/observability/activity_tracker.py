@@ -1703,6 +1703,8 @@ def format_response(response=None):
             response.get("lines_deleted", 0),
         ),
     ]
+    if response.get("sampling"):
+        lines.append("sampling: %s" % response["sampling"])
     files = response.get("files") or []
     if files:
         lines.append("file changes:")
