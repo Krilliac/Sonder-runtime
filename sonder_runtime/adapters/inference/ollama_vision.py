@@ -5,7 +5,6 @@ import base64
 import json
 import logging
 import time
-import urllib.parse
 import urllib.request
 
 from ...application.context import OperationContext
@@ -17,6 +16,7 @@ from ...domain.common.errors import (
 from ..provider_bindings import provider_bindings_from_env
 from . import ollama_endpoint
 from . import gpu_admission
+from .log_safe import redact_url, safe_origin, urlsplit_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,19 @@ def _read_bounded(stream, limit: int) -> bytes:
         chunks.append(chunk)
         total += len(chunk)
     return b"".join(chunks)
+
+
+def _admission_target(url: str) -> tuple[str, str]:
+    """``(origin, path)`` of ``url`` for GPU admission; the origin never carries userinfo.
+
+    Raises a ValueError with fixed text for a URL that ``safe_origin`` or
+    urllib rejects: urllib quotes the text it rejected in its own message.
+    """
+    origin = safe_origin(url)
+    target = urlsplit_or_none(url)
+    if origin is None or target is None:
+        raise ValueError("vision endpoint URL is malformed")
+    return origin, target.path
 
 
 def configure_typed_request_timeout(seconds: int | None) -> None:
@@ -71,7 +84,7 @@ class OllamaVisionGateway:
         if self._provider_bindings.tier_providers.get(request.tier, "ollama") != "ollama":
             raise Forbidden("image analysis is only available on Ollama-bound vision tiers")
         endpoint = ollama_endpoint.normalize()
-        logger.debug(f"OllamaVisionGateway.analyze: endpoint={endpoint!r}, tier={request.tier!r}")
+        logger.debug(f"OllamaVisionGateway.analyze: endpoint={redact_url(endpoint)!r}, tier={request.tier!r}")
         if not ollama_endpoint.is_loopback(endpoint):
             raise Forbidden("vision analysis requires a loopback Ollama endpoint")
         target = self._target_resolver(request.tier, True)
@@ -102,7 +115,7 @@ class OllamaVisionGateway:
         if request.think is not None:
             payload["think"] = bool(request.think)
         url = endpoint + "/api/chat"
-        logger.debug(f"OllamaVisionGateway.analyze: posting to {url!r}, model={target.model!r}, timeout={timeout}")
+        logger.debug(f"OllamaVisionGateway.analyze: posting to {redact_url(url)!r}, model={target.model!r}, timeout={timeout}")
         data = (
             self._transport(url, payload, timeout)
             if self._transport is not None
@@ -121,9 +134,9 @@ class OllamaVisionGateway:
         limit = RESPONSE_BODY_LIMIT
         budget = timeout or _configured_request_timeout
         try:
-            target = urllib.parse.urlsplit(url)
+            origin, path = _admission_target(url)
             with gpu_admission.process_service().admit(
-                target.path, payload, origin="%s://%s" % (target.scheme, target.netloc),
+                path, payload, origin=origin,
                 deadline=time.monotonic() + budget,
             ) as ticket:
                 request = urllib.request.Request(
@@ -141,18 +154,18 @@ class OllamaVisionGateway:
             raise
         except gpu_admission.GpuAdmissionRefused as refused:
             raise Conflict(refused.detail) from refused
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sanitize transport errors before raising
+            # No traceback: transport exception text can repeat the request URL.
             logger.warning(
-                f"Ollama vision request failed: url={url!r}, "
-                f"timeout={timeout}",
-                exc_info=True,
+                f"Ollama vision request failed: url={redact_url(url)!r}, "
+                f"timeout={timeout}, error={type(exc).__name__}"
             )
             logger.error(
-                f"Ollama vision inference request failed, url={url!r}, "
-                f"timeout={timeout}",
-                exc_info=True,
+                f"Ollama vision inference request failed, url={redact_url(url)!r}, "
+                f"timeout={timeout}, error={type(exc).__name__}"
             )
-            raise DependencyUnavailable("local Ollama vision request failed") from exc
+        # Leave the handler before raising, so the raw response is not context.
+        raise DependencyUnavailable("local Ollama vision request failed")
 
 
 __all__ = ["OllamaVisionGateway"]
