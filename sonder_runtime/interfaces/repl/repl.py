@@ -62,6 +62,7 @@ from sonder_runtime.adapters.repl_services import (
 )
 from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
 from sonder_runtime.interfaces.repl import command_router
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.repl import style as S
 from sonder_runtime.application.ports import repl_notices
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -886,7 +887,7 @@ def _repl_autopilot_owner(cmd, arg):
     """The owner to pass for one ``/autopilot`` or ``/mission`` line, or None."""
     words = str(arg or "").split(None, 1)
     action = words[0].lower() if words else ""
-    command = str(cmd or "").lower()
+    command = _slash_head(cmd)
     if command == "/mission":
         return _repl_console_owner() if action == "start" else None
     return _repl_console_owner() if action in _AUTOPILOT_OWNER_ACTIONS else None
@@ -906,7 +907,7 @@ def _help_policy_note(topic):
     name = str(topic or "").strip().split(None, 1)
     if not name:
         return ""
-    cmd = "/" + name[0].lstrip("/").lower()
+    cmd = "/" + _slash_head(name[0].lstrip("/"))
     try:
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable:
@@ -1161,7 +1162,7 @@ def _history_safe(line):
     normal command and chat recall remain unchanged.
     """
     value = str(line or "").strip()
-    command = value.split(None, 1)[0].lower() if value else ""
+    command = _slash_head(value)
     return bool(value) and command not in _HISTORY_SECRET_COMMANDS and not (
         _HISTORY_SECRET_ASSIGNMENT.search(value)
     )
@@ -1359,7 +1360,7 @@ class _ModelArgumentCompleter:
         return self._choices
 
     def __call__(self, command, prefix, *, limit=8):
-        if str(command or "").casefold() != "/model":
+        if _slash_head(command) != "/model":
             return []
         if self._choices is None:
             self.refresh()
@@ -2122,7 +2123,7 @@ def _branch_usage_error(cmd, arg):
     answered here and never reaches the gate.  It is pure: no tool, no state,
     and an empty result means "let the gate and the branch decide".
     """
-    command = str(cmd or "").strip().lower()
+    command = _slash_head(cmd)
     raw = str(arg or "")
     text = raw.strip()
     if command == "/register":
@@ -4277,7 +4278,7 @@ def main(*, machine_output=False):
                 if _looks_like_slash_command(line):
                     _CURRENT_LINE[0] = " ".join(line.split())
                     parts = line.split(None, 1)
-                    cmd = parts[0].lower()
+                    cmd = _slash_head(parts[0])
                     arg = parts[1] if len(parts) > 1 else ""
 
                     # One choke point for every hand-written branch below, including
