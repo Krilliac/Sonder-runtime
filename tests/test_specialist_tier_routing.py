@@ -8,6 +8,7 @@ chain: the policy vocabulary, the seeded binding, the server's tier -> model
 map, the live selection, and the unset-tier fallback that must not regress.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -35,7 +36,9 @@ def isolated_runtime_policy(monkeypatch, tmp_path):
 
 def test_policy_vocabulary_covers_every_tier_the_router_prefers():
     """The regression that started this: a preference nothing can bind to."""
-    wanted = set(cr._PREFERRED.values())
+    wanted = set(
+        _test_model_lists.load().values["capability_router"]["preferred"].values()
+    )
 
     assert wanted <= set(rules.LOCAL_TIERS), (
         "capability router prefers tiers the runtime policy cannot bind: %s"
@@ -45,7 +48,7 @@ def test_policy_vocabulary_covers_every_tier_the_router_prefers():
 
 def test_router_fallback_floor_is_always_bindable():
     """Every fallback rung must be a base tier that can never be unset."""
-    assert set(cr._FALLBACK) <= set(rules.BASE_LOCAL_TIERS)
+    assert set(_test_model_lists.load().values["capability_router"]["fallback"]) <= set(rules.BASE_LOCAL_TIERS)
 
 
 def test_optional_tiers_are_disjoint_from_base_tiers():
@@ -87,7 +90,10 @@ def test_environment_can_leave_a_specialist_tier_unset():
 def test_specialist_tiers_still_refuse_cloud_models():
     policy = runtime_policy.default_policy(env={"SONDER_REASONING": "glm-5.2:cloud"})
 
-    assert policy["local_models"]["reasoning"] == rules.DEFAULT_MODELS["reasoning"]
+    assert (
+        policy["local_models"]["reasoning"]
+        == _test_model_lists.load().document()["default_local_models"]["reasoning"]
+    )
 
 
 def test_older_policy_file_gains_safe_unbound_specialist_tiers_on_load():
@@ -115,11 +121,17 @@ def test_older_policy_file_gains_safe_unbound_specialist_tiers_on_load():
 @pytest.mark.parametrize("tier", rules.OPTIONAL_LOCAL_TIERS)
 def test_execution_lanes_cannot_pin_to_an_optional_tier(tier):
     payload = {
-        "version": 1, "revision": 0,
-        "local_models": dict(rules.DEFAULT_MODELS),
+        "version": 1,
+        "revision": 0,
+        "local_models": dict(
+            _test_model_lists.load().document()["default_local_models"]
+        ),
         "routing": {
-            "router": tier, "workbench": "code", "autopilot": "code",
-            "fleet": "code", "review": "code",
+            "router": tier,
+            "workbench": "code",
+            "autopilot": "code",
+            "fleet": "code",
+            "review": "code",
         },
     }
 
@@ -138,7 +150,11 @@ def test_reasoning_prompt_selects_the_reasoning_tier(
     available = runtime_policy.bound_tiers(policy)
     assert "reasoning" in available
 
-    route = cr.route("Prove step by step why this algorithm is O(n log n)", available)
+    route = cr.route(
+        "Prove step by step why this algorithm is O(n log n)",
+        available,
+        config=_test_model_lists.load().values["capability_router"],
+    )
 
     assert route.task == "reasoning"
     assert route.tier == "reasoning"
@@ -152,7 +168,11 @@ def test_vision_prompt_selects_the_vision_tier(
     policy = server._refresh_runtime_policy(create=True)
     available = runtime_policy.bound_tiers(policy)
 
-    route = cr.route("describe the screenshot in this image", available)
+    route = cr.route(
+        "describe the screenshot in this image",
+        available,
+        config=_test_model_lists.load().values["capability_router"],
+    )
 
     assert route.task == "vision"
     assert route.tier == "vision"
@@ -185,7 +205,12 @@ def test_capability_refinement_needs_a_real_image_for_the_vision_tier(
     monkeypatch.setenv("SONDER_VISION", "moondream")
     server._refresh_runtime_policy(create=True)
     prompt = "summarize what this chart of build times shows"
-    assert cr.classify_task(prompt)[0] == "vision"
+    assert (
+        cr.classify_task(
+            prompt, config=_test_model_lists.load().values["capability_router"]
+        )[0]
+        == "vision"
+    )
 
     tier, reason = server._capability_refined_tier(prompt, "code", "lane default")
     assert (tier, reason) == ("code", "lane default")
@@ -234,8 +259,17 @@ def test_unset_specialist_tier_falls_back_to_a_base_tier(isolated_runtime_policy
     available = runtime_policy.bound_tiers(policy)
     assert available == rules.BASE_LOCAL_TIERS
 
-    reasoning = cr.route("Prove step by step why this is correct", available)
-    vision = cr.route("what is in this photo", available, has_image=True)
+    reasoning = cr.route(
+        "Prove step by step why this is correct",
+        available,
+        config=_test_model_lists.load().values["capability_router"],
+    )
+    vision = cr.route(
+        "what is in this photo",
+        available,
+        has_image=True,
+        config=_test_model_lists.load().values["capability_router"],
+    )
 
     assert reasoning.task == "reasoning" and reasoning.tier == "general"
     assert vision.task == "vision" and vision.tier == "general"

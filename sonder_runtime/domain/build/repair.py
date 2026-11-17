@@ -1,18 +1,10 @@
-"""Repair-loop policy for ``build_fix``: edit scope, hostile-directive scan,
-patch validation, progress ordering, the repair prompt and the fix report.
+"""Repair-loop policy for build_fix: edit scope, directive scanning, patch validation, progress
+ordering, prompts and reports.
 
-Everything is pure. The loop (application layer) reads files through the
-typed gateway and hands their text here; nothing in this module touches the
-filesystem.
-
-Why the scan normalizes first (F7): the preprocessor splices
-backslash-newlines, maps ``%:`` to ``#`` and ``??=`` to ``#``, and strips
-comments before it sees a directive, so ``%:include``, ``#inc\\<newline>lude``
-and ``# /**/ include`` are all real directives. The scan runs on the same
-logical lines the compiler would see. Compilers disagree on some of this
-(trigraphs on or off, raw strings in C, whether blanks may sit between the
-backslash and the newline of a splice), so ``scan_added_lexings`` scans
-every reading and refuses what any of them refuses.
+This pure module receives text through the application gateway. Its conservative scanner
+models alternative splice, trigraph, digraph, comment and literal readings, then unions the
+configured refusals. The models describe scanner policy rather than measured compiler
+conformance.
 """
 from __future__ import annotations
 
@@ -26,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Mapping
 
+from ..common.bounded_json import JsonBoundsExceeded, check_depth
 from ..diagnostics.model import Diagnostic, diagnostic_to_wire
 from .model import BuildDomainError, bounded_notes, clip, safe_rel
 from .report import BuildJobReport, build_report_to_wire
@@ -168,9 +161,8 @@ def _glob_match(rel: str, glob: str) -> bool:
 
 _TRIGRAPHS = {"=": "#", "/": "\\", "'": "^", "(": "[", ")": "]", "!": "|", "<": "{", ">": "}", "-": "~"}
 _TRIGRAPH_RE = re.compile(r"\?\?([=/'()!<>-])")
-# gcc and clang accept blanks (space, tab, form feed, vertical tab) between the
-# backslash and the newline of a line splice; MSVC does not splice there (the
-# next line stays a line of its own). CRLF/CR are already folded to LF.
+# The lenient splice model spans configured horizontal blanks before a newline.
+# The strict model requires adjacency; newline folding occurs before either model.
 _SPLICE_RE = re.compile(r"\\[ \t\f\v]*\n")
 _STRICT_SPLICE = "\\\n"
 _LEGACY_SPLICE_RE = re.compile(r"\\[ \t]*\n")
@@ -179,11 +171,8 @@ _LEGACY_SPLICE_RE = re.compile(r"\\[ \t]*\n")
 _BLANK_SPLICE_RE = re.compile(r"(?:\\|\?\?/)([ \t\f\v]+)\n")
 _DIGRAPH_PAIRS = ("<:", ":>", "<%", "%>", "%:")
 _RAW_OPEN_RE = re.compile(r'(?:u8|u|U|L)?R"')
-# Raw-string delimiter characters gcc, clang and MSVC all accept. Anything else
-# (a blank, ``$``, ``@``, a backquote, ``"``, a non-ASCII character, more than
-# 16 characters) is an error each compiler recovers from differently: gcc and
-# clang lex on to the next ``"`` (across lines), MSVC keeps a raw string with
-# another delimiter. No single reading covers that, so such a prefix is refused.
+# Raw delimiters are limited to the modeled character set and 16 characters.
+# Other prefixes are refused instead of assuming one error-recovery reading.
 _RAW_PREFIX_RE = re.compile(r"""(?:u8|u|U|L)?R"([A-Za-z0-9_{}\[\]#<>%:;.?*+\-/^&|~!=,']{0,16})\(""")
 # The delimiter rule before the fix above; the "legacy" masking keeps it.
 _LEGACY_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
@@ -192,41 +181,20 @@ _LEGACY_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool = True,
                        digraphs: bool = True, strict_splices: bool = False,
                        legacy: bool = False, separators: str = "cxx14") -> str:
-    """Translation phases 1-3 as far as the scan needs them.
+    """Normalize text under one configured lexical model.
 
-    All nine trigraphs are replaced, backslash-newline splices (blanks between
-    the backslash and the newline included) are joined, the digraphs
-    ``%:%:``/``%:``/``<:``/``:>``/``<%``/``%>`` become ``##``/``#``/``[``/``]``/
-    ``{``/``}`` (``<::`` not followed by ``:`` or ``>`` stays ``<`` ``::``),
-    comments become a space, and raw-string bodies are masked (their newlines kept) so text
-    inside them cannot pose as a directive. Ordinary string contents are
-    kept: ``_Pragma("...")`` and ``asm("...")`` arguments must stay visible.
+    Enabled trigraphs and digraphs are replaced, configured backslash-newline splices are
+    joined, comments become spaces, and raw-string bodies are masked with newlines retained.
+    Ordinary string contents remain visible for pragma and assembler checks.
 
-    ``raw_strings=False`` lexes ``R"(`` as C does (identifier + ordinary
-    string): in C, or in a header a C TU includes, masking a "raw string"
-    could hide real directives, so ``validate_patch`` scans both lexings.
-    ``trigraphs=False`` leaves ``??/`` and friends alone, as gcc, clang and
-    MSVC do by default (only ``-trigraphs``/``-std=c++14`` and older apply
-    them); ``digraphs=False`` leaves ``<:``/``<%`` alone so a header-name
-    such as ``<:/../x.h>`` is seen as written. ``strict_splices=True`` joins
-    only a backslash directly followed by the newline, as MSVC does: with a
-    blank in between, the lenient (gcc/clang) reading lets a ``//`` comment
-    swallow the next line while MSVC compiles that line. No reading is safe
-    to assume, so ``scan_added_lexings`` scans every combination and unions
-    the reasons.
-    ``legacy=True`` is the one reading this scanner had before those modes
-    existed (only ``??=`` and ``??/``, splices across space and tab, ``%:``
-    as the only digraph); it overrides the three mode flags. No compiler
-    reads a file that way, but it is scanned too so that nothing the old
-    scanner refused is accepted now.
-    ``separators`` picks how a ``'`` right after a pp-number is lexed (a
-    wrong guess lets a character literal swallow a quote or a ``/*`` and
-    hide later lines): ``"cxx14"`` (C++14, C23: a digit separator when an
-    ASCII digit, letter or ``_`` follows, as gcc and clang read it; where
-    MSVC reads it otherwise the input is refused, see ``_mask_literals``),
-    ``"none"`` (C17, C++11: always a character literal) and ``"legacy"``
-    (the masking before these modes: any ``'`` inside a pp-number, whose
-    start was any Unicode digit). See ``_mask_literals``.
+    raw_strings=False models an identifier plus ordinary string at a raw-looking prefix.
+    trigraphs=False and digraphs=False leave those spellings unchanged. strict_splices=True
+    joins only an adjacent backslash and newline; the lenient model also spans configured
+    blanks. scan_added_lexings combines the readings instead of assuming one.
+
+    legacy=True retains the older limited trigraph/digraph and splice model, overriding the
+    three mode flags. The cxx14, none and legacy separator modes select alternative quote
+    handling; ambiguous cases are refused by _mask_literals.
     """
     value = _translation_phases(text, trigraphs=trigraphs, digraphs=digraphs,
                                 strict_splices=strict_splices, legacy=legacy)
@@ -262,15 +230,13 @@ _ASCII_DIGITS = frozenset("0123456789")
 _ASCII_IDENT = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 _ASCII_IDENT_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
 _IDENT_OR_DOLLAR = _ASCII_IDENT | {"$"}
-_UNSURE_IN_NUMBER = frozenset("\\$")  # a UCN or ``$``: gcc continues a pp-number over it
+_UNSURE_IN_NUMBER = frozenset("\\$")  # a UCN or dollar sign: ambiguous content under the number model
 _EXPONENTS = frozenset("eEpP")
 _SIGNS = frozenset("+-")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
-# The literal part of a pp-number as MSVC 19.44 lexes it: digits with separators, a fraction, an
-# exponent, then an optional trailing ``'``. MSVC reads a ``'`` as a separator only right after a
-# digit of this part, and its number token ends where the part ends (``1x.R"(`` is ``1x``, ``.``
-# and a raw string to it), while gcc and clang continue the pp-number over every identifier
-# character, ``.``, ``'`` and exponent sign. Matched once per number, only when needed.
+# Literal-part model: digits with separators, a fraction, an exponent, and an
+# optional trailing quote. It supplies a conservative comparison boundary for
+# quote and raw-prefix cases; the broader number model can continue beyond it.
 _DEC_RUN = r"[0-9](?:'?[0-9])*"
 _HEX_RUN = r"[0-9A-Fa-f](?:'?[0-9A-Fa-f])*"
 _LITERAL_PART_RE = re.compile(
@@ -289,8 +255,8 @@ _SEPARATOR_MODES = ("cxx14", "none", "legacy")
 # What one ``_mask_literals`` pass saw (``events``); ``scan_added_lexings`` acts on them.
 _EVENT_SEPARATOR = "separator"  # a ``'`` the C++14 reading took as a digit separator
 _EVENT_LEGACY = "legacy"        # the legacy masking lexes a ``'`` or a raw prefix differently
-_EVENT_AMBIGUOUS = "ambiguous"  # a ``'`` after a pp-number that compilers lex differently
-_EVENT_BAD_RAW = "bad_raw"      # a raw-string prefix whose delimiter some compiler rejects
+_EVENT_AMBIGUOUS = "ambiguous"  # a quote after a number that the configured models do not resolve
+_EVENT_BAD_RAW = "bad_raw"      # a raw-string prefix outside the modeled delimiter or number boundary
 _AMBIGUOUS_SEPARATOR = ("a quote after a number that compilers lex differently (digit separator "
                         "or character literal) is refused")
 _BAD_RAW_DELIMITER = ("a raw string prefix that compilers lex differently (a delimiter some compiler "
@@ -299,35 +265,18 @@ _BAD_RAW_DELIMITER = ("a raw string prefix that compilers lex differently (a del
 
 def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators: str = "cxx14",
                    events: set[str] | None = None) -> str:
-    """The token-level part of ``normalize_for_scan``: comments, raw strings, digraph pairs.
+    """Mask comments and literals under the selected conservative lexical model.
 
-    A ``'`` right after a pp-number is where compilers part ways. Checked with
-    gcc 16, clang 22 and MSVC 19.44: in C++14 and C23 modes gcc and clang take
-    it as a digit separator only when an ASCII digit, letter or ``_`` follows
-    (gcc also across ``''``), in C17 and C++11 never, and MSVC in every mode
-    exactly when it follows a digit of the number's literal part
-    (``_LITERAL_PART_RE``: ``1'/`` yes, ``1x'2``, ``1.'2``, ``1e+'2`` no).
-    The exponent sign is not uniform either: clang (C++) and g++
-    ``-std=c++14`` end the number before a sign after ``p`` in a decimal
-    number (g++ C++11 and C++14 in a hex one too: ``0xp+``, ``0x.p-``),
-    clang in MS mode before a sign after ``e`` in a hex one.
-    ``separators`` picks the reading (see
-    ``normalize_for_scan``); every reading follows the same text up to the
-    first ``'`` it decides differently, so ``events`` (when given) records
-    whether another reading can differ at all: ``"separator"`` (the C++14
-    reading took a separator, so the C17 one differs), ``"legacy"`` (the
-    legacy reading decides a ``'`` or a raw prefix differently) and the two
-    that no reading covers: ``"ambiguous"`` (a ``'`` after a pp-number
-    followed by anything else, one gcc and clang take as a separator but
-    MSVC does not, one after a sign after ``p`` or in a hex number, or a
-    pp-number holding a character compilers disagree on: non-ASCII, ``\\``,
-    ``$``; taken from the C++14 pass) and ``"bad_raw"`` (a raw prefix whose
-    delimiter some compiler rejects, one after a non-ASCII character or a
-    backslash, or one inside a pp-number that some compiler ends before it).
-    A raw prefix inside a pp-number every compiler continues (``1.R"(``,
-    ``1'R"(``, ``1e+R"(``) is no raw string: ``1.R`` is part of the number.
+    The separator modes model alternative quote handling after preprocessing numbers. The
+    literal-part pattern, exponent checks and ambiguous-character checks flag cases that the
+    configured readings do not resolve uniformly. Raw-looking prefixes inside numbers and
+    delimiters outside the modeled set can also require refusal.
 
-    Pure; ``events`` is the only argument it mutates. Linear in ``value``.
+    When supplied, events records separator, legacy, ambiguous and bad_raw cases so the
+    caller can request another configured reading or refuse the input. This is a scanner-
+    policy model, not a compiler comparison.
+
+    Pure except for mutations to the caller-owned events set; work is linear in value.
     """
     if separators not in _SEPARATOR_MODES:
         raise ValueError(f"separators must be one of {', '.join(_SEPARATOR_MODES)}")
@@ -335,7 +284,7 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     i = 0
     n = len(value)
     pp_number = False  # C++14 reading: inside a pp-number (started by an ASCII digit)
-    unsure = False  # ... and it holds a character compilers lex differently
+    unsure = False  # ... and it holds content treated as ambiguous by the number model
     number_start = 0  # ... where it starts
     hex_number = False  # ... and whether it starts with ``0x``
     literal_end = -1  # ... end of its literal part (``_LITERAL_PART_RE``), -1 until needed
@@ -363,8 +312,8 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 if pp_number and not separator:
                     events.add(_EVENT_AMBIGUOUS)
                 elif separator and separators == "cxx14":
-                    # MSVC takes it only after a digit of the literal part. Matched in the C++14
-                    # pass alone (where a number's literal part does not run into the next number).
+                    # Compare the quote against the modeled literal-part digit boundary.
+                    # An unresolved difference is flagged for conservative refusal.
                     if literal_end < 0:
                         literal_end = _literal_part_end(value, number_start)
                     if i - 1 >= literal_end \
@@ -389,7 +338,7 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
             if ch in _ASCII_IDENT or ch == ".":
                 pass
             elif ch in _SIGNS and previous in _EXPONENTS:
-                # gcc and clang disagree whether the number goes on after ``p+`` or a hex ``e+``.
+                # Treat these exponent-sign boundaries as ambiguous in the number model.
                 if previous in "pP" or hex_number:
                     unsure = True
             elif ch in _UNSURE_IN_NUMBER or not ch.isascii():
@@ -398,11 +347,8 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 pp_number = unsure = False
         elif (ch in _ASCII_DIGITS and previous not in _ASCII_IDENT) \
                 or (ch == "." and value[i + 1:i + 2] in _ASCII_DIGITS):
-            # "." is never an identifier character, so ``.`` plus a digit starts a pp-number
-            # even right after one: ``b.0x1`` is ``b`` and ``.0x1``, literal part ``.0``.
-            # ASCII digits only: a Unicode digit (U+0661, U+FF11, U+00B2) is an identifier
-            # character to the compilers. After a non-ASCII character, ``\`` or ``$`` it is
-            # unsure whether the digit starts a number or continues an identifier.
+            # A non-ASCII character, backslash or dollar sign makes this prefix ambiguous.
+            # The policy refuses it instead of assuming a single literal boundary.
             pp_number = True
             unsure = previous != "" and (previous in _UNSURE_IN_NUMBER or not previous.isascii())
             number_start = i
@@ -422,11 +368,10 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
             legacy_raw = None if previous.isalnum() or previous == "_" \
                 else _LEGACY_RAW_PREFIX_RE.match(value, i)
             if previous in _IDENT_OR_DOLLAR:
-                raw = None  # ``xR"`` and ``$R"`` are identifiers to every compiler
+                raw = None  # These prefixes remain identifiers under the configured model.
             elif pp_number:
-                # ``1.R"(``, ``1'R"(``, ``1e+R"(``: the prefix continues the number. Unless some
-                # compiler ends the number before it (an unsure number, or past MSVC's literal
-                # part); a delimiter some compiler rejects stays refused here too, as before.
+                # Refuse a raw-looking prefix at an unresolved number boundary.
+                # An out-of-model delimiter remains refused as well.
                 raw = None
                 if events is not None:
                     if literal_end < 0:
@@ -494,10 +439,8 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     return "".join(out)
 
 
-# ``\s`` is wider than any compiler's blank (it takes U+00A0, U+2028, U+0085,
-# \x1c-\x1f, which gcc lexes as stray tokens), so this recognises more lines
-# as directives, never fewer, and checks them. What it misses (U+180E, which
-# clang treats as blank but ``\s`` does not) is refused by the check below.
+# Python whitespace includes characters beyond the scanner directive-head model.
+# The broader matcher is paired with explicit refusal of ambiguous characters.
 _DIRECTIVE_RE = re.compile(r"^\s*#\s*([A-Za-z_]\w*)\s*(.*)$")
 # A line that starts like a directive: what precedes the ``#`` (group 1), what
 # separates it from the name (group 2), the ASCII name (3) and the next character (4).
@@ -505,11 +448,8 @@ _DIRECTIVE_SHAPE_RE = re.compile(r"([^\x21-\x7e]*)(?:#|%:)([^\x21-\x7e]*)([A-Za-
 _LINE_BLANKS = frozenset(" \t\f\v\r")
 _ODD_DIRECTIVE = ("a non-ASCII or control character before, after or inside a directive's '#' "
                   "and name is refused (compilers disagree whether the line is a directive)")
-# U+FEFF is skipped as a byte order mark at the start of a file by gcc, clang and MSVC;
-# clang 22 takes U+180E as a blank before a ``#`` (not between ``_Pragma`` and its
-# ``(``). ``\s`` matches neither; both are refused anywhere in added text, one
-# rule instead of a guess per construct (``scan_added_lexings`` drops the one
-# byte order mark at offset 0 of a file before scanning).
+# One initial U+FEFF is handled separately as a byte-order mark.
+# Other U+FEFF and U+180E occurrences are refused by scanner policy.
 _ODD_BLANKS_RE = re.compile("[\ufeff\u180e]")
 _ODD_BLANKS = "U+FEFF (byte order mark) or U+180E in added text is refused (a compiler reads it as a blank)"
 _PRAGMA_BAD_RE = re.compile(
@@ -520,29 +460,18 @@ _PRAGMA_BAD_RE = re.compile(
 )
 _PRAGMA_OP_RE = re.compile(r"\b_Pragma\s*\(")
 _MS_PRAGMA_RE = re.compile(r"\b__pragma\s*\(")
-# ``__has_include__``/``__has_include_next__`` are the spellings older GCC used.
+# Recognize the additional __has_include__ and __has_include_next__ spellings.
 _HAS_TOKEN_RE = re.compile(r"\b__has_(?:include(?:_next)?(?:__)?|embed)\b")
 # ``(`` then ``<`` or ``"``. A use needs the whole operand on the token's own
 # logical line; the match may run past it because a literal that follows a
 # merely named token on a later line is still path-checked.
 _HAS_OPERAND_RE = re.compile(r"\s*\(\s*([<\"])")
-# Directives whose first operand is a macro *name*: there the token is defined,
-# removed or tested, never evaluated. Matched from the start of the logical
-# line, so text before the ``#`` (``#if 0 #define __has_include(P)``, a
-# stringized or pasted ``#define``) is not a directive head.
-# Both grant an exemption, so they take only the blanks every compiler skips
-# (``\s`` would also take U+00A0 or \x1c, a stray token to gcc, which then
-# expands ``__has_include(P)`` on that line as ordinary text), and ``if``/``elif``
-# must not run on into an identifier character, ASCII or not.
+# Exemptions use the restricted whitespace model; broader whitespace must not
+# turn an ambiguous line into a recognized directive head.
 _HAS_NAME_HEAD_RE = re.compile(
     r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:define|undef|ifdef|ifndef|elifdef|elifndef)[ \t\f\v]+")
 _HAS_IF_HEAD_RE = re.compile(r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:if|elif)(?![0-9A-Za-z_$]|[^\x00-\x7f])")
-# Words of an ``#if`` line. Group 1 is anything that may be (or hide) a macro:
-# an identifier, or a quote, backslash or other character that starts a token
-# this scan does not pair up. A pp-number and ``defined NAME``/``defined(NAME``
-# (its operand is never expanded) are not.
-# ASCII digits only: Python's \d also matches Unicode Nd (U+0663, U+FF11), which C
-# compilers accept as identifier characters, so "\uff11LP" must be an identifier here.
+# Treat these Unicode digit characters as identifier content in this model.
 _IF_WORD_RE = re.compile(r"\.?[0-9](?:[eEpP][+-]|'?[\w.])*|defined\b[ \t\f\v]*\(?[ \t\f\v]*(?:[^\W0-9]\w*)?"
                          r"|([^\W0-9]\w*|[$\\'\"`@]|[^\x00-\x7f])")
 _HAS_COMPUTED = "__has_include/__has_embed: computed operand (not a literal header-name)"
@@ -708,9 +637,8 @@ def _is_defined_operand(text: str, line_start: int, start: int, end: int, line_e
     budget.charge(start - j + k - end + 1)
     if j - 7 < line_start or text[j - 7:j] != "defined":
         return False
-    # Any non-ASCII character may continue an identifier (U+0300, U+00B7, ZWJ,
-    # U+203F are not ``isalnum`` but compilers accept them), so ``X\u0300defined``
-    # is one identifier, not the operator.
+    # Treat combining and connector characters conservatively as identifier
+    # continuations so they cannot create a false defined-token boundary.
     if j - 7 > line_start and (text[j - 8] in _IDENT_OR_DOLLAR or not text[j - 8].isascii()):
         return False
     following = text[k] if k < line_end else ""
@@ -719,39 +647,21 @@ def _is_defined_operand(text: str, line_start: int, start: int, end: int, line_e
 
 def _scan_has_include(text: str, *, include_ok: Callable[[str], bool], budget: _Budget,
                       refuse: Callable[[str], None]) -> None:
-    """Check every ``__has_include``-family token spelled in ``text``.
+    """Check every recognized __has_include-family token in text.
 
-    The compiler probes the file system for the operand, so a use is accepted
-    only with a literal header-name that passes the include rules. A token
-    not directly followed by ``(`` and ``<`` or ``"`` on its own logical line
-    is refused: ``__has_include(P)``, a bare token (``#define H __has_include``
-    makes an alias) and a parenthesis that comes from a macro all lead to a
-    computed path.
+    The policy permits literal operands that pass the include rules and refuses computed or
+    ambiguous operands. Directive-name and defined-token exemptions apply only at recognized
+    logical-line heads. Literal operands following an exempt token remain checked.
 
-    Not a use: the macro name of ``#define``/``#undef``/``#ifdef``/``#ifndef``
-    when that directive starts the logical line (the fallback shim
-    ``#define __has_include(x) 0``), and ``defined(__has_include)``/``defined
-    __has_include`` in ``#if``/``#elif``. Wherever the token stands, a literal
-    operand that follows it (even on a later line) still has to pass the
-    include rules.
+    An angle operand is accepted only in the modeled direct #if/#elif context. Earlier
+    identifiers can make that context ambiguous, so the scanner conservatively refuses them;
+    quoted operands follow the string-literal path.
 
-    A ``<...>`` operand is a header-name only where the compiler lexes it as
-    one: written directly in an ``#if``/``#elif`` line. In a macro body or a
-    macro argument its tokens are macro-expanded first (clang and MSVC both
-    do this), and any identifier earlier on the line may expand to the call
-    that makes it an argument (``#define LP F(``). So on an ``#if``/``#elif``
-    line a ``<...>`` operand is refused once anything but ``defined NAME``,
-    numbers, operators and other checked ``__has_include`` operands precedes
-    it. A quoted operand is a string literal and is never expanded.
+    Known limitations, covered by test_gap cases: this does not resolve tokens constructed
+    by ## pasting or alias macros defined outside the edited code.
 
-    What this cannot see (pinned by the ``test_gap_*`` tests): a token built
-    by ``##`` pasting, and an alias macro defined in code the patch does not
-    touch.
-
-    Each logical line is located once and its directive head matched once;
-    every per-token walk is charged, so the work stays linear, and each token
-    is charged ``_HAS_TOKEN_STEPS`` for its path check, so a file that is
-    mostly probe tokens exhausts the budget and is refused.
+    Logical lines and directive heads are located once. Per-token walking and path checks
+    are charged to the work budget; exceeding it causes refusal.
     """
     line_start = 0
     line_end = -1
@@ -1005,7 +915,7 @@ _LEXING_REFUSAL = ("too many distinct readings for a file this large "
 
 
 def _without_bom(text: str) -> str:
-    """``text`` without one U+FEFF at offset 0 (the byte order mark every compiler skips)."""
+    """Drop one U+FEFF at offset zero before the scanner compares old and new text."""
     return str(text or "").removeprefix("\ufeff")
 
 
@@ -1015,41 +925,20 @@ def _digest(text: str) -> bytes:
 
 def scan_added_lexings(before: str, after: str, *,
                        include_ok: Callable[[str], bool]) -> tuple[str, ...]:
-    """Union of the hostile-scan reasons over every lexing a compiler might use.
+    """Union directive-scan reasons over the configured conservative lexical models.
 
-    The lexings that change what the scanner sees: C++ raw strings versus C
-    (``R"(`` is an identifier and a string), trigraphs applied (``-trigraphs``,
-    ``-std=c++14``) versus ignored (the gcc/clang/MSVC default), digraphs
-    normalised versus left as written (a header-name such as ``<:/../x.h>``
-    is never digraph-translated by the compiler), and a backslash-blanks-newline
-    spliced (gcc, clang) versus left alone (MSVC). The legacy reading (see
-    ``normalize_for_scan``) is scanned as well, so nothing it refused is
-    accepted now.
+    The models vary raw-string handling, trigraphs, digraphs and strict versus lenient
+    splices. The legacy model is retained so earlier refusals are not lost. Equivalent
+    normalized text and added-line readings are deduplicated.
 
-    That is up to 18 readings, but most of them read a given file the same
-    way. A reading is skipped when its whole-text phases give the same old
-    and new text as one already done (and the raw-string and digraph-pair
-    switches cannot matter because the text has no ``R"`` or digraph pair),
-    and its added lines are scanned only when no earlier reading produced the
-    same ones. Ordinary code costs one normalisation and one scan.
+    Separator and legacy events request additional quote readings; unresolved quote and raw-
+    prefix events cause refusal. These models do not establish coverage of every compiler
+    interpretation.
 
-    Each of those readings is masked with C++14 digit separators; when that
-    pass meets a ``'`` it takes as a separator, the C17/C++11 masking (no
-    separators) is scanned too, and when the legacy masking would decide a
-    ``'`` or a raw prefix differently, so is that one. A ``'`` after a number
-    that no reading covers (gcc, clang and MSVC each lex it differently) and
-    a raw prefix with a delimiter some compiler rejects are refused wherever
-    they stand in the old or the new text.
-
-    The work is bounded: the distinct readings are counted first (cheap), and
-    when there are more than two and together they would put more than
-    ``_LEXING_WORK_CHARS`` characters (old plus new text, per reading)
-    through the scanner, the input is refused, never accepted. The quote
-    readings found while scanning count against the same bound.
-
-    gcc, clang and MSVC skip one U+FEFF (byte order mark) at the very start of
-    a file, so exactly one there is dropped from the old and the new text
-    first; any other U+FEFF stays and is refused by the scan.
+    _LEXING_WORK_CHARS limits combined work when more than two readings are needed. Up to
+    two readings remain permitted regardless of the combined text-length product; additional
+    quote readings participate in this accounting. One initial U+FEFF is removed from old
+    and new text; later occurrences remain subject to refusal.
     """
     before = _without_bom(before)
     after = _without_bom(after)
@@ -1181,8 +1070,9 @@ def parse_candidate_patch(text: str, *, model_id: str = "") -> CandidatePatch:
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped)
     try:
+        check_depth(stripped)
         document = json.loads(stripped)
-    except (ValueError, RecursionError) as exc:
+    except (JsonBoundsExceeded, ValueError, RecursionError) as exc:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer is not JSON") from exc
     if not isinstance(document, dict) or set(document) - {"hunks", "rationale"}:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer has unexpected fields")
@@ -1270,8 +1160,8 @@ def validate_patch(
         if len(new_text.encode("utf-8", "replace")) > scope.max_file_bytes:
             reasons.append("FILE_TOO_LARGE: %s" % rel)
         changed_total += _changed_lines(before, new_text)
-        # Every lexing (raw strings, trigraphs, digraphs, splice blanks): none can
-        # hide a directive that a compiler reading the file the other way would see.
+        # Scan configured alternate readings so normalization does not hide a directive
+        # that another modeled reading would expose.
         found = scan_added_lexings(before, new_text, include_ok=include_checker(scope, rel))
         reasons.extend("HOSTILE_DIRECTIVE: %s: %s" % (rel, reason) for reason in found)
     touched = set(loop_files_used) | {rel for rel, text in texts.items() if text != current.get(rel)}

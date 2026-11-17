@@ -1,4 +1,5 @@
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 from sonder_runtime.application.training import hardware_planning
 import adaptive_training
@@ -27,7 +28,11 @@ def test_legacy_names_delegate_to_application_planning_boundary():
 
 def test_planning_boundary_is_side_effect_free_and_typed():
     options = hardware_planning.PlanOptions(model="3b", gpu_index=2)
-    plan = hardware_planning.build_plan(profile(), options)
+    plan = hardware_planning.build_plan(
+        profile(),
+        options,
+        specs=_test_model_lists.load().values["training_model_specs"],
+    )
     assert isinstance(plan, hardware_planning.HardwarePlan)
     assert plan.options == options
     assert plan.training.model_size == "3b"
@@ -36,7 +41,9 @@ def test_planning_boundary_is_side_effect_free_and_typed():
 
 def test_planning_boundary_fails_closed_for_cpu_offload():
     plan = hardware_planning.build_plan(
-        profile(), hardware_planning.PlanOptions(model="3b", allow_cpu_offload=True)
+        profile(),
+        hardware_planning.PlanOptions(model="3b", allow_cpu_offload=True),
+        specs=_test_model_lists.load().values["training_model_specs"],
     )
     assert not plan.training.enabled
     assert hardware_planning.TRAINING_CPU_OFFLOAD_REASON in plan.training.rejected
