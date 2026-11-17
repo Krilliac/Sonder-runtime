@@ -2,7 +2,9 @@
 
 * ``GET /v1/approvals`` -- refused calls waiting for approval, and approvals;
 * ``POST /v1/approvals/<call_id>`` -- approve one refused call once;
-* ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval.
+* ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval;
+* ``POST /v1/approvals/deny/<call_id>`` -- decline one refused call (authorises
+  nothing; revokes its open approval and lets a waiting turn see the refusal).
 
 Reviewing the list needs a developer or administrator. Approving or revoking
 issues authority another caller spends later, so it needs exactly what the
@@ -24,9 +26,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .approvals import approvals_payload, approve_call, revoke_approval
+from .approvals import approvals_payload, approve_call, deny_call, revoke_approval
 
 ROUTE = "/v1/approvals"
+_SINGLE_OWNER_MODES = frozenset({"local-open", "api-key"})
 
 
 def _unavailable() -> dict:
@@ -97,7 +100,8 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
     """``GET /v1/approvals``; ``False`` for another route."""
     if (path.rstrip("/") or "/") != ROUTE:
         return False
-    ledger, done = _access(handler, handler._request_auth_context(), ports)
+    context = handler._request_auth_context()
+    ledger, done = _access(handler, context, ports)
     if done:
         return True
     query = parse_query()
@@ -112,7 +116,13 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
         return True
     include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
     try:
-        payload = approvals_payload(ledger, limit=limit, include_spent=include_spent)
+        # The ledger is not scoped by owner, so in any mode with accounts the
+        # exact code of someone else's pending call stays hidden until approvals
+        # are bound to the turn's owner (design D7).
+        payload = approvals_payload(
+            ledger, limit=limit, include_spent=include_spent,
+            show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+        )
     except Exception:
         ports.log.error("approval ledger read failed", exc_info=True)
         handler._send_json_payload(_unavailable(), status=503)
@@ -132,7 +142,9 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     parts = path[len(ROUTE):].strip("/").split("/")
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
         action, target = "revoke", parts[1]
-    elif len(parts) == 1 and parts[0] and parts[0] != "revoke":
+    elif len(parts) == 2 and parts[0] == "deny" and parts[1]:
+        action, target = "deny", parts[1]
+    elif len(parts) == 1 and parts[0] and parts[0] not in ("revoke", "deny"):
         action, target = "approve", parts[0]
     else:
         handler._send_not_found()
@@ -146,6 +158,8 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     def run():
         if action == "revoke":
             return revoke_approval(ledger, target)
+        if action == "deny":
+            return deny_call(ledger, target, req)
         return approve_call(ledger, target, req, approver=approver, surface="http")
 
     action_text = "approval\0%s\0%s\0%s" % (
@@ -162,7 +176,8 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     if ports.send_idempotency_refusal(handler, result):
         return
     if result.status < 300:
-        approval = (result.body or {}).get("approval") or {}
+        body = result.body or {}
+        approval = {**(body.get("approval") or body.get("denial") or {}), "actor": approver}
         ports.audit(action, approval, started)
     handler._send_json_payload(dict(result.body), status=result.status)
 

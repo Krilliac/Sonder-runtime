@@ -9155,20 +9155,25 @@ def permission_approve(
             raise approval_ledger_module.ApprovalLedgerError(
                 "give a call id from /approvals, or a tool with its arguments_json"
             )
+        # Only the console may knowingly approve a call an operator denied.
+        overrode = surface == "console" and ledger.denied_for(target, digest)
         approval = ledger.issue(
             target, digest, approver=approver, surface=surface,
             ttl_seconds=ttl_seconds, preview=preview,
+            override_denial=surface == "console",
         )
     except approval_ledger_module.ApprovalLedgerError as exc:
         error = "ERROR: %s" % exc
         return error
     _record_direct_tool(
         "permission_approve",
-        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds)},
+        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
-        "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        ("overrode a denial: " if overrode else "")
+        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (

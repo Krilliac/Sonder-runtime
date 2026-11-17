@@ -510,6 +510,22 @@ def call_id(digest: str) -> str:
     return str(digest or "")[:CALL_ID_CHARS]
 
 
+def run_code_detail(tool_name: str, arguments) -> str:
+    """The exact ``code`` of a ``run_code`` call, for the operator to read.
+
+    ``argument_preview`` shows ``code`` only by its length (a bulk payload), so
+    an operator approving a ``run_code`` call could not see what they approved.
+    This is the separate view: the raw text, unbounded here (the ledger redacts
+    and bounds what it stores). "" for any other tool or a call without
+    string code. It is display-only and never feeds ``call_digest``.
+    """
+    if str(tool_name or "").strip().lstrip("/") != "run_code":
+        return ""
+    body = _call_body(arguments)
+    code = body.get("code") if body else None
+    return code if isinstance(code, str) else ""
+
+
 def argument_preview(arguments, limit: int = 200) -> str:
     """A bounded, content-free line naming what a call was about.
 
@@ -1729,9 +1745,11 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                         name, source="approval", call_id=call,
                     )
                 try:
+                    extra = run_code_detail(name, arguments)
                     ledger.record_pending(
                         name, digest, surface=surface,
                         preview=argument_preview(arguments),
+                        **({"detail": extra} if extra else {}),
                     )
                 except Exception:
                     # The ledger is a route out, not the gate: a ledger that
