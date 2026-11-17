@@ -84,6 +84,7 @@ if "_OWNER_RECENT" not in globals():
     _OWNER_RECENT = {}
 
 MAX_REASONING_CHARS = 20000
+MAX_REDACT_CHARS = 65536
 MAX_FEED_OWNERS = 32
 MAX_OWNER_FEED_ENTRIES = 12
 
@@ -128,12 +129,46 @@ def _block(value, limit=MAX_EVENT_BLOCK):
 # numeric values would fix that and would equally un-redact "password: 1234", so
 # it stays redacted. The ledger's OWN token counters are structured ints
 # (format_transcript reads them from the span) and never pass through here.
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b([a-z0-9_]*(?:password|passwd|pwd|token|secret|api[-_]?key|"
-    r"access[-_]?key|authorization|credential)[a-z0-9_]*)"
-    r"(?:[\"']?[ \t]*[:=][ \t]*|[ \t]+)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+#
+# Linear on hostile input: the old `\b([a-z0-9_]*KEYWORD[a-z0-9_]*)` backtracked
+# across the whole identifier run for every keyword in it, so 'token'*N cost
+# 0.3 s at 10 KB and 6.9 s at 40 KB. Names of any length still match: a match
+# can only START at the beginning of a name run (lookbehinds), the prefix is a
+# tempered run that stops at the FIRST keyword, and both runs are possessive,
+# so each run is walked once.
+#
+# A name run is [a-z0-9_] plus a '-' that joins "key" onto the character
+# before it (api-key, access-key). The old rule found `tokenapi-key=` and
+# `aws_secret_access-key:` by backtracking from the first keyword to a later
+# hyphenated one; possessive runs cannot backtrack, so the joining '-' is a run
+# character instead and the suffix carries "api-key"/"access-key" after an
+# earlier keyword. A match may not start at that "key" (it is mid-run), which
+# keeps `-key-key-...` from offering a start per repeat. The captured name is
+# still the whole prefix + keyword + suffix, as before. Possessive quantifiers
+# need Python 3.11+. _redact_text also caps its input at MAX_REDACT_CHARS.
+_SECRET_KEYWORD = (
+    r"(?:password|passwd|pwd|token|secret|api[-_]?key|"
+    r"access[-_]?key|authorization|credential)"
 )
+_SECRET_NAME_CHAR = r"(?:[a-z0-9_]|(?<=[a-z0-9_])-(?=key))"
+
+
+def _secret_assignment_re(unterminated_quote_tail):
+    # The truncated-input variant also lets a quoted value run to the end of
+    # the text: a cut inside "correct horse battery" must not leave `horse`
+    # behind the first-word fallback.
+    end = r"|\Z)" if unterminated_quote_tail else r")"
+    return re.compile(
+        r"(?i)(?<![a-z0-9_])(?!(?<=[a-z0-9_]-)key)"
+        r"((?:(?!" + _SECRET_KEYWORD + r")" + _SECRET_NAME_CHAR + r")*+"
+        + _SECRET_KEYWORD + _SECRET_NAME_CHAR + r"*+)"
+        r"(?:[\"']?[ \t]*[:=][ \t]*|[ \t]+)"
+        r"(?:\"[^\"]*(?:\"" + end + r"|'[^']*(?:'" + end + r"|[^\s,;]+)"
+    )
+
+
+_SECRET_ASSIGNMENT_RE = _secret_assignment_re(False)
+_SECRET_ASSIGNMENT_TAIL_RE = _secret_assignment_re(True)
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
 _KEY_SHAPE_RE = re.compile(
     r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
@@ -150,21 +185,67 @@ _URI_CREDENTIAL_RE = re.compile(
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-def _redact_text(value):
+# Characters of the key, JWT and base64 shapes the detectors need whole.
+_SHAPE_RUN_CHARS = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+_TRUNCATION_MARKER = "\n... (truncated before redaction)"
+
+
+def _truncate_for_redaction(text):
+    """Cut text to MAX_REDACT_CHARS without leaving a partial credential.
+
+    A plain cut can split a credential so the remainder has lost the shape a
+    detector needs, and once earlier values shrink to "<redacted>" that
+    remainder lands inside the visible block. So after the cut:
+
+    * drop the whole trailing run of key/JWT characters, however long (a
+      single 64K run leaves nothing, which is the safe answer);
+    * if the text now ends inside a URL authority -- "://" with no "/", "@"
+      or whitespace after it, i.e. possibly mid ``user:password`` -- drop it
+      from the "://";
+    * an unterminated quoted value at the tail is the caller's job: it
+      redacts truncated text with _SECRET_ASSIGNMENT_TAIL_RE.
+
+    Linear: rstrip and rfind are single passes over at most MAX_REDACT_CHARS.
+    """
+    head = text[:MAX_REDACT_CHARS].rstrip(_SHAPE_RUN_CHARS)
+    scheme = head.rfind("://")
+    if scheme >= 0:
+        authority = head[scheme + 3:]
+        if not any(ch in "/@" or ch.isspace() for ch in authority):
+            head = head[:scheme]
+    return head
+
+
+def _redact_details(value):
+    """Return (safe_text, redacted, input_truncated).
+
+    ``redacted`` is True only when a rule changed the text; cutting an
+    oversized input is reported separately as ``input_truncated``.
+    """
     try:
         text = str(value or "")
+        truncated = len(text) > MAX_REDACT_CHARS
+        if truncated:
+            text = _truncate_for_redaction(text)
+        original = text
         # Bearer first: the assignment rule now matches `Authorization:` too, and it
         # consumes only up to the next space -- so running it first would eat the
         # word "Bearer" and leave the token itself behind, unmatchable.
         text = _BEARER_RE.sub("Bearer <redacted>", text)
         text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
-        text = _SECRET_ASSIGNMENT_RE.sub(
-            lambda match: "%s=<redacted>" % match.group(1), text,
-        )
+        assignment = _SECRET_ASSIGNMENT_TAIL_RE if truncated else _SECRET_ASSIGNMENT_RE
+        text = assignment.sub(lambda match: "%s=<redacted>" % match.group(1), text)
         text = _JWT_RE.sub("<redacted-token>", text)
-        return _CONTROL_RE.sub("?", _KEY_SHAPE_RE.sub("<redacted-key>", text))
+        text = _CONTROL_RE.sub("?", _KEY_SHAPE_RE.sub("<redacted-key>", text))
+        return (text + _TRUNCATION_MARKER if truncated else text), text != original, truncated
     except Exception:
-        return "<redaction-failed>"
+        return "<redaction-failed>", True, False
+
+
+def _redact_text(value):
+    return _redact_details(value)[0]
 
 
 def _preview_descriptor(value=None, *, limit=MAX_PUBLIC_PREVIEW, available=True):
@@ -183,15 +264,15 @@ def _preview_descriptor(value=None, *, limit=MAX_PUBLIC_PREVIEW, available=True)
         raw = str(value or "").replace("\x00", "\\0")
     except Exception:
         raw = "<redaction-failed>"
-    safe = _redact_text(raw)
+    safe, redacted, input_truncated = _redact_details(raw)
     bounded = max(80, min(MAX_EVENT_BLOCK, int(limit or MAX_PUBLIC_PREVIEW)))
-    truncated = len(safe) > bounded
+    shown_truncated = len(safe) > bounded
     return {
         "state": "available",
-        "text": safe[:bounded] + ("\n... (truncated)" if truncated else ""),
+        "text": safe[:bounded] + ("\n... (truncated)" if shown_truncated else ""),
         "chars": len(raw),
-        "truncated": truncated,
-        "redacted": safe != raw,
+        "truncated": shown_truncated or input_truncated,
+        "redacted": redacted,
     }
 
 
@@ -335,12 +416,9 @@ def _safe_value_descriptor(raw, safe):
         )
 
     nested_redacted, nested_truncated = flags(safe)
-    descriptor["redacted"] = (
-        descriptor["redacted"]
-        or nested_redacted
-        or _redact_text(raw_text) != raw_text
-    )
-    descriptor["truncated"] = descriptor["truncated"] or nested_truncated
+    _, raw_redacted, raw_truncated = _redact_details(raw_text)
+    descriptor["redacted"] = descriptor["redacted"] or nested_redacted or raw_redacted
+    descriptor["truncated"] = descriptor["truncated"] or nested_truncated or raw_truncated
     return descriptor
 
 
@@ -720,35 +798,41 @@ def record_tool_result(
     response = _current()
     if response is None:
         return
+    global _TOTAL_TOOL_CALLS
+    # Redaction is pure CPU on caller-supplied (possibly hostile, unbounded)
+    # text and touches no tracker state, so it runs before the lock is taken.
+    safe_args = _safe_args(args or {})
+    safe_command = _safe_command(command)
+    safe_output = _block(_redact_text(output), MAX_EVENT_BLOCK)
+    result_source = output if output not in (None, "") else summary
+    safe_result = _block(_redact_text(result_source), MAX_EVENT_BLOCK)
+    args_preview = _safe_value_descriptor(args or {}, safe_args)
+    command_preview = (
+        _safe_value_descriptor(command, safe_command)
+        if command not in (None, "") else _preview_descriptor(available=False)
+    )
+    result_preview = (
+        _safe_value_descriptor(result_source, safe_result)
+        if result_source not in (None, "") else _preview_descriptor(available=False)
+    )
+    safe_summary = _short(_redact_text(summary), 220)
     with _LOCK:
-        global _TOTAL_TOOL_CALLS
         response["tool_calls"] += 1
         _TOTAL_TOOL_CALLS += 1
-        safe_args = _safe_args(args or {})
-        safe_command = _safe_command(command)
-        safe_output = _block(_redact_text(output), MAX_EVENT_BLOCK)
-        result_source = output if output not in (None, "") else summary
-        safe_result = _block(_redact_text(result_source), MAX_EVENT_BLOCK)
         _event(
             response,
             "tool_call",
             tool=_short(name, 80),
             title=action_title(name),
             args=safe_args,
-            args_preview=_safe_value_descriptor(args or {}, safe_args),
+            args_preview=args_preview,
             command=safe_command,
-            command_preview=(
-                _safe_value_descriptor(command, safe_command)
-                if command not in (None, "") else _preview_descriptor(available=False)
-            ),
+            command_preview=command_preview,
             output=safe_output,
-            result_preview=(
-                _safe_value_descriptor(result_source, safe_result)
-                if result_source not in (None, "") else _preview_descriptor(available=False)
-            ),
+            result_preview=result_preview,
             ok=bool(ok),
             elapsed_ms=int(elapsed_ms or 0),
-            summary=_short(_redact_text(summary), 220),
+            summary=safe_summary,
         )
 
 
@@ -1619,8 +1703,6 @@ def format_response(response=None):
             response.get("lines_deleted", 0),
         ),
     ]
-    if response.get("sampling"):
-        lines.append("sampling: %s" % response["sampling"])
     files = response.get("files") or []
     if files:
         lines.append("file changes:")
