@@ -114,6 +114,63 @@ void main() {
     expect(seen, ['POST /v1/approvals/revoke/n_c41a']);
   });
 
+  test('deny posts to /deny/<call_id> with Idempotency-Key and tool/digest',
+      () async {
+    final seen = <http.Request>[];
+    final digest = 'b' * 64;
+    await http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
+            .approvals
+            .deny(_call, tool: 'run_code', digest: digest),
+        () => MockClient((r) async {
+              seen.add(r);
+              return http.Response(
+                  jsonEncode({
+                    'object': 'denial',
+                    'denial': {
+                      'tool': 'run_code',
+                      'call_id': _call,
+                      'digest': digest,
+                    },
+                  }),
+                  200);
+            }));
+    expect(seen, hasLength(1));
+    expect(seen.single.url.path, '/v1/approvals/deny/$_call');
+    expect(seen.single.headers['Idempotency-Key'], startsWith('deny-'));
+    expect(jsonDecode(seen.single.body), {'tool': 'run_code', 'digest': digest});
+  });
+
+  test('PendingApproval parses detail, denied and bidi_warning fields',
+      () async {
+    final snap = await http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:11435').approvals.list(),
+        () => MockClient((r) async => http.Response(
+            jsonEncode({
+              'pending': [
+                {
+                  'call_id': _call,
+                  'tool': 'run_code',
+                  'preview': 'language=python',
+                  'mode': 'manual',
+                  'detail': 'print(1)',
+                  'detail_hidden': false,
+                  'detail_truncated': true,
+                  'detail_chars': 5000,
+                  'denied': true,
+                  'bidi_warning': true,
+                },
+              ],
+            }),
+            200)));
+    final p = snap!.pending.single;
+    expect(p.detail, 'print(1)');
+    expect(p.detailTruncated, isTrue);
+    expect(p.detailChars, 5000);
+    expect(p.denied, isTrue);
+    expect(p.bidiWarning, isTrue);
+  });
+
   group('refusal metadata', () {
     test('structured sonder_receipt.refusal (server S1)', () async {
       final reply = await http.runWithClient(

@@ -89,7 +89,15 @@ class _LiveLineViewState extends State<LiveLineView> {
     final prev = _turn;
     if (next != null) {
       final newTurn = prev == null || next.startedAt != prev.startedAt;
-      final progressed = next.elapsedSeconds == prev?.elapsedSeconds ||
+      // A status comment is the server explaining the wait, never progress:
+      // a change of waitStatus (new text or a clear) is not a server event
+      // here. A status that merely repeats the current text never reaches
+      // this listener, because the controller drops it without touching
+      // [LiveTurn] (a repeat is value-identical to a re-stated phase and
+      // could not be told apart here).
+      final tick = next.elapsedSeconds != prev?.elapsedSeconds;
+      final statusChanged = next.waitStatus != prev?.waitStatus;
+      final progressed = (!tick && !statusChanged) ||
           next.phase != prev?.phase ||
           next.tokensIn != prev?.tokensIn;
       if (newTurn || progressed) _lastProgress = next.elapsedSeconds;
@@ -103,7 +111,9 @@ class _LiveLineViewState extends State<LiveLineView> {
     final turn = _turn;
     final seconds = turn?.elapsedSeconds ?? 0;
     final quiet = seconds - _lastProgress < 0 ? 0 : seconds - _lastProgress;
-    final stalled = turn != null && quiet >= slowTurnSeconds;
+    final stalled = turn != null &&
+        turn.phase != 'awaiting approval' &&
+        quiet >= slowTurnSeconds;
     final state = LiveState(
       phase: turn?.phase ?? 'working',
       elapsedS: seconds,
@@ -113,11 +123,14 @@ class _LiveLineViewState extends State<LiveLineView> {
     final tone = stalled ? tokens.warn : StatusKind.running.color(tokens);
     final style = tokens.mono(12, color: tokens.text2);
     final quietText = 'no output for ${elapsedLabel(quiet)}';
+    // The server's own reason for the wait, when it gave one, replaces the
+    // generic slow-model hint. Plain text only.
+    final hint = turn?.waitStatus ?? const LiveState().slowHint;
     return Semantics(
       key: const Key('live-line'),
       container: true,
       label: 'Sonder Runtime is working, ${state.phase}, '
-          '${elapsedLabel(seconds)}${stalled ? ', $quietText' : ''}',
+          '${elapsedLabel(seconds)}${stalled ? ', $quietText, $hint' : ''}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -187,8 +200,7 @@ class _LiveLineViewState extends State<LiveLineView> {
                         style: style.copyWith(
                             color: tokens.warn, fontWeight: FontWeight.w500)),
                     TextSpan(
-                        text:
-                            ' ${statusGlyphs['sep']} ${const LiveState().slowHint}',
+                        text: ' ${statusGlyphs['sep']} $hint',
                         style: style),
                   ]),
                   key: const Key('live-stall'),
