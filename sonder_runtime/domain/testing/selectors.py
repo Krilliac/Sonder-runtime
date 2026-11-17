@@ -161,7 +161,9 @@ def parse_selector(runner, raw: str) -> TestSelector:
                 raise _reject(INVALID_SELECTOR, "pytest keyword selector ends with an operator")
             normalized = " ".join(words)
             return TestSelector(SelectorKind.PYTEST_KEYWORD, normalized, ("-k", normalized))
-        _require_relative_path(raw)
+        # Path checks apply to the path part only; "::Class::test" and "[param]"
+        # suffixes are not path segments.
+        _require_relative_path(re.split(r"::|\[", raw, maxsplit=1)[0])
         if not _PYTEST_NODE.fullmatch(raw):
             raise _reject(INVALID_SELECTOR, "pytest selector does not match the node-id grammar")
         return TestSelector(SelectorKind.PYTEST_NODE, raw, (raw,))
