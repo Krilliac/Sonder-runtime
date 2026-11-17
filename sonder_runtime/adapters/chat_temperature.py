@@ -6,6 +6,7 @@ Order: request > session (``/temp``) > lane > preset (none sent).  See
 from __future__ import annotations
 
 import logging
+from typing import Any, Callable
 
 from ..application.session.temperature_settings import STORE, session_key, temp_command
 from ..domain.common.errors import InvalidInput
@@ -59,8 +60,22 @@ def repair_temperature(value: float | None) -> float:
     return CODE_REPAIR_TEMPERATURE if value is None else float(value)
 
 
+def http_temperature_owner(
+    context: dict[str, Any] | None,
+    principal_fn: Callable[[dict[str, Any]], str],
+) -> str:
+    """Principal key for bounding per-tenant session temperature entries."""
+    ctx = context or {}
+    if (ctx.get("mode") == "local-open" and not ctx.get("account")) or (
+        not ctx.get("account") and not ctx.get("api_key")
+    ):
+        return ""
+    return principal_fn(ctx)
+
+
 __all__ = [
     "CODE_REPAIR_TEMPERATURE",
+    "http_temperature_owner",
     "repair_temperature",
     "resolve_turn_temperature",
     "session_field",

@@ -70,6 +70,7 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_TIERED_ROUTING,
 )
 from ...domain import reasoning_continuation as reasoning_continuation_policy
+from ...domain.sampling_temperature import check_temperature
 
 
 # Static, provider-shape facts — never a live probe result.  Ollama resolves
@@ -355,6 +356,7 @@ class OllamaGateway:
                 )
             except ValueError as exc:
                 raise InvalidInput(str(exc)) from exc
+        temperature = check_temperature(options.get("temperature"))
         timeout = _check_liveness(context)
         effective_system = request.system
         if not effective_system and self._system_builder is not None:
@@ -391,7 +393,7 @@ class OllamaGateway:
             model,
             effective_system,
             # No temperature set: send none, so the model preset applies.
-            None if options.get("temperature") is None else float(options["temperature"]),
+            temperature,
             num_predict,
             int(options.get("num_ctx", self._session_num_ctx)),
             cloud=cloud,

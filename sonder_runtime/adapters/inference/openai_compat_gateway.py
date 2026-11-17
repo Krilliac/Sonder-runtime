@@ -76,6 +76,7 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
+from ...domain.sampling_temperature import check_temperature
 from ...platform.metrics import default_registry
 from ..model_request_admission import (
     HostModelRequestAdmission,
@@ -385,8 +386,9 @@ class OpenAICompatibleGateway:
             "messages": self._build_messages(request),
             "stream": False,
         }
-        if options.get("temperature") is not None:  # unset: the server's preset applies
-            payload["temperature"] = float(options["temperature"])
+        temperature = check_temperature(options.get("temperature"))
+        if temperature is not None:  # unset: the server's preset applies
+            payload["temperature"] = temperature
         try:
             template_kwargs = normalize_chat_template_options(options)
         except ChatTemplateOptionsError as exc:

@@ -3647,7 +3647,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return "(nothing to record yet)"
     if cmd == "/temp":
         from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
-        return _chat_temperature.temp_command(arg, storage_session, lane=serve_lane_temperature())
+        owner = _chat_temperature.http_temperature_owner(context, _state_principal)
+        return _chat_temperature.temp_command(arg, storage_session, lane=serve_lane_temperature(), owner=owner)
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -7464,7 +7465,7 @@ class Handler(BaseHTTPRequestHandler):
                 mutating=True, owner=_admission_request_owner(context)
             ), state.lock:
                 if apply_session_temperature:
-                    _chat_temperature.STORE.set(storage_session, session_temperature)
+                    _chat_temperature.STORE.set(storage_session, session_temperature, owner=_chat_temperature.http_temperature_owner(context, _state_principal))
                 _record_chat("user", prompt, state=state)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
