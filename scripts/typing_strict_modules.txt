@@ -59,6 +59,7 @@ sonder_runtime/adapters/inference/anthropic_gateway.py
 sonder_runtime/adapters/inference/anthropic_spend.py
 sonder_runtime/adapters/inference/gpu_admission.py
 sonder_runtime/adapters/inference/gpu_admission_store.py
+sonder_runtime/adapters/inference/log_safe.py
 sonder_runtime/adapters/inference/model_gateway_factory.py
 sonder_runtime/adapters/inference/ollama.py
 sonder_runtime/adapters/inference/openai_compat.py

@@ -41,11 +41,12 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import Sequence
 from urllib.parse import urlsplit
 
-logger = logging.getLogger(__name__)
-
+from .log_safe import UNSENDABLE_URL_CHARS as _UNSENDABLE_URL_CHARS
+from .log_safe import redact_url, urlsplit_or_none
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
     Embedding,
@@ -85,6 +86,8 @@ from ..tls_contexts import default_https_context
 from ..provider_bindings import provider_id_for_label
 from .telemetry import from_openai_compatible
 
+logger = logging.getLogger(__name__)
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
 # Error bodies and GET responses are read with a hard bound: an error page is
@@ -96,6 +99,11 @@ GET_BODY_LIMIT = 1_048_576
 POST_BODY_LIMIT = 16 * 1024 * 1024
 _READ_CHUNK = 65_536
 ENV_ALLOW_HTTP_NETWORKS = "SONDER_OPENAI_ALLOW_HTTP_NETWORKS"
+_MALFORMED_BASE_URL = (
+    "OpenAI-compatible base URL is not a valid http:// or https:// URL "
+    "(check the host, the port, and for spaces or control characters)"
+)
+_PERCENT_IN_HOST = "OpenAI-compatible base URL host must not contain percent-encoding"
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -265,14 +273,16 @@ class OpenAICompatibleGateway:
 
     @staticmethod
     def _is_loopback(base_url: str) -> bool:
-        host = (urlsplit(base_url).hostname or "").lower()
+        # Unparsable is never loopback; _require_secure_transport refuses it.
+        parts = urlsplit_or_none(base_url)
+        host = (parts.hostname or "").lower() if parts is not None else ""
         return host in _LOOPBACK_HOSTS
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
             raise Forbidden(
                 "endpoint %r is non-loopback but this operation context does "
-                "not allow cloud" % cfg.base_url
+                "not allow cloud" % redact_url(cfg.base_url)
             )
 
     def _require_secure_transport(self, cfg: OpenAICompatibleConfig) -> None:
@@ -282,21 +292,47 @@ class OpenAICompatibleGateway:
         request can carry the bearer key.  Cloud consent does not relax it:
         consent is about where prompts go, not about sending them in clear.
         """
-        parts = urlsplit(cfg.base_url)
+        # Nothing malformed may reach the transport: urllib and http.client
+        # quote the text they reject (a port, a netloc, a path and query) in
+        # their errors. Every refusal here has fixed text and no chained error.
+        parts = urlsplit_or_none(cfg.base_url)
+        if parts is None:
+            raise InvalidInput(_MALFORMED_BASE_URL)
+        if "@" in parts.netloc:
+            # urllib never sends URL userinfo as auth (the key goes in a header),
+            # and http.client's error for it repeats the password, so refuse it
+            # before any request is built.
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain credentials "
+                "(user:password@); set the API key instead"
+            )
+        if "%" in parts.netloc:
+            # urllib unquotes the host, so "%3A" and "%40" become a port and
+            # userinfo that http.client then quotes back in its InvalidURL; an
+            # IPv6 zone id ("%25") is refused with them. A "%" in the path is fine.
+            raise InvalidInput(_PERCENT_IN_HOST)
+        if "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]:
+            # A password with an unescaped "/" parses as a path, so an "@" in
+            # the path cannot be told apart from credentials.
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain '@' before its "
+                "query string: it cannot be told apart from credentials "
+                "(user:password@). Write an '@' that belongs to the path as %40"
+            )
         scheme = (parts.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            raise InvalidInput("OpenAI-compatible endpoint must use http or https")
+        if not parts.hostname or _UNSENDABLE_URL_CHARS.search(cfg.base_url):
+            raise InvalidInput(_MALFORMED_BASE_URL)
         if scheme == "https" or self._is_loopback(cfg.base_url):
             return
-        if scheme != "http":
-            raise InvalidInput(
-                "OpenAI-compatible endpoint must use http or https, got %r" % scheme
-            )
         if self._trusted_plaintext_host(parts.hostname or "", cfg.plaintext_networks):
             return
         raise Forbidden(
             "OpenAI-compatible endpoint %s is not loopback and uses plaintext "
             "http; use an https:// base URL, or list its private network in %s "
             "to allow http to that private IP address"
-            % (parts.hostname or cfg.base_url, ENV_ALLOW_HTTP_NETWORKS)
+            % (redact_url(cfg.base_url), ENV_ALLOW_HTTP_NETWORKS)
         )
 
     @staticmethod
@@ -343,7 +379,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         model = str(options.get("model") or cfg.model or request.tier or "default")
-        logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={cfg.base_url!r}, timeout={timeout}")
+        logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload = {
             "model": model,
             "messages": self._build_messages(request),
@@ -501,6 +537,22 @@ class OpenAICompatibleGateway:
             return b""
         return body if isinstance(body, bytes) else b""
 
+    @staticmethod
+    def _safe_http_cause(code: int, retry_after: object) -> urllib.error.HTTPError:
+        """Retain retry timing without the response URL, reason or other headers."""
+        header = None
+        if isinstance(retry_after, (str, int, float)):
+            try:
+                header = str(float(retry_after))
+            except (ValueError, TypeError, OverflowError):
+                if isinstance(retry_after, str):
+                    try:
+                        header = format_datetime(parsedate_to_datetime(retry_after))
+                    except (ValueError, TypeError, OverflowError):
+                        pass
+        headers = {} if header is None else {"Retry-After": header}
+        return urllib.error.HTTPError("", code, "endpoint HTTP response", headers, None)
+
     def _classified_connect_error(self, reason: BaseException) -> SonderError | None:
         if self._connect_error_classifier is None:
             return None
@@ -512,7 +564,8 @@ class OpenAICompatibleGateway:
     ) -> dict:
         self._require_secure_transport(cfg)
         url = cfg.base_url.rstrip("/") + path
-        logger.debug(f"OpenAICompatibleGateway._post: url={url!r}, timeout={timeout}")
+        safe_url = redact_url(url)
+        logger.debug(f"OpenAICompatibleGateway._post: url={safe_url!r}, timeout={timeout}")
         transport = self._transport or self._default_transport
         if context is not None:
             self._check_liveness(context, phase="before provider send")
@@ -523,6 +576,8 @@ class OpenAICompatibleGateway:
                 f"retry after about {admission.retry_after:.3f}s"
             )
         headers = self._headers(cfg, context)
+        failure: SonderError | None = None
+        http_cause: urllib.error.HTTPError | None = None
         try:
             if path == "/v1/chat/completions":
                 data = dispatch_provider(
@@ -533,77 +588,81 @@ class OpenAICompatibleGateway:
                 data = transport(url, payload, headers, timeout)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
+            retry_after = next((value for key, value in (exc.headers or {}).items()
+                                if str(key).lower() == "retry-after"), None)
+            http_cause = self._safe_http_cause(int(code or 0), retry_after)
             if self._http_error_classifier is not None:
-                classified = self._http_error_classifier(
+                failure = self._http_error_classifier(
                     int(code or 0), self._bounded_error_body(exc),
                 )
-                if classified is not None:
-                    raise classified from exc
-            if code in (401, 403):
-                logger.error(
-                    f"authentication failed for OpenAI-compatible endpoint, "
-                    f"http_status={code}, url={url!r}"
-                )
-                raise Forbidden("endpoint rejected credentials (HTTP %d)" % code) from exc
-            if code in (400, 404, 422):
-                raise InvalidInput("endpoint rejected request (HTTP %d)" % code) from exc
-            if code == 429:
-                logger.warning(
-                    f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
-                    f"url={url!r}"
-                )
-                raise CapacityExceeded(
-                    "endpoint is rate limiting requests (HTTP 429)"
-                ) from exc
-            logger.error(
-                f"OpenAI-compatible endpoint returned server error, "
-                f"http_status={code}, url={url!r}",
-                exc_info=True,
-            )
-            raise DependencyUnavailable("endpoint returned HTTP %d" % code) from exc
-        except (socket.timeout, TimeoutError) as exc:
+            if failure is None:
+                if code in (401, 403):
+                    logger.error(
+                        f"authentication failed for OpenAI-compatible endpoint, "
+                        f"http_status={code}, url={safe_url!r}"
+                    )
+                    failure = Forbidden("endpoint rejected credentials (HTTP %d)" % code)
+                elif code in (400, 404, 422):
+                    failure = InvalidInput("endpoint rejected request (HTTP %d)" % code)
+                elif code == 429:
+                    logger.warning(
+                        f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
+                        f"url={safe_url!r}"
+                    )
+                    failure = CapacityExceeded(
+                        "endpoint is rate limiting requests (HTTP 429)"
+                    )
+                else:
+                    logger.error(
+                        f"OpenAI-compatible endpoint returned server error, "
+                        f"http_status={code}, url={safe_url!r}"
+                    )
+                    failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+        except (socket.timeout, TimeoutError):
             logger.warning(
-                f"OpenAI-compatible endpoint timed out: url={url!r}, "
+                f"OpenAI-compatible endpoint timed out: url={safe_url!r}, "
                 f"timeout={timeout}"
             )
-            raise DeadlineExceeded("endpoint timed out") from exc
+            failure = DeadlineExceeded("endpoint timed out")
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (socket.timeout, TimeoutError)):
                 logger.warning(
                     f"OpenAI-compatible endpoint timed out (URLError): "
-                    f"url={url!r}, timeout={timeout}"
+                    f"url={safe_url!r}, timeout={timeout}"
                 )
-                raise DeadlineExceeded("endpoint timed out") from exc
-            logger.warning(
-                f"OpenAI-compatible endpoint unreachable: url={url!r}, "
-                f"reason={reason}"
-            )
-            classified = self._classified_connect_error(
-                reason if isinstance(reason, BaseException) else exc
-            )
-            if classified is not None:
-                raise classified from exc
-            raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
+                failure = DeadlineExceeded("endpoint timed out")
+            else:
+                logger.warning(
+                    f"OpenAI-compatible endpoint unreachable: url={safe_url!r}, "
+                    f"error={type(reason).__name__}"
+                )
+                failure = self._classified_connect_error(
+                    reason if isinstance(reason, BaseException) else exc
+                )
+                if failure is None:
+                    failure = DependencyUnavailable("cannot reach endpoint")
         except http.client.HTTPException as exc:
-            # A peer that is not speaking HTTP (or cut the response short) is
-            # a dependency failure, never "unreachable": bytes were sent.
+            # The class name is safe; the transport text can contain the URL.
+            malformed = type(exc).__name__
             logger.warning(
                 f"OpenAI-compatible endpoint sent a malformed HTTP response: "
-                f"url={url!r}, error={type(exc).__name__}"
+                f"url={safe_url!r}, error={malformed}"
             )
-            raise DependencyUnavailable(
-                "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
-            ) from exc
+            failure = DependencyUnavailable(
+                "endpoint sent a malformed HTTP response (%s)" % malformed
+            )
         except OSError as exc:
-            classified = self._classified_connect_error(exc)
-            if classified is not None:
-                raise classified from exc
-            logger.error(
-                f"OpenAI-compatible endpoint unreachable (OSError), url={url!r}",
-                exc_info=True,
-            )
-            raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
+            failure = self._classified_connect_error(exc)
+            if failure is None:
+                logger.error(
+                    f"OpenAI-compatible endpoint unreachable (OSError), url={safe_url!r}, "
+                    f"error={type(exc).__name__}"
+                )
+                failure = DependencyUnavailable("cannot reach endpoint")
+        # Raise after the handlers so no raw transport error becomes context.
+        if failure is not None:
+            raise failure from http_cause
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")
         return data
@@ -629,29 +688,31 @@ class OpenAICompatibleGateway:
         headers.pop("Content-Type", None)
         headers["Accept"] = "application/json"
         transport = self._get_transport or self._default_get_transport
+        failure: SonderError | None = None
         try:
             status, body = transport(url, headers, float(timeout))
-        except (socket.timeout, TimeoutError) as exc:
-            raise DeadlineExceeded("endpoint timed out") from exc
+        except (socket.timeout, TimeoutError):
+            failure = DeadlineExceeded("endpoint timed out")
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (socket.timeout, TimeoutError)):
-                raise DeadlineExceeded("endpoint timed out") from exc
-            classified = self._classified_connect_error(
-                reason if isinstance(reason, BaseException) else exc
-            )
-            if classified is not None:
-                raise classified from exc
-            raise DependencyUnavailable("cannot reach endpoint: %s" % reason) from exc
+                failure = DeadlineExceeded("endpoint timed out")
+            else:
+                failure = self._classified_connect_error(
+                    reason if isinstance(reason, BaseException) else exc
+                )
+                if failure is None:
+                    failure = DependencyUnavailable("cannot reach endpoint")
         except http.client.HTTPException as exc:
-            raise DependencyUnavailable(
+            failure = DependencyUnavailable(
                 "endpoint sent a malformed HTTP response (%s)" % type(exc).__name__
-            ) from exc
+            )
         except OSError as exc:
-            classified = self._classified_connect_error(exc)
-            if classified is not None:
-                raise classified from exc
-            raise DependencyUnavailable("cannot reach endpoint: %s" % exc) from exc
+            failure = self._classified_connect_error(exc)
+            if failure is None:
+                failure = DependencyUnavailable("cannot reach endpoint")
+        if failure is not None:
+            raise failure
         if not isinstance(body, (bytes, bytearray)) or len(body) > GET_BODY_LIMIT:
             raise DependencyUnavailable("endpoint returned an oversized or invalid body")
         try:
