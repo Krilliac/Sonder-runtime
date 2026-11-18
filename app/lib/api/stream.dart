@@ -295,6 +295,43 @@ class ChatStreamToolEvent extends ChatStreamEvent {
         result: result ?? this.result,
       );
 
+  /// This frame laid over the [previous] frame of the same call: what this
+  /// frame states wins, and what it leaves out (the arguments, the code, the
+  /// risk) is kept from [previous] instead of being lost. The risk is never
+  /// lowered by a later frame: the first one declared stays.
+  ChatStreamToolEvent mergedOnto(ChatStreamToolEvent previous) {
+    String pick(String now, String before) => now.isNotEmpty ? now : before;
+    final hasArgs = args.isNotEmpty || argumentsReported;
+    return ChatStreamToolEvent(
+      id: pick(id, previous.id),
+      callId: pick(callId, previous.callId),
+      digest: pick(digest, previous.digest),
+      tool: pick(tool, previous.tool),
+      language: pick(language, previous.language),
+      code: pick(code, previous.code),
+      args: hasArgs ? args : previous.args,
+      rawArgs: hasArgs ? rawArgs : previous.rawArgs,
+      preview: pick(preview, previous.preview),
+      detail: detail.isNotEmpty ? detail : previous.detail,
+      detailTruncated: detail.isNotEmpty ? detailTruncated : previous.detailTruncated,
+      detailChars: detail.isNotEmpty ? detailChars : previous.detailChars,
+      argumentsReported: argumentsReported || previous.argumentsReported,
+      timeout: timeout ?? previous.timeout,
+      backend: pick(backend, previous.backend),
+      executionTarget: pick(executionTarget, previous.executionTarget),
+      phase: pick(phase, previous.phase),
+      risk: pick(previous.risk, risk),
+      session: pick(session, previous.session),
+      ok: ok ?? previous.ok,
+      denied: denied || previous.denied,
+      bidiWarning: bidiWarning || previous.bidiWarning,
+      bidiChars: bidiChars.isNotEmpty ? bidiChars : previous.bidiChars,
+      state: pick(state, previous.state),
+      error: error ?? previous.error,
+      result: result ?? previous.result,
+    );
+  }
+
   factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
     final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
     final callId =

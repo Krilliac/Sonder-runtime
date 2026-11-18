@@ -12,7 +12,7 @@ void main() {
       final api = SonderApi(baseUrl: 'http://127.0.0.1:1');
       expect(await api.listApiKeys(), {'keys': []});
       await api.generateApiKey();
-      await api.revokeApiKey();
+      await api.revokeApiKey('0123456789abcdef');
       await api.getSwarmStatus();
     },
         () => MockClient((request) async {
@@ -40,5 +40,43 @@ void main() {
       ),
       throwsA(isA<SonderException>()),
     );
+  });
+
+  test('revoke names the key it revokes and never revokes all', () async {
+    final bodies = <Map<String, dynamic>>[];
+    await http.runWithClient(
+      () => SonderApi(baseUrl: 'http://127.0.0.1:1')
+          .revokeApiKey('0123456789abcdef'),
+      () => MockClient((request) async {
+        bodies.add(jsonDecode(request.body) as Map<String, dynamic>);
+        return http.Response(jsonEncode({'ok': true, 'revoked': 1}), 200,
+            headers: {'content-type': 'application/json'});
+      }),
+    );
+    expect(bodies, [
+      {'key_id': '0123456789abcdef'}
+    ]);
+    await expectLater(
+      http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:1').revokeApiKey('  '),
+        () => MockClient((_) async => fail('must not reach the network')),
+      ),
+      throwsA(isA<SonderException>()),
+    );
+  });
+
+  test('a 200 that is not a JSON object, or says ok:false, is an error',
+      () async {
+    for (final body in ['not json', '[1]', jsonEncode({'ok': false})]) {
+      await expectLater(
+        http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:1').listApiKeys(),
+          () => MockClient((_) async => http.Response(body, 200,
+              headers: {'content-type': 'application/json'})),
+        ),
+        throwsA(isA<SonderException>()),
+        reason: body,
+      );
+    }
   });
 }

@@ -213,10 +213,33 @@ extension _AccountPage on _SettingsScreenState {
     );
   }
 
+  /// Runs one key call and records what the server answered; a refusal is
+  /// shown as a failure.
+  Future<void> _runKeyCall(
+    String title,
+    Future<Map<String, dynamic>> Function(SonderApi api) call,
+    void Function(Map<String, dynamic> reply) onReply, {
+    String? detail,
+  }) async {
+    try {
+      final reply = await call(_accountApi);
+      if (!mounted) return;
+      _update(() {
+        onReply(reply);
+        _apiOutcome = ActionOutcome.ok(title, detail: detail);
+      });
+    } on SonderException catch (e) {
+      if (!mounted) return;
+      _update(() => _apiOutcome = ActionOutcome.failed(title, detail: e.message));
+    }
+  }
+
   Widget _apiAccessSection(BuildContext context) {
+    final newKey = _newApiKey;
     return SettingsSection(
       title: 'API Access',
-      description: 'Manage your assigned API keys for Sonder API usage.',
+      description: 'Manage your assigned API keys for Sonder API usage. '
+          'A key you generate stands for this account, with no admin authority.',
       children: [
         _ActionRow(
           outcome: _apiOutcome,
@@ -225,23 +248,88 @@ extension _AccountPage on _SettingsScreenState {
             AsyncActionButton(
               label: 'List Keys',
               icon: Icons.list,
-              onPressed: () =>
-                  _runAccountCall('API keys', (api) => api.listApiKeys()),
+              onPressed: () => _runKeyCall(
+                'API keys',
+                (api) => api.listApiKeys(),
+                (reply) {
+                  final keys = reply['keys'];
+                  _apiKeyIds = keys is List
+                      ? keys
+                          .whereType<Map>()
+                          .map((k) => '${k['key_id'] ?? ''}')
+                          .where((id) => id.isNotEmpty)
+                          .toList(growable: false)
+                      : const <String>[];
+                },
+                detail: 'Revoke a key from the list below.',
+              ),
             ),
             AsyncActionButton(
               label: 'Generate New Key',
               icon: Icons.vpn_key,
-              onPressed: () => _runAccountCall(
-                  'New API key', (api) => api.generateApiKey()),
-            ),
-            AsyncActionButton(
-              label: 'Revoke Key',
-              icon: Icons.delete_forever,
-              onPressed: () =>
-                  _runAccountCall('Revoke API key', (api) => api.revokeApiKey()),
+              onPressed: () => _runKeyCall(
+                'New API key',
+                (api) => api.generateApiKey(),
+                (reply) {
+                  final key = reply['key'];
+                  _newApiKey = key is String && key.isNotEmpty ? key : null;
+                  final id = '${reply['key_id'] ?? ''}';
+                  if (id.isNotEmpty && !_apiKeyIds.contains(id)) {
+                    _apiKeyIds = [..._apiKeyIds, id];
+                  }
+                },
+                detail: 'Copy the key now. It is shown once and cannot be '
+                    'shown again.',
+              ),
             ),
           ],
         ),
+        if (newKey != null)
+          Padding(
+            key: const Key('settings-new-api-key'),
+            padding: const EdgeInsets.fromLTRB(
+                SonderSpace.lg, 0, SonderSpace.lg, SonderSpace.md),
+            child: Row(
+              children: [
+                Expanded(child: SelectableText(newKey)),
+                IconButton(
+                  key: const Key('settings-new-api-key-copy'),
+                  tooltip: 'Copy key',
+                  icon: const Icon(Icons.copy),
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: newKey)),
+                ),
+                TextButton(
+                  key: const Key('settings-new-api-key-hide'),
+                  onPressed: () => _update(() => _newApiKey = null),
+                  child: const Text('Hide'),
+                ),
+              ],
+            ),
+          ),
+        if (_apiKeyIds.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                SonderSpace.lg, 0, SonderSpace.lg, SonderSpace.md),
+            child: Wrap(
+              spacing: SonderSpace.sm,
+              runSpacing: SonderSpace.sm,
+              children: [
+                for (final id in _apiKeyIds)
+                  AsyncActionButton(
+                    buttonKey: Key('settings-revoke-key-$id'),
+                    label: 'Revoke $id',
+                    icon: Icons.delete_forever,
+                    onPressed: () => _runKeyCall(
+                      'Revoke API key',
+                      (api) => api.revokeApiKey(id),
+                      (_) => _apiKeyIds =
+                          _apiKeyIds.where((k) => k != id).toList(growable: false),
+                    ),
+                  ),
+              ],
+            ),
+          ),
       ],
     );
   }
