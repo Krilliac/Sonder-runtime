@@ -988,6 +988,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _signedInUser = null;
     _signedInToken = null;
     _whoami = null;
+    _newApiKey = null;
+    _apiKeyIds = const <String>[];
     _password.clear();
     _saved = _saved.copyWith(withoutAccountSession: true);
     unawaited(_probeServerPolicy());
