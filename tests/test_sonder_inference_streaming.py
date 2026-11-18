@@ -585,3 +585,89 @@ def test_served_turn_announces_a_revision_after_streaming(monkeypatch):
     assert stream_sink.REVISION_NOTICE in content and content.endswith("Repaired answer.")
     final = [e for e in events if e.get("choices") and e["choices"][0].get("finish_reason")]
     assert final[0]["sonder_receipt"]["live_stream"]["revised"] is True
+
+
+def test_thinking_empty_length_retry_preserves_stream_when_sink_claimed():
+    captured_payloads: list[dict] = []
+
+    class RetryHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            return
+
+        def _sse(self, event_obj):
+            body = json.dumps(event_obj) if isinstance(event_obj, dict) else str(event_obj)
+            self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        def do_GET(self):
+            doc = {
+                "status": "ready", "api_version": 1, "version": "0.1.0", "synthetic": False,
+                "backends": [{"name": "llamaserver", "available": True, "capabilities": ["streaming", "thinking"]}],
+                "models": [{"id": "qwen3.8:27b", "backend": "llamaserver", "default": True}],
+            }
+            raw = json.dumps(doc).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            captured_payloads.append(payload)
+            attempt = len(captured_payloads)
+            if not payload.get("stream"):
+                raw = json.dumps({
+                    "id": "chatcmpl-nonstream", "object": "chat.completion", "model": "qwen3.8:27b",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "Nonstream"},
+                                 "finish_reason": "stop"}],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.close_connection = True
+            if attempt == 1:
+                self._sse({"id": "c1", "object": "chat.completion.chunk", "model": "qwen3.8:27b",
+                           "choices": [{"index": 0, "delta": {"reasoning_content": "thinking..."}, "finish_reason": None}]})
+                self._sse({"id": "c1", "object": "chat.completion.chunk", "model": "qwen3.8:27b",
+                           "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]})
+                self._sse("[DONE]")
+                return
+            self._sse({"id": "c2", "object": "chat.completion.chunk", "model": "qwen3.8:27b",
+                       "choices": [{"index": 0, "delta": {"content": "Recovered "}, "finish_reason": None}]})
+            self._sse({"id": "c2", "object": "chat.completion.chunk", "model": "qwen3.8:27b",
+                       "choices": [{"index": 0, "delta": {"content": "answer."}, "finish_reason": None}]})
+            self._sse({"id": "c2", "object": "chat.completion.chunk", "model": "qwen3.8:27b",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+            self._sse("[DONE]")
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+    httpd.daemon_threads = True
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+        gw = _gateway(base_url)
+        rec = Recorder()
+        live = stream_sink.LiveTurnStream(rec.write, client_gone=lambda: rec.gone)
+        payload = {"model": "ignored", "messages": [{"role": "user", "content": "hello"}],
+                   "options": {"num_predict": 64}}
+        with stream_sink.armed(live), bridge.bind_rung("sonder_inference", "general"):
+            _shaped, resp = bridge.generate_via_gateway(gw, payload, tier="general", context=_ctx())
+        assert len(captured_payloads) == 2
+        assert captured_payloads[0].get("stream") is True
+        assert captured_payloads[1].get("stream") is True
+        assert captured_payloads[1].get("chat_template_kwargs", {}).get("enable_thinking") is False
+        assert resp.text == "Recovered answer."
+        assert "".join(delta for _, delta in rec.deltas) == "Recovered answer."
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        t.join(timeout=5)

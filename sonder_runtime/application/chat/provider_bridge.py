@@ -215,7 +215,10 @@ def _text(value: object, where: str) -> str:
 
 
 def ollama_only_feature(
-    payload: Mapping[str, object], *, provider: str | None = None,
+    payload: Mapping[str, object],
+    *,
+    provider: str | None = None,
+    supports_tools: bool = False,
 ) -> tuple[str, str] | None:
     """The first Ollama-only feature ``payload`` asks for, as (feature, message).
 
@@ -231,19 +234,25 @@ def ollama_only_feature(
                 "response_format/schema decoding is only available on Ollama tiers")
     if payload.get("think") is True and provider not in THINKING_PROVIDERS:
         return ("think", "model thinking is only available on Ollama tiers")
-    if payload.get("tools"):
+    allow_tools = bool(supports_tools and provider == "sonder_inference")
+    if payload.get("tools") and not allow_tools:
         return ("tools", "native tool calls are only available on Ollama tiers")
     messages = payload.get("messages")
     for message in messages if isinstance(messages, list) else ():
-        if isinstance(message, Mapping) and (
-                message.get("images") or message.get("tool_calls")):
-            return ("images" if message.get("images") else "tool_calls",
-                    "images and tool calls are only available on Ollama tiers")
+        if isinstance(message, Mapping):
+            if message.get("images"):
+                return ("images", "images and tool calls are only available on Ollama tiers")
+            if message.get("tool_calls") and not allow_tools:
+                return ("tool_calls", "images and tool calls are only available on Ollama tiers")
     return None
 
 
 def model_request_from_ollama_payload(
-    payload: Mapping[str, object], *, tier: str, provider: str | None = None,
+    payload: Mapping[str, object],
+    *,
+    tier: str,
+    provider: str | None = None,
+    supports_tools: bool = False,
 ) -> ModelRequest:
     """Convert one Ollama ``/api/chat`` payload into a provider-neutral request.
 
@@ -252,7 +261,8 @@ def model_request_from_ollama_payload(
     """
     if not isinstance(payload, Mapping):
         raise InvalidInput("chat payload must be an object")
-    refused = ollama_only_feature(payload, provider=provider)
+    allow_tools = bool(supports_tools and provider == "sonder_inference")
+    refused = ollama_only_feature(payload, provider=provider, supports_tools=allow_tools)
     if refused is not None:
         raise UnsupportedProviderFeature(refused[1])
     think = payload.get("think")
@@ -272,24 +282,40 @@ def model_request_from_ollama_payload(
     if not isinstance(messages, list) or not messages:
         raise InvalidInput("chat payload has no messages")
     system_parts: list[str] = []
-    turns: list[dict[str, str]] = []
+    turns: list[dict[str, object]] = []
+    allowed_roles = (_ROLES | {"tool"}) if allow_tools else _ROLES
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             raise InvalidInput("chat message %d is not an object" % index)
         role = message.get("role")
-        if role not in _ROLES:
+        if role not in allowed_roles:
             raise InvalidInput("chat message %d has an unsupported role" % index)
-        content = _text(message.get("content", ""), "message content")
+        raw_content = message.get("content", "")
+        if raw_content is None and allow_tools:
+            raw_content = ""
+        content = _text(raw_content, "message content")
         if role == "system" and not turns:
             if content.strip():
                 system_parts.append(content)
             continue
-        turns.append({"role": str(role), "content": content})
-    if not turns or turns[-1]["role"] != "user":
+        entry: dict[str, object] = {"role": str(role), "content": content}
+        if allow_tools:
+            if isinstance(message.get("tool_calls"), list):
+                entry["tool_calls"] = [dict(tc) for tc in message["tool_calls"] if isinstance(tc, Mapping)]
+            if isinstance(message.get("tool_call_id"), str) and message.get("tool_call_id"):
+                entry["tool_call_id"] = str(message["tool_call_id"])
+            if isinstance(message.get("name"), str) and message.get("name"):
+                entry["name"] = str(message["name"])
+        turns.append(entry)
+    if not turns or (turns[-1]["role"] != "user" and not (allow_tools and turns[-1]["role"] == "tool")):
         raise InvalidInput("chat payload must end with a user message")
-    prompt = turns.pop()["content"]
+    prompt = str(turns.pop()["content"]) if turns[-1]["role"] == "user" else ""
     raw_options = payload.get("options")
-    options = {}
+    options: dict[str, object] = {}
+    if allow_tools and payload.get("tools"):
+        options["tools"] = payload["tools"]
+        if payload.get("tool_choice") is not None:
+            options["tool_choice"] = payload["tool_choice"]
     if str(tier or "").strip().lower().startswith("model:"):
         pinned_model = str(payload.get("model") or str(tier).strip()[len("model:"):]).strip()
         if pinned_model:
@@ -356,9 +382,13 @@ def ollama_shape(response: ModelResponse, *, finish_reason=None) -> dict[str, ob
     if reason is None:
         telemetry = getattr(response, "telemetry", None)
         reason = getattr(telemetry, "finish_reason", None)
+    shaped_message: dict[str, object] = {"role": "assistant", "content": response.text}
+    raw_tool_calls = getattr(response, "tool_calls", None)
+    if raw_tool_calls:
+        shaped_message["tool_calls"] = [dict(tc) for tc in raw_tool_calls if isinstance(tc, Mapping)]
     shaped: dict[str, object] = {
         "model": response.model,
-        "message": {"role": "assistant", "content": response.text},
+        "message": shaped_message,
         "done": True,
     }
     if isinstance(reason, str) and reason.strip().lower() in {
@@ -422,6 +452,7 @@ def generate_via_gateway(
     *,
     tier: str,
     context: OperationContext,
+    supports_tools: bool = False,
 ) -> tuple[dict[str, object], ModelResponse]:
     """Send one converted payload through ``gateway`` and shape the reply.
 
@@ -440,7 +471,9 @@ def generate_via_gateway(
         # with no content.  Same headroom the local Ollama path gives a known
         # thinking model; it only raises a cap, so non-thinking models are unaffected.
         payload = with_local_thinking_budget(payload)
-    request = model_request_from_ollama_payload(payload, tier=tier, provider=provider)
+    request = model_request_from_ollama_payload(
+        payload, tier=tier, provider=provider, supports_tools=supports_tools,
+    )
     with suspend_rung():
         if provider in STREAMING_PROVIDERS:
             # Only the turn's first bridged generation streams (see stream_sink).

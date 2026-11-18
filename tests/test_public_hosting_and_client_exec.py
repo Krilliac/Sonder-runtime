@@ -749,3 +749,128 @@ def test_client_exec_streamed_slash_and_nonstream_model_handoff(monkeypatch, tmp
         assert handoff["tool"] == "file_read"
         assert handoff["phase"] == "awaiting_client_result"
         assert handoff["args"] == {"path": "notes.txt"}
+
+
+def test_stream_keepalive_runs_during_work_intent_and_heartbeat_default(monkeypatch, tmp_path):
+    import time as _time
+
+    _configure_public_host(monkeypatch, tmp_path)
+    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "PUBLIC_HOSTING", False)
+    assert runtime_config.ServerConfig().stream_heartbeat_seconds == 10
+    monkeypatch.setattr(ts, "STREAM_HEARTBEAT_SECONDS", 0.05)
+
+    def slow_work(content, **_k):
+        _time.sleep(0.18)
+        return "work-done"
+
+    monkeypatch.setattr(ts, "_handle_work_intent", slow_work)
+    monkeypatch.setattr(legacy_server, "available_tiers", lambda: {"code": "qwen2.5:7b"})
+
+    with _http_server(monkeypatch) as port:
+        conn_sse = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        body = json.dumps({
+            "model": "sonder",
+            "stream": True,
+            "messages": [{"role": "user", "content": "check work"}],
+        })
+        conn_sse.request(
+            "POST",
+            "/v1/chat/completions",
+            body=body.encode("utf-8"),
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body.encode("utf-8")))},
+        )
+        resp = conn_sse.getresponse()
+        assert resp.status == 200
+        raw_stream = resp.read().decode("utf-8", "replace")
+        conn_sse.close()
+    assert raw_stream.count(": keep-alive") >= 2
+    assert "work-done" in raw_stream
+    assert "data: [DONE]" in raw_stream
+
+
+def test_chat_tool_turn_exposes_delegation_tools_with_pool_and_inference_tools(monkeypatch):
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+        SonderInferenceResponse,
+    )
+    from sonder_runtime.adapters.legacy_chat_bridge import chat_request as bridge_chat_request
+    from sonder_runtime.application.context import local_owner_context
+
+    class FakeInfGateway:
+        last_response_meta = {"finish_reason": "tool_calls"}
+
+        def __init__(self):
+            self.requests = []
+
+        def unified_worker_status(self):
+            return {
+                "workers": [
+                    {
+                        "source": "sonder_inference_worker",
+                        "supports_tools": {"qwen3:32b": True},
+                    }
+                ]
+            }
+
+        def generate(self, request, context):
+            self.requests.append(request)
+            return SonderInferenceResponse(
+                text="",
+                model="qwen3:32b",
+                tier=request.tier,
+                finish_reason="tool_calls",
+                tool_calls=({"function": {"name": "spawn_agents", "arguments": {"tasks": ["inspect"]}}},),
+            )
+
+    gw = FakeInfGateway()
+    pool_stub = SimpleNamespace(enabled=True, snapshots=lambda: ())
+    fake_server = SimpleNamespace(
+        OLLAMA_POOL=pool_stub,
+        _APP_GRAPH=SimpleNamespace(model_gateway=gw),
+        _AGENT_SYSTEM_OPERATOR_TOOLS=frozenset(),
+        _agent_dispatch=lambda *_a, **_k: "ok",
+        mcp=None,
+        code_runner=None,
+        permission_modes=pm,
+        _runtime_installed_model_records=lambda: [],
+        _runtime_model_has_capability=lambda *_a: False,
+    )
+    turn = legacy_server._http_chat_tools().build_http_chat_tool_turn(
+        server=fake_server,
+        permission_policy=pm,
+        handler=SimpleNamespace(),
+        chunk_fn=lambda *a: "",
+        model="qwen3:32b",
+        project="",
+        stream=False,
+        authorized_tools=True,
+    )
+    assert turn is not None
+    tool_names = {item["function"]["name"] for item in turn.tools_payload}
+    assert {"spawn_agents", "delegate_task", "post_to_board", "read_board"} <= tool_names
+
+    # Verify legacy_chat_bridge forwards tools & tool_calls when gateway supports tools
+    assert SonderInferenceGateway._tools_supported(
+        {"models": [{"id": "qwen3:32b", "capabilities": ["tools"]}]},
+        model="qwen3:32b",
+    )
+    from sonder_runtime.application.chat import provider_bridge
+
+    with provider_bridge.bind_rung("sonder_inference", "model:qwen3:32b"):
+        out, msg = bridge_chat_request(
+            gw,
+            {
+                "model": "qwen3:32b",
+                "messages": [{"role": "user", "content": "use agents"}],
+                "tools": turn.tools_payload,
+            },
+            SimpleNamespace(provider="sonder_inference", tier="model:qwen3:32b"),
+            context=local_owner_context(correlation_id="t1"),
+            return_message=True,
+        )
+    assert gw.requests and gw.requests[0].options.get("tools")
+    assert msg["tool_calls"][0]["function"]["name"] == "spawn_agents"
+    assert out["done_reason"] == "tool_calls"

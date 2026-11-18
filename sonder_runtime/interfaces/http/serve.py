@@ -899,7 +899,7 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # given its own short deadline so an error path never inherits the full
 # per-connection wait above.
 # Interval of SSE keep-alive comment frames while a streamed turn generates.
-STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
+STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 10)))
 # [server].prewarm_on_start: load the default chat model once the listener is bound.
 PREWARM_ON_START = env_bool(os.environ.get("SONDER_PREWARM_ON_START", "1"))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
@@ -7398,10 +7398,15 @@ class Handler(BaseHTTPRequestHandler):
             # bounded per-owner so one account cannot starve the rest.
             with _lifecycle.acquire_request_slot(
                 mutating=True, owner=_admission_request_owner(context)
-            ), state.lock:
+            ), state.lock, contextlib.ExitStack() as _early_scope:
                 if apply_session_temperature:
                     _chat_temperature.STORE.set(storage_session, session_temperature, owner=_chat_temperature.http_temperature_owner(context, _state_principal))
                 _record_chat("user", prompt, state=state)
+                from sonder_runtime.platform.spanda_http import resolve_spanda_policy as _resolve_spanda_policy_early
+                _spanda_early = _resolve_spanda_policy_early(_SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
+                if stream and structured_schema is None and not (_spanda_early.active and _spanda_early.block):
+                    self._begin_early_stream(model)
+                    _early_scope.callback(self._pause_early_stream)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
                     prompt,
@@ -7990,6 +7995,9 @@ class Handler(BaseHTTPRequestHandler):
         they are delivered as one terminal SSE error event followed by
         ``[DONE]`` (see ``_end_early_stream_with_error``).
         """
+        existing = getattr(self, "_early_stream", None)
+        if existing is not None:
+            return existing
         connection = getattr(self, "connection", None)
         if connection is not None:
             try:

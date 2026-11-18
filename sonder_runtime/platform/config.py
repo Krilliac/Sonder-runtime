@@ -188,7 +188,7 @@ class ServerConfig:
     work_budget_seconds: int = 1800
     work_max_running: int = 2
     # SSE keep-alive comment interval while a streamed chat turn generates.
-    stream_heartbeat_seconds: int = 15
+    stream_heartbeat_seconds: int = 10
     # Load the default chat model as soon as the listener is bound so the first
     # chat never waits on a cold load (SONDER_PREWARM_ON_START).  Still gated by
     # the global prewarm switch and by GPU admission.

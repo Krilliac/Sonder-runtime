@@ -110,8 +110,23 @@ def _model_supports_tools(server: Any, model: str) -> bool:
                             return True
         except Exception:
             pass
-    if bool(getattr(pool, "enabled", False)):
-        return False
+    app_graph = getattr(server, "_APP_GRAPH", None)
+    if app_graph is None:
+        app_fn = getattr(server, "_application", None)
+        if callable(app_fn):
+            try:
+                app_graph = app_fn()
+            except Exception:
+                app_graph = None
+    gateway = getattr(app_graph, "model_gateway", None) if app_graph is not None else None
+    if gateway is not None:
+        try:
+            from sonder_runtime.adapters.legacy_chat_bridge import _sonder_inference_any_supports_tools
+
+            if _sonder_inference_any_supports_tools(gateway, candidates):
+                return True
+        except Exception:
+            pass
     try:
         records = server._runtime_installed_model_records()
         return any(bool(server._runtime_model_has_capability(c, "tools", records)) for c in candidates)
