@@ -5,6 +5,7 @@ library;
 
 import '../account_session.dart';
 import '../api.dart';
+import '../models.dart';
 import '../runtime/model_routing.dart';
 import '../ui/status_vocab.dart';
 
@@ -210,4 +211,67 @@ class SettingsConnection {
       rethrow;
     }
   }
+
+  /// Server discovery & policy (`GET /v1/sonder/capabilities`), or null when
+  /// unsupported / unreachable.
+  Future<ServerCapabilities?> capabilities(
+    String serverUrl,
+    String apiKey,
+    AccountSession? account,
+  ) async {
+    try {
+      return await SonderApi(
+        baseUrl: serverUrl,
+        apiKey: apiKey,
+        accountSession: account,
+      ).fetchCapabilities();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Authenticated principal identity (`GET /v1/sonder/whoami`), or null when
+  /// unsupported / unauthenticated.
+  Future<WhoamiInfo?> whoami(
+    String serverUrl,
+    String apiKey,
+    AccountSession? account,
+  ) async {
+    try {
+      return await SonderApi(
+        baseUrl: serverUrl,
+        apiKey: apiKey,
+        accountSession: account,
+      ).fetchWhoami();
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Client-side password hint / validation matching the public-hosting server
+/// rule: 12..1024 chars, >=3 of 4 character classes (upper, lower, digit,
+/// symbol), and not containing the username (when >= 3 chars). Returns null
+/// when valid, else an actionable error message.
+String? validatePublicHostingPassword(String password, {String username = ''}) {
+  if (password.length < 12) {
+    return 'Password must be at least 12 characters.';
+  }
+  if (password.length > 1024) {
+    return 'Password must be at most 1024 characters.';
+  }
+  final hasUpper = RegExp(r'[A-Z]').hasMatch(password);
+  final hasLower = RegExp(r'[a-z]').hasMatch(password);
+  final hasDigit = RegExp(r'[0-9]').hasMatch(password);
+  final hasSymbol = RegExp(r'[^A-Za-z0-9]').hasMatch(password);
+  final classes = [hasUpper, hasLower, hasDigit, hasSymbol].where((b) => b).length;
+  if (classes < 3) {
+    return 'Password must include at least 3 character classes '
+        '(uppercase, lowercase, digit, symbol).';
+  }
+  final cleanUser = username.trim().toLowerCase();
+  if (cleanUser.length >= 3 && password.toLowerCase().contains(cleanUser)) {
+    return 'Password must not contain your username.';
+  }
+  return null;
 }
