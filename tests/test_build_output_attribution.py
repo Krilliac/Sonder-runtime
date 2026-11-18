@@ -210,13 +210,16 @@ FIXES = (
 def _run(argv, cwd, compiler, timeout=240):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd), "LANG": "C",
            "LC_ALL": "C", "CXX": compiler, "TERM": "dumb", "NINJA_STATUS": "[%f/%t] "}
+    for key in ("TMP", "TEMP", "TMPDIR"):
+        if key in os.environ:
+            env[key] = os.environ[key]
     completed = subprocess.run(list(argv), cwd=cwd, capture_output=True, text=True,
                                timeout=timeout, stdin=subprocess.DEVNULL, env=env)
     return completed.returncode, completed.stdout + completed.stderr
 
 
 def _snapshot(root: Path) -> dict[str, str]:
-    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in root.rglob("*") if path.is_file() and "build" not in path.relative_to(root).parts}
 
 
