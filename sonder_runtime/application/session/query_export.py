@@ -379,9 +379,10 @@ class SessionQueryEngine:
         for event in raw:
             if event_type is not None and event.event_type != event_type:
                 continue
-            if text is not None and text not in json.dumps(event.payload, ensure_ascii=False, sort_keys=True):
+            record = self._record_for_event(event, privacy_targets)
+            if text is not None and text not in json.dumps(record.payload, ensure_ascii=False, sort_keys=True):
                 continue
-            matches.append(self._record_for_event(event, privacy_targets))
+            matches.append(record)
         selected = matches[:page_size]
         # If the page filled, the cursor must resume after the last selected
         # record, not after the end of the scan (which may contain records that

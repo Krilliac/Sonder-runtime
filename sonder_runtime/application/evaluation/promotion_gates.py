@@ -114,6 +114,8 @@ class PromotionGatePolicy:
     require_canary: bool = True
     min_canary_samples: int = 1
     require_baseline: bool = True
+    max_timeout_rate: float = 0.0
+    max_error_rate: float = 0.0
     schema: str = SCHEMA
 
     def __post_init__(self) -> None:
@@ -122,7 +124,10 @@ class PromotionGatePolicy:
         if self.schema != SCHEMA:
             raise PromotionGateError("unsupported promotion gate schema")
         _count(self.min_samples, "min_samples", minimum=1)
-        for name in ("min_pass_rate", "min_pass_rate_lower_bound", "max_pass_rate_drop"):
+        for name in (
+            "min_pass_rate", "min_pass_rate_lower_bound", "max_pass_rate_drop",
+            "max_timeout_rate", "max_error_rate",
+        ):
             object.__setattr__(self, name, _rate(getattr(self, name), name))
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)) or not 0.5 <= self.confidence < 1:
             raise PromotionGateError("confidence must be within [0.5, 1)")
@@ -138,7 +143,7 @@ class PromotionGatePolicy:
             raise PromotionGateError("a canary requirement also requires a shadow observation")
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema": self.schema,
             "kind": self.kind.value,
             "min_samples": self.min_samples,
@@ -153,6 +158,11 @@ class PromotionGatePolicy:
             "min_canary_samples": self.min_canary_samples,
             "require_baseline": self.require_baseline,
         }
+        if self.max_timeout_rate > 0.0:
+            payload["max_timeout_rate"] = self.max_timeout_rate
+        if self.max_error_rate > 0.0:
+            payload["max_error_rate"] = self.max_error_rate
+        return payload
 
     @property
     def digest(self) -> str:
@@ -301,6 +311,11 @@ def evaluate_promotion_gate(
                 raise PromotionGateError("results from different suite digests cannot be pooled")
     samples = 0
     successes = 0
+    timeout_weight = 0.0
+    timeout_samples = 0
+    error_weight = 0.0
+    error_samples = 0
+    offline_passed = True
     for result in offline:
         if PASS_RATE_METRIC not in result.metrics:
             raise PromotionGateError(f"offline result {result.result_id!r} lacks a {PASS_RATE_METRIC} metric")
@@ -309,6 +324,16 @@ def evaluate_promotion_gate(
         passed_count = round(raw)
         if abs(raw - passed_count) > _INTEGRAL_TOLERANCE:
             raise PromotionGateError(f"offline result {result.result_id!r} pass_rate does not imply an integral success count")
+        if "timeout_rate" in result.metrics:
+            timeout_rate = _rate(result.metrics["timeout_rate"], f"{result.result_id}.timeout_rate")
+            timeout_weight += timeout_rate * result.sample_count
+            timeout_samples += result.sample_count
+        if "error_rate" in result.metrics:
+            error_rate = _rate(result.metrics["error_rate"], f"{result.result_id}.error_rate")
+            error_weight += error_rate * result.sample_count
+            error_samples += result.sample_count
+        if not result.passed:
+            offline_passed = False
         samples += result.sample_count
         successes += passed_count
     pass_rate = successes / samples if samples else 0.0
@@ -322,6 +347,12 @@ def evaluate_promotion_gate(
         "case_regressions": case_regressions <= policy.max_case_regressions,
         "pass_rate_drop": baseline_pass_rate is None or baseline_pass_rate - pass_rate <= policy.max_pass_rate_drop,
     }
+    if offline and not offline_passed:
+        gates["offline_passed"] = False
+    if timeout_samples > 0 and (timeout_weight / timeout_samples) > policy.max_timeout_rate:
+        gates["timeout_rate"] = False
+    if error_samples > 0 and (error_weight / error_samples) > policy.max_error_rate:
+        gates["error_rate"] = False
     if policy.kind is PromotionKind.STRATEGY:
         # Synthetic expected-action agreement is useful for policy regression,
         # but no verifier of real task completion is composed here. Nothing

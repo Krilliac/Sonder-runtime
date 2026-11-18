@@ -33,7 +33,8 @@ from .artifact_spool import (
     PrivateDirectoryAnchor,
 )
 from .spool_budget import (
-    counted_directories, locked_spool, reap_stale_directories, regular_file_bytes,
+    counted_directories, locked_spool, reap_stale_directories,
+    reap_stray_spool_files, regular_file_bytes,
 )
 
 
@@ -773,6 +774,7 @@ class ComputeJobWorker:
                         # Stages older than any job deadline (<= 1 day) are leftovers.
                         input_root.validate()
                         reap_stale_directories(spool, max_age_seconds=2 * 86400)
+                        reap_stray_spool_files(spool)
                         stages = tuple(counted_directories(spool, max_directories=64))
                         if len(stages) >= 64:
                             raise ValueError("input staging exceeds the stage count limit")
@@ -996,6 +998,7 @@ class ComputeJobWorker:
         snapshot are removed; callers must treat the old artifact as unavailable.
         """
         root = self._artifact_root.path
+        reap_stray_spool_files(root)
         excluded = hashlib.new("sha256", exclude_job.encode("utf-8")).hexdigest()
         total = jobs = 0
         cutoff = time.time() - self._artifact_retention_seconds
