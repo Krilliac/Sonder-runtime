@@ -50,10 +50,13 @@ class ResumableStream:
             if not isinstance(state, dict):
                 raise TypeError("snapshot state must be a dict")
             point = self.watermark if watermark is None else watermark
-            if point < 0 or point > self.watermark:
+            if isinstance(point, bool) or not isinstance(point, int) or point < 0 or point > self.watermark:
                 raise ValueError("snapshot watermark must be within stream history")
+            if self._snapshot is not None and point < self._snapshot.watermark:
+                raise ValueError("snapshot watermark cannot regress below existing snapshot")
             self._snapshot = Snapshot(self.stream_id, point, dict(state))
             self._events = [event for event in self._events if event.sequence > point]
+            self._event_ids = {event.event_id: event for event in self._events}
             return self._snapshot
 
     def publish(self, event_type: str, payload: dict, *, event_id: str, sequence: int | None = None) -> EventEnvelope:

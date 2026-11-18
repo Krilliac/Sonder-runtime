@@ -714,6 +714,11 @@ def _request(url, timeout=10):
                 current_url = urllib.parse.urljoin(current_url, location)
                 redirects += 1
                 continue
+            if status >= 400:
+                reason = getattr(resp, "reason", "") or f"HTTP Error {status}"
+                raise urllib.error.HTTPError(
+                    current_url, int(status), str(reason), resp.headers, None,
+                )
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise ValueError(
