@@ -184,9 +184,16 @@ class ChatStreamToolEvent extends ChatStreamEvent {
   final String language;
   final String code;
   final Map<String, String> args;
+  final Map<String, dynamic> rawArgs;
   final String preview;
   final int? timeout;
   final String backend;
+  final String executionTarget;
+  final String phase;
+  final String risk;
+  final String session;
+  final bool? ok;
+  final bool denied;
   final bool bidiWarning;
   final List<String> bidiChars;
   final String state;
@@ -201,9 +208,16 @@ class ChatStreamToolEvent extends ChatStreamEvent {
     this.language = '',
     this.code = '',
     this.args = const {},
+    this.rawArgs = const {},
     this.preview = '',
     this.timeout,
     this.backend = '',
+    this.executionTarget = '',
+    this.phase = '',
+    this.risk = '',
+    this.session = '',
+    this.ok,
+    this.denied = false,
     this.bidiWarning = false,
     this.bidiChars = const [],
     required this.state,
@@ -211,7 +225,50 @@ class ChatStreamToolEvent extends ChatStreamEvent {
     this.result,
   });
 
+  bool get isClientTarget =>
+      executionTarget == 'client' || backend == 'client';
+
   bool get isAwaitingApproval => state == 'awaiting_approval';
+
+  bool get isAwaitingClientApproval =>
+      isClientTarget && state == 'awaiting_client_approval';
+
+  bool get isAwaitingClientResult =>
+      isClientTarget && phase == 'awaiting_client_result';
+
+  ChatStreamToolEvent copyWith({
+    String? state,
+    String? phase,
+    bool? ok,
+    bool? denied,
+    String? error,
+    bool clearError = false,
+    ToolRunResult? result,
+  }) =>
+      ChatStreamToolEvent(
+        id: id,
+        callId: callId,
+        digest: digest,
+        tool: tool,
+        language: language,
+        code: code,
+        args: args,
+        rawArgs: rawArgs,
+        preview: preview,
+        timeout: timeout,
+        backend: backend,
+        executionTarget: executionTarget,
+        phase: phase ?? this.phase,
+        risk: risk,
+        session: session,
+        ok: ok ?? this.ok,
+        denied: denied ?? this.denied,
+        bidiWarning: bidiWarning,
+        bidiChars: bidiChars,
+        state: state ?? this.state,
+        error: clearError ? null : (error ?? this.error),
+        result: result ?? this.result,
+      );
 
   factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
     final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
@@ -219,12 +276,14 @@ class ChatStreamToolEvent extends ChatStreamEvent {
         RegExp(r'^[0-9a-f]{8,64}$').hasMatch(rawCallId) ? rawCallId : '';
     final rawDigest = json['digest']?.toString().trim().toLowerCase() ?? '';
     final digest = RegExp(r'^[0-9a-f]{64}$').hasMatch(rawDigest) ? rawDigest : '';
-    final rawArgs = json['args'];
+    final rawArgsIn = json['args'];
     final args = <String, String>{};
-    if (rawArgs is Map) {
-      for (final entry in rawArgs.entries.take(16)) {
+    final rawArgs = <String, dynamic>{};
+    if (rawArgsIn is Map) {
+      for (final entry in rawArgsIn.entries.take(24)) {
         final k = boundedResponseMetadata(entry.key, 64);
         if (k.isNotEmpty) {
+          rawArgs[k] = entry.value;
           args[k] = boundedResponseMetadata(entry.value, 4096);
         }
       }
@@ -237,37 +296,63 @@ class ChatStreamToolEvent extends ChatStreamEvent {
             .take(16)
             .toList(growable: false)
         : const <String>[];
-    final rawTimeout = json['timeout'];
+    final rawTimeout = json['timeout'] ?? json['timeout_seconds'];
     final timeout =
         rawTimeout is num ? rawTimeout.toInt() : int.tryParse('$rawTimeout');
     final rawError = json['error'];
     final errorText = rawError == null
         ? null
         : boundedResponseMetadata(rawError, 2000);
-    final rawCode = json['code'];
+    final rawCode = json['code'] ?? rawArgs['code'];
     final code = rawCode is String
         ? (rawCode.length <= 16384 ? rawCode : rawCode.substring(0, 16384))
         : '';
+    final rawLang = json['language'] ?? rawArgs['language'];
+    final executionTarget =
+        boundedResponseMetadata(json['execution_target'], 32);
+    final backend = boundedResponseMetadata(json['backend'], 32);
+    final phase = boundedResponseMetadata(json['phase'], 48);
+    final rawState = boundedResponseMetadata(json['state'], 32);
+    final effectiveState = rawState.isNotEmpty
+        ? rawState
+        : (phase == 'finished'
+            ? 'done'
+            : (phase == 'awaiting_client_result' ? 'running' : phase));
+    final okVal = json['ok'] is bool ? json['ok'] as bool : null;
+    final deniedVal = json['denied'] == true || phase == 'denied';
+    final rawId = boundedResponseMetadata(json['id'], 64);
+    final effectiveId = rawId.isNotEmpty ? rawId : callId;
+    ToolRunResult? parsedResult = json['result'] is Map
+        ? ToolRunResult.fromJson(
+            Map<String, dynamic>.from(json['result'] as Map),
+          )
+        : null;
+    if (parsedResult == null && okVal != null && phase == 'finished') {
+      parsedResult = ToolRunResult(ok: okVal);
+    }
     return ChatStreamToolEvent(
-      id: boundedResponseMetadata(json['id'], 64),
+      id: effectiveId,
       callId: callId,
       digest: digest,
       tool: boundedResponseMetadata(json['tool'], 128),
-      language: boundedResponseMetadata(json['language'], 32),
+      language: boundedResponseMetadata(rawLang, 32),
       code: code,
       args: Map.unmodifiable(args),
+      rawArgs: Map.unmodifiable(rawArgs),
       preview: boundedResponseMetadata(json['preview'], 4096),
       timeout: timeout != null && timeout > 0 ? timeout : null,
-      backend: boundedResponseMetadata(json['backend'], 32),
+      backend: backend.isNotEmpty ? backend : executionTarget,
+      executionTarget: executionTarget,
+      phase: phase,
+      risk: boundedResponseMetadata(json['risk'], 32),
+      session: boundedResponseMetadata(json['session'], 128),
+      ok: okVal,
+      denied: deniedVal,
       bidiWarning: json['bidi_warning'] == true || bidiChars.isNotEmpty,
       bidiChars: bidiChars,
-      state: boundedResponseMetadata(json['state'], 32),
+      state: effectiveState,
       error: errorText == null || errorText.isEmpty ? null : errorText,
-      result: json['result'] is Map
-          ? ToolRunResult.fromJson(
-              Map<String, dynamic>.from(json['result'] as Map),
-            )
-          : null,
+      result: parsedResult,
     );
   }
 }

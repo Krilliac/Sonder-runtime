@@ -87,6 +87,11 @@ class Settings {
   static const _kObservatoryExecutable = 'sonder_observatory_executable';
   static const _kObservatoryWebUrl = 'sonder_observatory_web_url';
   static const _kCleartextKeyHosts = 'sonder_cleartext_key_hosts';
+  static const _kClientExecEnabled = 'sonder_client_exec_enabled';
+  static const _kClientPermissionMode = 'sonder_client_permission_mode';
+  static const _kClientWorkspaceRoot = 'sonder_client_workspace_root';
+  static const _kClientAgentUrl = 'sonder_client_agent_url';
+  static const _kClientAgentToken = 'sonder_client_agent_token';
   static const _credentials = PlatformCredentialStore();
 
   /// Test-only override: widget tests do not load desktop/mobile plugins, and
@@ -160,6 +165,23 @@ class Settings {
   /// [CleartextKeyPolicy] on load and save; not a secret.
   List<String> cleartextKeyHosts;
 
+  /// Whether client-side tool execution (`X-Sonder-Client-Exec: 1`) is active.
+  bool clientExecEnabled;
+
+  /// User's own client-local permission mode (`plan|manual|acceptEdits|auto|bypass`).
+  String clientPermissionMode;
+
+  /// Client PC workspace root for native desktop execution (empty = current dir).
+  String clientWorkspaceRoot;
+
+  /// Loopback URL of the optional web client companion (default `http://127.0.0.1:11439`).
+  String clientAgentUrl;
+
+  /// Bearer token for the local client companion (kept in secure storage / memory-only on web).
+  String clientAgentToken;
+
+  static const defaultClientAgentUrl = 'http://127.0.0.1:11439';
+
   Settings({
     String? serverUrl,
     this.apiKey = '',
@@ -176,6 +198,11 @@ class Settings {
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
     this.cleartextKeyHosts = const [],
+    this.clientExecEnabled = true,
+    this.clientPermissionMode = 'manual',
+    this.clientWorkspaceRoot = '',
+    this.clientAgentUrl = defaultClientAgentUrl,
+    this.clientAgentToken = '',
   })  : temperature = normalizeTemperature(temperature),
         serverUrl = serverUrl ?? defaultServerUrl;
 
@@ -201,6 +228,11 @@ class Settings {
     String? observatoryExecutable,
     String? observatoryWebUrl,
     List<String>? cleartextKeyHosts,
+    bool? clientExecEnabled,
+    String? clientPermissionMode,
+    String? clientWorkspaceRoot,
+    String? clientAgentUrl,
+    String? clientAgentToken,
   }) =>
       Settings(
         serverUrl: serverUrl ?? this.serverUrl,
@@ -223,6 +255,11 @@ class Settings {
             observatoryExecutable ?? this.observatoryExecutable,
         observatoryWebUrl: observatoryWebUrl ?? this.observatoryWebUrl,
         cleartextKeyHosts: [...cleartextKeyHosts ?? this.cleartextKeyHosts],
+        clientExecEnabled: clientExecEnabled ?? this.clientExecEnabled,
+        clientPermissionMode: clientPermissionMode ?? this.clientPermissionMode,
+        clientWorkspaceRoot: clientWorkspaceRoot ?? this.clientWorkspaceRoot,
+        clientAgentUrl: clientAgentUrl ?? this.clientAgentUrl,
+        clientAgentToken: clientAgentToken ?? this.clientAgentToken,
       );
 
   static const themeModes = ['dark', 'light', 'system'];
@@ -289,6 +326,11 @@ class Settings {
       preferences: p,
       key: _kLauncherToken,
     );
+    final clientAgentToken = await _readCredential(
+      credentials: credentials,
+      preferences: p,
+      key: _kClientAgentToken,
+    );
     AccountSession? account;
     try {
       final raw = await credentials.read(_kAccount);
@@ -319,6 +361,13 @@ class Settings {
       launcherToken: launcherToken,
       observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
       observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
+      clientExecEnabled: p.getBool(_kClientExecEnabled) ?? true,
+      clientPermissionMode:
+          p.getString(_kClientPermissionMode) ?? 'manual',
+      clientWorkspaceRoot: p.getString(_kClientWorkspaceRoot) ?? '',
+      clientAgentUrl:
+          p.getString(_kClientAgentUrl) ?? defaultClientAgentUrl,
+      clientAgentToken: clientAgentToken,
     );
   }
 
@@ -406,6 +455,18 @@ class Settings {
     } else {
       await p.remove(_kLauncherToken);
     }
+    if (clientAgentToken.trim().isNotEmpty) {
+      await guarded(
+          _kClientAgentToken,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kClientAgentToken,
+                value: clientAgentToken,
+              ));
+    } else {
+      await p.remove(_kClientAgentToken);
+    }
     final account = accountSession;
     if (account != null && account.matches(serverUrl)) {
       await guarded(
@@ -437,6 +498,18 @@ class Settings {
     await p.setString(_kObservatoryExecutable, observatoryExecutable.trim());
     await p.setString(_kObservatoryWebUrl, observatoryWebUrl.trim());
     await p.setStringList(_kCleartextKeyHosts, cleartextKeyHosts);
+    await p.setBool(_kClientExecEnabled, clientExecEnabled);
+    await p.setString(
+        _kClientPermissionMode,
+        clientPermissionMode.trim().isEmpty
+            ? 'manual'
+            : clientPermissionMode.trim());
+    await p.setString(_kClientWorkspaceRoot, clientWorkspaceRoot.trim());
+    await p.setString(
+        _kClientAgentUrl,
+        clientAgentUrl.trim().isEmpty
+            ? defaultClientAgentUrl
+            : clientAgentUrl.trim());
     CleartextKeyPolicy.allowOnly(cleartextKeyHosts);
     return SettingsSaveResult(
       credentialsStored: stored || !needed,
@@ -511,6 +584,14 @@ class Settings {
       _deleteCredential(
         credentialStore ?? testingCredentialStore ?? _credentials,
         _kLauncherToken,
+      );
+
+  /// Removes the local client-companion token from this device.
+  static Future<void> clearClientAgentToken(
+          {CredentialStore? credentialStore}) =>
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kClientAgentToken,
       );
 
   static Future<String> _readCredential({

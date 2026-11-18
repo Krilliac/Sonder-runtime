@@ -55,6 +55,7 @@ class ChatResponseMetadata {
 
   final AgentLaneReceipt? agentLane;
   final OrchestrationReceipt? orchestration;
+  final List<ClientToolHandoff> clientToolHandoffs;
 
   const ChatResponseMetadata({
     this.completionId = '',
@@ -77,6 +78,7 @@ class ChatResponseMetadata {
     this.overflow,
     this.agentLane,
     this.orchestration,
+    this.clientToolHandoffs = const [],
   });
 
   /// True while the answer is still being produced by a work run.
@@ -106,7 +108,7 @@ class ChatResponseMetadata {
               )
             : null,
         overflow: RouteOverflow.fromJson(json['overflow']),
-      agentLane: json['agent_lane'] is Map
+        agentLane: json['agent_lane'] is Map
             ? AgentLaneReceipt.fromJson(
                 Map<String, dynamic>.from(json['agent_lane'] as Map),
               )
@@ -116,6 +118,13 @@ class ChatResponseMetadata {
                 Map<String, dynamic>.from(json['orchestration'] as Map),
               )
             : null,
+        clientToolHandoffs: ClientToolHandoff.listFromJson(
+          json['client_tool_handoff'] ??
+              json['client_tool_handoffs'] ??
+              (json['receipt'] is Map
+                  ? (json['receipt'] as Map)['client_tool_handoff']
+                  : null),
+        ),
       );
 
   /// A copy with the work-run fields replaced (after a refresh or cancel).
@@ -146,6 +155,7 @@ class ChatResponseMetadata {
         overflow: overflow,
         agentLane: agentLane,
         orchestration: orchestration,
+        clientToolHandoffs: clientToolHandoffs,
       );
 
   bool get isEmpty =>
@@ -168,7 +178,8 @@ class ChatResponseMetadata {
       refusal == null &&
       overflow == null &&
       agentLane == null &&
-      orchestration == null;
+      orchestration == null &&
+      clientToolHandoffs.isEmpty;
 
   Map<String, Object> toJson() => {
         'completion_id': completionId,
@@ -191,6 +202,9 @@ class ChatResponseMetadata {
         if (overflow != null) 'overflow': overflow!.toJson(),
         if (agentLane != null) 'agent_lane': agentLane!.toJson(),
         if (orchestration != null) 'orchestration': orchestration!.toJson(),
+        if (clientToolHandoffs.isNotEmpty)
+          'client_tool_handoffs':
+              clientToolHandoffs.map((h) => h.toJson()).toList(),
       };
 
   /// Compact, content-free evidence suitable for a collapsed diagnostics row.
@@ -762,4 +776,228 @@ class ExtensionRegistryStatus {
             .map(ExtensionRecord.fromJson)
             .toList(growable: false),
       );
+}
+
+/// Role-based feature flags advertised by `/v1/sonder/capabilities`,
+/// `/v1/sonder/whoami`, `/v1/sonder/status`, `/v1/sonder/login`, and
+/// `/v1/sonder/register`.
+class AllowedFeatures {
+  final bool chat;
+  final bool registration;
+  final bool clientExec;
+  final bool hostTools;
+  final bool hostBypass;
+  final bool hostAdmin;
+
+  const AllowedFeatures({
+    this.chat = true,
+    this.registration = false,
+    this.clientExec = true,
+    this.hostTools = true,
+    this.hostBypass = false,
+    this.hostAdmin = true,
+  });
+
+  factory AllowedFeatures.fromJson(Object? raw) {
+    if (raw is! Map) return const AllowedFeatures();
+    final map = Map<String, dynamic>.from(raw);
+    return AllowedFeatures(
+      chat: map['chat'] != false,
+      registration: map['registration'] == true,
+      clientExec: map['client_exec'] == true,
+      hostTools: map['host_tools'] == true,
+      hostBypass: map['host_bypass'] == true,
+      hostAdmin: map['host_admin'] == true,
+    );
+  }
+}
+
+/// Server discovery & policy capabilities (`GET /v1/sonder/capabilities`).
+class ServerCapabilities {
+  final String authMode;
+  final bool publicHosting;
+  final bool registrationEnabled;
+  final bool requireAccount;
+  final bool clientExecSupported;
+  final String clientExecHeader;
+  final String clientResultEndpoint;
+  final List<String> clientDelegatableTools;
+  final bool clientOwnsToolPolicy;
+  final bool hostBypassAllowed;
+  final AllowedFeatures allowedFeatures;
+  final String role;
+  final String username;
+
+  const ServerCapabilities({
+    this.authMode = 'local-open',
+    this.publicHosting = false,
+    this.registrationEnabled = false,
+    this.requireAccount = false,
+    this.clientExecSupported = false,
+    this.clientExecHeader = 'X-Sonder-Client-Exec',
+    this.clientResultEndpoint = '/v1/client-tools/{call_id}/result',
+    this.clientDelegatableTools = const [],
+    this.clientOwnsToolPolicy = true,
+    this.hostBypassAllowed = false,
+    this.allowedFeatures = const AllowedFeatures(),
+    this.role = '',
+    this.username = '',
+  });
+
+  factory ServerCapabilities.fromJson(Map<String, dynamic> json) {
+    final tools = (json['client_delegatable_tools'] as List? ?? const [])
+        .map((e) => _boundedMetadataText(e, 64))
+        .where((e) => e.isNotEmpty)
+        .toList(growable: false);
+    return ServerCapabilities(
+      authMode: _boundedMetadataText(json['auth_mode'], 32).isEmpty
+          ? 'local-open'
+          : _boundedMetadataText(json['auth_mode'], 32),
+      publicHosting: json['public_hosting'] == true,
+      registrationEnabled: json['registration_enabled'] == true,
+      requireAccount: json['require_account'] == true,
+      clientExecSupported: json['client_exec_supported'] == true,
+      clientExecHeader:
+          _boundedMetadataText(json['client_exec_header'], 64).isEmpty
+              ? 'X-Sonder-Client-Exec'
+              : _boundedMetadataText(json['client_exec_header'], 64),
+      clientResultEndpoint:
+          _boundedMetadataText(json['client_result_endpoint'], 128).isEmpty
+              ? '/v1/client-tools/{call_id}/result'
+              : _boundedMetadataText(json['client_result_endpoint'], 128),
+      clientDelegatableTools: List.unmodifiable(tools),
+      clientOwnsToolPolicy: json['client_owns_tool_policy'] != false,
+      hostBypassAllowed: json['host_bypass_allowed'] == true,
+      allowedFeatures: AllowedFeatures.fromJson(json['allowed_features']),
+      role: _boundedMetadataText(json['role'], 32).toLowerCase(),
+      username: _boundedMetadataText(json['username'], 128),
+    );
+  }
+}
+
+/// Authenticated principal identity & permissions (`GET /v1/sonder/whoami`).
+class WhoamiInfo {
+  final bool ok;
+  final String username;
+  final String role;
+  final String authMode;
+  final bool publicHosting;
+  final bool clientExecSupported;
+  final bool hostBypassAllowed;
+  final AllowedFeatures allowedFeatures;
+
+  const WhoamiInfo({
+    this.ok = true,
+    this.username = '',
+    this.role = '',
+    this.authMode = '',
+    this.publicHosting = false,
+    this.clientExecSupported = false,
+    this.hostBypassAllowed = false,
+    this.allowedFeatures = const AllowedFeatures(),
+  });
+
+  bool get isRestrictedUser =>
+      role == 'user' || (publicHosting && !allowedFeatures.hostAdmin);
+
+  factory WhoamiInfo.fromJson(Map<String, dynamic> json) {
+    final account = json['account'] is Map
+        ? Map<String, dynamic>.from(json['account'] as Map)
+        : const <String, dynamic>{};
+    final rawName = json['username'] ?? account['username'];
+    final rawRole = json['role'] ?? account['role'];
+    return WhoamiInfo(
+      ok: json['ok'] != false,
+      username: _boundedMetadataText(rawName, 128),
+      role: _boundedMetadataText(rawRole, 32).toLowerCase(),
+      authMode: _boundedMetadataText(json['auth_mode'], 32),
+      publicHosting: json['public_hosting'] == true,
+      clientExecSupported: json['client_exec_supported'] == true,
+      hostBypassAllowed: json['host_bypass_allowed'] == true,
+      allowedFeatures: AllowedFeatures.fromJson(json['allowed_features']),
+    );
+  }
+}
+
+/// Non-stream handoff metadata emitted in `sonder_receipt.client_tool_handoff`.
+class ClientToolHandoff {
+  final String executionTarget;
+  final String phase;
+  final String callId;
+  final String tool;
+  final Map<String, dynamic> args;
+  final String risk;
+  final String resultEndpoint;
+  final int expiresAt;
+  final String session;
+
+  const ClientToolHandoff({
+    this.executionTarget = 'client',
+    this.phase = 'awaiting_client_result',
+    required this.callId,
+    required this.tool,
+    this.args = const {},
+    this.risk = 'execute',
+    this.resultEndpoint = '',
+    this.expiresAt = 0,
+    this.session = '',
+  });
+
+  static List<ClientToolHandoff> listFromJson(Object? raw) {
+    if (raw is Map) {
+      final parsed = ClientToolHandoff.fromJson(Map<String, dynamic>.from(raw));
+      return parsed.callId.isNotEmpty && parsed.tool.isNotEmpty
+          ? [parsed]
+          : const [];
+    }
+    if (raw is List) {
+      final items = <ClientToolHandoff>[];
+      for (final item in raw) {
+        if (item is Map) {
+          final parsed =
+              ClientToolHandoff.fromJson(Map<String, dynamic>.from(item));
+          if (parsed.callId.isNotEmpty && parsed.tool.isNotEmpty) {
+            items.add(parsed);
+          }
+        }
+      }
+      return List.unmodifiable(items);
+    }
+    return const [];
+  }
+
+  factory ClientToolHandoff.fromJson(Map<String, dynamic> json) {
+    final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
+    final callId =
+        RegExp(r'^[0-9a-f]{8,64}$').hasMatch(rawCallId) ? rawCallId : '';
+    final rawArgs = json['args'];
+    final args = rawArgs is Map
+        ? Map<String, dynamic>.from(rawArgs)
+        : const <String, dynamic>{};
+    return ClientToolHandoff(
+      executionTarget: _boundedMetadataText(json['execution_target'], 32),
+      phase: _boundedMetadataText(json['phase'], 48),
+      callId: callId,
+      tool: _boundedMetadataText(json['tool'], 128),
+      args: Map.unmodifiable(args),
+      risk: _boundedMetadataText(json['risk'], 32).isEmpty
+          ? 'execute'
+          : _boundedMetadataText(json['risk'], 32),
+      resultEndpoint: _boundedMetadataText(json['result_endpoint'], 160),
+      expiresAt: _metadataCount(json['expires_at']),
+      session: _boundedMetadataText(json['session'], 128),
+    );
+  }
+
+  Map<String, Object> toJson() => {
+        'execution_target': executionTarget,
+        'phase': phase,
+        'call_id': callId,
+        'tool': tool,
+        'args': args,
+        'risk': risk,
+        if (resultEndpoint.isNotEmpty) 'result_endpoint': resultEndpoint,
+        if (expiresAt > 0) 'expires_at': expiresAt,
+        if (session.isNotEmpty) 'session': session,
+      };
 }

@@ -11,9 +11,17 @@ extension _AccountPage on _SettingsScreenState {
   }
 
   Widget _signInSection(BuildContext context) {
+    final publicHosting = _isPublicHosting;
+    final accountOnly = _isAccountAuthMode;
+    final pwHint = publicHosting && _password.text.isNotEmpty
+        ? validatePublicHostingPassword(_password.text,
+            username: _username.text)
+        : null;
     return SettingsSection(
       title: 'Sign in',
-      description: 'Login keeps your deployment API key.',
+      description: publicHosting || accountOnly
+          ? 'Sign in or create an account without a shared host API key.'
+          : 'Login keeps your deployment API key.',
       children: [
         SettingsFieldRow(
           label: 'Username',
@@ -25,16 +33,26 @@ extension _AccountPage on _SettingsScreenState {
         ),
         SettingsFieldRow(
           label: 'Password',
-          description: 'At least 8 characters. The first account becomes '
-              'admin.',
+          description: publicHosting
+              ? 'At least 12 characters with 3+ classes (upper, lower, digit, '
+                  'symbol), not containing your username.'
+              : 'At least 8 characters. The first account becomes admin.',
           field: LabeledTextField(
             fieldKey: const Key('settings-password'),
             label: 'Password',
             controller: _password,
             obscureText: true,
+            onChanged: publicHosting ? (_) => _update(() {}) : null,
           ),
+          below: pwHint == null
+              ? null
+              : FieldNote(
+                  StatusKind.warn,
+                  pwHint,
+                  key: const Key('settings-public-password-hint'),
+                ),
         ),
-        if (_needsBootstrap)
+        if (_needsBootstrap && !publicHosting)
           SettingsFieldRow(
             label: 'Bootstrap secret',
             description: 'Printed by Sonder on the PC for the first admin. '
@@ -84,7 +102,11 @@ extension _AccountPage on _SettingsScreenState {
 
   Widget _sessionSection(BuildContext context, AccountSession account) {
     final here = account.matches(_server.text);
-    final user = account.token == _signedInToken ? _signedInUser : null;
+    final whoUser = _whoami?.username.trim() ?? '';
+    final user = whoUser.isNotEmpty
+        ? whoUser
+        : (account.token == _signedInToken ? _signedInUser : null);
+    final role = _whoami?.role.trim() ?? '';
     return SettingsSection(
       title: 'Session',
       description: 'Sign out revokes this session on the server. Forget '
@@ -97,6 +119,20 @@ extension _AccountPage on _SettingsScreenState {
           kind: here ? StatusKind.ok : StatusKind.warn,
         ),
         if (user != null) FactRow(label: 'Signed in as', value: user),
+        if (role.isNotEmpty)
+          FactRow(
+            key: const Key('settings-account-role'),
+            label: 'Role',
+            value: role,
+          ),
+        if (_isPublicHosting || _capabilities?.clientExecSupported == true)
+          FactRow(
+            key: const Key('settings-account-client-exec'),
+            label: 'Tool execution',
+            value: _clientExecEnabled
+                ? 'On this PC (mode: $_clientPermissionMode)'
+                : 'Disabled',
+          ),
         if (!here)
           Padding(
             padding: const EdgeInsets.fromLTRB(
