@@ -335,7 +335,8 @@ class PlaybookStore:
                 for key in changes:
                     value = validated.get(key)
                     if key == "title":
-                        block = re.sub(r"\A[^\r\n]*", f"## Entry: {entry_id} — {value}", block, count=1)
+                        header = f"## Entry: {entry_id} — {value}"
+                        block = re.sub(r"\A[^\r\n]*", lambda _m, rep=header: rep, block, count=1)
                     elif key in {"body", "evidence", "triggers"}:
                         value = ", ".join(value) if key == "triggers" else value
                         marker = re.search(r"(?m)^### " + key.title() + r"\r?$\n", block)
@@ -344,10 +345,11 @@ class PlaybookStore:
                         block = block[:marker.end()] + str(value).replace("\r\n", "\n").replace("\n", newline) + newline * 2 + block[stop:]
                     else:
                         pattern = r"(?m)^- " + key + r": [^\r\n]*"
+                        line_rep = "- " + key + ": " + str(value)
                         if re.search(pattern, block):
-                            block = re.sub(pattern, "- " + key + ": " + str(value), block, count=1)
+                            block = re.sub(pattern, lambda _m, rep=line_rep: rep, block, count=1)
                         else:
-                            block = block.replace("### Body", "- " + key + ": " + str(value) + newline * 2 + "### Body", 1)
+                            block = block.replace("### Body", line_rep + newline * 2 + "### Body", 1)
                 if len(block.encode("utf-8")) > self.policy.entry_limit:
                     raise PlaybookError("playbook entry exceeds byte limit")
                 updated = raw[:start.start()] + block + raw[end.start():]

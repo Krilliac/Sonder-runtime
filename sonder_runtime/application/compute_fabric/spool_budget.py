@@ -89,3 +89,26 @@ def reap_stale_directories(root: Path, *, max_age_seconds: float) -> int:
         shutil.rmtree(path, ignore_errors=True)
         removed += 0 if path.exists() else 1
     return removed
+
+
+def reap_stray_spool_files(root: Path) -> int:
+    """Remove unexpected regular files directly in a spool root (excluding .quota.lock).
+
+    Only real non-link regular files directly under ``root`` are removed;
+    symlinks/reparse points are left for ``counted_directories`` to reject.
+    """
+    removed = 0
+    with os.scandir(root) as entries:
+        stray = [
+            Path(entry.path) for entry in entries
+            if entry.name != ".quota.lock"
+            and not entry.is_symlink()
+            and entry.is_file(follow_symlinks=False)
+        ]
+    for path in stray:
+        try:
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            pass
+    return removed
