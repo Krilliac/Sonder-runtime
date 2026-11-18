@@ -1,5 +1,4 @@
 """The GPU-admission wait status on the wire, and the start-up prewarm wiring in serve."""
-import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -30,15 +29,21 @@ def _low_ram_service(tmp_path, monkeypatch, state):
 def test_streamed_turn_with_a_queued_admission_sends_status_then_clear(tmp_path, monkeypatch):
     state = {"available": 12 * GIB}
     fake, _service = _low_ram_service(tmp_path, monkeypatch, state)
-    threading.Timer(0.6, lambda: state.update(available=40 * GIB)).start()
 
     def answer(*_args, **_kwargs):
         server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
         return "late answer"
 
+    def release_once_waiting(received):
+        # Free the memory only once the client has seen the wait. A fixed
+        # timer raced the request: on Windows the stream's first byte alone
+        # can take seconds, so the RAM came back before admission queued.
+        if b": sonder-status waiting" in received:
+            state.update(available=40 * GIB)
+
     monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)
     with _http_server(monkeypatch) as port:
-        text = _stream_request(port)
+        text = _stream_request(port, on_received=release_once_waiting)
 
     _head, _, stream = text.partition("\r\n\r\n")
     lines = stream.splitlines()
