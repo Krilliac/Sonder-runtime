@@ -10658,7 +10658,6 @@ def admin_status(token: str = "") -> str:
         count = admin_auth.account_count(conn)
     finally:
         conn.close()
-    return "accounts: %d" % count
     lines = [
         "sonder admin status",
         "  accounts: %d" % count,

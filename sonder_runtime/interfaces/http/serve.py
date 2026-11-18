@@ -1974,7 +1974,15 @@ def _auth_account(auth_header):
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return _legacy_runtime()._admin_account_from_token(token)
+    if not token.startswith(admin_auth.API_KEY_PREFIX):
+        return _legacy_runtime()._admin_account_from_token(token)
+    # An account's assigned API key stands for that account, so its role, tier and
+    # dev_flags apply (rate limit, metering). Revoked or banned: None.
+    conn = _legacy_runtime()._open_db()
+    try:
+        return admin_auth.api_key_account(conn, token)
+    finally:
+        conn.close()
 
 
 def _app_control_deployment_authorized(authorization, config):
@@ -6558,7 +6566,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
-                work_binding=_app_managed_work_binding):
+                work_binding=_app_managed_work_binding, accounts=admin_auth,
+                swarm_status=lambda: server.master_orchestrator.get_swarm_status()):
             return
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
@@ -7180,23 +7189,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = server._open_db()
         try:
-            # Need to know the estimated token cost here. This might require
-            # inspecting the request or model. For now, using a placeholder cost
-            # or 0 until model-based estimation is implemented.
-            estimated_tokens = 500
-            print(f"DEBUG: Calling rate_limit with account: {account}")
-            # Mock account for test environment
-            test_account = account.copy()
-            test_account.setdefault('tier', 'enterprise')
-            print(f"DEBUG: Modified account for test: {test_account}")
-            ok, msg = admin_auth.rate_limit(conn, test_account, token_cost=estimated_tokens)
-            
-            if ok:
-                # Increment usage
-                admin_auth.increment_usage(conn, account["username"], estimated_tokens)
+            # account is None for key-only and local-open callers: neither limit applies.
+            ok, msg = admin_auth.rate_limit(conn, account)
+            if ok:  # monthly token metering; a no-op unless SaaS metering is switched on
+                ok, msg = admin_auth.meter_usage(conn, account, admin_auth.CHAT_REQUEST_TOKEN_ESTIMATE)
         finally:
             conn.close()
-            
         if not ok:
             record_early_chat_metric("rate_limited")
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
