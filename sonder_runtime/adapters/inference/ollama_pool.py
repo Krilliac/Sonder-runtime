@@ -919,9 +919,13 @@ def _extract_show_metadata(
 def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open_url=None):
     """Build a bounded prober using the same no-proxy/no-redirect transport.
 
-    Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps``, and lazy
+    Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps`` and
     per-``(origin, model, digest)`` cached ``/api/show`` metadata without
-    failing if optional endpoints are unavailable.
+    failing if optional endpoints are unavailable.  Each probe fetches
+    ``/api/show`` for at most ``_SHOW_FETCHES_PER_PROBE`` models that are not
+    cached yet, so large inventories fill in over successive probes.  Stock
+    Ollama exposes no host VRAM, host RAM or KV-cache type, so the report never
+    carries those fields.
     """
     ollama_endpoint = importlib.import_module(
         "sonder_runtime.adapters.inference.ollama_endpoint"
@@ -952,6 +956,10 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         if not isinstance(payload, dict):
             raise ValueError("capability response must be an object")
         return payload
+
+    def show_is_cached(origin: str, model_name: str, digest: str) -> bool:
+        with show_lock:
+            return (origin, model_name, digest) in show_cache
 
     def read_show_cached(
         origin: str,
@@ -1028,18 +1036,22 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         supports_tools: dict[str, bool] = {}
         model_active_billions: dict[str, float] = {}
         model_metadata: dict[str, dict[str, Any]] = {}
+        show_budget = _SHOW_FETCHES_PER_PROBE
         for name in models:
             tag_entry = tag_entries.get(name)
             digest = str(tag_entry.get("digest") or "").strip() if tag_entry else ""
-            # Lazy-cached /api/show: probe(origin) reads cached show metadata and
-            # /api/tags details without firing synchronous /api/show requests during
-            # bulk inventory probes; callers trigger show(origin, model) lazily.
+            # /api/show is cached per (origin, model, digest); only uncached
+            # models spend the per-probe fetch budget.
+            allow_fetch = False
+            if show_budget > 0 and not show_is_cached(origin, name, digest):
+                allow_fetch = True
+                show_budget -= 1
             meta = read_show_cached(
                 origin,
                 name,
                 digest=digest,
                 tag_entry=tag_entry,
-                allow_fetch=False,
+                allow_fetch=allow_fetch,
             )
             if meta:
                 model_metadata[name] = meta
@@ -1050,25 +1062,6 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             if isinstance(meta.get("active_billions"), (int, float)):
                 model_active_billions[name] = float(meta["active_billions"])
 
-        kv_type_raw = None
-        vram_raw = None
-        ram_raw = None
-        for source in (ps_payload, version):
-            if not isinstance(source, Mapping):
-                continue
-            if kv_type_raw is None:
-                candidate_kv = str(source.get("kv_cache_type") or "").strip().lower()
-                if candidate_kv in _KV_CACHE_TYPES:
-                    kv_type_raw = candidate_kv
-            if vram_raw is None:
-                vram_raw = _positive_int_value(
-                    source.get("vram_bytes") or source.get("gpu_vram_bytes")
-                )
-            if ram_raw is None:
-                ram_raw = _positive_int_value(
-                    source.get("ram_bytes") or source.get("host_ram_bytes")
-                )
-
         report: dict[str, Any] = {
             "protocol": _PROTOCOL,
             "version": str(version.get("version") or "unknown")[:80],
@@ -1078,12 +1071,6 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             report["model_contexts"] = model_contexts
         if loaded_models:
             report["loaded_models"] = tuple(sorted(set(loaded_models)))
-        if vram_raw is not None:
-            report["vram_bytes"] = vram_raw
-        if ram_raw is not None:
-            report["ram_bytes"] = ram_raw
-        if kv_type_raw is not None:
-            report["kv_cache_type"] = kv_type_raw
         if supports_tools:
             report["supports_tools"] = supports_tools
         if model_active_billions:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import socket
 import time
@@ -31,7 +32,16 @@ DEFAULT_CTX_SIZE = 8192
 DEFAULT_GPU_LAYERS = 999
 DEFAULT_KV_CACHE_TYPE = "q8_0"
 DEFAULT_FLASH_ATTN = "on"
-DEFAULT_RPC_INSTALL_DIR_MAIN = Path(r"C:\Users\Nathan\AppData\Local\sonder\llama-rpc")
+
+
+def _default_main_install_dir() -> Path:
+    """Return LOCALAPPDATA/sonder/llama-rpc (or ~/AppData/Local when unset)."""
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    base = Path(local) if local else Path.home() / "AppData" / "Local"
+    return base / "sonder" / "llama-rpc"
+
+
+DEFAULT_RPC_INSTALL_DIR_MAIN = _default_main_install_dir()
 DEFAULT_RPC_INSTALL_DIR_NODE1 = r"C:\NewBuild\llama-rpc"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _VALID_KV_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"})
@@ -199,36 +209,67 @@ class RpcHardwareProfile:
     notes: str
 
 
-def load_inference_config() -> dict:
-    """Load configuration from inference_models.json."""
+def load_inference_config() -> dict[str, object]:
+    """Load ``config/inference_models.json``; the top level must be an object."""
     config_path = Path(__file__).parent.parent.parent / "config" / "inference_models.json"
-    with open(config_path, "r") as f:
-        return json.load(f)
+    with open(config_path, encoding="utf-8") as handle:
+        data: object = json.load(handle)
+    if not isinstance(data, dict):
+        raise RpcClusterConfigError("inference_models.json must contain a JSON object")
+    return {str(key): value for key, value in data.items()}
+
+
+def _profile_text(name: str, raw: Mapping[str, object], key: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise RpcClusterConfigError(f"profile {name!r}: {key} must be a non-empty string")
+    return value
+
+
+def _profile_int(name: str, raw: Mapping[str, object], key: str) -> int:
+    value = raw.get(key)
+    if type(value) is not int or value < 0:
+        raise RpcClusterConfigError(f"profile {name!r}: {key} must be a non-negative integer")
+    return value
+
 
 def load_hardware_profiles() -> dict[str, RpcHardwareProfile]:
-    """Load hardware-tuned sharding parameters from configuration."""
+    """Load hardware-tuned sharding parameters, validating every field."""
     data = load_inference_config()
-    profiles = {}
-    for name, p in data.get("profiles", {}).items():
+    raw_profiles = data.get("profiles", {})
+    if not isinstance(raw_profiles, Mapping):
+        raise RpcClusterConfigError("inference_models.json: profiles must be an object")
+    profiles: dict[str, RpcHardwareProfile] = {}
+    for raw_name, raw in raw_profiles.items():
+        name = str(raw_name)
+        if not isinstance(raw, Mapping):
+            raise RpcClusterConfigError(f"profile {name!r} must be an object")
         profiles[name] = RpcHardwareProfile(
             name=name,
-            node1_device=p["node1_device"],
-            tensor_split=p["tensor_split"],
-            ctx_size=p["ctx_size"],
-            n_gpu_layers=p["n_gpu_layers"],
-            notes=p["notes"]
+            node1_device=_profile_text(name, raw, "node1_device"),
+            tensor_split=validate_tensor_split(_profile_text(name, raw, "tensor_split")),
+            ctx_size=_profile_int(name, raw, "ctx_size"),
+            n_gpu_layers=_profile_int(name, raw, "n_gpu_layers"),
+            notes=_profile_text(name, raw, "notes"),
         )
     return profiles
 
 
+def _require_profile(name: str) -> RpcHardwareProfile:
+    profiles = load_hardware_profiles()
+    if name not in profiles:
+        raise RpcClusterConfigError(f"hardware profile {name!r} missing from inference_models.json")
+    return profiles[name]
+
+
 def current_780m_profile() -> RpcHardwareProfile:
     """Profile for current Node1 hardware (Ryzen 780M iGPU + 2 GiB UMA, 46 GB RAM)."""
-    return load_hardware_profiles()["main-5070ti-plus-node1-780m"]
+    return _require_profile("main-5070ti-plus-node1-780m")
 
 
 def rx_9060_xt_16gb_profile() -> RpcHardwareProfile:
     """Target profile once RX 9060 XT 16 GB is installed on Node1 & UMA lowered."""
-    return load_hardware_profiles()["main-5070ti-plus-node1-9060xt-16gb"]
+    return _require_profile("main-5070ti-plus-node1-9060xt-16gb")
 
 
 @dataclass(frozen=True)
@@ -434,6 +475,34 @@ def _validate_loopback_base_url(base_url: str) -> str:
     return raw
 
 
+def log_sharded_readiness(
+    logger: logging.Logger,
+    base_url: str,
+    *,
+    probe: Callable[[str], ShardedServerHealth] | None = None,
+) -> None:
+    """Probe the sharded backend once and log the outcome (never raises)."""
+    run = probe_sharded_server if probe is None else probe
+    try:
+        health = run(base_url)
+    except Exception as exc:
+        logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
+        return
+    if health.healthy:
+        logger.info(
+            "RPC sharded backend status: healthy=%s models=%s",
+            health.healthy,
+            list(health.model_ids),
+        )
+    else:
+        logger.warning(
+            "RPC sharded backend status: healthy=%s models=%s error=%s",
+            health.healthy,
+            list(health.model_ids),
+            health.error or health.status or "unknown",
+        )
+
+
 def probe_sharded_server(
     base_url: str = f"http://{DEFAULT_SERVER_HOST}:{DEFAULT_SERVER_PORT}",
     *,
@@ -616,6 +685,7 @@ __all__ = [
     "DEFAULT_SERVER_HOST",
     "DEFAULT_SERVER_PORT",
     "Node1RpcServerConfig",
+    "log_sharded_readiness",
     "PRIVATE_LINK_CIDR",
     "RpcClusterConfigError",
     "RpcHardwareProfile",

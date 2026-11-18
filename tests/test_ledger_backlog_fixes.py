@@ -107,13 +107,13 @@ def test_a1_resumable_download_cleans_bad_partial_for_clean_retry(tmp_path: Path
     partial = tmp_path / "bundle.tar.gz.partial"
     sidecar = tmp_path / "bundle.tar.gz.partial.validators.json"
 
-    calls = 0
+    seen_ranges: list[str | None] = []
 
-    def opener_short_then_ok(_url: str, headers: dict[str, str]) -> _FakeStreamResponse:
-        nonlocal calls
-        calls += 1
-        assert "Range" not in headers
-        return _FakeStreamResponse(payload[:5] if calls == 1 else payload)
+    def opener_short_then_resume(_url: str, headers: dict[str, str]) -> _FakeStreamResponse:
+        seen_ranges.append(headers.get("Range"))
+        if len(seen_ranges) == 1:
+            return _FakeStreamResponse(payload[:5])
+        return _FakeStreamResponse(payload[5:], status=206)
 
     with pytest.raises(updates_service.UpdateError, match="downloaded length"):
         updates_service.resumable_download(
@@ -122,20 +122,22 @@ def test_a1_resumable_download_cleans_bad_partial_for_clean_retry(tmp_path: Path
             validators={"etag": "v1"},
             expected_length=len(payload),
             expected_sha256=digest,
-            opener=opener_short_then_ok,
+            opener=opener_short_then_resume,
         )
-    assert not partial.exists()
-    assert not sidecar.exists()
+    # A short prefix is kept so the validator-guarded resume can continue.
+    assert partial.read_bytes() == payload[:5]
+    assert sidecar.exists()
     result = updates_service.resumable_download(
         "http://mirror/bundle.tar.gz",
         dest,
         validators={"etag": "v1"},
         expected_length=len(payload),
         expected_sha256=digest,
-        opener=opener_short_then_ok,
+        opener=opener_short_then_resume,
     )
+    assert seen_ranges == [None, "bytes=5-"]
     assert dest.read_bytes() == payload
-    assert result["resumed"] is False
+    assert result["resumed"] is True
 
     dest2 = tmp_path / "bundle2.tar.gz"
     partial2 = tmp_path / "bundle2.tar.gz.partial"
