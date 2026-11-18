@@ -9,9 +9,10 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | Layer | Python files |
 |---|---:|
 | `adapters` | 480 |
-| `application` | 433 |
+| `application` | 434 |
 | `bootstrap` | 88 |
-| `domain` | 328 |
+| `config` | 0 |
+| `domain` | 329 |
 | `interfaces` | 84 |
 | `platform` | 58 |
 
@@ -28,6 +29,7 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | `sonder_runtime.adapters` | `adapters.state` | `adapters.ports` | `adapters.providers` | `adapters.schemas` | `adapters.lifecycle` |
 | `sonder_runtime.application` | `application.state` | `application.ports` | `application.providers` | `application.schemas` | `application.lifecycle` |
 | `sonder_runtime.bootstrap` | `bootstrap.state` | `bootstrap.ports` | `bootstrap.providers` | `bootstrap.schemas` | `bootstrap.lifecycle` |
+| `sonder_runtime.config` | `config.state` | `config.ports` | `config.providers` | `config.schemas` | `config.lifecycle` |
 | `sonder_runtime.domain` | `domain.state` | `domain.ports` | `domain.providers` | `domain.schemas` | `domain.lifecycle` |
 | `sonder_runtime.interfaces` | `interfaces.state` | `interfaces.ports` | `interfaces.providers` | `interfaces.schemas` | `interfaces.lifecycle` |
 | `sonder_runtime.platform` | `platform.state` | `platform.ports` | `platform.providers` | `platform.schemas` | `platform.lifecycle` |
