@@ -1390,7 +1390,7 @@
       ]
     },
     {
-      "file_count": 80,
+      "file_count": 84,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1403,6 +1403,10 @@
         "sonder_runtime/interfaces/cli/extensions.py",
         "sonder_runtime/interfaces/cli/headless.py",
         "sonder_runtime/interfaces/cli/playbooks.py",
+        "sonder_runtime/interfaces/client_agent/__init__.py",
+        "sonder_runtime/interfaces/client_agent/__main__.py",
+        "sonder_runtime/interfaces/client_agent/executor.py",
+        "sonder_runtime/interfaces/client_agent/server.py",
         "sonder_runtime/interfaces/editor/__init__.py",
         "sonder_runtime/interfaces/editor/transport.py",
         "sonder_runtime/interfaces/http/__init__.py",
