@@ -291,6 +291,13 @@ REFUSED_NEW_BLOCKERS = [
     ("C:/deno/deno.exe", ["run", "/dev/stdin"], "console.log(1)"),
     ("/usr/bin/php", ["-f", "/dev/stdin"], "<?php echo 1;"),
     (PY, ["file:///dev/stdin"], "print(1)"),
+    # dot-segment spellings of the same stdin operands
+    (PY, ["/dev/./stdin"], "print(1)"),
+    (PY, ["/dev/../dev/stdin"], "print(1)"),
+    (PY, ["/proc/self/fd/../fd/0"], "print(1)"),
+    (PY, ["//dev//./stdin"], "print(1)"),
+    (BASH, ["/dev/./stdin"], "id"),
+    (PY, ["file:///dev/./stdin"], "print(1)"),
     # PowerShell inline guard bypasses
     ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["/c", "Write-Host 1"], ""),
     ("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["/Command", "Write-Host 1"], ""),
