@@ -45,12 +45,7 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
     def fake_open_url(request, **_kwargs):
         url = request.full_url
         if url.endswith("/api/version"):
-            return _json_response({
-                "version": "0.40.16",
-                "kv_cache_type": "q8_0",
-                "vram_bytes": 32 * (1024 ** 3),
-                "ram_bytes": 64 * (1024 ** 3),
-            })
+            return _json_response({"version": "0.12.6"})
         if url.endswith("/api/tags"):
             return _json_response({
                 "models": [
@@ -89,18 +84,23 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
 
     probe = _default_capability_prober(allow_remote=True, open_url=fake_open_url)
     first = probe(NODE1)
-    assert first["version"] == "0.40.16"
+    assert first["version"] == "0.12.6"
     assert first["models"] == ("astra-cyber-35b-a3b:latest",)
     assert first["loaded_models"] == ("astra-cyber-35b-a3b:latest",)
-    # /api/ps supplies active context and tag name supplies MoE hint without eager /api/show.
-    assert first["model_contexts"]["astra-cyber-35b-a3b:latest"] == 32768
     assert first["model_active_billions"]["astra-cyber-35b-a3b:latest"] == 3.0
-    assert first["kv_cache_type"] == "q8_0"
-    assert first["vram_bytes"] == 32 * (1024 ** 3)
-    assert first["ram_bytes"] == 64 * (1024 ** 3)
-    assert len(show_calls) == 0
+    # Real Ollama reports no host VRAM/RAM/KV-cache fields; none may be invented.
+    assert "vram_bytes" not in first
+    assert "ram_bytes" not in first
+    assert "kv_cache_type" not in first
+    # The probe never waits on /api/show; a background fill caches it.
+    probe.wait_show_fill(10.0)
+    assert len(show_calls) == 1
+    first = probe(NODE1)
+    assert first["supports_tools"]["astra-cyber-35b-a3b:latest"] is True
+    # Loaded model: /api/ps runtime context (32768) wins over the trained
+    # maximum (262144) that /api/show reports.
+    assert first["model_contexts"]["astra-cyber-35b-a3b:latest"] == 32768
 
-    # Lazy /api/show fetches once per (origin, model, digest) and populates cache.
     details = probe.show(NODE1, "astra-cyber-35b-a3b:latest", digest=digest)
     assert details["context_length"] == 262144
     assert details["supports_tools"] is True
@@ -109,7 +109,7 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
 
     # Subsequent probe(NODE1) and show() calls with same digest reuse cached /api/show.
     second = probe(NODE1)
-    assert second["model_contexts"]["astra-cyber-35b-a3b:latest"] == 262144
+    assert second["model_contexts"]["astra-cyber-35b-a3b:latest"] == 32768
     assert second["supports_tools"]["astra-cyber-35b-a3b:latest"] is True
     probe.show(NODE1, "astra-cyber-35b-a3b:latest", digest=digest)
     assert len(show_calls) == 1
@@ -435,3 +435,35 @@ def test_sonder_inference_gateway_unifies_ollama_pool_snapshots():
     status = gw.provider_status()["sonder_inference"]
     assert status["ollama_pool"]["healthy_worker_count"] == 2
     assert len(status["pool_workers"]) == 2
+
+
+def test_default_capability_prober_bounds_show_fetches_per_probe():
+    from sonder_runtime.adapters.inference import ollama_pool
+
+    names = [f"m{i}:latest" for i in range(ollama_pool._SHOW_FETCHES_PER_PROBE + 4)]
+    show_calls: list[str] = []
+
+    def fake_open_url(request, **_kwargs):
+        url = request.full_url
+        if url.endswith("/api/version"):
+            return _json_response({"version": "0.12.6"})
+        if url.endswith("/api/tags"):
+            return _json_response({"models": [{"name": n, "digest": "sha256:" + n} for n in names]})
+        if url.endswith("/api/ps"):
+            return _json_response({"models": []})
+        if url.endswith("/api/show"):
+            show_calls.append(json.loads(request.data.decode("utf-8"))["model"])
+            return _json_response({"capabilities": ["completion", "tools"]})
+        raise AssertionError(url)
+
+    probe = _default_capability_prober(allow_remote=True, open_url=fake_open_url)
+    probe(NODE1)
+    probe.wait_show_fill(10.0)
+    assert len(show_calls) == ollama_pool._SHOW_FETCHES_PER_PROBE
+    first = probe(NODE1)
+    assert len(first["supports_tools"]) == ollama_pool._SHOW_FETCHES_PER_PROBE
+    probe.wait_show_fill(10.0)
+    second = probe(NODE1)
+    # Cached models are not refetched; the remainder is filled in.
+    assert len(show_calls) == len(names)
+    assert len(second["supports_tools"]) == len(names)
