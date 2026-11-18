@@ -784,6 +784,8 @@ def _model_names(payload) -> tuple[str, ...]:
 
 _SHOW_CACHE_LIMIT = 512
 _SHOW_FETCHES_PER_PROBE = 8
+_SHOW_BACKOFF_BASE_SECONDS = 30.0
+_SHOW_BACKOFF_MAX_SECONDS = 600.0
 _KV_CACHE_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"})
 
 
@@ -922,8 +924,14 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps`` and
     per-``(origin, model, digest)`` cached ``/api/show`` metadata without
     failing if optional endpoints are unavailable.  Each probe fetches
-    ``/api/show`` for at most ``_SHOW_FETCHES_PER_PROBE`` models that are not
-    cached yet, so large inventories fill in over successive probes.  Stock
+    ``/api/show`` metadata.  The probe itself never calls ``/api/show``: it
+    reports whatever is cached and starts at most one background filler per
+    origin that fetches up to ``_SHOW_FETCHES_PER_PROBE`` uncached models, so a
+    slow or hanging ``/api/show`` cannot fail the capability probe, and large
+    inventories fill in over successive probes.  A failed ``/api/show`` is
+    remembered per ``(origin, model, digest)`` with exponential backoff.  For a
+    model that is loaded, ``/api/ps`` ``context_length`` (the runtime context)
+    wins over the trained maximum from ``/api/show``.  Stock
     Ollama exposes no host VRAM, host RAM or KV-cache type, so the report never
     carries those fields.
     """
@@ -932,6 +940,9 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     )
     show_cache: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
     show_lock = threading.Lock()
+    show_failures: dict[tuple[str, str, str], tuple[float, int]] = {}
+    fillers: dict[str, threading.Thread] = {}
+    show_timeout = max(float(timeout), 5.0)
 
     def read(
         origin: str,
@@ -939,13 +950,16 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         *,
         method: str = "GET",
         body: Mapping[str, Any] | None = None,
+        request_timeout: float | None = None,
     ) -> dict:
         transport = open_url or ollama_endpoint.open_url
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else {}
         request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
-            request, timeout=timeout, allow_remote=allow_remote,
+            request,
+            timeout=timeout if request_timeout is None else request_timeout,
+            allow_remote=allow_remote,
         ) as response:
             raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
         if not isinstance(raw, bytes):
@@ -979,17 +993,76 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             return _extract_show_metadata(model_name, tag_entry, None)
         show_payload: dict | None = None
         try:
-            show_payload = read(origin, "/api/show", method="POST", body={"model": model_name})
+            show_payload = read(
+                origin, "/api/show", method="POST", body={"model": model_name},
+                request_timeout=show_timeout,
+            )
         except Exception:
             show_payload = None
         meta = _extract_show_metadata(model_name, tag_entry, show_payload)
-        if show_payload is not None:
+        if show_payload is None:
             with show_lock:
+                failures = show_failures.get(cache_key, (0.0, 0))[1] + 1
+                delay = min(_SHOW_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+                            _SHOW_BACKOFF_MAX_SECONDS)
+                show_failures[cache_key] = (time.monotonic() + delay, failures)
+                while len(show_failures) > _SHOW_CACHE_LIMIT:
+                    show_failures.pop(next(iter(show_failures)))
+        else:
+            with show_lock:
+                show_failures.pop(cache_key, None)
                 show_cache[cache_key] = dict(meta)
                 show_cache.move_to_end(cache_key)
                 while len(show_cache) > _SHOW_CACHE_LIMIT:
                     show_cache.popitem(last=False)
         return meta
+
+    def show_is_backed_off(origin: str, model_name: str, digest: str) -> bool:
+        with show_lock:
+            entry = show_failures.get((origin, model_name, digest))
+        return entry is not None and time.monotonic() < entry[0]
+
+    def fill_show_cache(origin: str, pending: list[tuple[str, str]]) -> None:
+        try:
+            for name, digest in pending:
+                if show_is_cached(origin, name, digest):
+                    continue
+                read_show_cached(origin, name, digest=digest)
+                if show_is_backed_off(origin, name, digest):
+                    # One failing /api/show ends this pass; the backoff keeps
+                    # the model out of later passes until it expires.
+                    return
+        finally:
+            with show_lock:
+                if fillers.get(origin) is threading.current_thread():
+                    fillers.pop(origin, None)
+
+    def start_show_fill(origin: str, pending: list[tuple[str, str]]) -> None:
+        if not pending:
+            return
+        with show_lock:
+            if origin in fillers:
+                return
+            thread = threading.Thread(
+                target=fill_show_cache,
+                args=(origin, pending),
+                name="sonder-ollama-show-fill",
+                daemon=True,
+            )
+            fillers[origin] = thread
+        thread.start()
+
+    def wait_show_fill(wait_timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(wait_timeout))
+        while True:
+            with show_lock:
+                threads = list(fillers.values())
+            if not threads:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            threads[0].join(remaining)
 
     def probe(origin: str) -> dict:
         try:
@@ -1036,32 +1109,37 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         supports_tools: dict[str, bool] = {}
         model_active_billions: dict[str, float] = {}
         model_metadata: dict[str, dict[str, Any]] = {}
-        show_budget = _SHOW_FETCHES_PER_PROBE
+        pending: list[tuple[str, str]] = []
         for name in models:
             tag_entry = tag_entries.get(name)
             digest = str(tag_entry.get("digest") or "").strip() if tag_entry else ""
-            # /api/show is cached per (origin, model, digest); only uncached
-            # models spend the per-probe fetch budget.
-            allow_fetch = False
-            if show_budget > 0 and not show_is_cached(origin, name, digest):
-                allow_fetch = True
-                show_budget -= 1
+            # The probe only reads the /api/show cache; uncached models are
+            # filled in the background (bounded count, failures backed off).
+            if (
+                len(pending) < _SHOW_FETCHES_PER_PROBE
+                and not show_is_cached(origin, name, digest)
+                and not show_is_backed_off(origin, name, digest)
+            ):
+                pending.append((name, digest))
             meta = read_show_cached(
                 origin,
                 name,
                 digest=digest,
                 tag_entry=tag_entry,
-                allow_fetch=allow_fetch,
+                allow_fetch=False,
             )
             if meta:
                 model_metadata[name] = meta
-            if isinstance(meta.get("context_length"), int):
+            # Loaded models keep the runtime context from /api/ps; the
+            # trained maximum from /api/show only fills models not loaded.
+            if name not in ps_contexts and isinstance(meta.get("context_length"), int):
                 model_contexts[name] = meta["context_length"]
             if isinstance(meta.get("supports_tools"), bool):
                 supports_tools[name] = meta["supports_tools"]
             if isinstance(meta.get("active_billions"), (int, float)):
                 model_active_billions[name] = float(meta["active_billions"])
 
+        start_show_fill(origin, pending)
         report: dict[str, Any] = {
             "protocol": _PROTOCOL,
             "version": str(version.get("version") or "unknown")[:80],
@@ -1085,9 +1163,11 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     def clear_show_cache() -> None:
         with show_lock:
             show_cache.clear()
+            show_failures.clear()
 
     probe.show = show  # type: ignore[attr-defined]
     probe.clear_show_cache = clear_show_cache  # type: ignore[attr-defined]
+    probe.wait_show_fill = wait_show_fill  # type: ignore[attr-defined]
     probe._sonder_default_allow_remote = allow_remote  # type: ignore[attr-defined]
     return probe
 

@@ -503,6 +503,25 @@ def log_sharded_readiness(
         )
 
 
+def log_sharded_readiness_from_env(
+    logger: logging.Logger,
+    env: Mapping[str, str],
+    *,
+    probe: Callable[[str], ShardedServerHealth] | None = None,
+) -> bool:
+    """Run the startup readiness probe only when RPC sharding is configured.
+
+    Sharding is configured when both ``SONDER_OPENAI_BASE_URL`` and
+    ``SONDER_RPC_PEERS`` are non-empty.  Returns True when the probe ran.
+    """
+    base_url = env.get("SONDER_OPENAI_BASE_URL", "").strip()
+    peers = env.get("SONDER_RPC_PEERS", "").strip()
+    if not (base_url and peers):
+        return False
+    log_sharded_readiness(logger, base_url, probe=probe)
+    return True
+
+
 def probe_sharded_server(
     base_url: str = f"http://{DEFAULT_SERVER_HOST}:{DEFAULT_SERVER_PORT}",
     *,

@@ -8263,12 +8263,9 @@ def main(
         )
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
-        rpc_base = os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
-        rpc_peers = os.environ.get("SONDER_RPC_PEERS", "").strip()
-        if rpc_base and rpc_peers:
-            from sonder_runtime.adapters.inference.rpc_cluster import log_sharded_readiness
+        from sonder_runtime.adapters.inference.rpc_cluster import log_sharded_readiness_from_env
 
-            log_sharded_readiness(_serve_logger, rpc_base)
+        log_sharded_readiness_from_env(_serve_logger, os.environ)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())
