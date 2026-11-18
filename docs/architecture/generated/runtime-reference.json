@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
+    "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
+      "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -279,6 +279,18 @@
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "public_hosting": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Public Hosting"
+              },
               "token": {
                 "default": "",
                 "title": "Token",
@@ -8847,6 +8859,12 @@
         {
           "default": "",
           "name": "token",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "public_hosting",
           "required": false,
           "type": "str"
         }
@@ -20730,6 +20748,12 @@
       "type": "bool"
     },
     {
+      "default": false,
+      "field": "public_hosting",
+      "section": "server",
+      "type": "bool"
+    },
+    {
       "default": "developer",
       "field": "reasoning_audience",
       "section": "server",
@@ -20899,13 +20923,13 @@
   "counts": {
     "capabilities": 246,
     "commands": 365,
-    "configuration": 317,
+    "configuration": 318,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
     "tools": 246
   },
-  "digest": "caeb8473b5c627a58918ef520b9c6534d6aa5571c52be6cc850050d954505e40",
+  "digest": "e2030675c7e4fd9290d2667313f11d4709acebdf0ff46373f9850bf6432f3eef",
   "events": [
     {
       "name": "session.started",
@@ -23617,9 +23641,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
+    "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
     "client": {
-      "digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
+      "digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
       "events": [
         {
           "name": "approval.denied",
@@ -26468,6 +26492,18 @@
           "execution_class": "pure",
           "input_schema": {
             "properties": {
+              "public_hosting": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Public Hosting"
+              },
               "token": {
                 "default": "",
                 "title": "Token",
@@ -36120,6 +36156,18 @@
           "description": "Show the account attached to a session token.",
           "inputSchema": {
             "properties": {
+              "public_hosting": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Public Hosting"
+              },
               "token": {
                 "default": "",
                 "title": "Token",
@@ -44163,6 +44211,18 @@
             "name": "admin_whoami",
             "parameters": {
               "properties": {
+                "public_hosting": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Public Hosting"
+                },
                 "token": {
                   "default": "",
                   "title": "Token",
@@ -52717,13 +52777,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "9a9440978c4685140a798c6f9ccdc7c8a8569c393024e73e5b58d3b9638db3cc",
+    "server.py": "5f3ca5ff7c114f980b4b3fe240feaa23fa90ab4917e1a81c0bd6111b442be8c5",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "464cec387fab8d80d8492b6fbbf669c4f6238ff36c0bce3945ceba66dd7d1683",
+    "sonder_runtime/platform/config.py": "54db41d2c6f6f7bef115cf8e7d08e83225ce03fcc04ecad77e711c10aee2ab77",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
@@ -52906,6 +52966,18 @@
       "name": "admin_whoami",
       "parameters": {
         "properties": {
+          "public_hosting": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Public Hosting"
+          },
           "token": {
             "default": "",
             "title": "Token",

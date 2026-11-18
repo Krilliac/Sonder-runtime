@@ -126,3 +126,24 @@ def parse_untooled_allowlist(payload: object) -> frozenset[str]:
     if len(set(names)) != len(names):
         raise ValueError("untooled allowlist names a command twice")
     return frozenset(names)
+
+
+def allowed_features_for_role(
+    role: str | None,
+    *,
+    public_hosting: bool = False,
+    client_exec_supported: bool = True,
+) -> dict[str, bool]:
+    """Return the capability/feature flags visible to one account role."""
+    normalized = str(role or "").strip().lower()
+    is_admin = normalized == ROLE_ADMIN
+    is_dev = normalized in UNRESTRICTED_ROLES
+    return {
+        "chat": True,
+        "client_exec": bool(client_exec_supported),
+        "host_tools": is_dev,
+        "host_bypass": is_admin,
+        "host_admin": is_admin,
+        "approvals": is_dev,
+        "self_registration": bool(public_hosting),
+    }

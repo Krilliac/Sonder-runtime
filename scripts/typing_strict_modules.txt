@@ -444,6 +444,7 @@ sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/chat_tools.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py
+sonder_runtime/domain/client_tools.py
 sonder_runtime/domain/cloud_model_policy.py
 sonder_runtime/domain/cloud_tier_policy.py
 sonder_runtime/domain/cluster_ownership.py
@@ -557,6 +558,7 @@ sonder_runtime/interfaces/cli/headless.py
 sonder_runtime/interfaces/editor/__init__.py
 sonder_runtime/interfaces/http/__init__.py
 sonder_runtime/interfaces/http/chat_tool_stream.py
+sonder_runtime/interfaces/http/client_tools.py
 sonder_runtime/interfaces/http/facades/__init__.py
 sonder_runtime/interfaces/http/facades/client_protocol.py
 sonder_runtime/interfaces/http/facades/compute_fabric.py
