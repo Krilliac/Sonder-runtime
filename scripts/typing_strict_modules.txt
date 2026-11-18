@@ -68,6 +68,7 @@ sonder_runtime/adapters/inference/ollama.py
 sonder_runtime/adapters/inference/openai_compat.py
 sonder_runtime/adapters/inference/openai_protocol_probe.py
 sonder_runtime/adapters/inference/prewarm_gate.py
+sonder_runtime/adapters/inference/rpc_cluster.py
 sonder_runtime/adapters/inference/runner_footprint.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
 sonder_runtime/adapters/inference/startup_prewarm.py
