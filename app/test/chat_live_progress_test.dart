@@ -15,6 +15,7 @@ import 'package:sonder_runtime/chat/turn_progress.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/theme.dart';
 
+import 'chat_fakes.dart';
 import 'fixtures/server_fixtures.dart';
 import 'goldens/golden_fonts.dart';
 
@@ -201,6 +202,80 @@ void main() {
     expect(events.last, isA<TurnDone>());
   });
 
+  test('the production backend maps sonder-status comments to TurnStatus',
+      () async {
+    final events = <TurnEvent>[];
+    await recordStreamingClients(() async {
+      final backend = SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435');
+      final turn = backend.startTurn(const TurnRequest(
+        history: [ChatMessage(role: Role.user, content: 'hi')],
+        model: 'sonder',
+      ));
+      await turn.events.listen(events.add).asFuture<void>();
+    }, (request, body) async {
+      await body.drain<void>();
+      if (request.url.path == '/v1/sonder/status') {
+        return http.StreamedResponse(
+          Stream.value(utf8.encode(jsonEncode({'status': 'ok'}))),
+          200,
+          headers: jsonHeaders,
+        );
+      }
+      return http.StreamedResponse(
+        Stream.value(utf8.encode(
+            ': sonder-status waiting for memory to load m: need ~6.5 GiB\n\n'
+            ': sonder-status\n\n'
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            'data: [DONE]\n\n')),
+        200,
+        headers: const {'content-type': 'text/event-stream'},
+      );
+    });
+    expect(events.whereType<TurnStatus>().map((e) => e.text),
+        ['waiting for memory to load m: need ~6.5 GiB', '']);
+    final firstText = events.indexWhere((e) => e is TurnDelta);
+    final lastStatus = events.lastIndexWhere((e) => e is TurnStatus);
+    expect(lastStatus, lessThan(firstText),
+        reason: 'the clear frame arrives before the answer text');
+  });
+
+  testWidgets(
+      'an identical status every 15 s for 60 s still opens the stall row at '
+      '20 s, with the status text', (tester) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'sonder');
+    addTearDown(c.dispose);
+    final sent = c.send('hello');
+    await tester.pump();
+    await tester.pumpWidget(MaterialApp(
+      theme: SonderTheme.dark,
+      home: MediaQuery(
+        data: const MediaQueryData(size: Size(800, 600)),
+        child: Scaffold(
+          body: LiveLineView(live: c.live, onStop: () {}, outputLength: 0),
+        ),
+      ),
+    ));
+    const status = 'waiting to load m: every gpu GPU slot is busy';
+    final stallAt = <int>[];
+    for (var s = 1; s <= 60; s++) {
+      if (s % 15 == 1) backend.lastTurn.status(status);
+      await tester.pump(const Duration(seconds: 1));
+      if (find.byKey(const Key('live-stall')).evaluate().isNotEmpty) {
+        stallAt.add(s);
+      }
+    }
+    expect(stallAt, isNotEmpty, reason: 'a repeating status must not hide it');
+    expect(stallAt.first, 20);
+    expect(stallAt.last, 60);
+    expect(find.textContaining('! no output for 1m', findRichText: true),
+        findsOneWidget);
+    expect(find.textContaining(status, findRichText: true), findsOneWidget);
+    backend.lastTurn.done('answer');
+    await sent;
+  });
+
   group('LiveLineView', () {
     late ValueNotifier<LiveTurn?> live;
     final start = DateTime(2026, 10, 1, 12);
@@ -245,6 +320,38 @@ void main() {
           findsOneWidget);
       expect(
           find.textContaining('working · thinking · 20s', findRichText: true),
+          findsOneWidget);
+    });
+
+    testWidgets('a server status replaces the slow-model hint, as plain text',
+        (tester) async {
+      await pumpLine(tester);
+      for (var i = 0; i < 10; i++) {
+        tick();
+      }
+      live.value = live.value!
+          .copyWith(waitStatus: 'waiting for memory to load m: <b>4.2</b> GiB');
+      for (var i = 0; i < 10; i++) {
+        tick();
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // The status does not count as progress, so the row still opens.
+      expect(find.textContaining('! no output for 20s', findRichText: true),
+          findsOneWidget);
+      expect(
+          find.textContaining('waiting for memory to load m: <b>4.2</b> GiB',
+              findRichText: true),
+          findsOneWidget);
+      expect(
+          find.textContaining('slow local model?', findRichText: true),
+          findsNothing);
+      live.value = live.value!.copyWith(clearWaitStatus: true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+          find.textContaining('slow local model? try the fast route',
+              findRichText: true),
           findsOneWidget);
     });
 
