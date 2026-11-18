@@ -1900,7 +1900,45 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
     return errors
 
 
-def _validate(config: SonderConfig, errors: list[str]) -> None:
+def _rpc_peers_errors(raw: str) -> list[str]:
+    """Fail closed when SONDER_RPC_PEERS names endpoints outside 10.77.0.0/30."""
+    tokens = [part.strip() for part in str(raw or "").replace(";", ",").split(",") if part.strip()]
+    if not tokens:
+        return []
+    private_link = ipaddress.IPv4Network("10.77.0.0/30")
+    errors: list[str] = []
+    for token in tokens:
+        if ":" in token:
+            host_part, port_part = token.rsplit(":", 1)
+            try:
+                port = int(port_part.strip())
+            except ValueError:
+                errors.append(f"invalid SONDER_RPC_PEERS port in {token!r}")
+                continue
+            if not 1 <= port <= 65535:
+                errors.append(f"SONDER_RPC_PEERS port out of range in {token!r}")
+                continue
+        else:
+            host_part = token
+        try:
+            addr = ipaddress.ip_address(host_part.strip())
+        except ValueError:
+            errors.append(f"SONDER_RPC_PEERS host must be an IPv4 literal in {token!r}")
+            continue
+        if (
+            not isinstance(addr, ipaddress.IPv4Address)
+            or addr.is_unspecified
+            or addr not in private_link
+            or addr in (private_link.network_address, private_link.broadcast_address)
+        ):
+            errors.append(f"SONDER_RPC_PEERS host {addr} is outside private link {private_link}")
+    return errors
+
+
+def _validate(config: SonderConfig, errors: list[str], *, rpc_peers_raw: str | None = None) -> None:
+    raw_rpc = os.environ.get("SONDER_RPC_PEERS", "") if rpc_peers_raw is None else rpc_peers_raw
+    if str(raw_rpc or "").strip():
+        errors.extend(_rpc_peers_errors(str(raw_rpc)))
     errors.extend(_context_root_errors(config))
     try:
         validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
@@ -2615,7 +2653,11 @@ def load_config(
             setting="[observability].live_export_origins",
         ),
     ))
-    _validate(config, errors)
+    _validate(
+        config,
+        errors,
+        rpc_peers_raw=(env.get("SONDER_RPC_PEERS", "") if env is not None else None),
+    )
     if errors:
         raise ConfigError(errors)
     if config.ollama.ca_bundle:
