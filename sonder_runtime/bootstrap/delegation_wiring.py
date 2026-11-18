@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sonder_runtime.adapters.inference import gpu_admission
+from sonder_runtime.adapters.inference.ollama_pool import local_agent_admission
 from sonder_runtime.adapters.inference.pool_model_catalog import (
     PinResolution,
     PinSource,
@@ -186,6 +187,11 @@ def build_runtime_identity_preamble(
     )
 
 
+def _selected_origin_for_model(pool: Any, model: str, *, default_origin: str = "") -> str:
+    from sonder_runtime.bootstrap.pool_wiring import selected_origin_for_model
+    return selected_origin_for_model(pool, model, default_origin=default_origin)
+
+
 def _run_one_child(
     server: Any,
     spec: DelegationTaskSpec,
@@ -264,12 +270,18 @@ def _run_one_child(
     origin_info = {"origin": "", "model": resolved_model}
 
     pool = getattr(server, "OLLAMA_POOL", None)
+    base_origin = str(getattr(server, "BASE", "") or "").strip().rstrip("/")
+    if not origin_info["origin"] and resolved_model:
+        origin_info["origin"] = _selected_origin_for_model(
+            pool, resolved_model, default_origin=base_origin,
+        )
     pool_route = getattr(pool, "local_agent_admission", None)
-    route_ctx = (
-        pool_route(spec.agent_id)
-        if callable(pool_route) and bool(getattr(pool, "enabled", False))
-        else contextlib.nullcontext()
-    )
+    if callable(pool_route) and bool(getattr(pool, "enabled", False)):
+        route_ctx = pool_route(spec.agent_id)
+    elif bool(getattr(pool, "enabled", False)):
+        route_ctx = local_agent_admission(caller="agent")
+    else:
+        route_ctx = contextlib.nullcontext()
 
     with (
         _rt.depth_scope(1),
@@ -297,10 +309,16 @@ def _run_one_child(
             if spec.model:
                 call_kwargs["model_override"] = spec.model
             output = str(server._agent_impl(child_prompt, **call_kwargs) or "")
+            origin_info["model"] = _rt.current_agent_model() or origin_info["model"]
             last_route_fn = getattr(pool, "last_route", None)
             if callable(last_route_fn) and bool(getattr(pool, "enabled", False)):
                 with contextlib.suppress(*_SOFT_ERRORS):
                     origin_info["origin"] = str(last_route_fn() or "")
+            origin_info["origin"] = _rt.current_agent_origin() or origin_info["origin"]
+            if not origin_info["origin"] and origin_info["model"]:
+                origin_info["origin"] = _selected_origin_for_model(
+                    pool, origin_info["model"], default_origin=base_origin,
+                )
             elapsed_ms = int((time.monotonic() - started) * 1000)
             failed = has_legacy_error_prefix(output)
             status = "failed" if failed else "completed"
@@ -339,6 +357,8 @@ def _run_one_child(
                 personality=spec.personality,
             )
         except (*_SOFT_ERRORS, PermissionError) as exc:
+            origin_info["model"] = _rt.current_agent_model() or origin_info["model"]
+            origin_info["origin"] = _rt.current_agent_origin() or origin_info["origin"]
             elapsed_ms = int((time.monotonic() - started) * 1000)
             err = f"{type(exc).__name__}: {exc}"
             _rt.finish_ephemeral_child(
@@ -662,6 +682,11 @@ class AgentImplBridge:
 
 def _find_sonder_inference_gateway(server: Any) -> Any:
     graph = getattr(server, "_APP_GRAPH", None)
+    if graph is None:
+        app_fn = getattr(server, "_application", None)
+        if callable(app_fn):
+            with contextlib.suppress(*_SOFT_ERRORS):
+                graph = app_fn()
     root_gw = getattr(graph, "model_gateway", None)
     seen: set[int] = set()
     queue: list[Any] = [root_gw] if root_gw is not None else []
@@ -672,10 +697,11 @@ def _find_sonder_inference_gateway(server: Any) -> Any:
         seen.add(id(cand))
         if callable(getattr(cand, "unified_worker_status", None)):
             return cand
-        providers = getattr(cand, "providers", None)
-        if isinstance(providers, Mapping):
-            queue.extend(providers.values())
-        for attr in ("primary", "fallback", "_gateway", "gateway"):
+        for map_attr in ("providers", "_providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping):
+                queue.extend(providers.values())
+        for attr in ("primary", "_primary", "fallback", "_fallback", "_gateway", "gateway"):
             nested = getattr(cand, attr, None)
             if nested is not None:
                 queue.append(nested)
@@ -803,8 +829,19 @@ def open_agent_run(
         stack.callback(detach)
     if _rt.current_delegation_executor() is None and _rt.can_delegate():
         stack.enter_context(_rt.bind_delegation_executor(make_delegation_executor(server)))
+    origin_hint = ""
+    if not cloud and model:
+        origin_hint = _selected_origin_for_model(
+            getattr(server, "OLLAMA_POOL", None),
+            model,
+            default_origin=str(getattr(server, "BASE", "") or ""),
+        )
     if _rt.current_depth() == 0:
-        stack.enter_context(_rt.agent_identity_scope("coordinator", role="coordinator", model=model))
+        stack.enter_context(
+            _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
+        )
+    else:
+        _rt.note_agent_execution(model=model, origin=origin_hint)
     return AgentImplBridge(
         stack=stack,
         prompt=prompt,

@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
+    "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
+      "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -7097,7 +7097,31 @@
                 "title": "Project",
                 "type": "string"
               },
+              "tasks": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tasks"
+              },
               "tasks_json": {
+                "default": "",
                 "title": "Tasks Json",
                 "type": "string"
               },
@@ -7107,9 +7131,6 @@
                 "type": "string"
               }
             },
-            "required": [
-              "tasks_json"
-            ],
             "title": "spawn_agentsArguments",
             "type": "object"
           },
@@ -17078,8 +17099,14 @@
       "params": [
         {
           "default": null,
+          "name": "tasks",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
           "name": "tasks_json",
-          "required": true,
+          "required": false,
           "type": "str"
         },
         {
@@ -20878,7 +20905,7 @@
     "schemas": 4,
     "tools": 246
   },
-  "digest": "1c8aa58b548403b6a0ba227eec387b83564fde3c5b5d55090f0a53ff517237e0",
+  "digest": "f807eeff00df0924c889a3a87d193fb6304f3eed4ac8f8a2c3ba22bc42aa27d5",
   "events": [
     {
       "name": "session.started",
@@ -23590,9 +23617,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
+    "catalog_digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
     "client": {
-      "digest": "25f12ebc68c4aa1a231e27654093e90f0b4409e08562b90a117b5fb578ba4f34",
+      "digest": "d8e91271d9def3004c2f9d1f8d5821cd0ed6c124e6166cb75b7ad1bb46052e6b",
       "events": [
         {
           "name": "approval.denied",
@@ -33259,7 +33286,31 @@
                 "title": "Project",
                 "type": "string"
               },
+              "tasks": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tasks"
+              },
               "tasks_json": {
+                "default": "",
                 "title": "Tasks Json",
                 "type": "string"
               },
@@ -33269,9 +33320,6 @@
                 "type": "string"
               }
             },
-            "required": [
-              "tasks_json"
-            ],
             "title": "spawn_agentsArguments",
             "type": "object"
           },
@@ -42502,7 +42550,31 @@
                 "title": "Project",
                 "type": "string"
               },
+              "tasks": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tasks"
+              },
               "tasks_json": {
+                "default": "",
                 "title": "Tasks Json",
                 "type": "string"
               },
@@ -42512,9 +42584,6 @@
                 "type": "string"
               }
             },
-            "required": [
-              "tasks_json"
-            ],
             "title": "spawn_agentsArguments",
             "type": "object"
           },
@@ -51106,7 +51175,31 @@
                   "title": "Project",
                   "type": "string"
                 },
+                "tasks": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tasks"
+                },
                 "tasks_json": {
+                  "default": "",
                   "title": "Tasks Json",
                   "type": "string"
                 },
@@ -51116,9 +51209,6 @@
                   "type": "string"
                 }
               },
-              "required": [
-                "tasks_json"
-              ],
               "title": "spawn_agentsArguments",
               "type": "object"
             }
@@ -52627,7 +52717,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "899159718ef4ec89ebdd3ee918864ed6dbd626560ee4130dabaaf8d571147ca2",
+    "server.py": "022d8949d2affe02a88debd32839038fa93f58a73df1ff40f9244ca3e5e7bd56",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -59246,7 +59336,31 @@
             "title": "Project",
             "type": "string"
           },
+          "tasks": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tasks"
+          },
           "tasks_json": {
+            "default": "",
             "title": "Tasks Json",
             "type": "string"
           },
@@ -59256,9 +59370,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "tasks_json"
-        ],
         "title": "spawn_agentsArguments",
         "type": "object"
       }

@@ -331,6 +331,24 @@ def current_agent_origin() -> str:
     return str(_AGENT_ORIGIN.get() or "")
 
 
+def note_agent_execution(*, model: str = "", origin: str = "") -> None:
+    """Update active agent ``model`` / ``origin`` in the current context and live child row."""
+    clean_model = str(model or "").strip()
+    clean_origin = str(origin or "").strip().rstrip("/")
+    if clean_model:
+        _AGENT_MODEL.set(clean_model)
+    if clean_origin:
+        _AGENT_ORIGIN.set(clean_origin)
+    if current_depth() >= 1 and (clean_model or clean_origin):
+        agent_id = current_agent_id()
+        changes: dict[str, Any] = {}
+        if clean_model:
+            changes["model"] = clean_model
+        if clean_origin:
+            changes["origin"] = clean_origin
+        update_ephemeral_child(agent_id, **changes)
+
+
 def current_board() -> AgentProgressBoard | None:
     return _ACTIVE_BOARD.get()
 
@@ -815,6 +833,7 @@ __all__ = [
     "emit_agent_event",
     "finish_ephemeral_child",
     "merge_ephemeral_snapshot",
+    "note_agent_execution",
     "parent_agent_id",
     "post_to_board",
     "read_board_messages",

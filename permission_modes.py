@@ -332,10 +332,56 @@ _MODE_SCOPE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.Contex
 _AGENT_APPROVAL_HOOK: contextvars.ContextVar[object] = contextvars.ContextVar(
     "sonder_agent_approval_hook", default=None,
 )
-_PREAPPROVED_EXECUTION: contextvars.ContextVar[tuple[str, object] | None] = contextvars.ContextVar(
+_PREAPPROVED_EXECUTION: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
     "sonder_preapproved_execution", default=None,
 )
+_PREAPPROVED_CAPTURE: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
+    "sonder_preapproved_capture", default=None,
+)
 _SCOPED_MODES: dict[str, str] = {}
+
+
+@contextlib.contextmanager
+def capture_preapproved_scope():
+    """Collect allowed decisions from a surface gate so downstream chain gates do not double-spend."""
+    captured: dict[str, object] = {}
+    token = _PREAPPROVED_CAPTURE.set(captured)
+    try:
+        yield captured
+    finally:
+        _PREAPPROVED_CAPTURE.reset(token)
+
+
+def note_preapproved_decision(tool_name: str, decision) -> None:
+    """Record an allowed surface decision if ``capture_preapproved_scope`` is active."""
+    captured = _PREAPPROVED_CAPTURE.get()
+    if captured is None or decision is None or not getattr(decision, "allowed", False):
+        return
+    canonical = str(tool_name or "").strip().lstrip("/")
+    if canonical:
+        captured[canonical] = decision
+
+
+@contextlib.contextmanager
+def preapproved_tools_scope(decisions):
+    """Allow the immediately following dispatch of tools in ``decisions`` once without double-spending."""
+    normalized = {
+        str(name or "").strip().lstrip("/"): decision
+        for name, decision in dict(decisions or {}).items()
+        if str(name or "").strip().lstrip("/")
+        and decision is not None
+        and getattr(decision, "allowed", False)
+    }
+    if not normalized:
+        yield normalized
+        return
+    merged = dict(_PREAPPROVED_EXECUTION.get() or {})
+    merged.update(normalized)
+    token = _PREAPPROVED_EXECUTION.set(merged)
+    try:
+        yield normalized
+    finally:
+        _PREAPPROVED_EXECUTION.reset(token)
 
 
 @contextlib.contextmanager
@@ -345,22 +391,22 @@ def preapproved_scope(tool_name: str, decision):
     if not canonical or decision is None or not getattr(decision, "allowed", False):
         yield decision
         return
-    token = _PREAPPROVED_EXECUTION.set((canonical, decision))
-    try:
+    with preapproved_tools_scope({canonical: decision}):
         yield decision
-    finally:
-        _PREAPPROVED_EXECUTION.reset(token)
 
 
 def consume_preapproved_decision(tool_name: str):
     """Pop and return the pre-approved decision iff it matches ``tool_name``."""
     entry = _PREAPPROVED_EXECUTION.get()
-    if entry is None:
+    if not entry:
         return None
-    _PREAPPROVED_EXECUTION.set(None)
     canonical = str(tool_name or "").strip().lstrip("/")
-    expected_name, decision = entry
-    if canonical and canonical == expected_name and getattr(decision, "allowed", False):
+    if not canonical or canonical not in entry:
+        return None
+    remaining = dict(entry)
+    decision = remaining.pop(canonical, None)
+    _PREAPPROVED_EXECUTION.set(remaining or None)
+    if decision is not None and getattr(decision, "allowed", False):
         return decision
     return None
 
