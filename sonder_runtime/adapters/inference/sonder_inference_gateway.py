@@ -2250,7 +2250,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _generate_here(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         context = self._with_request_cancel_token(request, context)
         self._call.response_meta = {}
-        if not (request.prompt or "").strip():
+        has_tool_history = bool(
+            request.history
+            and isinstance(request.history[-1], Mapping)
+            and request.history[-1].get("role") == "tool"
+        )
+        if not (request.prompt or "").strip() and not has_tool_history:
             raise InvalidInput("model request prompt is empty")
         settings = self.settings()
         cfg = OpenAICompatibleConfig(
@@ -2328,8 +2333,11 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 remaining = min(self._call_timeout(settings, context), timeout - elapsed)
                 if remaining >= MIN_THINKING_RETRY_SECONDS:
                     retry = dict(payload)
-                    retry["stream"] = False
-                    retry.pop("stream_options", None)
+                    retry["stream"] = live is not None
+                    if live is not None:
+                        retry["stream_options"] = {"include_usage": True}
+                    else:
+                        retry.pop("stream_options", None)
                     template = dict(retry.get("chat_template_kwargs") or {})
                     template["enable_thinking"] = False
                     retry["chat_template_kwargs"] = template

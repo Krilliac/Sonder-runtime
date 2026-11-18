@@ -89,6 +89,20 @@ def pool_unified_status(pool: Any, gateway: object) -> dict[str, Any]:
     return out
 
 
+def merge_pool_unified_status(page: Any, pool: Any, gateway: object) -> Any:
+    """Merge ``pool_unified_status`` onto ``page`` and refresh ``serialized_bytes``."""
+    if not isinstance(page, dict):
+        return page
+    extra = pool_unified_status(pool, gateway)
+    if not extra:
+        return page
+    merged = {**page, **extra}
+    if "serialized_bytes" in merged:
+        for _ in range(3):
+            merged["serialized_bytes"] = len(json.dumps(merged).encode("utf-8"))
+    return merged
+
+
 def fetch_ps_for_origin(
     pool: Any,
     origin: str,

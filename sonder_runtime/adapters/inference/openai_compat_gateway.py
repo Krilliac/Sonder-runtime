@@ -486,10 +486,15 @@ class OpenAICompatibleGateway:
             messages.append({"role": "system", "content": request.system})
         for entry in request.history or ():
             if isinstance(entry, dict) and entry.get("role") and "content" in entry:
-                messages.append({"role": entry["role"], "content": entry["content"]})
+                item = {"role": entry["role"], "content": entry["content"]}
+                for extra_key in ("tool_calls", "tool_call_id", "name"):
+                    if extra_key in entry and entry[extra_key] is not None:
+                        item[extra_key] = entry[extra_key]
+                messages.append(item)
             elif isinstance(entry, (list, tuple)) and len(entry) == 2:
                 messages.append({"role": entry[0], "content": entry[1]})
-        messages.append({"role": "user", "content": request.prompt})
+        if request.prompt or not (messages and messages[-1].get("role") == "tool"):
+            messages.append({"role": "user", "content": request.prompt})
         return messages
 
     @staticmethod

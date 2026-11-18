@@ -15,7 +15,7 @@ import dataclasses
 import logging
 import os
 import time
-from typing import Callable
+from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -247,8 +247,91 @@ def _provider_display_url(gateway: object, provider: str) -> str:
     return "(endpoint unavailable)"
 
 
+def _sonder_inference_any_supports_tools(gateway: object, models: list[str] | tuple[str, ...]) -> bool:
+    """True only when a ``sonder_inference`` gateway advertises ``tools`` for any candidate in ``models``."""
+    raw_models = [str(m or "").strip() for m in models if str(m or "").strip()]
+    wanted = {m.casefold() for m in raw_models}
+    if not wanted or gateway is None:
+        return False
+    env_flag = str(os.environ.get("SONDER_INFERENCE_TOOLS", "") or "").strip().lower()
+    if env_flag in ("0", "off", "false", "no"):
+        return False
+    queue: list[object] = [gateway]
+    seen: set[int] = set()
+    while queue:
+        cand = queue.pop(0)
+        if cand is None or id(cand) in seen:
+            continue
+        seen.add(id(cand))
+        for map_attr in ("_providers", "providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping) and "sonder_inference" in providers:
+                queue.insert(0, providers["sonder_inference"])
+        for attr in ("primary", "_primary", "_gateway", "gateway"):
+            nested = getattr(cand, attr, None)
+            if nested is not None:
+                queue.append(nested)
+        tools_fn = getattr(cand, "_tools_supported", None)
+        cached_snap = getattr(cand, "_health_cache", None)
+        cached_doc = getattr(cached_snap, "document", None)
+        if callable(tools_fn) and cached_doc is not None:
+            try:
+                if any(bool(tools_fn(cached_doc, model=m)) for m in raw_models):
+                    return True
+            except Exception:
+                pass
+        # Skip network probes on unconfigured SonderInferenceGateway instances so non-inference calls never stall.
+        settings_fn = getattr(cand, "settings", None)
+        configured = True
+        if callable(settings_fn):
+            try:
+                cfg = settings_fn()
+                has_workers = bool(getattr(cfg, "workers", ()))
+                has_env = bool(
+                    os.environ.get("SONDER_INFERENCE_URL")
+                    or os.environ.get("SONDER_INFERENCE_MODEL")
+                    or str(os.environ.get("SONDER_MODEL_BACKEND", "")).strip().lower() == "sonder_inference"
+                )
+                configured = has_workers or has_env or cached_snap is not None
+            except Exception:
+                configured = False
+        if not configured:
+            continue
+        unified_fn = getattr(cand, "unified_worker_status", None)
+        if callable(unified_fn):
+            try:
+                status = unified_fn()
+            except Exception:
+                status = None
+            if isinstance(status, Mapping):
+                for row in status.get("workers") or ():
+                    if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
+                        st_map = row.get("supports_tools")
+                        if isinstance(st_map, Mapping):
+                            for m_name, flag in st_map.items():
+                                if flag is True and str(m_name or "").strip().casefold() in wanted:
+                                    return True
+        health_fn = getattr(cand, "health", None)
+        if callable(tools_fn) and callable(health_fn):
+            try:
+                snap = health_fn()
+                doc = getattr(snap, "document", None)
+                if doc is not None and any(bool(tools_fn(doc, model=m)) for m in raw_models):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _sonder_inference_supports_tools(gateway: object, model: object) -> bool:
+    """True only when a live ``sonder_inference`` gateway advertises ``tools`` for ``model``."""
+    name = str(model or "").strip()
+    return _sonder_inference_any_supports_tools(gateway, [name] if name else [])
+
+
 def chat_request(
     gateway: object, payload: dict, rung, *, context: OperationContext, text_only: bool = False,
+    return_message: bool = False,
 ):
     """Serve one local chat step through the gateway for a non-Ollama rung.
 
@@ -259,9 +342,15 @@ def chat_request(
     """
     from sonder_runtime.adapters.tool_lane_guard import require_served
 
+    provider = getattr(rung, "provider", None)
+    supports_tools = (
+        provider == "sonder_inference"
+        and _sonder_inference_supports_tools(gateway, payload.get("model"))
+    )
     try:
         out, response = provider_bridge.generate_via_gateway(
             gateway, payload, tier=rung.tier, context=context,
+            supports_tools=supports_tools,
         )
     except SonderError as exc:
         failure = provider_bridge.classify_failure(exc, provider=rung.provider)
@@ -279,6 +368,9 @@ def chat_request(
         model=str(getattr(response, "model", "") or ""),
         origin="" if origin == "(endpoint unavailable)" else origin,
     )
+    if return_message:
+        msg = out.get("message") if isinstance(out, Mapping) else None
+        return out, dict(msg) if isinstance(msg, Mapping) else {"role": "assistant", "content": response.text}
     return out, response.text
 
 
@@ -324,7 +416,10 @@ def ollama_only_reroute(
     provider = getattr(rung, "provider", None)
     if provider != "sonder_inference":
         return None
-    found = provider_bridge.ollama_only_feature(payload, provider=provider)
+    supports_tools = _sonder_inference_supports_tools(gateway, payload.get("model") or model)
+    found = provider_bridge.ollama_only_feature(
+        payload, provider=provider, supports_tools=supports_tools,
+    )
     if found is None:
         return None
     feature, message = found
