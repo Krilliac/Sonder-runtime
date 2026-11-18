@@ -575,7 +575,6 @@ def test_102_direct_sonder_inference_model_routes_through_provider_dispatch(monk
                 tier=request.tier,
                 tokens_in=4,
                 tokens_out=2,
-                latency_ms=5,
             )
 
     class FailingOllamaGateway:
