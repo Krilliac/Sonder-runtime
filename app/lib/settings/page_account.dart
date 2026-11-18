@@ -173,19 +173,41 @@ extension _AccountPage on _SettingsScreenState {
     );
   }
 
+  SonderApi get _accountApi => SonderApi(
+        baseUrl: _server.text,
+        apiKey: _key.text,
+        accountSession: _account?.matches(_server.text) == true ? _account : null,
+      );
+
+  /// Runs one account-API call and shows what the server answered. A failure
+  /// is shown as a failure, never as success.
+  Future<void> _runAccountCall(
+    String title,
+    Future<Map<String, dynamic>> Function(SonderApi api) call,
+  ) async {
+    try {
+      final reply = await call(_accountApi);
+      if (!mounted) return;
+      _update(() => _apiOutcome = ActionOutcome.ok(
+            title,
+            output: const JsonEncoder.withIndent('  ').convert(reply),
+          ));
+    } on SonderException catch (e) {
+      if (!mounted) return;
+      _update(() => _apiOutcome = ActionOutcome.failed(title, detail: e.message));
+    }
+  }
+
   Widget _swarmStatusSection(BuildContext context) {
     return SettingsSection(
       title: 'Swarm Status',
-      description: 'Active swarm agent monitoring.',
+      description: 'Active swarm agent monitoring. Needs an admin session.',
       children: [
         AsyncActionButton(
           label: 'Refresh Swarm Status',
           icon: Icons.refresh,
-          onPressed: () async {
-            final status = await _api.getSwarmStatus();
-            // Handle status display
-            _update(() {});
-          },
+          onPressed: () =>
+              _runAccountCall('Swarm status', (api) => api.getSwarmStatus()),
         ),
       ],
     );
@@ -197,22 +219,26 @@ extension _AccountPage on _SettingsScreenState {
       description: 'Manage your assigned API keys for Sonder API usage.',
       children: [
         _ActionRow(
+          outcome: _apiOutcome,
+          onDismiss: () => _update(() => _apiOutcome = null),
           buttons: [
+            AsyncActionButton(
+              label: 'List Keys',
+              icon: Icons.list,
+              onPressed: () =>
+                  _runAccountCall('API keys', (api) => api.listApiKeys()),
+            ),
             AsyncActionButton(
               label: 'Generate New Key',
               icon: Icons.vpn_key,
-              onPressed: () async {
-                await _api.generateApiKey();
-                _update(() {});
-              },
+              onPressed: () => _runAccountCall(
+                  'New API key', (api) => api.generateApiKey()),
             ),
             AsyncActionButton(
               label: 'Revoke Key',
               icon: Icons.delete_forever,
-              onPressed: () async {
-                await _api.revokeApiKey();
-                _update(() {});
-              },
+              onPressed: () =>
+                  _runAccountCall('Revoke API key', (api) => api.revokeApiKey()),
             ),
           ],
         ),

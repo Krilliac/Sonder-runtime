@@ -393,12 +393,14 @@ class _ThreadRowState extends State<ThreadRow> with SingleTickerProviderStateMix
                 ),
               ),
             ),
-            IgnorePointer(
-              child: AnimatedBuilder(
-                animation: _particleController,
-                builder: (context, _) => Positioned.fill(
-                  child: CustomPaint(
-                      painter: StaticyPainter(_particleController.value)),
+            // Positioned must be the Stack's direct child.
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _particleController,
+                  builder: (context, _) => CustomPaint(
+                      painter: StaticyPainter(_particleController.value,
+                          color: tokens.text)),
                 ),
               ),
             ),

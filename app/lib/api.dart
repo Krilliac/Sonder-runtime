@@ -791,34 +791,46 @@ class SonderApi implements SonderApiPort {
     );
   }
 
+  /// Lists the API keys of the signed-in account.  The server derives the
+  /// account from the authenticated session, never from this request.
+  Future<Map<String, dynamic>> listApiKeys() =>
+      _appControlPost('/v1/app-control/api-keys/list', 'Could not list API keys.');
+
+  /// Generates a new API key for the signed-in account.
+  Future<Map<String, dynamic>> generateApiKey() => _appControlPost(
+      '/v1/app-control/api-keys/generate', 'Could not generate an API key.');
+
+  /// Revokes the signed-in account's API key.
+  Future<Map<String, dynamic>> revokeApiKey() => _appControlPost(
+      '/v1/app-control/api-keys/revoke', 'Could not revoke the API key.');
+
+  /// Operator view of the swarm; needs an admin session.
+  Future<Map<String, dynamic>> getSwarmStatus() => _appControlPost(
+      '/v1/app-control/swarm/status', 'Could not load swarm status.');
+
+  Future<Map<String, dynamic>> _appControlPost(
+    String path,
+    String failure,
+  ) async {
+    final response = await requestPost(
+      _uri(path),
+      headers: _headers(),
+      body: jsonEncode(const <String, Object?>{}),
+      timeout: const Duration(seconds: 20),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw responseException(response, failure);
+    }
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
   /// Requests cancellation through the existing permission-gated chat
   /// commands.  The aggregate endpoint is read-only; cancellation must keep
   /// the command's owner and approval policy rather than inventing a second
   /// HTTP mutation surface.
-  Future<Map<String, dynamic>> listApiKeys() async {
-    final uri = _uri('/v1/app-control/api-keys/list');
-    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
-    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-  }
-
-  Future<Map<String, dynamic>> generateApiKey() async {
-    final uri = _uri('/v1/app-control/api-keys/generate');
-    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
-    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-  }
-
-  Future<Map<String, dynamic>> revokeApiKey() async {
-    final uri = _uri('/v1/app-control/api-keys/revoke');
-    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
-    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-  }
-
-  Future<Map<String, dynamic>> getSwarmStatus() async {
-    final uri = _uri('/v1/app-control/swarm/status');
-    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
-    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-  }
-
+  Future<void> cancelBackground(
+    String kind,
+    String id, {
     String project = '',
   }) async {
     final normalizedKind = kind.trim().toLowerCase();

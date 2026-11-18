@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/foundation.dart';
@@ -179,7 +180,9 @@ class ShellSidebar extends StatelessWidget {
         return Transform(
           transform: Matrix4.identity()
             ..setEntry(3, 2, 0.002) // Perspective
-            ..rotateY((1 - t) * -0.25), // Hinge effect
+            // Hinge effect while the rail opens or closes; flat at rest, so a
+            // collapsed rail is not left tilted.
+            ..rotateY(-0.25 * math.sin(math.pi * t)),
           alignment: Alignment.centerLeft,
           child: Container(
             key: const Key('shell-sidebar'),
@@ -188,7 +191,7 @@ class ShellSidebar extends StatelessWidget {
               color: tokens.sunken,
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.15 * t),
+                  color: tokens.shadow.withValues(alpha: tokens.shadow.a * t),
                   blurRadius: 10 * t,
                   offset: Offset(5 * t, 0),
                 ),
