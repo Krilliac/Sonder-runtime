@@ -8266,17 +8266,9 @@ def main(
         rpc_base = os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
         rpc_peers = os.environ.get("SONDER_RPC_PEERS", "").strip()
         if rpc_base and rpc_peers:
-            try:
-                from sonder_runtime.adapters.inference.rpc_cluster import probe_sharded_server
+            from sonder_runtime.adapters.inference.rpc_cluster import log_sharded_readiness
 
-                sharded_health = probe_sharded_server(rpc_base)
-                _serve_logger.info(
-                    "RPC sharded backend status: healthy=%s models=%s",
-                    sharded_health.healthy,
-                    list(sharded_health.models),
-                )
-            except Exception as exc:
-                _serve_logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
+            log_sharded_readiness(_serve_logger, rpc_base)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())

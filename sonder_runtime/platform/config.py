@@ -2656,7 +2656,7 @@ def load_config(
     _validate(
         config,
         errors,
-        rpc_peers_raw=(env.get("SONDER_RPC_PEERS", "") if env is not None else None),
+        rpc_peers_raw=merged_env.get("SONDER_RPC_PEERS", ""),
     )
     if errors:
         raise ConfigError(errors)
