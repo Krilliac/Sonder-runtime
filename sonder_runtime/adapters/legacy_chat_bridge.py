@@ -391,7 +391,6 @@ _FALLBACK_HINT = (
 def ollama_only_reroute(
     gateway: object, payload: dict, rung, *, model: str, graph: object,
     loopback_endpoint: bool, context_probe: Callable[[], object],
-    allow_pool_workers: bool = False,
 ) -> dict | None:
     """The payload to serve on local Ollama instead of the bridge, or None.
 
@@ -402,10 +401,12 @@ def ollama_only_reroute(
     -- the existing statement that local Ollama may serve prompts bound for
     Inference -- such a step returns its payload (with the Ollama context
     window the bridged rung skipped, via ``context_probe``) and the caller
-    runs its ordinary Ollama path, *loopback only* (``local_only``), with the
-    payload's own tier model.  Consent never widens: a hosted ``-cloud`` model or a
-    non-loopback Ollama endpoint is refused here, exactly as the pre-send
-    fallback's narrowed context would refuse it.
+    runs its ordinary Ollama path with the payload's own tier model: on the
+    loopback endpoint only (``local_only``), unless ``reroute_may_use_pool``
+    lets the operator's Ollama pool place it on one of its configured workers.
+    A hosted ``-cloud`` model or a non-loopback primary Ollama endpoint is
+    refused here whatever the pool holds, exactly as the pre-send fallback's
+    narrowed context would refuse it.
 
     Returns None for every other step (it stays on the bridge, which refuses
     the feature for providers without a declared fallback).  Without the
@@ -446,7 +447,7 @@ def ollama_only_reroute(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on a local "
             "Ollama model, and this tier's model is hosted" % message
         )
-    if not loopback_endpoint and not allow_pool_workers:
+    if not loopback_endpoint:
         raise refuse(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on the "
             "loopback Ollama endpoint, and this one is remote" % message
@@ -463,6 +464,24 @@ def ollama_only_reroute(
 
     report_provider_fallback(provider, "ollama", OLLAMA_ONLY_FEATURE_REASON)
     return with_local_context(payload, context_probe)
+
+
+def reroute_may_use_pool(pool: object, *, base_loopback: bool, local_only: bool) -> bool:
+    """Whether an ``ollama_only_reroute`` step may be placed by the Ollama pool.
+
+    Node1 pooled inference: with a loopback primary and a pool that holds
+    remote workers, the rerouted step may run on any pool member, a remote
+    worker included.  Those workers are the operator's configured list
+    (``SONDER_OLLAMA_WORKERS``), each admitted by ``validate_worker_origin``
+    only with ``SONDER_ALLOW_REMOTE_OLLAMA=1`` and https; nothing here checks
+    that a worker's address is private.  A remote primary never qualifies
+    (``ollama_only_reroute`` refuses it), and a ``local_only`` call stays on
+    the loopback endpoint.
+    """
+    return bool(
+        base_loopback and not local_only
+        and getattr(pool, "enabled", False) and getattr(pool, "has_remote_workers", False)
+    )
 
 
 def with_local_context(payload: dict, context_probe: Callable[[], object]) -> dict:

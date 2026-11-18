@@ -203,11 +203,33 @@ def admin_opt_in(enabled: bool = True) -> Iterator[None]:
         _ADMIN_OPT_IN.reset(token)
 
 
-_LOCAL_PRIVATE_PROVIDERS = frozenset({"", "ollama", "sonder_inference"})
+_LOCAL_PROVIDERS = frozenset({"", "ollama"})
+
+
+def _sonder_inference_on_loopback() -> bool:
+    """Whether the configured Sonder Inference endpoint is this machine's loopback.
+
+    Read the way the gateway reads it (``config_from_env``, on every call).  The
+    loopback primary is the only Sonder Inference endpoint that counts as local:
+    the approved private workers it places work on (Node1) are reached through
+    it.  A remote endpoint (``SONDER_ALLOW_REMOTE_INFERENCE=1``) does not count,
+    and neither does a configuration that cannot be read.
+    """
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
+
+        return bool(config_from_env().loopback)
+    except Exception:
+        return False
 
 
 def _is_non_local_provider(provider: Any) -> bool:
-    return str(provider or "").strip().lower() not in _LOCAL_PRIVATE_PROVIDERS
+    name = str(provider or "").strip().lower()
+    if name in _LOCAL_PROVIDERS:
+        return False
+    if name == "sonder_inference":
+        return not _sonder_inference_on_loopback()
+    return True
 
 
 def admit(
@@ -251,7 +273,8 @@ def admit(
         )
     if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
-            "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
+            "model '%s' has a restricted tool grant, which applies only to a local model "
+            "(Ollama, or Sonder Inference on loopback)." % (selector,)
         )
     confirmed = decide(model, policy)
     tools = decision.tools & confirmed.tools
