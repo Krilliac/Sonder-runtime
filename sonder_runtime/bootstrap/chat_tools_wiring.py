@@ -31,6 +31,7 @@ from sonder_runtime.domain.client_tools import (
     client_tools_payload,
     resolve_client_slash_command,
 )
+from sonder_runtime.interfaces.http.client_tools import DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS
 
 
 def slash_run_arguments(
@@ -252,13 +253,22 @@ def build_http_chat_tool_turn(
     handoffs: list[dict[str, Any]] = []
 
     def delegate_client(tool_name: str, args: dict[str, Any]) -> tuple[str, ChatToolRecord]:
+        """Run one tool on the caller's PC.
+
+        Streamed: wait in this turn for the client's posted result and give it
+        to the model. Non-streamed: a one-way handoff. The turn ends with the
+        call in ``sonder_receipt.client_tool_handoff``; the result endpoint
+        stays open for ``DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS``, and nothing
+        feeds the posted result back to the model in this turn or the next --
+        a client that wants the model to see it sends it in its next message.
+        """
         call = client_broker.create_call(
             principal=client_principal,
             session=client_session,
             tool=tool_name,
             args=args,
             risk=client_tool_risk(tool_name),
-            timeout_seconds=wait_timeout_seconds,
+            timeout_seconds=wait_timeout_seconds if stream else DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS,
             mode="stream" if stream else "handoff",
         )
         if not stream:
@@ -273,7 +283,8 @@ def build_http_chat_tool_turn(
             msg = (
                 f"CLIENT TOOL HANDOFF ({call.call_id}): tool '{tool_name}' requires execution on "
                 f"the client PC (result endpoint /v1/client-tools/{call.call_id}/result). "
-                "Stop calling tools and report the pending client handoff."
+                "Its result is not returned to you in this turn. Stop calling tools and "
+                "report the pending client handoff."
             )
             return msg, record
         on_event(call.sse_event("awaiting_client_result"))

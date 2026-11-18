@@ -38,11 +38,14 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     pm._reset_for_tests()
     assert pm.BYPASS == "bypass"
     assert pm.BYPASS in pm.MODES
-    for risk in ("safe", "ask", "mutation", "execution", "dangerous", pm.UNCLASSIFIED):
+    for risk in ("safe", "ask", "mutation", "execution", "dangerous"):
         assert pm._MATRIX[pm.BYPASS][risk] == pm.ALLOW
+    # Nothing could classify it: not a prompt bypass skips.
+    assert pm._MATRIX[pm.BYPASS][pm.UNCLASSIFIED] == pm.ASK
 
     rules = {
-        "file_delete": {"pattern": "file_delete", "action": "deny", "note": "shipped default"},
+        # The unmodified shipped default, which bypass alone steps past.
+        "file_delete": {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
         "admin_private_chain_of_thought": {
             "pattern": "admin_private_chain_of_thought",
             "action": "deny",
@@ -178,8 +181,13 @@ def test_scoped_mode_persistence_keeps_default_shape_when_empty(monkeypatch, tmp
     with pm.mode_scope("dev-1", "s-1"):
         pm.set_mode(pm.BYPASS)
     raw = json.loads(state_file.read_text(encoding="utf-8"))
+    # Bypass is never saved, not even for one scope.
+    assert raw == {"mode": pm.AUTO}
+    with pm.mode_scope("dev-1", "s-2"):
+        pm.set_mode(pm.PLAN)
+    raw = json.loads(state_file.read_text(encoding="utf-8"))
     assert raw["mode"] == pm.AUTO
-    assert raw["scopes"]["dev-1|s-1"] == pm.BYPASS
+    assert raw["scopes"] == {"dev-1|s-2": pm.PLAN}
 
     # Ensure concurrent _SCOPED_MODES reads remain thread-safe under scope churn.
     errors = []
