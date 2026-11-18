@@ -9,25 +9,106 @@ class _PermissionsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final info = s._info;
+    final hostAdmin = s._hostAdminAllowed;
+    final showClientSection =
+        !hostAdmin || info?.publicHosting == true || info?.clientExecSupported == true;
     return _PageColumn(children: [
-      ApprovalsPanel(
-        page: s._approvals,
-        error: s._approvalsError,
-        loading: s._loadingExtras,
-        now: s._now,
-        onRefresh: s._loadExtras,
-        onApprove: s._approve,
-        onRevoke: s._revoke,
-        busy: s._approvalBusy,
-        approving: s._approving,
-        outcomes: s._approvalOutcomes,
-        onDismiss: s._dismissApprovalOutcome,
-      ),
+      if (showClientSection) _ClientExecRuntimeSection(s),
+      if (hostAdmin)
+        ApprovalsPanel(
+          page: s._approvals,
+          error: s._approvalsError,
+          loading: s._loadingExtras,
+          now: s._now,
+          onRefresh: s._loadExtras,
+          onApprove: s._approve,
+          onRevoke: s._revoke,
+          busy: s._approvalBusy,
+          approving: s._approving,
+          outcomes: s._approvalOutcomes,
+          onDismiss: s._dismissApprovalOutcome,
+        ),
       _PermissionModeSection(s),
-      HostToolsPanel(source: s._data),
-      if (info?.mcpRuntime != null)
+      if (hostAdmin) HostToolsPanel(source: s._data),
+      if (hostAdmin && info?.mcpRuntime != null)
         _McpRuntimePanel(s: s, runtime: info!.mcpRuntime!),
     ]);
+  }
+}
+
+class _ClientExecRuntimeSection extends StatelessWidget {
+  final _RuntimeScreenState s;
+  const _ClientExecRuntimeSection(this.s);
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = s.widget.settings;
+    final shell = ShellScope.maybeOf(context);
+    final launchCmd = clientCompanionLaunchCommand(
+      workspace: settings.clientWorkspaceRoot,
+      allowOrigin: Settings.pageOrigin ?? '',
+    );
+    return SettingsSection(
+      key: const Key('client-exec-runtime-section'),
+      title: 'Client PC execution',
+      description: 'Tools delegated by the server run on your own PC under '
+          'your client-local permission mode.',
+      children: [
+        ValueRow(
+          key: const Key('client-exec-status'),
+          label: 'Client execution',
+          value: settings.clientExecEnabled
+              ? 'Active (X-Sonder-Client-Exec: 1)'
+              : 'Disabled',
+          kind: settings.clientExecEnabled ? StatusKind.ok : StatusKind.skipped,
+        ),
+        ValueRow(
+          key: const Key('client-exec-mode'),
+          label: 'Client PC mode',
+          description: 'Owned by your client. Bypass skips confirmation on '
+              'your PC only.',
+          value: settings.clientPermissionMode,
+        ),
+        if (!s._hostBypassAllowed)
+          const ValueRow(
+            key: Key('client-exec-host-bypass'),
+            label: 'Host bypass',
+            value: 'Disabled for user accounts',
+            kind: StatusKind.skipped,
+          ),
+        if (!LocalManager.canRunLocalTools)
+          RuntimePanelNote(
+            status: StatusKind.note,
+            word: 'companion',
+            text: 'Browser execution uses the loopback companion: $launchCmd',
+            action: TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: launchCmd));
+                showSonderToast(context, 'Copied companion command');
+              },
+              child: const Text('Copy'),
+            ),
+          ),
+        SettingRow(
+          label: 'Configure client PC mode',
+          description: 'Change client mode, workspace root, or companion settings.',
+          trailing: shell != null
+              ? OutlinedButton(
+                  key: const Key('client-exec-open-settings'),
+                  onPressed: () {
+                    final open = shell.openSection;
+                    if (open != null) {
+                      open(WorkspaceDestination.settings, 'general');
+                    } else {
+                      shell.navigate(WorkspaceDestination.settings);
+                    }
+                  },
+                  child: const Text('Settings'),
+                )
+              : null,
+        ),
+      ],
+    );
   }
 }
 

@@ -150,9 +150,9 @@ sonder_runtime/application/agent_registry/fleet_autopilot.py
 sonder_runtime/application/agent_registry/unified.py
 sonder_runtime/application/agent_registry/workbench_review.py
 sonder_runtime/application/agents/__init__.py
+sonder_runtime/application/agents/delegation_runtime.py
 sonder_runtime/application/agents/durable_lineage.py
 sonder_runtime/application/agents/lineage_delegation.py
-sonder_runtime/application/agents/delegation_runtime.py
 sonder_runtime/application/agents/presets.py
 sonder_runtime/application/agents/recursive_delegation.py
 sonder_runtime/application/agents/workflow_integration.py
@@ -555,6 +555,10 @@ sonder_runtime/interfaces/a2a/__init__.py
 sonder_runtime/interfaces/a2a/jsonrpc.py
 sonder_runtime/interfaces/cli/__init__.py
 sonder_runtime/interfaces/cli/headless.py
+sonder_runtime/interfaces/client_agent/__init__.py
+sonder_runtime/interfaces/client_agent/__main__.py
+sonder_runtime/interfaces/client_agent/executor.py
+sonder_runtime/interfaces/client_agent/server.py
 sonder_runtime/interfaces/editor/__init__.py
 sonder_runtime/interfaces/http/__init__.py
 sonder_runtime/interfaces/http/chat_tool_stream.py

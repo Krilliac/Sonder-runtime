@@ -45,7 +45,16 @@ class ChatSession {
     chat = ChatController(_backendFor(settings), model: settings.model)
       ..contextSize = settings.contextSize
       ..temperature = settings.temperature
-      ..allowApproximateLocation = settings.allowApproximateLocation;
+      ..allowApproximateLocation = settings.allowApproximateLocation
+      ..clientExecEnabled = settings.clientExecEnabled
+      ..clientPermissionMode = settings.clientPermissionMode
+      ..clientWorkspaceRoot = settings.clientWorkspaceRoot
+      ..clientAgentUrl = settings.clientAgentUrl
+      ..clientAgentToken = settings.clientAgentToken
+      ..onClientModeChanged = (mode) {
+        _settings.clientPermissionMode = mode;
+        unawaited(_settings.save());
+      };
   }
 
   Settings _settings;
@@ -116,7 +125,12 @@ class ChatSession {
     chat
       ..contextSize = next.contextSize
       ..temperature = next.temperature
-      ..allowApproximateLocation = next.allowApproximateLocation;
+      ..allowApproximateLocation = next.allowApproximateLocation
+      ..clientExecEnabled = next.clientExecEnabled
+      ..clientPermissionMode = next.clientPermissionMode
+      ..clientWorkspaceRoot = next.clientWorkspaceRoot
+      ..clientAgentUrl = next.clientAgentUrl
+      ..clientAgentToken = next.clientAgentToken;
     final identity = _identityOf(next);
     final changed = identity != _identity;
     _identity = identity;

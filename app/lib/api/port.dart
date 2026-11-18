@@ -24,10 +24,20 @@ abstract interface class SonderApiPort {
   Future<ModelCatalog> modelCatalog();
   Future<EcosystemReading> ecosystemStatus();
   Future<SystemInfo> systemInfo();
+  Future<ServerCapabilities?> fetchCapabilities();
+  Future<WhoamiInfo?> fetchWhoami();
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();
   Future<PermissionMode> setPermissionMode(String mode,
       {String? idempotencyKey, bool confirmBypass = false});
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  });
 
   Future<String> chat(
     List<ChatMessage> messages, {
@@ -48,6 +58,7 @@ abstract interface class SonderApiPort {
     bool allowApproximateLocation,
     Object? sessionTemperature,
     String? history,
+    bool clientExec,
     CancelToken? cancel,
   });
 
@@ -60,6 +71,7 @@ abstract interface class SonderApiPort {
     bool allowApproximateLocation,
     Object? sessionTemperature,
     String? history,
+    bool clientExec,
     CancelToken? cancel,
   });
 
