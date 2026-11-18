@@ -3583,7 +3583,8 @@ def test_bounded_idempotency_key_still_replays(
     monkeypatch.setattr(ts.served_action_receipts, "claim", lambda *a, **k: "claimed")
     monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
     applied = []
-    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # Any mode but bypass is process-global over HTTP (set_global_mode).
+    monkeypatch.setattr(ts.permission_policy, "set_global_mode", lambda mode: applied.append(mode))
     headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
     try:
         with _http_server(monkeypatch) as port:
