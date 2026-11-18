@@ -5233,7 +5233,8 @@ def _preserve_reasoning_failure_usage(
 
 def _bridge_provider_for_tier(tier_label, cloud=False):
     """The non-Ollama provider serving a local rung, or None for Ollama."""
-    return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, _APP_GRAPH)
+    graph = _APP_GRAPH if (_APP_GRAPH is not None or cloud or not str(tier_label or "").strip().lower().startswith("model:")) else _application()
+    return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, graph)
 
 
 def _bridge_operation_context(timeout, cancel_check):
