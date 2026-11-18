@@ -796,3 +796,19 @@ def authenticate_api_key(conn: sqlite3.Connection, key: str) -> str | None:
         (_hash_token(key),),
     ).fetchone()
     return row[0] if row else None
+
+
+def api_key_account(conn: sqlite3.Connection, key: str) -> dict | None:
+    """The public account (role, tier, dev_flags) a live ``key`` stands for, else None.
+
+    None for a malformed, unknown or revoked key and for a banned or deleted
+    account, so the caller sees no difference between them.
+    """
+    username = authenticate_api_key(conn, key)
+    if username is None:
+        return None
+    try:
+        account = public_account(conn, username)
+    except ValueError:  # the account was deleted after the key lookup
+        return None
+    return None if account["banned"] else account

@@ -101,6 +101,23 @@ def _refusal(text: str) -> str:
     return message
 
 
+def classifier_verdict(tool_name: str, args: Any) -> str:
+    """``allow``, ``ask`` or ``block`` for one call, with the catalog's risk grade filled in.
+
+    The rules are ``domain.security.tool_call_classifier``; a grade that cannot
+    be read is no grade, which they answer with ``ask``, as they answer any
+    fault.  No model name is an input, so no model is exempt.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    try:
+        risk = str(gate.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - no grade: the rules ask
+        risk = ""
+    return classifier.classify(tool_name, args, risk=risk)
+
+
 def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
     """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
 
@@ -119,11 +136,7 @@ def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
     from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
     from sonder_runtime.domain.security import tool_call_classifier as classifier
 
-    try:
-        risk = str(gate.risk_of(tool_name))
-    except Exception:  # noqa: BLE001 - no grade: the rules ask
-        risk = ""
-    verdict = classifier.classify(tool_name, args, risk=risk)
+    verdict = classifier_verdict(tool_name, args)
     if verdict == classifier.ALLOW:
         return ""
     if verdict != classifier.ASK:
