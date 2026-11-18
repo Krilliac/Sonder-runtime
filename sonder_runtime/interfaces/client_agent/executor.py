@@ -154,8 +154,79 @@ _GIT_METADATA_DIRECTORY = ".git"
 _GIT_CONTROL_FILES: frozenset[str] = frozenset({".gitattributes", ".gitmodules"})
 
 
-class GitControlPathRefused(PermissionError):
+class WritePathRefused(PermissionError):
+    """A write-class tool targeted a path no client mode may change."""
+
+
+class GitControlPathRefused(WritePathRefused):
     """A write-class tool targeted git metadata or a git-executable config file."""
+
+
+class CredentialPathRefused(WritePathRefused):
+    """A write-class tool targeted a credential store."""
+
+
+# Credential stores, restated from the secret-name rules of the server's
+# mutation guard (``sonder_runtime.adapters.filesystem.file_ops``:
+# SECRET_FILES, CREDENTIAL_READ_* and ``_is_secret_path``); the architecture
+# rules keep the interfaces layer from importing adapters. A write there is a
+# swapped token or a program a later command runs (``~/.ssh/config``
+# ProxyCommand, an ``authorized_keys`` entry, an ``.npmrc`` script-shell), so
+# the write tools refuse it in every mode, bypass included.
+_CREDENTIAL_DIRECTORIES: frozenset[str] = frozenset({
+    ".ssh", ".aws", ".azure", ".gcloud", ".gnupg", ".kube",
+})
+_CREDENTIAL_FILES: frozenset[str] = frozenset({
+    ".credentials.json", ".netrc", "_netrc", ".token", "auth.json",
+    "credentials.json", "secrets.json", "token.json", ".git-credentials", ".pgpass",
+    "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_rsa",
+    ".npmrc", ".pypirc", "kubeconfig", ".terraformrc", "terraform.rc",
+    "credentials.tfrc.json", ".boto", ".s3cfg", ".htpasswd", ".vault-token",
+    "service-account.json", "service_account.json", "serviceaccount.json",
+    "application_default_credentials.json",
+})
+_CREDENTIAL_SUFFIXES: frozenset[str] = frozenset({".key", ".p12", ".pem", ".pfx", ".kdbx"})
+# A config file is a credential store when its name says so (``db_secret.yaml``).
+_NAMED_CREDENTIAL_CONFIG_SUFFIXES: frozenset[str] = frozenset({
+    ".cfg", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml",
+})
+_CREDENTIAL_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    (".docker", "config.json"), (".cargo", "credentials.toml"), (".cargo", "credentials"),
+    (".gem", "credentials"), (".m2", "settings.xml"), (".m2", "settings-security.xml"),
+    ("github cli", "hosts.yml"),
+})
+_CREDENTIAL_DIRECTORY_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    (".config", "gcloud"), ("roaming", "gcloud"),
+})
+_CREDENTIAL_TRIPLES: frozenset[tuple[str, str, str]] = frozenset({
+    (".config", "gh", "hosts.yml"), (".config", "glab-cli", "config.yml"),
+})
+
+
+def _is_credential_name(name: str) -> bool:
+    """``name`` (already canonical) is a credential file by name alone."""
+    dot = name.rfind(".")
+    suffix = name[dot:] if dot > 0 else ""
+    if name in _CREDENTIAL_FILES or suffix in _CREDENTIAL_SUFFIXES:
+        return True
+    if name in {".env", ".envrc"} or name.startswith(".env.") or suffix == ".env":
+        return True
+    return suffix in _NAMED_CREDENTIAL_CONFIG_SUFFIXES and ("credential" in name or "secret" in name)
+
+
+def _is_credential_path(names: list[str]) -> bool:
+    """``names`` (canonical components, leaf last) name a credential store."""
+    if not names:
+        return False
+    if any(name in _CREDENTIAL_DIRECTORIES for name in names):
+        return True
+    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in zip(names, names[1:])):
+        return True
+    if _is_credential_name(names[-1]):
+        return True
+    if len(names) >= 2 and (names[-2], names[-1]) in _CREDENTIAL_PAIRS:
+        return True
+    return len(names) >= 3 and (names[-3], names[-2], names[-1]) in _CREDENTIAL_TRIPLES
 
 
 def _canonical_component(part: str) -> str:
@@ -176,39 +247,45 @@ def _components_under(path: Path, root: Path) -> tuple[str, ...]:
         return path.parts
 
 
-def _git_control_refusal(text: str, resolved: Path, root: Path) -> str:
-    """Why a write to ``text`` (resolving to ``resolved``) is refused, or ``""``.
+def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | None:
+    """The refusal for a write to ``text`` (resolving to ``resolved``), or ``None``.
 
     The lexical spelling and the resolved path are both checked, so neither a
     ``..`` detour nor a symlink or 8.3 short name (which ``resolve`` expands
-    for existing directories) reaches ``.git``. Components above the workspace
-    root are not inspected, so a workspace that itself sits under a directory
-    named ``.git`` is not refused wholesale.
+    for existing directories) reaches ``.git`` or a credential store.
+    Components above the workspace root are not inspected, so a workspace that
+    itself sits under a directory named ``.git`` or ``.ssh`` is not refused
+    wholesale; a path outside the root (bypass) is inspected in full.
     """
     lexical = Path(text)
     lexical_parts = _components_under(lexical, root) if lexical.is_absolute() else lexical.parts
     for parts in (lexical_parts, _components_under(resolved, root)):
         names = [_canonical_component(part) for part in parts]
         if _GIT_METADATA_DIRECTORY in names:
-            return (
+            return GitControlPathRefused(
                 f"refusing to modify git repository metadata '{text}': hooks and config there "
                 "name programs git runs; use run_program (execute approval) if this is intended"
             )
         if names and names[-1] in _GIT_CONTROL_FILES:
-            return (
+            return GitControlPathRefused(
                 f"refusing to modify git control file '{text}': it selects programs git runs; "
                 "use run_program (execute approval) if this is intended"
             )
-    return ""
+        if _is_credential_path(names):
+            return CredentialPathRefused(
+                f"refusing to modify credential store '{text}' from a client tool; "
+                "use run_program (execute approval) if this is intended"
+            )
+    return None
 
 
 def _resolve_write_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
-    """``_resolve_path`` for write-class tools, refusing git-executable config."""
+    """``_resolve_path`` for write-class tools, refusing git-executable config and credential stores."""
     text = str(raw or "").strip() or "."
     resolved = _resolve_path(text, root, allow_escape=allow_escape)
-    reason = _git_control_refusal(text, resolved, root)
-    if reason:
-        raise GitControlPathRefused(reason)
+    refusal = _write_refusal(text, resolved, root)
+    if refusal is not None:
+        raise refusal
     return resolved
 
 
@@ -567,7 +644,9 @@ def _git_environment() -> dict[str, str]:
 
 def _git_executable(root: Path, cwd: Path) -> str:
     """Absolute path of the git on PATH; never one the write tools could have planted."""
-    found = shutil.which("git")
+    # On Windows a ``git.cmd``/``git.bat`` earlier in PATHEXT order would run
+    # through cmd.exe; ask for the executable itself.
+    found = shutil.which("git.exe" if os.name == "nt" else "git")
     if not found:
         raise FileNotFoundError("git is not installed or not on PATH")
     resolved = Path(found).resolve()
@@ -581,9 +660,10 @@ def _git_executable(root: Path, cwd: Path) -> str:
 
 
 def _git_driver_overrides(probe_stdout: str) -> list[str]:
-    """Built-in replacements for every driver key ``_GIT_DRIVER_PROBE`` listed.
+    """Neutralising overrides for every driver key ``_GIT_DRIVER_PROBE`` listed.
 
-    A key of an unexpected shape raises ``ValueError`` (fail closed).
+    A key of an unexpected shape, or a driver name ``-c`` cannot express,
+    raises ``ValueError`` (fail closed).
     """
     overrides: list[str] = []
     seen: set[tuple[str, str]] = set()
@@ -596,16 +676,25 @@ def _git_driver_overrides(probe_stdout: str) -> list[str]:
         section = section.lower()
         if not name or leaf.lower() not in _GIT_DRIVER_LEAVES.get(section, frozenset()):
             raise ValueError("unexpected git driver configuration key; refusing to run git")
+        if "=" in name or "\ufffd" in name or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+            # git splits ``-c`` at the first '=': ``-c filter.a=b.process=``
+            # would set ``filter.a`` and leave the driver named ``a=b`` live.
+            # A name that did not decode cleanly would not match either.
+            raise ValueError(
+                "git driver name contains '=', a control character or invalid UTF-8; refusing to run git"
+            )
         if (section, name) in seen:
             continue
         seen.add((section, name))
         prefix = f"{section}.{name}."
         if section == "filter":
-            # ``process=`` drops the long-running protocol; ``cat`` passes data through.
+            # Empty ``process``/``clean``/``smudge`` make git run no filter
+            # program at all (content passes through unchanged); with
+            # ``required=false`` the missing filter is not an error.
             overrides.extend([
                 "-c", prefix + "process=",
-                "-c", prefix + "clean=cat",
-                "-c", prefix + "smudge=cat",
+                "-c", prefix + "clean=",
+                "-c", prefix + "smudge=",
                 "-c", prefix + "required=false",
             ])
         elif section == "merge":
@@ -620,9 +709,13 @@ def _hardened_git_prefix(git: str, cwd: Path, env: Mapping[str, str]) -> list[st
 
     The static overrides cover hooks, fsmonitor and the rest; a ``git config``
     probe (which launches nothing) then lists the configured filter, merge and
-    diff drivers, and each is replaced with a built-in. A probe that fails
-    (including ``safe.bareRepository`` refusing an embedded bare repository)
-    or times out raises, and no further git command runs: fail closed.
+    diff drivers, and each is neutralised: filters run no program, merge
+    drivers become git's built-in ``merge-file`` and textconv becomes ``cat``
+    (the diff and log tools also pass ``--no-textconv``). A driver whose name
+    ``-c`` cannot express exactly (an '=', a control character, invalid
+    UTF-8) refuses. A probe that fails (including ``safe.bareRepository``
+    refusing an embedded bare repository) or times out raises, and no further
+    git command runs: fail closed.
     """
     base = [git, "--no-pager", "--no-optional-locks", *_GIT_STATIC_OVERRIDES]
     try:
@@ -718,7 +811,7 @@ def execute_client_tool(
             res = _exec_test_run(safe_args, policy.workspace_root, bypass=bypass)
         else:
             res = _exec_git(clean_tool, safe_args, policy.workspace_root, bypass=bypass)
-    except GitControlPathRefused as exc:
+    except WritePathRefused as exc:
         return ClientToolExecutionResult(
             ok=False,
             error=str(exc),

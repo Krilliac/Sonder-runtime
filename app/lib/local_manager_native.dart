@@ -908,6 +908,7 @@ class LocalManager {
     List<String> args, {
     required String workingDirectory,
     Map<String, String>? environment,
+    bool includeParentEnvironment = true,
     required Duration timeout,
     Future<void> Function(int pid)? onKillTree,
   }) async {
@@ -923,6 +924,7 @@ class LocalManager {
         args,
         workingDirectory: workingDirectory,
         environment: environment,
+        includeParentEnvironment: includeParentEnvironment,
       );
     } else {
       try {
@@ -936,6 +938,7 @@ class LocalManager {
           ],
           workingDirectory: workingDirectory,
           environment: environment,
+          includeParentEnvironment: includeParentEnvironment,
         );
         grouped = true;
       } on ProcessException {
@@ -944,6 +947,7 @@ class LocalManager {
           args,
           workingDirectory: workingDirectory,
           environment: environment,
+          includeParentEnvironment: includeParentEnvironment,
         );
       }
     }
@@ -1402,19 +1406,23 @@ class LocalManager {
     return normalized;
   }
 
+  static String _clientRoot(String workspaceRoot) {
+    final rootRaw = workspaceRoot.trim().isEmpty
+        ? Directory.current.path
+        : workspaceRoot.trim();
+    return _canonicalizeWithExistingAncestor(
+      _isAbsolutePath(rootRaw)
+          ? rootRaw
+          : '${Directory.current.path}${Platform.pathSeparator}$rootRaw',
+    );
+  }
+
   static String _resolveClientPath(
     Object? rawArg,
     String workspaceRoot, {
     required bool bypass,
   }) {
-    final rootRaw = workspaceRoot.trim().isEmpty
-        ? Directory.current.path
-        : workspaceRoot.trim();
-    final root = _canonicalizeWithExistingAncestor(
-      _isAbsolutePath(rootRaw)
-          ? rootRaw
-          : '${Directory.current.path}${Platform.pathSeparator}$rootRaw',
-    );
+    final root = _clientRoot(workspaceRoot);
     final raw = (rawArg?.toString() ?? '').trim();
     final candidate = raw.isEmpty || raw == '.'
         ? root
@@ -1431,6 +1439,330 @@ class LocalManager {
       }
     }
     return resolved;
+  }
+
+  // Git runs programs named by repository metadata as a side effect of the
+  // read-only git tools: core.fsmonitor on every status/diff, hooks, and the
+  // filter/diff/merge drivers that .git/config defines and .gitattributes /
+  // .git/info/attributes select. A write there would turn a write-class call
+  // (no prompt in acceptEdits) into execution with no execute prompt, so the
+  // write tools refuse these paths in every mode, bypass included. The same
+  // holds for credential stores (a swapped token, or a program a later
+  // command runs: ~/.ssh/config ProxyCommand, authorized_keys, an .npmrc
+  // script-shell). Mirrors sonder_runtime/interfaces/client_agent/executor.py
+  // and the server's file_ops secret-name rules.
+  static const _gitMetadataDirectory = '.git';
+  static const _gitControlFiles = {'.gitattributes', '.gitmodules'};
+  static const _credentialDirectories = {
+    '.ssh', '.aws', '.azure', '.gcloud', '.gnupg', '.kube', //
+  };
+  static const _credentialFiles = {
+    '.credentials.json', '.netrc', '_netrc', '.token', 'auth.json',
+    'credentials.json', 'secrets.json', 'token.json', '.git-credentials',
+    '.pgpass', 'id_dsa', 'id_ecdsa', 'id_ecdsa_sk', 'id_ed25519',
+    'id_ed25519_sk', 'id_rsa', '.npmrc', '.pypirc', 'kubeconfig',
+    '.terraformrc', 'terraform.rc', 'credentials.tfrc.json', '.boto',
+    '.s3cfg', '.htpasswd', '.vault-token', 'service-account.json',
+    'service_account.json', 'serviceaccount.json',
+    'application_default_credentials.json',
+  };
+  static const _credentialSuffixes = {'.key', '.p12', '.pem', '.pfx', '.kdbx'};
+  static const _namedCredentialConfigSuffixes = {
+    '.cfg', '.ini', '.json', '.toml', '.txt', '.yaml', '.yml', //
+  };
+  static const _credentialPairs = {
+    '.docker/config.json', '.cargo/credentials.toml', '.cargo/credentials',
+    '.gem/credentials', '.m2/settings.xml', '.m2/settings-security.xml',
+    'github cli/hosts.yml',
+  };
+  static const _credentialDirectoryPairs = {'.config/gcloud', 'roaming/gcloud'};
+  static const _credentialTriples = {
+    '.config/gh/hosts.yml', '.config/glab-cli/config.yml', //
+  };
+
+  /// The name Windows opens for [part], lower-cased: NTFS ignores trailing
+  /// dots and spaces and treats `name:stream` (`.git::$INDEX_ALLOCATION`) as
+  /// `name`. Folded on every platform; on POSIX that only errs toward refusal.
+  static String _canonicalClientComponent(String part) {
+    final colon = part.indexOf(':');
+    final s = colon >= 0 ? part.substring(0, colon) : part;
+    var end = s.length;
+    while (end > 0) {
+      final c = s.codeUnitAt(end - 1);
+      if (c != 0x20 && c != 0x2E) break;
+      end--;
+    }
+    return s.substring(0, end).toLowerCase();
+  }
+
+  static bool _isInsideClientDir(String path, String dir) {
+    final p = Platform.isWindows ? path.toLowerCase() : path;
+    final d = Platform.isWindows ? dir.toLowerCase() : dir;
+    final sep = Platform.pathSeparator;
+    return p == d || p.startsWith(d.endsWith(sep) ? d : '$d$sep');
+  }
+
+  /// Components of [path] below [root]; the whole path when it is outside.
+  static List<String> _clientComponentsUnder(String path, String root) {
+    var rest = path;
+    if (_isInsideClientDir(path, root)) {
+      final sep = Platform.pathSeparator;
+      final prefixLength = root.endsWith(sep) ? root.length : root.length + 1;
+      rest = path.length <= prefixLength ? '' : path.substring(prefixLength);
+    }
+    return rest.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+  }
+
+  static bool _isCredentialName(String name) {
+    final dot = name.lastIndexOf('.');
+    final suffix = dot > 0 ? name.substring(dot) : '';
+    if (_credentialFiles.contains(name) || _credentialSuffixes.contains(suffix)) {
+      return true;
+    }
+    if (name == '.env' ||
+        name == '.envrc' ||
+        name.startsWith('.env.') ||
+        suffix == '.env') {
+      return true;
+    }
+    return _namedCredentialConfigSuffixes.contains(suffix) &&
+        (name.contains('credential') || name.contains('secret'));
+  }
+
+  static bool _isCredentialPath(List<String> names) {
+    if (names.isEmpty) return false;
+    if (names.any(_credentialDirectories.contains)) return true;
+    for (var i = 0; i + 1 < names.length; i++) {
+      if (_credentialDirectoryPairs.contains('${names[i]}/${names[i + 1]}')) {
+        return true;
+      }
+    }
+    final n = names.length;
+    if (_isCredentialName(names[n - 1])) return true;
+    if (n >= 2 && _credentialPairs.contains('${names[n - 2]}/${names[n - 1]}')) {
+      return true;
+    }
+    return n >= 3 &&
+        _credentialTriples
+            .contains('${names[n - 3]}/${names[n - 2]}/${names[n - 1]}');
+  }
+
+  /// [_resolveClientPath] for the write-class tools: refuses git metadata,
+  /// git control files and credential stores, judged on both the lexical
+  /// spelling (so `sub/../.git` is caught) and the resolved path (so a
+  /// symlink or short name is caught). Components above the workspace root
+  /// are not inspected; a path outside it (bypass) is inspected in full.
+  static String _resolveClientWritePath(
+    Object? rawArg,
+    String workspaceRoot, {
+    required bool bypass,
+  }) {
+    final resolved = _resolveClientPath(rawArg, workspaceRoot, bypass: bypass);
+    final root = _clientRoot(workspaceRoot);
+    final raw = (rawArg?.toString() ?? '').trim();
+    final lexical = _isAbsolutePath(raw)
+        ? _clientComponentsUnder(raw, root)
+        : raw.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+    for (final parts in [lexical, _clientComponentsUnder(resolved, root)]) {
+      final names = parts.map(_canonicalClientComponent).toList();
+      if (names.contains(_gitMetadataDirectory)) {
+        throw _ClientPathRefused(
+            "Refusing to modify git repository metadata '$raw': hooks and "
+            'config there name programs git runs; use run_program (execute '
+            'approval) if this is intended.');
+      }
+      if (names.isNotEmpty && _gitControlFiles.contains(names.last)) {
+        throw _ClientPathRefused(
+            "Refusing to modify git control file '$raw': it selects programs "
+            'git runs; use run_program (execute approval) if this is intended.');
+      }
+      if (_isCredentialPath(names)) {
+        throw _ClientPathRefused(
+            "Refusing to modify credential store '$raw' from a client tool; "
+            'use run_program (execute approval) if this is intended.');
+      }
+    }
+    return resolved;
+  }
+
+  // Command-line -c values beat every config file, so these hold even for a
+  // repository the tools did not write. Mirrors _GIT_STATIC_OVERRIDES in
+  // sonder_runtime/interfaces/client_agent/executor.py:
+  //   core.hooksPath / core.fsmonitor / core.sshCommand: programs git runs.
+  //   submodule/diff/status settings: never descend into a submodule, whose
+  //     own config the driver probe does not see.
+  //   safe.bareRepository=explicit: a directory the write tools filled with
+  //     HEAD/objects/refs/config (no .git component) is not a repository.
+  //   protocol.allow=never (and GIT_NO_LAZY_FETCH): no lazy fetch runs a
+  //     promisor remote's upload-pack.
+  //   log.showSignature=false: git log never runs gpg.program.
+  static List<String> get _gitStaticOverrides => [
+        '-c', 'core.hooksPath=${Platform.isWindows ? 'nul' : '/dev/null'}',
+        '-c', 'core.fsmonitor=false',
+        '-c', 'core.sshCommand=',
+        '-c', 'submodule.recurse=false',
+        '-c', 'diff.ignoreSubmodules=all',
+        '-c', 'diff.submodule=short',
+        '-c', 'status.submoduleSummary=false',
+        '-c', 'fetch.recurseSubmodules=false',
+        '-c', 'safe.bareRepository=explicit',
+        '-c', 'protocol.allow=never',
+        '-c', 'log.showSignature=false',
+      ];
+
+  // `git config` arguments listing every configured filter/merge/diff driver
+  // key (git's regex syntax; Dart never compiles it). `git config` launches
+  // no program.
+  static const _gitDriverProbe = [
+    'config', '--null', '--name-only', '--get-regexp',
+    r'^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver|diff\..*\.textconv)$',
+  ];
+  static const _gitDriverLeaves = {
+    'filter': {'clean', 'smudge', 'process', 'required'},
+    'merge': {'driver'},
+    'diff': {'textconv'},
+  };
+  static const _builtinMergeDriver = 'git merge-file --marker-size=%L %A %O %B';
+  static const _gitProgramEnvVars = {
+    'GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'GIT_SSH', 'GIT_SSH_COMMAND',
+    'GIT_ASKPASS',
+  };
+  static const _gitTimeout = Duration(seconds: 30);
+
+  static Map<String, String> _clientGitEnvironment() {
+    final env = <String, String>{};
+    Platform.environment.forEach((key, value) {
+      if (!_gitProgramEnvVars.contains(key.toUpperCase())) env[key] = value;
+    });
+    env['GIT_NO_LAZY_FETCH'] = '1';
+    env['GIT_OPTIONAL_LOCKS'] = '0';
+    env['GIT_TERMINAL_PROMPT'] = '0';
+    return env;
+  }
+
+  /// Absolute path of the git on PATH; never one the write tools could have
+  /// planted. Relative PATH entries are skipped, and on Windows only
+  /// `git.exe` is accepted (a `git.cmd` would run through cmd.exe).
+  static String _clientGitExecutable(String root, String cwd) {
+    final pathVar = Platform.environment['PATH'] ?? '';
+    final name = Platform.isWindows ? 'git.exe' : 'git';
+    final sep = Platform.pathSeparator;
+    for (var dir in pathVar.split(Platform.isWindows ? ';' : ':')) {
+      dir = dir.trim();
+      if (Platform.isWindows && dir.length >= 2 && dir.startsWith('"') && dir.endsWith('"')) {
+        dir = dir.substring(1, dir.length - 1);
+      }
+      if (dir.isEmpty || !_isAbsolutePath(dir)) continue;
+      final candidate = '${dir.endsWith(sep) ? dir : '$dir$sep'}$name';
+      if (FileSystemEntity.typeSync(candidate) != FileSystemEntityType.file) {
+        continue;
+      }
+      if (!Platform.isWindows && (File(candidate).statSync().mode & 0x49) == 0) {
+        continue;
+      }
+      final resolved = File(candidate).resolveSymbolicLinksSync();
+      for (final base in [root, cwd]) {
+        if (_isInsideClientDir(resolved, base)) {
+          throw _ClientGitRefused(
+              'Refusing to run a git executable found inside the workspace: $resolved');
+        }
+      }
+      return resolved;
+    }
+    throw const _ClientGitRefused('git is not installed or not on PATH');
+  }
+
+  /// Neutralising overrides for every driver key [_gitDriverProbe] listed:
+  /// filters run no program (empty clean/smudge/process, required=false),
+  /// merge drivers become git's built-in merge-file, textconv becomes `cat`
+  /// (the diff and log tools also pass --no-textconv). A key of an
+  /// unexpected shape, or a driver name `-c` cannot express exactly (git
+  /// splits `-c` at the first '='; a control or non-ASCII character could be
+  /// re-encoded on the way back), refuses: fail closed.
+  static List<String> _clientGitDriverOverrides(String probeStdout) {
+    final overrides = <String>[];
+    final seen = <String>{};
+    for (final rawKey in probeStdout.split('\x00')) {
+      final key = rawKey.trim();
+      if (key.isEmpty) continue;
+      final firstDot = key.indexOf('.');
+      final lastDot = key.lastIndexOf('.');
+      if (firstDot <= 0 || lastDot <= firstDot + 1) {
+        throw const _ClientGitRefused(
+            'Unexpected git driver configuration key; refusing to run git.');
+      }
+      final section = key.substring(0, firstDot).toLowerCase();
+      final name = key.substring(firstDot + 1, lastDot);
+      final leaf = key.substring(lastDot + 1).toLowerCase();
+      if (!(_gitDriverLeaves[section]?.contains(leaf) ?? false)) {
+        throw const _ClientGitRefused(
+            'Unexpected git driver configuration key; refusing to run git.');
+      }
+      if (name.codeUnits.any((c) => c < 0x20 || c > 0x7E || c == 0x3D)) {
+        throw const _ClientGitRefused(
+            "git driver name contains '=' or a non-printable character; "
+            'refusing to run git.');
+      }
+      if (!seen.add('$section.$name')) continue;
+      final prefix = '$section.$name.';
+      if (section == 'filter') {
+        overrides.addAll([
+          '-c', '${prefix}process=',
+          '-c', '${prefix}clean=',
+          '-c', '${prefix}smudge=',
+          '-c', '${prefix}required=false',
+        ]);
+      } else if (section == 'merge') {
+        overrides.addAll(['-c', '${prefix}driver=$_builtinMergeDriver']);
+      } else {
+        overrides.addAll(['-c', '${prefix}textconv=cat']);
+      }
+    }
+    return overrides;
+  }
+
+  /// The git arguments that keep repository config from launching a
+  /// program: the static overrides, then a `git config` probe (which
+  /// launches nothing) of the configured drivers, each neutralised. A probe
+  /// that fails (including safe.bareRepository refusing an embedded bare
+  /// repository) or times out throws, and no further git command runs.
+  static Future<List<String>> _clientHardenedGitArgs(
+    String git,
+    String cwd,
+    Map<String, String> env,
+  ) async {
+    final base = ['--no-pager', '--no-optional-locks', ..._gitStaticOverrides];
+    final probe = await runBoundedProcess(
+      git,
+      [...base, ..._gitDriverProbe],
+      workingDirectory: cwd,
+      environment: env,
+      includeParentEnvironment: false,
+      timeout: _gitTimeout,
+    );
+    if (probe.timedOut) {
+      throw const _ClientGitRefused(
+          'git driver configuration probe timed out; refusing to run git.');
+    }
+    if (probe.exitCode != 0 && probe.exitCode != 1) {
+      // 1 is git's "no matching key".
+      final detail = probe.output.isEmpty ? 'exit code ${probe.exitCode}' : probe.output;
+      throw _ClientGitRefused(
+          'git driver configuration could not be read; refusing to run git: '
+          '${_boundClientText(detail, _maxClientErrorChars)}');
+    }
+    return [...base, ..._clientGitDriverOverrides(probe.stdout)];
+  }
+
+  static int _clientRiskRank(String risk) {
+    switch (risk.trim()) {
+      case 'read_only':
+        return 0;
+      case 'write':
+        return 1;
+      default:
+        return 2;
+    }
   }
 
   /// Reports native desktop execution readiness (or unavailability on mobile).
@@ -1487,7 +1819,12 @@ class LocalManager {
       );
     }
     final cleanTool = tool.trim().replaceFirst(RegExp(r'^/+'), '');
-    final effectiveRisk = risk.isEmpty ? clientToolRisk(cleanTool) : risk;
+    // A declared risk can raise the local classification, never lower it.
+    final localRisk = clientToolRisk(cleanTool);
+    final effectiveRisk = risk.trim().isEmpty ||
+            _clientRiskRank(localRisk) >= _clientRiskRank(risk)
+        ? localRisk
+        : risk.trim();
     if (!approved && !clientModeAllowsWithoutPrompt(mode, effectiveRisk)) {
       return ClientToolExecResult(
         ok: false,
@@ -1524,8 +1861,8 @@ class LocalManager {
             output: _boundClientText(out.join('\n'), _maxClientOutputChars),
           );
         case 'file_write':
-          final path =
-              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
           final content = args['content']?.toString() ?? '';
           final writeMode =
               (args['mode']?.toString() ?? 'overwrite').trim().toLowerCase();
@@ -1545,8 +1882,8 @@ class LocalManager {
             output: 'Wrote ${content.length} chars to $path',
           );
         case 'file_edit':
-          final path =
-              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
           final oldStr = args['old']?.toString() ?? '';
           final newStr = args['new']?.toString() ?? '';
           if (oldStr.isEmpty) {
@@ -1572,8 +1909,8 @@ class LocalManager {
           await file.writeAsString(text.replaceFirst(oldStr, newStr));
           return ClientToolExecResult(ok: true, output: 'Edited $path');
         case 'file_delete':
-          final path =
-              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
           final file = File(path);
           if (!await file.exists()) {
             return ClientToolExecResult(
@@ -1582,8 +1919,8 @@ class LocalManager {
           await file.delete();
           return ClientToolExecResult(ok: true, output: 'Deleted $path');
         case 'directory_create':
-          final path =
-              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
           await Directory(path).create(recursive: true);
           return ClientToolExecResult(
               ok: true, output: 'Created directory $path');
@@ -1800,7 +2137,7 @@ class LocalManager {
           if (cleanTool == 'git_status') {
             gitArgs.addAll(['status', '--short']);
           } else if (cleanTool == 'git_diff') {
-            gitArgs.add('diff');
+            gitArgs.addAll(['diff', '--no-ext-diff', '--no-textconv']);
             if (args['staged'] == true) gitArgs.add('--staged');
             final rel = (args['path']?.toString() ?? '').trim();
             if (rel.isNotEmpty) {
@@ -1810,15 +2147,21 @@ class LocalManager {
           } else if (cleanTool == 'git_log') {
             final limit =
                 (int.tryParse('${args['limit'] ?? 20}') ?? 20).clamp(1, 100);
-            gitArgs.addAll(['log', '-n$limit', '--oneline']);
+            gitArgs.addAll(
+                ['log', '--no-ext-diff', '--no-textconv', '-n$limit', '--oneline']);
           } else {
             gitArgs.addAll(['branch', '-a']);
           }
+          final env = _clientGitEnvironment();
+          final git = _clientGitExecutable(_clientRoot(workspaceRoot), cwd);
+          final hardened = await _clientHardenedGitArgs(git, cwd, env);
           final res = await runBoundedProcess(
-            'git',
-            gitArgs,
+            git,
+            [...hardened, ...gitArgs],
             workingDirectory: cwd,
-            timeout: const Duration(seconds: 30),
+            environment: env,
+            includeParentEnvironment: false,
+            timeout: _gitTimeout,
           );
           return _fromProcessResult(res);
         default:
@@ -1828,6 +2171,12 @@ class LocalManager {
             error: "Tool '$cleanTool' is not supported for client execution.",
           );
       }
+    } on _ClientPathRefused catch (e) {
+      return ClientToolExecResult(
+        ok: false,
+        denied: true,
+        error: _boundClientText(e.message, _maxClientErrorChars),
+      );
     } catch (e) {
       return ClientToolExecResult(
         ok: false,
@@ -1903,6 +2252,25 @@ class LocalManager {
     if (buf.isNotEmpty) out.add(buf.toString());
     return out;
   }
+}
+
+/// A write-class client tool targeted git metadata, a git control file or a
+/// credential store; reported as a denial.
+class _ClientPathRefused implements Exception {
+  final String message;
+  const _ClientPathRefused(this.message);
+
+  @override
+  String toString() => message;
+}
+
+/// A git tool refused to run (fail closed); reported as a tool error.
+class _ClientGitRefused implements Exception {
+  final String message;
+  const _ClientGitRefused(this.message);
+
+  @override
+  String toString() => message;
 }
 
 /// The outcome of [LocalManager.runBoundedProcess].
