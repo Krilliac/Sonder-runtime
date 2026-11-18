@@ -5,7 +5,12 @@ programs, destructive tools -- when nobody is present to answer a mode's
 ``ask``. This ledger is the fourth route out, next to an allow rule, a mode
 that allows the class, and the console prompt: an operator approves *exactly
 one call* (one tool, one argument digest) and the next unchanged call from
-any surface runs once. Nothing here widens a rule, nothing survives one use
+any surface runs once -- the next one made by the owner whose refused call it
+answers: an account's turns record and spend under that account's owner key,
+the operator's own surfaces under the unowned key ''. The operator (the
+console and MCP, which bind no owner, or an explicit ``operator_scope``) sees
+and approves every owner's calls; an account sees only its own; a developer
+its own plus the unowned ones. Nothing here widens a rule, nothing survives one use
 or its expiry. The ledger stores no argument values, with one exception: a
 ``run_code`` pending call carries a bounded, redacted copy of its code
 (``detail``) so the operator can read what they approve. Otherwise the digest
@@ -120,28 +125,96 @@ _PENDING_COLUMNS = (
     ("detail_chars", "INTEGER NOT NULL DEFAULT 0"),
 )
 
-_OWNER_SCOPE: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "sonder_approval_ledger_owner", default=""
+# Who is asking. ``None`` means no owner scope was ever bound on this context:
+# the operator's own process surfaces (the console, MCP, a local-open or
+# deployment-key HTTP turn). An account turn always binds its owner key
+# (``permission_modes.mode_scope`` does it for every ``account:`` principal).
+_OWNER_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sonder_approval_ledger_owner", default=None
 )
 _INCLUDE_UNOWNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "sonder_approval_ledger_include_unowned", default=False
 )
+_ALL_OWNERS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_approval_ledger_all_owners", default=False
+)
 
 
 @contextlib.contextmanager
-def owner_scope(owner: str = "", *, include_unowned: bool = False) -> Iterator[None]:
-    """Bind the active principal owner key for approval ledger operations."""
+def owner_scope(owner: str = "", *, include_unowned: bool = False,
+                all_owners: bool = False) -> Iterator[None]:
+    """Bind the active principal owner key for approval ledger operations.
+
+    ``include_unowned`` adds the unowned ('') rows to the owner's view (a
+    developer). ``all_owners`` is the operator view (an administrator, or the
+    single-owner local-open / deployment-key listener): it reads, resolves,
+    approves, denies and revokes every owner's calls. Writes made on the
+    caller's own behalf (``record_pending``, ``consume``, ``restore``) and the
+    waiting-turn queries (``open_for``, ``denied_for``, ``get``) always use
+    exactly the bound owner key.
+    """
     token = _OWNER_SCOPE.set(str(owner or "").strip())
     unowned_token = _INCLUDE_UNOWNED.set(bool(include_unowned))
+    all_token = _ALL_OWNERS.set(bool(all_owners))
     try:
         yield
     finally:
+        _ALL_OWNERS.reset(all_token)
         _INCLUDE_UNOWNED.reset(unowned_token)
         _OWNER_SCOPE.reset(token)
 
 
+def operator_scope() -> contextlib.AbstractContextManager[None]:
+    """The operator view: every owner's pending calls and approvals."""
+    return owner_scope("", all_owners=True)
+
+
 def current_owner() -> str:
-    return _OWNER_SCOPE.get()
+    return _OWNER_SCOPE.get() or ""
+
+
+def operator_view() -> bool:
+    """True when this context sees every owner's calls.
+
+    Either an explicit ``operator_scope`` / ``owner_scope(all_owners=True)``,
+    or no owner scope bound at all: the console and MCP run with none, and
+    their ``/approvals`` and ``/approve`` must reach the calls account turns
+    left behind.
+    """
+    return bool(_ALL_OWNERS.get()) or _OWNER_SCOPE.get() is None
+
+
+_ALL = "all"
+_WITH_UNOWNED = "with_unowned"
+_EXACT = "exact"
+
+
+def _read_scope(owner: str | None, include_unowned: bool | None) -> tuple[str, str]:
+    """``(kind, owner_key)`` for an operator-facing read or resolve.
+
+    An explicit ``owner`` argument is always exact (plus unowned rows when
+    ``include_unowned`` is true); only the bound context can grant the
+    operator view.
+    """
+    if owner is None:
+        owner_key = current_owner()
+        if operator_view():
+            return _ALL, owner_key
+        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+    else:
+        owner_key = str(owner or "").strip()
+        unowned = bool(include_unowned)
+    if unowned and owner_key:
+        return _WITH_UNOWNED, owner_key
+    return _EXACT, owner_key
+
+
+def _owner_sql(kind: str, owner_key: str) -> tuple[str, tuple[str, ...]]:
+    if kind == _ALL:
+        return "1=1", ()
+    if kind == _WITH_UNOWNED:
+        return "owner IN (?, '')", (owner_key,)
+    return "owner=?", (owner_key,)
 
 
 # One definition of "spendable" shared by ``open_for`` and ``consume``, so the
@@ -278,9 +351,10 @@ class ApprovalLedger:
             return self._path
         return runtime_paths.state_path(DATABASE_NAME, DATABASE_ENV)
 
-    def scope(self, owner: str = "", *, include_unowned: bool = False) -> contextlib.AbstractContextManager[None]:
-        """Bind the principal owner scope for approval ledger calls."""
-        return owner_scope(owner, include_unowned=include_unowned)
+    def scope(self, owner: str = "", *, include_unowned: bool = False,
+              all_owners: bool = False) -> contextlib.AbstractContextManager[None]:
+        """Bind the principal owner scope for approval ledger calls (see ``owner_scope``)."""
+        return owner_scope(owner, include_unowned=include_unowned, all_owners=all_owners)
 
     def pinned(self):
         """Resolve configuration once for one multi-operation host decision.
@@ -319,7 +393,14 @@ class ApprovalLedger:
             try:
                 still = {str(r["name"]) for r in conn.execute("PRAGMA table_info(pending_calls)")}
                 if "owner" not in still:
-                    conn.executescript(
+                    # One statement at a time: ``executescript`` would COMMIT
+                    # the BEGIN IMMEDIATE above first, so a racing upgrader
+                    # could see the table gone between DROP and RENAME, and a
+                    # crash there would leave pending_calls_v2 orphaned. As
+                    # separate statements the rebuild is one transaction, and
+                    # an orphan a pre-fix build left behind is dropped first.
+                    conn.execute("DROP TABLE IF EXISTS pending_calls_v2")
+                    conn.execute(
                         """
                         CREATE TABLE pending_calls_v2 (
                             owner TEXT NOT NULL DEFAULT '',
@@ -334,15 +415,19 @@ class ApprovalLedger:
                             denied_ts REAL,
                             detail_chars INTEGER NOT NULL DEFAULT 0,
                             PRIMARY KEY (owner, digest)
-                        );
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
                         INSERT INTO pending_calls_v2
                             (owner, digest, tool, surface, preview, first_ts, last_ts, count, detail, denied_ts, detail_chars)
                         SELECT '', digest, tool, surface, preview, first_ts, last_ts, count, detail, denied_ts, detail_chars
-                        FROM pending_calls;
-                        DROP TABLE pending_calls;
-                        ALTER TABLE pending_calls_v2 RENAME TO pending_calls;
+                        FROM pending_calls
                         """
                     )
+                    conn.execute("DROP TABLE pending_calls")
+                    conn.execute("ALTER TABLE pending_calls_v2 RENAME TO pending_calls")
                 if conn.in_transaction:
                     conn.execute("COMMIT")
             except BaseException:
@@ -475,40 +560,38 @@ class ApprovalLedger:
             raise ApprovalLedgerError(
                 "a call id is at least %d hex characters (see /approvals)" % MIN_CALL_ID_CHARS
             )
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
-        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+        kind, owner_key = _read_scope(owner, include_unowned)
+        where, params = _owner_sql(kind, owner_key)
         with self._read() as conn:
-            if unowned and owner_key:
-                rows = conn.execute(
-                    "SELECT * FROM pending_calls WHERE owner IN (?, '') AND digest LIKE ? ORDER BY last_ts DESC LIMIT 2",
-                    (owner_key, prefix + "%"),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM pending_calls WHERE owner=? AND digest LIKE ? ORDER BY last_ts DESC LIMIT 2",
-                    (owner_key, prefix + "%"),
-                ).fetchall()
-        if not rows:
-            raise ApprovalLedgerError("no pending call starts with %r" % prefix)
-        if len(rows) > 1:
-            raise ApprovalLedgerError("call id %r is ambiguous; give more characters" % prefix)
-        return self._pending(rows[0])
+            digests = conn.execute(
+                "SELECT DISTINCT digest FROM pending_calls WHERE " + where
+                + " AND digest LIKE ? LIMIT 2",
+                (*params, prefix + "%"),
+            ).fetchall()
+            if not digests:
+                raise ApprovalLedgerError("no pending call starts with %r" % prefix)
+            if len(digests) > 1:
+                raise ApprovalLedgerError("call id %r is ambiguous; give more characters" % prefix)
+            # One call, possibly asked for by more than one owner (the same
+            # tool and arguments): the caller's own row first, then the most
+            # recent. ``issue`` picks the same row, so an approval made from
+            # this answer is spendable by the owner shown.
+            row = conn.execute(
+                "SELECT * FROM pending_calls WHERE " + where
+                + " AND digest=? ORDER BY (owner=?) DESC, last_ts DESC LIMIT 1",
+                (*params, str(digests[0]["digest"]), owner_key),
+            ).fetchone()
+        return self._pending(row)
 
     def pending(self, limit: int = 20, *, owner: str | None = None,
                 include_unowned: bool | None = None) -> list[PendingCall]:
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
-        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+        kind, owner_key = _read_scope(owner, include_unowned)
+        where, params = _owner_sql(kind, owner_key)
         with self._read() as conn:
-            if unowned and owner_key:
-                rows = conn.execute(
-                    "SELECT * FROM pending_calls WHERE owner IN (?, '') ORDER BY last_ts DESC LIMIT ?",
-                    (owner_key, max(1, min(int(limit), 200))),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM pending_calls WHERE owner=? ORDER BY last_ts DESC LIMIT ?",
-                    (owner_key, max(1, min(int(limit), 200))),
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM pending_calls WHERE " + where + " ORDER BY last_ts DESC LIMIT ?",
+                (*params, max(1, min(int(limit), 200))),
+            ).fetchall()
         return [self._pending(row) for row in rows]
 
     # -- approvals ---------------------------------------------------------
@@ -523,6 +606,12 @@ class ApprovalLedger:
         transaction, so it serialises with ``deny``. ``override_denial=True``
         clears the denial and issues in that same transaction; only the
         console ``/approve`` command passes it.
+
+        The approval belongs to the owner whose pending call it answers, so
+        that owner's next unchanged call spends it. In the operator view that
+        is any owner (the caller's own row first, then the most recent, as
+        ``resolve_call`` picks); for a developer, its own row or an unowned
+        one. With no pending call to answer it belongs to the caller's owner.
         """
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
@@ -531,18 +620,22 @@ class ApprovalLedger:
             raise ApprovalLedgerError("an approval needs a tool and a full digest")
         if not approver:
             raise ApprovalLedgerError("an approval must name who approved it")
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
-        unowned = _INCLUDE_UNOWNED.get() if owner is None else False
+        if owner is None:
+            kind, owner_key = _read_scope(None, None)
+        else:
+            kind, owner_key = _EXACT, str(owner or "").strip()
         ttl = clamp_ttl(ttl_seconds)
         now = time.time()
         nonce = "apv_" + secrets.token_hex(8)
         clean = self._clean_preview(preview)
         with self._write() as conn:
             self._prune(conn, now)
-            if unowned and owner_key:
+            if kind != _EXACT:
+                where, params = _owner_sql(kind, owner_key)
                 match = conn.execute(
-                    "SELECT owner FROM pending_calls WHERE owner IN (?, '') AND digest=? ORDER BY owner DESC LIMIT 1",
-                    (owner_key, digest),
+                    "SELECT owner FROM pending_calls WHERE " + where
+                    + " AND digest=? ORDER BY (owner=?) DESC, last_ts DESC LIMIT 1",
+                    (*params, digest, owner_key),
                 ).fetchone()
                 if match is not None:
                     owner_key = str(match["owner"])
@@ -650,13 +743,10 @@ class ApprovalLedger:
         lasts ``DENIAL_TTL_SECONDS``; a refusal inside that window does not
         clear it.
         """
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
         pending = self.resolve_call(
-            call_id_or_digest,
-            owner=owner_key,
-            include_unowned=_INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned),
+            call_id_or_digest, owner=owner, include_unowned=include_unowned,
         )
-        target_owner = pending.owner if hasattr(pending, "owner") else owner_key
+        target_owner = pending.owner
         now = time.time()
         with self._write() as conn:
             cursor = conn.execute(
@@ -728,17 +818,16 @@ class ApprovalLedger:
                include_unowned: bool | None = None) -> Approval | None:
         """Withdraw an open approval; returns it, or None if there is none open."""
         nonce = str(nonce or "").strip()
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
-        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+        kind, owner_key = _read_scope(owner, include_unowned)
+        owner_sql, owner_params = _owner_sql(kind, owner_key)
         now = time.time()
-        owner_sql = "owner IN (?, '')" if (unowned and owner_key) else "owner=?"
         with self._write() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE approvals SET revoked_ts=?
                 WHERE nonce=? AND {owner_sql} AND consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
                 """,
-                (now, nonce, owner_key, now),
+                (now, nonce, *owner_params, now),
             )
             if cursor.rowcount != 1:
                 return None
@@ -756,15 +845,14 @@ class ApprovalLedger:
 
     def approvals(self, *, include_spent: bool = False, limit: int = 20,
                   owner: str | None = None, include_unowned: bool | None = None) -> list[Approval]:
-        owner_key = current_owner() if owner is None else str(owner or "").strip()
-        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+        kind, owner_key = _read_scope(owner, include_unowned)
+        owner_sql, owner_params = _owner_sql(kind, owner_key)
         now = time.time()
         with self._read() as conn:
-            owner_sql = "owner IN (?, '')" if (unowned and owner_key) else "owner=?"
             if include_spent:
                 rows = conn.execute(
                     f"SELECT * FROM approvals WHERE {owner_sql} ORDER BY issued_ts DESC LIMIT ?",
-                    (owner_key, max(1, min(int(limit), 200))),
+                    (*owner_params, max(1, min(int(limit), 200))),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -773,7 +861,7 @@ class ApprovalLedger:
                     WHERE {owner_sql} AND consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
                     ORDER BY issued_ts DESC LIMIT ?
                     """,
-                    (owner_key, now, max(1, min(int(limit), 200))),
+                    (*owner_params, now, max(1, min(int(limit), 200))),
                 ).fetchall()
         return [self._approval(row) for row in rows]
 
@@ -847,5 +935,5 @@ __all__ = [
     "Approval", "ApprovalDeniedError", "ApprovalLedger", "ApprovalLedgerError",
     "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS",
     "MAX_DETAIL_CHARS", "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PendingCall", "call_id", "clamp_ttl",
-    "current_owner", "default_ledger", "owner_scope",
+    "current_owner", "default_ledger", "operator_scope", "operator_view", "owner_scope",
 ]
