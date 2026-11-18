@@ -210,7 +210,8 @@ FIXES = (
 def _run(argv, cwd, compiler, timeout=240):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(cwd), "LANG": "C",
            "LC_ALL": "C", "CXX": compiler, "TERM": "dumb", "NINJA_STATUS": "[%f/%t] "}
-    for key in ("TMP", "TEMP", "TMPDIR"):
+    for key in ("TMP", "TEMP", "TMPDIR", "LIB", "INCLUDE", "LIBPATH", "WindowsSdkDir",
+                "VCToolsInstallDir", "UniversalCRTSdkDir", "SystemRoot"):
         if key in os.environ:
             env[key] = os.environ[key]
     completed = subprocess.run(list(argv), cwd=cwd, capture_output=True, text=True,
@@ -250,6 +251,10 @@ def test_real_ninja_build_model_diagnostics_trace_and_bounded_fix(tmp_path, comp
     for tool in ("cmake", "ninja", compiler):
         if shutil.which(tool) is None:
             pytest.skip("%s not installed" % tool)
+    if compiler == "clang++" and not os.environ.get("LIB"):
+        probe = subprocess.run(["clang++", "--version"], capture_output=True, text=True)
+        if "-windows-msvc" in probe.stdout:
+            pytest.skip("MSVC-target clang++ needs a vcvars environment (LIB is unset)")
     source = tmp_path / "sparklite"
     shutil.copytree(SPARKLITE, source)
     build = source / "build" / "ninja-debug"
