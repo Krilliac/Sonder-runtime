@@ -220,7 +220,7 @@ def _is_credential_path(names: list[str]) -> bool:
         return False
     if any(name in _CREDENTIAL_DIRECTORIES for name in names):
         return True
-    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in zip(names, names[1:])):
+    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in zip(names, names[1:], strict=False)):
         return True
     if _is_credential_name(names[-1]):
         return True
