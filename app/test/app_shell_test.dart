@@ -221,8 +221,8 @@ void main() {
       const tokens = SonderTokens.dark;
       final frame =
           tester.widget<Container>(find.byKey(const Key('shell-sidebar')));
-      expect(frame.color, tokens.sunken);
-      expect(frame.decoration, isNull);
+      expect(
+          (frame.decoration as BoxDecoration).color, tokens.sunken);
       await unmountChat(tester);
     });
 

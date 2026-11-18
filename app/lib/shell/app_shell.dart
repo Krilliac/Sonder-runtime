@@ -260,7 +260,6 @@ class _AppShellState extends State<AppShell>
         mini: StatusKind.running.glyph,
       );
     }
-    final info = chat.status.value;
     final running =
         (info?.agents?.activeAgents ?? 0) + (info?.autopilot?.activeRuns ?? 0);
     if (running > 0) {

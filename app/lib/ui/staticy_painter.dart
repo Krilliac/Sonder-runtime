@@ -4,16 +4,18 @@ import 'package:flutter/material.dart';
 
 class StaticyPainter extends CustomPainter {
   final double animation;
+  final Color color;
   final math.Random _random;
 
-  StaticyPainter(this.animation) : _random = math.Random();
+  StaticyPainter(this.animation, {required this.color})
+      : _random = math.Random();
 
   @override
   void paint(Canvas canvas, Size size) {
     if (animation <= 0 || animation >= 1) return;
 
     final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.5 * (1 - animation))
+      ..color = color.withValues(alpha: 0.5 * (1 - animation))
       ..style = PaintingStyle.fill;
 
     for (int i = 0; i < 15; i++) {
@@ -33,5 +35,6 @@ class StaticyPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(StaticyPainter oldDelegate) => true;
+  bool shouldRepaint(StaticyPainter oldDelegate) =>
+      oldDelegate.animation != animation || oldDelegate.color != color;
 }
