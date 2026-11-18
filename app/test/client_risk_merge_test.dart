@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat_store.dart';
+import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/local_manager_models.dart';
 
 import 'chat_fakes.dart';
@@ -64,6 +65,55 @@ void main() {
       backend.lastTurn.done('x');
       await send;
       c.dispose();
+    });
+
+    testWidgets('a non-stream handoff declared read_only still prompts for run_program',
+        (tester) async {
+      final backend = FakeChatBackend();
+      backend.autoReply = 'done';
+      backend.autoMetadata = const ChatResponseMetadata(
+        clientToolHandoffs: [
+          ClientToolHandoff(
+            callId: 'feedface0002',
+            tool: 'run_program',
+            args: {'command': 'whoami'},
+            risk: 'read_only',
+          ),
+        ],
+      );
+      final c = await _start(tester, backend);
+      c.clientExecEnabled = true;
+      c.clientPermissionMode = 'manual';
+      await c.send('go');
+      await tester.pump();
+      await tester.pump();
+
+      expect(backend.clientToolExecs, isEmpty);
+      c.dispose();
+    });
+
+    test('a later finished frame replaces an earlier error and keeps the stricter risk', () {
+      final first = ChatStreamToolEvent.fromJson({
+        'id': 'abc2',
+        'tool': 'run_program',
+        'risk': 'read_only',
+        'ok': false,
+        'error': 'companion unavailable',
+      });
+      final later = ChatStreamToolEvent.fromJson({
+        'id': 'abc2',
+        'tool': 'run_program',
+        'risk': 'execute',
+        'state': 'finished',
+        'ok': true,
+      });
+      final merged = later.mergedOnto(first);
+      expect(merged.ok, isTrue);
+      expect(merged.error, isNull);
+      expect(merged.risk, 'execute');
+      final lowered = ChatStreamToolEvent.fromJson({'id': 'abc2', 'risk': 'read_only'})
+          .mergedOnto(merged);
+      expect(lowered.risk, 'execute');
     });
 
     testWidgets('a later frame without arguments keeps the arguments',

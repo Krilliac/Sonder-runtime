@@ -791,13 +791,14 @@ class SonderApi implements SonderApiPort {
     );
   }
 
-  /// Lists the API keys of the account the call stands for: the signed-in
-  /// session's account, or the account an assigned API key was minted for.
-  /// The account is never taken from this request.
+  /// Lists the API keys of the signed-in session's account. The account comes
+  /// only from the session token (`X-Sonder-Account-Token`), never from the
+  /// request body. An assigned API key cannot use this route: the server
+  /// refuses it, and the bearer here must be the deployment key.
   Future<Map<String, dynamic>> listApiKeys() =>
       _appControlPost('/v1/app-control/api-keys/list', 'Could not list API keys.');
 
-  /// Generates a new API key for the same account. The reply carries the key
+  /// Generates a new API key for the signed-in session's account. The reply carries the key
   /// once (`key`) with its `key_id`; the server keeps only a hash.
   Future<Map<String, dynamic>> generateApiKey() => _appControlPost(
       '/v1/app-control/api-keys/generate', 'Could not generate an API key.');

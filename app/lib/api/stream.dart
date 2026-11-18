@@ -298,7 +298,9 @@ class ChatStreamToolEvent extends ChatStreamEvent {
   /// This frame laid over the [previous] frame of the same call: what this
   /// frame states wins, and what it leaves out (the arguments, the code, the
   /// risk) is kept from [previous] instead of being lost. The risk is never
-  /// lowered by a later frame: the first one declared stays.
+  /// lowered by a later frame: the stricter of the two stays. A terminal
+  /// outcome (`ok`, `error`, `result`) is the one this frame states, so a
+  /// later `ok: true` frame does not keep an earlier error.
   ChatStreamToolEvent mergedOnto(ChatStreamToolEvent previous) {
     String pick(String now, String before) => now.isNotEmpty ? now : before;
     final hasArgs = args.isNotEmpty || argumentsReported;
@@ -320,17 +322,37 @@ class ChatStreamToolEvent extends ChatStreamEvent {
       backend: pick(backend, previous.backend),
       executionTarget: pick(executionTarget, previous.executionTarget),
       phase: pick(phase, previous.phase),
-      risk: pick(previous.risk, risk),
+      risk: _stricterRisk(previous.risk, risk),
       session: pick(session, previous.session),
       ok: ok ?? previous.ok,
-      denied: denied || previous.denied,
+      denied: ok != null ? denied : (denied || previous.denied),
       bidiWarning: bidiWarning || previous.bidiWarning,
       bidiChars: bidiChars.isNotEmpty ? bidiChars : previous.bidiChars,
       state: pick(state, previous.state),
-      error: error ?? previous.error,
+      error: ok != null ? error : (error ?? previous.error),
       result: result ?? previous.result,
     );
   }
+
+  static int _riskRank(String risk) {
+    switch (risk.trim()) {
+      case '':
+        return -1;
+      case 'read_only':
+        return 0;
+      case 'write':
+      case 'workspace_write':
+        return 1;
+      case 'execute':
+      case 'host_exec':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  static String _stricterRisk(String before, String now) =>
+      _riskRank(now) > _riskRank(before) ? now : before;
 
   factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
     final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
