@@ -31,7 +31,11 @@ A restricted turn (:class:`RestrictedRun`) is then fenced:
   entries of a ``directory_tree`` that name a path matching a secret glob
   (spelled or real; a tree entry under a matching directory too) are withheld
   from the observation (``filter_observation``); a line that does not parse is
-  withheld too.
+  withheld too;
+* every dispatch the other checks allow is classified (``domain.security.tool_call_classifier``),
+  in admin-open runs too: ``block`` refuses in every mode, bypass included; ``ask`` is skipped
+  only in bypass, and otherwise needs a person's approval of exactly that call
+  (:func:`classifier_refusal`).
 
 Its own model calls.  The restricted model stays on the deny list, so the
 generation guard (``tool_lane_guard.require_generation``) would refuse its
@@ -95,6 +99,62 @@ _TREE_TRUNCATED = re.compile(r"^  \.\.\. truncated at \d+ entries$")
 def _refusal(text: str) -> str:
     message = "%s%s" % (_POLICY, text)
     return message
+
+
+def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
+    """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
+
+    ``block`` refuses in every permission mode, bypass included.  ``allow``
+    goes on to the operator's own gate at dispatch, which still decides.
+    ``ask`` is skipped only in bypass (``bypass_root_containment_active``, so a
+    restricted caller role in bypass is still asked).  Otherwise the call must
+    be confirmed by a person: when the operator's mode would already ask for
+    it, the dispatch gate asks, so this returns ``""``; when the mode would
+    let it run outright (``auto``, say), it is decided here as ``manual``
+    would, so it stays refused, naming its call id, until an operator approves
+    exactly that call once (an explicit ``allow`` rule the operator wrote for
+    the tool also answers it, as it answers ``manual``).  Any fault on this
+    path refuses.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    try:
+        risk = str(gate.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - no grade: the rules ask
+        risk = ""
+    verdict = classifier.classify(tool_name, args, risk=risk)
+    if verdict == classifier.ALLOW:
+        return ""
+    if verdict != classifier.ASK:
+        return _refusal("the safety classifier blocks tool '%s' for model '%s'." % (tool_name, model))
+    try:
+        from sonder_runtime.adapters.execution import effect_fence
+
+        if gate.bypass_root_containment_active():
+            return ""
+        arguments = args if isinstance(args, dict) else None
+        preflight = gate.decide(tool_name, interactive=False, surface="agent", record=False,
+                                arguments=arguments)
+        if not preflight.allowed:
+            return ""  # the dispatch gate asks (or refuses) for this call itself
+        decision = gate.decide(tool_name, interactive=False, mode=gate.MANUAL, surface="agent",
+                               record=True, arguments=arguments, fence=effect_fence.current())
+        if decision.allowed:
+            return ""
+        call = str(getattr(decision, "call_id", "") or "")
+        # Not decision.reason: its remedies name modes, and no mode lifts this ask.
+        reason = (
+            "approve exactly this call once at the console with /approve %s, or write an "
+            "explicit allow rule for the tool with /permissions" % call
+            if call else str(decision.reason)
+        )
+    except Exception:  # noqa: BLE001 - an unconfirmable ask is a refusal, never an allow
+        reason = "the confirmation could not be checked"
+    return _refusal(
+        "the safety classifier requires confirmation for tool '%s' from model '%s': %s"
+        % (tool_name, model, reason)
+    )
 
 
 # ---- entry marking ------------------------------------------------------------
@@ -489,7 +549,8 @@ class RestrictedRun:
             def admin_check(tool_name: str, args: Any) -> str:
                 if not self.still_granted():
                     return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
-                return str(inner(tool_name, args) or "") if inner is not None else ""
+                refused = str(inner(tool_name, args) or "") if inner is not None else ""
+                return refused or classifier_refusal(self.model, tool_name, args)
 
             return admin_check
 
@@ -524,7 +585,8 @@ class RestrictedRun:
             refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root), globs)
             if refused:
                 return refused
-            return str(inner(tool_name, args) or "") if inner is not None else ""
+            refused = str(inner(tool_name, args) or "") if inner is not None else ""
+            return refused or classifier_refusal(self.model, tool_name, args)
 
         return check
 

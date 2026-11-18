@@ -89,11 +89,9 @@ if "_PRINCIPAL_ID" not in globals():
 
 
 def get_swarm_status() -> list[dict]:
+    """Every local agent row, for the admin-only app-control swarm view."""
     with _LOCK:
-        return [
-            {"id": agent_id, **data}
-            for agent_id, data in _AGENTS.items()
-        ]
+        return [{"id": agent_id, **data} for agent_id, data in _AGENTS.items()]
 
 
 def _lane_deadline(row, progress_deadline: float) -> float:
@@ -101,11 +99,6 @@ def _lane_deadline(row, progress_deadline: float) -> float:
     resolve = getattr(fleet_store, "lane_progress_deadline", None)
     if resolve is None:
         return float(progress_deadline)
-    try:
-        return float(resolve(row, progress_deadline))
-    except Exception:
-        return float(progress_deadline)
-
     try:
         return float(resolve(row, progress_deadline))
     except Exception:

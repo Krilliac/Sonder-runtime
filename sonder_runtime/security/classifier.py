@@ -1,39 +1,45 @@
-"""Middleware security classifier for tool calls."""
+"""The safety classifier with the live permission catalog's risk grade filled in.
+
+The rules are ``sonder_runtime.domain.security.tool_call_classifier``; this
+module only reads the grade for the tool (``permission_policy.risk_of``) and
+asks them, for callers outside the layered packages (``server.py`` and other
+entry modules).  Inside ``sonder_runtime``, the restricted tool lane consults
+the domain rules directly.  A grade that cannot be read is no grade, which the
+rules answer with ``ASK``.  Stateless and thread-safe.
+"""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger("sonder_runtime.security.classifier")
+from sonder_runtime.domain.security import tool_call_classifier as _rules
+from sonder_runtime.domain.security.tool_call_classifier import ALLOW, ASK, BLOCK, VERDICTS
+
+
+def risk_of(tool_name: str) -> str:
+    """The permission catalog's grade for ``tool_name``; ``""`` when it cannot be read."""
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+        return str(permission_policy.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - an unreadable grade asks, never allows
+        return ""
+
+
+def classify(tool_name: str, arguments: Any) -> str:
+    """``ALLOW``, ``ASK`` or ``BLOCK`` for one tool call; ``ASK`` on any fault."""
+    return _rules.classify(tool_name, arguments, risk=risk_of(tool_name))
+
 
 class SecurityClassifier:
-    """Classifies tool calls for restricted models using a model or static rules."""
-    
-    def __init__(self):
-        self.restricted_prefixes = ("astra-cyber-",)
+    """Object form of :func:`classify`; every model is classified the same way.
 
-    def is_restricted(self, model_name: str) -> bool:
-        return any(model_name.startswith(p) for p in self.restricted_prefixes)
+    ``model_name`` is accepted so callers can pass what they know, but no model
+    name exempts a call: an unrestricted model gets the same verdict.
+    """
 
     def classify(self, model_name: str, tool_name: str, arguments: Any) -> str:
-        """
-        Return 'ALLOW', 'ASK', or 'DENY'.
-        """
-        if not self.is_restricted(model_name):
-            return "ALLOW"
-        
-        # 1. Static Rule-Based Classifier (Safety First)
-        if tool_name == "git_commit":
-            return "ALLOW"
-        
-        if tool_name in {"file_delete", "run_command"}:
-            # Elevated or destructive tools require prompt
-            return "ASK"
-            
-        # 2. Model-Based Classifier (For Complex/Ambiguous cases)
-        # Placeholder: Wire up to qwen3.5:4b for analysis
-        logger.info(f"Classifier analyzing {tool_name} for model {model_name}")
-        
-        # Example decision logic (would call sonder RPC here)
-        # For now, default to ASK to be safe
-        return "ASK"
+        del model_name
+        return classify(tool_name, arguments)
+
+
+__all__ = ["ALLOW", "ASK", "BLOCK", "VERDICTS", "SecurityClassifier", "classify", "risk_of"]
