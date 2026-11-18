@@ -621,3 +621,103 @@ def test_102_direct_sonder_inference_model_routes_through_provider_dispatch(monk
     reply = gen("hello node1")
     assert reply == "NODE1_DIRECT_OK"
     assert seen_requests == [("model:qwen3.6:35b", "qwen3.6:35b", "hello node1")]
+
+
+def test_109_blocked_node1_sonder_inference_model_in_bypass_and_text_only(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane
+    from sonder_runtime.adapters import tool_lane_guard
+    from sonder_runtime.adapters.provider_bindings import ProviderBindings
+    from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
+    from sonder_runtime.application.chat import provider_bridge
+    from sonder_runtime.application.ports.model_gateway import ModelResponse
+
+    blocked_model = "astra-cyber-35b-a3b:latest"
+    seen = []
+
+    class FakeSonderInferenceGateway:
+        def unified_worker_status(self, ollama_pool=None):
+            return {
+                "available_models": [blocked_model],
+                "workers": [{
+                    "source": "sonder_inference_worker",
+                    "origin": "https://10.77.0.2:8443",
+                    "healthy": True,
+                    "models": [blocked_model],
+                }],
+            }
+
+        def generate(self, request, context):
+            seen.append((request.tier, (request.options or {}).get("model")))
+            return ModelResponse(
+                text="ASTRA_OK",
+                model=str((request.options or {}).get("model") or blocked_model),
+                tier=request.tier,
+                tokens_in=3,
+                tokens_out=2,
+            )
+
+    bindings = ProviderBindings(
+        default_generation_provider="sonder_inference",
+        tier_providers={
+            "fast": "sonder_inference",
+            "general": "sonder_inference",
+            "code": "sonder_inference",
+            "reasoning": "sonder_inference",
+            "vision": "ollama",
+        },
+        embedding_provider="ollama",
+    )
+    dispatch = ProviderDispatchGateway(
+        providers={"sonder_inference": FakeSonderInferenceGateway(), "ollama": SimpleNamespace()},
+        tier_providers=dict(bindings.tier_providers),
+        default_generation_provider="sonder_inference",
+        embedding_provider="ollama",
+    )
+    monkeypatch.setattr(
+        server, "_APP_GRAPH",
+        SimpleNamespace(provider_bindings=bindings, model_gateway=dispatch),
+        raising=False,
+    )
+
+    # 1. text_only (ensemble_answer / chat by name) succeeds through sonder_inference without tier refusal
+    gen_text = server._make_tier_generate(f"model:{blocked_model}", blocked_model, "", 0.2, 64, 0, text_only=True)
+    assert gen_text("ping") == "ASTRA_OK"
+
+    # 2. Manual mode blocks restricted_tool_lane admission; Mode.BYPASS admits sonder_inference model:*
+    lane = restricted_tool_lane.entry("agent", "")
+    pm.set_mode(pm.MANUAL)
+    denied_run, denied_refusal = restricted_tool_lane.admit(
+        lane, blocked_model, tool_lane_guard.DENIED_LABEL, server._RUNTIME_POLICY,
+        unsafe=False, prepared=False,
+        resolve=lambda: (blocked_model, False, False, f"model:{blocked_model}"),
+        provider_for=server._bridge_provider_for_tier,
+    )
+    assert denied_run is None and denied_refusal == ""
+
+    with pm.attended_bypass_confirm():
+        pm.set_mode(pm.BYPASS)
+    bypass_run, bypass_refusal = restricted_tool_lane.admit(
+        lane, blocked_model, tool_lane_guard.DENIED_LABEL, server._RUNTIME_POLICY,
+        unsafe=False, prepared=False,
+        resolve=lambda: (blocked_model, False, False, f"model:{blocked_model}"),
+        provider_for=server._bridge_provider_for_tier,
+    )
+    assert bypass_refusal == "" and bypass_run is not None and bypass_run.admin_open is True
+
+    # 3. Non-text-only tool turn under RestrictedRun.generator passes require_generation + require_served
+    gen_bypass = restricted_tool_lane.permitted(
+        bypass_run,
+        server._make_tier_generate(f"model:{blocked_model}", blocked_model, "", 0.2, 64, 0, text_only=False),
+    )
+    assert gen_bypass("agent step") == "ASTRA_OK"
+
+    # 4. External/cloud provider (e.g. openrouter) remains refused even in BYPASS
+    ext_run, ext_refusal = restricted_tool_lane.admit(
+        lane, blocked_model, tool_lane_guard.DENIED_LABEL, server._RUNTIME_POLICY,
+        unsafe=False, prepared=False,
+        resolve=lambda: (blocked_model, False, False, f"model:{blocked_model}"),
+        provider_for=lambda _label: "openrouter",
+    )
+    assert ext_run is None and ext_refusal == ""
+    assert seen == [(f"model:{blocked_model}", blocked_model), (f"model:{blocked_model}", blocked_model)]
+    assert provider_bridge.provider_for_tier("code", bindings) == "sonder_inference"
