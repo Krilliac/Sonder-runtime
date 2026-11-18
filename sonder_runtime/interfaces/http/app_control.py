@@ -5,6 +5,8 @@ import re
 import threading
 import time
 from ...application.ports.app_control_http import ControlError
+import admin_auth as admin_auth_module
+import master_orchestrator as master_orchestrator_module
 
 _SLOTS = threading.BoundedSemaphore(8)
 _LOCK = threading.Lock()
@@ -81,6 +83,10 @@ def _route(method, target):
         "/clear": "clear_selection",
         "/revoke": "revoke_binding",
         "/work": "prepare_work",
+        "/api-keys/list": "list_api_keys",
+        "/api-keys/generate": "generate_api_key",
+        "/api-keys/revoke": "revoke_api_key",
+        "/swarm/status": "get_swarm_status",
     }
     suffix = path.removeprefix("/v1/app-control")
     if method == "POST" and suffix in post and not separator:
@@ -191,6 +197,21 @@ def handle_app_control(
             if not deployment_authorized(authorization or "", config):
                 raise ControlError(401, "APP_CONTROL_AUTH_REQUIRED")
             account = _token(account)
+            
+            # Key management handlers
+            if action == "list_api_keys":
+                keys = admin_auth_module.list_api_keys(binding.store.conn, account)
+                return reply(200, {"keys": keys})
+            elif action == "generate_api_key":
+                key = admin_auth_module.generate_api_key(binding.store.conn, account)
+                return reply(200, {"key": key})
+            elif action == "revoke_api_key":
+                admin_auth_module.revoke_api_key(binding.store.conn, account)
+                return reply(200, {"ok": True})
+            elif action == "get_swarm_status":
+                status = master_orchestrator_module.get_swarm_status()
+                return reply(200, {"status": status})
+
             if method == "POST":
                 body = handler._read_json(max_bytes=16384)
                 if action in {

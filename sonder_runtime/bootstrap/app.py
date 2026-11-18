@@ -2173,6 +2173,8 @@ def build_application(
     _recover_interrupted_build_fixes(build_tools, peer_hosts_live=_build_fix_peer_hosts_live)
     if inference_pool is not None:
         ollama_pool.configure_typed_pool(inference_pool)
+        from .pool_wiring import attach_pool_to_gateway
+        attach_pool_to_gateway(raw_gateway, inference_pool)
     return application
 
 

@@ -390,7 +390,7 @@ def test_both_spellings_of_one_tool_get_the_same_answer(monkeypatch):
     )
 
     def agree():
-        for mode in pm.MODES:
+        for mode in pm._CYCLE_MODES:
             pm.set_mode(mode)
             before = len(ran)
             named = ts._handle_slash("/delete notes.txt")

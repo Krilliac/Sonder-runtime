@@ -37,6 +37,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
+from sonder_runtime.application.command_surface.command_text import ascii_lower, slash_head
 from sonder_runtime.application.ports.command_catalog import (
     CatalogCommand,
     CatalogInvocation,
@@ -344,7 +345,7 @@ _CATEGORY_BY_SLASH = {
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
     "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
-    "/trace": "system", "/strict": "system", "/dump": "system",
+    "/trace": "system", "/strict": "system", "/temp": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/approve": "security", "/approvals": "security",
@@ -443,6 +444,9 @@ _READ_ONLY = frozenset({
     # (bootstrap/reference_agent_tools.py): query and count only, no model
     # call, no write, no network; the index path is never an argument.
     "reference_search",
+    # Transient in-memory agent progress / peer-board coordination only (no
+    # disk, database, network, or command execution).
+    "report_progress", "post_status", "post_to_board", "read_board",
 })
 
 # Branches whose real work is done by module-level functions that front no
@@ -1210,7 +1214,7 @@ def narrow_branch_tools(cmd, argument, tools):
     support that operation, and the union is kept so the surface refuses it
     as it always did.
     """
-    command = str(cmd or "").strip().lower()
+    command = slash_head(cmd)
     words = str(argument or "").strip().split(None, 1)
     action = words[0].lower() if words else ""
     union = tuple(tools or ())
@@ -1904,6 +1908,10 @@ def by_name(name: str) -> Optional[CatalogCommand]:
         return None
     if not wanted.startswith("/"):
         wanted = "/" + wanted
+    if not wanted.isascii():
+        # Command names and aliases are ASCII; str.lower() would fold U+212A
+        # (Kelvin sign) to "k" and resolve a non-ASCII head to a real command.
+        return None
     wanted = wanted.lower()
     for command in catalog():
         if wanted in (n.lower() for n in command.all_names):
@@ -2317,7 +2325,7 @@ def unknown_command(cmd: str, width: int = 80, sep: str = " · ",
 
 
 def help_category(name: str) -> str:
-    key = str(name or "").strip().lower().lstrip("/")
+    key = ascii_lower(str(name or "").strip()).lstrip("/")
     grouped = categories()
     if key not in grouped:
         close = [k for k in grouped if k.startswith(key) or key in k]
@@ -2414,7 +2422,7 @@ def help_text(topic: str = "") -> str:
     try:
         if not key:
             return help_overview()
-        if key.lstrip("/").lower() in categories():
+        if ascii_lower(key.lstrip("/")) in categories():
             return help_category(key)
         return help_command(key)
     except CatalogUnavailable as exc:

@@ -6,6 +6,7 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat_screen.dart';
 import 'package:sonder_runtime/chat_store.dart';
+import 'package:sonder_runtime/local_manager.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/shell/app_shell.dart';
@@ -32,6 +33,12 @@ class FakeTurn implements ChatTurn {
   void phase(String p) => controller.add(TurnPhase(p));
   void delta(String text) => controller.add(TurnDelta(text));
 
+  /// The server's wait status; an empty [text] is its clearing frame.
+  void status(String text) => controller.add(TurnStatus(text));
+
+  /// Emits a `sonder_tool` event during the live turn.
+  void tool(ChatStreamToolEvent event) => controller.add(TurnTool(event));
+
   void done(String text, {ChatResponseMetadata? metadata}) {
     controller.add(TurnDone(ChatReply(text: text, metadata: metadata)));
     controller.close();
@@ -53,9 +60,24 @@ class FakeChatBackend implements ChatBackend {
   final List<FakeTurn> turns = [];
   final List<String> feedback = [];
   final List<String> modePosts = [];
+  final List<(String, bool)> modeRequests = [];
   final List<String> workRunGets = [];
   final List<String> workRunCancels = [];
   final List<(String, Duration)> approvals = [];
+  final List<(String, String, String)> denials = [];
+  final List<(String, Map<String, dynamic>, bool, String)> clientToolExecs = [];
+  final List<(String, bool, String, String, bool, String)> clientToolResults = [];
+
+  ServerCapabilities? capabilities;
+  WhoamiInfo? whoami;
+  Future<ClientToolExecResult> Function(
+    String callId,
+    String tool,
+    Map<String, dynamic> args,
+    String risk,
+    String mode,
+    bool approved,
+  )? clientExecHandler;
 
   /// `(tool, digest)` sent with each approval, in order.
   final List<(String, String)> approvalBindings = [];
@@ -100,6 +122,8 @@ class FakeChatBackend implements ChatBackend {
   WorkRun Function(String id)? cancelWorkRunResult;
   ApprovalOutcome approvalOutcome =
       const ApprovalOutcome(ApprovalStatus.approved, nonce: 'n_c41a');
+  ApprovalOutcome denialOutcome =
+      const ApprovalOutcome(ApprovalStatus.approved);
 
   FakeTurn get lastTurn => turns.last;
 
@@ -137,6 +161,12 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
+  Future<ServerCapabilities?> fetchCapabilities() async => capabilities;
+
+  @override
+  Future<WhoamiInfo?> fetchWhoami() async => whoami;
+
+  @override
   Future<List<String>> listModels() async => models;
 
   /// Per-row routing fields of `/v1/models`, keyed by lower-case id.
@@ -165,11 +195,13 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
-  Future<PermissionMode> setPermissionMode(String next) async {
+  Future<PermissionMode> setPermissionMode(String next,
+      {bool confirmBypass = false}) async {
     modePosts.add(next);
+    modeRequests.add((next, confirmBypass));
     final err = modeWriteError;
     if (err != null) throw err;
-    mode = permissionModeFor(next);
+    mode = permissionModeFor(next, canBypass: mode?.canBypass ?? false);
     return mode!;
   }
 
@@ -214,22 +246,64 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''}) async {
+    denials.add((callId, tool, digest));
+    return denialOutcome;
+  }
+
+  @override
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  }) async {
+    clientToolExecs.add((tool, args, approved, mode));
+    final handler = clientExecHandler;
+    if (handler != null) {
+      return handler(callId, tool, args, risk, mode, approved);
+    }
+    return ClientToolExecResult(ok: true, output: 'executed $tool');
+  }
+
+  @override
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  }) async {
+    clientToolResults.add((callId, ok, output, error, denied, session));
+  }
+
+  @override
   void dispose() {}
 }
 
 /// A server-shaped permission mode record.
-PermissionMode permissionModeFor(String mode, {bool elevated = false}) {
+PermissionMode permissionModeFor(String mode,
+    {bool elevated = false, bool canBypass = false}) {
   const blurbs = <String, String>{
     'plan': 'reads only - no writes, no commands',
     'manual': 'ask before anything that is not a read',
     'acceptEdits': 'file changes proceed; running programs still asks',
     'auto': 'file changes and programs proceed',
+    'bypass': 'skips all confirmations and filesystem root containment',
   };
   return PermissionMode(
     mode: mode,
     label: mode,
     blurb: blurbs[mode] ?? '',
     elevated: elevated,
+    canBypass: canBypass,
     modes: [
       for (final e in blurbs.entries)
         PermissionModeOption(name: e.key, label: e.key, blurb: e.value),

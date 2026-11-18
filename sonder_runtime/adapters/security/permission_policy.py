@@ -62,6 +62,25 @@ class PermissionPolicyProvider:
         """Context for a mode change a present person makes (console only)."""
         return _engine().attended_mode_change()
 
+    def attended_bypass_confirm(self):
+        """Context for explicit attended confirmation of bypass mode."""
+        return _engine().attended_bypass_confirm()
+
+    def mode_scope(self, principal: str = "", session: str = ""):
+        """Context binding principal/session permission-mode scope."""
+        return _engine().mode_scope(principal, session)
+
+    def capture_preapproved_scope(self):
+        """Collect allowed decisions from a surface gate for downstream forwarding."""
+        return _engine().capture_preapproved_scope()
+
+    def note_preapproved_decision(self, tool_name: str, decision) -> None:
+        _engine().note_preapproved_decision(tool_name, decision)
+
+    def preapproved_tools_scope(self, decisions):
+        """Allow pre-approved tools once in downstream chain gates without double-spending."""
+        return _engine().preapproved_tools_scope(decisions)
+
     def current_mode(self) -> str:
         return _engine().current_mode()
 

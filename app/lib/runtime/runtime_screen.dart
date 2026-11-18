@@ -56,6 +56,7 @@ part 'panels/operational_capabilities_panel.dart';
 part 'panels/activity_panels.dart';
 part 'panels/updates_panels.dart';
 part 'panels/ecosystem_panel.dart';
+part 'panels/saas_config_panel.dart';
 part 'widgets.dart';
 
 /// Former name, kept for existing call sites (`chat_screen.dart`, tests).
@@ -246,6 +247,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   ModelCatalog? _modelCatalog;
   Object? _ecosystemError;
   bool _loadingExtras = false;
+
+  /// Bumped when the server, key or account changes. An extras load that
+  /// started under an older generation is discarded and re-run.
+  int _extrasGeneration = 0;
   PermissionMode? _mode;
   Object? _modeError;
   bool _modeLoaded = false;
@@ -318,6 +323,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _mode = null;
       _modeError = null;
       _modeLoaded = false;
+      _extrasGeneration++;
       unawaited(_loadExtras());
     }
   }
@@ -374,6 +380,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   /// permission mode: the reads beyond `/v1/sonder/status` on each cycle.
   Future<void> _loadExtras() async {
     if (_loadingExtras) return;
+    final generation = _extrasGeneration;
     setState(() => _loadingExtras = true);
     List<WorkRun>? runs;
     Object? runsError;
@@ -432,6 +439,13 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       readMode(),
     ]);
     if (!mounted) return;
+    if (generation != _extrasGeneration) {
+      // The identity changed while this load was in flight: its result
+      // belongs to the old server/account. Drop it and load again.
+      setState(() => _loadingExtras = false);
+      unawaited(_loadExtras());
+      return;
+    }
     setState(() {
       _loadingExtras = false;
       _workRuns = runs ??
@@ -1312,7 +1326,24 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return failed ? StatusKind.warn : null;
   }
 
-  bool get _hasUpdates => _updateStatus != null || _extensionRegistry != null;
+  bool get _hasUpdates =>
+      _hostAdminAllowed && (_updateStatus != null || _extensionRegistry != null);
+
+  bool get _hostAdminAllowed {
+    final features =
+        _info?.allowedFeatures ?? _info?.capabilities?.allowedFeatures;
+    if (features != null) return features.hostAdmin;
+    if (_info?.role == 'user') return false;
+    return true;
+  }
+
+  bool get _hostBypassAllowed {
+    final bypass = _info?.hostBypassAllowed ?? _info?.capabilities?.hostBypassAllowed;
+    if (bypass != null) return bypass;
+    final features = _info?.allowedFeatures;
+    if (features != null) return features.hostBypass;
+    return _mode?.canBypass ?? false;
+  }
 
   // -- Layout --------------------------------------------------------------
 
@@ -1399,6 +1430,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         icon: Icons.school_outlined,
         description:
             'What the runtime has learned, and how well it is grounded.',
+        requiredRole: 'admin',
         keywords: const [
           'learning quality',
           'lessons',
@@ -1417,9 +1449,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         label: 'Permissions',
         group: 'Safety',
         icon: Icons.shield_outlined,
-        description:
-            'Approvals, the permission mode, and the tools agents can reach.',
-        badge: waiting > 0
+        description: _hostAdminAllowed
+            ? 'Approvals, the permission mode, and the tools agents can reach.'
+            : 'Client PC execution, local permission mode and access policy.',
+        badge: _hostAdminAllowed && waiting > 0
             ? Semantics(
                 label: '$waiting approval${waiting == 1 ? '' : 's'} waiting',
                 child: ExcludeSemantics(
@@ -1433,6 +1466,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'approve',
           'revoke',
           'permission mode',
+          'client pc',
           'host tools',
           'developer tools',
           'mcp',
@@ -1445,6 +1479,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         group: 'Host',
         icon: Icons.dns_outlined,
         description: 'The local server process and its launcher.',
+        requiredRole: 'admin',
         badge: problem == null
             ? null
             : StatusPill(problem,
@@ -1469,19 +1504,20 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         group: 'Host',
         icon: Icons.insights_outlined,
         description: 'Live telemetry for the Sonder Observatory.',
+        requiredRole: 'admin',
         keywords: const ['telemetry', 'export', 'connect urls'],
         builder: (context) => _ObservatoryPage(this),
       ),
-      if (_hasUpdates)
-        SonderCategory(
-          id: RuntimeCategories.updates,
-          label: 'Updates & extensions',
-          group: 'Host',
-          icon: Icons.system_update_alt_outlined,
-          description: 'Releases of this runtime and its extensions.',
-          keywords: const ['release', 'rollback', 'extensions', 'version'],
-          builder: (context) => _UpdatesPage(this),
-        ),
+      SonderCategory(
+        id: RuntimeCategories.updates,
+        label: 'Updates & extensions',
+        group: 'Host',
+        icon: Icons.system_update_alt_outlined,
+        description: 'Releases of this runtime and its extensions.',
+        requiredRole: 'admin',
+        keywords: const ['release', 'rollback', 'extensions', 'version'],
+        builder: (context) => _UpdatesPage(this),
+      ),
       SonderCategory(
         id: RuntimeCategories.cluster,
         label: 'Cluster',
@@ -1489,6 +1525,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         icon: Icons.lan_outlined,
         description:
             'Deployment profile, distributed capabilities and compute nodes.',
+        requiredRole: 'admin',
         keywords: const [
           'deployment',
           'profile',
@@ -1506,6 +1543,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         group: 'Advanced',
         icon: Icons.terminal_outlined,
         description: 'Slash commands and the raw status report.',
+        requiredRole: 'admin',
         keywords: const [
           'command',
           'console',
@@ -1515,6 +1553,15 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'diagnostics',
         ],
         builder: (context) => _DeveloperPage(this),
+      ),
+      SonderCategory(
+        id: 'saas-config',
+        label: 'SaaS Config',
+        group: 'Advanced',
+        icon: Icons.settings_applications_outlined,
+        description: 'Configure usage metering and feature flags.',
+        requiredRole: 'admin',
+        builder: (context) => SaasConfigPanel(_api),
       ),
       SonderCategory(
         id: RuntimeCategories.about,
@@ -1581,6 +1628,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return CategoryScaffold(
       title: 'Runtime',
       categories: _categories(),
+      userRole: _info?.role,
       initialId: widget.initialCategory,
       leading: leading,
       actions: actions,

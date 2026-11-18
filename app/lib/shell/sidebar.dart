@@ -10,6 +10,7 @@ import '../theme.dart';
 import '../ui/kit.dart';
 import '../ui/sonder_mark.dart';
 import '../workspace_ui.dart';
+import 'chat_link.dart' show ChatShareKind;
 import 'shortcuts.dart';
 
 /// Width of the expanded sidebar.
@@ -126,6 +127,10 @@ class ShellSidebar extends StatelessWidget {
   final ValueChanged<WorkspaceDestination> onDestination;
   final ValueChanged<ChatThread> onOpenThread;
   final ValueChanged<ChatThread> onDeleteThread;
+
+  /// Copy a conversation's link or code; null leaves the rows without the
+  /// share menu.
+  final void Function(ChatThread thread, ChatShareKind kind)? onShareThread;
   final VoidCallback onConnection;
 
   const ShellSidebar({
@@ -145,6 +150,7 @@ class ShellSidebar extends StatelessWidget {
     required this.onOpenThread,
     required this.onDeleteThread,
     required this.onConnection,
+    this.onShareThread,
     this.onToggleCollapsed,
     this.onShowShortcuts,
     this.inDrawer = false,
@@ -170,17 +176,31 @@ class ShellSidebar extends StatelessWidget {
       builder: (context, _) {
         final t = SonderMotion.standard.transform(expansion.value);
         final width = lerpDouble(kSidebarRailWidth, kSidebarWidth, t)!;
-        return Container(
-          key: const Key('shell-sidebar'),
-          width: width,
-          // The frame is told from the page by tone alone.
-          color: tokens.sunken,
-          child: ClipRect(
-            child: OverflowBox(
-              alignment: Alignment.topLeft,
-              minWidth: kSidebarWidth,
-              maxWidth: kSidebarWidth,
-              child: _content(context, t, kSidebarWidth),
+        return Transform(
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.002) // Perspective
+            ..rotateY((1 - t) * -0.25), // Hinge effect
+          alignment: Alignment.centerLeft,
+          child: Container(
+            key: const Key('shell-sidebar'),
+            width: width,
+            decoration: BoxDecoration(
+              color: tokens.sunken,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15 * t),
+                  blurRadius: 10 * t,
+                  offset: Offset(5 * t, 0),
+                ),
+              ],
+            ),
+            child: ClipRect(
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minWidth: kSidebarWidth,
+                maxWidth: kSidebarWidth,
+                child: _content(context, t, kSidebarWidth),
+              ),
             ),
           ),
         );
@@ -257,6 +277,7 @@ class ShellSidebar extends StatelessWidget {
                     projectFilter: projectFilter,
                     onOpenThread: onOpenThread,
                     onDeleteThread: onDeleteThread,
+                    onShareThread: onShareThread,
                   ),
                 ),
               ),
@@ -676,6 +697,7 @@ class _ThreadSection extends StatelessWidget {
   final String? projectFilter;
   final ValueChanged<ChatThread> onOpenThread;
   final ValueChanged<ChatThread> onDeleteThread;
+  final void Function(ChatThread thread, ChatShareKind kind)? onShareThread;
 
   const _ThreadSection({
     required this.state,
@@ -685,6 +707,7 @@ class _ThreadSection extends StatelessWidget {
     required this.projectFilter,
     required this.onOpenThread,
     required this.onDeleteThread,
+    required this.onShareThread,
   });
 
   @override
@@ -731,6 +754,9 @@ class _ThreadSection extends StatelessWidget {
               running: thread.id == state.runningThreadId,
               touch: touch,
               onTap: () => onOpenThread(thread),
+              onShare: onShareThread == null
+                  ? null
+                  : (kind) => onShareThread!(thread, kind),
               onDelete: state.threads.length <= 1
                   ? null
                   : () => onDeleteThread(thread),

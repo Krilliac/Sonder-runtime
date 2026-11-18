@@ -15,7 +15,7 @@ import dataclasses
 import logging
 import os
 import time
-from typing import Callable
+from collections.abc import Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -45,12 +45,91 @@ def provider_bindings(graph: object) -> object:
         raise ModelCallError("configuration", str(exc), status=503) from exc
 
 
+def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
+    """Return True when the graph's ``sonder_inference`` gateway advertises ``model_name``."""
+    from collections.abc import Mapping
+
+    wanted = str(model_name or "").strip()
+    if not wanted or graph is None:
+        return False
+    root_gw = getattr(graph, "model_gateway", None)
+    if root_gw is None:
+        return False
+    seen: set[int] = set()
+    queue: list[object] = [root_gw]
+    gw = None
+    while queue:
+        cand = queue.pop(0)
+        if cand is None or id(cand) in seen:
+            continue
+        seen.add(id(cand))
+        if callable(getattr(cand, "unified_worker_status", None)):
+            gw = cand
+            break
+        for map_attr in ("providers", "_providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping):
+                preferred = providers.get("sonder_inference")
+                if preferred is not None:
+                    queue.insert(0, preferred)
+                for k, v in providers.items():
+                    if k != "sonder_inference":
+                        queue.append(v)
+        for attr in ("primary", "_primary", "fallback", "_fallback", "_gateway", "gateway"):
+            nested = getattr(cand, attr, None)
+            if nested is not None:
+                queue.append(nested)
+    if gw is None:
+        return False
+    candidates: list[str] = []
+    try:
+        status = gw.unified_worker_status()
+    except Exception:
+        status = None
+    if isinstance(status, Mapping):
+        for row in status.get("workers") or ():
+            if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
+                for raw in row.get("models") or ():
+                    text = str(raw or "").strip()
+                    if text:
+                        candidates.append(text)
+    if not candidates:
+        try:
+            snap = gw.health()
+            doc = getattr(snap, "document", None)
+            if isinstance(doc, Mapping):
+                for raw in doc.get("models") or ():
+                    text = str(raw or "").strip()
+                    if text:
+                        candidates.append(text)
+        except Exception:
+            pass
+    wanted_cf = wanted.casefold()
+    for item in candidates:
+        if item.casefold() == wanted_cf:
+            return True
+    if ":" not in wanted:
+        prefix = wanted_cf + ":"
+        return any(item.casefold().startswith(prefix) for item in candidates)
+    return False
+
+
 def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | None:
     """The non-Ollama provider serving a local rung, or None for Ollama."""
     if cloud:
         return None
-    provider = provider_bridge.provider_for_tier(tier_label, provider_bindings(graph))
-    return provider if provider_bridge.is_bridged(provider) else None
+    bindings = provider_bindings(graph)
+    provider = provider_bridge.provider_for_tier(tier_label, bindings)
+    if provider_bridge.is_bridged(provider):
+        return provider
+    raw_label = str(tier_label or "").strip()
+    if raw_label.lower().startswith("model:"):
+        model_name = raw_label[len("model:"):].strip()
+        tiers_map = getattr(bindings, "tier_providers", None) or {}
+        if model_name and "sonder_inference" in tiers_map.values():
+            if _sonder_inference_advertises_model(graph, model_name):
+                return "sonder_inference"
+    return None
 
 
 def prompt_identity_model(model: str, tier_label: object, provider: str | None,
@@ -168,8 +247,91 @@ def _provider_display_url(gateway: object, provider: str) -> str:
     return "(endpoint unavailable)"
 
 
+def _sonder_inference_any_supports_tools(gateway: object, models: list[str] | tuple[str, ...]) -> bool:
+    """True only when a ``sonder_inference`` gateway advertises ``tools`` for any candidate in ``models``."""
+    raw_models = [str(m or "").strip() for m in models if str(m or "").strip()]
+    wanted = {m.casefold() for m in raw_models}
+    if not wanted or gateway is None:
+        return False
+    env_flag = str(os.environ.get("SONDER_INFERENCE_TOOLS", "") or "").strip().lower()
+    if env_flag in ("0", "off", "false", "no"):
+        return False
+    queue: list[object] = [gateway]
+    seen: set[int] = set()
+    while queue:
+        cand = queue.pop(0)
+        if cand is None or id(cand) in seen:
+            continue
+        seen.add(id(cand))
+        for map_attr in ("_providers", "providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping) and "sonder_inference" in providers:
+                queue.insert(0, providers["sonder_inference"])
+        for attr in ("primary", "_primary", "_gateway", "gateway"):
+            nested = getattr(cand, attr, None)
+            if nested is not None:
+                queue.append(nested)
+        tools_fn = getattr(cand, "_tools_supported", None)
+        cached_snap = getattr(cand, "_health_cache", None)
+        cached_doc = getattr(cached_snap, "document", None)
+        if callable(tools_fn) and cached_doc is not None:
+            try:
+                if any(bool(tools_fn(cached_doc, model=m)) for m in raw_models):
+                    return True
+            except Exception:
+                pass
+        # Skip network probes on unconfigured SonderInferenceGateway instances so non-inference calls never stall.
+        settings_fn = getattr(cand, "settings", None)
+        configured = True
+        if callable(settings_fn):
+            try:
+                cfg = settings_fn()
+                has_workers = bool(getattr(cfg, "workers", ()))
+                has_env = bool(
+                    os.environ.get("SONDER_INFERENCE_URL")
+                    or os.environ.get("SONDER_INFERENCE_MODEL")
+                    or str(os.environ.get("SONDER_MODEL_BACKEND", "")).strip().lower() == "sonder_inference"
+                )
+                configured = has_workers or has_env or cached_snap is not None
+            except Exception:
+                configured = False
+        if not configured:
+            continue
+        unified_fn = getattr(cand, "unified_worker_status", None)
+        if callable(unified_fn):
+            try:
+                status = unified_fn()
+            except Exception:
+                status = None
+            if isinstance(status, Mapping):
+                for row in status.get("workers") or ():
+                    if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
+                        st_map = row.get("supports_tools")
+                        if isinstance(st_map, Mapping):
+                            for m_name, flag in st_map.items():
+                                if flag is True and str(m_name or "").strip().casefold() in wanted:
+                                    return True
+        health_fn = getattr(cand, "health", None)
+        if callable(tools_fn) and callable(health_fn):
+            try:
+                snap = health_fn()
+                doc = getattr(snap, "document", None)
+                if doc is not None and any(bool(tools_fn(doc, model=m)) for m in raw_models):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _sonder_inference_supports_tools(gateway: object, model: object) -> bool:
+    """True only when a live ``sonder_inference`` gateway advertises ``tools`` for ``model``."""
+    name = str(model or "").strip()
+    return _sonder_inference_any_supports_tools(gateway, [name] if name else [])
+
+
 def chat_request(
     gateway: object, payload: dict, rung, *, context: OperationContext, text_only: bool = False,
+    return_message: bool = False,
 ):
     """Serve one local chat step through the gateway for a non-Ollama rung.
 
@@ -180,9 +342,15 @@ def chat_request(
     """
     from sonder_runtime.adapters.tool_lane_guard import require_served
 
+    provider = getattr(rung, "provider", None)
+    supports_tools = (
+        provider == "sonder_inference"
+        and _sonder_inference_supports_tools(gateway, payload.get("model"))
+    )
     try:
         out, response = provider_bridge.generate_via_gateway(
             gateway, payload, tier=rung.tier, context=context,
+            supports_tools=supports_tools,
         )
     except SonderError as exc:
         failure = provider_bridge.classify_failure(exc, provider=rung.provider)
@@ -194,6 +362,15 @@ def chat_request(
         error.provider_display_url = _provider_display_url(gateway, rung.provider)
         raise error from exc
     require_served(rung, response.model, text_only=text_only)
+    origin = _provider_display_url(gateway, rung.provider)
+    from sonder_runtime.application.agents.delegation_runtime import note_agent_execution
+    note_agent_execution(
+        model=str(getattr(response, "model", "") or ""),
+        origin="" if origin == "(endpoint unavailable)" else origin,
+    )
+    if return_message:
+        msg = out.get("message") if isinstance(out, Mapping) else None
+        return out, dict(msg) if isinstance(msg, Mapping) else {"role": "assistant", "content": response.text}
     return out, response.text
 
 
@@ -214,6 +391,7 @@ _FALLBACK_HINT = (
 def ollama_only_reroute(
     gateway: object, payload: dict, rung, *, model: str, graph: object,
     loopback_endpoint: bool, context_probe: Callable[[], object],
+    allow_pool_workers: bool = False,
 ) -> dict | None:
     """The payload to serve on local Ollama instead of the bridge, or None.
 
@@ -238,7 +416,10 @@ def ollama_only_reroute(
     provider = getattr(rung, "provider", None)
     if provider != "sonder_inference":
         return None
-    found = provider_bridge.ollama_only_feature(payload, provider=provider)
+    supports_tools = _sonder_inference_supports_tools(gateway, payload.get("model") or model)
+    found = provider_bridge.ollama_only_feature(
+        payload, provider=provider, supports_tools=supports_tools,
+    )
     if found is None:
         return None
     feature, message = found
@@ -265,7 +446,7 @@ def ollama_only_reroute(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on a local "
             "Ollama model, and this tier's model is hosted" % message
         )
-    if not loopback_endpoint:
+    if not loopback_endpoint and not allow_pool_workers:
         raise refuse(
             "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on the "
             "loopback Ollama endpoint, and this one is remote" % message

@@ -17,6 +17,9 @@ Design rules that keep this from hijacking real work:
 * File and orchestration rules require an explicit keyword ("file <path>",
   "orchestrate ...") or a path-with-extension, so ordinary prose that merely
   mentions reading or fixing is left alone.
+* Command keywords are ASCII. A turn holding a character that Python folds
+  into an ASCII letter (see ``command_text``) resolves only when reading that
+  character as the letter and reading it as plain data give the same line.
 * The tier-aware trio (consult / route / refactor) is delegated to
   ``intents.classify_command`` so their argument extraction lives in one place.
 
@@ -36,10 +39,13 @@ reports *which* stage claimed or refused the turn (and, for a catalog refusal,
 why -- including the tied candidates an ambiguous turn produced). ``resolve``
 stays the only dispatch entry point; ``explain`` never dispatches anything.
 
-Stdlib only.
+Stdlib plus the pure ``command_text`` helpers.
 """
 import importlib
 import re
+import unicodedata
+
+from sonder_runtime.application.command_surface import command_text as _command_text
 
 
 class _LazyService:
@@ -142,6 +148,125 @@ _TEST_RUNNER_WORDS = {
 }
 
 
+_PROJECT_PROSE_ARGS = frozenset({
+    "file", "files", "folder", "folders", "directory", "directories",
+    "root", "structure", "layout", "config", "settings", "readme",
+    "docs", "doc", "tests", "test", "code", "path", "tree", "name",
+    "up", "down", "out", "in", "on", "off",
+})
+
+
+def _project_action(match):
+    arg = (match.group("arg") or "").strip()
+    if not arg or len(arg.split()) != 1 or arg.endswith("?"):
+        return None
+    if not match.group("to") and arg.lower() in _PROJECT_PROSE_ARGS:
+        return None
+    return "/project %s" % arg
+
+
+_FACT_PROSE_STARTERS = frozenset({
+    "to", "how", "why", "what", "when", "where", "who", "which", "if", "whether",
+})
+
+
+def _fact_action(match):
+    verb = (match.group("verb") or "").lower()
+    cue = (match.group("cue") or "").strip()
+    arg = (match.group("arg") or "").strip()
+    if not arg or arg.endswith("?"):
+        return None
+    if verb == "note" and not cue:
+        return None
+    first = arg.split(None, 1)[0].lower().rstrip(",:;")
+    if first in _FACT_PROSE_STARTERS:
+        return None
+    if re.search(
+        r"(?:,\s*(?:please|can|could|would|should|fix|run|check|explain|show|tell|help|and)\b|"
+        r";|\band\s+(?:then\s+)?(?:fix|check|run|update|explain|show|tell|help|write|delete|create)\b)",
+        arg,
+        re.I,
+    ):
+        return None
+    return "/fact %s" % arg
+
+
+_PREFER_PROSE_STARTERS = frozenset({
+    "are", "is", "were", "was", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "don't", "doesn't", "didn't", "aren't", "isn't",
+    "weren't", "wasn't", "can", "can't", "could", "would", "should", "will",
+    "won't", "must", "may", "might", "seem", "seems", "look", "looks",
+    "appear", "for", "in", "on", "of", "to", "with", "from", "by", "at",
+    "about", "that", "which", "who", "when", "where", "why", "how", "and",
+    "or", "but", "not", "no", "also", "only", "still", "always", "never",
+})
+
+
+def _prefer_action(match):
+    arg = (match.group("arg") or "").strip()
+    if match.group("show"):
+        if not arg or arg.lower() in {"list", "status", "show"}:
+            return "/prefer"
+        return None
+    if not arg:
+        return "/prefer"
+    if arg.endswith("?"):
+        return None
+    lower = arg.lower()
+    if lower in {"list", "status", "show"}:
+        return "/prefer"
+    if lower.startswith(("learn ", "forget ")) and not re.search(
+        r"(?:;|\band\s+(?:then\s+)?(?:explain|show|tell|help|fix|run)\b)",
+        arg,
+        re.I,
+    ):
+        return "/prefer %s" % arg
+    if len(arg.split()) == 1 and lower.rstrip(".,!") not in _PREFER_PROSE_STARTERS:
+        return "/prefer %s" % arg
+    return None
+
+
+_MASTER_NON_COMMAND_STARTERS = frozenset({
+    "the", "a", "an", "this", "that", "these", "those", "my", "your", "our",
+    "of", "in", "on", "for", "to", "with", "from", "is", "are", "was", "were",
+    "has", "have", "had", "can", "could", "will", "would", "should", "may",
+    "might", "must", "do", "does", "did", "branch", "branches", "commit",
+    "commits", "repo", "repository", "key", "keys", "password", "passwords",
+    "token", "tokens", "secret", "secrets", "plan", "plans", "list", "table",
+    "copy", "node", "nodes", "server", "worker", "host", "detail", "record",
+    "index", "thesis", "degree", "class", "file", "files", "config", "process",
+    "thread", "data", "set",
+})
+
+
+def _master_action(match):
+    verb = (match.group("verb") or "").lower()
+    arg = (match.group("arg") or "").strip()
+    if not arg:
+        return None
+    if verb == "orchestrate":
+        return "/master %s" % arg
+    if arg.endswith("?"):
+        return None
+    first = arg.split(None, 1)[0].lower().rstrip(",:;")
+    if first in _MASTER_NON_COMMAND_STARTERS:
+        return None
+    return "/master %s" % arg
+
+
+def _append_action(match):
+    arg = (match.group("arg") or "").strip()
+    if not arg or arg.endswith("?"):
+        return None
+    if re.search(
+        r"\b(?:and|then)\s+(?:read|open|summarize|describe|explain|check|run|delete|show|tell)\b",
+        arg,
+        re.I,
+    ):
+        return None
+    return "/append %s" % arg
+
+
 def _test_runner_action(match):
     """"run cargo test" -> /test cargo (runner names as /test spells them)."""
     words = re.sub(r"\s+", " ", match.group("arg").strip().lower())
@@ -187,7 +312,7 @@ _RULES = [
     _rule(r"^(?:list|show|my)\s+sessions\b", _fixed("/sessions")),
     _rule(r"^resume(?:\s+session)?\s+(?P<arg>.+)$", _with_arg("/resume")),
     _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?project"
-          r"(?:\s+to)?\s+(?P<arg>.+)$", _with_arg("/project")),
+          r"(?:\s+(?P<to>to))?\s+(?P<arg>.+)$", _project_action),
     _rule(r"^(?:current project|what(?:'s| is)\s+(?:the\s+)?(?:current\s+)?project)\b",
           _fixed("/project")),
     _rule(r"^(?:switch(?:\s+to)?|set|use|change(?:\s+to)?)\s+(?:the\s+)?"
@@ -205,8 +330,8 @@ _RULES = [
     _rule(r"^(?:list|show)?\s*accounts\b", _fixed("/accounts")),
 
     # --- memory / facts / lessons ---
-    _rule(r"^(?:remember|note|memorize)(?:\s+(?:that|this))?\s+(?P<arg>.+)$",
-          _with_arg("/fact")),
+    _rule(r"^(?P<verb>remember|note|memorize)(?P<cue>\s+(?:that|this)|:)?\s+(?P<arg>.+)$",
+          _fact_action),
     _rule(r"^(?:show|list)?\s*(?:my\s+)?facts\b|^what\s+do\s+you\s+remember\b",
           _fixed("/facts")),
     _rule(r"^(?:show|list)?\s*(?:learned\s+)?lessons\b", _fixed("/lessons")),
@@ -259,8 +384,8 @@ _RULES = [
     _rule(r"^(?:privacy\s+review|review\s+privacy)\b", _fixed("/privacyreview")),
     _rule(r"^(?:backfill|build)\s+(?:the\s+)?embeddings\b", _fixed("/embedfix")),
     _rule(r"^(?:show\s+)?(?:emotions?|mood|emotion\s+vectors)\b", _fixed("/emotion")),
-    _rule(r"^(?:show\s+)?(?:my\s+)?preferences?\b(?:\s+(?P<arg>.+))?",
-          lambda m: ("/prefer %s" % (m.group("arg") or "")).strip()),
+    _rule(r"^(?P<show>show\s+)?(?:my\s+)?preferences?\b(?:\s+(?P<arg>.+))?",
+          _prefer_action),
     # Self-inspection must use the host's deterministic improvement report,
     # rather than asking the chat model to recall stale diagnostics or stored
     # facts.  These are deliberately complete, question-shaped turns only;
@@ -305,7 +430,7 @@ _RULES = [
     _rule(r"^(?:run|start)\s+(?:the\s+)?(?:saved\s+)?workflow\s+"
           r"(?P<arg>[A-Za-z][A-Za-z0-9_-]{1,63})\s*[?!.]*$",
           lambda m: "/workflow_run " + m.group("arg").lower()),
-    _rule(r"^(?:orchestrate|master)\s+(?P<arg>.+)$", _with_arg("/master")),
+    _rule(r"^(?P<verb>orchestrate|master)\s+(?P<arg>.+)$", _master_action),
     _rule(r"^autopilot\b(?:\s+(?P<arg>.+))?",
           lambda m: ("/autopilot %s" % (m.group("arg") or "")).strip()),
 
@@ -416,7 +541,8 @@ _RULES = [
           lambda m: ("/files %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:read|open|show\s+me)\s+(?:the\s+)?file\s+(?P<arg>\S+)", _with_arg("/read")),
     _rule(r"^read\s+(?P<arg>\S+\.\w+)\s*$", _with_arg("/read")),
-    _rule(r"^append\s+to\s+(?:file\s+)?(?P<arg>.+)$", _with_arg("/append")),
+    _rule(r"^append\s+to\s+(?:the\s+)?file\s+(?P<arg>\S+(?:\s+.+)?)$", _append_action),
+    _rule(r"^append\s+to\s+(?P<arg>\S+\.\w+(?:\s+.+)?)$", _append_action),
     _rule(r"^(?:write|save)\s+(?:to\s+)?file\s+(?P<arg>.+)$", _with_arg("/write")),
     _rule(r"^edit\s+file\s+(?P<arg>.+)$", _with_arg("/edit")),
     _rule(r"^delete\s+(?:the\s+)?file\s+(?P<arg>\S+)", _with_arg("/delete")),
@@ -643,7 +769,7 @@ _RULES = [
 # summary-only stage. "delete task abc" names /task_delete; "clean up" names
 # nothing.
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[A-Za-z0-9]+")  # the catalog stage reads ASCII words only
 
 # The three vocabularies are written as plain prose here and normalized into
 # _STOPWORDS / _OPENERS / _POLITE below, once _norm_token exists: they have to
@@ -737,7 +863,7 @@ def _norm_token(token):
 
 
 def _tokenize(text):
-    return [_norm_token(t) for t in _WORD.findall(str(text or "").lower())]
+    return [_norm_token(t.lower()) for t in _WORD.findall(str(text or ""))]
 
 
 def _word_set(raw):
@@ -893,7 +1019,7 @@ def _canonical_single_name_present(value, command):
     name = command.name.lstrip("/")
     if len(_tokenize(name)) != 1:
         return False
-    return name.lower() in re.findall(r"[a-z0-9]+", str(value).lower())
+    return name.lower() in [t.lower() for t in _WORD.findall(str(value))]
 
 
 def _single_word_argument(value, matched):
@@ -929,6 +1055,33 @@ def _single_word_argument(value, matched):
     return None
 
 
+# Punctuation that may wrap the trailing argument without being part of it:
+# the end of a sentence, quotes and brackets ("delete task abc?").
+_ARGUMENT_EDGES = "?!,;:\"'`()[]{}<>"
+
+
+def _unreadable_by_catalog(value):
+    """True when the turn holds a letter, digit, mark or invisible character
+    outside ASCII.
+
+    The catalog stage reads ASCII words and skips everything else. Skipping
+    punctuation, symbols and spaces loses nothing, but skipping a letter
+    changes the words: "delete task caf\u00e9" would name the task "caf".
+    Such a turn is refused here and stays reachable through the hand-written
+    rules and chat.
+    """
+    if value.isascii():
+        return False
+    return any(ord(ch) > 127 and unicodedata.category(ch)[0] not in "PSZ"
+               for ch in value)
+
+
+def _typed_last_word(value):
+    """The last whitespace-delimited word of the turn, without edge punctuation."""
+    words = str(value).split()
+    return words[-1].strip(_ARGUMENT_EDGES) if words else ""
+
+
 def _note(trace, reason, **extra):
     """Record why the catalog stage stopped, when a trace dict was passed."""
     if trace is not None:
@@ -946,6 +1099,9 @@ def _catalog_match(value, trace=None):
     ``trace``, when given, is a dict this function fills with the refusal
     reason (or the match) for ``explain``. It never changes what resolves.
     """
+    if _unreadable_by_catalog(str(value)):
+        _note(trace, "non-ascii-text")
+        return None
     entries = _index()
     if not entries:
         _note(trace, "catalog-unavailable")
@@ -1065,8 +1221,11 @@ def _catalog_match(value, trace=None):
         # an argument is that argument ("delete task abc"). Anything more, a
         # bare one-word name, or a command that takes nothing, means the turn
         # is asking for more than the command does.
+        # The argument is passed on exactly as typed or not at all: a word
+        # the tokenizer had to trim to read ("task/abc", ".env") is refused.
         words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.\-]*", str(value))
-        if words and _norm_token(words[-1].lower()) == leftover[0]:
+        if (words and words[-1] == _typed_last_word(value)
+                and _norm_token(words[-1].lower()) == leftover[0]):
             _note(trace, "matched", command=command.name)
             return "%s %s" % (command.name, words[-1])
     _note(trace, "unexplained-words", command=command.name, leftover=leftover)
@@ -1131,6 +1290,34 @@ def _resolve_value(value, trace):
     return generic.strip() if generic else None
 
 
+def _resolve_turn(value, trace):
+    """``_resolve_value``, unless the turn holds a fold character.
+
+    Such a character is ambiguous: Python's case folding takes it for an ASCII
+    letter (U+212A for "k"), and the person may have typed it as data (a place
+    name with a Turkish dotless i). The turn is resolved under both readings
+    and accepted only when they give the same line, which then carries the
+    characters as typed. So a fold character can sit in an argument but can
+    never spell, or complete, a command keyword.
+    """
+    if not _command_text.has_fold_character(value):
+        return _resolve_value(value, trace)
+    refusal = {"reason": "fold-character"}
+    as_data = _command_text.opaque_reading(value)
+    data_trace = {} if trace is not None else None
+    resolved = _resolve_value(as_data, data_trace) if as_data is not None else None
+    if resolved is not None:
+        resolved = _command_text.restore_fold_characters(resolved)
+        as_letters = _resolve_value(_command_text.ascii_reading(value), None)
+        if as_letters == _command_text.ascii_reading(resolved):
+            if trace is not None:
+                trace.update(data_trace)
+            return resolved
+    if trace is not None:
+        trace["detail"] = refusal
+    return None
+
+
 def resolve(text):
     """Return a synthesized slash-command line for `text`, or None.
 
@@ -1141,7 +1328,7 @@ def resolve(text):
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     if not value or value.startswith("/"):
         return None
-    return _resolve_value(value, None)
+    return _resolve_turn(value, None)
 
 
 def explain(text):
@@ -1163,7 +1350,9 @@ def explain(text):
 
     This is a diagnostic seam for tests, tracing, and "why didn't that run"
     answers. It is guaranteed to agree with ``resolve`` because both run
-    ``_resolve_value``; only the bookkeeping differs.
+    ``_resolve_turn``; only the bookkeeping differs. A turn refused because a
+    fold character's two readings disagree reports the ``fold-character``
+    ``reason``.
     """
     value = re.sub(r"\s+", " ", str(text or "")).strip()
     report = {"input": value, "resolved": None, "source": "none", "detail": {}}
@@ -1174,7 +1363,7 @@ def explain(text):
         report["source"] = "slash"
         return report
     trace = {}
-    report["resolved"] = _resolve_value(value, trace)
+    report["resolved"] = _resolve_turn(value, trace)
     report["source"] = trace.get("source", "none")
     report["detail"] = trace.get("detail", {})
     if "declined_rules" in trace:

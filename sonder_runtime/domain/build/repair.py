@@ -1,15 +1,10 @@
-"""Repair-loop policy for ``build_fix``: edit scope, hostile-directive scan,
-patch validation, progress ordering, the repair prompt and the fix report.
+"""Repair-loop policy for build_fix: edit scope, directive scanning, patch validation, progress
+ordering, prompts and reports.
 
-Everything is pure. The loop (application layer) reads files through the
-typed gateway and hands their text here; nothing in this module touches the
-filesystem.
-
-Why the scan normalizes first (F7): the preprocessor splices
-backslash-newlines, maps ``%:`` to ``#`` and ``??=`` to ``#``, and strips
-comments before it sees a directive, so ``%:include``, ``#inc\\<newline>lude``
-and ``# /**/ include`` are all real directives. The scan runs on the same
-logical lines the compiler would see.
+This pure module receives text through the application gateway. Its conservative scanner
+models alternative splice, trigraph, digraph, comment and literal readings, then unions the
+configured refusals. The models describe scanner policy rather than measured compiler
+conformance.
 """
 from __future__ import annotations
 
@@ -23,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable, Mapping
 
+from ..common.bounded_json import JsonBoundsExceeded, check_depth
 from ..diagnostics.model import Diagnostic, diagnostic_to_wire
 from .model import BuildDomainError, bounded_notes, clip, safe_rel
 from .report import BuildJobReport, build_report_to_wire
@@ -163,45 +159,201 @@ def _glob_match(rel: str, glob: str) -> bool:
 
 # --- normalization and hostile scan -------------------------------------------------
 
-_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
+_TRIGRAPHS = {"=": "#", "/": "\\", "'": "^", "(": "[", ")": "]", "!": "|", "<": "{", ">": "}", "-": "~"}
+_TRIGRAPH_RE = re.compile(r"\?\?([=/'()!<>-])")
+# The lenient splice model spans configured horizontal blanks before a newline.
+# The strict model requires adjacency; newline folding occurs before either model.
+_SPLICE_RE = re.compile(r"\\[ \t\f\v]*\n")
+_STRICT_SPLICE = "\\\n"
+_LEGACY_SPLICE_RE = re.compile(r"\\[ \t]*\n")
+# A backslash (or its trigraph) with blanks before the newline: the only text
+# the splice readings lex differently.
+_BLANK_SPLICE_RE = re.compile(r"(?:\\|\?\?/)([ \t\f\v]+)\n")
+_DIGRAPH_PAIRS = ("<:", ":>", "<%", "%>", "%:")
+_RAW_OPEN_RE = re.compile(r'(?:u8|u|U|L)?R"')
+# Raw delimiters are limited to the modeled character set and 16 characters.
+# Other prefixes are refused instead of assuming one error-recovery reading.
+_RAW_PREFIX_RE = re.compile(r"""(?:u8|u|U|L)?R"([A-Za-z0-9_{}\[\]#<>%:;.?*+\-/^&|~!=,']{0,16})\(""")
+# The delimiter rule before the fix above; the "legacy" masking keeps it.
+_LEGACY_RAW_PREFIX_RE = re.compile(r'(?:u8|u|U|L)?R"([^()\\\s"]{0,16})\(')
 
 
-def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
-    """Translation phases 1-3 as far as the scan needs them.
+def normalize_for_scan(text: str, *, raw_strings: bool = True, trigraphs: bool = True,
+                       digraphs: bool = True, strict_splices: bool = False,
+                       legacy: bool = False, separators: str = "cxx14") -> str:
+    """Normalize text under one configured lexical model.
 
-    Trigraphs ``??=`` and ``??/`` are replaced, backslash-newline splices are
-    joined, digraphs ``%:%:``/``%:`` become ``##``/``#``, comments become a
-    space, and raw-string bodies are masked (their newlines kept) so text
-    inside them cannot pose as a directive. Ordinary string contents are
-    kept: ``_Pragma("...")`` and ``asm("...")`` arguments must stay visible.
+    Enabled trigraphs and digraphs are replaced, configured backslash-newline splices are
+    joined, comments become spaces, and raw-string bodies are masked with newlines retained.
+    Ordinary string contents remain visible for pragma and assembler checks.
 
-    ``raw_strings=False`` lexes ``R"(`` as C does (identifier + ordinary
-    string): in C, or in a header a C TU includes, masking a "raw string"
-    could hide real directives, so ``validate_patch`` scans both lexings.
-    A ``'`` inside a pp-number (``1'000``) is a C++14 digit separator, not
-    the start of a character literal (which could otherwise swallow a
-    string's quote and start a phantom comment that hides later lines).
+    raw_strings=False models an identifier plus ordinary string at a raw-looking prefix.
+    trigraphs=False and digraphs=False leave those spellings unchanged. strict_splices=True
+    joins only an adjacent backslash and newline; the lenient model also spans configured
+    blanks. scan_added_lexings combines the readings instead of assuming one.
+
+    legacy=True retains the older limited trigraph/digraph and splice model, overriding the
+    three mode flags. The cxx14, none and legacy separator modes select alternative quote
+    handling; ambiguous cases are refused by _mask_literals.
     """
+    value = _translation_phases(text, trigraphs=trigraphs, digraphs=digraphs,
+                                strict_splices=strict_splices, legacy=legacy)
+    return _mask_literals(value, raw_strings=raw_strings, digraphs=digraphs and not legacy,
+                          separators=separators)
+
+
+def _translation_phases(text: str, *, trigraphs: bool = True, digraphs: bool = True,
+                        strict_splices: bool = False, legacy: bool = False) -> str:
+    """The whole-text part of ``normalize_for_scan``: line ends, trigraphs, splices, ``%:``."""
     value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    value = value.replace("??=", "#").replace("??/", "\\")
-    value = re.sub(r"\\[ \t]*\n", "", value)
-    value = value.replace("%:%:", "##").replace("%:", "#")
+    if legacy:
+        value = value.replace("??=", "#").replace("??/", "\\")
+        value = _LEGACY_SPLICE_RE.sub("", value)
+        value = value.replace("%:%:", "##").replace("%:", "#")
+    else:
+        if trigraphs:
+            value = _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)
+        value = value.replace(_STRICT_SPLICE, "") if strict_splices \
+            else _SPLICE_RE.sub("", value)
+        if digraphs:
+            value = value.replace("%:%:", "##").replace("%:", "#")
+    return value
+
+
+# Characters the masking loop only copies: ASCII that cannot start a comment,
+# a literal, a raw-string prefix, a pp-number or a digraph. Runs of them are
+# copied in one step.
+_PLAIN_RUN_RE = re.compile(r"(?:[^/\"'<:%0-9.uULR\x80-\U0010ffff]|u(?!8?R\")|[UL](?!R\")|R(?!\"))+")
+_LETTERS_RE = re.compile(r"[A-Za-z_]+")
+_MASK_STARTERS = "/\"'<:%0123456789."  # never plain: skip the run match for these
+_ASCII_DIGITS = frozenset("0123456789")
+_ASCII_IDENT = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+_ASCII_IDENT_RUN_RE = re.compile(r"[A-Za-z0-9_]+")
+_IDENT_OR_DOLLAR = _ASCII_IDENT | {"$"}
+_UNSURE_IN_NUMBER = frozenset("\\$")  # a UCN or dollar sign: ambiguous content under the number model
+_EXPONENTS = frozenset("eEpP")
+_SIGNS = frozenset("+-")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+# Literal-part model: digits with separators, a fraction, an exponent, and an
+# optional trailing quote. It supplies a conservative comparison boundary for
+# quote and raw-prefix cases; the broader number model can continue beyond it.
+_DEC_RUN = r"[0-9](?:'?[0-9])*"
+_HEX_RUN = r"[0-9A-Fa-f](?:'?[0-9A-Fa-f])*"
+_LITERAL_PART_RE = re.compile(
+    rf"(?:0[xX](?:{_HEX_RUN})?(?:\.(?:{_HEX_RUN})?)?(?:[pP][+-]?(?:{_DEC_RUN})?)?"
+    rf"|0[bB](?:{_DEC_RUN})?"
+    rf"|(?:{_DEC_RUN}(?:\.(?:{_DEC_RUN})?)?|\.{_DEC_RUN})(?:[eE][+-]?(?:{_DEC_RUN})?)?)'?")
+
+
+def _literal_part_end(value: str, start: int) -> int:
+    """End of the literal part of the number starting at ``start`` (see ``_LITERAL_PART_RE``)."""
+    match = _LITERAL_PART_RE.match(value, start)
+    return start if match is None else match.end()
+
+
+_SEPARATOR_MODES = ("cxx14", "none", "legacy")
+# What one ``_mask_literals`` pass saw (``events``); ``scan_added_lexings`` acts on them.
+_EVENT_SEPARATOR = "separator"  # a ``'`` the C++14 reading took as a digit separator
+_EVENT_LEGACY = "legacy"        # the legacy masking lexes a ``'`` or a raw prefix differently
+_EVENT_AMBIGUOUS = "ambiguous"  # a quote after a number that the configured models do not resolve
+_EVENT_BAD_RAW = "bad_raw"      # a raw-string prefix outside the modeled delimiter or number boundary
+_AMBIGUOUS_SEPARATOR = ("a quote after a number that compilers lex differently (digit separator "
+                        "or character literal) is refused")
+_BAD_RAW_DELIMITER = ("a raw string prefix that compilers lex differently (a delimiter some compiler "
+                      "rejects, or a prefix inside a number) is refused")
+
+
+def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators: str = "cxx14",
+                   events: set[str] | None = None) -> str:
+    """Mask comments and literals under the selected conservative lexical model.
+
+    The separator modes model alternative quote handling after preprocessing numbers. The
+    literal-part pattern, exponent checks and ambiguous-character checks flag cases that the
+    configured readings do not resolve uniformly. Raw-looking prefixes inside numbers and
+    delimiters outside the modeled set can also require refusal.
+
+    When supplied, events records separator, legacy, ambiguous and bad_raw cases so the
+    caller can request another configured reading or refuse the input. This is a scanner-
+    policy model, not a compiler comparison.
+
+    Pure except for mutations to the caller-owned events set; work is linear in value.
+    """
+    if separators not in _SEPARATOR_MODES:
+        raise ValueError(f"separators must be one of {', '.join(_SEPARATOR_MODES)}")
     out: list[str] = []
     i = 0
     n = len(value)
-    pp_number = False  # inside a pp-number, where ' is a digit separator
+    pp_number = False  # C++14 reading: inside a pp-number (started by an ASCII digit)
+    unsure = False  # ... and it holds content treated as ambiguous by the number model
+    number_start = 0  # ... where it starts
+    hex_number = False  # ... and whether it starts with ``0x``
+    literal_end = -1  # ... end of its literal part (``_LITERAL_PART_RE``), -1 until needed
+    legacy_pp = False  # the legacy tracker: started by any Unicode digit, ' always continues it
     while i < n:
         ch = value[i]
-        if ch == "'" and pp_number:
-            out.append(ch)
-            i += 1
-            continue
-        previous_ident = i > 0 and (value[i - 1].isalnum() or value[i - 1] == "_")
+        if pp_number or legacy_pp:
+            # Inside a number: ASCII identifier characters after one continue it in every
+            # tracker (and cannot start one or a raw prefix), so copy them in one step.
+            if ch in _ASCII_IDENT and i > 0 and value[i - 1] in _ASCII_IDENT:
+                j = _ASCII_IDENT_RUN_RE.match(value, i).end()
+                out.append(value[i:j])
+                i = j
+                continue
+        elif ch not in _MASK_STARTERS:
+            run = _PLAIN_RUN_RE.match(value, i)
+            if run is not None:
+                j = run.end()
+                out.append(value[i:j])
+                i = j
+                continue
+        if ch == "'" and (pp_number or legacy_pp):
+            separator = pp_number and not unsure and value[i + 1:i + 2] in _ASCII_IDENT
+            if events is not None:
+                if pp_number and not separator:
+                    events.add(_EVENT_AMBIGUOUS)
+                elif separator and separators == "cxx14":
+                    # Compare the quote against the modeled literal-part digit boundary.
+                    # An unresolved difference is flagged for conservative refusal.
+                    if literal_end < 0:
+                        literal_end = _literal_part_end(value, number_start)
+                    if i - 1 >= literal_end \
+                            or value[i - 1] not in (_HEX_DIGITS if hex_number else _ASCII_DIGITS):
+                        events.add(_EVENT_AMBIGUOUS)
+                if separator:
+                    events.add(_EVENT_SEPARATOR)
+                if separator != legacy_pp:
+                    events.add(_EVENT_LEGACY)
+            take = legacy_pp if separators == "legacy" else separator and separators == "cxx14"
+            if take:
+                out.append(ch)
+                i += 1
+                continue
+        previous = value[i - 1] if i > 0 else ""
+        if legacy_pp:
+            legacy_pp = ch.isalnum() or ch in "_."
+        elif not (previous.isalnum() or previous == "_") and (
+                ch.isdigit() or (ch == "." and i + 1 < n and value[i + 1].isdigit())):
+            legacy_pp = True
         if pp_number:
-            pp_number = ch.isalnum() or ch in "_."
-        elif not previous_ident and (ch.isdigit() or (ch == "." and i + 1 < n
-                                                      and value[i + 1].isdigit())):
+            if ch in _ASCII_IDENT or ch == ".":
+                pass
+            elif ch in _SIGNS and previous in _EXPONENTS:
+                # Treat these exponent-sign boundaries as ambiguous in the number model.
+                if previous in "pP" or hex_number:
+                    unsure = True
+            elif ch in _UNSURE_IN_NUMBER or not ch.isascii():
+                unsure = True
+            else:
+                pp_number = unsure = False
+        elif (ch in _ASCII_DIGITS and previous not in _ASCII_IDENT) \
+                or (ch == "." and value[i + 1:i + 2] in _ASCII_DIGITS):
+            # A non-ASCII character, backslash or dollar sign makes this prefix ambiguous.
+            # The policy refuses it instead of assuming a single literal boundary.
             pp_number = True
+            unsure = previous != "" and (previous in _UNSURE_IN_NUMBER or not previous.isascii())
+            number_start = i
+            hex_number = value.startswith(("0x", "0X"), i)
+            literal_end = -1
         if ch == "/" and i + 1 < n and value[i + 1] == "/":
             end = value.find("\n", i)
             out.append(" ")
@@ -212,9 +364,32 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
             out.append(" ")
             i = n if end < 0 else end + 2
             continue
-        if raw_strings and ch in "uUL8R":
-            raw = _RAW_PREFIX_RE.match(value, i)
-            if raw and (i == 0 or not (value[i - 1].isalnum() or value[i - 1] == "_")):
+        if raw_strings and ch in "uULR" and _RAW_OPEN_RE.match(value, i) is not None:
+            legacy_raw = None if previous.isalnum() or previous == "_" \
+                else _LEGACY_RAW_PREFIX_RE.match(value, i)
+            if previous in _IDENT_OR_DOLLAR:
+                raw = None  # These prefixes remain identifiers under the configured model.
+            elif pp_number:
+                # Refuse a raw-looking prefix at an unresolved number boundary.
+                # An out-of-model delimiter remains refused as well.
+                raw = None
+                if events is not None:
+                    if literal_end < 0:
+                        literal_end = _literal_part_end(value, number_start)
+                    if unsure or i - 1 >= literal_end or _RAW_PREFIX_RE.match(value, i) is None:
+                        events.add(_EVENT_BAD_RAW)
+            else:
+                raw = _RAW_PREFIX_RE.match(value, i)
+                # After a non-ASCII character or a stray backslash it is unsure whether an
+                # identifier continues (no raw string) or a blank precedes one.
+                if events is not None and (raw is None or previous == "\\"
+                                           or not previous.isascii()):
+                    events.add(_EVENT_BAD_RAW)
+            if events is not None and (raw is None) != (legacy_raw is None):
+                events.add(_EVENT_LEGACY)
+            if separators == "legacy":
+                raw = legacy_raw
+            if raw:
                 delimiter = ")" + raw.group(1) + '"'
                 start = raw.end()
                 end = value.find(delimiter, start)
@@ -233,12 +408,50 @@ def normalize_for_scan(text: str, *, raw_strings: bool = True) -> str:
             out.append(value[i:min(j + 1, n)])
             i = j + 1
             continue
+        if digraphs and ch in "<:%" and i + 1 < n:
+            pair = value[i:i + 2]
+            if pair == "<:":
+                if value[i + 2:i + 3] == ":" and value[i + 3:i + 4] not in (":", ">"):
+                    out.append("<")  # ``<::`` is ``<`` ``::`` (std::vector<::T>), not a digraph
+                    i += 1
+                else:
+                    out.append("[")
+                    i += 2
+                continue
+            if pair == "<%":
+                out.append("{")
+                i += 2
+                continue
+            if pair == "%>":
+                out.append("}")
+                i += 2
+                continue
+            if pair == ":>":
+                out.append("]")
+                i += 2
+                continue
+            if pair == "::":
+                out.append("::")  # maximal munch: ``::`` is one token, so ``::>`` is not ``:>``
+                i += 2
+                continue
         out.append(ch)
         i += 1
     return "".join(out)
 
 
+# Python whitespace includes characters beyond the scanner directive-head model.
+# The broader matcher is paired with explicit refusal of ambiguous characters.
 _DIRECTIVE_RE = re.compile(r"^\s*#\s*([A-Za-z_]\w*)\s*(.*)$")
+# A line that starts like a directive: what precedes the ``#`` (group 1), what
+# separates it from the name (group 2), the ASCII name (3) and the next character (4).
+_DIRECTIVE_SHAPE_RE = re.compile(r"([^\x21-\x7e]*)(?:#|%:)([^\x21-\x7e]*)([A-Za-z0-9_]*)(.?)")
+_LINE_BLANKS = frozenset(" \t\f\v\r")
+_ODD_DIRECTIVE = ("a non-ASCII or control character before, after or inside a directive's '#' "
+                  "and name is refused (compilers disagree whether the line is a directive)")
+# One initial U+FEFF is handled separately as a byte-order mark.
+# Other U+FEFF and U+180E occurrences are refused by scanner policy.
+_ODD_BLANKS_RE = re.compile("[\ufeff\u180e]")
+_ODD_BLANKS = "U+FEFF (byte order mark) or U+180E in added text is refused (a compiler reads it as a blank)"
 _PRAGMA_BAD_RE = re.compile(
     r"\b(?:comment\s*\(\s*(?:linker|lib|user)\b|include_alias|section|init_seg|code_seg|"
     r"data_seg|const_seg|bss_seg|alloc_text|detect_mismatch)\b|\bGCC\s+poison\b|"
@@ -247,7 +460,25 @@ _PRAGMA_BAD_RE = re.compile(
 )
 _PRAGMA_OP_RE = re.compile(r"\b_Pragma\s*\(")
 _MS_PRAGMA_RE = re.compile(r"\b__pragma\s*\(")
-_HAS_RE = re.compile(r"\b__has_(?:include(?:_next)?|embed)\s*\(\s*([<\"])")
+# Recognize the additional __has_include__ and __has_include_next__ spellings.
+_HAS_TOKEN_RE = re.compile(r"\b__has_(?:include(?:_next)?(?:__)?|embed)\b")
+# ``(`` then ``<`` or ``"``. A use needs the whole operand on the token's own
+# logical line; the match may run past it because a literal that follows a
+# merely named token on a later line is still path-checked.
+_HAS_OPERAND_RE = re.compile(r"\s*\(\s*([<\"])")
+# Exemptions use the restricted whitespace model; broader whitespace must not
+# turn an ambiguous line into a recognized directive head.
+_HAS_NAME_HEAD_RE = re.compile(
+    r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:define|undef|ifdef|ifndef|elifdef|elifndef)[ \t\f\v]+")
+_HAS_IF_HEAD_RE = re.compile(r"[ \t\f\v]*(?:#|%:)[ \t\f\v]*(?:if|elif)(?![0-9A-Za-z_$]|[^\x00-\x7f])")
+# Treat these Unicode digit characters as identifier content in this model.
+_IF_WORD_RE = re.compile(r"\.?[0-9](?:[eEpP][+-]|'?[\w.])*|defined\b[ \t\f\v]*\(?[ \t\f\v]*(?:[^\W0-9]\w*)?"
+                         r"|([^\W0-9]\w*|[$\\'\"`@]|[^\x00-\x7f])")
+_HAS_COMPUTED = "__has_include/__has_embed: computed operand (not a literal header-name)"
+_HEADER_NAME_LIMIT = 4096
+# Budget steps per token: its path check costs about what 500 plain characters do.
+_HAS_TOKEN_STEPS = 512
+_BLANKS = " \t\f\v"
 _ASM_RE = re.compile(r"\b(?:asm|__asm__|__asm)\b")
 # An assembler directive anywhere in added code: in an asm body, a string
 # literal, a macro that later feeds asm (``#define X .incbin "f"``) or a
@@ -273,7 +504,32 @@ _DECLSPEC_RE = re.compile(r"\b__declspec\s*\(\s*(?:allocate|code_seg)\b")
 _STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 
 
-def _balanced(text: str, start: int, limit: int = 4096) -> str:
+class _ScanBudgetExceeded(Exception):
+    """The scan did more work than a bounded input can legitimately need."""
+
+
+class _Budget:
+    """Character-steps still allowed for one scan (shared by every bounded sub-scan)."""
+
+    __slots__ = ("left",)
+
+    def __init__(self, steps: int) -> None:
+        self.left = steps
+
+    def charge(self, steps: int) -> None:
+        self.left -= steps
+        if self.left < 0:
+            raise _ScanBudgetExceeded
+
+
+# Each unterminated opener re-scans up to 4096 characters, so N openers cost
+# N * 4096 steps. A scan may spend this base plus a few steps per input
+# character; past it the input is refused (fail closed), never accepted.
+_SCAN_BUDGET_BASE = 262_144
+_SCAN_BUDGET_PER_CHAR = 8
+
+
+def _balanced(text: str, start: int, limit: int = 4096, budget: _Budget | None = None) -> str:
     """Text from ``start`` (just after an opening paren) to its closing paren."""
     depth = 1
     i = start
@@ -294,14 +550,41 @@ def _balanced(text: str, start: int, limit: int = 4096) -> str:
         elif ch == ")":
             depth -= 1
             if depth == 0:
+                if budget is not None:
+                    budget.charge(2 * (i - start) + 1)
                 return text[start:i]
         i += 1
+    if budget is not None:
+        budget.charge(2 * (end - start) + 1)
     return text[start:end]
 
 
+_C_ESCAPE_RE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]+)|([0-7]{1,3})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([ntrabfv'\"\\?]))")
+_C_SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v",
+                     "'": "'", '"': '"', "\\": "\\", "?": "?"}
+
+
+def _decode_escape(match: re.Match) -> str:
+    hex_digits, octal, small, large, simple = match.groups()
+    if simple is not None:
+        return _C_SIMPLE_ESCAPES[simple]
+    if hex_digits is not None:
+        return chr(int(hex_digits, 16) & 0xFF)  # greedy like C; the byte is what reaches the assembler
+    if octal is not None:
+        return chr(int(octal, 8) & 0xFF)
+    code = int(small if small is not None else large, 16)
+    return chr(code) if code <= 0x10FFFF else match.group(0)
+
+
 def _unescape(literal: str) -> str:
+    """Decode the C escapes (simple, octal, ``\\x``, ``\\u``, ``\\U``) of a string literal.
+
+    ``.\\x69ncbin`` and ``.\\151ncbin`` reach the assembler as ``.incbin``, so the
+    directive scan has to see the decoded text.
+    """
     body = literal[1:-1] if len(literal) >= 2 else literal
-    return body.replace('\\"', '"').replace("\\\\", "\\")
+    return _C_ESCAPE_RE.sub(_decode_escape, body)
 
 
 def include_path_problem(path: str, *, quoted: bool) -> str:
@@ -337,21 +620,147 @@ def _include_target(rest: str) -> tuple[str, bool] | None:
     return None
 
 
+def _is_defined_operand(text: str, line_start: int, start: int, end: int, line_end: int,
+                        budget: _Budget) -> bool:
+    """``defined(TOKEN)`` or ``defined TOKEN`` (the token is tested, not evaluated)."""
+    j = start
+    while j > line_start and text[j - 1] in _BLANKS:
+        j -= 1
+    paren = j > line_start and text[j - 1] == "("
+    if paren:
+        j -= 1
+        while j > line_start and text[j - 1] in _BLANKS:
+            j -= 1
+    k = end
+    while k < line_end and text[k] in _BLANKS:
+        k += 1
+    budget.charge(start - j + k - end + 1)
+    if j - 7 < line_start or text[j - 7:j] != "defined":
+        return False
+    # Treat combining and connector characters conservatively as identifier
+    # continuations so they cannot create a false defined-token boundary.
+    if j - 7 > line_start and (text[j - 8] in _IDENT_OR_DOLLAR or not text[j - 8].isascii()):
+        return False
+    following = text[k] if k < line_end else ""
+    return following == ")" if paren else following != "("
+
+
+def _scan_has_include(text: str, *, include_ok: Callable[[str], bool], budget: _Budget,
+                      refuse: Callable[[str], None]) -> None:
+    """Check every recognized __has_include-family token in text.
+
+    The policy permits literal operands that pass the include rules and refuses computed or
+    ambiguous operands. Directive-name and defined-token exemptions apply only at recognized
+    logical-line heads. Literal operands following an exempt token remain checked.
+
+    An angle operand is accepted only in the modeled direct #if/#elif context. Earlier
+    identifiers can make that context ambiguous, so the scanner conservatively refuses them;
+    quoted operands follow the string-literal path.
+
+    Known limitations, covered by test_gap cases: this does not resolve tokens constructed
+    by ## pasting or alias macros defined outside the edited code.
+
+    Logical lines and directive heads are located once. Per-token walking and path checks
+    are charged to the work budget; exceeding it causes refusal.
+    """
+    line_start = 0
+    line_end = -1
+    name_at = -1
+    in_if = False
+    walked = 0  # #if/#elif lines: the line is checked for identifiers up to here
+    opened = True  # ... and one was seen (or the line is not #if/#elif at all)
+    size = len(text)
+    for match in _HAS_TOKEN_RE.finditer(text):
+        budget.charge(_HAS_TOKEN_STEPS)
+        start, end = match.span()
+        if start > line_end:  # first token of the next logical line
+            line_start = text.rfind("\n", max(line_end, 0), start) + 1
+            line_end = text.find("\n", end)
+            if line_end < 0:
+                line_end = size
+            head = _HAS_NAME_HEAD_RE.match(text, line_start, line_end)
+            name_at = head.end() if head else -1
+            head = _HAS_IF_HEAD_RE.match(text, line_start, line_end)
+            in_if = head is not None
+            walked = head.end() if head else line_end
+            opened = not in_if
+        if not opened and start > walked:
+            budget.charge(start - walked)
+            opened = any(word.lastindex == 1 for word in _IF_WORD_RE.finditer(text, walked, start))
+        walked = max(walked, end)
+        operand = _HAS_OPERAND_RE.match(text, end)
+        problem = ""
+        close = -1
+        quoted = False
+        if operand is not None:
+            quoted = operand.group(1) == '"'
+            name_start = operand.end()
+            limit = min(size, name_start + _HEADER_NAME_LIMIT)
+            close = text.find('"' if quoted else ">", name_start, limit)
+            budget.charge((limit if close < 0 else close) - name_start + 1)
+            path = text[name_start:close] if close > name_start else ""
+            problem = include_path_problem(path, quoted=quoted) if path else "computed __has_include"
+            if not problem and quoted and not include_ok(path):
+                problem = "include escapes the project root"
+        if start == name_at or (in_if and _is_defined_operand(text, line_start, start, end,
+                                                             line_end, budget)):
+            # Named, not evaluated; a literal after it is still checked as before.
+            if problem:
+                refuse("__has_include/__has_embed: " + problem)
+            continue
+        if operand is None or not 0 <= close < line_end:
+            refuse(_HAS_COMPUTED)
+            continue
+        if not problem and not quoted and opened:
+            problem = ("<...> operand outside a plain #if/#elif (macro-expanded, so computed); "
+                           "test it alone in a nested #if")
+        walked = max(walked, close + 1)
+        if problem:
+            refuse("__has_include/__has_embed: " + problem)
+
+
 def scan_hostile_directives(added_text: str, *,
                             include_ok: Callable[[str], bool]) -> tuple[str, ...]:
     """Reasons the added (already normalized) logical lines are refused.
 
     ``include_ok(path)`` decides containment of a quoted include relative to
     the edited file (it must refuse ``..`` escaping the project root).
+    Each ``__has_include``/``__has_include_next``/``__has_embed`` token spelled
+    in the text is refused unless its operand is a checkable literal
+    header-name (see ``_scan_has_include`` for what that cannot see).
+    Every opener scan (``_Pragma(``, ``__pragma(``, ``__attribute__((``, ``asm``,
+    ``[[``, ``__has_include``) charges the characters it walks to a budget of
+    a fixed base plus 8 steps per input character, and each walk is capped
+    (4096 characters, 1026 for ``[[``), so the total work is linear in the
+    input. An input that exhausts the budget (thousands of unterminated
+    openers) is refused, never accepted.
     """
+    text = str(added_text or "")
+    budget = _Budget(_SCAN_BUDGET_BASE + _SCAN_BUDGET_PER_CHAR * len(text))
+    try:
+        return _scan_hostile_directives(text, include_ok=include_ok, budget=budget)
+    except _ScanBudgetExceeded:
+        return ("scan work budget exceeded (unterminated openers); the input is refused",)
+
+
+def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
+                             budget: _Budget) -> tuple[str, ...]:
     reasons: list[str] = []
 
     def refuse(reason: str) -> None:
         if reason not in reasons:
             reasons.append(reason)
 
-    text = str(added_text or "")
+    if _ODD_BLANKS_RE.search(text):
+        refuse(_ODD_BLANKS)
     for line in text.split("\n"):
+        shape = _DIRECTIVE_SHAPE_RE.match(line)
+        if shape is not None:
+            lead, gap, name, after = shape.groups()
+            if any(c not in _LINE_BLANKS for c in lead) or any(c not in _LINE_BLANKS for c in gap) \
+                    or (name and after and after not in _LINE_BLANKS
+                        and not "\x21" <= after <= "\x7e"):
+                refuse(_ODD_DIRECTIVE)
         directive = _DIRECTIVE_RE.match(line)
         if not directive:
             continue
@@ -380,7 +789,7 @@ def scan_hostile_directives(added_text: str, *,
             if _PRAGMA_BAD_RE.search(rest):
                 refuse("#pragma %s is refused" % clip(rest.split("(")[0].strip(), 40))
     for match in _PRAGMA_OP_RE.finditer(text):
-        body = _balanced(text, match.end())
+        body = _balanced(text, match.end(), budget=budget)
         literals = _STRING_RE.findall(body)
         if not literals:
             refuse("_Pragma without a string literal is refused")
@@ -388,19 +797,10 @@ def scan_hostile_directives(added_text: str, *,
         if _PRAGMA_BAD_RE.search(" ".join(_unescape(item) for item in literals)):
             refuse("_Pragma with a linker/section directive is refused")
     for match in _MS_PRAGMA_RE.finditer(text):
-        if _PRAGMA_BAD_RE.search(_balanced(text, match.end())):
+        if _PRAGMA_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__pragma with a linker/section directive is refused")
-    for match in _HAS_RE.finditer(text):
-        quoted = match.group(1) == '"'
-        closer = '"' if quoted else ">"
-        start = match.end()
-        end = text.find(closer, start)
-        path = text[start:end] if end > start else ""
-        problem = include_path_problem(path, quoted=quoted) if path else "computed __has_include"
-        if not problem and quoted and not include_ok(path):
-            problem = "include escapes the project root"
-        if problem:
-            refuse("__has_include/__has_embed: " + problem)
+    _scan_has_include(text, include_ok=include_ok, budget=budget, refuse=refuse)
+
     def _asm_text(chunk: str) -> str:
         return chunk.replace("\\n", "\n").replace("\\t", " ")
 
@@ -409,12 +809,13 @@ def scan_hostile_directives(added_text: str, *,
         paren = window.find("(")
         brace = window.find("{")
         if paren >= 0 and (brace < 0 or paren < brace):
-            body = _balanced(window, paren + 1)
+            body = _balanced(window, paren + 1, budget=budget)
         elif brace >= 0:
             end = window.find("}", brace)
             body = window[brace: end if end > 0 else len(window)]
         else:
             body = window[:256]
+        budget.charge(4 * len(body) + 1)  # the string/regex passes below walk the whole body
         joined = "".join(_unescape(item) for item in _STRING_RE.findall(body))
         if _ASM_DIRECTIVE_RE.search(_asm_text(body)) or _ASM_DIRECTIVE_RE.search(_asm_text(joined)):
             refuse("inline assembly with an assembler file/section directive is refused")
@@ -429,11 +830,14 @@ def scan_hostile_directives(added_text: str, *,
             refuse("string literal carrying an assembler directive is refused")
             break
     for match in _ATTRIBUTE_RE.finditer(text):
-        if _ATTR_BAD_RE.search(_balanced(text, match.end())):
+        if _ATTR_BAD_RE.search(_balanced(text, match.end(), budget=budget)):
             refuse("__attribute__ section/constructor/destructor is refused")
     for match in _CXX_ATTR_OPEN_RE.finditer(text):
-        end = text.find("]]", match.end())
-        body = text[match.end(): end if end >= 0 else len(text)][:1024]
+        window_end = min(len(text), match.end() + 1026)
+        end = text.find("]]", match.end(), window_end)
+        stop = window_end if end < 0 else end
+        budget.charge(stop - match.end() + 1)
+        body = text[match.end(): min(stop, match.end() + 1024)]
         if _ATTR_BAD_RE.search(body):
             refuse("[[gnu::section/constructor/destructor]] is refused")
             break
@@ -445,20 +849,173 @@ def scan_hostile_directives(added_text: str, *,
     return tuple(reasons)
 
 
-def added_logical_lines(before: str, after: str, *, raw_strings: bool = True) -> str:
+def added_logical_lines(before: str, after: str, *, raw_strings: bool = True,
+                        trigraphs: bool = True, digraphs: bool = True,
+                        strict_splices: bool = False, legacy: bool = False,
+                        separators: str = "cxx14") -> str:
     """Normalized logical lines present in ``after`` but not in ``before`` (multiset)."""
-    old = normalize_for_scan(before, raw_strings=raw_strings).split("\n")
-    new = normalize_for_scan(after, raw_strings=raw_strings).split("\n")
+    return _added_lines(
+        normalize_for_scan(before, raw_strings=raw_strings, trigraphs=trigraphs,
+                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy,
+                           separators=separators),
+        normalize_for_scan(after, raw_strings=raw_strings, trigraphs=trigraphs,
+                           digraphs=digraphs, strict_splices=strict_splices, legacy=legacy,
+                           separators=separators))
+
+
+def _added_lines(old_text: str, new_text: str) -> str:
+    """Lines of ``new_text`` that ``old_text`` does not have (multiset difference, order kept)."""
     counts: dict[str, int] = {}
-    for line in old:
+    for line in old_text.split("\n"):
         counts[line] = counts.get(line, 0) + 1
     added: list[str] = []
-    for line in new:
+    for line in new_text.split("\n"):
         if counts.get(line, 0) > 0:
             counts[line] -= 1
         else:
             added.append(line)
     return "\n".join(added)
+
+
+def _may_hold_digraph(text: str) -> bool:
+    """True when a digraph could appear once splices (and trigraphs) are applied.
+
+    Any of the five spellings counts: read as written, ``<:``/``<%`` open a
+    header-name, and ``:>``/``%>``/``%:`` are operator characters that the
+    digraph reading turns into ``]``/``}``/``#``.
+    """
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for candidate in (value, _TRIGRAPH_RE.sub(lambda m: _TRIGRAPHS[m.group(1)], value)):
+        joined = _SPLICE_RE.sub("", candidate)
+        if any(pair in joined for pair in _DIGRAPH_PAIRS):
+            return True
+    return False
+
+
+def _blank_splices(text: str) -> tuple[bool, bool]:
+    """(a backslash-blanks-newline exists, one of them holds a form feed or vertical tab)."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    found = False
+    for match in _BLANK_SPLICE_RE.finditer(value):
+        found = True
+        if "\f" in match.group(1) or "\v" in match.group(1):
+            return True, True
+    return found, False
+
+
+# Characters (old text plus new text, once per distinct reading) that one
+# ``scan_added_lexings`` call may normalise and scan. Two readings are always
+# allowed; a file that needs more and would pass this total is refused instead
+# of costing seconds per patch. All 18 readings fit while old plus new text
+# total about 166 kB; 3 readings fit up to 1 MB.
+_LEXING_WORK_CHARS = 3_000_000
+_LOOP_DIGRAPHS = ("<:", ":>", "<%", "%>")
+_LEXING_REFUSAL = ("too many distinct readings for a file this large "
+                   "(lexing work budget exceeded); the input is refused")
+
+
+def _without_bom(text: str) -> str:
+    """Drop one U+FEFF at offset zero before the scanner compares old and new text."""
+    return str(text or "").removeprefix("\ufeff")
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+
+
+def scan_added_lexings(before: str, after: str, *,
+                       include_ok: Callable[[str], bool]) -> tuple[str, ...]:
+    """Union directive-scan reasons over the configured conservative lexical models.
+
+    The models vary raw-string handling, trigraphs, digraphs and strict versus lenient
+    splices. The legacy model is retained so earlier refusals are not lost. Equivalent
+    normalized text and added-line readings are deduplicated.
+
+    Separator and legacy events request additional quote readings; unresolved quote and raw-
+    prefix events cause refusal. These models do not establish coverage of every compiler
+    interpretation.
+
+    _LEXING_WORK_CHARS limits combined work when more than two readings are needed. Up to
+    two readings remain permitted regardless of the combined text-length product; additional
+    quote readings participate in this accounting. One initial U+FEFF is removed from old
+    and new text; later occurrences remain subject to refusal.
+    """
+    before = _without_bom(before)
+    after = _without_bom(after)
+    blank_before, odd_before = _blank_splices(before)
+    blank_after, odd_after = _blank_splices(after)
+    digraph_modes = (True, False) if _may_hold_digraph(before) or _may_hold_digraph(after) \
+        else (True,)
+    splice_modes = (False, True) if blank_before or blank_after else (False,)
+    legacy = odd_before or odd_after or len(digraph_modes) == 2 \
+        or "??" in str(before or "") or "??" in str(after or "")
+    lexings: list[dict[str, bool]] = [
+        {"trigraphs": trigraphs, "digraphs": digraphs, "strict_splices": strict_splices}
+        for trigraphs in (True, False) for digraphs in digraph_modes
+        for strict_splices in splice_modes]
+    if legacy:
+        lexings.append({"legacy": True})
+    unit = len(str(before or "")) + len(str(after or "")) + 1
+    done: set[tuple[bytes, bytes, bool, bool]] = set()
+    plan: list[tuple[dict[str, bool], bool, bool]] = []
+    for lexing in lexings:
+        old = _translation_phases(before, **lexing)
+        new = _translation_phases(after, **lexing)
+        pairs = lexing.get("digraphs", False) \
+            and any(pair in old or pair in new for pair in _LOOP_DIGRAPHS)
+        old_mark, new_mark = _digest(old), _digest(new)
+        for raw_strings in ((True, False) if 'R"' in old or 'R"' in new else (False,)):
+            key = (old_mark, new_mark, raw_strings, pairs)
+            if key not in done:
+                done.add(key)
+                plan.append((lexing, raw_strings, pairs))
+    readings = len(plan)
+    if readings > 2 and readings * unit > _LEXING_WORK_CHARS:
+        return (_LEXING_REFUSAL,)
+    scanned: set[bytes] = set()
+    found: list[str] = []
+
+    def note(reason: str) -> None:
+        if reason not in found:
+            found.append(reason)
+
+    for lexing, raw_strings, pairs in plan:
+        old = _translation_phases(before, **lexing)
+        new = _translation_phases(after, **lexing)
+        events: set[str] = set()
+        masked = [(_mask_literals(old, raw_strings=raw_strings, digraphs=pairs, events=events),
+                   _mask_literals(new, raw_strings=raw_strings, digraphs=pairs, events=events))]
+        # The C17 and legacy quote readings follow the C++14 one up to the first quote they
+        # decide differently, so each runs only when the C++14 pass saw such a quote.
+        extra = [mode for mode, event in (("none", _EVENT_SEPARATOR), ("legacy", _EVENT_LEGACY))
+                 if event in events]
+        if extra:
+            readings += len(extra)
+            if readings > 2 and readings * unit > _LEXING_WORK_CHARS:
+                note(_LEXING_REFUSAL)
+                return tuple(found)
+        for mode in extra:
+            seen: set[str] = set()
+            masked.append((
+                _mask_literals(old, raw_strings=raw_strings, digraphs=pairs, separators=mode, events=seen),
+                _mask_literals(new, raw_strings=raw_strings, digraphs=pairs, separators=mode, events=seen)))
+            if mode == "none" and _EVENT_BAD_RAW in seen:  # C++11 has raw strings too
+                events.add(_EVENT_BAD_RAW)
+        # Anywhere in the old or the new text, not only in added lines: a quote or raw
+        # prefix lexed differently changes which later lines are hidden in a comment.
+        if _EVENT_AMBIGUOUS in events:
+            note(_AMBIGUOUS_SEPARATOR)
+        if _EVENT_BAD_RAW in events:
+            note(_BAD_RAW_DELIMITER)
+        for old_masked, new_masked in masked:
+            added = _added_lines(old_masked, new_masked)
+            mark = _digest(added)
+            if mark in scanned:
+                continue
+            scanned.add(mark)
+            for reason in scan_hostile_directives(added, include_ok=include_ok):
+                note(reason)
+    return tuple(found)
 
 
 # --- patches ------------------------------------------------------------------------
@@ -513,8 +1070,9 @@ def parse_candidate_patch(text: str, *, model_id: str = "") -> CandidatePatch:
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped)
     try:
+        check_depth(stripped)
         document = json.loads(stripped)
-    except ValueError as exc:
+    except (JsonBoundsExceeded, ValueError, RecursionError) as exc:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer is not JSON") from exc
     if not isinstance(document, dict) or set(document) - {"hunks", "rationale"}:
         raise BuildDomainError("FIX_SCOPE_REJECTED", "candidate answer has unexpected fields")
@@ -602,14 +1160,9 @@ def validate_patch(
         if len(new_text.encode("utf-8", "replace")) > scope.max_file_bytes:
             reasons.append("FILE_TOO_LARGE: %s" % rel)
         changed_total += _changed_lines(before, new_text)
-        found: list[str] = []
-        # Both lexings: C++ (raw strings masked) and C (``R"(`` is not a raw
-        # string), so neither can hide a directive the other compiler sees.
-        for raw_strings in (True, False):
-            added = added_logical_lines(before, new_text, raw_strings=raw_strings)
-            for reason in scan_hostile_directives(added, include_ok=include_checker(scope, rel)):
-                if reason not in found:
-                    found.append(reason)
+        # Scan configured alternate readings so normalization does not hide a directive
+        # that another modeled reading would expose.
+        found = scan_added_lexings(before, new_text, include_ok=include_checker(scope, rel))
         reasons.extend("HOSTILE_DIRECTIVE: %s: %s" % (rel, reason) for reason in found)
     touched = set(loop_files_used) | {rel for rel, text in texts.items() if text != current.get(rel)}
     if changed_total > max_changed_lines:
@@ -931,6 +1484,6 @@ __all__ = [
     "MAX_LOOP_FILES", "PatchHunk", "RepairEvidence", "added_logical_lines",
     "fix_report_to_wire", "include_checker", "include_path_problem", "looks_generated",
     "make_file_changes", "make_fix_report", "normalize_for_scan", "parse_candidate_patch",
-    "progress_key", "progress_to_wire", "repair_prompt", "scan_hostile_directives",
-    "sha256_text", "to_strategy_metrics", "validate_patch",
+    "progress_key", "progress_to_wire", "repair_prompt", "scan_added_lexings",
+    "scan_hostile_directives", "sha256_text", "to_strategy_metrics", "validate_patch",
 ]

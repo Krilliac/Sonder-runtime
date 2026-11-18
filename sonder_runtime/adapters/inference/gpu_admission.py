@@ -53,6 +53,7 @@ from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 from sonder_runtime.domain import gpu_admission as policy
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.gpu_admission import (
@@ -74,6 +75,11 @@ _READ_LIMIT = 4 * 1024 * 1024
 _BOUND_LOG_TUPLES = 4096
 _HELD_TICKET: contextvars.ContextVar[_Entry | None] = contextvars.ContextVar(
     "sonder_gpu_admission_held", default=None)
+
+
+def held_ticket_active() -> bool:
+    """Return True when the current context holds an active GPU admission ticket."""
+    return _HELD_TICKET.get() is not None
 
 PsReader = Callable[[str], "Mapping[str, Any] | None"]
 
@@ -158,6 +164,8 @@ class _Entry:
     file_size: int = 0
     digest: str = ""
     store_ok: bool = True
+    # Called once, with no admission lock held, just before the first wait.
+    on_queue: Callable[[], None] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -278,6 +286,9 @@ def _positive(value: object) -> int | None:
 class GpuAdmission:
     """The admission service; one per process (see ``process_service``)."""
 
+    # ``admit`` takes ``on_queue``; callers feature-test this before passing it.
+    accepts_queue_callback = True
+
     def __init__(
         self,
         config: GpuAdmissionConfig | None = None,
@@ -288,6 +299,7 @@ class GpuAdmission:
         tags_reader: PsReader | None = None,
         show_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
         memory_reader: Callable[[str], tuple[int, int] | None] | None = None,
+        evictor: Callable[[str, str], bool] | None = None,
         metrics: _CtxMismatchMetrics | None = None,
         background: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -307,6 +319,7 @@ class GpuAdmission:
         self._show_reader = show_reader or (
             lambda origin, model: self._show_modelfile(origin, model))
         self._memory_reader = memory_reader
+        self._evictor = evictor or self._unload_idle_model
         self._metrics = metrics
         self._clock = clock
         self._sleep = sleep
@@ -436,8 +449,14 @@ class GpuAdmission:
         self, path: str, payload: Mapping[str, Any] | None, *, origin: str,
         deadline: float | None = None, caller: str = "interactive",
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
+        on_queue: Callable[[], None] | None = None,
     ) -> Iterator[AdmissionTicket]:
-        """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
+        """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value.
+
+        ``on_queue`` is called at most once, on the requesting thread and with
+        no admission lock held, just before the request first waits in the
+        GPU or host-memory queue. An exception from it is logged and ignored.
+        """
         origin = _origin_without_userinfo(origin)
         mode = self.config.mode
         if mode == "off":
@@ -470,7 +489,8 @@ class GpuAdmission:
             yield passthrough_ticket(payload)
             self._after_unload(origin, key)
             return
-        entry = self._enter(lane, body, origin, key, deadline, caller, ctx_policy)
+        entry = self._enter(lane, body, origin, key, deadline, caller, ctx_policy,
+                            on_queue=on_queue)
         token = _HELD_TICKET.set(entry)
         succeeded = False
         try:
@@ -533,11 +553,13 @@ class GpuAdmission:
     def _enter(
         self, lane: AdmissionLane, body: Mapping[str, Any], origin: str, key: str,
         deadline: float | None, caller: str, ctx_policy: CtxPolicy | None,
+        *, on_queue: Callable[[], None] | None = None,
     ) -> _Entry:
         ticket = AdmissionTicket(lane, body, requested_num_ctx=policy.requested_num_ctx(body))
         entry = _Entry(ticket, lane=lane, origin=origin, model_key=key,
                        ticket_id=uuid.uuid4().hex,
-                       pool="embed" if lane is AdmissionLane.EMBED else "gpu")
+                       pool="embed" if lane is AdmissionLane.EMBED else "gpu",
+                       on_queue=on_queue)
         ticket.served_num_ctx = ticket.requested_num_ctx
         if self.config.mode == "observe":
             self._observe(entry, body, deadline, ctx_policy)
@@ -586,7 +608,97 @@ class GpuAdmission:
                     "waited %.0f s for a free %s GPU slot" % (
                         self.config.max_queue_wait_seconds, entry.pool),
                     retry_after_seconds=5.0))
+            self._signal_queued(entry)
+            wait_status.report_wait(
+                entry.model_key, detail="every %s GPU slot is busy" % entry.pool)
             self._pause(min(interval, max(0.0, limit - self._clock())))
+
+    @staticmethod
+    def _signal_queued(entry: _Entry) -> None:
+        """Run ``entry.on_queue`` once; never while holding ``_lock`` or ``_wake``.
+
+        The pool's callback takes the pool lock, and the pool calls
+        ``snapshot()`` (which takes ``_lock``) while holding it, so calling it
+        under an admission lock could deadlock.
+        """
+        callback, entry.on_queue = entry.on_queue, None
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            logger.warning("gpu admission: on_queue callback failed; still queueing", exc_info=True)
+
+    def _report_memory_wait(self, model_key: str, refusal: Refused) -> None:
+        """Say what the wait is on: the binding floor, with its numbers."""
+        reading, footprint = refusal.reading, refusal.footprint
+        free = need = floor = None
+        if reading is not None and footprint is not None:
+            if refusal.reason is RefusalReason.HOST_RAM_FLOOR:
+                free, need = reading.available_physical_bytes, footprint.working_set_bytes
+                floor = self._policy.min_available_ram_bytes
+            elif refusal.reason is RefusalReason.COMMIT_FLOOR:
+                free, need = reading.commit_available_bytes, footprint.private_bytes
+                floor = self._policy.min_commit_headroom_bytes
+        wait_status.report_wait(
+            model_key, free, need, refusal.detail,
+            reason=refusal.reason.value, floor_bytes=floor)
+
+    def _unload_idle_model(self, origin: str, model_name: str) -> bool:
+        """Ask Ollama to unload an idle resident model immediately."""
+        ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
+        try:
+            request = urllib.request.Request(
+                origin + "/api/generate",
+                data=json.dumps({"model": model_name, "keep_alive": 0}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with ollama_endpoint.open_url(request, timeout=5.0) as response:
+                response.read(_READ_LIMIT)
+        except Exception as exc:
+            logger.debug(
+                "gpu admission could not unload idle model %s on %s: %s",
+                model_name, redact_url(origin), type(exc).__name__,
+            )
+            return False
+        logger.info(
+            "gpu admission evicted idle model %s on %s to free host memory",
+            model_name, redact_url(origin),
+        )
+        return True
+
+    def _evict_idle_candidate(
+        self,
+        origin: str,
+        target_key: str,
+        exclude_ticket: str,
+        attempted: set[str],
+        store: GpuAdmissionStore,
+    ) -> str | None:
+        """Evict the largest idle evictable model on ``origin``, if any."""
+        rows = self._read_ps(origin)
+        if not rows:
+            return None
+        candidates = sorted(
+            (
+                (other, row)
+                for other, row in rows.items()
+                if other != target_key
+                and other not in attempted
+                and store.holders(origin, other, exclude=exclude_ticket) == 0
+            ),
+            key=lambda item: (item[1].size, item[0]),
+            reverse=True,
+        )
+        for other, row in candidates:
+            attempted.add(other)
+            if self._evictor(origin, row.name):
+                self._ps_cache.pop(origin, None)
+                with self._lock:
+                    self._counters["evicted"] += 1
+                return row.name
+        return None
 
     def _release_quietly(self, entry: _Entry) -> None:
         if entry.enqueued and self._store is not None:
@@ -608,6 +720,7 @@ class GpuAdmission:
             limit = min(limit, deadline)
         local = ollama_policy.is_loopback(entry.origin)
         store = self._the_store()
+        attempted_evictions: set[str] = set()
         while True:
             if local:
                 self._take_slot(entry, limit, deadline, caller)
@@ -625,6 +738,11 @@ class GpuAdmission:
                     "%s: model %s is loaded at its pinned window until it unloads"
                     % (plan.ctx.detail, entry.model_key), retry_after_seconds=30.0)
             elif isinstance(plan.memory, Queued):
+                if local and self._clock() < limit and self._evict_idle_candidate(
+                    entry.origin, entry.model_key, entry.ticket_id,
+                    attempted_evictions, store,
+                ) is not None:
+                    continue
                 wait_interval = self.config.host_recheck_interval_ms / 1000.0
                 refusal = Refused(
                     plan.memory.reason, plan.memory.detail, plan.memory.retry_after_seconds,
@@ -639,7 +757,10 @@ class GpuAdmission:
             self._release_quietly(entry)
             with self._lock:
                 self._counters["queued"] += 1
+            self._signal_queued(entry)
+            self._report_memory_wait(entry.model_key, refusal)
             self._pause(wait_interval)
+        wait_status.report_admitted()
         self._apply(entry, plan, body, store)
         entry.ticket.waited_seconds = self._clock() - started
         with self._lock:

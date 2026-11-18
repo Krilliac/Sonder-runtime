@@ -6,8 +6,9 @@ Two halves of one flow (app plan S1/S2):
   call (``Decision.call_id``) into the ``sonder_receipt.refusal`` object a
   chat response carries, so a client can show *what* was refused and offer
   "approve this call once" without parsing prose.
-* ``approvals_payload`` / ``approve_call`` / ``revoke_approval`` serve
-  ``GET /v1/approvals``, ``POST /v1/approvals/<call_id>`` and
+* ``approvals_payload`` / ``approve_call`` / ``deny_call`` / ``revoke_approval``
+  serve ``GET /v1/approvals``, ``POST /v1/approvals/<call_id>``,
+  ``POST /v1/approvals/deny/<call_id>`` and
   ``POST /v1/approvals/revoke/<nonce>`` over the same approval ledger the
   permission gate spends from.
 
@@ -43,6 +44,7 @@ __all__ = [
     "approval_view",
     "approvals_payload",
     "approve_call",
+    "deny_call",
     "pending_view",
     "refusal_receipt",
     "revoke_approval",
@@ -123,7 +125,14 @@ def refusal_receipt(decision, *, mode_label: str = "", modes_allowing=(),
     return receipt
 
 
-def pending_view(item) -> dict:
+def pending_view(item, *, show_detail: bool = True) -> dict:
+    """One pending call. ``detail`` (the exact code of a run_code call) is
+    withheld, with ``detail_hidden`` true, when ``show_detail`` is false."""
+    from sonder_runtime.application.chat.bidi import detect_bidi_chars
+
+    detail = str(getattr(item, "detail", "") or "")
+    chars = int(getattr(item, "detail_chars", 0) or 0)
+    has_bidi, bidi = detect_bidi_chars(detail) if (show_detail and detail) else (False, [])
     return {
         "call_id": str(item.call_id),
         "digest": str(item.digest),
@@ -133,6 +142,13 @@ def pending_view(item) -> dict:
         "count": int(item.count),
         "first_at": _iso(item.first_ts),
         "last_at": _iso(item.last_ts),
+        "detail": detail if show_detail else None,
+        "detail_hidden": not show_detail,
+        "detail_truncated": bool(getattr(item, "detail_truncated", False)),
+        "detail_chars": chars,
+        "bidi_warning": has_bidi,
+        "bidi_chars": list(bidi),
+        "denied": bool(getattr(item, "denied", False)),
     }
 
 
@@ -157,13 +173,14 @@ def approval_view(item, now: float | None = None) -> dict:
     }
 
 
-def approvals_payload(ledger, *, limit: int = 20, include_spent: bool = False) -> dict:
+def approvals_payload(ledger, *, limit: int = 20, include_spent: bool = False,
+                      show_detail: bool = True) -> dict:
     """Pending (refused, approvable) calls and approvals; previews are pre-redacted."""
     limit = max(1, min(int(limit), 200))
     now = time.time()
     return {
         "object": "approvals",
-        "pending": [pending_view(item) for item in ledger.pending(limit)],
+        "pending": [pending_view(item, show_detail=show_detail) for item in ledger.pending(limit)],
         "approvals": [
             approval_view(item, now)
             for item in ledger.approvals(include_spent=include_spent, limit=limit)
@@ -236,6 +253,10 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
                 ttl_seconds=ttl, preview=pending.preview,
             )
         except ValueError as exc:
+            if getattr(exc, "denied", False):
+                # Decided inside the ledger's issuing transaction, so a deny
+                # racing this approve can never leave an approval behind.
+                return _error(409, "CALL_DENIED", str(exc))
             code = "INVALID_TTL" if "ttl" in str(exc) else "INVALID_REQUEST"
             return _error(400, code, str(exc))
     view = approval_view(approval)
@@ -247,6 +268,58 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
             "runs once and spends it (expires %s)"
             % (approval.tool, approval.call_id, view["expires_at"])
         ),
+    })
+
+
+def deny_call(ledger, call_ref: str, request) -> ApprovalResult:
+    """Record that the operator declined one pending call.
+
+    Authorises nothing: it revokes any open approval for the call and marks the
+    pending call denied so a waiting turn can see it. ``request`` is the
+    decoded JSON body; optional ``tool`` and ``digest`` must equal the pending
+    call's, as for approving. Repeating it is harmless.
+    """
+    ref = str(call_ref or "").strip().lower()
+    if not _valid_call_ref(ref):
+        return _error(400, "INVALID_CALL_ID",
+                      "a call id is the 16 hex characters a refusal names "
+                      "(or the full 64-character digest)")
+    if request is None:
+        request = {}
+    if not isinstance(request, Mapping):
+        return _error(400, "INVALID_REQUEST", "the request body must be a JSON object")
+    unknown = sorted(set(request) - {"tool", "digest"})
+    if unknown:
+        return _error(400, "INVALID_REQUEST",
+                      "unknown field(s): %s" % ", ".join(str(k) for k in unknown))
+    try:
+        pending = ledger.resolve_call(ref)
+    except ValueError:
+        return _error(404, "CALL_NOT_PENDING",
+                      "no refused call %s is waiting for approval; it may already "
+                      "have been approved and run, or have aged out" % ref)
+    wanted_digest = request.get("digest")
+    if wanted_digest is not None and str(wanted_digest).strip().lower() != pending.digest:
+        return _error(409, "CALL_DIGEST_MISMATCH",
+                      "the call's arguments changed since it was refused")
+    wanted_tool = request.get("tool")
+    if wanted_tool is not None and str(wanted_tool).strip().lstrip("/") != pending.tool:
+        return _error(409, "CALL_DIGEST_MISMATCH",
+                      "call %s is a %s call, not %s" % (pending.call_id, pending.tool, wanted_tool))
+    try:
+        denied = ledger.deny(pending.digest)
+    except ValueError:
+        return _error(404, "CALL_NOT_PENDING",
+                      "call %s is no longer pending" % pending.call_id)
+    return ApprovalResult(200, {
+        "object": "denial",
+        "denial": {
+            "tool": str(denied.tool),
+            "call_id": str(denied.call_id),
+            "digest": str(denied.digest),
+            "denied_at": _iso(getattr(denied, "denied_ts", None)),
+        },
+        "message": "denied %s call %s; nothing is approved or run" % (denied.tool, denied.call_id),
     })
 
 

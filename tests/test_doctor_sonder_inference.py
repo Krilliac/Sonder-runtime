@@ -351,3 +351,19 @@ def test_preflight_reports_a_check_that_raises_instead_of_blocking(monkeypatch):
     result = preflight_adapter._check_sonder_inference()
     assert result.ok is False and result.required is False
     assert "RuntimeError" in result.detail
+
+
+def test_ready_warns_when_configured_tier_model_is_missing_from_server():
+    env = dict(BOUND, SONDER_INFERENCE_TIER_MODELS="reasoning=qwen3.6:35b")
+    gw = SonderInferenceGateway(
+        SonderInferenceConfig(
+            base_url="http://127.0.0.1:18437",
+            tier_models={"reasoning": "qwen3.6:35b"},
+        ),
+        transport=lambda *_a: pytest.fail("doctor must never generate"),
+        get_transport=lambda _u, _h, _t: (200, json.dumps(_health()).encode()),
+    )
+    result = sonder_doctor._check_sonder_inference(env=env, gateway=gw)
+    assert result["status"] == "warn"
+    assert "qwen3.6:35b" in result["detail"]
+    assert "reasoning" in result["detail"]

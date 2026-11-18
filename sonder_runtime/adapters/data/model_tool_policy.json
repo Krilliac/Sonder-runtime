@@ -18,11 +18,16 @@
           "cyber-ornith-1.5-9b-obliterated"
         ]
       },
-      "tools": [],
+      "tools": [
+        "text_search"
+      ],
       "lanes": []
     }
   ],
-  "undetermined_served_models": ["", "default"],
+  "undetermined_served_models": [
+    "",
+    "default"
+  ],
   "restricted_tool_ceiling": [
     "text_search",
     "repository_symbol_index",

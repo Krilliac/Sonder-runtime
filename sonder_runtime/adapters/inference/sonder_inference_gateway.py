@@ -56,6 +56,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -76,6 +77,7 @@ from ...application.ports.model_gateway import (
 from ...application.ports.model_gateway_contract import Capability, CapabilityHealth
 from .log_safe import redact_url, urlsplit_or_none
 from ...domain.common.errors import (
+    Cancelled,
     CapacityExceeded,
     DeadlineExceeded,
     DependencyUnavailable,
@@ -86,6 +88,12 @@ from ...domain.common.errors import (
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
+)
+from ...domain.native_tool_policy import (
+    MAX_ARGUMENT_CHARS as MAX_TOOL_SCHEMA_CHARS,
+    TOOL_NAME_RE,
+    _value_depth_within,
+    native_tool_call_decision,
 )
 from ...domain.routing.backend_conformance import BackendIdentity
 from ...platform.metrics import default_registry
@@ -99,7 +107,7 @@ from .openai_compat_gateway import (
     OpenAICompatibleGateway,
     shared_https_context,
 )
-from .request_tuning import thinking_supported, tune_request
+from .request_tuning import advertised_features, thinking_supported, tune_request
 from .sse_stream import post_streaming
 from .telemetry import from_openai_compatible
 
@@ -191,7 +199,11 @@ _FORWARDED_OPTIONS = {
 _INTEGER_OPTIONS = frozenset({"top_k", "seed", "repeat_last_n", "num_ctx", "num_predict"})
 # Requests Inference v1 rejects with 400 unsupported_parameter.  Refusing them
 # here keeps the failure local, loud and free of a wasted network round trip.
-_UNSUPPORTED_OPTIONS = ("format", "tools", "tool_choice", "functions", "response_format")
+_UNSUPPORTED_OPTIONS = ("format", "functions", "response_format")
+MAX_TOOLS = 64
+MAX_TOOL_SCHEMA_DEPTH = 16
+ENV_TOOLS = "SONDER_INFERENCE_TOOLS"
+MIN_THINKING_RETRY_SECONDS = 2.0
 
 
 class SonderInferenceUnreachable(DependencyUnavailable):
@@ -210,16 +222,23 @@ class SonderInferenceUnreachable(DependencyUnavailable):
     kind = "provider_unavailable"
 
     def __init__(self, message: str, *, reason: str | None = None,
-                 summary: str | None = None) -> None:
+                 summary: str | None = None, timed_out: bool = False) -> None:
         super().__init__(message)
         self.reason = reason or message
         self.summary = summary or message
+        self.timed_out = bool(timed_out)
 
 
 class SonderInferenceBusyTimeout(DependencyUnavailable):
     """A backend read timeout; retry here once, never on another provider."""
 
     kind = "busy_timeout"
+
+
+class SonderInferenceOverloaded(CapacityExceeded):
+    """Endpoint reported HTTP 503 overloaded before execution."""
+
+    kind = "provider_unavailable"
 
 
 @dataclass(frozen=True)
@@ -231,6 +250,7 @@ class SonderInferenceResponse(ModelResponse):
     # Scheme and host of the endpoint that served it, when private workers
     # are configured (never a path, query or credential).
     endpoint: str | None = None
+    tool_calls: tuple[Mapping[str, object], ...] | None = None
 
 
 # -- transport ---------------------------------------------------------------
@@ -247,28 +267,108 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-class _ExchangeBudget:
-    """Shut down an exchange's sockets once its total budget is spent."""
+_ACTIVE_CANCELLATION: ContextVar[object | None] = ContextVar(
+    "sonder_inference_active_cancellation", default=None,
+)
+_UNSET = object()
 
-    def __init__(self, seconds: float) -> None:
+
+def _is_cancelled(token: object | None) -> bool:
+    if token is None:
+        return False
+    is_set = getattr(token, "is_set", None)
+    if callable(is_set):
+        return bool(is_set())
+    if hasattr(token, "cancelled"):
+        return bool(token.cancelled)
+    if callable(token):
+        return bool(token())
+    return False
+
+
+class _CompositeCancellation:
+    """Combine OperationContext.cancellation with a per-request cancel token."""
+
+    def __init__(self, primary: object | None, secondary: object | None) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    @property
+    def cancelled(self) -> bool:
+        return _is_cancelled(self._primary) or _is_cancelled(self._secondary)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if timeout is None or timeout <= 0:
+            return self.cancelled
+        deadline = time.monotonic() + float(timeout)
+        while not self.cancelled:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+        return self.cancelled
+
+
+@contextmanager
+def _cancellation_scope(token: object | None):
+    if token is None:
+        yield
+        return
+    scope_token = _ACTIVE_CANCELLATION.set(token)
+    try:
+        yield
+    finally:
+        _ACTIVE_CANCELLATION.reset(scope_token)
+
+
+class _ExchangeBudget:
+    """Shut down an exchange's sockets once its total budget is spent or cancelled."""
+
+    def __init__(self, seconds: float, *, cancellation: object | None = _UNSET) -> None:
         self._lock = threading.Lock()
         self._sockets: list[socket.socket] = []
         self.expired = False
+        self.aborted = False
+        self._cancellation = _ACTIVE_CANCELLATION.get() if cancellation is _UNSET else cancellation
+        self._stop = threading.Event()
+        self._cancel_thread: threading.Thread | None = None
         self._timer = threading.Timer(max(0.0, float(seconds)), self._expire)
         self._timer.daemon = True
 
     def __enter__(self) -> "_ExchangeBudget":
         self._timer.start()
+        if self._cancellation is not None:
+            if _is_cancelled(self._cancellation):
+                self.abort()
+            else:
+                self._cancel_thread = threading.Thread(
+                    target=self._watch_cancel,
+                    name="sonder-inference-cancel",
+                    daemon=True,
+                )
+                self._cancel_thread.start()
         return self
 
     def __exit__(self, *exc_info) -> None:
         self._timer.cancel()
+        self._stop.set()
+        if self._cancel_thread is not None and threading.current_thread() is not self._cancel_thread:
+            self._cancel_thread.join(timeout=0.5)
+
+    def _watch_cancel(self) -> None:
+        while not self._stop.wait(0.05):
+            if _is_cancelled(self._cancellation):
+                self.abort()
+                return
 
     def attach(self, sock: socket.socket) -> None:
         with self._lock:
             self._sockets.append(sock)
             expired = self.expired
-        if expired:
+            aborted = self.aborted
+        if aborted:
+            _close_socket(sock)
+        elif expired:
             _shutdown(sock)
 
     def _expire(self) -> None:
@@ -278,10 +378,28 @@ class _ExchangeBudget:
         for sock in sockets:
             _shutdown(sock)
 
+    def abort(self) -> None:
+        """Close attached sockets immediately so an active HTTP call unblocks."""
+        with self._lock:
+            self.aborted = True
+            sockets = list(self._sockets)
+        for sock in sockets:
+            _close_socket(sock)
+
 
 def _shutdown(sock: socket.socket) -> None:
     try:
         sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _close_socket(sock: socket.socket) -> None:
+    _shutdown(sock)
+    try:
+        descriptor = sock.detach()
+        if descriptor >= 0:
+            socket.close(descriptor)
     except OSError:
         pass
 
@@ -372,19 +490,24 @@ def _read_bounded(stream, limit: int) -> bytes:
 
 def _exchange(
     method: str, url: str, headers: Mapping[str, str], data: bytes | None,
-    timeout: float, limit: int,
+    timeout: float, limit: int, *, cancellation: object | None = _UNSET,
 ) -> tuple[int, bytes, Mapping[str, str] | None]:
     """Run one direct, non-redirected, wall-clock-bounded HTTP exchange.
 
     Returns ``(status, body, None)`` for a 2xx response and
-    ``(status, error body, headers)`` otherwise.  Raises ``TimeoutError`` when
-    the budget is spent, ``DependencyUnavailable`` for a malformed or
-    oversized HTTP response, and the usual ``URLError``/``OSError`` for
-    transport failures before a response (refused, unresolvable, ...).
+    ``(status, error body, headers)`` otherwise.  Raises ``Cancelled`` on
+    cooperative cancellation, ``TimeoutError`` when the budget is spent,
+    ``DependencyUnavailable`` for a malformed or oversized HTTP response, and
+    the usual ``URLError``/``OSError`` for transport failures before a response
+    (refused, unresolvable, ...).
     """
     budget_seconds = float(timeout) if timeout else DEFAULT_TIMEOUT_SECONDS
+    token = _ACTIVE_CANCELLATION.get() if cancellation is _UNSET else cancellation
+    if _is_cancelled(token):
+        raise Cancelled("sonder-inference exchange cancelled before send")
     request = urllib.request.Request(url, data=data, headers=dict(headers), method=method)
-    with _ExchangeBudget(budget_seconds) as budget:
+    scope = _cancellation_scope(token) if cancellation is not _UNSET else _cancellation_scope(None)
+    with scope, _ExchangeBudget(budget_seconds) as budget:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), _NoRedirect(),
             _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
@@ -394,6 +517,7 @@ def _exchange(
         # variable and the error is raised after the except block.
         malformed: str | None = None
         expired_cause: Exception | None = None
+        aborted_cause: Exception | None = None
         try:
             try:
                 with opener.open(request, timeout=budget_seconds) as response:
@@ -408,12 +532,16 @@ def _exchange(
                     exc.close()
                 error_headers = dict(exc.headers or {})
         except Exception as exc:
-            if isinstance(exc, http.client.HTTPException):
+            if budget.aborted:
+                aborted_cause = exc
+            elif isinstance(exc, http.client.HTTPException):
                 malformed = type(exc).__name__
             elif budget.expired:
                 expired_cause = exc
             else:
                 raise
+        if budget.aborted or aborted_cause is not None:
+            raise Cancelled("sonder-inference exchange cancelled") from aborted_cause
         if malformed is not None:
             if budget.expired:
                 raise TimeoutError(
@@ -993,6 +1121,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         env: Mapping[str, str] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] | None = None,
+        ollama_pool=None,
     ) -> None:
         super().__init__(
             None,
@@ -1008,7 +1137,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._env = env
         self._monotonic = monotonic
         self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
+        self._ollama_pool = ollama_pool
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._refresh_lock = threading.Lock()
         self._health_cache: HealthSnapshot | None = None
         self._health_probe_monotonic = float("-inf")
@@ -1022,6 +1153,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._transport_seams = (transport, get_transport)
         self._workers: dict[str, tuple[tuple, SonderInferenceGateway]] = {}
         self._inflight: dict[str, int] = {}
+        self._local_inflight = 0
         self._cursor = 0
         # Observed milliseconds per output token per endpoint (EWMA of
         # successful calls), so a much slower endpoint only gets overflow.
@@ -1074,7 +1206,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return settings.tier_models.get(request.tier or "", settings.model)
 
     @staticmethod
-    def unreachable_error(settings: SonderInferenceConfig, reason: str) -> SonderInferenceUnreachable:
+    def unreachable_error(
+        settings: SonderInferenceConfig, reason: str, *, timed_out: bool = False,
+    ) -> SonderInferenceUnreachable:
         """Build the one operator message for "Inference did not get it"."""
         summary = "Sonder Inference at %s is not reachable or not ready (%s)" % (
             settings.display_base_url, _bounded(reason),
@@ -1083,7 +1217,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             "%s; start it with `sonder-infer serve`, or set %s=ollama and restart "
             "the runtime to send requests it never received to local Ollama"
             % (summary, ENV_FALLBACK),
-            reason=_bounded(reason), summary=summary,
+            reason=_bounded(reason), summary=summary, timed_out=timed_out,
         )
 
     # -- error classification (hooks of the shared transport) --------------
@@ -1136,7 +1270,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 )
             return self.unreachable_error(settings, detail)
         if status == 503 and code == "overloaded":
-            return CapacityExceeded("sonder-inference is at its connection limit (%s)" % label)
+            return SonderInferenceOverloaded("sonder-inference is at its connection limit (%s)" % label)
         if busy_timeout:
             return SonderInferenceBusyTimeout(
                 "sonder-inference busy_timeout (%s)%s" % (label, suffix)
@@ -1237,6 +1371,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         try:
             with trust_scope(settings.ca_bundle):
                 status, document = self.get_json("/v1/sonder/health", timeout=timeout, cfg=cfg)
+        except Cancelled:
+            raise
         except SonderInferenceUnreachable as exc:
             return snapshot("unavailable", exc.reason)
         except DeadlineExceeded:
@@ -1310,12 +1446,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if snap.overloaded:
             # Preserve capacity classification for an overloaded endpoint with
             # no healthy evidence; this must not activate the Ollama fallback.
-            error = CapacityExceeded("sonder-inference at %s %s; retry shortly"
-                                     % (settings.display_base_url, snap.detail))
+            error = SonderInferenceOverloaded("sonder-inference at %s %s; retry shortly"
+                                              % (settings.display_base_url, snap.detail))
             error.kind = "provider_unavailable"
             raise error
         if snap.state != "ready":
-            raise self.unreachable_error(settings, snap.detail)
+            raise self.unreachable_error(settings, snap.detail, timed_out=snap.timed_out)
         return snap
 
     def readiness(self) -> Readiness:
@@ -1520,16 +1656,203 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 ))
                 identity = None
             entry["identity"] = identity.to_dict() if identity is not None else None
+        if self._ollama_pool is not None:
+            unified = self.unified_worker_status()
+            entry["ollama_pool"] = unified["pool"]
+            entry["pool_workers"] = unified["workers"]
         return {PROVIDER_ID: entry}
+
+    def attach_ollama_pool(self, ollama_pool) -> None:
+        """Bind or replace the cached OllamaWorkerPool used for unified discovery."""
+        with self._lock:
+            self._ollama_pool = ollama_pool
+
+    def register_ollama_worker(
+        self,
+        origin: str,
+        *,
+        allow_remote: bool | None = None,
+        ollama_pool=None,
+        refresh: bool = True,
+    ):
+        """Register/refresh a peer worker on the bound OllamaWorkerPool."""
+        pool = ollama_pool if ollama_pool is not None else self._ollama_pool
+        if pool is None:
+            raise InvalidInput("no OllamaWorkerPool is attached to SonderInferenceGateway")
+        return pool.register_worker(origin, allow_remote=allow_remote, refresh=refresh)
+
+    def unified_worker_status(self, *, ollama_pool=None) -> dict[str, object]:
+        """Unify private gateway worker status with cached ``OLLAMA_POOL`` snapshots."""
+        pool = ollama_pool if ollama_pool is not None else self._ollama_pool
+        settings = self.settings()
+        gateway_rows = self._workers_status(settings) if settings.workers else []
+        pool_summary = (
+            pool.pool_capacity_summary()
+            if pool is not None and callable(getattr(pool, "pool_capacity_summary", None))
+            else None
+        )
+        unified_workers: list[dict[str, object]] = []
+        available_models: set[str] = set()
+        resident_models: set[str] = set()
+        model_contexts: dict[str, int] = {}
+        tool_capable_models: set[str] = set()
+        healthy_count = 0
+
+        if pool is not None and callable(getattr(pool, "snapshots", None)):
+            for snap in pool.snapshots():
+                snap_dict = snap.to_dict() if callable(getattr(snap, "to_dict", None)) else {}
+                row = {
+                    "source": "ollama_pool",
+                    "worker_id": getattr(snap, "worker_id", snap_dict.get("worker_id")),
+                    "base_url": getattr(snap, "origin", snap_dict.get("origin")),
+                    "origin": getattr(snap, "origin", snap_dict.get("origin")),
+                    "state": getattr(snap, "state", snap_dict.get("state")),
+                    "healthy": bool(getattr(snap, "healthy", False)),
+                    "inflight": getattr(snap, "inflight", 0),
+                    "capacity": getattr(snap, "capacity", 0),
+                    "latency_ewma_ms": getattr(snap, "latency_ewma_ms", None),
+                    "models": list(getattr(snap, "models", ()) or ()),
+                    "loaded_models": list(getattr(snap, "loaded_models", ()) or ()),
+                    "model_contexts": dict(getattr(snap, "model_contexts", {}) or {}),
+                    "vram_bytes": getattr(snap, "vram_bytes", None),
+                    "ram_bytes": getattr(snap, "ram_bytes", None),
+                    "kv_cache_type": getattr(snap, "kv_cache_type", None),
+                    "supports_tools": dict(getattr(snap, "supports_tools", {}) or {}),
+                    "model_active_billions": dict(getattr(snap, "model_active_billions", {}) or {}),
+                }
+                unified_workers.append(row)
+                if row["healthy"]:
+                    healthy_count += 1
+                    available_models.update(row["models"])
+                    resident_models.update(row["loaded_models"])
+                    for m_name, ctx in row["model_contexts"].items():
+                        prev = model_contexts.get(m_name)
+                        if prev is None or ctx > prev:
+                            model_contexts[m_name] = ctx
+                    for m_name, supported in row["supports_tools"].items():
+                        if supported:
+                            tool_capable_models.add(m_name)
+
+        for gw_row in gateway_rows:
+            tagged = {"source": "sonder_inference_worker", **gw_row}
+            unified_workers.append(tagged)
+            if gw_row.get("healthy"):
+                healthy_count += 1
+                raw_models = gw_row.get("models")
+                if isinstance(raw_models, list):
+                    available_models.update(str(m) for m in raw_models if m)
+
+        return {
+            "worker_count": len(unified_workers),
+            "healthy_worker_count": healthy_count,
+            "workers": unified_workers,
+            "pool": pool_summary,
+            "gateway_workers": gateway_rows,
+            "available_models": sorted(available_models),
+            "resident_models": sorted(resident_models),
+            "model_contexts": dict(sorted(model_contexts.items())),
+            "tool_capable_models": sorted(tool_capable_models),
+            "total_vram_bytes": pool_summary.get("total_vram_bytes") if pool_summary else None,
+        }
 
     # -- generate ----------------------------------------------------------
 
     @staticmethod
-    def _payload_options(options: Mapping[str, object]) -> dict[str, object]:
+    def _validate_tools(raw_tools: object) -> list[dict[str, object]]:
+        if not isinstance(raw_tools, (list, tuple)) or not 1 <= len(raw_tools) <= MAX_TOOLS:
+            raise InvalidInput("option 'tools' must be a list of 1-%d tool definitions" % MAX_TOOLS)
+        validated: list[dict[str, object]] = []
+        for idx, item in enumerate(raw_tools):
+            if not isinstance(item, Mapping) or item.get("type") != "function":
+                raise InvalidInput("option 'tools[%d]' must be a function tool object" % idx)
+            fn = item.get("function")
+            if not isinstance(fn, Mapping):
+                raise InvalidInput("option 'tools[%d].function' must be an object" % idx)
+            name = fn.get("name")
+            if not isinstance(name, str) or not TOOL_NAME_RE.fullmatch(name.strip()):
+                raise InvalidInput("option 'tools[%d].function.name' is invalid" % idx)
+            entry = dict(item)
+            entry["function"] = dict(fn, name=name.strip())
+            if not _value_depth_within(entry, MAX_TOOL_SCHEMA_DEPTH):
+                raise InvalidInput("option 'tools[%d]' exceeds nesting limit" % idx)
+            validated.append(entry)
+        try:
+            encoded = json.dumps(validated, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise InvalidInput("option 'tools' must be finite JSON: %s" % exc) from None
+        if len(encoded) > MAX_TOOL_SCHEMA_CHARS:
+            raise InvalidInput("option 'tools' exceeds %d characters" % MAX_TOOL_SCHEMA_CHARS)
+        return validated
+
+    @staticmethod
+    def _validate_tool_choice(raw_choice: object) -> object:
+        if isinstance(raw_choice, str):
+            if raw_choice in ("auto", "none", "required"):
+                return raw_choice
+            raise InvalidInput("option 'tool_choice' string must be auto, none, or required")
+        if isinstance(raw_choice, Mapping) and raw_choice.get("type") == "function":
+            fn = raw_choice.get("function")
+            name = fn.get("name") if isinstance(fn, Mapping) else None
+            if isinstance(name, str) and TOOL_NAME_RE.fullmatch(name.strip()):
+                return {"type": "function", "function": {"name": name.strip()}}
+        raise InvalidInput("option 'tool_choice' is invalid")
+
+    @staticmethod
+    def _tools_supported(
+        document: Mapping[str, object] | None,
+        *,
+        model: str,
+        env: Mapping[str, str] | None = None,
+    ) -> bool:
+        source = os.environ if env is None else env
+        flag = str(source.get(ENV_TOOLS, "") or "").strip().lower()
+        if flag in ("1", "on", "true", "yes"):
+            return True
+        if flag in ("0", "off", "false", "no"):
+            return False
+        if not isinstance(document, Mapping):
+            return False
+        models = document.get("models")
+        if isinstance(models, list):
+            for entry in models:
+                if not isinstance(entry, Mapping):
+                    continue
+                matches = (
+                    entry.get("id") == model
+                    or (model == DEFAULT_MODEL and entry.get("default") is True)
+                )
+                if not matches:
+                    continue
+                caps = entry.get("capabilities")
+                feats = entry.get("features")
+                if caps is not None or feats is not None:
+                    names = {
+                        str(x).strip().lower()
+                        for src in (caps, feats)
+                        for x in (
+                            [k for k, v in src.items() if v]
+                            if isinstance(src, Mapping)
+                            else (src if isinstance(src, (list, tuple, set, frozenset)) else ())
+                        )
+                        if isinstance(x, str)
+                    }
+                    return "tools" in names
+        return "tools" in advertised_features(document)
+
+    @classmethod
+    def _payload_options(cls, options: Mapping[str, object]) -> dict[str, object]:
         for name in _UNSUPPORTED_OPTIONS:
             if options.get(name) not in (None, False, "", [], {}):
                 raise InvalidInput("sonder-inference v1 does not support the %r option" % name)
         payload: dict[str, object] = {}
+        raw_tools = options.get("tools")
+        if raw_tools not in (None, False, "", [], {}):
+            payload["tools"] = cls._validate_tools(raw_tools)
+        raw_choice = options.get("tool_choice")
+        if raw_choice not in (None, ""):
+            if "tools" not in payload:
+                raise InvalidInput("option 'tool_choice' requires 'tools'")
+            payload["tool_choice"] = cls._validate_tool_choice(raw_choice)
         for option, wire in _FORWARDED_OPTIONS.items():
             if option not in options or options[option] is None:
                 continue
@@ -1712,6 +2035,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 # serves is not sent here first (a 404 would be final).
                 try:
                     snapshot = self.health(settings=endpoint)
+                except Cancelled:
+                    raise
                 except Exception:  # noqa: BLE001 - the primary path reports it
                     snapshot = None
             if snapshot is not None and snapshot.state != "ready" and not snapshot.busy:
@@ -1735,6 +2060,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if snapshot is None:
             try:
                 snapshot = gateway.health(settings=endpoint)
+            except Cancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - an unusable worker is skipped
                 logger.info("private sonder-inference worker %s skipped: %s",
                             endpoint.display_base_url,
@@ -1747,8 +2074,60 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             return False
         return model in {item.get("id") for item in models if isinstance(item, dict)}
 
-    def _acquire_endpoint(self, usable, excluded: set[str]):
-        """Pick the endpoint with the lowest expected cost and count it.
+    @staticmethod
+    def _with_request_cancel_token(
+        request: ModelRequest, context: OperationContext,
+    ) -> OperationContext:
+        options = request.options or {}
+        token = options.get("cancel_token")
+        if token is None:
+            token = options.get("cancel_event")
+        if token is None:
+            return context
+        if context.cancellation is None:
+            return replace(context, cancellation=token)
+        return replace(context, cancellation=_CompositeCancellation(context.cancellation, token))
+
+    def _post(
+        self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
+        *, context: OperationContext | None = None,
+    ) -> dict:
+        token = context.cancellation if context is not None else _ACTIVE_CANCELLATION.get()
+        with _cancellation_scope(token):
+            try:
+                return super()._post(path, payload, cfg, timeout, context=context)
+            except Cancelled:
+                raise
+            except Exception:
+                if _is_cancelled(token):
+                    raise Cancelled("operation cancelled during model call") from None
+                raise
+
+    def _has_free_endpoint(self, usable, excluded: set[str]) -> bool:
+        with self._lock:
+            return any(
+                item[0] not in excluded and self._inflight.get(item[0], 0) < item[2].max_inflight
+                for item in usable
+            )
+
+    @contextmanager
+    def _local_slot(self, settings: SonderInferenceConfig, context: OperationContext):
+        with self._cond:
+            while self._local_inflight >= settings.max_inflight:
+                remaining = self._check_liveness(context, phase="while waiting for inference slot")
+                wait_for = 0.05 if remaining is None else min(0.05, max(0.001, remaining))
+                self._cond.wait(timeout=wait_for)
+            self._local_inflight += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._local_inflight = max(0, self._local_inflight - 1)
+                self._cond.notify_all()
+
+    def _acquire_endpoint(self, usable, excluded: set[str],
+                          context: OperationContext | None = None):
+        """Pick the lowest-cost endpoint with free inflight capacity, waiting if saturated.
 
         Cost = (in-flight + 1) / max_inflight x observed ms per output token.
         An idle endpoint with no observation yet costs nothing, so each one is
@@ -1756,27 +2135,39 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         fastest observed value (1.0 when there is none, i.e. plain
         least-in-flight).  Ties rotate.
         """
-        with self._lock:
-            open_ = [item for item in usable if item[0] not in excluded]
-            if not open_:
-                return None
-            known = [self._ms_per_token[item[0]] for item in open_ if item[0] in self._ms_per_token]
-            fallback = min(known) if known else 1.0
-            start = self._cursor % len(open_)
-            self._cursor += 1
-            rotated = open_[start:] + open_[:start]
+        with self._cond:
+            while True:
+                open_ = [item for item in usable if item[0] not in excluded]
+                if not open_:
+                    return None
+                ready = [
+                    item for item in open_
+                    if self._inflight.get(item[0], 0) < item[2].max_inflight
+                ]
+                if ready:
+                    known = [self._ms_per_token[item[0]] for item in ready if item[0] in self._ms_per_token]
+                    fallback = min(known) if known else 1.0
+                    start = self._cursor % len(ready)
+                    self._cursor += 1
+                    rotated = ready[start:] + ready[:start]
 
-            def cost(item):
-                inflight = self._inflight.get(item[0], 0)
-                load = (inflight + 1) / item[2].max_inflight
-                if item[0] not in self._ms_per_token and inflight == 0:
-                    return (0.0, load)
-                return (load * self._ms_per_token.get(item[0], fallback), load)
+                    def cost(item, *, default_rate=fallback):
+                        inflight = self._inflight.get(item[0], 0)
+                        load = (inflight + 1) / item[2].max_inflight
+                        if item[0] not in self._ms_per_token and inflight == 0:
+                            return (0.0, load)
+                        return (load * self._ms_per_token.get(item[0], default_rate), load)
 
-            chosen = min(rotated, key=cost)
-            load = cost(chosen)[1]
-            self._inflight[chosen[0]] = self._inflight.get(chosen[0], 0) + 1
-            return chosen, load
+                    chosen = min(rotated, key=cost)
+                    load = cost(chosen)[1]
+                    self._inflight[chosen[0]] = self._inflight.get(chosen[0], 0) + 1
+                    return chosen, load
+                if context is not None:
+                    remaining = self._check_liveness(context, phase="while waiting for inference slot")
+                    wait_for = 0.05 if remaining is None else min(0.05, max(0.001, remaining))
+                else:
+                    wait_for = 0.05
+                self._cond.wait(timeout=wait_for)
 
     def _observe_latency(self, key: str, response: ModelResponse, load: float) -> None:
         """Fold one success into the endpoint's ms-per-token estimate.
@@ -1798,27 +2189,32 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             )
 
     def _release_endpoint(self, key: str) -> None:
-        with self._lock:
+        with self._cond:
             remaining = self._inflight.get(key, 0) - 1
             if remaining > 0:
                 self._inflight[key] = remaining
             else:
                 self._inflight.pop(key, None)
+            self._cond.notify_all()
 
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
+        context = self._with_request_cancel_token(request, context)
         settings = self.settings()
         if settings.private_worker or not settings.workers:
-            return self._generate_here(request, context)
+            with self._local_slot(settings, context):
+                return self._generate_here(request, context)
         self._call.response_meta = {}
-        usable = self._placement_candidates(request, settings, context)
+        with _cancellation_scope(context.cancellation):
+            usable = self._placement_candidates(request, settings, context)
         if not usable:
             # Nothing is known to be able to take it: let the primary produce
             # the precise refusal (not ready, unknown model, consent, ...).
-            return self._generate_here(request, context)
+            with self._local_slot(settings, context):
+                return self._generate_here(request, context)
         excluded: set[str] = set()
-        last_error: SonderInferenceUnreachable | None = None
+        last_error: SonderError | None = None
         while True:
-            acquired = self._acquire_endpoint(usable, excluded)
+            acquired = self._acquire_endpoint(usable, excluded, context)
             if acquired is None:
                 assert last_error is not None
                 raise last_error
@@ -1830,10 +2226,17 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                     endpoint.display_base_url, "private worker" if endpoint.private_worker else "primary",
                 )
                 response = gateway._generate_here(request, context)
-            except SonderInferenceUnreachable as exc:
-                # Provably never executed there: another endpoint may take it.
+            except (SonderInferenceUnreachable, SonderInferenceOverloaded) as exc:
+                # Provably never executed there: another endpoint may take it,
+                # except never cascade-failover a timeout or overload onto an
+                # already-saturated endpoint.
                 excluded.add(key)
                 last_error = exc
+                if isinstance(exc, SonderInferenceOverloaded) or getattr(exc, "timed_out", False):
+                    if not self._has_free_endpoint(usable, excluded):
+                        raise
+                if not any(item[0] not in excluded for item in usable):
+                    raise
                 continue
             finally:
                 self._release_endpoint(key)
@@ -1845,8 +2248,14 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             return response
 
     def _generate_here(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
+        context = self._with_request_cancel_token(request, context)
         self._call.response_meta = {}
-        if not (request.prompt or "").strip():
+        has_tool_history = bool(
+            request.history
+            and isinstance(request.history[-1], Mapping)
+            and request.history[-1].get("role") == "tool"
+        )
+        if not (request.prompt or "").strip() and not has_tool_history:
             raise InvalidInput("model request prompt is empty")
         settings = self.settings()
         cfg = OpenAICompatibleConfig(
@@ -1856,6 +2265,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         timeout = self._call_timeout(settings, context)
         options = dict(request.options or {})
         think = options.pop("think", None)  # decided after readiness (request_tuning)
+        options.pop("cancel_token", None)
+        options.pop("cancel_event", None)
         model = self.select_model(request, settings)
         live = stream_sink.call_stream()
         payload = {
@@ -1870,11 +2281,15 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if cache_key is not None:
             payload["prompt_cache_key"] = cache_key
         self._call.settings = settings
-        snap = self._require_ready(settings, timeout)
+        with _cancellation_scope(context.cancellation):
+            snap = self._require_ready(settings, timeout)
+        self._check_liveness(context, phase="before model call")
+        if "tools" in payload and not self._tools_supported(snap.document, model=model, env=self._env):
+            raise InvalidInput(
+                "sonder-inference does not advertise 'tools' capability for model %r" % model
+            )
         tune_request(payload, think, snap.document, self._env)
         started = time.monotonic()
-        data = self._post_with_busy_retry(payload, cfg, settings, context, live)
-        self._check_liveness(context, phase="during model call")
 
         def served_model(result: dict) -> str:
             extension = result.get("sonder")
@@ -1891,86 +2306,136 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 )
             return served
 
-        served = served_model(data)
-        choices = data.get("choices")
-        choice = choices[0] if isinstance(choices, list) and choices else None
-        message = choice.get("message") if isinstance(choice, dict) else None
-        empty_length = (
-            isinstance(choice, dict) and choice.get("finish_reason") == "length"
-            and isinstance(message, dict)
-            and (message.get("content") is None
-                 or isinstance(message.get("content"), str)
-                 and not message["content"].strip())
-        )
-        repaired = False
-        if (empty_length and think is None
-                and thinking_supported(snap.document, self._env)
-                and (live is None or not live.generated and not live.cancelled)):
-            # The model used its entire cap on private reasoning. No answer
-            # reached the caller, so one non-thinking retry can recover it.
-            # Keep this within the original transport and operation deadlines.
-            remaining = min(self._call_timeout(settings, context),
-                            timeout - (time.monotonic() - started))
-            if remaining > 0:
-                retry = dict(payload)
-                retry["stream"] = False
-                retry.pop("stream_options", None)
-                template = dict(retry.get("chat_template_kwargs") or {})
-                template["enable_thinking"] = False
-                retry["chat_template_kwargs"] = template
-                data = self._post("/v1/chat/completions", retry, cfg, remaining,
-                                  context=context)
-                self._check_liveness(context, phase="during model call")
-                served = served_model(data)
-                repaired = True
-        text = self._extract_text(data)
-        usage = data.get("usage")
-        if usage is None:
-            usage = {}
-        if not isinstance(usage, dict):
-            raise DependencyUnavailable("sonder-inference returned an invalid usage object")
-        timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-        extension = usage.get("sonder")
-        nested = extension.get("timings") if isinstance(extension, dict) else None
-        if isinstance(nested, dict):
-            timings = {**timings, **nested}
-        measured = _response_timings(timings, usage)
-        telemetry = from_openai_compatible({**data, "timings": timings}, with_usage=True)
-        prompt_count = usage.get("prompt_tokens")
-        if prompt_count is None:
-            prompt_count = timings.get("prompt_n")
-        output_count = usage.get("completion_tokens")
-        if output_count is None:
-            output_count = timings.get("predicted_n")
-        choices = data.get("choices")
-        finish = choices[0].get("finish_reason") if (
-            isinstance(choices, list) and choices and isinstance(choices[0], dict)
-        ) else None
-        finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
-        self._call.response_meta = {key: value for key, value in (
-            ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
-            ("empty_length_recovered", True if repaired else None),
-        ) if value is not None}
-        # The public activity projection retains summary, while the owning
-        # span also gets structured measurements. Never attach response text.
-        activity_tracker.record_event(
-            "inference_outcome", provider=PROVIDER_ID,
-            summary=json.dumps(self._call.response_meta, sort_keys=True),
-            **self._call.response_meta,
-        )
-        response = SonderInferenceResponse(
-            text=require_model_text(text),
-            model=served,
-            tier=request.tier or PROVIDER_ID,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            tokens_in=optional_token_count(prompt_count, "prompt token count"),
-            tokens_out=optional_token_count(output_count, "completion token count"),
-            telemetry=telemetry,
-            timings=measured,
-            finish_reason=finish,
-        )
-        default_registry().observe_inference(PROVIDER_ID, telemetry)
-        return response
+        try:
+            data = self._post_with_busy_retry(payload, cfg, settings, context, live)
+            self._check_liveness(context, phase="during model call")
+
+            served = served_model(data)
+            choices = data.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            message = choice.get("message") if isinstance(choice, dict) else None
+            empty_length = (
+                isinstance(choice, dict) and choice.get("finish_reason") == "length"
+                and isinstance(message, dict)
+                and (message.get("content") is None
+                     or isinstance(message.get("content"), str)
+                     and not message["content"].strip())
+                and not (isinstance(message.get("tool_calls"), list) and message["tool_calls"])
+            )
+            repaired = False
+            if (empty_length and think is None
+                    and thinking_supported(snap.document, self._env)
+                    and (live is None or not live.generated and not live.cancelled)):
+                # The model used its entire cap on private reasoning. No answer
+                # reached the caller, so one non-thinking retry can recover it.
+                # Keep this within the original transport and operation deadlines.
+                elapsed = max(0.0, time.monotonic() - started)
+                remaining = min(self._call_timeout(settings, context), timeout - elapsed)
+                if remaining >= MIN_THINKING_RETRY_SECONDS:
+                    retry = dict(payload)
+                    retry["stream"] = live is not None
+                    if live is not None:
+                        retry["stream_options"] = {"include_usage": True}
+                    else:
+                        retry.pop("stream_options", None)
+                    template = dict(retry.get("chat_template_kwargs") or {})
+                    template["enable_thinking"] = False
+                    retry["chat_template_kwargs"] = template
+                    usage_first = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+                    first_tokens = usage_first.get("completion_tokens")
+                    if (
+                        isinstance(first_tokens, int)
+                        and first_tokens >= 16
+                        and elapsed > 0
+                        and isinstance(retry.get("max_tokens"), int)
+                    ):
+                        affordable = max(64, int((first_tokens / elapsed) * remaining * 0.8))
+                        if retry["max_tokens"] > affordable:
+                            retry["max_tokens"] = affordable
+                    with trust_scope(settings.ca_bundle):
+                        data = self._post("/v1/chat/completions", retry, cfg, remaining,
+                                          context=context)
+                    self._check_liveness(context, phase="during model call")
+                    served = served_model(data)
+                    repaired = True
+            choices = data.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            message = choice.get("message") if isinstance(choice, dict) else None
+            raw_tool_calls = (
+                tuple(tc for tc in message["tool_calls"] if isinstance(tc, Mapping))
+                if "tools" in payload and isinstance(message, dict)
+                and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
+                else None
+            )
+            if raw_tool_calls and isinstance(message, dict) and (
+                message.get("content") is None
+                or (isinstance(message.get("content"), str) and not message["content"].strip())
+            ):
+                text = native_tool_call_decision(message) or json.dumps(
+                    {"tool_calls": [dict(tc) for tc in raw_tool_calls]}, ensure_ascii=False,
+                )
+            else:
+                text = self._extract_text(data)
+            usage = data.get("usage")
+            if usage is None:
+                usage = {}
+            if not isinstance(usage, dict):
+                raise DependencyUnavailable("sonder-inference returned an invalid usage object")
+            timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+            extension = usage.get("sonder")
+            nested = extension.get("timings") if isinstance(extension, dict) else None
+            if isinstance(nested, dict):
+                timings = {**timings, **nested}
+            measured = _response_timings(timings, usage)
+            telemetry = from_openai_compatible({**data, "timings": timings}, with_usage=True)
+            prompt_count = usage.get("prompt_tokens")
+            if prompt_count is None:
+                prompt_count = timings.get("prompt_n")
+            output_count = usage.get("completion_tokens")
+            if output_count is None:
+                output_count = timings.get("predicted_n")
+            finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+            finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
+            self._call.response_meta = {key: value for key, value in (
+                ("model", served), ("served_model", served),
+                ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
+                ("empty_length_recovered", True if repaired else None),
+            ) if value is not None}
+            # The public activity projection retains summary, while the owning
+            # span also gets structured measurements. Never attach response text.
+            activity_tracker.record_event(
+                "inference_outcome", provider=PROVIDER_ID,
+                summary=json.dumps(self._call.response_meta, sort_keys=True),
+                **self._call.response_meta,
+            )
+            response = SonderInferenceResponse(
+                text=require_model_text(text),
+                model=served,
+                tier=request.tier or PROVIDER_ID,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                tokens_in=optional_token_count(prompt_count, "prompt token count"),
+                tokens_out=optional_token_count(output_count, "completion token count"),
+                telemetry=telemetry,
+                timings=measured,
+                finish_reason=finish,
+                tool_calls=raw_tool_calls or None,
+            )
+            default_registry().observe_inference(PROVIDER_ID, telemetry)
+            return response
+        except Exception as exc:
+            failure_meta = {
+                "ok": False,
+                "model": model,
+                "error_kind": type(exc).__name__,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+            self._call.response_meta = {}
+            activity_tracker.record_event(
+                "inference_outcome", provider=PROVIDER_ID,
+                summary=json.dumps(failure_meta, sort_keys=True),
+                **failure_meta,
+            )
+            raise
 
     # -- embed -------------------------------------------------------------
 
@@ -1996,6 +2461,7 @@ __all__ = [
     "STATUS_KEYS",
     "SonderInferenceConfig",
     "SonderInferenceGateway",
+    "SonderInferenceOverloaded",
     "SonderInferenceUnreachable",
     "WORKLOAD_BY_SOURCE",
     "check_endpoint_policy",

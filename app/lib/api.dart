@@ -656,11 +656,14 @@ class PermissionModeOption {
 /// check: a record with no mode name is not a mode, and a blank or guessed
 /// chip is worse than no chip at all.
 class PermissionMode {
+  static const bypass = 'bypass';
+
   final String mode;
   final String label;
   final String blurb;
   final bool elevated;
   final String elevationReason;
+  final bool canBypass;
   final List<PermissionModeOption> modes;
 
   /// risk class -> allow | ask | deny, as the server resolved it for [mode].
@@ -672,6 +675,7 @@ class PermissionMode {
     this.blurb = '',
     this.elevated = false,
     this.elevationReason = '',
+    this.canBypass = false,
     this.modes = const [],
     this.matrix = const {},
   });
@@ -689,6 +693,7 @@ class PermissionMode {
       elevationReason: json['elevationReason']?.toString() ??
           json['elevation_reason']?.toString() ??
           '',
+      canBypass: json['can_bypass'] == true || json['canBypass'] == true,
       modes: rawModes is List
           ? rawModes
               .whereType<Map>()
@@ -790,9 +795,30 @@ class SonderApi implements SonderApiPort {
   /// commands.  The aggregate endpoint is read-only; cancellation must keep
   /// the command's owner and approval policy rather than inventing a second
   /// HTTP mutation surface.
-  Future<void> cancelBackground(
-    String kind,
-    String id, {
+  Future<Map<String, dynamic>> listApiKeys() async {
+    final uri = _uri('/v1/app-control/api-keys/list');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> generateApiKey() async {
+    final uri = _uri('/v1/app-control/api-keys/generate');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> revokeApiKey() async {
+    final uri = _uri('/v1/app-control/api-keys/revoke');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getSwarmStatus() async {
+    final uri = _uri('/v1/app-control/swarm/status');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
     String project = '',
   }) async {
     final normalizedKind = kind.trim().toLowerCase();
@@ -1148,6 +1174,93 @@ class SonderApi implements SonderApiPort {
     }
   }
 
+  /// Server capabilities & public-hosting policy (`GET /v1/sonder/capabilities`).
+  ///
+  /// Works both unauthenticated and authenticated. Returns null on 404 for
+  /// older runtimes that do not publish this endpoint.
+  @override
+  Future<ServerCapabilities?> fetchCapabilities() async {
+    final resp = await _get(
+        _uri('/v1/sonder/capabilities'), const Duration(seconds: 10));
+    if (resp.statusCode == 404) return null;
+    if (resp.statusCode != 200) {
+      throw _failure(resp, action: 'read server capabilities');
+    }
+    try {
+      return ServerCapabilities.fromJson(
+          decodeJsonObject(resp, 'server capabilities'));
+    } catch (_) {
+      throw SonderException('Could not parse server capabilities.');
+    }
+  }
+
+  /// Authenticated caller identity, role, and allowed features (`GET /v1/sonder/whoami`).
+  ///
+  /// Returns null on 404 for older runtimes.
+  @override
+  Future<WhoamiInfo?> fetchWhoami() async {
+    final resp =
+        await _get(_uri('/v1/sonder/whoami'), const Duration(seconds: 10));
+    if (resp.statusCode == 404) return null;
+    if (resp.statusCode != 200) {
+      throw _failure(resp,
+          fallback: resp.statusCode == 401
+              ? 'Unauthorized - check the API key or sign in.'
+              : null,
+          action: 'read caller identity');
+    }
+    try {
+      return WhoamiInfo.fromJson(decodeJsonObject(resp, 'caller identity'));
+    } catch (_) {
+      throw SonderException('Could not parse caller identity.');
+    }
+  }
+
+  /// Submit the result of a client-executed tool call (`POST /v1/client-tools/<call_id>/result`).
+  @override
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  }) async {
+    final cid = callId.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{8,64}$').hasMatch(cid)) {
+      throw ArgumentError.value(callId, 'callId', 'invalid client tool call id');
+    }
+    final cleanSession = session.trim();
+    final boundedOutput =
+        output.length <= 65536 ? output : output.substring(0, 65536);
+    final boundedError =
+        error.length <= 4096 ? error : error.substring(0, 4096);
+    late http.Response resp;
+    try {
+      resp = await requestPost(
+        _uri('/v1/client-tools/$cid/result'),
+        headers: {
+          ..._headers(),
+          if (cleanSession.isNotEmpty) 'X-Sonder-Session': cleanSession,
+        },
+        body: jsonEncode({
+          'ok': denied ? false : ok,
+          'output': boundedOutput,
+          'error': boundedError,
+          'denied': denied,
+          if (cleanSession.isNotEmpty) 'session': cleanSession,
+        }),
+        timeout: const Duration(seconds: 20),
+      );
+    } catch (e) {
+      throw SonderException('Cannot reach server to submit tool result: $e',
+          cause: e, code: SonderException.unreachableCode, retryable: true);
+    }
+    if (resp.statusCode != 200) {
+      throw _failure(resp, action: 'submit client tool result');
+    }
+  }
+
   /// The message a 401/403 on an admin-only read shows.
   static const adminRequiredMessage =
       'Administrator authorization is required.';
@@ -1379,7 +1492,7 @@ class SonderApi implements SonderApiPort {
   /// administrator can change the permission mode." (code `FORBIDDEN`).
   @override
   Future<PermissionMode> setPermissionMode(String mode,
-      {String? idempotencyKey}) async {
+      {String? idempotencyKey, bool confirmBypass = false}) async {
     final wanted = mode.trim();
     if (wanted.isEmpty) {
       throw SonderException('A permission mode name is required.');
@@ -1392,7 +1505,10 @@ class SonderApi implements SonderApiPort {
           ..._headers(),
           'Idempotency-Key': idempotencyKey ?? newIdempotencyKey('mode'),
         },
-        body: jsonEncode({'mode': wanted}),
+        body: jsonEncode({
+          'mode': wanted,
+          if (confirmBypass) 'confirm_bypass': true,
+        }),
         timeout: const Duration(seconds: 10),
       );
     } catch (e) {
@@ -1489,6 +1605,7 @@ class SonderApi implements SonderApiPort {
     required String project,
     required bool allowApproximateLocation,
     required bool stream,
+    Object? sessionTemperature,
     String? history,
   }) async {
     if (history != null && history != 'client' && history != 'auto') {
@@ -1503,6 +1620,9 @@ class SonderApi implements SonderApiPort {
       'context_size': contextSize,
       if (sessionId.trim().isNotEmpty) 'session': sessionId.trim(),
       if (project.trim().isNotEmpty) 'project': project.trim(),
+      // A number 0..2 sets the session's temperature, "auto" clears it; an
+      // absent field leaves it alone (a typed /temp stays).
+      if (sessionTemperature != null) 'session_temperature': sessionTemperature,
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
       // Server S5: "client" means use only the messages sent, never inject
@@ -1546,7 +1666,9 @@ class SonderApi implements SonderApiPort {
     String sessionId = '',
     String project = '',
     bool allowApproximateLocation = false,
+    Object? sessionTemperature,
     String? history,
+    bool clientExec = true,
     CancelToken? cancel,
   }) async {
     final token = cancel ?? CancelToken();
@@ -1559,7 +1681,9 @@ class SonderApi implements SonderApiPort {
         sessionId: sessionId,
         project: project,
         allowApproximateLocation: allowApproximateLocation,
+        sessionTemperature: sessionTemperature,
         history: history,
+        clientExec: clientExec,
         cancel: token,
         allowFallback: true,
       );
@@ -1577,7 +1701,9 @@ class SonderApi implements SonderApiPort {
     required bool allowApproximateLocation,
     required CancelToken cancel,
     required bool allowFallback,
+    Object? sessionTemperature,
     String? history,
+    bool clientExec = true,
     Duration? timeout,
   }) async {
     final body = await _chatBody(
@@ -1587,17 +1713,22 @@ class SonderApi implements SonderApiPort {
       sessionId: sessionId,
       project: project,
       allowApproximateLocation: allowApproximateLocation,
+      sessionTemperature: sessionTemperature,
       history: history,
       stream: false,
     );
     if (cancel.isCancelled) throw SonderException.cancelled();
 
+    final chatHeaders = {
+      ..._headers(),
+      'X-Sonder-Client-Exec': clientExec ? '1' : '0',
+    };
     late http.Response resp;
     String warning = '';
     try {
       resp = await requestPost(
         _uri('/v1/chat/completions'),
-        headers: _headers(),
+        headers: chatHeaders,
         body: body,
         timeout: timeout ?? chatTimeout,
         cancel: cancel,
@@ -1611,7 +1742,10 @@ class SonderApi implements SonderApiPort {
       try {
         resp = await requestPost(
           _uri('/v1/chat/completions', localFallbackUrl),
-          headers: _headers(''),
+          headers: {
+            ..._headers(''),
+            'X-Sonder-Client-Exec': clientExec ? '1' : '0',
+          },
           body: body,
           timeout: timeout ?? chatTimeout,
           cancel: cancel,
@@ -1671,7 +1805,9 @@ class SonderApi implements SonderApiPort {
     String sessionId = '',
     String project = '',
     bool allowApproximateLocation = false,
+    Object? sessionTemperature,
     String? history,
+    bool clientExec = true,
     CancelToken? cancel,
   }) async* {
     final token = cancel ?? CancelToken();
@@ -1684,6 +1820,7 @@ class SonderApi implements SonderApiPort {
         sessionId: sessionId,
         project: project,
         allowApproximateLocation: allowApproximateLocation,
+        sessionTemperature: sessionTemperature,
         history: history,
         stream: true,
       );
@@ -1691,7 +1828,10 @@ class SonderApi implements SonderApiPort {
       final events = openChatStream(
         ChatStreamRequest(
           uri: _uri('/v1/chat/completions'),
-          headers: _headers(),
+          headers: {
+            ..._headers(),
+            'X-Sonder-Client-Exec': clientExec ? '1' : '0',
+          },
           body: body,
           cancel: token,
           headerTimeout: chatTimeout,
@@ -1702,7 +1842,10 @@ class SonderApi implements SonderApiPort {
           warning = _fallbackWarning('chat', error);
           return ChatStreamRequest(
             uri: _uri('/v1/chat/completions', localFallbackUrl),
-            headers: _headers(''),
+            headers: {
+              ..._headers(''),
+              'X-Sonder-Client-Exec': clientExec ? '1' : '0',
+            },
             body: body,
             cancel: token,
             headerTimeout: chatTimeout,
@@ -1869,6 +2012,12 @@ class SystemInfo {
   final ExecutionStatus? execution;
   final ExecutionFeed? executionFeed;
   final List<SystemModel> models;
+  final String role;
+  final bool publicHosting;
+  final bool clientExecSupported;
+  final bool? hostBypassAllowed;
+  final AllowedFeatures? allowedFeatures;
+  final ServerCapabilities? capabilities;
 
   const SystemInfo({
     required this.status,
@@ -1890,6 +2039,12 @@ class SystemInfo {
     required this.execution,
     this.executionFeed,
     required this.models,
+    this.role = '',
+    this.publicHosting = false,
+    this.clientExecSupported = false,
+    this.hostBypassAllowed,
+    this.allowedFeatures,
+    this.capabilities,
   });
 
   factory SystemInfo.fromJson(Map<String, dynamic> json) {
@@ -1955,6 +2110,19 @@ class SystemInfo {
             )
           : null,
       models: models,
+      role: json['role']?.toString().trim().toLowerCase() ?? '',
+      publicHosting: json['public_hosting'] == true,
+      clientExecSupported: json['client_exec_supported'] == true,
+      hostBypassAllowed: json['host_bypass_allowed'] is bool
+          ? json['host_bypass_allowed'] as bool
+          : null,
+      allowedFeatures: json['allowed_features'] is Map
+          ? AllowedFeatures.fromJson(json['allowed_features'])
+          : null,
+      capabilities: json['capabilities'] is Map
+          ? ServerCapabilities.fromJson(
+              Map<String, dynamic>.from(json['capabilities'] as Map))
+          : null,
     );
   }
 

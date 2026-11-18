@@ -57,9 +57,9 @@ class SpyGateway:
                            error_code=self._code, policy_match="permission:allow")
 
 
-def dispatch(gateway, method, path, query=None, payload=None, principal="account:abc"):
+def dispatch(gateway, method, path, query=None, payload=None, principal="account:abc", auth_level="admin"):
     return TestRunHttpRoutes(lambda: gateway).dispatch(
-        method, path, query or {}, payload, principal_id=principal, workspace_roots=("/w",))
+        method, path, query or {}, payload, principal_id=principal, workspace_roots=("/w",), auth_level=auth_level)
 
 
 # --- routing -----------------------------------------------------------------------------------
@@ -197,14 +197,14 @@ def test_an_unattended_http_run_is_refused_with_its_call_id(tmp_path, monkeypatc
                                       digest=FakeDigest())
     tools, _, _ = facade(tmp_path, developer)
     status, body = TestRunHttpRoutes(lambda: tools).dispatch(
-        "POST", "/v1/tools/test-run", {}, {"runner": "pytest"}, principal_id="owner")
+        "POST", "/v1/tools/test-run", {}, {"runner": "pytest"}, principal_id="owner", auth_level="admin")
     assert status == 403 and body["error"]["code"] == "PERMISSION_DENIED"
     assert body["error"]["decision"]["call_id"]
     assert body["error"]["remedies"] == list(PERMISSION_REMEDIES)
     assert developer.test_runs.runs == []
     # The safe reads still answer in the same mode.
     status, body = TestRunHttpRoutes(lambda: tools).dispatch(
-        "POST", "/v1/tools/output-digest", {}, {"path": "build.log"}, principal_id="owner")
+        "POST", "/v1/tools/output-digest", {}, {"path": "build.log"}, principal_id="owner", auth_level="admin")
     assert status == 200 and body["source_kind"] == "file"
 
 
@@ -221,18 +221,18 @@ def test_a_refused_http_run_can_be_approved_once_by_its_call_id(tmp_path, monkey
         routes = TestRunHttpRoutes(lambda: tools)
         body_in = {"runner": "pytest", "selector": "k:fast"}
         status, body = routes.dispatch("POST", "/v1/tools/test-run", {}, body_in,
-                                       principal_id="owner")
+                                       principal_id="owner", auth_level="admin")
         assert status == 403
         pending = ledger.resolve_call(body["error"]["decision"]["call_id"])
         assert pending.tool == "test_run"
         ledger.issue(pending.tool, pending.digest, approver="test")
         status, body = routes.dispatch("POST", "/v1/tools/test-run", {}, body_in,
-                                       principal_id="owner")
+                                       principal_id="owner", auth_level="admin")
         assert status == 202, body
         assert [request.selector for request, _, _ in developer.test_runs.runs] == ["k:fast"]
         # Spent: the same call is refused again.
         assert routes.dispatch("POST", "/v1/tools/test-run", {}, body_in,
-                               principal_id="owner")[0] == 403
+                               principal_id="owner", auth_level="admin")[0] == 403
     finally:
         pm.forget_spent_approval()
         pm.reset_unattended_for_tests()

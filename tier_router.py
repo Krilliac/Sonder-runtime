@@ -139,7 +139,8 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
           identity_for=None, tier_models=None, tools=False,
           structured_output=False, has_image=False, approx_tokens=0,
           long_context=False, required_capabilities=None,
-          request_payload=None, capability_routing=None) -> dict:
+          request_payload=None, capability_routing=None,
+          cloud_allowed=None) -> dict:
     """Suggest a tier for `prompt`.
 
     Returns {"kind", "tier", "reason", "fallback_used", "signal"}. If the preferred tier
@@ -179,8 +180,11 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
             )
     if available_tiers is not None:
         # Keep the caller's order: the last-resort fallback takes the first entry.
-        available_tiers = [tier_name for tier_name in available_tiers
-                           if tier_name != "vision" or "vision" in evidence_required]
+        available_tiers = [
+            tier_name for tier_name in available_tiers
+            if (tier_name != "vision" or "vision" in evidence_required)
+            and not (cloud_allowed is False and str(tier_name).startswith("cloud-"))
+        ]
     if requirements_error and mode == "strict":
         return {"kind": kind, "tier": None, "reason": "request capability requirements are invalid",
                 "fallback_used": True, "signal": signal}
@@ -231,7 +235,20 @@ def route(prompt: str, available_tiers=None, *, semantic_enabled=None,
                       f"embedding model={semantic['model']}")
             signal = "semantic"
     fallback_used = evidence_fallback
-    if available_tiers is not None and tier not in available_tiers:
+    if cloud_allowed is False and str(tier).startswith("cloud-"):
+        fallback_used = True
+        candidates = ("code", "general", "reasoning")
+        if available_tiers is not None:
+            for candidate in candidates:
+                if candidate in available_tiers:
+                    tier = candidate
+                    break
+            else:
+                tier = next(iter(available_tiers), "code")
+        else:
+            tier = "code"
+        reason += " (cloud routing disabled; using %s)" % tier
+    elif available_tiers is not None and tier not in available_tiers:
         fallback_used = True
         for candidate in ("code", "general", "reasoning"):
             if candidate in available_tiers:

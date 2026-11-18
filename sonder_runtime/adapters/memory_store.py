@@ -2808,6 +2808,20 @@ def session_turns(conn, session_id):
     return [dict(r) for r in rows]
 
 
+def session_turn_rows(conn, session_id):
+    """``session_turns`` plus ``tier``/``ts``/token columns: what export merging reads.
+
+    ``ts`` (UTC, second resolution) is how a row is placed against the session
+    event log; ordering is identical to ``session_turns``.
+    """
+    rows = conn.execute(
+        "SELECT id, task, response, tier, ts, tokens_in, tokens_out, token_source "
+        "FROM interactions WHERE session_id=? ORDER BY ts ASC, rowid ASC",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def session_turns_for_project(conn, session_id, project):
     """Session turns with per-turn project provenance matching the request."""
     effective = "NULLIF(i.project,'')"
@@ -3001,6 +3015,10 @@ def create_task(conn, title, detail="", status="pending", priority=2,
     return get_task(conn, task_id, account_scope=scope)
 
 
+def _escape_like(value):
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def resolve_task_id(conn, task_id, account_scope=None):
     value = (task_id or "").strip()
     if not value:
@@ -3014,9 +3032,9 @@ def resolve_task_id(conn, task_id, account_scope=None):
     if row:
         return row["id"]
     rows = conn.execute(
-        "SELECT id FROM tasks WHERE id LIKE ?%s "
+        "SELECT id FROM tasks WHERE id LIKE ? ESCAPE '\\'%s "
         "ORDER BY updated_ts DESC, rowid DESC LIMIT 2" % where_scope,
-        tuple([value + "%"] + scope_values),
+        tuple([_escape_like(value) + "%"] + scope_values),
     ).fetchall()
     if len(rows) == 1:
         return rows[0]["id"]
@@ -3204,18 +3222,22 @@ def list_sessions(conn, limit=20):
 
 
 def find_session(conn, prefix):
-    """Resolve a session by exact id, then by a case-insensitive title prefix."""
+    """Resolve a session by exact id, then by a unique case-insensitive title prefix."""
+    if not prefix:
+        return None
     row = conn.execute(
         "SELECT session_id FROM sessions WHERE session_id=?", (prefix,)
     ).fetchone()
     if row:
         return row[0]
-    row = conn.execute(
-        "SELECT session_id FROM sessions WHERE lower(title) LIKE lower(?) "
-        "ORDER BY updated_ts DESC LIMIT 1",
-        (prefix + "%",),
-    ).fetchone()
-    return row[0] if row else None
+    rows = conn.execute(
+        "SELECT session_id FROM sessions WHERE lower(title) LIKE lower(?) ESCAPE '\\' "
+        "ORDER BY updated_ts DESC LIMIT 2",
+        (_escape_like(prefix) + "%",),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    return None
 
 
 # --- semantic recall over past interactions --------------------------------
@@ -4056,8 +4078,26 @@ def task_progress(conn, project="", account_scope=None):
     }
 
 
-def all_preferences(conn, limit=50, include_disabled=False):
-    where = "" if include_disabled else "WHERE enabled=1"
+def all_preferences(conn, limit=50, include_disabled=False, bound_project=""):
+    if bound_project and not isinstance(bound_project, str):
+        raise TypeError("bound_project must be a project root path string")
+    bound = bool(bound_project)
+    clauses = [] if include_disabled else ["enabled=1"]
+    if bound:
+        from sonder_runtime.adapters.memory_search import (
+            _MATCH_FUNCTION,
+            bound_project_matcher,
+        )
+
+        conn.create_function(
+            _MATCH_FUNCTION, 1, bound_project_matcher(bound_project),
+            deterministic=True,
+        )
+        clauses.append(
+            "(scope='global' OR %s(scope) OR (substr(scope, 1, 8)='project:' "
+            "AND %s(substr(scope, 9))))" % (_MATCH_FUNCTION, _MATCH_FUNCTION)
+        )
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         "SELECT id, scope, key, text, source_interaction, confidence, "
         "evidence_count, enabled, revision, created_ts, updated_ts "

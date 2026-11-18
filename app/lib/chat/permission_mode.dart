@@ -5,6 +5,7 @@ import '../safety_colors.dart';
 import '../theme.dart';
 import 'permission_rules.dart';
 
+export '../api.dart' show PermissionMode, PermissionModeOption;
 export '../ui/raise_mode_sheet.dart'
     show RaiseModeSheet, confirmModeChange, showRaiseModeSheet;
 export 'permission_rules.dart';
@@ -217,6 +218,12 @@ class PermissionModeDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final visibleOptions = state.options
+        .where((o) =>
+            o.name != PermissionMode.bypass ||
+            state.canBypass ||
+            state.mode == PermissionMode.bypass)
+        .toList(growable: false);
     return AlertDialog(
       key: const Key('permission-mode-picker'),
       title: const Text('Autonomy mode'),
@@ -228,7 +235,7 @@ class PermissionModeDialog extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              for (final option in state.options)
+              for (final option in visibleOptions)
                 InkWell(
                   key: Key('permission-mode-option-${option.name}'),
                   onTap: () => Navigator.of(context).pop(option.name),

@@ -7,8 +7,24 @@ import pkgutil
 import time
 from typing import Any
 
-from ..domain.agents.tool_help import advertised_scope, tool_help_text
+from ..domain.agents.tool_help import advertised_scope, has_active_scope, tool_help_text
 from ..domain.cloud_access import LEGACY_ERROR_PREFIX
+
+_BUILTIN_HELP_METADATA = {
+    "run_code": {
+        "description": "Execute a short local code snippet and return stdout/stderr.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string"},
+                "language": {"type": "string", "default": "python"},
+                "stdin": {"type": "string"},
+                "timeout": {"type": "integer", "default": 10},
+            },
+            "required": ["code"],
+        },
+    },
+}
 
 
 def help_scope(mcp, allowed, refusal, **flags):
@@ -73,6 +89,9 @@ def catalog_from_mcp(mcp):
 
 def catalog_for(mcp, advertised=None):
     catalog = catalog_from_mcp(mcp)
+    for builtin_name, builtin_meta in _BUILTIN_HELP_METADATA.items():
+        if builtin_name not in catalog and (advertised is None or builtin_name in advertised):
+            catalog[builtin_name] = dict(builtin_meta)
     if advertised is None:
         return catalog
     allowed = {str(name) for name in advertised}
@@ -135,4 +154,4 @@ def register(mcp, record) -> None:
         return run({"name": name, "query": query})
 
 
-__all__ = ["catalog_for", "catalog_from_mcp", "dispatch_tool_help", "discover_agent_tool_registrars", "register", "register_agent_tools"]
+__all__ = ["catalog_for", "catalog_from_mcp", "dispatch_tool_help", "discover_agent_tool_registrars", "has_active_scope", "register", "register_agent_tools"]

@@ -18,6 +18,9 @@ class SonderCategory {
   /// Rail group heading; consecutive categories with the same group share it.
   final String? group;
 
+  /// The role required to see this category.
+  final String? requiredRole;
+
   /// Trailing rail widget: a count or a status. It must carry text, never
   /// colour alone (see `CountBadge` and `StatusPill`).
   final Widget? badge;
@@ -33,6 +36,7 @@ class SonderCategory {
     required this.builder,
     this.description,
     this.group,
+    this.requiredRole,
     this.badge,
     this.keywords = const [],
   });
@@ -82,6 +86,7 @@ class CategoryScaffold extends StatefulWidget {
   final String? selectedId;
   final String? initialId;
   final ValueChanged<String>? onSelected;
+  final String? userRole;
 
   /// App bar actions, shown in both layouts.
   final List<Widget> actions;
@@ -117,6 +122,7 @@ class CategoryScaffold extends StatefulWidget {
     this.selectedId,
     this.initialId,
     this.onSelected,
+    this.userRole,
     this.actions = const [],
     this.leading,
     this.leadingWidth,
@@ -145,16 +151,24 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
   late bool _narrowDetail =
       widget.initialId != null || widget.selectedId != null;
 
+  List<SonderCategory> get _allowedCategories {
+    if (widget.userRole == null) return widget.categories;
+    return widget.categories.where((c) {
+      if (c.requiredRole == null) return true;
+      return c.requiredRole == widget.userRole;
+    }).toList();
+  }
+
   String get _selected {
     final wanted = widget.selectedId ?? _internal ?? widget.initialId;
-    if (wanted != null && widget.categories.any((c) => c.id == wanted)) {
+    if (wanted != null && _allowedCategories.any((c) => c.id == wanted)) {
       return wanted;
     }
-    return widget.categories.first.id;
+    return _allowedCategories.first.id;
   }
 
   SonderCategory get _current =>
-      widget.categories.firstWhere((c) => c.id == _selected);
+      _allowedCategories.firstWhere((c) => c.id == _selected);
 
   void _select(String id) {
     setState(() {
@@ -223,7 +237,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
   Widget _rail(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    final visible = widget.categories.where((c) => c.matches(_query)).toList();
+    final visible = _allowedCategories.where((c) => c.matches(_query)).toList();
     final children = <Widget>[];
     String? group;
     for (final c in visible) {
@@ -306,7 +320,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
     }
     final text = Theme.of(context).textTheme;
     final tokens = SonderTokens.of(context);
-    final visible = widget.categories.where((c) => c.matches(_query)).toList();
+    final visible = _allowedCategories.where((c) => c.matches(_query)).toList();
     final rows = <Widget>[];
     String? group;
     for (final c in visible) {
@@ -426,33 +440,25 @@ class _SearchField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    return TextField(
-      key: const Key('category-search'),
+    return SonderTextField(
+      fieldKey: const Key('category-search'),
       controller: controller,
       onChanged: onChanged,
-      style: Theme.of(context).textTheme.bodyMedium,
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: hint,
-        prefixIcon: Icon(Icons.search, size: 18, color: tokens.muted),
-        prefixIconConstraints:
-            const BoxConstraints(minWidth: 36, minHeight: 36),
-        contentPadding: const EdgeInsets.symmetric(
-            horizontal: SonderSpace.sm, vertical: SonderSpace.sm),
-        suffixIcon: ValueListenableBuilder<TextEditingValue>(
-          valueListenable: controller,
-          builder: (context, value, _) => value.text.isEmpty
-              ? const SizedBox.shrink()
-              : IconButton(
-                  tooltip: 'Clear search',
-                  iconSize: 16,
-                  icon: const Icon(Icons.close),
-                  onPressed: () {
-                    controller.clear();
-                    onChanged('');
-                  },
-                ),
-        ),
+      hint: hint,
+      prefix: Icon(Icons.search, size: 18, color: tokens.muted),
+      suffix: ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (context, value, _) => value.text.isEmpty
+            ? const SizedBox.shrink()
+            : IconButton(
+                tooltip: 'Clear search',
+                iconSize: 16,
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  controller.clear();
+                  onChanged('');
+                },
+              ),
       ),
     );
   }

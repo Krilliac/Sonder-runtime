@@ -38,6 +38,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from ....application.command_surface.command_text import slash_head
 from ...repl.facades import build_tools as repl_build
 from ...repl.facades import debug_tools as repl_debug
 from . import build_tools as http_build
@@ -105,7 +106,7 @@ class DebugCall:
 
 def parse_chat_command(cmd: str, arg: str) -> TypedCall | DebugCall:
     """The call a chat line makes; ``ChatUsage`` (the reply) when it makes none."""
-    name = str(cmd or "").lower()
+    name = slash_head(cmd)
     text = str(arg or "").strip()
     if name == "/test":
         return _parse_test(text)
@@ -387,7 +388,7 @@ def reply(
             status, body = execute_typed_call(
                 lambda: getattr(app, "tools", None), call.tool, call.arguments,
                 call.codes, principal_id=principal, workspace_roots=roots,
-                auth_level=auth_level,
+                auth_level=auth_level, gate="surface",
             )
             if (call.fallback is not None and status == 404
                     and error_code(body) == "JOB_NOT_FOUND"):
@@ -409,8 +410,38 @@ def reply(
         return render_debug(call, status, body)
 
 
+def slash_call_arguments(cmd: str, argument: str) -> dict[str, Any] | None:
+    """Canonical tool arguments for a slash command so refusals carry a ``call_id``."""
+    text = str(argument or "")
+    stripped = text.strip()
+    if cmd in ("/write", "/append"):
+        parts = text.split(None, 1)
+        if len(parts) != 2:
+            return None
+        return {"path": parts[0], "content": parts[1],
+                "mode": "append" if cmd == "/append" else "create"}
+    if cmd == "/edit":
+        pieces = text.split("|", 2)
+        if len(pieces) != 3:
+            return None
+        return {"path": pieces[0].strip(), "old": pieces[1], "new": pieces[2]}
+    if cmd == "/mkdir":
+        return {"path": stripped, "parents": True} if stripped else None
+    if cmd == "/delete":
+        return {"path": stripped, "recursive": False, "dry_run": True, "confirm": ""} if stripped else None
+    if cmd in ("/test", "/build", "/fix-build", "/digest"):
+        try:
+            args = getattr(parse_chat_command(cmd, text), "arguments", None)
+            return dict(args) if isinstance(args, Mapping) else None
+        except Exception:
+            return None
+    if cmd in ("/run", "/runwindow", "/runnew", "/runconsole") and stripped:
+        return {"code": stripped, "language": "python"}
+    return None
+
+
 __all__ = [
     "ADMIN_COMMANDS", "CHAT_COMMANDS", "ChatUsage", "DEVELOPER_COMMANDS", "DIGEST_USAGE",
     "DebugCall", "TEST_USAGE", "TypedCall", "error_code", "parse_chat_command",
-    "render_debug", "render_refusal", "render_typed", "reply",
+    "render_debug", "render_refusal", "render_typed", "reply", "slash_call_arguments",
 ]

@@ -69,6 +69,7 @@ from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, refusal_mess
 
 # None: no entry point has spoken (lane defaults apply); "": suppressed.
 _ENTRY: ContextVar[str | None] = ContextVar("sonder_restricted_tool_lane_entry", default=None)
+_ADMIN_OPT_IN: ContextVar[bool] = ContextVar("sonder_restricted_tool_lane_admin_open", default=False)
 _SUPPRESSED = ""
 _POLICY = "ERROR: HOST POLICY: "
 _SEARCH_TOOLS = frozenset({"text_search", "repository_symbol_index"})
@@ -169,6 +170,46 @@ def decide(model: Any, policy: Mapping[str, Any] | None = None) -> _rules.ModelT
     return _rules.decide_tools(model, deny, grants.grants, deny_only, free_form=True)
 
 
+def _is_env_admin_open() -> bool:
+    raw = str(os.environ.get("SONDER_RESTRICTED_TOOL_LANE_ADMIN_OPEN", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from sonder_runtime.adapters.security import role_tool_policy
+        return role_tool_policy.agent_refusal("run_code") == ""
+    except Exception:
+        return False
+
+
+def admin_opt_in_active() -> bool:
+    """True when an authorized local-open/admin caller opted into denied models or BYPASS."""
+    if bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open():
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def admin_opt_in(enabled: bool = True) -> Iterator[None]:
+    """Explicit opt-in scope for ``local-open``/admin callers on denied-list models."""
+    token = _ADMIN_OPT_IN.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _ADMIN_OPT_IN.reset(token)
+
+
+_LOCAL_PRIVATE_PROVIDERS = frozenset({"", "ollama", "sonder_inference"})
+
+
+def _is_non_local_provider(provider: Any) -> bool:
+    return str(provider or "").strip().lower() not in _LOCAL_PRIVATE_PROVIDERS
+
+
 def admit(
     lane_entry: LaneEntry | None,
     selector: Any,
@@ -190,6 +231,15 @@ def admit(
     """
     if lane_entry is None or unsafe or prepared or tier_label != _guard.DENIED_LABEL:
         return None, ""
+    if admin_opt_in_active():
+        target = tuple(resolve())
+        model, cloud, _augment, label = target
+        if model is not None and not cloud and not _is_non_local_provider(provider_for(label)) and str(label or "").startswith("model:"):
+            return RestrictedRun(
+                lane=lane_entry.lane, model=str(model), tools=frozenset(),
+                profiles=("admin-opt-in",), secret_globs=(),
+                caller_project=lane_entry.caller_project, target=target, admin_open=True,
+            ), ""
     decision = decide(selector, policy)
     if not decision.permits(lane_entry.lane):
         return None, ""
@@ -199,7 +249,7 @@ def admit(
         return None, _refusal(
             "model '%s' has a restricted tool grant but is not an installed local model." % (selector,)
         )
-    if cloud or provider_for(label):
+    if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
             "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
         )
@@ -248,6 +298,7 @@ class RestrictedRun:
     def __init__(
         self, *, lane: str, model: str, tools: frozenset[str], profiles: tuple[str, ...],
         secret_globs: tuple[str, ...], caller_project: str, target: tuple[Any, ...],
+        admin_open: bool = False,
     ) -> None:
         self.lane = lane
         self.model = model
@@ -256,6 +307,7 @@ class RestrictedRun:
         self.secret_globs = tuple(secret_globs)
         self.caller_project = caller_project
         self.target = target
+        self.admin_open = bool(admin_open)
         self.project_root = ""
 
     def generator(self, generate: Callable[..., Any]) -> Callable[..., Any]:
@@ -285,6 +337,8 @@ class RestrictedRun:
         Decided again on each model call, so revoking any one of the run's
         tools mid-turn stops its next model call.  Any fault answers False.
         """
+        if self.admin_open:
+            return admin_opt_in_active()
         return self.current_tools(policy) == self.tools
 
     def current_secret_globs(self) -> tuple[str, ...] | None:
@@ -306,14 +360,22 @@ class RestrictedRun:
             return None
         return tuple(dict.fromkeys(self.secret_globs + current))
 
-    def allowlist(self, requested: Any) -> frozenset[str]:
+    def allowlist(self, requested: Any) -> frozenset[str] | None:
         """The caller's allowlist (when it gave one) narrowed to the granted tools."""
+        if self.admin_open:
+            if requested is None:
+                return None
+            return frozenset(str(name) for name in requested if name)
         if requested is None:
             return self.tools
         return self.tools & frozenset(str(name) for name in requested if name)
 
     def bind_project(self, project_scope: str, *, codegen_requested: bool = False) -> str:
         """Bind the project root; a refusal when there is none the caller named."""
+        if self.admin_open:
+            scope = str(project_scope or "").strip()
+            self.project_root = os.path.realpath(scope) if scope else ""
+            return ""
         if codegen_requested:
             return _refusal(
                 "model '%s' is restricted to read-only tools and cannot run compiler-feedback retries."
@@ -423,6 +485,14 @@ class RestrictedRun:
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
+        if self.admin_open:
+            def admin_check(tool_name: str, args: Any) -> str:
+                if not self.still_granted():
+                    return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
+                return str(inner(tool_name, args) or "") if inner is not None else ""
+
+            return admin_check
+
         def check(tool_name: str, args: Any) -> str:
             if tool_name not in self.tools:
                 return _refusal(
@@ -553,6 +623,8 @@ class RestrictedRun:
         The globs are read again now (:meth:`current_secret_globs`); when they
         cannot be read the whole result is withheld.
         """
+        if self.admin_open:
+            return observation
         if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)

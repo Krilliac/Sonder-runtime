@@ -61,7 +61,9 @@ from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
 from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.interfaces.repl import command_router
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.repl import style as S
 from sonder_runtime.application.ports import repl_notices
 from sonder_runtime.adapters.command_catalog import command_catalog
@@ -886,7 +888,7 @@ def _repl_autopilot_owner(cmd, arg):
     """The owner to pass for one ``/autopilot`` or ``/mission`` line, or None."""
     words = str(arg or "").split(None, 1)
     action = words[0].lower() if words else ""
-    command = str(cmd or "").lower()
+    command = _slash_head(cmd)
     if command == "/mission":
         return _repl_console_owner() if action == "start" else None
     return _repl_console_owner() if action in _AUTOPILOT_OWNER_ACTIONS else None
@@ -906,7 +908,7 @@ def _help_policy_note(topic):
     name = str(topic or "").strip().split(None, 1)
     if not name:
         return ""
-    cmd = "/" + name[0].lstrip("/").lower()
+    cmd = "/" + _slash_head(name[0].lstrip("/"))
     try:
         tools = command_catalog.console_tools().get(cmd, ())
     except command_catalog.CatalogUnavailable:
@@ -1008,6 +1010,25 @@ def _mode_command(argument):
             break
     # The console is the attended surface: a person typed this, so it may
     # raise autonomy (unattended callers may only lower it).
+    if wanted and not explain:
+        try:
+            resolved = permission_policy.resolve_mode(wanted)
+        except ValueError:
+            resolved = ""
+        if resolved == getattr(permission_policy, "BYPASS", "bypass"):
+            if not _console_has_operator():
+                return "refused: entering bypass mode requires an interactive operator prompt"
+            try:
+                answer = input(
+                    "Bypass mode disables all confirmation prompts and root containment. "
+                    "Type 'yes' to confirm: "
+                )
+            except (EOFError, KeyboardInterrupt):
+                return "bypass mode cancelled."
+            if answer.strip().lower() != "yes":
+                return "bypass mode cancelled."
+            with permission_policy.attended_mode_change(), permission_policy.attended_bypass_confirm():
+                return server.permission_mode(mode=wanted, explain=False)
     with permission_policy.attended_mode_change():
         return server.permission_mode(mode=wanted, explain=explain)
 
@@ -1161,7 +1182,7 @@ def _history_safe(line):
     normal command and chat recall remain unchanged.
     """
     value = str(line or "").strip()
-    command = value.split(None, 1)[0].lower() if value else ""
+    command = _slash_head(value)
     return bool(value) and command not in _HISTORY_SECRET_COMMANDS and not (
         _HISTORY_SECRET_ASSIGNMENT.search(value)
     )
@@ -1359,7 +1380,7 @@ class _ModelArgumentCompleter:
         return self._choices
 
     def __call__(self, command, prefix, *, limit=8):
-        if str(command or "").casefold() != "/model":
+        if _slash_head(command) != "/model":
             return []
         if self._choices is None:
             self.refresh()
@@ -1740,6 +1761,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /logs [n]          show the last n records of this session's REPL log
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
+  /temp [0-2|auto]   show/set this session's sampling temperature (auto = model preset)
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
   /cloud [status|on|off]  change process-local hosted/cloud consent
@@ -2122,7 +2144,7 @@ def _branch_usage_error(cmd, arg):
     answered here and never reaches the gate.  It is pure: no tool, no state,
     and an empty result means "let the gate and the branch decide".
     """
-    command = str(cmd or "").strip().lower()
+    command = _slash_head(cmd)
     raw = str(arg or "")
     text = raw.strip()
     if command == "/register":
@@ -3080,7 +3102,7 @@ def _run_train(n):
     for t in tasks:
         print("  %s %s" % (_paint("PRACTICE", "teal", "bold"), t["name"]))
         # Practice runs are single-turn and must not pollute the user's chat thread.
-        resp = server.sonder(t["prompt"], session="none")
+        resp = server.sonder(t["prompt"], session="none", temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False
@@ -4277,7 +4299,7 @@ def main(*, machine_output=False):
                 if _looks_like_slash_command(line):
                     _CURRENT_LINE[0] = " ".join(line.split())
                     parts = line.split(None, 1)
-                    cmd = parts[0].lower()
+                    cmd = _slash_head(parts[0])
                     arg = parts[1] if len(parts) > 1 else ""
 
                     # One choke point for every hand-written branch below, including
@@ -4378,6 +4400,9 @@ def main(*, machine_output=False):
                                   % build_identity.VERSION)
                     elif cmd == "/clear":
                         _clear_terminal_scrollback()
+                    elif cmd == "/temp":
+                        # Kept with this session id; the next turn reads it.
+                        _emit(_chat_temperature.temp_command(arg, session_id))
                     elif cmd == "/trace":
                         apply_trace(_on_off(arg, trace))
                     elif cmd == "/strict":

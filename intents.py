@@ -7,6 +7,7 @@ on, /run), without hijacking real coding questions or requests. Stdlib only.
 import re
 
 from sonder_runtime.application.chat.tool_intent import classify_file_intent, suppresses_file_tools
+from sonder_runtime.application.command_surface.command_text import ascii_lower
 
 # Messages that open with one of these are almost always a real question or
 # task ("how do I...", "explain strict mode in javascript"), not a control
@@ -14,20 +15,46 @@ from sonder_runtime.application.chat.tool_intent import classify_file_intent, su
 # one deliberate exception is "show me your reasoning", handled below.
 _GUARD_RE = re.compile(r"^(how|what|why|explain|write|create|show me how)\b")
 
-_SHOW_REASONING_RE = re.compile(r"show (me )?(your )?(reasoning|thinking)")
+_POLITE = r"(?:(?:please|kindly)\s+)?"
+_TAIL = r"(?:\s+(?:please|now))?"
 
-_TRACE_OFF_RE = re.compile(r"\b(trace|debug)\s+off\b")
-_TRACE_ON_RE = re.compile(r"\b(trace|debug)\s+on\b")
-
-_STRICT_OFF_RE = re.compile(r"\bstrict\s+off\b")
-_STRICT_ON_RE = re.compile(r"\bstrict(\s+mode)?(\s+on)?\b")
-
-_RUN_RE = re.compile(r"^(run|execute)\b.*\b(it|that|this|the code|code)\b")
-
-_TRAIN_N_RE = re.compile(r"\btrain(\s+on)?\s+(\d+)")
-_TRAIN_DEFAULT_RE = re.compile(
-    r"\b(self.?train|train yourself|practice|improve yourself|learn something|teach yourself)\b"
+_SHOW_REASONING_RE = re.compile(
+    r"^" + _POLITE + r"show(?:\s+me)?(?:\s+your)?\s+(?:reasoning|thinking)" + _TAIL + r"$"
 )
+
+# Every control phrasing is anchored to a whole clause of the message
+# ("strict on", "run it"), so ordinary chat that merely contains a control
+# word ("this is not strict", "run this by the team first", "practice makes
+# perfect") is never read as a command.
+_TRACE_RE = re.compile(
+    r"^" + _POLITE + r"(?:turn\s+|switch\s+)?(?:trace|debug)(?:\s+(?P<state>on|off))" + _TAIL + r"$"
+)
+
+_STRICT_RE = re.compile(
+    r"^" + _POLITE + r"(?:(?:be|turn|switch)\s+)?strict(?:\s+mode)?(?:\s+(?P<state>on|off))?" + _TAIL + r"$"
+)
+
+_RUN_RE = re.compile(
+    r"^" + _POLITE + r"(?:run|execute)"
+    r"(?:\s+(?:it|that|this|(?:the|my|this|that)\s+(?:code|script)))?"
+    r"(?:\s+(?:again|for\s+me))?" + _TAIL + r"$"
+)
+
+_TRAIN_N_RE = re.compile(
+    r"^" + _POLITE + r"(?:train|practice)(?:\s+on)?\s+(?P<n>\d+)(?:\s+(?:tasks?|problems?|rounds?|times?))?" + _TAIL + r"$"
+)
+_TRAIN_DEFAULT_RE = re.compile(
+    r"^" + _POLITE + r"(?:self.?train|train\s+yourself|practice(?:\s+tasks)?|improve\s+yourself|learn\s+something|teach\s+yourself)" + _TAIL + r"$"
+)
+
+# Clauses are split on the bare delimiters and stripped afterwards: a leading
+# `\s*` in the pattern would rescan every whitespace run (quadratic).
+_CLAUSE_SPLIT_RE = re.compile(r"[,;&]|\band\b")
+
+# Longest legitimate control turn is about ten short words ("please turn strict
+# mode on and show me your reasoning now"); anything longer than this is never
+# a control command, so it is rejected before any regex touches it.
+_MAX_CONTROL_CHARS = 200
 
 TRAIN_DEFAULT_N = 3
 
@@ -253,42 +280,46 @@ def classify(text):
     """Return a dict of detected control intents, or {} for a normal task turn.
 
     Keys (any subset): 'trace': bool, 'strict': bool, 'run': True, 'train': int.
-    Conservative: only fires on SHORT control-like messages (<= 10 words), and
-    never fires on messages that read as a real question or task.
+    Conservative: only fires on SHORT messages (<= 10 words) in which EVERY
+    clause is a whole control phrasing ("strict on", "run it", "train on 5"),
+    and never on questions, tasks or negated phrasings.
     """
-    t = (text or "").strip().lower()
+    t = text if isinstance(text, str) else str(text or "")
+    if len(t) > _MAX_CONTROL_CHARS:
+        return {}
+    t = ascii_lower(t.strip()).rstrip(".!? \t\r\n\f\v")
     if not t or len(t.split()) > 10:
         return {}
-
-    is_show_reasoning = bool(_SHOW_REASONING_RE.search(t))
-    if not is_show_reasoning and _GUARD_RE.match(t):
+    if _GUARD_RE.match(t) and not _SHOW_REASONING_RE.match(t):
         return {}
 
     out = {}
-
-    # trace / debug / show reasoning
-    if _TRACE_OFF_RE.search(t):
-        out["trace"] = False
-    elif _TRACE_ON_RE.search(t) or is_show_reasoning:
-        out["trace"] = True
-
-    # strict
-    if _STRICT_OFF_RE.search(t):
-        out["strict"] = False
-    elif _STRICT_ON_RE.search(t):
-        out["strict"] = True
-
-    # run it / execute
-    if _RUN_RE.search(t) or t in ("run", "run it", "execute", "execute it"):
-        out["run"] = True
-
-    # self-train / practice / learn / improve
-    m = _TRAIN_N_RE.search(t)
-    if m:
-        out["train"] = int(m.group(2))
-    elif _TRAIN_DEFAULT_RE.search(t):
-        out["train"] = TRAIN_DEFAULT_N
-
+    clauses = [c for c in (p.strip() for p in _CLAUSE_SPLIT_RE.split(t)) if c]
+    if not clauses:
+        return {}
+    for clause in clauses:
+        m = _TRACE_RE.match(clause)
+        if m:
+            out["trace"] = m.group("state") == "on"
+            continue
+        if _SHOW_REASONING_RE.match(clause):
+            out["trace"] = True
+            continue
+        m = _STRICT_RE.match(clause)
+        if m:
+            out["strict"] = m.group("state") != "off"
+            continue
+        if _RUN_RE.match(clause):
+            out["run"] = True
+            continue
+        m = _TRAIN_N_RE.match(clause)
+        if m:
+            out["train"] = int(m.group("n"))
+            continue
+        if _TRAIN_DEFAULT_RE.match(clause):
+            out["train"] = TRAIN_DEFAULT_N
+            continue
+        return {}
     return out
 
 

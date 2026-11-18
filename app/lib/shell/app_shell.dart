@@ -13,7 +13,10 @@ import '../settings_screen.dart';
 import '../system_screen.dart';
 import '../theme.dart';
 import '../ui/kit.dart';
+import '../ui/tone_provider.dart';
 import '../workspace_ui.dart';
+
+import 'chat_link.dart';
 import 'page_navigator.dart';
 import 'preferences.dart';
 import 'shortcuts.dart';
@@ -63,6 +66,15 @@ class AppShell extends StatefulWidget {
   @visibleForTesting
   final DateTime Function()? clock;
 
+  /// Opens a chat from a `/c/<id>` route (see [chatLinkRoute]). Defaults to
+  /// the app-wide [ChatDeepLink.pending].
+  final ValueListenable<ChatLinkRequest?>? deepLink;
+
+  /// Tests: the origin shared links are built on, in place of the page
+  /// origin (browser) or the configured server (elsewhere).
+  @visibleForTesting
+  final String? shareOrigin;
+
   const AppShell({
     super.key,
     required this.settings,
@@ -72,6 +84,8 @@ class AppShell extends StatefulWidget {
     this.pageBuilder,
     this.approvals,
     this.clock,
+    this.deepLink,
+    this.shareOrigin,
   });
 
   @override
@@ -116,8 +130,17 @@ class _AppShellState extends State<AppShell>
   bool _wide = true;
   String? _projectFilter;
   int _identityGeneration = 0;
+  double _themeTone = 0.0;
+
 
   DateTime _now() => widget.clock?.call() ?? DateTime.now();
+
+  ValueListenable<ChatLinkRequest?> get _deepLink =>
+      widget.deepLink ?? ChatDeepLink.pending;
+
+  /// The last deep link acted on, so a rebuild or a chat change never
+  /// reopens it.
+  ChatLinkRequest? _handledLink;
 
   @override
   void initState() {
@@ -148,6 +171,7 @@ class _AppShellState extends State<AppShell>
       connection: _session.chat.connection,
     );
     _approvals.waiting.addListener(_updateBadges);
+    _deepLink.addListener(_applyDeepLink);
     WidgetsBinding.instance.addObserver(this);
     _session.start();
     _approvals.start();
@@ -185,6 +209,7 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _deepLink.removeListener(_applyDeepLink);
     _session.chat.removeListener(_chatChanged);
     _session.chat.status.removeListener(_updateBadges);
     _approvals.waiting.removeListener(_updateBadges);
@@ -209,12 +234,25 @@ class _AppShellState extends State<AppShell>
       loading: chat.loadingThreads,
     );
     _updateBadges();
+    _applyDeepLink();
   }
 
   void _updateBadges() {
     final chat = _session.chat;
     final badges = <WorkspaceDestination, SidebarBadge>{};
+    
+    // Calculate theme tone based on active work
+    final info = chat.status.value;
+    final activeAgents = info?.agents?.activeAgents ?? 0;
+    final activeRuns = info?.autopilot?.activeRuns ?? 0;
+    final totalActive = activeAgents + activeRuns;
+    final newTone = (totalActive > 0) ? (totalActive * 0.1).clamp(0.0, 0.5) : 0.0;
+    if (_themeTone != newTone) {
+      setState(() => _themeTone = newTone);
+    }
+
     if (chat.sending && _current != WorkspaceDestination.chat) {
+
       badges[WorkspaceDestination.chat] = SidebarBadge(
         kind: StatusKind.running,
         text: StatusKind.running.word,
@@ -395,6 +433,72 @@ class _AppShellState extends State<AppShell>
     _session.chat.switchThread(thread);
   }
 
+  /// Open the chat a `/c/<id>` link names, once chats are loaded; an id that
+  /// is malformed (checked before any lookup) or not among this user's chats
+  /// shows the "Chat not found" state.
+  void _applyDeepLink() {
+    final request = _deepLink.value;
+    if (request == null ||
+        identical(request, _handledLink) ||
+        _session.chat.loadingThreads ||
+        !mounted) {
+      return;
+    }
+    _handledLink = request;
+    unawaited(_openChatLink(request.ref));
+  }
+
+  Future<void> _openChatLink(String ref) async {
+    final thread =
+        isValidChatRef(ref) ? _session.chat.threadForSession(ref) : null;
+    if (thread == null) {
+      await _navigate(WorkspaceDestination.chat);
+      if (!mounted) return;
+      await _showChatNotFound(ref);
+      return;
+    }
+    if (_projectFilter != null && thread.project != _projectFilter) {
+      setState(() => _projectFilter = null);
+    }
+    await _openThread(thread);
+  }
+
+  Future<void> _showChatNotFound(String ref) {
+    final shown = isValidChatRef(ref)
+        ? ref
+        : (ref.length > 40 ? '${ref.substring(0, 40)}...' : ref);
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('chat-not-found'),
+        title: const Text('Chat not found'),
+        content:
+            Text('There is no chat "$shown" here. It may belong to another '
+                'account or browser, or it was deleted.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The origin shared links are built on: the page origin in a browser, else
+  /// the configured server.
+  String? get _shareOrigin =>
+      widget.shareOrigin ?? Settings.pageOrigin ?? widget.settings.serverUrl;
+
+  Future<void> _shareThread(ChatThread thread, ChatShareKind kind) async {
+    await copyChatShare(
+      context,
+      kind,
+      _session.chat.sessionFor(thread.id),
+      origin: _shareOrigin,
+    );
+  }
+
   Future<void> _openSearch() async {
     _closeDrawer();
     final chat = _session.chat;
@@ -554,6 +658,7 @@ class _AppShellState extends State<AppShell>
         onDestination: (d) => unawaited(_navigate(d)),
         onOpenThread: (t) => unawaited(_openThread(t)),
         onDeleteThread: (t) => unawaited(_deleteThread(t)),
+        onShareThread: (t, kind) => unawaited(_shareThread(t, kind)),
         onConnection: _openConnection,
       );
 
@@ -575,47 +680,53 @@ class _AppShellState extends State<AppShell>
   @override
   Widget build(BuildContext context) {
     final platform = Theme.of(context).platform;
-    return LayoutBuilder(builder: (context, constraints) {
-      // Read by callbacks; the drawer leaves with the narrow layout.
-      final wide = _wide = constraints.maxWidth >= kShellWideBreakpoint;
-      final content = KeyedSubtree(key: _contentKey, child: _content());
-      return PopScope<Object?>(
-        canPop: _current == WorkspaceDestination.chat && !_chatHasRoutes,
-        onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) unawaited(_handleBack());
-        },
-        child: Shortcuts(
-          shortcuts: shellShortcuts(platform),
-          child: Actions(
-            actions: _actions,
-            child: Focus(
-              focusNode: _shellFocus,
-              autofocus: true,
-              child: Scaffold(
-                key: _scaffoldKey,
-                drawer: wide
-                    ? null
-                    : Drawer(
-                        width: 304,
-                        child: _sidebar(inDrawer: true),
-                      ),
-                drawerEnableOpenDragGesture: !wide,
-                body: wide
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _sidebar(inDrawer: false),
-                          Expanded(child: content),
-                        ],
-                      )
-                    : content,
+    return ToneProvider(
+      tone: _themeTone,
+      child: LayoutBuilder(builder: (context, constraints) {
+        // Read by callbacks; the drawer leaves with the narrow layout.
+        final wide = _wide = constraints.maxWidth >= kShellWideBreakpoint;
+        final content = KeyedSubtree(key: _contentKey, child: _content());
+        return PopScope<Object?>(
+          canPop: _current == WorkspaceDestination.chat && !_chatHasRoutes,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) unawaited(_handleBack());
+          },
+          child: Shortcuts(
+            shortcuts: shellShortcuts(platform),
+            child: Actions(
+              actions: _actions,
+              child: Focus(
+                focusNode: _shellFocus,
+                autofocus: true,
+                child: TonalTheme(
+                  child: Scaffold(
+                    key: _scaffoldKey,
+                    drawer: wide
+                        ? null
+                        : Drawer(
+                            width: 304,
+                            child: _sidebar(inDrawer: true),
+                          ),
+                    drawerEnableOpenDragGesture: !wide,
+                    body: wide
+                        ? Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _sidebar(inDrawer: false),
+                              Expanded(child: content),
+                            ],
+                          )
+                        : content,
+                  ),
+                ),
               ),
             ),
           ),
-        ),
-      );
-    });
+        );
+      }),
+    );
   }
+
 }
 
 /// The always-mounted Chat page. While another destination is shown it
@@ -676,7 +787,14 @@ class _FadeThrough extends StatelessWidget {
         children: [...previous, if (current != null) current],
       ),
       transitionBuilder: (child, animation) {
-        final scale = Tween<double>(begin: 0.985, end: 1).animate(animation);
+        final slide = Tween<Offset>(
+          begin: const Offset(0.05, 0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(
+          parent: animation,
+          curve: SonderMotion.enter,
+          reverseCurve: SonderMotion.exit,
+        ));
         return AnimatedBuilder(
           animation: animation,
           child: child,
@@ -684,7 +802,7 @@ class _FadeThrough extends StatelessWidget {
             ignoring: animation.status == AnimationStatus.reverse,
             child: FadeTransition(
               opacity: animation,
-              child: ScaleTransition(scale: scale, child: child),
+              child: SlideTransition(position: slide, child: child),
             ),
           ),
         );

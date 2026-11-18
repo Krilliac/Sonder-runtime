@@ -1,5 +1,6 @@
 """Environment-backed native and virtual context sizing policy."""
 
+import math
 import os
 import re
 
@@ -85,8 +86,14 @@ METADATA_UNAVAILABLE_CONTEXT = 8_192
 
 
 def auto_context_plan(
-    model_context=None, parameter_size=None, residency_ceiling=None,
+    model_context=None,
+    parameter_size=None,
+    residency_ceiling=None,
     metadata_unavailable=False,
+    *,
+    active_billions=None,
+    node_vram_bytes=None,
+    node_kv_cache_type=None,
 ) -> dict:
     """Explain a model-aware native context choice with clamp provenance.
 
@@ -104,7 +111,26 @@ def auto_context_plan(
     when the operator has *not* pinned a size: an explicit
     ``SONDER_CONTEXT_SIZE``/``SONDER_SESSION_NUM_CTX`` is an informed override
     of the conservative KV budget, matching this module's documented contract.
+
+    When targeting a specific worker node or MoE model, optional keyword
+    arguments refine the estimate without affecting operator pins:
+    ``active_billions`` uses active parameters per token (for MoE models such as
+    35B-A3B) rather than total weight size when applying parameter bands;
+    ``node_vram_bytes`` adjusts headroom when a remote/local GPU has more or
+    less VRAM than the 16 GiB baseline; and ``node_kv_cache_type`` uses the
+    target worker's reported KV cache type when ``SONDER_KV_CACHE_TYPE`` is
+    not explicitly declared.
     """
+    kv_type, kv_source = kv_cache_type()
+    normalized_node_kv = str(node_kv_cache_type or "").strip().lower()
+    if (
+        kv_source != "declared"
+        and normalized_node_kv in {"f32", "f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"}
+    ):
+        kv_type = normalized_node_kv
+        kv_source = "node-capability"
+    kv_quantised = kv_type in {"q8_0", "q5_1", "q5_0", "q4_1", "q4_0"}
+
     has_explicit_environment = bool(
         str(os.environ.get("SONDER_CONTEXT_SIZE") or "").strip()
         or str(os.environ.get("SONDER_SESSION_NUM_CTX") or "").strip()
@@ -112,19 +138,47 @@ def auto_context_plan(
     if has_explicit_environment:
         base = default_requested()
         source = "environment"
+    elif kv_source == "node-capability":
+        base = DEFAULT_CONTEXT_QUANTISED_KV if kv_quantised else DEFAULT_CONTEXT_FP16_KV
+        source = "kv-quantised-default" if kv_quantised else "fp16-default"
     else:
         base = default_context()
         source = "kv-quantised-default" if _kv_cache_is_quantised() else "fp16-default"
+
     clamps = []
     chosen = base
     parameters = _parameter_billions(parameter_size)
-    if parameters is not None and not has_explicit_environment:
+    active_params = _parameter_billions(active_billions)
+    parsed_vram: int | None = None
+    if node_vram_bytes is not None and not isinstance(node_vram_bytes, bool):
+        try:
+            vram_candidate = int(node_vram_bytes)
+        except (TypeError, ValueError):
+            vram_candidate = 0
+        if vram_candidate > 0:
+            parsed_vram = vram_candidate
+
+    effective_params = active_params if active_params is not None else parameters
+    if effective_params is not None and not has_explicit_environment:
+        # Reference baseline is a 16 GiB workstation GPU; higher-VRAM nodes
+        # have proportionally more headroom for active weights + KV cache.
+        vram_scale = 1.0
+        if parsed_vram is not None and parsed_vram >= 24 * (1024 ** 3):
+            vram_scale = min(4.0, (parsed_vram / (1024 ** 3)) / 16.0)
+        scaled_params = effective_params / vram_scale
         for floor, ceiling, reason in _PARAMETER_CONTEXT_BANDS:
-            if parameters >= floor:
+            if scaled_params >= floor:
                 if ceiling < chosen:
                     chosen = ceiling
                     clamps.append(reason)
                 break
+    if parsed_vram is not None and not has_explicit_environment:
+        if parsed_vram < 8 * (1024 ** 3) and 8_192 < chosen:
+            chosen = 8_192
+            clamps.append("node-vram-budget")
+        elif parsed_vram < 12 * (1024 ** 3) and 16_384 < chosen:
+            chosen = 16_384
+            clamps.append("node-vram-budget")
     if (
         metadata_unavailable
         and not has_explicit_environment
@@ -150,7 +204,6 @@ def auto_context_plan(
     if chosen < MIN_CONTEXT:
         chosen = MIN_CONTEXT
         clamps.append("minimum-window")
-    kv_type, kv_source = kv_cache_type()
     return {
         "context": chosen,
         "base": base,
@@ -159,14 +212,22 @@ def auto_context_plan(
         "kv_cache_source": kv_source,
         "residency_ceiling": measured,
         "parameter_billions": parameters,
+        "active_billions": active_params,
+        "node_vram_bytes": parsed_vram,
         "advertised": advertised,
         "clamps": tuple(clamps),
     }
 
 
 def auto_context(
-    model_context=None, parameter_size=None, residency_ceiling=None,
+    model_context=None,
+    parameter_size=None,
+    residency_ceiling=None,
     metadata_unavailable=False,
+    *,
+    active_billions=None,
+    node_vram_bytes=None,
+    node_kv_cache_type=None,
 ) -> int:
     """Choose a model-aware native context when the caller did not pin one.
 
@@ -177,7 +238,13 @@ def auto_context(
     result with ``SONDER_CONTEXT_SIZE`` or an explicit request value.
     """
     return auto_context_plan(
-        model_context, parameter_size, residency_ceiling, metadata_unavailable,
+        model_context,
+        parameter_size,
+        residency_ceiling,
+        metadata_unavailable,
+        active_billions=active_billions,
+        node_vram_bytes=node_vram_bytes,
+        node_kv_cache_type=node_kv_cache_type,
     )["context"]
 
 
@@ -205,9 +272,11 @@ def parse_strict(value):
 def parse_size(value, default=None):
     if default is None:
         default = default_context()
-    if value is None:
+    if value is None or isinstance(value, bool):
         return int(default)
     if isinstance(value, (int, float)):
+        if not math.isfinite(value) or int(value) <= 0:
+            return int(default)
         return max(1, int(value))
     text = str(value).strip().lower().replace("_", "").replace(",", "")
     if not text:
@@ -220,7 +289,8 @@ def parse_size(value, default=None):
         number *= 1000
     elif match.group(2) == "m":
         number *= 1000000
-    return max(1, int(number))
+    parsed = int(number)
+    return parsed if parsed > 0 else int(default)
 
 
 def native_max():
@@ -240,7 +310,16 @@ def default_requested():
 
 
 def requested(value=None):
-    raw = default_requested() if value in (None, "") else parse_size(value, default_requested())
+    is_unset_number = (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and (not math.isfinite(value) or value <= 0)
+    )
+    raw = (
+        default_requested()
+        if value in (None, "") or isinstance(value, bool) or is_unset_number
+        else parse_size(value, default_requested())
+    )
     return max(1, min(raw, virtual_max()))
 
 

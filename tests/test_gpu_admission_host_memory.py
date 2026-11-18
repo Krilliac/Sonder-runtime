@@ -123,3 +123,58 @@ def test_an_unreadable_ps_is_unknown_not_cold(monkeypatch, tmp_path):
 
     assert len(fake.chat_bodies) == 1
     assert service.snapshot()["refused"] == 0
+
+
+def test_queue_mode_evicts_idle_evictable_model_instead_of_stalling(monkeypatch, tmp_path):
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    fake = FakeOllama()
+    fake.loaded["other:9b"] = 8192
+    state = {"available": 12 * GIB}
+    service = make_service(tmp_path, fake, host=LOW_HOST, on_host_floor="queue",
+                           host_recheck_interval_ms=5000)
+    domain_reading = type(service._host_reader())
+    service._host_reader = lambda: domain_reading(
+        available_physical_bytes=state["available"], total_physical_bytes=64 * GIB,
+        commit_limit_bytes=96 * GIB, commit_available_bytes=64 * GIB, commit_enforced=True)
+    wire(monkeypatch, server, fake, service)
+    _seed_measured(service)
+
+    def open_and_free(request, timeout=None, **_kwargs):
+        resp = fake.open_url(request, timeout=timeout)
+        if "other:9b" not in fake.loaded:
+            state["available"] = 40 * GIB
+        return resp
+
+    monkeypatch.setattr(ollama_endpoint, "open_url", open_and_free)
+
+    started = time.monotonic()
+    server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+
+    assert time.monotonic() - started < 1.5
+    assert "other:9b" not in fake.loaded
+    assert len(fake.chat_bodies) == 1
+
+
+def test_queue_mode_does_not_evict_actively_held_model(monkeypatch, tmp_path):
+    fake = FakeOllama()
+    fake.loaded["other:9b"] = 8192
+    service = make_service(tmp_path, fake, host=LOW_HOST, gpu_slots=2, on_host_floor="queue",
+                           host_recheck_interval_ms=100)
+    evict_calls = []
+    service._evictor = lambda origin, name: evict_calls.append((origin, name)) or True
+    wire(monkeypatch, server, fake, service)
+    _seed_measured(service)
+    # Another request actively holds a lease on other:9b in the shared store.
+    service._the_store().acquire(
+        "active-other", "gpu", slots=2, priority=0,
+        origin="http://127.0.0.1:11434", model_key="other:9b",
+        ttl_seconds=60.0, max_depth=8,
+    )
+
+    with pytest.raises(server.ModelCallError) as refused:
+        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=0.4)
+
+    assert refused.value.refusal.reason.name == "HOST_RAM_FLOOR"
+    assert evict_calls == []
+    assert "other:9b" in fake.loaded

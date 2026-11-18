@@ -71,7 +71,7 @@ class ProtocolEnvelope:
             raise EditorInteropError("payload must be a mapping with at most 128 keys")
         try:
             encoded = json.dumps(self.payload, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
             raise EditorInteropError("payload must be JSON-compatible") from exc
         if len(encoded.encode("utf-8")) > MAX_CONTENT_LENGTH:
             raise EditorInteropError("payload exceeds content limit")

@@ -389,9 +389,15 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
 
 
 def bypass_enabled() -> bool:
-    return os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
+    if os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
         "1", "true", "yes", "on"
-    )
+    ):
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
 
 
 def _normalized_absolute(path: Path) -> Path:
@@ -1001,7 +1007,7 @@ def resolve_repository_read_path(
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(path).expanduser()
+    candidate = Path(_reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -1245,9 +1251,38 @@ def _require_plain_name_spelling(path: str) -> None:
         )
 
 
-def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
+_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+
+
+def _reject_network_path(path: str) -> str:
+    """Refuse a UNC / extended / device-namespace spelling before any filesystem call.
+
+    ``Path.resolve`` (and even ``lstat``) on ``//host/share`` opens an SMB
+    connection and can leak NTLM credentials before a containment check runs.
+    Covers both slash flavours of the UNC, extended (``//?/``), device (``//./``) and NT (``/??/``) forms.
+    Every entry point must call this first, so no ``lstat``/``is_symlink``/``stat``/``resolve``
+    ever sees a caller-supplied network path.
+
+    A legitimate extended-length local path (``\\\\?\\D:\\x`` or ``//?/D:/x``) is
+    returned with the prefix stripped (``D:\\x``); callers must use the return
+    value for the rest of their checks. Any other ``\\\\?\\`` form (``UNC``,
+    ``GLOBALROOT``, ``Volume{``...) is refused.
+    """
+    text = str(path).strip()
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        return text[extended.start(1):]
+    flat = text.replace("/", "\\")
+    if flat.startswith(("\\\\", "\\??\\")):
+        raise PermissionError("refusing a UNC or network path spelling")
+    return path
+
+
+def resolve_path(path: str, *, extra_roots: str = "", bypass: bool | None = None) -> Path:
+    effective_bypass = bypass_enabled() if bypass is None else bool(bypass)
     if not (path or "").strip():
         raise ValueError("empty path")
+    path = _reject_network_path(path)
     _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
@@ -1256,8 +1291,8 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
         resolved = candidate.resolve()
     except OSError:
         resolved = _normalized_absolute(candidate)
-    roots = allowed_roots(extra_roots if bypass else "")
-    if bypass and not _MANAGED_ROOTS.get():
+    roots = allowed_roots(extra_roots if effective_bypass else "")
+    if effective_bypass and not _MANAGED_ROOTS.get():
         return resolved
     if any(_is_inside(resolved, root) for root in roots):
         return resolved
@@ -1270,7 +1305,7 @@ def resolve_mutation_path(
     path: str,
     *,
     extra_roots: str = "",
-    bypass: bool = False,
+    bypass: bool | None = None,
 ) -> Path:
     """Resolve a mutation target without accepting a reparse-point spelling.
 
@@ -1285,6 +1320,7 @@ def resolve_mutation_path(
     """
     if not isinstance(path, str) or not path.strip():
         raise ValueError("empty path")
+    path = _reject_network_path(path)
     if _foreign_absolute(path.strip()):
         raise PermissionError("path uses a foreign absolute path form")
     requested = _requested_path(path)
@@ -1438,7 +1474,7 @@ def _resolve_transfer_path(
 ) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
         raise ValueError("%s must be an explicit non-empty file path" % label)
-    raw_path = raw_path.strip()
+    raw_path = _reject_network_path(raw_path.strip())
     if _foreign_absolute(raw_path):
         raise PermissionError("%s uses a foreign absolute path form" % label)
     requested = _requested_path(raw_path)
@@ -2159,7 +2195,7 @@ def _batch_payload(operations):
 
 def _batch_requested_path(path: str) -> Path:
     """Return the lexical requested path used for reparse-point checks."""
-    candidate = Path(path).expanduser()
+    candidate = Path(_reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -2192,6 +2228,7 @@ def _batch_preflight(
             mode = operation.get("mode")
             if not isinstance(path, str) or not path.strip():
                 raise ValueError("path must be a non-empty string")
+            path = _reject_network_path(path)
             if _foreign_absolute(path.strip()):
                 raise PermissionError("path uses a non-native absolute form")
             if not isinstance(content, str):

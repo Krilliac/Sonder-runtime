@@ -75,6 +75,7 @@ from sonder_runtime.platform import unsafe_lab_policy
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
     env_bool,
+    env_bool_checked,
     env_int,
     parse_env_file as _parse_env_file,
 )
@@ -158,6 +159,7 @@ class ServerConfig:
     cors_origins: tuple[str, ...] = ()
     require_account: bool = False
     allow_registration: bool = False
+    public_hosting: bool = False
     reasoning_audience: str = "developer"
     session_state_limit: int = 128
     session_state_owner_limit: int = 32
@@ -186,7 +188,11 @@ class ServerConfig:
     work_budget_seconds: int = 1800
     work_max_running: int = 2
     # SSE keep-alive comment interval while a streamed chat turn generates.
-    stream_heartbeat_seconds: int = 15
+    stream_heartbeat_seconds: int = 10
+    # Load the default chat model as soon as the listener is bound so the first
+    # chat never waits on a cold load (SONDER_PREWARM_ON_START).  Still gated by
+    # the global prewarm switch and by GPU admission.
+    prewarm_on_start: bool = True
 
 
 @dataclass(frozen=True)
@@ -1571,15 +1577,42 @@ def _apply_environment(
                 if part.strip()
             ),
         )
+    if "SONDER_PREWARM_ON_START" in env:
+        server = replace(
+            server,
+            prewarm_on_start=env_bool_checked(
+                "SONDER_PREWARM_ON_START", env, server.prewarm_on_start, errors,
+            ),
+        )
     if "SONDER_WEB_APP" in env:
-        server = replace(server, web_app_enabled=_env_bool(env["SONDER_WEB_APP"]))
+        server = replace(
+            server,
+            web_app_enabled=env_bool_checked(
+                "SONDER_WEB_APP", env, server.web_app_enabled, errors,
+            ),
+        )
     if "SONDER_WEB_APP_DIR" in env:
         server = replace(server, web_app_dir=env["SONDER_WEB_APP_DIR"].strip())
     if "SONDER_REQUIRE_ACCOUNT" in env:
-        server = replace(server, require_account=_env_bool(env["SONDER_REQUIRE_ACCOUNT"]))
+        server = replace(
+            server,
+            require_account=env_bool_checked(
+                "SONDER_REQUIRE_ACCOUNT", env, server.require_account, errors,
+            ),
+        )
     if "SONDER_ALLOW_REGISTRATION" in env:
         server = replace(
-            server, allow_registration=_env_bool(env["SONDER_ALLOW_REGISTRATION"])
+            server,
+            allow_registration=env_bool_checked(
+                "SONDER_ALLOW_REGISTRATION", env, server.allow_registration, errors,
+            ),
+        )
+    if "SONDER_PUBLIC_HOSTING" in env:
+        server = replace(
+            server,
+            public_hosting=env_bool_checked(
+                "SONDER_PUBLIC_HOSTING", env, server.public_hosting, errors,
+            ),
         )
     if env.get("SONDER_REASONING_AUDIENCE", "").strip():
         server = replace(
@@ -1867,7 +1900,45 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
     return errors
 
 
-def _validate(config: SonderConfig, errors: list[str]) -> None:
+def _rpc_peers_errors(raw: str) -> list[str]:
+    """Fail closed when SONDER_RPC_PEERS names endpoints outside 10.77.0.0/30."""
+    tokens = [part.strip() for part in str(raw or "").replace(";", ",").split(",") if part.strip()]
+    if not tokens:
+        return []
+    private_link = ipaddress.IPv4Network("10.77.0.0/30")
+    errors: list[str] = []
+    for token in tokens:
+        if ":" in token:
+            host_part, port_part = token.rsplit(":", 1)
+            try:
+                port = int(port_part.strip())
+            except ValueError:
+                errors.append(f"invalid SONDER_RPC_PEERS port in {token!r}")
+                continue
+            if not 1 <= port <= 65535:
+                errors.append(f"SONDER_RPC_PEERS port out of range in {token!r}")
+                continue
+        else:
+            host_part = token
+        try:
+            addr = ipaddress.ip_address(host_part.strip())
+        except ValueError:
+            errors.append(f"SONDER_RPC_PEERS host must be an IPv4 literal in {token!r}")
+            continue
+        if (
+            not isinstance(addr, ipaddress.IPv4Address)
+            or addr.is_unspecified
+            or addr not in private_link
+            or addr in (private_link.network_address, private_link.broadcast_address)
+        ):
+            errors.append(f"SONDER_RPC_PEERS host {addr} is outside private link {private_link}")
+    return errors
+
+
+def _validate(config: SonderConfig, errors: list[str], *, rpc_peers_raw: str | None = None) -> None:
+    raw_rpc = os.environ.get("SONDER_RPC_PEERS", "") if rpc_peers_raw is None else rpc_peers_raw
+    if str(raw_rpc or "").strip():
+        errors.extend(_rpc_peers_errors(str(raw_rpc)))
     errors.extend(_context_root_errors(config))
     try:
         validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
@@ -1958,8 +2029,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for entry in server.allowed_hosts:
         if not _valid_allowed_host(entry):
             errors.append(f"[server].allowed_hosts entry invalid: {entry!r}")
+    if type(server.prewarm_on_start) is not bool:
+        errors.append("[server].prewarm_on_start must be a boolean")
     if type(server.web_app_enabled) is not bool:
         errors.append("[server].web_app_enabled must be a boolean")
+    if type(server.public_hosting) is not bool:
+        errors.append("[server].public_hosting must be a boolean")
     if type(server.web_app_dir) is not str or (
             server.web_app_dir and not Path(server.web_app_dir).is_absolute()):
         errors.append("[server].web_app_dir must be an absolute path")
@@ -1992,6 +2067,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if require_account is True and auth_mode_is_exact_string and auth_mode == "api-key"
         else auth_mode if auth_mode_is_exact_string else ""
     )
+    if server.public_hosting is True and effective_auth_mode not in ACCOUNT_BEARING_AUTH_MODES:
+        errors.append(
+            "[server].public_hosting requires an account-bearing auth_mode "
+            "('account', 'both', or 'either') or require_account=true"
+        )
     if effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES:
         auth_secret = getattr(config.secrets, "auth_secret", None)
         if not _is_exact_string(auth_secret):
@@ -2573,7 +2653,11 @@ def load_config(
             setting="[observability].live_export_origins",
         ),
     ))
-    _validate(config, errors)
+    _validate(
+        config,
+        errors,
+        rpc_peers_raw=(env.get("SONDER_RPC_PEERS", "") if env is not None else None),
+    )
     if errors:
         raise ConfigError(errors)
     if config.ollama.ca_bundle:

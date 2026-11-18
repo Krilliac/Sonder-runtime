@@ -104,6 +104,18 @@ class ChatStreamKeepAlive extends ChatStreamEvent {
   const ChatStreamKeepAlive();
 }
 
+/// The server says why the turn is waiting (`: sonder-status …` comment, for
+/// example while GPU admission queues it). [text] is plain text, at most
+/// [maxStatusChars] long; never render it as markup. An empty [text] is the
+/// clearing frame: the wait is over, drop any status shown.
+class ChatStreamStatus extends ChatStreamEvent {
+  final String text;
+  const ChatStreamStatus(this.text);
+}
+
+/// Longest status text kept from a `: sonder-status` comment.
+const maxStatusChars = 200;
+
 /// New answer text. [text] is the fragment; [accumulated] the answer so far.
 class ChatStreamDelta extends ChatStreamEvent {
   final String text;
@@ -117,14 +129,252 @@ class ChatStreamDone extends ChatStreamEvent {
   const ChatStreamDone(this.reply);
 }
 
+String _boundedRawText(Object? value, int limit) {
+  if (value == null) return '';
+  final text = value is String ? value : value.toString();
+  if (text.length <= limit) return text;
+  return '${text.substring(0, limit)}...';
+}
+
+/// Bounded execution outcome carried on a completed `sonder_tool` SSE event.
+class ToolRunResult {
+  final bool ok;
+  final int? returncode;
+  final bool timedOut;
+  final int? elapsedMs;
+  final String stdoutTail;
+  final String stderrTail;
+  final String output;
+  final bool truncated;
+
+  const ToolRunResult({
+    this.ok = false,
+    this.returncode,
+    this.timedOut = false,
+    this.elapsedMs,
+    this.stdoutTail = '',
+    this.stderrTail = '',
+    this.output = '',
+    this.truncated = false,
+  });
+
+  factory ToolRunResult.fromJson(Map<String, dynamic> json) {
+    final rawRc = json['returncode'];
+    final rawElapsed = json['elapsed_ms'];
+    return ToolRunResult(
+      ok: json['ok'] == true,
+      returncode: rawRc is num ? rawRc.toInt() : int.tryParse('$rawRc'),
+      timedOut: json['timed_out'] == true,
+      elapsedMs:
+          rawElapsed is num ? rawElapsed.toInt() : int.tryParse('$rawElapsed'),
+      stdoutTail: _boundedRawText(json['stdout_tail'], 12000),
+      stderrTail: _boundedRawText(json['stderr_tail'], 12000),
+      output: _boundedRawText(json['output'], 12000),
+      truncated: json['truncated'] == true,
+    );
+  }
+}
+
+/// Live tool execution / approval event (`sonder_tool` on a chat chunk).
+class ChatStreamToolEvent extends ChatStreamEvent {
+  final String id;
+  final String callId;
+  final String digest;
+  final String tool;
+  final String language;
+  final String code;
+  final Map<String, String> args;
+  final Map<String, dynamic> rawArgs;
+  final String preview;
+  final int? timeout;
+  final String backend;
+  final String executionTarget;
+  final String phase;
+  final String risk;
+  final String session;
+  final bool? ok;
+  final bool denied;
+  final bool bidiWarning;
+  final List<String> bidiChars;
+  final String state;
+  final String? error;
+  final ToolRunResult? result;
+
+  const ChatStreamToolEvent({
+    required this.id,
+    this.callId = '',
+    this.digest = '',
+    required this.tool,
+    this.language = '',
+    this.code = '',
+    this.args = const {},
+    this.rawArgs = const {},
+    this.preview = '',
+    this.timeout,
+    this.backend = '',
+    this.executionTarget = '',
+    this.phase = '',
+    this.risk = '',
+    this.session = '',
+    this.ok,
+    this.denied = false,
+    this.bidiWarning = false,
+    this.bidiChars = const [],
+    required this.state,
+    this.error,
+    this.result,
+  });
+
+  bool get isClientTarget =>
+      executionTarget == 'client' || backend == 'client';
+
+  bool get isAwaitingApproval => state == 'awaiting_approval';
+
+  bool get isAwaitingClientApproval =>
+      isClientTarget && state == 'awaiting_client_approval';
+
+  bool get isAwaitingClientResult =>
+      isClientTarget && phase == 'awaiting_client_result';
+
+  ChatStreamToolEvent copyWith({
+    String? state,
+    String? phase,
+    bool? ok,
+    bool? denied,
+    String? error,
+    bool clearError = false,
+    ToolRunResult? result,
+  }) =>
+      ChatStreamToolEvent(
+        id: id,
+        callId: callId,
+        digest: digest,
+        tool: tool,
+        language: language,
+        code: code,
+        args: args,
+        rawArgs: rawArgs,
+        preview: preview,
+        timeout: timeout,
+        backend: backend,
+        executionTarget: executionTarget,
+        phase: phase ?? this.phase,
+        risk: risk,
+        session: session,
+        ok: ok ?? this.ok,
+        denied: denied ?? this.denied,
+        bidiWarning: bidiWarning,
+        bidiChars: bidiChars,
+        state: state ?? this.state,
+        error: clearError ? null : (error ?? this.error),
+        result: result ?? this.result,
+      );
+
+  factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
+    final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
+    final callId =
+        RegExp(r'^[0-9a-f]{8,64}$').hasMatch(rawCallId) ? rawCallId : '';
+    final rawDigest = json['digest']?.toString().trim().toLowerCase() ?? '';
+    final digest = RegExp(r'^[0-9a-f]{64}$').hasMatch(rawDigest) ? rawDigest : '';
+    final rawArgsIn = json['args'];
+    final args = <String, String>{};
+    final rawArgs = <String, dynamic>{};
+    if (rawArgsIn is Map) {
+      for (final entry in rawArgsIn.entries.take(24)) {
+        final k = boundedResponseMetadata(entry.key, 64);
+        if (k.isNotEmpty) {
+          rawArgs[k] = entry.value;
+          args[k] = boundedResponseMetadata(entry.value, 4096);
+        }
+      }
+    }
+    final rawBidi = json['bidi_chars'];
+    final bidiChars = rawBidi is List
+        ? rawBidi
+            .map((e) => boundedResponseMetadata(e, 16))
+            .where((e) => e.isNotEmpty)
+            .take(16)
+            .toList(growable: false)
+        : const <String>[];
+    final rawTimeout = json['timeout'] ?? json['timeout_seconds'];
+    final timeout =
+        rawTimeout is num ? rawTimeout.toInt() : int.tryParse('$rawTimeout');
+    final rawError = json['error'];
+    final errorText = rawError == null
+        ? null
+        : boundedResponseMetadata(rawError, 2000);
+    final rawCode = json['code'] ?? rawArgs['code'];
+    final code = rawCode is String
+        ? (rawCode.length <= 16384 ? rawCode : rawCode.substring(0, 16384))
+        : '';
+    final rawLang = json['language'] ?? rawArgs['language'];
+    final executionTarget =
+        boundedResponseMetadata(json['execution_target'], 32);
+    final backend = boundedResponseMetadata(json['backend'], 32);
+    final phase = boundedResponseMetadata(json['phase'], 48);
+    final rawState = boundedResponseMetadata(json['state'], 32);
+    final effectiveState = rawState.isNotEmpty
+        ? rawState
+        : (phase == 'finished'
+            ? 'done'
+            : (phase == 'awaiting_client_result' ? 'running' : phase));
+    final okVal = json['ok'] is bool ? json['ok'] as bool : null;
+    final deniedVal = json['denied'] == true || phase == 'denied';
+    final rawId = boundedResponseMetadata(json['id'], 64);
+    final effectiveId = rawId.isNotEmpty ? rawId : callId;
+    ToolRunResult? parsedResult = json['result'] is Map
+        ? ToolRunResult.fromJson(
+            Map<String, dynamic>.from(json['result'] as Map),
+          )
+        : null;
+    if (parsedResult == null && okVal != null && phase == 'finished') {
+      parsedResult = ToolRunResult(ok: okVal);
+    }
+    return ChatStreamToolEvent(
+      id: effectiveId,
+      callId: callId,
+      digest: digest,
+      tool: boundedResponseMetadata(json['tool'], 128),
+      language: boundedResponseMetadata(rawLang, 32),
+      code: code,
+      args: Map.unmodifiable(args),
+      rawArgs: Map.unmodifiable(rawArgs),
+      preview: boundedResponseMetadata(json['preview'], 4096),
+      timeout: timeout != null && timeout > 0 ? timeout : null,
+      backend: backend.isNotEmpty ? backend : executionTarget,
+      executionTarget: executionTarget,
+      phase: phase,
+      risk: boundedResponseMetadata(json['risk'], 32),
+      session: boundedResponseMetadata(json['session'], 128),
+      ok: okVal,
+      denied: deniedVal,
+      bidiWarning: json['bidi_warning'] == true || bidiChars.isNotEmpty,
+      bidiChars: bidiChars,
+      state: effectiveState,
+      error: errorText == null || errorText.isEmpty ? null : errorText,
+      result: parsedResult,
+    );
+  }
+}
+
 /// One parsed SSE frame: either a comment (keep-alive) or a data payload.
 class SseFrame {
   final bool comment;
   final String data;
+
+  /// Text of a `: sonder-status` comment ('' for the clearing frame); null for
+  /// any other frame.
+  final String? status;
   const SseFrame.comment()
       : comment = true,
+        data = '',
+        status = null;
+  const SseFrame.statusComment(String this.status)
+      : comment = true,
         data = '';
-  const SseFrame.data(this.data) : comment = false;
+  const SseFrame.data(this.data)
+      : comment = false,
+        status = null;
 
   bool get isDone => !comment && data.trim() == '[DONE]';
 }
@@ -149,7 +399,20 @@ class SseFrameParser {
       _size = 0;
       return [frame];
     }
-    if (line.startsWith(':')) return const [SseFrame.comment()];
+    if (line.startsWith(':')) {
+      var body = line.substring(1);
+      if (body.startsWith(' ')) body = body.substring(1);
+      const name = 'sonder-status';
+      if (body.trimRight() == name || body.startsWith('$name ')) {
+        var text = body.substring(name.length).trim();
+        if (text.length > maxStatusChars) {
+          text = text.substring(0, maxStatusChars).trimRight();
+        }
+        // An empty text is the server's clearing frame (the wait is over).
+        return [SseFrame.statusComment(text)];
+      }
+      return const [SseFrame.comment()];
+    }
     if (line.startsWith('data:')) {
       var value = line.substring(5);
       if (value.startsWith(' ')) value = value.substring(1);
@@ -179,11 +442,15 @@ class ChatStreamAccumulator {
   final Map<String, dynamic> completion = {};
   String finishReason = '';
 
+  /// Tool event parsed from the most recent [apply] call, if any.
+  ChatStreamToolEvent? lastToolEvent;
+
   String get text => _text.toString();
 
   /// Apply one decoded chunk. Returns the new content fragment (may be
   /// empty). Throws [SonderException] for an `object: error` frame.
   String apply(Map<String, dynamic> chunk) {
+    lastToolEvent = null;
     if (chunk['object'] == 'error') {
       final error = chunk['error'] is Map
           ? Map<String, dynamic>.from(chunk['error'] as Map)
@@ -210,6 +477,14 @@ class ChatStreamAccumulator {
       'usage',
     ]) {
       if (chunk[key] != null) completion[key] = chunk[key];
+    }
+    if (chunk['sonder_tool'] is Map) {
+      final parsed = ChatStreamToolEvent.fromJson(
+        Map<String, dynamic>.from(chunk['sonder_tool'] as Map),
+      );
+      if (parsed.tool.isNotEmpty || parsed.id.isNotEmpty) {
+        lastToolEvent = parsed;
+      }
     }
     var fragment = '';
     final choices = chunk['choices'];
@@ -406,7 +681,10 @@ Stream<ChatStreamEvent> openChatStream(
     void handle(SseFrame frame) {
       if (finished) return;
       if (frame.comment) {
-        controller.add(const ChatStreamKeepAlive());
+        final status = frame.status;
+        controller.add(status == null
+            ? const ChatStreamKeepAlive()
+            : ChatStreamStatus(status));
         return;
       }
       if (frame.isDone) {
@@ -423,6 +701,10 @@ Stream<ChatStreamEvent> openChatStream(
       if (decoded is! Map) return;
       try {
         final fragment = acc.apply(Map<String, dynamic>.from(decoded));
+        final toolEvent = acc.lastToolEvent;
+        if (toolEvent != null) {
+          controller.add(toolEvent);
+        }
         if (fragment.isNotEmpty) {
           controller.add(ChatStreamDelta(fragment, acc.text));
         }

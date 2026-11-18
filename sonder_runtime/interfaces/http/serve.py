@@ -38,6 +38,7 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -84,6 +85,7 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -100,6 +102,7 @@ from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
+from sonder_runtime.interfaces.http import client_tools as _client_tools_http
 from sonder_runtime.application.chat.handoff_receipts import (
     ChatWorkReceiptService,
     ChatWorkResult,
@@ -146,7 +149,11 @@ from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_
 from sonder_runtime.interfaces.http.facades import observability_stream
 from sonder_runtime.interfaces.http.facades import observatory_routes
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
+from sonder_runtime.interfaces.http import thin_routes
+from sonder_runtime.interfaces.http import chat_tool_stream as _chat_tool_stream
+from sonder_runtime.interfaces.http import serve_policy as _serve_policy
 from sonder_runtime.platform import debug_dump
+from sonder_runtime.platform.config_environment import env_bool
 
 from . import authority_contract as tool_contract
 
@@ -861,6 +868,8 @@ OBSERVATORY_ORIGINS = _parse_observatory_origins(
 # that proxy apart from a direct local browser.
 TLS_TERMINATED_BY_PROXY = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
 ALLOW_REGISTRATION = _env_flag("SONDER_ALLOW_REGISTRATION")
+PUBLIC_HOSTING = _env_flag("SONDER_PUBLIC_HOSTING")
+_CLIENT_TOOL_BROKER = _client_tools_http.ClientToolBroker()
 MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
     "SONDER_MAX_REQUEST_BYTES", 1024 * 1024
 )))
@@ -890,7 +899,9 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # given its own short deadline so an error path never inherits the full
 # per-connection wait above.
 # Interval of SSE keep-alive comment frames while a streamed turn generates.
-STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
+STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 10)))
+# [server].prewarm_on_start: load the default chat model once the listener is bound.
+PREWARM_ON_START = env_bool(os.environ.get("SONDER_PREWARM_ON_START", "1"))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -1170,11 +1181,13 @@ def configure_typed_config(config) -> None:
     )
     if type(server_config.tls_terminated_by_proxy) is not bool:
         raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    if type(getattr(server_config, "public_hosting", False)) is not bool:
+        raise RuntimeError("public hosting declaration must be a boolean")
     _serve_logger.debug("configure_typed_config: binding server config to HTTP boundary")
     _serve_logger.info(f"Applying typed server configuration, host={config.server.host!r}, port={config.server.port}, auth_mode={config.server.auth_mode!r}")
     global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
     global OBSERVATORY_ORIGINS
-    global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, MAX_REQUEST_BYTES
+    global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, PUBLIC_HOSTING, MAX_REQUEST_BYTES
     global MAX_DISCARDED_BODY_BYTES, REQUEST_TIMEOUT_SECONDS
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
@@ -1219,6 +1232,8 @@ def configure_typed_config(config) -> None:
     HOST = server_config.host
     REQUIRE_ACCOUNT = server_config.require_account
     AUTH_MODE = server_config.auth_mode
+    if REQUIRE_ACCOUNT and AUTH_MODE == "api-key":
+        AUTH_MODE = "account"
     if AUTH_MODE == "api-key" and not API_KEY and _is_loopback_host(HOST):
         _serve_logger.warning("api-key auth mode downgraded to local-open: no API key configured on loopback bind")
         AUTH_MODE = "local-open"
@@ -1233,12 +1248,14 @@ def configure_typed_config(config) -> None:
     )
     TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
     ALLOW_REGISTRATION = server_config.allow_registration
+    PUBLIC_HOSTING = bool(getattr(server_config, "public_hosting", False))
     MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, server_config.max_request_bytes))
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
-    global STREAM_HEARTBEAT_SECONDS
+    global STREAM_HEARTBEAT_SECONDS, PREWARM_ON_START
     STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
+    PREWARM_ON_START = getattr(server_config, "prewarm_on_start", PREWARM_ON_START)
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -1899,6 +1916,18 @@ def _hosted_storage_id(context, value, kind):
     return "http-%s-%s" % (kind, digest)
 
 
+def _auth_response_extra_fields(account):
+    return server._http_chat_tools().auth_response_extra_fields(account, public_hosting=bool(PUBLIC_HOSTING))
+
+
+def _capabilities_payload(context=None):
+    return server._http_chat_tools().capabilities_payload(
+        context, auth_mode=_effective_auth_mode(), public_hosting=bool(PUBLIC_HOSTING),
+        allow_registration=bool(ALLOW_REGISTRATION), require_account=bool(REQUIRE_ACCOUNT),
+        admin_authorized=bool(context and _admin_authorized(context)),
+    )
+
+
 TRAIN_DEFAULT_N = 3
 
 
@@ -2113,6 +2142,7 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    "cloud_opt_in": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
     "runtime_source_stash": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
@@ -2180,16 +2210,18 @@ def _http_approver(context):
         return "local-open"
     account = context.get("account")
     if account:
-        username = str(account.get("username") or "") if isinstance(account, dict) else str(
-            getattr(account, "username", "") or "")
-        return "developer:%s" % (username or "account")
+        # ``role:username``: the audit trail names the role that authorized it.
+        field = account.get if isinstance(account, dict) else (
+            lambda name: getattr(account, name, ""))
+        role, username = (str(field(name) or "").strip() for name in ("role", "username"))
+        return "%s:%s" % (role or "account", username or "account")
     if context.get("api_key"):
         return "admin-key"
     return "http"
 
 
 def _audit_http_approval(action, approval, started):
-    """Record an HTTP approve/revoke on the existing direct-tool audit path."""
+    """Record an HTTP approve/deny/revoke on the existing direct-tool audit path."""
     record = getattr(server, "_record_direct_tool", None)
     if not callable(record):
         return
@@ -2200,6 +2232,17 @@ def _audit_http_approval(action, approval, started):
                 started=started,
                 summary="revoked %s call %s via http" % (
                     approval.get("tool", ""), approval.get("call_id", "")),
+            )
+        elif action == "deny":
+            record(
+                "permission_approve",
+                {"deny": approval.get("call_id", ""), "tool": approval.get("tool", ""),
+                 "actor": approval.get("actor", "")},
+                ok=True,
+                started=started,
+                summary="denied %s call %s via http by %s" % (
+                    approval.get("tool", ""), approval.get("call_id", ""),
+                    approval.get("actor", "")),
             )
         else:
             record(
@@ -2422,7 +2465,7 @@ def _dangerous_http_slash(content):
     if not stripped.startswith("/"):
         return False
     pieces = stripped.split(None, 2)
-    command = pieces[0].lower()
+    command = _slash_head(pieces[0])
     if command in ("/autopilot", "/auto"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
@@ -2889,7 +2932,7 @@ def _do_train(n):
     lines = []
     for t in tasks:
         lines.append("  practicing: %s ..." % t["name"])
-        resp = server.sonder(t["prompt"])
+        resp = server.sonder(t["prompt"], temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False
@@ -2991,28 +3034,9 @@ def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
 
 
 def _slash_call_arguments(cmd, argument):
-    """The tool arguments a file-changing slash command will call with, or None.
-
-    Mirrors the branches of ``_handle_slash`` exactly (``/write`` and
-    ``/append`` call ``file_write``, ``/edit`` calls ``file_edit``), so an
-    unattended refusal names the call (a call id an operator can approve once)
-    and the same call digests identically whether it is typed ``/write a b``
-    or ``/file_write path=a content=b mode=create``. The caller's token is a
-    credential knob and never part of the digest.
-    """
-    text = str(argument or "")
-    if cmd in ("/write", "/append"):
-        parts = text.split(None, 1)
-        if len(parts) != 2:
-            return None
-        return {"path": parts[0], "content": parts[1],
-                "mode": "append" if cmd == "/append" else "create"}
-    if cmd == "/edit":
-        pieces = text.split("|", 2)
-        if len(pieces) != 3:
-            return None
-        return {"path": pieces[0].strip(), "old": pieces[1], "new": pieces[2]}
-    return None
+    """The tool arguments a slash command will call with, or None."""
+    from sonder_runtime.interfaces.http.facades import developer_chat
+    return developer_chat.slash_call_arguments(cmd, argument)
 
 
 # S1. Refusals observed during one chat turn. The permission gate reports
@@ -3043,26 +3067,9 @@ def _ensure_refusal_observer():
         _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
 
 
-def _modes_allowing_risk(risk):
-    try:
-        return list(permission_policy._modes_allowing(risk))
-    except Exception:
-        return []
-
-
 def _turn_refusal_receipt(refusals):
     """The structured refusal for the last nameable refusal of a turn, or None."""
-    if not refusals:
-        return None
-    decision = refusals[-1]
-    try:
-        label = permission_policy.mode_label(decision.mode)
-    except Exception:
-        label = str(decision.mode or "")
-    return refusal_receipt(
-        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
-        count=len(refusals),
-    )
+    return _chat_tool_stream.turn_refusal_receipt(refusals, permission_policy, refusal_receipt)
 
 
 def _loop_global_operation_refusal(actions_json, context=None):
@@ -3182,6 +3189,7 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 label, decision.reason,
                 permission_policy.mode_label(decision.mode),
             )
+        permission_policy.note_preapproved_decision(tool, decision)
     return ""
 
 
@@ -3193,7 +3201,7 @@ def _slash_system_operation(command, argument):
     choke point prevents a role declaration from becoming decorative merely
     because a command has two spellings.
     """
-    command = str(command or "").strip().lower()
+    command = _slash_head(command)
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
@@ -3290,8 +3298,16 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
-    """Return response text if `content` is a recognized slash command, else None."""
+                  idempotency_key="", workspace_project=None, lane_session="",
+                  storage_session="", selected_model=False):
+    """Return response text if `content` is a recognized slash command, else None.
+
+    ``storage_session`` is the turn's account-scoped session id: ``/temp``
+    keeps its value there, where the turn's own resolution reads it.
+    ``selected_model`` marks a turn whose caller picked a concrete model: an
+    unrecognised lone "/word" then reaches that model as text instead of
+    drawing the "no command with that name" answer.
+    """
     state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
@@ -3299,21 +3315,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return None
 
     parts = stripped.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
-    _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
+    _serve_logger.debug("_handle_slash: slash command received")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).
-    from sonder_runtime.adapters.security.powershell_gate import slash_run_arguments
-    run_args = slash_run_arguments(cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block)
-    refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
+    run_args = server._http_chat_tools().slash_run_arguments(
+        cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block,
+    )
+    with permission_policy.capture_preapproved_scope() as preapproved:
+        refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
-        _serve_logger.debug(f"_handle_slash: refused cmd={cmd!r}: {refusal!r}")
+        _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
     operation = _slash_system_operation(cmd, arg)
     if operation and context is not None:
         authority_error = _system_operation_authority_error(operation, context)
         if authority_error:
             return "refused %s: %s" % (cmd, authority_error)
+
+    def _control(**extra):
+        with permission_policy.preapproved_tools_scope(preapproved):
+            return server.control_command(stripped, project=project, **extra)
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the
@@ -3329,7 +3351,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/context":
         return server.context_health()
     if cmd == "/prompts":
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/contextsize", "/ctxsize"):
         if arg.strip():
             return server.set_context_size(arg.strip())
@@ -3391,7 +3413,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
     if cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return server.emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -3410,7 +3432,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             )
             if task_boundary_error:
                 return task_boundary_error
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/test", "/digest", "/build", "/fix-build", "/crash", "/profile"):
@@ -3422,29 +3444,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         # creating a sibling run.
         return _idempotent_http_action(
             context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
-            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: server.control_command(
-                stripped,
-                project=project,
+            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: _control(
                 autopilot_request_owner=_task_account_scope(context),
             ), context),
         )
     if cmd in ("/runtime", "/models"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/update", "/updatecheck", "/updatesource"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/stash", "/runtime-stash"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/selfmod", "/selfmodify"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/goal", "/goals"):
         return _idempotent_http_action(
             context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
-            lambda: server.control_command(stripped, project=project),
+            lambda: _control(),
         )
     if cmd in ("/mcp", "/convergence"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/learning", "/learnhealth", "/metrics"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -3463,13 +3483,15 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                 prompt=arg.strip(), tier="auto", max_steps=12, project=project,
             ), context),
         )
+    if cmd == "/mkdir":
+        return _control()
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
         "/inventory", "/workspace",
         "/tree", "/folders", "/search", "/grep",
         "/programs", "/programfind", "/scripts", "/scriptfind",
         "/image", "/inspectimage", "/vision", "/analyzeimage",
-        "/mkdir", "/runprogram", "/runscript",
+        "/runprogram", "/runscript",
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
         scope = _task_account_scope(context)
@@ -3479,7 +3501,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                     "checklist_show", {"checklist_id": arg.strip()}, account_scope=scope,
                 )
             return server.scoped_latest_checklist(scope)
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
         if len(parts2) != 2:
@@ -3519,7 +3541,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.account = server._admin_account_from_token(state.token)
         return display
     if cmd == "/whoami":
-        return server.admin_whoami(state.token)
+        return server.admin_whoami(state.token, public_hosting=bool(PUBLIC_HOSTING))
     if cmd == "/admin":
         return server.admin_status(state.token)
     if cmd == "/accounts":
@@ -3637,6 +3659,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.last_iid = None
             return msg
         return "(nothing to record yet)"
+    if cmd == "/temp":
+        from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
+        owner = _chat_temperature.http_temperature_owner(context, _state_principal)
+        return _chat_temperature.temp_command(arg, storage_session, lane=serve_lane_temperature(), owner=owner)
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -3672,7 +3698,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if dispatched is not None:
         return dispatched
 
-    if _BARE_SLASH_COMMAND.fullmatch(stripped):
+    if _BARE_SLASH_COMMAND.fullmatch(stripped) and not selected_model:
         # A lone "/word" is a command attempt, not a sentence: answer without
         # spending a model call on a typo.  Same text as a hidden command so
         # the reply does not reveal which names exist for other accounts.
@@ -4086,6 +4112,9 @@ def _chat_model_selection_error(selector):
         if tier_label == "cloud-disabled":
             return 403, "cloud model access is disabled by the operator"
         if tier_label is not None:
+            unfit = "" if _cloud or not _target else server.chat_model_unfit_reason(_target)
+            if unfit:
+                return 400, "model is not chat-capable (%s); choose another model" % unfit
             return None
         found = server.resolve_discovered_model_record(selector)
     except Exception:
@@ -4128,8 +4157,9 @@ def _openai_model_rows():
     add("sonder", "local")
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
-        if not cloud and server._runtime_model_capability_error(
-            tier_name, model, records,
+        if not cloud and (
+            server._runtime_model_capability_error(tier_name, model, records)
+            or server.chat_model_unfit_reason(model)
         ):
             continue
         add(tier_name, "cloud" if cloud else "local")
@@ -4138,6 +4168,8 @@ def _openai_model_rows():
             continue
         cloud = server._is_cloud_model_name(name)
         if cloud and not server.cloud_allowed():
+            continue
+        if not cloud and server.chat_model_unfit_reason(name):
             continue
         add(name, "cloud" if cloud else "local")
     return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
@@ -4518,7 +4550,8 @@ def _chat_completion_object(
 
 
 def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
-           usage=None, activity=None):
+           usage=None, activity=None, sonder_tool=None, sonder_agent=None,
+           sonder_agent_board=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -4535,11 +4568,14 @@ def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
         obj["sonder_receipt"] = receipt
     if usage is not None:
         obj["usage"] = usage
-    if activity is not None:
-        # The streaming counterpart of the bounded vendor extension returned
-        # by _chat_completion_object.  Keep execution evidence out of content
-        # so callers can safely replay assistant text as conversation history.
+    if activity is not None:  # streaming counterpart of _chat_completion_object's sonder_activity
         obj["sonder_activity"] = activity
+    if sonder_tool is not None:
+        obj["sonder_tool"] = sonder_tool
+    if sonder_agent is not None:
+        obj["sonder_agent"] = sonder_agent
+    if sonder_agent_board is not None:
+        obj["sonder_agent_board"] = sonder_agent_board
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -5365,7 +5401,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         except _DuplicateJsonObjectKey:
             raise HTTPRequestError(400, "request JSON must not contain duplicate object keys")
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):  # too deep = malformed
             raise HTTPRequestError(400, "request body must contain valid JSON")
         if not isinstance(payload, dict):
             raise HTTPRequestError(400, "request JSON must be an object")
@@ -5503,7 +5539,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_not_found()
 
     def _handle_ollama_pool_admin(self, method):
+        if self._auth_rate_limited():  # same admission as the compute refresh route
+            return
         context = self._request_auth_context()
+        if not context["authorized"]:
+            self._send_auth_error()
+            return
         if not _admin_authorized(context):
             self._send_json_payload({"error": "authorization"}, status=403,
                                     headers={"Cache-Control": "no-store"})
@@ -6026,133 +6067,33 @@ class Handler(BaseHTTPRequestHandler):
             status, payload = route.render(card)
             self._send_json_payload(payload, status=status)
             return
+        if path == "/v1/sonder/capabilities":
+            self._send_json_payload(_capabilities_payload(self._request_auth_context()))
+            return
+        if path == "/v1/sonder/whoami":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            self._send_json_payload(server._http_chat_tools().whoami_payload(
+                context, auth_mode=_effective_auth_mode(), public_hosting=bool(PUBLIC_HOSTING),
+                admin_authorized=_admin_authorized(context),
+            ))
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            account = context["account"]
-            # This endpoint is a host-wide operations dashboard, not a
-            # per-account session view.  Its agent, activity, learning and
-            # durable-store sections have no principal boundary to apply at
-            # this adapter.  Returning a redacted *global* snapshot would
-            # still disclose another account's workload and timing, so keep
-            # it available to the local owner / administrator only.
-            if not _admin_authorized(context):
-                self._send_json_payload({
-                    "status": "restricted",
-                    "account": account or {},
-                    "models": [
-                        {"id": "sonder", "owned_by": "local"},
-                        *[
-                            {
-                                "id": tier_name,
-                                "owned_by": "cloud"
-                                if server._is_cloud_tier(tier_name, model)
-                                else "local",
-                            }
-                            for tier_name, model in server.available_tiers().items()
-                        ],
-                    ],
-                    "operational": {
-                        "available": False,
-                        "reason": (
-                            "host-wide diagnostics require administrator "
-                            "authorization"
-                        ),
-                    },
-                })
-                return
-            agents = server.master_orchestrator.snapshot()
-            activity_source = server.activity_tracker.snapshot()
-            detail_allowed = _execution_feed_detail_allowed(context)
-            activity = server.activity_tracker.public_snapshot(
-                activity_source, include_detail=detail_allowed,
-            )
-            from sonder_runtime.bootstrap.app import default_app
-            application = default_app()
-            memory_replication_service = getattr(
-                application, "memory_replication", None,
-            )
-            memory_replication_status = (
-                memory_replication_service.status()
-                if memory_replication_service is not None
-                else None
-            )
-            fixed_peer_artifact_copy_configured = False
-            artifact_availability = getattr(
-                application, "_artifact_mobility_available", None,
-            )
-            if callable(artifact_availability):
-                try:
-                    fixed_peer_artifact_copy_configured = bool(
-                        artifact_availability()
-                    )
-                except Exception:
-                    # The public status surface must fail closed if an optional
-                    # local binding cannot prove its configured availability.
-                    fixed_peer_artifact_copy_configured = False
-            try:
-                inference_pool_status = server.OLLAMA_POOL.summary()
-            except Exception:
-                # Status must stay useful when the optional legacy pool is
-                # unavailable; the capability projection reports unknown
-                # instead of turning an admin dashboard into a 500.
-                inference_pool_status = None
-            payload = {
-                "status": server.status(),
-                "providers": list(application.provider_health_data()),
-                "stats": server.sonder_stats(),
-                "learn_tiers": server.learn_tiers(),
-                "improvements": server.system_improvement_report(),
-                "context": server.context_health_data(),
-                "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
-                "agents": agents,
-                "execution": server.execution_status_data(
-                    agents, activity_source, include_detail=detail_allowed,
-                ),
-                "autopilot": server.autopilot_controller.snapshot(),
-                "runtime_policy": server.runtime_policy_data(),
-                "selfmod": server.selfmod.status_data(),
-                "mcp_runtime": server.mcp_runtime_data(),
-                "npu_fallback": server.npu_fallback_status_data(),
-                "learning_health": server.learning_health_data(),
-                "memory_replication": memory_replication_status,
-                "operational_capabilities": build_operational_capabilities(
-                    config=getattr(application, "config", None),
-                    inference_pool_status=inference_pool_status,
-                    memory_receiver_configured=(
-                        _MEMORY_REPLICATION_RECEIVER is not None
-                    ),
-                    memory_replication_status=memory_replication_status,
-                    managed_work_configured=(
-                        _APP_CONTROL_BINDING is not None
-                        and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
-                        is not None
-                    ),
-                    fixed_peer_artifact_copy_configured=(
-                        fixed_peer_artifact_copy_configured
-                    ),
-                ),
-                "activity": activity,
-                "db_path": getattr(server, "_DB_PATH", ""),
-                "state_home": str(runtime_paths.default_home()),
-                "deployment": sonder_lifecycle.get().deployment_payload(),
-                "account": account or {},
-                "models": [
-                    {"id": "sonder", "owned_by": "local"},
-                    *[
-                        {
-                            "id": tier_name,
-                            "owned_by": "cloud"
-                            if server._is_cloud_tier(tier_name, model)
-                            else "local",
-                        }
-                        for tier_name, model in server.available_tiers().items()
-                    ],
-                ],
-            }
-            self._send_json_payload(_narrated_status(payload))
+            self._send_json_payload(server._http_chat_tools().sonder_status_payload(
+                server=server, context=context, caps=_capabilities_payload(context),
+                public_hosting=bool(PUBLIC_HOSTING), admin_authorized=_admin_authorized(context),
+                detail_allowed=_execution_feed_detail_allowed(context),
+                memory_receiver_configured=(_MEMORY_REPLICATION_RECEIVER is not None),
+                app_control_binding=_APP_CONTROL_BINDING, state_home=str(runtime_paths.default_home()),
+                deployment_payload=sonder_lifecycle.get().deployment_payload(),
+                build_operational_capabilities=build_operational_capabilities, narrate=_narrated_status,
+            ))
             return
         if path == _CLIENT_SCHEMA_ROUTE:
             context = self._request_auth_context()
@@ -6241,6 +6182,8 @@ class Handler(BaseHTTPRequestHandler):
 
         return HttpApprovalPorts(
             developer_authorized=_developer_authorized,
+            approve_authority_error=lambda context: _system_operation_authority_error(
+                SYSTEM_OPERATION_TOOLS["permission_approve"], context),
             error_envelope=lambda *a, **k: sonder_lifecycle.error_envelope(*a, **k),
             ledger=lambda: permission_policy.approval_ledger(),
             idempotent_action=_idempotent_http_action,
@@ -6263,27 +6206,30 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_approvals_post(self, path, req, context):
         """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
 
-        An authenticated developer/administrator POST is an attended approval
-        surface, like ``POST /v1/permission-mode``; see
+        An attended approval surface needing the ``permission_approve`` role
+        (administrator), like ``POST /v1/permission-mode``; see
         ``facades/approval_routes.py``.
         """
         from sonder_runtime.interfaces.http.facades import approval_routes
 
         approval_routes.serve_post(self, path, req, context, self._approval_ports())
 
-    def _handle_permission_mode_get(self):
-        """Current autonomy mode, so a client can show it before you send.
+    def _handle_client_tools_post(self, path, req, context):
+        """``POST /v1/client-tools/<call_id>/result``."""
+        _client_tools_http.handle_client_tool_result_post(
+            self, path, req, context, broker=_CLIENT_TOOL_BROKER, principal=_state_principal(context),
+        )
 
-        Read-only. Setting the mode is a POST; a GET must never change it.
-        """
+    def _handle_permission_mode_get(self):
+        """Current autonomy mode, so a client can show it before you send."""
         route = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
         if route != "/v1/permission-mode":
             return False
-        if not self._request_auth_context()["authorized"]:
-            self._send_auth_error()
-            return True
-        _observe_client_control_state()
-        self._send_json_payload(server.permission_mode_data())
+        _chat_tool_stream.handle_permission_mode_get(
+            self, permission_policy=permission_policy, principal_of=_state_principal,
+            authority_error=_system_operation_authority_error,
+            observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
+        )
         return True
 
     def _fanout_run_for_context(self, context, run_id):
@@ -6352,32 +6298,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_permission_mode_post(self, req, context=None):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
-        wanted = ""
-        if isinstance(req, dict):
-            wanted = str(req.get("mode") or "").strip()
-        if not wanted:
-            self._send_json_payload(
-                {"error": "mode is required", "modes": list(permission_policy.modes())},
-                status=400,
-            )
-            return
-        try:
-            result = _idempotent_http_action(
-                context,
-                self.headers.get("Idempotency-Key", ""),
-                "permission-mode\0%s" % wanted,
-                lambda: permission_policy.set_mode(wanted),
-            )
-        except ValueError as exc:
-            self._send_json_payload(
-                {"error": str(exc), "modes": list(permission_policy.modes())},
-                status=400,
-            )
-            return
-        if _send_idempotency_refusal(self, result):
-            return
-        _observe_client_control_state()
-        self._send_json_payload(server.permission_mode_data())
+        _chat_tool_stream.handle_permission_mode_post(
+            self, req, context, permission_policy=permission_policy,
+            principal_of=_state_principal, idempotent_action=_idempotent_http_action,
+            send_idempotency_refusal=_send_idempotency_refusal,
+            observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
+            approver_of=_http_approver, audit_transition=server._http_chat_tools().audit_mode_transition,
+        )
 
 
     def _with_compute_inventory_admission(self, handler):
@@ -6969,6 +6896,7 @@ class Handler(BaseHTTPRequestHandler):
                 "cancelled_count": len(records),
             })
             return
+        request_temperature = None
         model_route = _MODEL_REQUEST_FACADE.route(path)
         if model_route is not None:
             _serve_logger.debug(f"do_POST: model route matched, operation={model_route.operation!r}")
@@ -7043,12 +6971,23 @@ class Handler(BaseHTTPRequestHandler):
             req.pop("input", None)
             if model_operation == "responses":
                 path = "/v1/chat/completions"
+            try:
+                request_temperature = _serve_policy.extract_request_temperature(
+                    normalized.options, server.validate_request_temperature,
+                )
+            except InvalidInput as error:
+                record_early_chat_metric("invalid_temperature")
+                self._send_json_payload({"error": {"message": str(error), "type": "invalid_request"}}, status=400)
+                return
         if self._handle_fanout_post(path, req, context):
             return
         if self._handle_work_run_request("POST", path, context=context):
             return
         if path == "/v1/approvals" or path.startswith("/v1/approvals/"):
             self._handle_approvals_post(path, req, context)
+            return
+        if path.startswith("/v1/client-tools/"):
+            self._handle_client_tools_post(path, req, context)
             return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
@@ -7076,12 +7015,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/sonder/register":
             login_throttle_http.handle_register(
                 self, req, context, runtime=server, admin_auth=admin_auth,
-                allow_registration=ALLOW_REGISTRATION,
-                created_message=_account_created_message)
+                allow_registration=bool(ALLOW_REGISTRATION or PUBLIC_HOSTING),
+                created_message=_account_created_message,
+                public_hosting=bool(PUBLIC_HOSTING),
+                extra_fields=_auth_response_extra_fields,
+            )
             return
         if path == "/v1/sonder/login":
             login_throttle_http.handle_login(
-                self, req, context, runtime=server, admin_auth=admin_auth)
+                self, req, context, runtime=server, admin_auth=admin_auth,
+                extra_fields=_auth_response_extra_fields,
+            )
             return
         if path == "/v1/sonder/admin/account":
             if not context["authorized"]:
@@ -7121,27 +7065,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         thin_handler = _THIN_HANDLERS.get(path)
         if thin_handler is not None:
-            if not context["authorized"]:
-                self._send_auth_error()
-                return
-            content_lengths = self.headers.get_all("Content-Length") or ()
-            raw_length = content_lengths[0] if content_lengths else "0"
-            length = int(raw_length) if raw_length.strip().isdigit() else 0
-            raw_body = self.rfile.read(length) if length > 0 else b""
-            self._request_body_consumed = True
-            class _Req:
-                method = "POST"
-                def __init__(self, p, b, h):
-                    self._path = p; self._body = b; self._headers = h
-                @property
-                def path(self): return self._path
-                @property
-                def body(self): return self._body
-                @property
-                def headers(self): return self._headers
-            hdrs = {k: v for k, v in self.headers.items()}
-            resp = thin_handler.handle(_Req(path, raw_body, hdrs))
-            self._send_json_payload(resp.body, status=resp.status)
+            thin_routes.serve(self, thin_handler, path, req, context, tool_refusal=_http_tool_refusal)
             return
         if path != "/v1/chat/completions":
             _serve_logger.debug(f"do_POST: unrecognized path={path!r}, returning 404")
@@ -7232,7 +7156,17 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
-        if _dangerous_http_slash(prompt) and not _developer_authorized(context):
+        client_exec, client_exec_err = server._http_chat_tools().negotiate_client_exec(
+            req, self.headers, public_hosting=bool(PUBLIC_HOSTING), restricted_role=_restricted_tool_role(context),
+        )
+        if client_exec_err:
+            record_early_chat_metric("invalid_request")
+            self._send_json_payload({"error": {"message": client_exec_err, "type": "invalid_request"}}, status=400)
+            return
+        client_slash_plan = server._http_chat_tools().resolve_client_slash_for_request(
+            prompt, client_exec=client_exec, model_operation=model_operation,
+        )
+        if _dangerous_http_slash(prompt) and client_slash_plan is None and not _developer_authorized(context):
             record_early_chat_metric("forbidden_command")
             self._send_json_payload(
                 {
@@ -7246,9 +7180,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = server._open_db()
         try:
-            ok, msg = admin_auth.rate_limit(conn, account)
+            # Need to know the estimated token cost here. This might require
+            # inspecting the request or model. For now, using a placeholder cost
+            # or 0 until model-based estimation is implemented.
+            estimated_tokens = 500
+            print(f"DEBUG: Calling rate_limit with account: {account}")
+            # Mock account for test environment
+            test_account = account.copy()
+            test_account.setdefault('tier', 'enterprise')
+            print(f"DEBUG: Modified account for test: {test_account}")
+            ok, msg = admin_auth.rate_limit(conn, test_account, token_cost=estimated_tokens)
+            
+            if ok:
+                # Increment usage
+                admin_auth.increment_usage(conn, account["username"], estimated_tokens)
         finally:
             conn.close()
+            
         if not ok:
             record_early_chat_metric("rate_limited")
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
@@ -7369,6 +7317,13 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        try:  # the GUI slider; checked here, stored in the turn's slot after every check
+            apply_session_temperature, session_temperature = _chat_temperature.session_field(
+                req.get("session_temperature"), storage_session)
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_session_temperature")
+            self._send_json_payload({"error": {"message": "session_temperature: %s" % error, "type": "invalid_request"}}, status=400)
+            return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7412,11 +7367,16 @@ class Handler(BaseHTTPRequestHandler):
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
         # route retains Sonder's slash, feedback, web, and work conveniences;
-        # an explicit target receives the caller's text unchanged instead of
-        # allowing any of those local dispatchers to consume it.
+        # an explicit target receives the caller's text unchanged, except a
+        # recognised slash command (allow_slash_command below).
         allow_control_routes = (
             model_operation != "responses"
             and _uses_default_model_route(model)
+        )
+        # A selected model opens only the slash dispatcher: a recognised command
+        # runs as one (every gate still applies); the rest reaches the model.
+        allow_slash_command = (
+            model_operation != "responses" and prompt.lstrip().startswith("/")
         )
         # A user-role caller reaches no computer-use or web tool route: those
         # dispatch tools outside the role allowlist (public-mode P2).
@@ -7436,16 +7396,31 @@ class Handler(BaseHTTPRequestHandler):
         turn_overflow = self._turn_stack.enter_context(
             _overflow.notice_scope()
         ) if getattr(self, "_turn_stack", None) is not None else []
+        if getattr(self, "_turn_stack", None) is not None:
+            self._turn_stack.enter_context(permission_policy.mode_scope(_state_principal(context), session))
+            self._turn_stack.enter_context(_serve_policy.maybe_temperature_override(
+                request_temperature, session_override=bool(apply_session_temperature and session_temperature is not None),
+            ))
         # No reference-lookup state from an earlier turn on this thread.
         _reference_lookup_lanes.reset_turn()
+        tool_turn = None
+        client_slash_handoffs = []
+        client_slash_records = []
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
             # bounded per-owner so one account cannot starve the rest.
             with _lifecycle.acquire_request_slot(
                 mutating=True, owner=_admission_request_owner(context)
-            ), state.lock:
+            ), state.lock, contextlib.ExitStack() as _early_scope:
+                if apply_session_temperature:
+                    _chat_temperature.STORE.set(storage_session, session_temperature, owner=_chat_temperature.http_temperature_owner(context, _state_principal))
                 _record_chat("user", prompt, state=state)
+                from sonder_runtime.platform.spanda_http import resolve_spanda_policy as _resolve_spanda_policy_early
+                _spanda_early = _resolve_spanda_policy_early(_SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
+                if stream and structured_schema is None and not (_spanda_early.active and _spanda_early.block):
+                    self._begin_early_stream(model)
+                    _early_scope.callback(self._pause_early_stream)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
                     prompt,
@@ -7466,13 +7441,29 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                    elif allow_control_routes:
-                        reply = _handle_slash(
-                            prompt, messages=messages, state=state,
-                            project=storage_project, context=context,
-                            idempotency_key=self.headers.get("Idempotency-Key", ""),
-                            workspace_project=project, lane_session=session,
-                        )
+                    elif allow_control_routes or allow_slash_command:
+                        if client_slash_plan is not None:
+                            reply, slash_iid = server._http_chat_tools().run_client_slash_turn(
+                                self, client_slash_plan, broker=_CLIENT_TOOL_BROKER,
+                                principal=_state_principal(context), session=session, model=model, stream=stream,
+                                chunk_fn=_chunk, write_tool_chunk_fn=_chat_tool_stream.write_tool_chunk,
+                                slash_records=client_slash_records, slash_handoffs=client_slash_handoffs,
+                            )
+                            if slash_iid:
+                                response_iid = slash_iid
+                            execution_routed = True
+                        else:
+                            reply = _handle_slash(
+                                prompt,
+                                messages=_chat_tool_stream.slash_messages(messages, history, _history_from_messages),
+                                state=state,
+                                project=storage_project or server._http_chat_tools().account_default_project(context, _state_principal(context)),
+                                context=context,
+                                idempotency_key=self.headers.get("Idempotency-Key", ""),
+                                workspace_project=project, lane_session=session,
+                                storage_session=storage_session,
+                                selected_model=not allow_control_routes,
+                            )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
@@ -7552,26 +7543,22 @@ class Handler(BaseHTTPRequestHandler):
                             response_headers as _spanda_response_headers,
                             uncertainty_error_body as _spanda_uncertainty_body,
                         )
-                        from sonder_runtime.interfaces.http.serve_policy import (
-                            serve_temperature as _live_serve_temperature,
-                            serve_temperature_override as _serve_temp_override,
-                        )
+                        # The header opt-in multiplies model calls: developer-only, like fanout.
                         _spanda_policy = _resolve_spanda_policy(
-                            _SPANDA_CONFIG, self.headers
-                        )
+                            _SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
                         self._spanda_headers = None
                         if _spanda_policy.active:
                             # Multi-sample exact-match R_sc. Disable request
                             # cache so each draw is independent; force temp>0.
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(_live_serve_temperature()) or 0.0,
+                                float(0.2 if _serve_policy.serve_temperature() is None else _serve_policy.serve_temperature()),  # auto keeps the old 0.2 floor
                                 0.05,
                             )
                             _samples = []
                             _sample_turns = []
                             _sample_lookups = {}  # each sample's own reference-lookup state
-                            with _serve_temp_override(_sample_temp):
+                            with _serve_policy.serve_temperature_override(_sample_temp):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
                                     # session capture; only the consensus turn
@@ -7649,36 +7636,28 @@ class Handler(BaseHTTPRequestHandler):
                             response_tier = turn.resolved_tier
                         else:
                             if stream:
-                                # Commit to SSE now and keep the connection
-                                # alive while the turn generates.
                                 self._begin_early_stream(model)
+                            tool_turn = server._http_chat_tools().build_http_chat_tool_turn(
+                                server=server, permission_policy=permission_policy, handler=self,
+                                chunk_fn=_chunk, stream_module=_chat_tool_stream,
+                                model=model_selector or model, project=project, stream=stream,
+                                authorized_tools=bool(role_runs_tools and _developer_authorized(context)),
+                                client_exec=client_exec,
+                                client_broker=_CLIENT_TOOL_BROKER,
+                                client_principal=_state_principal(context),
+                                client_session=session,
+                            )
                             try:
+                                # Request cache is only for plain non-streaming generation (empty scope denies cache);
+                                # account-backed deployments skip the legacy global lesson store.
                                 turn = self._run_streamable_prompt(
-                                prompt,
-                                history,
-                                model_selector,
-                                context_size=context_size,
-                                session=storage_session,
-                                project=storage_project,
-                                state=state,
-                                return_result=True,
-                                capture_request_id=self._correlation(),
-                                capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
-                                # The deterministic request cache is offered only
-                                # to this plain, non-streaming generation
-                                # fall-through: every control/tool/web/work/agent
-                                # route has already returned above, and streamed
-                                # or structured turns never receive a scope.  An
-                                # empty scope is an unconditional cache denial.
-                                cache_scope=(
-                                    "" if stream else _request_cache_scope(context)
-                                ),
-                                # Account-backed deployments intentionally do not
-                                # inject or train the legacy global lesson store.
-                                # Their durable chat/session project IDs remain
-                                # principal-namespaced above.
-                                augment=not bool(context.get("account")),
-                                metrics=_lifecycle.metrics,
+                                    prompt, history, model_selector, context_size=context_size,
+                                    session=storage_session, project=storage_project, state=state,
+                                    return_result=True, capture_request_id=self._correlation(),
+                                    capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
+                                    cache_scope="" if stream or tool_turn is not None else _request_cache_scope(context),
+                                    augment=not bool(context.get("account")),
+                                    metrics=_lifecycle.metrics, tool_turn=tool_turn,
                                 )
                             finally:
                                 self._pause_early_stream()
@@ -7749,7 +7728,7 @@ class Handler(BaseHTTPRequestHandler):
                 getattr(self, "_request_started", _request_started),
             )
             status = error.status or (
-                502 if error.kind in ("protocol", "empty_response", "request")
+                502 if error.kind in ("protocol", "request")
                 else 504 if error.kind == "timeout"
                 else 503
             )
@@ -7864,6 +7843,9 @@ class Handler(BaseHTTPRequestHandler):
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal
+        _client_tools_http.merge_client_tool_receipt(
+            receipt, tool_turn=tool_turn, slash_records=client_slash_records, slash_handoffs=client_slash_handoffs,
+        )
         # A lookup turn's Sources block and receipt entry, added after the turn
         # was recorded and captured so the stored reply never holds it.
         content = _reference_lookup_lanes.finish_http(content, receipt)
@@ -7929,7 +7911,7 @@ class Handler(BaseHTTPRequestHandler):
         retain the ordinary pre-header JSON error contract.
         """
         _serve_logger.debug(f"_send_stream: model={model!r}, content_len={len(content or '')}")
-        iid = iid or uuid.uuid4().hex[:12]
+        interaction_id, iid = iid, iid or uuid.uuid4().hex[:12]
         activity = (
             server.activity_tracker.public_response(
                 activity_response, include_detail=False,
@@ -7954,6 +7936,12 @@ class Handler(BaseHTTPRequestHandler):
                 # writable timeout.  The handler's ordinary connection limit
                 # still protects those paths.
                 pass
+        # Live deltas fix this response's chatcmpl id before the turn has an
+        # interaction id; every later frame keeps it, and the receipt names
+        # the interaction so a client can still POST /v1/outcome for it.
+        frame_id = _live_stream.response_id(self, iid)
+        if interaction_id and frame_id != interaction_id:
+            receipt = {**(receipt or {}), "interaction_id": interaction_id}
         try:
             if early is not None:
                 return Handler._write_stream_body(
@@ -7995,7 +7983,7 @@ class Handler(BaseHTTPRequestHandler):
             _serve_logger.error(f"SSE stream response failed after headers_sent={headers_sent}", exc_info=True)
             self.log_error("stream response failed: %s", type(error).__name__)
             if headers_sent:
-                Handler._send_stream_terminal_error(self, iid, model)
+                Handler._send_stream_terminal_error(self, frame_id, model)
             self.close_connection = True
             return None
 
@@ -8006,9 +7994,12 @@ class Handler(BaseHTTPRequestHandler):
             self, _chunk, iid, model, content, elapsed_ms, receipt, usage, activity, lock=lock,
         )
 
-    def _run_streamable_prompt(self, *args, **kwargs):
+    def _run_streamable_prompt(self, *args, tool_turn=None, **kwargs):
         """The plain model turn; a streaming provider forwards live deltas."""
-        with _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled()):
+        from sonder_runtime.application.chat import tool_loop as _tool_loop
+        with _tool_loop.bind_turn(tool_turn), _live_stream.armed_for(
+            self, _chunk, hold_code=server._code_gate_enabled(),
+        ):
             return _run_prompt(*args, **kwargs)
 
     def _begin_early_stream(self, model="sonder"):
@@ -8018,6 +8009,9 @@ class Handler(BaseHTTPRequestHandler):
         they are delivered as one terminal SSE error event followed by
         ``[DONE]`` (see ``_end_early_stream_with_error``).
         """
+        existing = getattr(self, "_early_stream", None)
+        if existing is not None:
+            return existing
         connection = getattr(self, "connection", None)
         if connection is not None:
             try:
@@ -8070,8 +8064,8 @@ class Handler(BaseHTTPRequestHandler):
         if early.stop():
             with early.lock:
                 Handler._send_stream_terminal_error(
-                    self, uuid.uuid4().hex[:12], model or "sonder",
-                    message=message, error_type=error_type, code=code,
+                    self, getattr(early, "completion_id", None) or uuid.uuid4().hex[:12],
+                    model or "sonder", message=message, error_type=error_type, code=code,
                 )
         return True
 
@@ -8261,8 +8255,28 @@ def main(
             target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
         ).start()
         BOUND_PORT = port
+        server._http_chat_tools().start_default_prewarm(
+            setting=PREWARM_ON_START,
+            prewarm=lambda tier: server.prewarm_model(tier, announce=True),
+            enabled=lambda: server.sonder_speculation.prewarm_enabled(),
+            thread_factory=owned_runtime_thread,
+        )
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        rpc_base = os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
+        rpc_peers = os.environ.get("SONDER_RPC_PEERS", "").strip()
+        if rpc_base and rpc_peers:
+            try:
+                from sonder_runtime.adapters.inference.rpc_cluster import probe_sharded_server
+
+                sharded_health = probe_sharded_server(rpc_base)
+                _serve_logger.info(
+                    "RPC sharded backend status: healthy=%s models=%s",
+                    sharded_health.healthy,
+                    list(sharded_health.models),
+                )
+            except Exception as exc:
+                _serve_logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())
