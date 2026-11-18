@@ -669,16 +669,18 @@ class AgentImplBridge:
         if self._closed:
             return
         self._closed = True
-        _rt.emit_agent_event(
-            phase="completed" if ok else "failed",
-            step=0,
-            max_steps=self._max_steps,
-            ok=ok,
-            elapsed_ms=int((time.monotonic() - self._started) * 1000),
-            model=self._model,
-            summary=compact_text(summary, limit=180),
-        )
-        self._stack.close()
+        try:
+            _rt.emit_agent_event(
+                phase="completed" if ok else "failed",
+                step=0,
+                max_steps=self._max_steps,
+                ok=ok,
+                elapsed_ms=int((time.monotonic() - self._started) * 1000),
+                model=self._model,
+                summary=compact_text(summary, limit=180),
+            )
+        finally:
+            self._stack.close()
 
 
 def _find_sonder_inference_gateway(server: Any) -> Any:
