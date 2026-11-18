@@ -64,7 +64,8 @@ def register(mcp: _McpServer, record: Any, *, runtime: Callable[[], Any]) -> Non
 
     @mcp.tool()
     def spawn_agents(
-        tasks_json: str,
+        tasks: list[dict[str, Any]] | dict[str, Any] | str | None = None,
+        tasks_json: str = "",
         tier: str = "",
         model: str = "",
         project: str = "",
@@ -72,12 +73,16 @@ def register(mcp: _McpServer, record: Any, *, runtime: Callable[[], Any]) -> Non
         max_steps: int = 8,
     ) -> str:
         """Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only)."""
-        try:
-            tasks: Any = json.loads(tasks_json) if isinstance(tasks_json, str) else tasks_json
-        except ValueError:
-            tasks = tasks_json
+        raw_tasks: Any = tasks if tasks not in (None, "") else tasks_json
+        if isinstance(raw_tasks, str):
+            try:
+                parsed_tasks: Any = json.loads(raw_tasks)
+            except ValueError:
+                parsed_tasks = raw_tasks
+        else:
+            parsed_tasks = raw_tasks
         args: dict[str, Any] = {
-            "tasks": tasks,
+            "tasks": parsed_tasks,
             "tier": tier,
             "model": model,
             "project": project,

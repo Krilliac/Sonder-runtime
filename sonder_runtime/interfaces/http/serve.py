@@ -3169,6 +3169,7 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 label, decision.reason,
                 permission_policy.mode_label(decision.mode),
             )
+        permission_policy.note_preapproved_decision(tool, decision)
     return ""
 
 
@@ -3301,7 +3302,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     run_args = server._http_chat_tools().slash_run_arguments(
         cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block,
     )
-    refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
+    with permission_policy.capture_preapproved_scope() as preapproved:
+        refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
         _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
@@ -3310,6 +3312,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         authority_error = _system_operation_authority_error(operation, context)
         if authority_error:
             return "refused %s: %s" % (cmd, authority_error)
+
+    def _control(**extra):
+        with permission_policy.preapproved_tools_scope(preapproved):
+            return server.control_command(stripped, project=project, **extra)
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the
@@ -3325,7 +3331,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/context":
         return server.context_health()
     if cmd == "/prompts":
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/contextsize", "/ctxsize"):
         if arg.strip():
             return server.set_context_size(arg.strip())
@@ -3387,7 +3393,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
     if cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return server.emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -3406,7 +3412,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             )
             if task_boundary_error:
                 return task_boundary_error
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/test", "/digest", "/build", "/fix-build", "/crash", "/profile"):
@@ -3418,29 +3424,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         # creating a sibling run.
         return _idempotent_http_action(
             context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
-            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: server.control_command(
-                stripped,
-                project=project,
+            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: _control(
                 autopilot_request_owner=_task_account_scope(context),
             ), context),
         )
     if cmd in ("/runtime", "/models"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/update", "/updatecheck", "/updatesource"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/stash", "/runtime-stash"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/selfmod", "/selfmodify"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/goal", "/goals"):
         return _idempotent_http_action(
             context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
-            lambda: server.control_command(stripped, project=project),
+            lambda: _control(),
         )
     if cmd in ("/mcp", "/convergence"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/learning", "/learnhealth", "/metrics"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -3460,7 +3464,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             ), context),
         )
     if cmd == "/mkdir":
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
         "/inventory", "/workspace",
@@ -3477,7 +3481,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                     "checklist_show", {"checklist_id": arg.strip()}, account_scope=scope,
                 )
             return server.scoped_latest_checklist(scope)
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
         if len(parts2) != 2:

@@ -3657,6 +3657,8 @@ def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=No
     here. This surface is one a person drives, so it carries it.
     """
     for tool in tools:
+        if permission_modes.consume_preapproved_decision(tool) is not None:
+            continue
         decision = permission_modes.decide_for_caller(
             tool, interactive=bool(operator_approved), gate_control_exempt=True,
             surface="control",
@@ -5637,6 +5639,8 @@ def _post(
                 headers={"Content-Type": "application/json"},
             )
             def transport():
+                if path in {"/api/chat", "/api/generate"}:
+                    from sonder_runtime.application.agents.delegation_runtime import note_agent_execution as _note_exec; _note_exec(origin=origin)
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                     _record_residency_dispatch(
                         path, json.loads(body), _residency_feedback, _is_cloud_model_name,

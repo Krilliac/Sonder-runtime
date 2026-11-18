@@ -22,6 +22,7 @@ from sonder_runtime.adapters.security import role_tool_policy
 from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
 from sonder_runtime.application.agents import delegation_runtime as rt
 from sonder_runtime.application.chat.tool_loop import ChatToolTurn, build_tool_turn_manifest
+from sonder_runtime.bootstrap import delegation_wiring
 from sonder_runtime.domain.chat_tools import chat_tools_payload
 
 
@@ -353,10 +354,13 @@ def test_74_compact_tool_help_no_denied_leak_and_run_code_lookup_and_mkdir(tmp_p
     found = server._agent_dispatch("tool_help", {"name": "run_code"}, repository_extra_roots=str(tmp_path))
     assert "run_code" in found and "unknown tool" not in found
 
-    # #74.4: /mkdir narrows cleanly to single ('directory_create',) so _http_tool_refusal preserves call_id
+    # #74.4: /mkdir narrows cleanly to single ('directory_create',) so _http_tool_refusal preserves call_id,
+    # and approving that call_id allows the retried /mkdir without double-spending in server.control_command.
     assert command_catalog.http_slash_tools().get("/mkdir") == ("directory_create",)
     ledger = ApprovalLedger(tmp_path / "mkdir_approvals.db")
     with pytest.MonkeyPatch.context() as mp:
+        mp.chdir(tmp_path)
+        mp.setattr(server.file_ops, "workspace_root", lambda: tmp_path)
         mp.setattr(pm, "_approval_ledger", lambda: ledger)
         pm.set_mode(pm.MANUAL)
         mp.setenv("SONDER_HTTP_ALLOW_LOCAL_OPEN", "1")
@@ -364,19 +368,47 @@ def test_74_compact_tool_help_no_denied_leak_and_run_code_lookup_and_mkdir(tmp_p
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
         try:
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
-                data=json.dumps({
-                    "model": "code",
-                    "messages": [{"role": "user", "content": "/mkdir sub_dir"}],
-                }).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+            def _post(path, body):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{srv.server_address[1]}{path}",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+
+            status1, payload = _post("/v1/chat/completions", {
+                "model": "code",
+                "messages": [{"role": "user", "content": "/mkdir sub_dir"}],
+            })
+            assert status1 == 200
             refusal = (payload.get("sonder_receipt") or {}).get("refusal") or {}
-            assert refusal.get("call_id"), payload
+            call_id = refusal.get("call_id")
+            assert call_id, payload
+            assert not (tmp_path / "sub_dir").exists()
+
+            apv_status, apv_payload = _post(f"/v1/approvals/{call_id}", {})
+            assert apv_status == 201 and apv_payload.get("object") == "approval", apv_payload
+
+            status2, retry_payload = _post("/v1/chat/completions", {
+                "model": "code",
+                "messages": [{"role": "user", "content": "/mkdir sub_dir"}],
+            })
+            assert status2 == 200
+            assert not (retry_payload.get("sonder_receipt") or {}).get("refusal"), retry_payload
+            reply_text = retry_payload["choices"][0]["message"]["content"]
+            assert not reply_text.startswith("refused /mkdir:"), reply_text
+            assert (tmp_path / "sub_dir").is_dir()
+
+            # One-shot approval is consumed: a second unapproved /mkdir sub_dir_2 is refused again
+            status3, third_payload = _post("/v1/chat/completions", {
+                "model": "code",
+                "messages": [{"role": "user", "content": "/mkdir sub_dir_2"}],
+            })
+            assert status3 == 200
+            assert ((third_payload.get("sonder_receipt") or {}).get("refusal") or {}).get("call_id")
+            assert not (tmp_path / "sub_dir_2").exists()
         finally:
             srv.shutdown()
             srv.server_close()
@@ -405,3 +437,109 @@ def test_78_node1_direct_model_pin_and_cluster_capacity(monkeypatch):
     cap = master_orchestrator.capacity()
     assert cap["ollama_num_parallel"] >= 3
     assert cap["automatic_worker_slots"] >= 3
+
+
+def test_92_provider_dispatch_and_fallback_gateway_pin_and_capacity(monkeypatch):
+    class FakeSonderGateway:
+        def unified_worker_status(self, ollama_pool=None):
+            return {
+                "available_models": ["qwen3.6:35b", "astra-cyber-35b-a3b:latest"],
+                "workers": [
+                    {"source": "sonder_inference_worker", "origin": "https://10.77.0.2:8443", "healthy": True, "max_inflight": 2},
+                ],
+            }
+
+    class FakePreSendFallbackGateway:
+        def __init__(self, primary, fallback):
+            self._primary = primary
+            self._fallback = fallback
+
+    class FakeProviderDispatchGateway:
+        def __init__(self, providers):
+            self._providers = providers
+
+    monkeypatch.setattr(server, "_get", lambda *a, **k: {"models": []})
+    wrapped = FakeProviderDispatchGateway({
+        "sonder_inference": FakePreSendFallbackGateway(FakeSonderGateway(), None),
+    })
+    monkeypatch.setattr(
+        server, "_APP_GRAPH",
+        SimpleNamespace(model_gateway=wrapped),
+        raising=False,
+    )
+    pin = server._resolve_model_pin("astra-cyber-35b-a3b:latest")
+    assert pin.ok and pin.model == "astra-cyber-35b-a3b:latest"
+    monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "1")
+    assert delegation_wiring.remote_cluster_parallel_slots(server) >= 2
+    cap = master_orchestrator.capacity()
+    assert cap["ollama_num_parallel"] >= 3
+    assert cap["automatic_worker_slots"] >= 3
+
+
+def test_92_spawn_agents_accepts_tasks_list_and_board_identity(monkeypatch):
+    from sonder_runtime.domain.agents.tool_args import normalize_tool_args
+
+    # spawn_agents MCP tool schema accepts both "tasks" (list) and "tasks_json" (str) without dropping "tasks"
+    tool_entry = server.mcp._tool_manager.get_tool("spawn_agents") if hasattr(server.mcp, "_tool_manager") else None
+    schema = getattr(tool_entry, "parameters", None) if tool_entry is not None else None
+    norm_args, notes = normalize_tool_args(
+        "spawn_agents",
+        {"tasks": [{"task": "check A", "name": "scout"}, {"task": "check B", "name": "coder"}], "tier": "fast"},
+        schema,
+    )
+    assert "tasks" in norm_args and isinstance(norm_args["tasks"], list)
+    assert not any("dropped unknown argument tasks" in n for n in notes), notes
+
+    board = rt.AgentProgressBoard(run_id="run-identity-92")
+    board_events: list[dict] = []
+    unsub = board.subscribe_board(lambda msg: board_events.append(msg.to_dict()))
+
+    def fake_agent_impl(prompt, **kwargs):
+        # Simulate depth-1 open_agent_run + note_agent_execution during model step
+        bridge = delegation_wiring.open_agent_run(
+            server,
+            prompt=prompt,
+            model="qwen3.6:35b" if rt.current_agent_id() == "coder" else "qwen3.5:9b",
+            max_steps=4,
+            cloud=False,
+            read_only=False,
+        )
+        try:
+            origin = "https://10.77.0.2:8443" if rt.current_agent_id() == "coder" else "http://127.0.0.1:11437"
+            rt.note_agent_execution(origin=origin)
+            rt.post_to_board(f"status from {rt.current_agent_id()}", kind="handoff")
+            rt.report_progress(f"step done by {rt.current_agent_id()}")
+            return f"ok:{rt.current_agent_id()}"
+        finally:
+            bridge.close(ok=True, summary="done")
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent_impl)
+    try:
+        with rt.bind_board(board):
+            with rt.bind_delegation_executor(delegation_wiring.make_delegation_executor(server)):
+                if tool_entry is not None and callable(getattr(tool_entry, "fn", None)):
+                    out = tool_entry.fn(
+                        tasks=[{"task": "A", "name": "scout"}, {"task": "B", "name": "coder"}],
+                        tier="fast",
+                    )
+                else:
+                    out = delegation_wiring.dispatch_delegation(
+                        server,
+                        "spawn_agents",
+                        norm_args,
+                    )
+        assert "scout" in out and "coder" in out
+        by_agent = {ev["agent"]: ev for ev in board_events}
+        assert by_agent["scout"]["role"] == "scout"
+        assert by_agent["scout"]["model"] == "qwen3.5:9b"
+        assert by_agent["scout"]["origin"] == "http://127.0.0.1:11437"
+        assert by_agent["coder"]["role"] == "coder"
+        assert by_agent["coder"]["model"] == "qwen3.6:35b"
+        assert by_agent["coder"]["origin"] == "https://10.77.0.2:8443"
+        progress_by_agent = {ev.agent_id: ev for ev in board.events() if ev.phase == "progress"}
+        assert progress_by_agent["scout"].model == "qwen3.5:9b"
+        assert progress_by_agent["scout"].origin == "http://127.0.0.1:11437"
+        assert progress_by_agent["coder"].model == "qwen3.6:35b"
+        assert progress_by_agent["coder"].origin == "https://10.77.0.2:8443"
+    finally:
+        unsub()
