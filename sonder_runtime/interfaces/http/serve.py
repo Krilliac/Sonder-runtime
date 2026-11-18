@@ -1974,7 +1974,15 @@ def _auth_account(auth_header):
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return _legacy_runtime()._admin_account_from_token(token)
+    if not token.startswith(admin_auth.API_KEY_PREFIX):
+        return _legacy_runtime()._admin_account_from_token(token)
+    # An account's assigned API key stands for that account, so its role, tier and
+    # dev_flags apply (rate limit, metering). Revoked or banned: None.
+    conn = _legacy_runtime()._open_db()
+    try:
+        return admin_auth.api_key_account(conn, token)
+    finally:
+        conn.close()
 
 
 def _app_control_deployment_authorized(authorization, config):
