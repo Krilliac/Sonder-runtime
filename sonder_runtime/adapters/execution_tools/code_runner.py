@@ -144,7 +144,12 @@ _OUTPUT_POLL_SECONDS = 0.05
 
 @dataclass(frozen=True)
 class RunLimits:
-    """Opt-in hardening for one run_code call (the chat run_code lane).
+    """Opt-in hardening for one run_code call.
+
+    No production caller passes limits yet: the /run handlers in serve.py,
+    server.py and the REPL call ``run_code`` without them, so those runs
+    have no process, memory or output kill cap. Wiring a caller in is
+    follow-up work.
 
     Immutable, so one instance may be shared across threads. Callers that
     pass nothing keep today's behaviour exactly. With limits the child is
@@ -1461,8 +1466,9 @@ def run_code(
 ):
     """Run a snippet and return a result dict.
 
-    ``limits`` (a RunLimits) opts into the hardened host run used by the
-    chat run_code lane; None keeps the existing behaviour.
+    ``limits`` (a RunLimits) opts into the hardened host run; None keeps
+    the existing behaviour. No production caller passes limits yet (see
+    RunLimits).
 
     The caller receives:
       ok: process exited 0
