@@ -73,7 +73,8 @@ class _ToolRunCardState extends State<ToolRunCard> {
         oldWidget.event.state != widget.event.state) {
       _busy = false;
       _pendingAction = '';
-      if (widget.event.state != 'awaiting_approval') {
+      if (!widget.event.isAwaitingApproval &&
+          !widget.event.isAwaitingClientApproval) {
         _submittedNotice = '';
         _outcome = null;
       }
@@ -94,13 +95,18 @@ class _ToolRunCardState extends State<ToolRunCard> {
     final outcome =
         await callback(callId, widget.event.tool, widget.event.digest);
     if (!mounted) return;
+    final isClient = widget.event.isClientTarget;
     setState(() {
       _busy = false;
       _pendingAction = '';
       if (outcome.status == ApprovalStatus.approved) {
         _submittedNotice = action == 'approve'
-            ? 'Approved once — waiting for execution…'
-            : 'Denied — returning refusal to the turn…';
+            ? (isClient
+                ? 'Executed on your PC — resuming turn…'
+                : 'Approved once — waiting for execution…')
+            : (isClient
+                ? 'Denied on your PC — returning refusal to the turn…'
+                : 'Denied — returning refusal to the turn…');
         _outcome = null;
       } else {
         _outcome = outcome;
@@ -110,12 +116,14 @@ class _ToolRunCardState extends State<ToolRunCard> {
 
   (StatusKind, String) _statusFor(ChatStreamToolEvent e) => switch (e.state) {
         'awaiting_approval' => (StatusKind.ask, 'approve?'),
+        'awaiting_client_approval' => (StatusKind.ask, 'approve on PC?'),
         'approved' => (StatusKind.ok, 'approved'),
         'running' => (StatusKind.running, 'running'),
         'done' => (StatusKind.ok, 'done'),
         'denied' => (StatusKind.refused, 'denied'),
         'expired' => (StatusKind.warn, 'expired'),
         'refused' => (StatusKind.refused, 'refused'),
+        'error' => (StatusKind.fail, 'error'),
         _ => (StatusKind.note, e.state.isEmpty ? 'tool' : e.state),
       };
 
@@ -131,7 +139,9 @@ class _ToolRunCardState extends State<ToolRunCard> {
       for (final val in e.args.values) ...detectHiddenBidiChars(val),
     }.toList(growable: false);
     final showBidi = e.bidiWarning || detectedChars.isNotEmpty;
-    final canAct = e.isAwaitingApproval &&
+    final awaitingDecision =
+        e.isAwaitingApproval || e.isAwaitingClientApproval;
+    final canAct = awaitingDecision &&
         e.callId.isNotEmpty &&
         _submittedNotice.isEmpty &&
         (widget.onApprove != null || widget.onDeny != null);
@@ -144,7 +154,7 @@ class _ToolRunCardState extends State<ToolRunCard> {
         color: tokens.panel,
         borderRadius: BorderRadius.circular(SonderRadius.card),
         border: Border.all(
-          color: e.isAwaitingApproval ? tokens.warn : tokens.hairline,
+          color: awaitingDecision ? tokens.warn : tokens.hairline,
         ),
       ),
       child: Column(
@@ -265,8 +275,10 @@ class _ToolRunCardState extends State<ToolRunCard> {
                     onPressed:
                         _busy ? null : () => _decide('approve', widget.onApprove),
                     child: Text(_busy && _pendingAction == 'approve'
-                        ? 'Approving…'
-                        : SonderStrings.approveOnce),
+                        ? (e.isClientTarget ? 'Running on PC…' : 'Approving…')
+                        : (e.isClientTarget
+                            ? 'Approve on my PC'
+                            : SonderStrings.approveOnce)),
                   ),
                 if (widget.onDeny != null)
                   OutlinedButton(
@@ -359,15 +371,20 @@ class _BackendTrustBadge extends StatelessWidget {
     final tokens = SonderTokens.of(context);
     final isHost = backend == 'host';
     final isContainer = backend == 'container';
+    final isClient = backend == 'client';
     final color = isHost
         ? tokens.warn
-        : (isContainer ? tokens.ok : tokens.muted);
+        : (isContainer || isClient ? tokens.ok : tokens.muted);
     final label = isHost
         ? 'host · unsandboxed'
-        : (isContainer ? 'container · isolated' : backend);
+        : (isContainer
+            ? 'container · isolated'
+            : (isClient ? 'client PC' : backend));
     final icon = isHost
         ? Icons.warning_amber_rounded
-        : (isContainer ? Icons.shield_outlined : Icons.memory_outlined);
+        : (isContainer
+            ? Icons.shield_outlined
+            : (isClient ? Icons.computer_outlined : Icons.memory_outlined));
     return Container(
       key: const Key('tool-run-backend-badge'),
       padding: const EdgeInsets.symmetric(

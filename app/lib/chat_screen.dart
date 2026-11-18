@@ -327,6 +327,10 @@ class _ChatScreenState extends State<ChatScreen>
   // -- Permission mode ---------------------------------------------------
 
   Future<void> _openPermissionModePicker() async {
+    if (_chat.isRestrictedUser && _chat.isClientExecActive) {
+      await _openClientPermissionModePicker();
+      return;
+    }
     final current = _chat.permissionMode;
     if (current == null) {
       _snack(_chat.connection.value.isOffline
@@ -347,7 +351,36 @@ class _ChatScreenState extends State<ChatScreen>
     await _changeMode(picked);
   }
 
+  Future<void> _openClientPermissionModePicker() async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => PermissionModeDialog(state: _chat.clientModeState),
+    );
+    if (picked == null || !mounted) return;
+    await _changeClientMode(picked);
+  }
+
+  Future<void> _changeClientMode(String target) async {
+    final (outcome, message) = await _chat.requestClientModeChange(
+      target,
+      confirm: (from, to) => confirmModeChange(context,
+          from: from, to: to, host: 'this PC'),
+    );
+    if (!mounted) return;
+    if (outcome == ModeChangeOutcome.changed) {
+      widget.settings.clientPermissionMode = _chat.clientPermissionMode;
+      unawaited(widget.settings.save());
+      widget.onSettingsChanged(widget.settings);
+    } else if (outcome == ModeChangeOutcome.failed) {
+      _snack(message);
+    }
+  }
+
   Future<void> _changeMode(String target) async {
+    if (_chat.isRestrictedUser && _chat.isClientExecActive) {
+      await _changeClientMode(target);
+      return;
+    }
     final (outcome, message) = await _chat.requestModeChange(
       target,
       confirm: (from, to) => confirmModeChange(context,
@@ -365,6 +398,12 @@ class _ChatScreenState extends State<ChatScreen>
   /// Move to the next mode; false when there is no mode to cycle (the
   /// server has not said, or is unreachable).
   bool _cycleMode() {
+    if (_chat.isRestrictedUser && _chat.isClientExecActive) {
+      final next = _chat.nextClientModeInCycle();
+      if (next == null) return false;
+      unawaited(_changeClientMode(next));
+      return true;
+    }
     final next = _chat.nextModeInCycle();
     if (next == null) return false;
     unawaited(_changeMode(next));
@@ -510,6 +549,11 @@ class _ChatScreenState extends State<ChatScreen>
             .approveCall(callId, ttl: ttl, tool: tool, digest: digest),
         onDeny: (callId, tool, digest) =>
             _chat.backend.denyCall(callId, tool: tool, digest: digest),
+        onApproveClient: (callId, tool, digest) =>
+            _chat.approveClientTool(callId, tool, digest),
+        onDenyClient: (callId, tool, digest) =>
+            _chat.denyClientTool(callId, tool, digest),
+        onChangeClientMode: () => unawaited(_openClientPermissionModePicker()),
         fetchWorkRun: (id) => _chat.backend.getWorkRun(id),
         cancelWorkRun: (id) => _chat.backend.cancelWorkRun(id),
         listWorkRuns: () => _chat.backend.listWorkRuns(),
@@ -520,6 +564,15 @@ class _ChatScreenState extends State<ChatScreen>
       );
 
   Widget? _modeChip() {
+    if (_chat.isRestrictedUser && _chat.isClientExecActive) {
+      return PermissionModeChip(
+        key: const Key('client-permission-mode-chip'),
+        state: _chat.clientModeState,
+        busy: false,
+        readOnly: false,
+        onTap: () => unawaited(_openClientPermissionModePicker()),
+      );
+    }
     final mode = _chat.permissionMode;
     if (mode != null) {
       return PermissionModeChip(

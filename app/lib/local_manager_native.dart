@@ -1336,6 +1336,573 @@ class LocalManager {
       message: observatoryGuidance,
     );
   }
+
+  static const _maxClientOutputChars = 65536;
+  static const _maxClientErrorChars = 4096;
+
+  static String _boundClientText(String text, int limit) {
+    if (text.length <= limit) return text;
+    return '${text.substring(0, limit - 16)}\n...[truncated]';
+  }
+
+  static bool _isAbsolutePath(String p) {
+    if (p.isEmpty) return false;
+    if (Platform.isWindows) {
+      return RegExp(r'^[A-Za-z]:[/\\]').hasMatch(p) || p.startsWith(r'\\');
+    }
+    return p.startsWith('/');
+  }
+
+  static String _normalizeSegments(String path) {
+    final sep = Platform.pathSeparator;
+    final parts = path.split(RegExp(r'[/\\]+'));
+    String prefix = '';
+    var start = 0;
+    if (Platform.isWindows && parts.isNotEmpty && RegExp(r'^[A-Za-z]:$').hasMatch(parts[0])) {
+      prefix = '${parts[0]}$sep';
+      start = 1;
+    } else if (path.startsWith('/')) {
+      prefix = '/';
+      start = 1;
+    }
+    final stack = <String>[];
+    for (var i = start; i < parts.length; i++) {
+      final seg = parts[i];
+      if (seg.isEmpty || seg == '.') continue;
+      if (seg == '..') {
+        if (stack.isNotEmpty) stack.removeLast();
+      } else {
+        stack.add(seg);
+      }
+    }
+    if (prefix.isEmpty) return stack.join(sep);
+    if (stack.isEmpty) return prefix;
+    return '$prefix${stack.join(sep)}';
+  }
+
+  static String _canonicalizeWithExistingAncestor(String rawPath) {
+    final normalized = _normalizeSegments(rawPath);
+    var cur = normalized;
+    final tail = <String>[];
+    while (cur.isNotEmpty) {
+      final type = FileSystemEntity.typeSync(cur, followLinks: false);
+      if (type != FileSystemEntityType.notFound) {
+        final resolved = type == FileSystemEntityType.directory
+            ? Directory(cur).resolveSymbolicLinksSync()
+            : File(cur).resolveSymbolicLinksSync();
+        if (tail.isEmpty) return _normalizeSegments(resolved);
+        return _normalizeSegments(
+            '$resolved${Platform.pathSeparator}${tail.reversed.join(Platform.pathSeparator)}');
+      }
+      final sepIdx = cur.lastIndexOf(Platform.pathSeparator);
+      if (sepIdx <= 0) break;
+      tail.add(cur.substring(sepIdx + 1));
+      cur = cur.substring(0, sepIdx);
+    }
+    return normalized;
+  }
+
+  static String _resolveClientPath(
+    Object? rawArg,
+    String workspaceRoot, {
+    required bool bypass,
+  }) {
+    final rootRaw = workspaceRoot.trim().isEmpty
+        ? Directory.current.path
+        : workspaceRoot.trim();
+    final root = _canonicalizeWithExistingAncestor(
+      _isAbsolutePath(rootRaw)
+          ? rootRaw
+          : '${Directory.current.path}${Platform.pathSeparator}$rootRaw',
+    );
+    final raw = (rawArg?.toString() ?? '').trim();
+    final candidate = raw.isEmpty || raw == '.'
+        ? root
+        : (_isAbsolutePath(raw) ? raw : '$root${Platform.pathSeparator}$raw');
+    final resolved = _canonicalizeWithExistingAncestor(candidate);
+    if (!bypass) {
+      final rCheck = Platform.isWindows ? root.toLowerCase() : root;
+      final pCheck = Platform.isWindows ? resolved.toLowerCase() : resolved;
+      final sep = Platform.pathSeparator;
+      final rootWithSep = rCheck.endsWith(sep) ? rCheck : '$rCheck$sep';
+      if (pCheck != rCheck && !pCheck.startsWith(rootWithSep)) {
+        throw FileSystemException(
+            'Path "$raw" escapes workspace root "$root"', resolved);
+      }
+    }
+    return resolved;
+  }
+
+  /// Reports native desktop execution readiness (or unavailability on mobile).
+  static Future<ClientAgentHealth> checkClientAgent({
+    String companionUrl = '',
+    String token = '',
+    String workspaceRoot = '',
+  }) async {
+    if (!canRunLocalTools) {
+      return ClientAgentHealth(
+        reachable: false,
+        nativeRunner: false,
+        message: 'Local execution is not supported on $platformLabel.',
+      );
+    }
+    final ws = workspaceRoot.trim().isEmpty
+        ? Directory.current.path
+        : workspaceRoot.trim();
+    return ClientAgentHealth(
+      reachable: true,
+      authenticated: true,
+      nativeRunner: true,
+      workspace: ws,
+      canBypass: true,
+      message: 'Native $platformLabel execution ready.',
+    );
+  }
+
+  /// No-op for native desktop runner (mode is held in client settings).
+  static Future<bool> setClientAgentMode({
+    required String mode,
+    bool confirmBypass = false,
+    String companionUrl = '',
+    String token = '',
+  }) async =>
+      canRunLocalTools;
+
+  /// Execute one `execution_target="client"` tool natively on the desktop PC.
+  static Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = '',
+    String companionToken = '',
+  }) async {
+    if (!canRunLocalTools) {
+      return ClientToolExecResult(
+        ok: false,
+        error: 'Client tool execution is not supported on $platformLabel.',
+      );
+    }
+    final cleanTool = tool.trim().replaceFirst(RegExp(r'^/+'), '');
+    final effectiveRisk = risk.isEmpty ? clientToolRisk(cleanTool) : risk;
+    if (!approved && !clientModeAllowsWithoutPrompt(mode, effectiveRisk)) {
+      return ClientToolExecResult(
+        ok: false,
+        needsApproval: true,
+        error:
+            "Approval required on your PC for '$cleanTool' ($effectiveRisk) in $mode mode.",
+      );
+    }
+    final bypass = mode.trim() == 'bypass';
+    try {
+      switch (cleanTool) {
+        case 'file_read':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          final lines = const LineSplitter()
+              .convert(await file.readAsString(encoding: utf8));
+          final rawOffset = int.tryParse('${args['offset'] ?? 1}') ?? 1;
+          final offset = rawOffset < 1 ? 1 : rawOffset;
+          final rawLimit = int.tryParse('${args['limit'] ?? 200}') ?? 200;
+          final limit = rawLimit.clamp(1, 500);
+          final end = (offset - 1 + limit).clamp(0, lines.length);
+          final start = (offset - 1).clamp(0, lines.length);
+          final out = <String>[];
+          for (var i = start; i < end; i++) {
+            out.add('${i + 1}: ${lines[i]}');
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: _boundClientText(out.join('\n'), _maxClientOutputChars),
+          );
+        case 'file_write':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final content = args['content']?.toString() ?? '';
+          final writeMode =
+              (args['mode']?.toString() ?? 'overwrite').trim().toLowerCase();
+          final file = File(path);
+          if (writeMode == 'create' && await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File already exists: $path');
+          }
+          await file.parent.create(recursive: true);
+          if (writeMode == 'append' && await file.exists()) {
+            await file.writeAsString(content, mode: FileMode.append);
+          } else {
+            await file.writeAsString(content);
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: 'Wrote ${content.length} chars to $path',
+          );
+        case 'file_edit':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final oldStr = args['old']?.toString() ?? '';
+          final newStr = args['new']?.toString() ?? '';
+          if (oldStr.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: "'old' text must be non-empty");
+          }
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          final text = await file.readAsString();
+          final count = oldStr.allMatches(text).length;
+          if (count == 0) {
+            return const ClientToolExecResult(
+                ok: false, error: 'Target string not found in file');
+          }
+          if (count > 1) {
+            return ClientToolExecResult(
+                ok: false,
+                error: 'Target string matched $count times; must be unique');
+          }
+          await file.writeAsString(text.replaceFirst(oldStr, newStr));
+          return ClientToolExecResult(ok: true, output: 'Edited $path');
+        case 'file_delete':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          await file.delete();
+          return ClientToolExecResult(ok: true, output: 'Deleted $path');
+        case 'directory_create':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          await Directory(path).create(recursive: true);
+          return ClientToolExecResult(
+              ok: true, output: 'Created directory $path');
+        case 'directory_tree':
+          final base = _resolveClientPath(
+              args['path'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final depth =
+              (int.tryParse('${args['depth'] ?? 2}') ?? 2).clamp(1, 5);
+          final lines = <String>[];
+          Future<void> walk(Directory cur, int level) async {
+            if (level > depth || lines.length >= 200) return;
+            final children = await cur.list(followLinks: false).toList();
+            children.sort((a, b) {
+              final aDir = a is Directory ? 0 : 1;
+              final bDir = b is Directory ? 0 : 1;
+              if (aDir != bDir) return aDir.compareTo(bDir);
+              return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+            });
+            for (final entity in children) {
+              final name = entity.uri.pathSegments
+                  .where((s) => s.isNotEmpty)
+                  .lastOrNull ?? '';
+              if (name == '.git' || name == '__pycache__') continue;
+              final indent = '  ' * (level - 1);
+              final isDir = entity is Directory;
+              lines.add('$indent$name${isDir ? '/' : ''}');
+              if (lines.length >= 200) return;
+              if (isDir && level < depth) await walk(entity, level + 1);
+            }
+          }
+          await walk(dir, 1);
+          return ClientToolExecResult(
+            ok: true,
+            output: lines.isEmpty ? '(empty)' : lines.join('\n'),
+          );
+        case 'file_find':
+          final base = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final pattern = (args['pattern']?.toString() ?? '*').trim();
+          final regex = _globToRegex(pattern.isEmpty ? '*' : pattern);
+          final matches = <String>[];
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            var rel = entity.path.substring(base.length);
+            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
+            rel = rel.replaceAll('\\', '/');
+            if (rel.split('/').contains('.git')) continue;
+            final name = rel.split('/').last;
+            if (regex.hasMatch(name) || regex.hasMatch(rel)) {
+              matches.add(rel);
+              if (matches.length >= 200) break;
+            }
+          }
+          matches.sort();
+          return ClientToolExecResult(
+            ok: true,
+            output: matches.isEmpty ? '(no matches)' : matches.join('\n'),
+          );
+        case 'text_search':
+          final query = args['query']?.toString() ?? '';
+          if (query.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'query is required');
+          }
+          final base = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final globPat = (args['glob']?.toString() ?? '').trim();
+          final globRegex =
+              globPat.isEmpty ? null : _globToRegex(globPat);
+          final matches = <String>[];
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            var rel = entity.path.substring(base.length);
+            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
+            rel = rel.replaceAll('\\', '/');
+            if (rel.split('/').contains('.git')) continue;
+            final name = rel.split('/').last;
+            if (globRegex != null && !globRegex.hasMatch(name)) continue;
+            try {
+              if (await entity.length() > 512 * 1024) continue;
+              final content = await entity.readAsString();
+              final fileLines = const LineSplitter().convert(content);
+              for (var i = 0; i < fileLines.length; i++) {
+                if (fileLines[i].contains(query)) {
+                  final lineText = fileLines[i].trim();
+                  final clipped = lineText.length <= 200
+                      ? lineText
+                      : lineText.substring(0, 200);
+                  matches.add('$rel:${i + 1}: $clipped');
+                  if (matches.length >= 100) break;
+                }
+              }
+            } catch (_) {}
+            if (matches.length >= 100) break;
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: matches.isEmpty ? '(no matches)' : matches.join('\n'),
+          );
+        case 'run_code':
+          final code = args['code']?.toString() ?? '';
+          if (code.trim().isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'code is required');
+          }
+          final lang =
+              (args['language']?.toString() ?? 'python').trim().toLowerCase();
+          final timeoutSec =
+              (int.tryParse('${args['timeout'] ?? 15}') ?? 15).clamp(1, 60);
+          final cwd = _resolveClientPath('.', workspaceRoot, bypass: bypass);
+          late final String exe;
+          late final List<String> procArgs;
+          File? tempScript;
+          if (lang == 'python' || lang == 'py') {
+            exe = Platform.isWindows ? 'python' : 'python3';
+            procArgs = ['-c', code];
+          } else if (lang == 'js' || lang == 'javascript' || lang == 'node') {
+            exe = 'node';
+            procArgs = ['-e', code];
+          } else if (lang == 'powershell' || lang == 'ps1') {
+            tempScript = File(
+                '${Directory.systemTemp.path}${Platform.pathSeparator}sonder_${DateTime.now().microsecondsSinceEpoch}.ps1');
+            await tempScript.writeAsString(code);
+            exe = 'powershell';
+            procArgs = ['-NoProfile', '-File', tempScript.path];
+          } else if (lang == 'bash' || lang == 'sh') {
+            exe = 'bash';
+            procArgs = ['-lc', code];
+          } else {
+            return ClientToolExecResult(
+                ok: false, error: 'Unsupported language on client: $lang');
+          }
+          try {
+            final res = await runBoundedProcess(
+              exe,
+              procArgs,
+              workingDirectory: cwd,
+              timeout: Duration(seconds: timeoutSec),
+            );
+            return _fromProcessResult(res);
+          } finally {
+            try {
+              if (tempScript != null && await tempScript.exists()) {
+                await tempScript.delete();
+              }
+            } catch (_) {}
+          }
+        case 'run_program':
+          final command = (args['command']?.toString() ?? '').trim();
+          if (command.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'command is required');
+          }
+          final cwd = _resolveClientPath(
+              args['cwd'] ?? '.', workspaceRoot, bypass: bypass);
+          final timeoutSec =
+              (int.tryParse('${args['timeout'] ?? 30}') ?? 30).clamp(1, 120);
+          final tokens = _splitCommand(command);
+          if (tokens.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'command is required');
+          }
+          final res = await runBoundedProcess(
+            tokens.first,
+            tokens.skip(1).toList(),
+            workingDirectory: cwd,
+            timeout: Duration(seconds: timeoutSec),
+          );
+          return _fromProcessResult(res);
+        case 'test_run':
+          final cwd = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final procArgs = ['-m', 'pytest', '-p', 'no:cacheprovider', '-q'];
+          final relPath = (args['path']?.toString() ?? '').trim();
+          if (relPath.isNotEmpty) {
+            procArgs.add(
+                _resolveClientPath(relPath, cwd, bypass: bypass));
+          }
+          final pat = (args['pattern']?.toString() ?? '').trim();
+          if (pat.isNotEmpty) {
+            procArgs.addAll(['-k', pat]);
+          }
+          final res = await runBoundedProcess(
+            Platform.isWindows ? 'python' : 'python3',
+            procArgs,
+            workingDirectory: cwd,
+            timeout: const Duration(seconds: 120),
+          );
+          return _fromProcessResult(res);
+        case 'git_status':
+        case 'git_diff':
+        case 'git_log':
+        case 'git_branch':
+          final cwd = _resolveClientPath(
+              args['cwd'] ?? '.', workspaceRoot, bypass: bypass);
+          final gitArgs = <String>[];
+          if (cleanTool == 'git_status') {
+            gitArgs.addAll(['status', '--short']);
+          } else if (cleanTool == 'git_diff') {
+            gitArgs.add('diff');
+            if (args['staged'] == true) gitArgs.add('--staged');
+            final rel = (args['path']?.toString() ?? '').trim();
+            if (rel.isNotEmpty) {
+              gitArgs.addAll(
+                  ['--', _resolveClientPath(rel, cwd, bypass: bypass)]);
+            }
+          } else if (cleanTool == 'git_log') {
+            final limit =
+                (int.tryParse('${args['limit'] ?? 20}') ?? 20).clamp(1, 100);
+            gitArgs.addAll(['log', '-n$limit', '--oneline']);
+          } else {
+            gitArgs.addAll(['branch', '-a']);
+          }
+          final res = await runBoundedProcess(
+            'git',
+            gitArgs,
+            workingDirectory: cwd,
+            timeout: const Duration(seconds: 30),
+          );
+          return _fromProcessResult(res);
+        default:
+          return ClientToolExecResult(
+            ok: false,
+            denied: true,
+            error: "Tool '$cleanTool' is not supported for client execution.",
+          );
+      }
+    } catch (e) {
+      return ClientToolExecResult(
+        ok: false,
+        error: _boundClientText('$e', _maxClientErrorChars),
+      );
+    }
+  }
+
+  static ClientToolExecResult _fromProcessResult(BoundedProcessResult res) {
+    final combined = res.output;
+    if (res.exitCode == 0 && !res.timedOut) {
+      return ClientToolExecResult(
+        ok: true,
+        output: _boundClientText(
+          combined.isEmpty ? '(no output)' : combined,
+          _maxClientOutputChars,
+        ),
+      );
+    }
+    return ClientToolExecResult(
+      ok: false,
+      output: _boundClientText(res.stdout, _maxClientOutputChars),
+      error: _boundClientText(
+        res.timedOut
+            ? 'Command timed out.'
+            : (combined.isEmpty ? 'Exit code ${res.exitCode}' : combined),
+        _maxClientErrorChars,
+      ),
+    );
+  }
+
+  static RegExp _globToRegex(String glob) {
+    final buf = StringBuffer('^');
+    for (var i = 0; i < glob.length; i++) {
+      final ch = glob[i];
+      if (ch == '*') {
+        buf.write('.*');
+      } else if (ch == '?') {
+        buf.write('.');
+      } else if (r'\.+^$[]{}()|'.contains(ch)) {
+        buf.write('\\$ch');
+      } else {
+        buf.write(ch);
+      }
+    }
+    buf.write(r'$');
+    return RegExp(buf.toString(), caseSensitive: !Platform.isWindows);
+  }
+
+  static List<String> _splitCommand(String command) {
+    final out = <String>[];
+    final buf = StringBuffer();
+    String? quote;
+    for (var i = 0; i < command.length; i++) {
+      final ch = command[i];
+      if (quote != null) {
+        if (ch == quote) {
+          quote = null;
+        } else {
+          buf.write(ch);
+        }
+      } else if (ch == '"' || ch == "'") {
+        quote = ch;
+      } else if (ch.trim().isEmpty) {
+        if (buf.isNotEmpty) {
+          out.add(buf.toString());
+          buf.clear();
+        }
+      } else {
+        buf.write(ch);
+      }
+    }
+    if (buf.isNotEmpty) out.add(buf.toString());
+    return out;
+  }
 }
 
 /// The outcome of [LocalManager.runBoundedProcess].
