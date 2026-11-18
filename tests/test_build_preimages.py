@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import uuid
@@ -138,3 +139,19 @@ def test_pruning_keeps_unfinished_jobs(tmp_path):
     jobs = set(store.jobs())
     assert running in jobs and newest in jobs
     assert len(jobs) <= 3 and not set(finished) <= jobs
+
+
+def test_a_persisted_record_with_an_unsafe_rel_is_skipped_or_typed_never_a_crash(store, tmp_path):
+    """safe_rel refuses ``a:b.cpp``; a manifest that already holds such a rel must not crash a loader."""
+    job = begun(store)
+    store.save(job, "src/a.cpp", "ok", sha("ok"))
+    manifest_path = tmp_path / "state" / "build-fix" / job / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["a:b.cpp"] = {"original_sha256": sha("bad"), "last_written_sha256": ""}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert [entry.rel for entry in store.list(job)] == ["src/a.cpp"]       # skipped like other invalid records
+    with pytest.raises(InvalidInput):
+        store.load(job, "a:b.cpp")
+    with pytest.raises(InvalidInput):
+        store.record_write(job, "a:b.cpp", sha("y"))
+    assert store.load(job, "src/a.cpp") == ("ok", sha("ok"))

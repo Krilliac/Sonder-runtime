@@ -27,7 +27,7 @@ from collections.abc import Callable, Mapping
 
 from ...domain import ollama_policy
 from ...domain.model_routing import is_cloud_model_name
-from ...domain.runtime_model_configuration import RuntimeModelConfiguration
+from ..model_list_consumers import runtime_configuration
 from ..model_tool_policy import shipped_floor
 from ..provider_bindings import PROVIDER_TIERS
 
@@ -110,7 +110,7 @@ def local_ollama_tier_models(env: Mapping[str, str], bindings) -> dict[str, str]
     """``{tier: model}`` for tiers a local Ollama serves on this machine."""
     if not _local_ollama(env):
         return {}
-    tiers = dict(RuntimeModelConfiguration.from_environment(env, floor=shipped_floor()).tier_map())
+    tiers = dict(runtime_configuration(env, floor=shipped_floor()).tier_map())
     found: dict[str, str] = {}
     for tier in PROVIDER_TIERS:
         model = str(tiers.get(tier, "") or "").strip()

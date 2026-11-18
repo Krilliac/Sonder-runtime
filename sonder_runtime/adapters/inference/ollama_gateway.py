@@ -109,6 +109,8 @@ def _is_loopback(value: str) -> bool:
         host = urllib.parse.urlparse(value or "").hostname
         if not host:
             return False
+        if "%" in host:
+            return False
         if host.casefold().rstrip(".") == "localhost":
             return True
         return ipaddress.ip_address(host).is_loopback

@@ -12,6 +12,11 @@ import urllib.parse
 import urllib.request
 
 from sonder_runtime.adapters.tls_contexts import bundle_https_context
+from sonder_runtime.adapters.inference.log_safe import (
+    UNSENDABLE_URL_CHARS as _UNSENDABLE_URL_CHARS,
+    redact_url,
+    urlsplit_or_none,
+)
 from sonder_runtime.domain import ollama_policy
 
 logger = logging.getLogger(__name__)
@@ -103,8 +108,12 @@ def configure_typed_endpoint(value: str | None) -> None:
     setter is deliberately tiny: validation remains at the configuration
     boundary and this adapter only stores the already-typed startup choice.
     """
-    logger.debug(f"configure_typed_endpoint: value={value!r}")
-    logger.info(f"Ollama endpoint configured: {safe_display(value) if value is not None else 'reset to default'}")
+    if value is not None:
+        _require_no_percent_authority(str(value))
+    logger.debug(
+        f"configure_typed_endpoint: value={redact_url(value) if value is not None else None!r}"
+    )
+    logger.info(f"Ollama endpoint configured: {redact_url(value) if value is not None else 'reset to default'}")
     global _configured_endpoint
     with _configuration_lock:
         _configured_endpoint = None if value is None else str(value)
@@ -181,12 +190,16 @@ def policy_error(value=None, *, allow_remote=None) -> str:
 
 
 def configured_origin(value=None, *, allow_remote=None) -> str:
-    origin = normalize(value)
-    error = policy_error(origin, allow_remote=allow_remote)
+    # The policy decides on the configured text itself, not on what
+    # normalisation made of it.
+    raw = _candidate(value)
+    origin = ollama_policy.normalize(raw)
+    _require_no_percent_authority(origin)
+    error = policy_error(raw, allow_remote=allow_remote)
     if error:
-        logger.debug(f"configured_origin: policy error for {origin!r}: {error}")
+        logger.debug(f"configured_origin: policy error for {redact_url(origin)!r}: {error}")
         raise ValueError(error)
-    logger.debug(f"configured_origin: resolved to {origin!r}")
+    logger.debug(f"configured_origin: resolved to {redact_url(origin)!r}")
     return origin
 
 
@@ -244,6 +257,8 @@ def safe_display(value=None) -> str:
         port = parsed.port
     except ValueError:
         return "<invalid Ollama endpoint>"
+    if "%" in parsed.netloc:
+        return "<invalid Ollama endpoint>"
     if not host or parsed.scheme.lower() not in {"http", "https"}:
         return "<invalid Ollama endpoint>"
     rendered_host = "[%s]" % host if ":" in host else host
@@ -251,8 +266,28 @@ def safe_display(value=None) -> str:
     return "%s://%s%s" % (parsed.scheme.lower(), rendered_host, suffix)
 
 
+_MALFORMED_REQUEST_URL = "Ollama request URL is malformed or has an invalid port"
+_PERCENT_IN_HOST = "Ollama endpoint host must not contain percent-encoding"
+
+
+def _require_no_percent_authority(url: str) -> None:
+    """Refuse a "%" in the authority with fixed text that holds none of ``url``.
+
+    urllib unquotes the host, so an encoded ":" or "@" turns into a port or
+    userinfo that http.client later quotes in its own error; an IPv6 zone id
+    is refused with them. A "%" in the path or query is fine.
+    """
+    parts = urlsplit_or_none(url)
+    if parts is not None and "%" in parts.netloc:
+        raise ValueError(_PERCENT_IN_HOST)
+
+
 def _origin_from_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
+    parsed = urlsplit_or_none(url)
+    if parsed is None:
+        raise ValueError(_MALFORMED_REQUEST_URL)
+    if "%" in parsed.netloc:
+        raise ValueError(_PERCENT_IN_HOST)
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Ollama request URL must not contain inline credentials")
     host = parsed.hostname
@@ -275,8 +310,10 @@ _OPENER = urllib.request.build_opener(_PROXY_HANDLER, _NoRedirect())
 def open_url(request, timeout=30, *, allow_remote=None):
     """Open one Ollama request without environment proxies or redirects."""
     url = request.full_url if hasattr(request, "full_url") else str(request)
-    logger.debug(f"open_url: url={url!r}, timeout={timeout}")
-    parsed = urllib.parse.urlsplit(url)
+    logger.debug(f"open_url: url={redact_url(url)!r}, timeout={timeout}")
+    parsed = urlsplit_or_none(url)
+    if parsed is None:
+        raise ValueError(_MALFORMED_REQUEST_URL)
     origin = configured_origin(
         _origin_from_url(url), allow_remote=allow_remote,
     )
@@ -287,6 +324,8 @@ def open_url(request, timeout=30, *, allow_remote=None):
         parsed.query,
         "",
     ))
+    if _UNSENDABLE_URL_CHARS.search(canonical_url):
+        raise ValueError(_MALFORMED_REQUEST_URL)
     if hasattr(request, "full_url"):
         headers = dict(request.header_items())
         canonical_request = urllib.request.Request(
