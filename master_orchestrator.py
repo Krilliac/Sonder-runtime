@@ -88,11 +88,24 @@ if "_PRINCIPAL_ID" not in globals():
 
 
 
+def get_swarm_status() -> list[dict]:
+    with _LOCK:
+        return [
+            {"id": agent_id, **data}
+            for agent_id, data in _AGENTS.items()
+        ]
+
+
 def _lane_deadline(row, progress_deadline: float) -> float:
     """Progress deadline for one lane's current fleet row (see fleet_store)."""
     resolve = getattr(fleet_store, "lane_progress_deadline", None)
     if resolve is None:
         return float(progress_deadline)
+    try:
+        return float(resolve(row, progress_deadline))
+    except Exception:
+        return float(progress_deadline)
+
     try:
         return float(resolve(row, progress_deadline))
     except Exception:

@@ -1,4 +1,5 @@
 import 'dart:async' show unawaited;
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../models.dart';
 import '../shell/chat_link.dart' show ChatShareKind;
 import '../theme.dart';
 import '../ui/kit.dart';
+import '../ui/staticy_painter.dart';
 import '../ui/status_vocab.dart';
 import 'connection.dart';
 
@@ -174,12 +176,28 @@ class ThreadRow extends StatefulWidget {
 
 enum _RowAction { copyLink, copyCode, delete }
 
-class _ThreadRowState extends State<ThreadRow> {
+class _ThreadRowState extends State<ThreadRow> with SingleTickerProviderStateMixin {
   bool _hover = false;
   bool _focused = false;
   bool _ring = false;
   bool _revealed = false;
   bool _menuOpen = false;
+  late AnimationController _particleController;
+
+  @override
+  void initState() {
+    super.initState();
+    _particleController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
+  }
+
+  @override
+  void dispose() {
+    _particleController.dispose();
+    super.dispose();
+  }
 
   /// The row's hit area; the pill drawn inside it is inset by [_pillInset].
   static const double _rowHeight = SonderSpace.x5;
@@ -295,7 +313,10 @@ class _ThreadRowState extends State<ThreadRow> {
             Material(
               type: MaterialType.transparency,
               child: InkWell(
-                onTap: widget.onTap,
+                onTap: () {
+                  _particleController.forward(from: 0);
+                  widget.onTap();
+                },
                 onSecondaryTapDown: onShare == null
                     ? null
                     : (details) => _openMenuAt(details.globalPosition),
@@ -369,6 +390,15 @@ class _ThreadRowState extends State<ThreadRow> {
                       ],
                     ),
                   ),
+                ),
+              ),
+            ),
+            IgnorePointer(
+              child: AnimatedBuilder(
+                animation: _particleController,
+                builder: (context, _) => Positioned.fill(
+                  child: CustomPaint(
+                      painter: StaticyPainter(_particleController.value)),
                 ),
               ),
             ),

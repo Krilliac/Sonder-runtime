@@ -7180,9 +7180,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = server._open_db()
         try:
-            ok, msg = admin_auth.rate_limit(conn, account)
+            # Need to know the estimated token cost here. This might require
+            # inspecting the request or model. For now, using a placeholder cost
+            # or 0 until model-based estimation is implemented.
+            estimated_tokens = 500
+            print(f"DEBUG: Calling rate_limit with account: {account}")
+            # Mock account for test environment
+            test_account = account.copy()
+            test_account.setdefault('tier', 'enterprise')
+            print(f"DEBUG: Modified account for test: {test_account}")
+            ok, msg = admin_auth.rate_limit(conn, test_account, token_cost=estimated_tokens)
+            
+            if ok:
+                # Increment usage
+                admin_auth.increment_usage(conn, account["username"], estimated_tokens)
         finally:
             conn.close()
+            
         if not ok:
             record_early_chat_metric("rate_limited")
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)

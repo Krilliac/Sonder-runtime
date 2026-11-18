@@ -199,35 +199,36 @@ class RpcHardwareProfile:
     notes: str
 
 
+def load_inference_config() -> dict:
+    """Load configuration from inference_models.json."""
+    config_path = Path(__file__).parent.parent.parent / "config" / "inference_models.json"
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+def load_hardware_profiles() -> dict[str, RpcHardwareProfile]:
+    """Load hardware-tuned sharding parameters from configuration."""
+    data = load_inference_config()
+    profiles = {}
+    for name, p in data.get("profiles", {}).items():
+        profiles[name] = RpcHardwareProfile(
+            name=name,
+            node1_device=p["node1_device"],
+            tensor_split=p["tensor_split"],
+            ctx_size=p["ctx_size"],
+            n_gpu_layers=p["n_gpu_layers"],
+            notes=p["notes"]
+        )
+    return profiles
+
+
 def current_780m_profile() -> RpcHardwareProfile:
     """Profile for current Node1 hardware (Ryzen 780M iGPU + 2 GiB UMA, 46 GB RAM)."""
-    return RpcHardwareProfile(
-        name="main-5070ti-plus-node1-780m",
-        node1_device="Vulkan0",
-        tensor_split="14,2",
-        ctx_size=4096,
-        n_gpu_layers=999,
-        notes=(
-            "Current Node1 has 780M iGPU (~2 GiB UMA); use tensor_split=14,2 "
-            "or leave empty for llama.cpp auto memory sizing on small smoke tests."
-        ),
-    )
+    return load_hardware_profiles()["main-5070ti-plus-node1-780m"]
 
 
 def rx_9060_xt_16gb_profile() -> RpcHardwareProfile:
     """Target profile once RX 9060 XT 16 GB is installed on Node1 & UMA lowered."""
-    return RpcHardwareProfile(
-        name="main-5070ti-plus-node1-9060xt-16gb",
-        node1_device="Vulkan0",
-        tensor_split="16,16",
-        ctx_size=16384,
-        n_gpu_layers=999,
-        notes=(
-            "After installing RX 9060 XT 16 GB on Node1 and lowering 780M BIOS UMA "
-            "to minimum (512M/Auto): pass -Device Vulkan0 (or discrete GPU index) "
-            "and -TensorSplit 16,16 for balanced 32 GiB VRAM sharding."
-        ),
-    )
+    return load_hardware_profiles()["main-5070ti-plus-node1-9060xt-16gb"]
 
 
 @dataclass(frozen=True)
