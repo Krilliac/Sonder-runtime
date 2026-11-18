@@ -139,6 +139,9 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
             scope_fn(
                 _approval_owner_for_context(context),
                 include_unowned=_approval_include_unowned(context),
+                # An administrator (the local-open listener and the deployment
+                # key count) is the operator: it sees every owner's calls.
+                all_owners=not ports.approve_authority_error(context),
             )
             if callable(scope_fn)
             else nullcontext()
@@ -185,7 +188,9 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     def run():
         scope_fn = getattr(ledger, "scope", None)
         scope_ctx = (
-            scope_fn(owner_key, include_unowned=include_unowned)
+            # Every caller here passed the administrator check in _access
+            # (issuing=True), so it approves, denies and revokes any owner's call.
+            scope_fn(owner_key, include_unowned=include_unowned, all_owners=True)
             if callable(scope_fn)
             else nullcontext()
         )

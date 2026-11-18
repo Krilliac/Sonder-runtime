@@ -62,7 +62,17 @@ def handle_permission_mode_post(
     approver_of: Callable[[Any], str],
     audit_transition: Callable[..., None] | None = None,
 ) -> None:
-    """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit."""
+    """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit.
+
+    The caller already holds the administrator authority this route needs.
+    Any mode but bypass is process-global, as it always was: it changes the
+    mode for every caller and surface (MCP, loops, autopilot, every account)
+    and clears every per-session scope, so lowering it stops a session in
+    bypass too. Bypass alone is scoped to this caller's principal and session
+    (``X-Sonder-Session`` or the body's ``session_id``; without one, every
+    session of the principal), lives only in memory, and needs
+    ``confirm_bypass: true``.
+    """
     wanted = ""
     confirm_bypass = False
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
@@ -96,6 +106,8 @@ def handle_permission_mode_post(
         )
         return
     principal = principal_of(context)
+    scoped = resolved == getattr(permission_policy, "BYPASS", "bypass")
+    change = permission_policy.set_mode if scoped else permission_policy.set_global_mode
     try:
         with permission_policy.mode_scope(principal, session_id):
             previous = permission_policy.current_mode()
@@ -103,7 +115,7 @@ def handle_permission_mode_post(
                 context,
                 handler.headers.get("Idempotency-Key", ""),
                 f"permission-mode\0{principal}\0{session_id}\0{resolved}",
-                lambda: permission_policy.set_mode(resolved),
+                lambda: change(resolved),
             )
     except ValueError as exc:
         handler._send_json_payload(
