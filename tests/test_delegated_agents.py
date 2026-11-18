@@ -543,3 +543,82 @@ def test_92_spawn_agents_accepts_tasks_list_and_board_identity(monkeypatch):
         assert progress_by_agent["coder"].origin == "https://10.77.0.2:8443"
     finally:
         unsub()
+
+
+def test_102_direct_sonder_inference_model_routes_through_provider_dispatch(monkeypatch):
+    from sonder_runtime.adapters.provider_bindings import ProviderBindings
+    from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
+    from sonder_runtime.application.chat import provider_bridge
+    from sonder_runtime.application.ports.model_gateway import ModelResponse
+
+    seen_requests = []
+
+    class FakeSonderInferenceGateway:
+        def unified_worker_status(self, ollama_pool=None):
+            return {
+                "available_models": ["qwen3.6:35b", "astra-cyber-35b-a3b:latest"],
+                "workers": [
+                    {
+                        "source": "sonder_inference_worker",
+                        "origin": "https://10.77.0.2:8443",
+                        "healthy": True,
+                        "models": ["qwen3.6:35b", "astra-cyber-35b-a3b:latest"],
+                    },
+                ],
+            }
+
+        def generate(self, request, context):
+            seen_requests.append((request.tier, (request.options or {}).get("model"), request.prompt))
+            return ModelResponse(
+                text="NODE1_DIRECT_OK",
+                model=str((request.options or {}).get("model") or "qwen3.6:35b"),
+                tier=request.tier,
+                tokens_in=4,
+                tokens_out=2,
+                latency_ms=5,
+            )
+
+    class FailingOllamaGateway:
+        def generate(self, request, context):
+            raise AssertionError("direct sonder-inference model must not hit Ollama gateway")
+
+    bindings = ProviderBindings(
+        default_generation_provider="sonder_inference",
+        tier_providers={
+            "fast": "sonder_inference",
+            "general": "sonder_inference",
+            "code": "sonder_inference",
+            "reasoning": "sonder_inference",
+            "vision": "ollama",
+        },
+        embedding_provider="ollama",
+    )
+    dispatch = ProviderDispatchGateway(
+        providers={"sonder_inference": FakeSonderInferenceGateway(), "ollama": FailingOllamaGateway()},
+        tier_providers=dict(bindings.tier_providers),
+        default_generation_provider="sonder_inference",
+        embedding_provider="ollama",
+    )
+    monkeypatch.setattr(
+        server,
+        "_APP_GRAPH",
+        SimpleNamespace(provider_bindings=bindings, model_gateway=dispatch),
+        raising=False,
+    )
+    monkeypatch.setattr(server, "_post_model", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Ollama _post_model must not be called")))
+
+    assert server._bridge_provider_for_tier("model:qwen3.6:35b") == "sonder_inference"
+    assert server._bridge_provider_for_tier("model:astra-cyber-35b-a3b:latest") == "sonder_inference"
+    assert server._bridge_provider_for_tier("model:local-only-ollama") is None
+
+    req = provider_bridge.model_request_from_ollama_payload(
+        {"model": "qwen3.6:35b", "messages": [{"role": "user", "content": "ping"}]},
+        tier="model:qwen3.6:35b",
+        provider="sonder_inference",
+    )
+    assert req.options["model"] == "qwen3.6:35b"
+
+    gen = server._make_tier_generate("model:qwen3.6:35b", "qwen3.6:35b", "", 0.2, 64, 0, text_only=True)
+    reply = gen("hello node1")
+    assert reply == "NODE1_DIRECT_OK"
+    assert seen_requests == [("model:qwen3.6:35b", "qwen3.6:35b", "hello node1")]
