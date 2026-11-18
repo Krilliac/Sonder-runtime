@@ -102,6 +102,7 @@ from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
+from sonder_runtime.interfaces.http import client_tools as _client_tools_http
 from sonder_runtime.application.chat.handoff_receipts import (
     ChatWorkReceiptService,
     ChatWorkResult,
@@ -867,6 +868,8 @@ OBSERVATORY_ORIGINS = _parse_observatory_origins(
 # that proxy apart from a direct local browser.
 TLS_TERMINATED_BY_PROXY = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
 ALLOW_REGISTRATION = _env_flag("SONDER_ALLOW_REGISTRATION")
+PUBLIC_HOSTING = _env_flag("SONDER_PUBLIC_HOSTING")
+_CLIENT_TOOL_BROKER = _client_tools_http.ClientToolBroker()
 MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, _env_int(
     "SONDER_MAX_REQUEST_BYTES", 1024 * 1024
 )))
@@ -1178,11 +1181,13 @@ def configure_typed_config(config) -> None:
     )
     if type(server_config.tls_terminated_by_proxy) is not bool:
         raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    if type(getattr(server_config, "public_hosting", False)) is not bool:
+        raise RuntimeError("public hosting declaration must be a boolean")
     _serve_logger.debug("configure_typed_config: binding server config to HTTP boundary")
     _serve_logger.info(f"Applying typed server configuration, host={config.server.host!r}, port={config.server.port}, auth_mode={config.server.auth_mode!r}")
     global CONFIGURED_PORT, API_KEY, AUTH_SECRET, HOST, REQUIRE_ACCOUNT, AUTH_MODE, CORS_ORIGINS
     global OBSERVATORY_ORIGINS
-    global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, MAX_REQUEST_BYTES
+    global TLS_TERMINATED_BY_PROXY, ALLOW_REGISTRATION, PUBLIC_HOSTING, MAX_REQUEST_BYTES
     global MAX_DISCARDED_BODY_BYTES, REQUEST_TIMEOUT_SECONDS
     global STREAM_IDLE_TIMEOUT_SECONDS, HTTP_SESSION_STATE_LIMIT
     global HTTP_SESSION_STATE_OWNER_LIMIT, TRAIN_MAX_N
@@ -1227,6 +1232,8 @@ def configure_typed_config(config) -> None:
     HOST = server_config.host
     REQUIRE_ACCOUNT = server_config.require_account
     AUTH_MODE = server_config.auth_mode
+    if REQUIRE_ACCOUNT and AUTH_MODE == "api-key":
+        AUTH_MODE = "account"
     if AUTH_MODE == "api-key" and not API_KEY and _is_loopback_host(HOST):
         _serve_logger.warning("api-key auth mode downgraded to local-open: no API key configured on loopback bind")
         AUTH_MODE = "local-open"
@@ -1241,6 +1248,7 @@ def configure_typed_config(config) -> None:
     )
     TLS_TERMINATED_BY_PROXY = server_config.tls_terminated_by_proxy
     ALLOW_REGISTRATION = server_config.allow_registration
+    PUBLIC_HOSTING = bool(getattr(server_config, "public_hosting", False))
     MAX_REQUEST_BYTES = max(1, min(16 * 1024 * 1024, server_config.max_request_bytes))
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
@@ -1906,6 +1914,18 @@ def _hosted_storage_id(context, value, kind):
     material = "%s\0%s\0%s" % (kind, _state_principal(context), value)
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return "http-%s-%s" % (kind, digest)
+
+
+def _auth_response_extra_fields(account):
+    return server._http_chat_tools().auth_response_extra_fields(account, public_hosting=bool(PUBLIC_HOSTING))
+
+
+def _capabilities_payload(context=None):
+    return server._http_chat_tools().capabilities_payload(
+        context, auth_mode=_effective_auth_mode(), public_hosting=bool(PUBLIC_HOSTING),
+        allow_registration=bool(ALLOW_REGISTRATION), require_account=bool(REQUIRE_ACCOUNT),
+        admin_authorized=bool(context and _admin_authorized(context)),
+    )
 
 
 TRAIN_DEFAULT_N = 3
@@ -3521,7 +3541,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.account = server._admin_account_from_token(state.token)
         return display
     if cmd == "/whoami":
-        return server.admin_whoami(state.token)
+        return server.admin_whoami(state.token, public_hosting=bool(PUBLIC_HOSTING))
     if cmd == "/admin":
         return server.admin_status(state.token)
     if cmd == "/accounts":
@@ -6047,133 +6067,33 @@ class Handler(BaseHTTPRequestHandler):
             status, payload = route.render(card)
             self._send_json_payload(payload, status=status)
             return
+        if path == "/v1/sonder/capabilities":
+            self._send_json_payload(_capabilities_payload(self._request_auth_context()))
+            return
+        if path == "/v1/sonder/whoami":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            self._send_json_payload(server._http_chat_tools().whoami_payload(
+                context, auth_mode=_effective_auth_mode(), public_hosting=bool(PUBLIC_HOSTING),
+                admin_authorized=_admin_authorized(context),
+            ))
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            account = context["account"]
-            # This endpoint is a host-wide operations dashboard, not a
-            # per-account session view.  Its agent, activity, learning and
-            # durable-store sections have no principal boundary to apply at
-            # this adapter.  Returning a redacted *global* snapshot would
-            # still disclose another account's workload and timing, so keep
-            # it available to the local owner / administrator only.
-            if not _admin_authorized(context):
-                self._send_json_payload({
-                    "status": "restricted",
-                    "account": account or {},
-                    "models": [
-                        {"id": "sonder", "owned_by": "local"},
-                        *[
-                            {
-                                "id": tier_name,
-                                "owned_by": "cloud"
-                                if server._is_cloud_tier(tier_name, model)
-                                else "local",
-                            }
-                            for tier_name, model in server.available_tiers().items()
-                        ],
-                    ],
-                    "operational": {
-                        "available": False,
-                        "reason": (
-                            "host-wide diagnostics require administrator "
-                            "authorization"
-                        ),
-                    },
-                })
-                return
-            agents = server.master_orchestrator.snapshot()
-            activity_source = server.activity_tracker.snapshot()
-            detail_allowed = _execution_feed_detail_allowed(context)
-            activity = server.activity_tracker.public_snapshot(
-                activity_source, include_detail=detail_allowed,
-            )
-            from sonder_runtime.bootstrap.app import default_app
-            application = default_app()
-            memory_replication_service = getattr(
-                application, "memory_replication", None,
-            )
-            memory_replication_status = (
-                memory_replication_service.status()
-                if memory_replication_service is not None
-                else None
-            )
-            fixed_peer_artifact_copy_configured = False
-            artifact_availability = getattr(
-                application, "_artifact_mobility_available", None,
-            )
-            if callable(artifact_availability):
-                try:
-                    fixed_peer_artifact_copy_configured = bool(
-                        artifact_availability()
-                    )
-                except Exception:
-                    # The public status surface must fail closed if an optional
-                    # local binding cannot prove its configured availability.
-                    fixed_peer_artifact_copy_configured = False
-            try:
-                inference_pool_status = server.OLLAMA_POOL.summary()
-            except Exception:
-                # Status must stay useful when the optional legacy pool is
-                # unavailable; the capability projection reports unknown
-                # instead of turning an admin dashboard into a 500.
-                inference_pool_status = None
-            payload = {
-                "status": server.status(),
-                "providers": list(application.provider_health_data()),
-                "stats": server.sonder_stats(),
-                "learn_tiers": server.learn_tiers(),
-                "improvements": server.system_improvement_report(),
-                "context": server.context_health_data(),
-                "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
-                "agents": agents,
-                "execution": server.execution_status_data(
-                    agents, activity_source, include_detail=detail_allowed,
-                ),
-                "autopilot": server.autopilot_controller.snapshot(),
-                "runtime_policy": server.runtime_policy_data(),
-                "selfmod": server.selfmod.status_data(),
-                "mcp_runtime": server.mcp_runtime_data(),
-                "npu_fallback": server.npu_fallback_status_data(),
-                "learning_health": server.learning_health_data(),
-                "memory_replication": memory_replication_status,
-                "operational_capabilities": build_operational_capabilities(
-                    config=getattr(application, "config", None),
-                    inference_pool_status=inference_pool_status,
-                    memory_receiver_configured=(
-                        _MEMORY_REPLICATION_RECEIVER is not None
-                    ),
-                    memory_replication_status=memory_replication_status,
-                    managed_work_configured=(
-                        _APP_CONTROL_BINDING is not None
-                        and getattr(_APP_CONTROL_BINDING, "_work_binding", None)
-                        is not None
-                    ),
-                    fixed_peer_artifact_copy_configured=(
-                        fixed_peer_artifact_copy_configured
-                    ),
-                ),
-                "activity": activity,
-                "db_path": getattr(server, "_DB_PATH", ""),
-                "state_home": str(runtime_paths.default_home()),
-                "deployment": sonder_lifecycle.get().deployment_payload(),
-                "account": account or {},
-                "models": [
-                    {"id": "sonder", "owned_by": "local"},
-                    *[
-                        {
-                            "id": tier_name,
-                            "owned_by": "cloud"
-                            if server._is_cloud_tier(tier_name, model)
-                            else "local",
-                        }
-                        for tier_name, model in server.available_tiers().items()
-                    ],
-                ],
-            }
-            self._send_json_payload(_narrated_status(payload))
+            self._send_json_payload(server._http_chat_tools().sonder_status_payload(
+                server=server, context=context, caps=_capabilities_payload(context),
+                public_hosting=bool(PUBLIC_HOSTING), admin_authorized=_admin_authorized(context),
+                detail_allowed=_execution_feed_detail_allowed(context),
+                memory_receiver_configured=(_MEMORY_REPLICATION_RECEIVER is not None),
+                app_control_binding=_APP_CONTROL_BINDING, state_home=str(runtime_paths.default_home()),
+                deployment_payload=sonder_lifecycle.get().deployment_payload(),
+                build_operational_capabilities=build_operational_capabilities, narrate=_narrated_status,
+            ))
             return
         if path == _CLIENT_SCHEMA_ROUTE:
             context = self._request_auth_context()
@@ -6293,6 +6213,12 @@ class Handler(BaseHTTPRequestHandler):
         from sonder_runtime.interfaces.http.facades import approval_routes
 
         approval_routes.serve_post(self, path, req, context, self._approval_ports())
+
+    def _handle_client_tools_post(self, path, req, context):
+        """``POST /v1/client-tools/<call_id>/result``."""
+        _client_tools_http.handle_client_tool_result_post(
+            self, path, req, context, broker=_CLIENT_TOOL_BROKER, principal=_state_principal(context),
+        )
 
     def _handle_permission_mode_get(self):
         """Current autonomy mode, so a client can show it before you send."""
@@ -7060,6 +6986,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/approvals" or path.startswith("/v1/approvals/"):
             self._handle_approvals_post(path, req, context)
             return
+        if path.startswith("/v1/client-tools/"):
+            self._handle_client_tools_post(path, req, context)
+            return
         if path == "/v1/permission-mode":
             if not context["authorized"]:
                 self._send_auth_error()
@@ -7086,12 +7015,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/sonder/register":
             login_throttle_http.handle_register(
                 self, req, context, runtime=server, admin_auth=admin_auth,
-                allow_registration=ALLOW_REGISTRATION,
-                created_message=_account_created_message)
+                allow_registration=bool(ALLOW_REGISTRATION or PUBLIC_HOSTING),
+                created_message=_account_created_message,
+                public_hosting=bool(PUBLIC_HOSTING),
+                extra_fields=_auth_response_extra_fields,
+            )
             return
         if path == "/v1/sonder/login":
             login_throttle_http.handle_login(
-                self, req, context, runtime=server, admin_auth=admin_auth)
+                self, req, context, runtime=server, admin_auth=admin_auth,
+                extra_fields=_auth_response_extra_fields,
+            )
             return
         if path == "/v1/sonder/admin/account":
             if not context["authorized"]:
@@ -7222,7 +7156,17 @@ class Handler(BaseHTTPRequestHandler):
                 status=400,
             )
             return
-        if _dangerous_http_slash(prompt) and not _developer_authorized(context):
+        client_exec, client_exec_err = server._http_chat_tools().negotiate_client_exec(
+            req, self.headers, public_hosting=bool(PUBLIC_HOSTING), restricted_role=_restricted_tool_role(context),
+        )
+        if client_exec_err:
+            record_early_chat_metric("invalid_request")
+            self._send_json_payload({"error": {"message": client_exec_err, "type": "invalid_request"}}, status=400)
+            return
+        client_slash_plan = server._http_chat_tools().resolve_client_slash_for_request(
+            prompt, client_exec=client_exec, model_operation=model_operation,
+        )
+        if _dangerous_http_slash(prompt) and client_slash_plan is None and not _developer_authorized(context):
             record_early_chat_metric("forbidden_command")
             self._send_json_payload(
                 {
@@ -7446,6 +7390,8 @@ class Handler(BaseHTTPRequestHandler):
         # No reference-lookup state from an earlier turn on this thread.
         _reference_lookup_lanes.reset_turn()
         tool_turn = None
+        client_slash_handoffs = []
+        client_slash_records = []
         try:
             # SPEC-2 WP4 admission: bounded concurrency slot with queue
             # depth, admission deadline, drain and maintenance awareness,
@@ -7477,16 +7423,28 @@ class Handler(BaseHTTPRequestHandler):
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
                     elif allow_control_routes or allow_slash_command:
-                        reply = _handle_slash(
-                            prompt,
-                            messages=_chat_tool_stream.slash_messages(messages, history, _history_from_messages),
-                            state=state,
-                            project=storage_project, context=context,
-                            idempotency_key=self.headers.get("Idempotency-Key", ""),
-                            workspace_project=project, lane_session=session,
-                            storage_session=storage_session,
-                            selected_model=not allow_control_routes,
-                        )
+                        if client_slash_plan is not None:
+                            reply, slash_iid = server._http_chat_tools().run_client_slash_turn(
+                                self, client_slash_plan, broker=_CLIENT_TOOL_BROKER,
+                                principal=_state_principal(context), session=session, model=model, stream=stream,
+                                chunk_fn=_chunk, write_tool_chunk_fn=_chat_tool_stream.write_tool_chunk,
+                                slash_records=client_slash_records, slash_handoffs=client_slash_handoffs,
+                            )
+                            if slash_iid:
+                                response_iid = slash_iid
+                            execution_routed = True
+                        else:
+                            reply = _handle_slash(
+                                prompt,
+                                messages=_chat_tool_stream.slash_messages(messages, history, _history_from_messages),
+                                state=state,
+                                project=storage_project or server._http_chat_tools().account_default_project(context, _state_principal(context)),
+                                context=context,
+                                idempotency_key=self.headers.get("Idempotency-Key", ""),
+                                workspace_project=project, lane_session=session,
+                                storage_session=storage_session,
+                                selected_model=not allow_control_routes,
+                            )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
@@ -7665,6 +7623,10 @@ class Handler(BaseHTTPRequestHandler):
                                 chunk_fn=_chunk, stream_module=_chat_tool_stream,
                                 model=model_selector or model, project=project, stream=stream,
                                 authorized_tools=bool(role_runs_tools and _developer_authorized(context)),
+                                client_exec=client_exec,
+                                client_broker=_CLIENT_TOOL_BROKER,
+                                client_principal=_state_principal(context),
+                                client_session=session,
                             )
                             try:
                                 # Request cache is only for plain non-streaming generation (empty scope denies cache);
@@ -7862,8 +7824,9 @@ class Handler(BaseHTTPRequestHandler):
         refusal = _turn_refusal_receipt(turn_refusals)
         if refusal is not None:
             receipt["refusal"] = refusal
-        if tool_turn is not None and getattr(tool_turn, "records", None):
-            receipt["tools"] = [record.to_receipt() for record in tool_turn.records]
+        _client_tools_http.merge_client_tool_receipt(
+            receipt, tool_turn=tool_turn, slash_records=client_slash_records, slash_handoffs=client_slash_handoffs,
+        )
         # A lookup turn's Sources block and receipt entry, added after the turn
         # was recorded and captured so the stored reply never holds it.
         content = _reference_lookup_lanes.finish_http(content, receipt)

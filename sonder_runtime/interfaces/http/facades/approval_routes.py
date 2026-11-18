@@ -22,7 +22,9 @@ label, the audit record and the logger -- arrives as
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -95,6 +97,21 @@ def _access(handler: Any, context: Any, ports: HttpApprovalPorts, *,
     return ledger, False
 
 
+def _approval_owner_for_context(context: Any) -> str:
+    account = (context or {}).get("account") or {}
+    username = str(account.get("username") or account.get("id") or "").strip()
+    if not username:
+        return ""
+    principal = "account:%s" % username
+    return "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+
+
+def _approval_include_unowned(context: Any) -> bool:
+    account = (context or {}).get("account") or {}
+    role = str(account.get("role") or "").strip().lower()
+    return role in ("developer", "admin") or (context or {}).get("mode") in _SINGLE_OWNER_MODES
+
+
 def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
               ports: HttpApprovalPorts) -> bool:
     """``GET /v1/approvals``; ``False`` for another route."""
@@ -116,13 +133,21 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
         return True
     include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
     try:
-        # The ledger is not scoped by owner, so in any mode with accounts the
-        # exact code of someone else's pending call stays hidden until approvals
-        # are bound to the turn's owner (design D7).
-        payload = approvals_payload(
-            ledger, limit=limit, include_spent=include_spent,
-            show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+        # Scope ledger queries to the authenticated account's owner key.
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            scope_fn(
+                _approval_owner_for_context(context),
+                include_unowned=_approval_include_unowned(context),
+            )
+            if callable(scope_fn)
+            else nullcontext()
         )
+        with scope_ctx:
+            payload = approvals_payload(
+                ledger, limit=limit, include_spent=include_spent,
+                show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+            )
     except Exception:
         ports.log.error("approval ledger read failed", exc_info=True)
         handler._send_json_payload(_unavailable(), status=503)
@@ -154,13 +179,22 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
         return
     approver = ports.approver_of(context)
     started = ports.clock()
+    owner_key = _approval_owner_for_context(context)
+    include_unowned = _approval_include_unowned(context)
 
     def run():
-        if action == "revoke":
-            return revoke_approval(ledger, target)
-        if action == "deny":
-            return deny_call(ledger, target, req)
-        return approve_call(ledger, target, req, approver=approver, surface="http")
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            scope_fn(owner_key, include_unowned=include_unowned)
+            if callable(scope_fn)
+            else nullcontext()
+        )
+        with scope_ctx:
+            if action == "revoke":
+                return revoke_approval(ledger, target)
+            if action == "deny":
+                return deny_call(ledger, target, req)
+            return approve_call(ledger, target, req, approver=approver, surface="http")
 
     action_text = "approval\0%s\0%s\0%s" % (
         action, target.lower(), json.dumps(req, sort_keys=True, default=str),

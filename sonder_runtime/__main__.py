@@ -1047,8 +1047,23 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     auth_mode = config.server.auth_mode
     if config.server.require_account and auth_mode == "api-key":
         auth_mode = "account"
-    if include_typed_runtime:
+    effective_local_open = (
+        auth_mode == "api-key"
+        and not config.secrets.api_key
+        and not config.server.require_account
+    )
+    if effective_local_open:
+        os.environ.pop("SONDER_AUTH_MODE", None)
+    else:
         os.environ["SONDER_AUTH_MODE"] = auth_mode
+    os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
+    os.environ["SONDER_ALLOW_REGISTRATION"] = (
+        "1" if config.server.allow_registration else "0"
+    )
+    os.environ["SONDER_PUBLIC_HOSTING"] = (
+        "1" if config.server.public_hosting else "0"
+    )
+    if include_typed_runtime:
         os.environ["SONDER_MAX_REQUEST_BYTES"] = str(config.server.max_request_bytes)
         os.environ["SONDER_MAX_CONCURRENT_REQUESTS"] = str(
             config.server.max_concurrent_requests
@@ -1060,10 +1075,6 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
             config.server.stream_idle_timeout_seconds
         )
         os.environ["SONDER_CORS_ORIGINS"] = ",".join(config.server.cors_origins)
-        os.environ["SONDER_REQUIRE_ACCOUNT"] = "1" if config.server.require_account else "0"
-        os.environ["SONDER_ALLOW_REGISTRATION"] = (
-            "1" if config.server.allow_registration else "0"
-        )
         os.environ["SONDER_REASONING_AUDIENCE"] = config.server.reasoning_audience
         os.environ["SONDER_HTTP_SESSION_STATE_LIMIT"] = str(config.server.session_state_limit)
         os.environ["SONDER_HTTP_SESSION_STATE_OWNER_LIMIT"] = str(

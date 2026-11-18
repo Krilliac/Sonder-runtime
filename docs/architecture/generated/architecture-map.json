@@ -1056,7 +1056,7 @@
       ]
     },
     {
-      "file_count": 327,
+      "file_count": 328,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1130,6 +1130,7 @@
         "sonder_runtime/domain/chat_tools.py",
         "sonder_runtime/domain/circuit_breaker.py",
         "sonder_runtime/domain/claim_check.py",
+        "sonder_runtime/domain/client_tools.py",
         "sonder_runtime/domain/cloud_access.py",
         "sonder_runtime/domain/cloud_agent_tool_policy.py",
         "sonder_runtime/domain/cloud_model_policy.py",
@@ -1389,7 +1390,7 @@
       ]
     },
     {
-      "file_count": 79,
+      "file_count": 80,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1411,6 +1412,7 @@
         "sonder_runtime/interfaces/http/authority_contract.py",
         "sonder_runtime/interfaces/http/background_work.py",
         "sonder_runtime/interfaces/http/chat_tool_stream.py",
+        "sonder_runtime/interfaces/http/client_tools.py",
         "sonder_runtime/interfaces/http/connection_limit.py",
         "sonder_runtime/interfaces/http/delegate.py",
         "sonder_runtime/interfaces/http/facades/__init__.py",

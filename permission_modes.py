@@ -1108,12 +1108,24 @@ class mode_scope:
         s = str(session or "").strip()
         self._pair: tuple[str, str] | None = (p, s) if (p or s) else None
         self._token = None
+        self._owner_ctx = None
 
     def __enter__(self):
         self._token = _MODE_SCOPE.set(self._pair)
+        principal = self._pair[0] if self._pair is not None else ""
+        if principal.startswith("account:"):
+            from sonder_runtime.adapters.security import approval_ledger
+            owner = "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+            self._owner_ctx = approval_ledger.owner_scope(owner)
+            self._owner_ctx.__enter__()
         return self
 
     def __exit__(self, *exc):
+        if self._owner_ctx is not None:
+            try:
+                self._owner_ctx.__exit__(*exc)
+            finally:
+                self._owner_ctx = None
         if self._token is not None:
             _MODE_SCOPE.reset(self._token)
         return False
@@ -1163,7 +1175,10 @@ def current_mode() -> str:
         scoped = _scoped_mode_unlocked(pair)
         if scoped is not None:
             return scoped
-        return _STATE["mode"]
+        mode = _STATE["mode"]
+        if pair is not None and mode == BYPASS:
+            return DEFAULT_MODE
+        return mode
 
 
 class attended_mode_change:
