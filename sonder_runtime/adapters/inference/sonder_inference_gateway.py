@@ -56,7 +56,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -280,7 +280,9 @@ def _is_cancelled(token: object | None) -> bool:
     if callable(is_set):
         return bool(is_set())
     if hasattr(token, "cancelled"):
-        return bool(token.cancelled)
+        # A property (OperationContext tokens) or a method (concurrent.futures.Future).
+        value = token.cancelled
+        return bool(value()) if callable(value) else bool(value)
     if callable(token):
         return bool(token())
     return False
@@ -307,6 +309,21 @@ class _CompositeCancellation:
                 break
             time.sleep(min(0.05, remaining))
         return self.cancelled
+
+
+# How often the exchange watcher re-reads its cancellation token.  An Event is
+# a memory read; any other token (a ``cancelled`` property or a callable, e.g.
+# a fleet worker's check, which reads the fleet store) is read at most twice a
+# second per in-flight exchange.  A composite polls at its slowest part's rate.
+_EVENT_POLL_SECONDS = 0.05
+_CHECK_POLL_SECONDS = 0.5
+
+
+def _cancel_poll_seconds(token: object | None) -> float:
+    if isinstance(token, _CompositeCancellation):
+        parts = [part for part in (token._primary, token._secondary) if part is not None]
+        return max((_cancel_poll_seconds(part) for part in parts), default=_EVENT_POLL_SECONDS)
+    return _EVENT_POLL_SECONDS if callable(getattr(token, "is_set", None)) else _CHECK_POLL_SECONDS
 
 
 @contextmanager
@@ -341,8 +358,11 @@ class _ExchangeBudget:
             if _is_cancelled(self._cancellation):
                 self.abort()
             else:
+                # The watcher runs in a copy of the caller's context: a cancel
+                # check bound to the caller (a fleet worker's effect fence is a
+                # ContextVar) reads the same binding on the watcher thread.
                 self._cancel_thread = threading.Thread(
-                    target=self._watch_cancel,
+                    target=copy_context().run, args=(self._watch_cancel,),
                     name="sonder-inference-cancel",
                     daemon=True,
                 )
@@ -356,7 +376,8 @@ class _ExchangeBudget:
             self._cancel_thread.join(timeout=0.5)
 
     def _watch_cancel(self) -> None:
-        while not self._stop.wait(0.05):
+        interval = _cancel_poll_seconds(self._cancellation)
+        while not self._stop.wait(interval):
             if _is_cancelled(self._cancellation):
                 self.abort()
                 return

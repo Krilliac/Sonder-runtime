@@ -31,10 +31,15 @@ from typing import Callable, Iterator
 
 @dataclass(frozen=True)
 class Fence:
-    """``check()`` returns "" while the fence holds, else why it no longer does."""
+    """``check()`` returns "" while the fence holds, else why it no longer does.
+
+    ``fleet_agent_id`` names the fleet agent a ``fleet_fence`` guards ("" for
+    every other fence).
+    """
 
     label: str
     check: Callable[[], str]
+    fleet_agent_id: str = ""
 
 
 _FENCE: contextvars.ContextVar[Fence | None] = contextvars.ContextVar(
@@ -45,6 +50,17 @@ _FENCE: contextvars.ContextVar[Fence | None] = contextvars.ContextVar(
 def current() -> Fence | None:
     """The fence on this thread's effects, if a worker installed one."""
     return _FENCE.get()
+
+
+def current_fleet_agent_id() -> str:
+    """The fleet agent whose fence is current, or "".
+
+    Being a context variable, it is also visible to a helper thread started in
+    a copy of the worker's context (the inference gateway's cancel watcher),
+    where the worker's thread-local binding is not.
+    """
+    fence = _FENCE.get()
+    return fence.fleet_agent_id if fence is not None else ""
 
 
 @contextlib.contextmanager
@@ -108,7 +124,7 @@ def fleet_fence(agent_id: str, owner_id: str) -> Fence:
             return "fleet agent %s is %s" % (agent_id, row.get("status"))
         return ""
 
-    return Fence("fleet:%s" % agent_id, check)
+    return Fence("fleet:%s" % agent_id, check, fleet_agent_id=agent_id)
 
 
 def selfmod_fence(run_id: str, owner_id: str) -> Fence:
