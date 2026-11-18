@@ -98,6 +98,14 @@ class TurnPhase extends TurnEvent {
   const TurnPhase(this.phase, {this.tokensIn});
 }
 
+/// Why the turn is waiting, in the server's words (plain text), for example
+/// "waiting for memory to load <model>". An empty [text] clears it, as does
+/// the first answer text.
+class TurnStatus extends TurnEvent {
+  final String text;
+  const TurnStatus(this.text);
+}
+
 /// More answer text. Appended in order.
 class TurnDelta extends TurnEvent {
   final String text;
@@ -393,6 +401,8 @@ class _ApiTurn implements ChatTurn {
           case ChatStreamKeepAlive():
             // Proves the link is alive, not that the turn progressed.
             break;
+          case ChatStreamStatus(:final text):
+            _controller.add(TurnStatus(text));
           case ChatStreamDelta(:final text):
             if (text.isNotEmpty) {
               if (_progress.wrote()) _phase();

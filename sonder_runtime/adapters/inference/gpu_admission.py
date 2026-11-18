@@ -53,6 +53,7 @@ from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 from sonder_runtime.domain import gpu_admission as policy
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.gpu_admission import (
@@ -586,7 +587,24 @@ class GpuAdmission:
                     "waited %.0f s for a free %s GPU slot" % (
                         self.config.max_queue_wait_seconds, entry.pool),
                     retry_after_seconds=5.0))
+            wait_status.report_wait(
+                entry.model_key, detail="every %s GPU slot is busy" % entry.pool)
             self._pause(min(interval, max(0.0, limit - self._clock())))
+
+    def _report_memory_wait(self, model_key: str, refusal: Refused) -> None:
+        """Say what the wait is on: the binding floor, with its numbers."""
+        reading, footprint = refusal.reading, refusal.footprint
+        free = need = floor = None
+        if reading is not None and footprint is not None:
+            if refusal.reason is RefusalReason.HOST_RAM_FLOOR:
+                free, need = reading.available_physical_bytes, footprint.working_set_bytes
+                floor = self._policy.min_available_ram_bytes
+            elif refusal.reason is RefusalReason.COMMIT_FLOOR:
+                free, need = reading.commit_available_bytes, footprint.private_bytes
+                floor = self._policy.min_commit_headroom_bytes
+        wait_status.report_wait(
+            model_key, free, need, refusal.detail,
+            reason=refusal.reason.value, floor_bytes=floor)
 
     def _release_quietly(self, entry: _Entry) -> None:
         if entry.enqueued and self._store is not None:
@@ -639,7 +657,9 @@ class GpuAdmission:
             self._release_quietly(entry)
             with self._lock:
                 self._counters["queued"] += 1
+            self._report_memory_wait(entry.model_key, refusal)
             self._pause(wait_interval)
+        wait_status.report_admitted()
         self._apply(entry, plan, body, store)
         entry.ticket.waited_seconds = self._clock() - started
         with self._lock:

@@ -62,6 +62,59 @@ void main() {
       p.addLine('data:[DONE]');
       expect(p.close().single.isDone, isTrue);
     });
+
+    test('a sonder-status comment carries its text; other comments do not',
+        () {
+      final p = SseFrameParser();
+      final status = p
+          .addLine(': sonder-status waiting for memory to load m: '
+              '4.2 GiB free, needs ~6.5 GiB')
+          .single;
+      expect(status.comment, isTrue);
+      expect(status.status,
+          'waiting for memory to load m: 4.2 GiB free, needs ~6.5 GiB');
+      expect(p.addLine(': keep-alive').single.status, isNull);
+      expect(p.addLine(': sonder-statusX y').single.status, isNull);
+    });
+
+    test('an empty sonder-status comment is the clearing frame', () {
+      final p = SseFrameParser();
+      for (final line in [': sonder-status', ':sonder-status', ': sonder-status ']) {
+        final frame = p.addLine(line).single;
+        expect(frame.comment, isTrue, reason: line);
+        expect(frame.status, '', reason: line);
+      }
+    });
+
+    test('an overlong status is trimmed; markup stays plain text', () {
+      final p = SseFrameParser();
+      final long = p.addLine(': sonder-status ${'x' * 500}').single;
+      expect(long.status, hasLength(maxStatusChars));
+      const markup = '<b>bold</b> **x** [a](http://e.example) <script>';
+      final frame = p.addLine(': sonder-status $markup').single;
+      expect(frame.status, markup);
+    });
+  });
+
+  test('status comments become ChatStreamStatus; keep-alives stay', () async {
+    late (List<ChatStreamEvent>, Object?) result;
+    await recordStreamingClients(() async {
+      result = await _collect(
+          SonderApi(baseUrl: 'http://127.0.0.1:11435').chatStream(_hi));
+    }, (request, body) async {
+      return _streamed([
+        ': keep-alive\n\n',
+        ': sonder-status every pool GPU slot is busy\n\n',
+        ': sonder-status\n\n',
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+    });
+    final (events, error) = result;
+    expect(error, isNull);
+    expect(events.whereType<ChatStreamKeepAlive>(), hasLength(1));
+    expect(events.whereType<ChatStreamStatus>().map((e) => e.text),
+        ['every pool GPU slot is busy', '']);
   });
 
   test('content + finish + usage + [DONE]: deltas then the reply', () async {
