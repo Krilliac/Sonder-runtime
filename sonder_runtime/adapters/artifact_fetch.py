@@ -1230,6 +1230,7 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
 
         digest = hashlib.sha256()
         written = 0
+        received = 0
         mode = "r+b" if append else "wb"
         try:
             part.parent.mkdir(parents=True, exist_ok=True)
@@ -1247,6 +1248,7 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                 chunk = sniff
                 while chunk:
                     written += len(chunk)
+                    received += len(chunk)
                     if written > max_bytes:
                         raise ArtifactFetchError(
                             "payload exceeded the %d-byte ceiling" % max_bytes
@@ -1271,6 +1273,21 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                 "content_type": content_type, "bytes": written, "sha256": "",
                 "resumed_from": offset, "block": None,
             }
+
+    if declared_length is not None and received != declared_length:
+        if not append or received > declared_length:
+            _discard(part)
+        checks.append(_check(
+            "content_length", False,
+            "received %d bytes, expected %d from Content-Length"
+            % (received, declared_length),
+        ))
+        return {
+            "ok": False, "checks": checks, "redirect_chain": chain,
+            "final_url": current, "status": status,
+            "content_type": content_type, "bytes": written, "sha256": "",
+            "resumed_from": offset if append else 0, "block": None,
+        }
 
     checks.append(_check(
         "download", True,

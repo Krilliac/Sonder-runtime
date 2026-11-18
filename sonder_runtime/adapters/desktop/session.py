@@ -125,32 +125,29 @@ class SessionController:
             lease_owner = self._acquire_desktop(sid, ttl_seconds, None)
             stop_file = self._dir / f"{sid}.stop"
             ready_file = self._dir / f"{sid}.ready"
+            helper = None
             try:
                 helper = self._launcher(stop_file, ready_file, f"{info.app} ({info.title[:40]})")
-            except BaseException:
-                self._release_desktop(lease_owner)
-                raise
-            ready = self._await_ready(helper, ready_file)
-            if not ready.get("ok"):
-                self._kill(helper)
-                self._release_desktop(lease_owner)
-                raise SessionRefused("the driving indicator did not start: %s"
-                                     % ready.get("error", "no response"))
-            # Record the indicator pid: once it has exited, a crashed holder's
-            # lease has the cleanup evidence another worker needs to reclaim it.
-            try:
+                ready = self._await_ready(helper, ready_file)
+                if not ready.get("ok"):
+                    raise SessionRefused("the driving indicator did not start: %s"
+                                         % ready.get("error", "no response"))
+                # Record the indicator pid: once it has exited, a crashed holder's
+                # lease has the cleanup evidence another worker needs to reclaim it.
                 self._acquire_desktop(sid, ttl_seconds, getattr(helper, "pid", None))
-            except SessionRefused:
-                self._kill(helper)
+                now = self._clock()
+                ticks_now, _ = self._desktop.idle_ticks()
+                self._session = DrivingSession(
+                    id=sid, hwnd=info.hwnd, app=info.app, pid=info.pid, title=info.title,
+                    started=now, expires=now + ttl_seconds,
+                    budget=ActionBudget(per_minute, per_session), helper=helper,
+                    stop_file=stop_file, last_input_mark=ticks_now, lease_owner=lease_owner,
+                )
+            except BaseException:
+                if helper is not None:
+                    self._kill(helper)
+                self._release_desktop(lease_owner)
                 raise
-            now = self._clock()
-            ticks_now, _ = self._desktop.idle_ticks()
-            self._session = DrivingSession(
-                id=sid, hwnd=info.hwnd, app=info.app, pid=info.pid, title=info.title,
-                started=now, expires=now + ttl_seconds,
-                budget=ActionBudget(per_minute, per_session), helper=helper,
-                stop_file=stop_file, last_input_mark=ticks_now, lease_owner=lease_owner,
-            )
             self._ended = ""
             return self._session
 

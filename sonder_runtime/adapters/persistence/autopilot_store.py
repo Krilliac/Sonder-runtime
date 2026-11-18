@@ -173,10 +173,20 @@ def _ensure_schema(path: str) -> None:
             }
             for name, declaration in _RUN_COLUMN_MIGRATIONS.items():
                 if name not in existing:
-                    conn.execute(
-                        "ALTER TABLE autopilot_runs ADD COLUMN %s %s"
-                        % (name, declaration)
-                    )
+                    try:
+                        conn.execute(
+                            "ALTER TABLE autopilot_runs ADD COLUMN %s %s"
+                            % (name, declaration)
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
+                        existing = {
+                            row[1]
+                            for row in conn.execute("PRAGMA table_info(autopilot_runs)")
+                        }
+                        if name not in existing:
+                            raise
             conn.commit()
         finally:
             conn.close()
