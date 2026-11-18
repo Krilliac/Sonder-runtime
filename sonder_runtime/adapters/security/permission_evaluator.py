@@ -28,6 +28,7 @@ from ...application.tools.gateway_contract import ToolGatewayRequest, ToolPermis
 from ...domain.common.errors import Forbidden
 from ..execution import effect_fence
 from .permission_policy import permission_policy
+from ...security.classifier import SecurityClassifier
 
 # The surface each request source is decided for, and whether that kind of
 # caller keeps the gate-control exemption: a person driving Sonder (console,
@@ -56,6 +57,7 @@ class PermissionModesEvaluator:
                  policy_names: Mapping[str, str] | None = None) -> None:
         self._policy = policy if policy is not None else permission_policy
         self._policy_names = dict(policy_names or {})
+        self._classifier = SecurityClassifier()
 
     def authorize(self, tool_name: str, scope: ToolScope, permission: ToolPermission) -> str:
         return self._decide(tool_name, scope, arguments=None,
@@ -71,12 +73,25 @@ class PermissionModesEvaluator:
 
     def _decide(self, tool_name: str, scope: ToolScope, *, arguments, traits=None) -> str:
         name = self._policy_names.get(tool_name, tool_name)
+        
+        # Global Classifier Gate
+        model_name = getattr(scope, "model_name", "unknown")
+        classifier_action = self._classifier.classify(model_name, name, arguments)
+        
         surface, exempt = SURFACES.get(getattr(scope, "source", "repl"), ("system", False))
         decision = self._policy.decide_for_caller(
             name, interactive=False, gate_control_exempt=exempt, surface=surface,
             arguments=arguments, fence=effect_fence.current(),
             traits=traits,
         )
+        
+        # Apply Classifier Override (IfClassifier is ASK or DENY, force policy)
+        if classifier_action == "DENY":
+            raise Forbidden(f"Classifier security policy denied {name}")
+        elif classifier_action == "ASK":
+            # Force interactive prompt for this decision
+            decision.action = self._policy.ask_action()
+            
         if decision is None:
             return "permission:exempt"
         if decision.action != self._policy.allow_action():

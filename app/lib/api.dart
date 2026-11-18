@@ -795,9 +795,30 @@ class SonderApi implements SonderApiPort {
   /// commands.  The aggregate endpoint is read-only; cancellation must keep
   /// the command's owner and approval policy rather than inventing a second
   /// HTTP mutation surface.
-  Future<void> cancelBackground(
-    String kind,
-    String id, {
+  Future<Map<String, dynamic>> listApiKeys() async {
+    final uri = _uri('/v1/app-control/api-keys/list');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> generateApiKey() async {
+    final uri = _uri('/v1/app-control/api-keys/generate');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> revokeApiKey() async {
+    final uri = _uri('/v1/app-control/api-keys/revoke');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getSwarmStatus() async {
+    final uri = _uri('/v1/app-control/swarm/status');
+    final response = await requestPost(uri, headers: _headers(), body: jsonEncode({}));
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  }
+
     String project = '',
   }) async {
     final normalizedKind = kind.trim().toLowerCase();

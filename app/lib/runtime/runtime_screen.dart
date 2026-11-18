@@ -56,6 +56,7 @@ part 'panels/operational_capabilities_panel.dart';
 part 'panels/activity_panels.dart';
 part 'panels/updates_panels.dart';
 part 'panels/ecosystem_panel.dart';
+part 'panels/saas_config_panel.dart';
 part 'widgets.dart';
 
 /// Former name, kept for existing call sites (`chat_screen.dart`, tests).
@@ -1422,27 +1423,27 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         ],
         builder: (context) => _ModelsPage(this),
       ),
-      if (_hostAdminAllowed)
-        SonderCategory(
-          id: RuntimeCategories.memory,
-          label: 'Memory & learning',
-          group: 'Inference',
-          icon: Icons.school_outlined,
-          description:
-              'What the runtime has learned, and how well it is grounded.',
-          keywords: const [
-            'learning quality',
-            'lessons',
-            'memory tiers',
-            'improvements',
-            'stats',
-            'self-improvement',
-            'selfmod',
-            'practice',
-            'train',
-          ],
-          builder: (context) => _MemoryPage(this),
-        ),
+      SonderCategory(
+        id: RuntimeCategories.memory,
+        label: 'Memory & learning',
+        group: 'Inference',
+        icon: Icons.school_outlined,
+        description:
+            'What the runtime has learned, and how well it is grounded.',
+        requiredRole: 'admin',
+        keywords: const [
+          'learning quality',
+          'lessons',
+          'memory tiers',
+          'improvements',
+          'stats',
+          'self-improvement',
+          'selfmod',
+          'practice',
+          'train',
+        ],
+        builder: (context) => _MemoryPage(this),
+      ),
       SonderCategory(
         id: RuntimeCategories.permissions,
         label: 'Permissions',
@@ -1472,87 +1473,96 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         ],
         builder: (context) => _PermissionsPage(this),
       ),
-      if (_hostAdminAllowed)
-        SonderCategory(
-          id: RuntimeCategories.server,
-          label: 'Server',
-          group: 'Host',
-          icon: Icons.dns_outlined,
-          description: 'The local server process and its launcher.',
-          badge: problem == null
-              ? null
-              : StatusPill(problem,
-                  word: problem == StatusKind.fail ? 'error' : 'warn',
-                  dense: true),
-          keywords: const [
-            'start',
-            'stop',
-            'restart',
-            'launcher',
-            'install',
-            'setup',
-            'update from git',
-            'database',
-            'state',
-          ],
-          builder: (context) => _ServerPage(this),
-        ),
-      if (_hostAdminAllowed)
-        SonderCategory(
-          id: RuntimeCategories.observatory,
-          label: 'Observatory',
-          group: 'Host',
-          icon: Icons.insights_outlined,
-          description: 'Live telemetry for the Sonder Observatory.',
-          keywords: const ['telemetry', 'export', 'connect urls'],
-          builder: (context) => _ObservatoryPage(this),
-        ),
-      if (_hasUpdates)
-        SonderCategory(
-          id: RuntimeCategories.updates,
-          label: 'Updates & extensions',
-          group: 'Host',
-          icon: Icons.system_update_alt_outlined,
-          description: 'Releases of this runtime and its extensions.',
-          keywords: const ['release', 'rollback', 'extensions', 'version'],
-          builder: (context) => _UpdatesPage(this),
-        ),
-      if (_hostAdminAllowed)
-        SonderCategory(
-          id: RuntimeCategories.cluster,
-          label: 'Cluster',
-          group: 'Host',
-          icon: Icons.lan_outlined,
-          description:
-              'Deployment profile, distributed capabilities and compute nodes.',
-          keywords: const [
-            'deployment',
-            'profile',
-            'takeover',
-            'failback',
-            'capabilities',
-            'compute nodes',
-            'peers',
-          ],
-          builder: (context) => _ClusterPage(this),
-        ),
-      if (_hostAdminAllowed)
-        SonderCategory(
-          id: RuntimeCategories.developer,
-          label: 'Developer',
-          group: 'Advanced',
-          icon: Icons.terminal_outlined,
-          description: 'Slash commands and the raw status report.',
-          keywords: const [
-            'command',
-            'console',
-            'slash',
-            'quick commands',
-            'raw status',
-            'diagnostics',
-          ],
-          builder: (context) => _DeveloperPage(this),
-        ),
+      SonderCategory(
+        id: RuntimeCategories.server,
+        label: 'Server',
+        group: 'Host',
+        icon: Icons.dns_outlined,
+        description: 'The local server process and its launcher.',
+        requiredRole: 'admin',
+        badge: problem == null
+            ? null
+            : StatusPill(problem,
+                word: problem == StatusKind.fail ? 'error' : 'warn',
+                dense: true),
+        keywords: const [
+          'start',
+          'stop',
+          'restart',
+          'launcher',
+          'install',
+          'setup',
+          'update from git',
+          'database',
+          'state',
+        ],
+        builder: (context) => _ServerPage(this),
+      ),
+      SonderCategory(
+        id: RuntimeCategories.observatory,
+        label: 'Observatory',
+        group: 'Host',
+        icon: Icons.insights_outlined,
+        description: 'Live telemetry for the Sonder Observatory.',
+        requiredRole: 'admin',
+        keywords: const ['telemetry', 'export', 'connect urls'],
+        builder: (context) => _ObservatoryPage(this),
+      ),
+      SonderCategory(
+        id: RuntimeCategories.updates,
+        label: 'Updates & extensions',
+        group: 'Host',
+        icon: Icons.system_update_alt_outlined,
+        description: 'Releases of this runtime and its extensions.',
+        requiredRole: 'admin',
+        keywords: const ['release', 'rollback', 'extensions', 'version'],
+        builder: (context) => _UpdatesPage(this),
+      ),
+      SonderCategory(
+        id: RuntimeCategories.cluster,
+        label: 'Cluster',
+        group: 'Host',
+        icon: Icons.lan_outlined,
+        description:
+            'Deployment profile, distributed capabilities and compute nodes.',
+        requiredRole: 'admin',
+        keywords: const [
+          'deployment',
+          'profile',
+          'takeover',
+          'failback',
+          'capabilities',
+          'compute nodes',
+          'peers',
+        ],
+        builder: (context) => _ClusterPage(this),
+      ),
+      SonderCategory(
+        id: RuntimeCategories.developer,
+        label: 'Developer',
+        group: 'Advanced',
+        icon: Icons.terminal_outlined,
+        description: 'Slash commands and the raw status report.',
+        requiredRole: 'admin',
+        keywords: const [
+          'command',
+          'console',
+          'slash',
+          'quick commands',
+          'raw status',
+          'diagnostics',
+        ],
+        builder: (context) => _DeveloperPage(this),
+      ),
+      SonderCategory(
+        id: 'saas-config',
+        label: 'SaaS Config',
+        group: 'Advanced',
+        icon: Icons.settings_applications_outlined,
+        description: 'Configure usage metering and feature flags.',
+        requiredRole: 'admin',
+        builder: (context) => SaasConfigPanel(_api),
+      ),
       SonderCategory(
         id: RuntimeCategories.about,
         label: 'About',
@@ -1618,6 +1628,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return CategoryScaffold(
       title: 'Runtime',
       categories: _categories(),
+      userRole: _info?.role,
       initialId: widget.initialCategory,
       leading: leading,
       actions: actions,

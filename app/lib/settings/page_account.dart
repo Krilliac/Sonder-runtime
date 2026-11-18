@@ -167,6 +167,55 @@ extension _AccountPage on _SettingsScreenState {
           outcome: _accountOutcome,
           onDismiss: () => _update(() => _accountOutcome = null),
         ),
+        _apiAccessSection(context),
+        _swarmStatusSection(context),
+      ],
+    );
+  }
+
+  Widget _swarmStatusSection(BuildContext context) {
+    return SettingsSection(
+      title: 'Swarm Status',
+      description: 'Active swarm agent monitoring.',
+      children: [
+        AsyncActionButton(
+          label: 'Refresh Swarm Status',
+          icon: Icons.refresh,
+          onPressed: () async {
+            final status = await _api.getSwarmStatus();
+            // Handle status display
+            _update(() {});
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _apiAccessSection(BuildContext context) {
+    return SettingsSection(
+      title: 'API Access',
+      description: 'Manage your assigned API keys for Sonder API usage.',
+      children: [
+        _ActionRow(
+          buttons: [
+            AsyncActionButton(
+              label: 'Generate New Key',
+              icon: Icons.vpn_key,
+              onPressed: () async {
+                await _api.generateApiKey();
+                _update(() {});
+              },
+            ),
+            AsyncActionButton(
+              label: 'Revoke Key',
+              icon: Icons.delete_forever,
+              onPressed: () async {
+                await _api.revokeApiKey();
+                _update(() {});
+              },
+            ),
+          ],
+        ),
       ],
     );
   }

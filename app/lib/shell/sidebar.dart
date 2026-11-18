@@ -176,17 +176,31 @@ class ShellSidebar extends StatelessWidget {
       builder: (context, _) {
         final t = SonderMotion.standard.transform(expansion.value);
         final width = lerpDouble(kSidebarRailWidth, kSidebarWidth, t)!;
-        return Container(
-          key: const Key('shell-sidebar'),
-          width: width,
-          // The frame is told from the page by tone alone.
-          color: tokens.sunken,
-          child: ClipRect(
-            child: OverflowBox(
-              alignment: Alignment.topLeft,
-              minWidth: kSidebarWidth,
-              maxWidth: kSidebarWidth,
-              child: _content(context, t, kSidebarWidth),
+        return Transform(
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.002) // Perspective
+            ..rotateY((1 - t) * -0.25), // Hinge effect
+          alignment: Alignment.centerLeft,
+          child: Container(
+            key: const Key('shell-sidebar'),
+            width: width,
+            decoration: BoxDecoration(
+              color: tokens.sunken,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15 * t),
+                  blurRadius: 10 * t,
+                  offset: Offset(5 * t, 0),
+                ),
+              ],
+            ),
+            child: ClipRect(
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minWidth: kSidebarWidth,
+                maxWidth: kSidebarWidth,
+                child: _content(context, t, kSidebarWidth),
+              ),
             ),
           ),
         );

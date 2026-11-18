@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import sonder_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
 from sonder_runtime.adapters.security import login_throttle
+from sonder_runtime.application.config.saas_config import SaaSConfig
 
 
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
@@ -203,6 +205,16 @@ def init(conn: sqlite3.Connection) -> None:
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
             consumed_ts INTEGER,
             consumed_by TEXT
+        );
+        CREATE TABLE IF NOT EXISTS api_keys (
+            username TEXT PRIMARY KEY,
+            key_hash TEXT,
+            created_ts INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS usage_stats (
+            username TEXT PRIMARY KEY,
+            monthly_count INTEGER DEFAULT 0,
+            month_start INTEGER
         );
         """
     )
@@ -557,16 +569,25 @@ def list_accounts(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
     return [public_account(conn, row["username"]) for row in rows]
 
 
-def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) -> tuple[bool, str]:
+def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1, token_cost: int = 0) -> tuple[bool, str]:
     init(conn)
     if not account:
         return True, ""
+    
+    # Check monthly usage limit
+    print(f"DEBUG: Checking usage for {account['username']}, tier: {account.get('tier')}, cost: {token_cost}")
+    ok, msg = check_usage_limit(conn, account, token_cost)
+    if not ok:
+        print(f"DEBUG: Usage limit exceeded: {msg}")
+        return False, msg
+
+    config = SaaSConfig(Path(next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")))
     limit = DEFAULT_RATE_LIMIT
     if account.get("tier") == "pro":
         limit = 600
     if account.get("tier") == "enterprise":
         limit = 3000
-    if "unlimited" in (account.get("dev_flags") or ""):
+    if "unlimited" in (account.get("dev_flags") or "") or not config.is_feature_enabled("usage_metering_enabled"):
         return True, ""
     username = account["username"]
     window = (_now() // RATE_WINDOW_SECONDS) * RATE_WINDOW_SECONDS
@@ -600,4 +621,90 @@ def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) ->
     if count > limit:
         return False, "rate limit exceeded for tier %s (%d/min)" % (account.get("tier"), limit)
     return True, ""
+
+
+def get_tier_limit(conn: sqlite3.Connection, tier: str) -> int:
+    config = SaaSConfig(Path(next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")))
+    return config.get_tier_limit(tier)
+
+
+def increment_usage(conn: sqlite3.Connection, username: str, tokens: int) -> None:
+    init(conn)
+    username = _username(username)
+    month_start = (_now() // (30 * 24 * 60 * 60)) * (30 * 24 * 60 * 60)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT monthly_count, month_start FROM usage_stats WHERE username=?",
+            (username,),
+        ).fetchone()
+        if row and row["month_start"] == month_start:
+            count = row["monthly_count"] + tokens
+            conn.execute(
+                "UPDATE usage_stats SET monthly_count=? WHERE username=?",
+                (count, username),
+            )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO usage_stats(username, monthly_count, month_start) VALUES(?, ?, ?)",
+                (username, tokens, month_start),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def check_usage_limit(conn: sqlite3.Connection, account: dict, token_cost: int = 0) -> tuple[bool, str]:
+    init(conn)
+    username = account["username"]
+    tier = account.get("tier", "free")
+    limit = get_tier_limit(conn, tier)
+    
+    print(f"DEBUG: Tier: {tier}, Limit: {limit}")
+    
+    month_start = (_now() // (30 * 24 * 60 * 60)) * (30 * 24 * 60 * 60)
+    row = conn.execute(
+        "SELECT monthly_count, month_start FROM usage_stats WHERE username=?",
+        (username,),
+    ).fetchone()
+    
+    current_usage = row["monthly_count"] if row and row["month_start"] == month_start else 0
+    print(f"DEBUG: Current usage: {current_usage}")
+    
+    if current_usage + token_cost > limit:
+        print(f"DEBUG: Usage limit exceeded: {current_usage + token_cost} > {limit}")
+        return False, "monthly token limit exceeded for tier %s (%d tokens/month)" % (tier, limit)
+    return True, ""
+
+
+def generate_api_key(conn: sqlite3.Connection, username: str) -> str:
+    init(conn)
+    username = _username(username)
+    key = "sk-" + secrets.token_hex(24)
+    conn.execute("INSERT OR REPLACE INTO api_keys(username, key_hash, created_ts) VALUES(?, ?, ?)",
+                 (username, _hash_token(key), _now()))
+    conn.commit()
+    return key
+
+
+def revoke_api_key(conn: sqlite3.Connection, username: str) -> None:
+    init(conn)
+    username = _username(username)
+    conn.execute("DELETE FROM api_keys WHERE username=?", (username,))
+    conn.commit()
+
+
+def list_api_keys(conn: sqlite3.Connection, username: str) -> list[dict]:
+    init(conn)
+    username = _username(username)
+    rows = conn.execute("SELECT key_hash, created_ts FROM api_keys WHERE username=?", (username,)).fetchall()
+    return [{"key_hash": row["key_hash"], "created_ts": row["created_ts"]} for row in rows]
+
+
+def authenticate_api_key(conn: sqlite3.Connection, key: str) -> str | None:
+    init(conn)
+    token_hash = _hash_token(key)
+    row = conn.execute("SELECT username FROM api_keys WHERE key_hash=?", (token_hash,)).fetchone()
+    return row["username"] if row else None
 
