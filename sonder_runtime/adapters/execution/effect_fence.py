@@ -47,29 +47,43 @@ _FENCE: contextvars.ContextVar[Fence | None] = contextvars.ContextVar(
 )
 
 
+# Every fence installed on this context, outermost first.  ``_FENCE`` is the
+# innermost; this stack lets a lookup see an outer fence a nested one hides.
+_STACK: contextvars.ContextVar[tuple[Fence, ...]] = contextvars.ContextVar(
+    "sonder_effect_fence_stack", default=(),
+)
+
+
 def current() -> Fence | None:
     """The fence on this thread's effects, if a worker installed one."""
     return _FENCE.get()
 
 
 def current_fleet_agent_id() -> str:
-    """The fleet agent whose fence is current, or "".
+    """The fleet agent of the innermost fleet fence on the stack, or "".
+
+    A fleet fence under a nested non-fleet fence (an autopilot or selfmod fence
+    installed by a task the fleet worker runs) is still found.
 
     Being a context variable, it is also visible to a helper thread started in
     a copy of the worker's context (the inference gateway's cancel watcher),
     where the worker's thread-local binding is not.
     """
-    fence = _FENCE.get()
-    return fence.fleet_agent_id if fence is not None else ""
+    for fence in reversed(_STACK.get()):
+        if fence.fleet_agent_id:
+            return fence.fleet_agent_id
+    return ""
 
 
 @contextlib.contextmanager
 def held(fence: Fence) -> Iterator[Fence]:
     """Install ``fence`` for the body; the previous fence (if any) is restored."""
     token = _FENCE.set(fence)
+    stack_token = _STACK.set(_STACK.get() + (fence,))
     try:
         yield fence
     finally:
+        _STACK.reset(stack_token)
         _FENCE.reset(token)
 
 
