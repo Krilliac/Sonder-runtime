@@ -6,8 +6,9 @@ import contextvars
 import json
 import logging
 import os
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -842,7 +843,7 @@ def open_agent_run(
         )
     else:
         _rt.note_agent_execution(model=model, origin=origin_hint)
-    return AgentImplBridge(
+    bridge = AgentImplBridge(
         stack=stack,
         prompt=prompt,
         model=model,
@@ -851,11 +852,54 @@ def open_agent_run(
         read_only=read_only,
         project_scope=project_scope,
     )
+    scope = _OPEN_RUNS.get()
+    if scope is not None and scope[0] == threading.get_ident():
+        scope[1].append(bridge)
+    return bridge
+
+
+# Bridges opened inside the innermost ``agent_run_scope`` on its own thread.
+_OPEN_RUNS: contextvars.ContextVar[tuple[int, list[AgentImplBridge]] | None] = contextvars.ContextVar(
+    "delegation_open_agent_runs", default=None,
+)
+
+
+@contextlib.contextmanager
+def agent_run_scope() -> Iterator[None]:
+    """Close every bridge ``open_agent_run`` opened in this scope that its run left open.
+
+    A run closes its bridge on its finish/fail paths.  A run that unwinds by an
+    exception (``ensure_not_cancelled``, KeyboardInterrupt, a raising helper)
+    does not, and its board, executor and identity bindings would stay set in
+    the caller's context: the next run in that context would reuse the stale
+    board and no terminal progress event would be sent.  On exit this closes
+    them, newest first, in the thread and context that opened them: as failed
+    when the body raised, else as completed.  ``close`` is idempotent, so a run
+    that already closed its bridge is not reported twice.  Only bridges opened
+    on the scope's own thread are tracked (a bridge's bindings can only be
+    reset in the context that set them).
+    """
+    opened: list[AgentImplBridge] = []
+    token = _OPEN_RUNS.set((threading.get_ident(), opened))
+    ok = False
+    try:
+        yield
+        ok = True
+    finally:
+        try:
+            with contextlib.ExitStack() as cleanup:
+                for bridge in opened:
+                    cleanup.callback(
+                        bridge.close, ok=ok, summary="" if ok else "agent run ended by an exception",
+                    )
+        finally:
+            _OPEN_RUNS.reset(token)
 
 
 __all__ = [
     "DEFAULT_AGENT_PERSONAS",
     "AgentImplBridge",
+    "agent_run_scope",
     "attach_board_observers",
     "build_runtime_identity_preamble",
     "dispatch_agent_tool",

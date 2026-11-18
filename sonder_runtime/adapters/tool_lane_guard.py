@@ -733,10 +733,12 @@ def chat_target(
     A target refused as tool-lane-denied, or reported unknown (tier label
     ``None``), is resolved again with ``chat_only=True``; every other selector
     keeps the two-argument call.  The ``chat_only`` call answers a denied
-    model by name and finds a model installed only on another pool member
-    (``server._serve_target``).  ``pool_wide=False`` keeps the narrower rule
-    (resolve again only for a refused target) for a resolver that also serves
-    tool lanes.  A caller that executes or applies the reply must use
+    model by name.  ``pool_wide=False`` resolves again only for a refused
+    target, not for an unknown one.  With ``server._serve_target`` the two give
+    the same answer for an unknown name: it looks up the pool union (a model
+    installed only on another pool member) for every lane, tool and agent
+    lanes included, and refuses a deny-listed name by name for every lane
+    that is not ``chat_only``.  A caller that executes or applies the reply must use
     ``selector_refusal`` first: it judges names, so where a model is installed
     never changes its verdict.
     """

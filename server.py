@@ -25,6 +25,7 @@ import collections
 import atexit
 import base64
 import contextlib
+import datetime
 import logging
 import functools
 import hashlib
@@ -107,6 +108,7 @@ from sonder_runtime.domain.model_usage_formatting import (
     usage_source as _model_usage_source,
 )
 from sonder_runtime.platform.environment_options import (
+    cpu_thread_default as _cpu_thread_default,
     env_int_option as _env_int_option,
     local_model_options as _platform_local_model_options,
 )
@@ -2568,7 +2570,7 @@ def _serve_target(tier, strict, *, chat_only=False):
         found = resolve_discovered_model_record(tier)
     except Exception:
         found = None
-    if not found:  # pool-wide lookup; chat_only gate enforced below
+    if not found:  # pool union, for every lane (Node1 pool); non-chat lanes refuse a denied name below
         try:
             pin = _resolve_model_pin(tier)
             found = (pin.model, pin.record) if pin.ok else None
@@ -5275,18 +5277,13 @@ def _chat_request(
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
-    pool_reroute_allowed = bool(
-        getattr(OLLAMA_POOL, "enabled", False)
-        and getattr(OLLAMA_POOL, "has_remote_workers", False)
-        and not local_only
-    )
+    base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
-        loopback_endpoint=ollama_endpoint.is_loopback(BASE),
-        context_probe=lambda: _auto_model_context(model),
-        allow_pool_workers=pool_reroute_allowed)
-    if rerouted is not None:  # SONDER_INFERENCE_FALLBACK=ollama: loopback unless private pool permitted
-        payload, bridged_rung, local_only = rerouted, None, (False if pool_reroute_allowed else True)
+        loopback_endpoint=base_loopback, context_probe=lambda: _auto_model_context(model))
+    if rerouted is not None:  # SONDER_INFERENCE_FALLBACK=ollama: loopback BASE, or its pool's configured workers
+        payload, bridged_rung = rerouted, None
+        local_only = not _legacy_chat_bridge.reroute_may_use_pool(OLLAMA_POOL, base_loopback=base_loopback, local_only=local_only)
     if bridged_rung is not None:
         # Delegation hook: this rung's tier is bound to a non-Ollama provider.
         # Every Ollama-only probe below (thinking budget, think support) is
@@ -20449,7 +20446,8 @@ def _take_agent_model_failure():
 
 def _agent_impl(*args, **kwargs) -> str:
     """Pin system-prompt parts across a turn and its negative-claim review."""
-    with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope():
+    from sonder_runtime.bootstrap.delegation_wiring import agent_run_scope  # closes a bridge an exception left open
+    with _managed_agent_admission_scope(), _stable_system_context(), _standalone_lanes.model_loop_scope(), agent_run_scope():
         controller = _standalone_lanes.current()
         if controller is not None:
             controller.terminal_projected = False
