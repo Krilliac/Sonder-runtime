@@ -1524,7 +1524,22 @@ _HEADER_NAME_BYPASSES = {
     "cxx20-import": ("import <a/*b.h>;\n", "#if 0 //*/\n#endif\n"),
     # A __has_include pasted from pieces, with a macro-made ``(``: the pieces still name it.
     "pasted-has-include": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has_, include) LP <a/*b.h>)\n#endif\n",
-                           "#if 0 //*/ c.h>)\n#endif\n"),
+                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # The same, split where no piece looks like __has_include: the user macro call on the #if
+    # line is what is refused.
+    "pasted-split-ha": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__ha, s_include) LP <a/*b.h>)\n#endif\n",
+                        "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    "pasted-split-has": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has, _include) LP <a/*b.h>)\n#endif\n",
+                         "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    "pasted-split-underscore": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(_, _has_include) LP <a/*b.h>)\n#endif\n",
+                                "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # An object-like macro pastes it and the next one supplies the ``(``: two adjacent names.
+    "pasted-object-like": ("#define HI __has_##include\n#define LP (\n#if HI LP <a/*b.h>)\n#endif\n",
+                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # A builtin a text redefines is no longer exempt as a builtin.
+    "pasted-redefined-builtin": (("#define __has_feature(a, b) a##b\n#define LP (\n"
+                                  "#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n"),
+                                 "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl (with a warning)
 }
 
 
@@ -1559,10 +1574,31 @@ def test_header_name_comment_bypass_is_refused_end_to_end():
     'static_assert(__has_trivial_copy(T), "T must be \\"trivial\\"");\n',
     'static_assert(__has_trivial_destructor(T) && sizeof(T) < 16, "size > 16");\n',
     "#if __has_builtin(__builtin_expect) && N < 3 /* see a->b */\n#endif\n",
+    '#if __has_feature(cxx_rtti) && X < 2 // "y" > z\n#endif\n',
+    "#if __has_cpp_attribute(nodiscard) && A < B /* a->b */\n#endif\n",
+    '#if __has_warning("-Wfoo") && A < B /* a->b */\n#endif\n',
+    "#if defined FOO && defined(BAR) && N < 3 /* see a->b */\n#endif\n",
 ])
 def test_header_name_rule_keeps_ordinary_code(text):
     found = scan_added_lexings("", text, include_ok=OK)
     assert not any("header-name" in reason for reason in found), (text, found, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    "#if MYVER(1, 2) < 3 /* a->b */\n#endif\n",
+    "#elif MYVER(1, 2) < 3 /* a->b */\n",
+    "#if A B < 3 /* a->b */\n#endif\n",
+])
+def test_header_name_rule_refuses_user_macros_before_a_split_name_on_if_lines(text):
+    """Pinned refusal, by design: a user macro on an #if line may paste ``__has_include``.
+
+    ``MYVER`` here is an ordinary version macro, but the scanner cannot see a macro's body, and
+    ``CAT(__ha, s_include) LP <a/*b.h>)`` has the same shape, so a ``<`` whose name holds a
+    comment opener or quote after a user macro call (or two adjacent names) on an #if line is
+    refused. It fails closed; such a line is rare in real code.
+    """
+    found = scan_added_lexings("", text, include_ok=OK)
+    assert any("header-name" in reason for reason in found), (text, found, TAG)
 
 
 def test_patch_json_does_not_resolve_unc_paths_before_the_root_check(tmp_path, monkeypatch, request):

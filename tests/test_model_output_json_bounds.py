@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from sonder_runtime.domain.common.bounded_json import container_extent, container_extents
+from sonder_runtime.domain.common.bounded_json import container_extent, container_extents, container_walk
 from sonder_runtime.domain.computer_use import rules
 from sonder_runtime.domain.security_eval import verdict
 
@@ -77,13 +77,14 @@ def test_overdeep_candidates_are_rejected_before_decoder_work(monkeypatch, parse
 
     monkeypatch.setattr(verdict, "_DECODER", RecordingDecoder())
     if parser == "verdict":
-        text = '{"a":' * 3000
+        texts = ['{"a":' * 3000, '{"a":' * 3000 + "0" + "}" * 3000]
         parse = verdict.parse_verdict
     else:
-        text = "[" * 30_000
+        texts = ["[" * 30_000, _arrays(30_000)]
         parse = verdict.parse_hypotheses
-    with pytest.raises(verdict.VerdictParseError):
-        parse(text)
+    for text in texts:  # never closed, then closed
+        with pytest.raises(verdict.VerdictParseError):
+            parse(text)
     # A wall-clock threshold cannot prove that decoder allocations were avoided.
     assert calls == []
 
@@ -179,37 +180,116 @@ def test_many_cheap_failed_openers_do_not_refuse_a_verdict_reply(answer, expecte
     assert (result.verdict, result.parse_mode) == expected
 
 
-@pytest.mark.parametrize("parser, text", [
-    # Nested unclosed containers inside the depth bound: every opener's decode reads to the end.
-    ("hypotheses", "[" * 60 + "0," * 99_000),
-    ("verdict", '{"a":' * 63 + "{" + '"a":0,' * 33_000),
-    ("hypotheses", '{"hypotheses":' * 63 + "{" + '"a":0,' * 33_000),
-], ids=["arrays", "objects", "hypotheses-objects"])
-def test_failed_decode_work_stays_linear(monkeypatch, parser, text):
-    read = []
+def _record_work(monkeypatch):
+    """Count, without asking the code under test, the characters each scan handed the decoder and
+    the characters its extent passes covered.
+
+    ``handed`` gets the length of every string passed to ``raw_decode`` (the decoder never reads
+    past it, so it bounds both the copy and the read); ``passes`` gets ``len(text)`` for every
+    ``container_extents`` table and ``end - start`` for every ``container_walk``.
+    """
+    handed, passes = [], []
     decoder = json.JSONDecoder()
+    real_extents, real_walk = verdict.container_extents, verdict.container_walk
 
     class RecordingDecoder:
         def raw_decode(self, piece, index):
-            try:
-                value, end = decoder.raw_decode(piece, index)
-            except json.JSONDecodeError as exc:
-                # An unterminated string is reported at its quote after a read to the end.
-                read.append(len(piece) if piece.startswith('"', exc.pos) else exc.pos)
-                raise
-            read.append(end)
-            return value, end
+            handed.append(len(piece) - index)
+            return decoder.raw_decode(piece, index)
+
+    def extents(text):
+        passes.append(len(text))
+        return real_extents(text)
+
+    def walk(text, start, *args, **kwargs):
+        deepest, end, closed = real_walk(text, start, *args, **kwargs)
+        passes.append(end - start)
+        return deepest, end, closed
 
     monkeypatch.setattr(verdict, "_DECODER", RecordingDecoder())
+    monkeypatch.setattr(verdict, "container_extents", extents)
+    monkeypatch.setattr(verdict, "container_walk", walk)
+    return handed, passes
+
+
+@pytest.mark.parametrize("parser, text", [
+    # Nested closed containers inside the depth bound, each failing at the far end: every
+    # opener's decode reads almost the whole reply.
+    ("hypotheses", "[" * 60 + "0," * 99_000 + "x" + "]" * 60),
+    ("verdict", '{"a":' * 63 + "{" + '"a":0,' * 33_000 + '"a":x' + "}" * 64),
+    ("hypotheses", '{"hypotheses":' * 63 + "{" + '"a":0,' * 33_000 + '"a":x' + "}" * 64),
+], ids=["arrays", "objects", "hypotheses-objects"])
+def test_failed_decode_work_stays_linear(monkeypatch, parser, text):
+    handed, passes = _record_work(monkeypatch)
     parse = verdict.parse_verdict if parser == "verdict" else verdict.parse_hypotheses
     with pytest.raises(verdict.VerdictParseError, match="work limit"):
         parse(text)
-    # Each of the (at most two) scans may read its failure budget, one attempt past it, and the
-    # disjoint successful values once.
-    per_scan = verdict._FAILED_SCAN_FACTOR * len(text) + verdict._FAILED_SCAN_FLOOR + 2 * len(text)
-    assert sum(read) <= 2 * per_scan, (sum(read), len(text))
+    # Here every failed decode reads (nearly) all it is handed, so what was handed is the read.
+    # Each of the (at most two) scans may read its failure budget plus one attempt past it, and
+    # the extent passes cover the reply a few times.
+    per_scan = verdict._FAILED_SCAN_FACTOR * len(text) + verdict._FAILED_SCAN_FLOOR + len(text)
+    assert sum(handed) <= 2 * per_scan, (sum(handed), len(text))
+    assert sum(passes) <= 4 * len(text), (sum(passes), len(text))
     # The budget, not the end of the openers, stopped the scan.
-    assert len(read) < text.count(text[0]), (len(read), len(text))
+    assert len(handed) < 20 < text.count(text[0]), (len(handed), len(text))
+
+
+def test_failed_decode_copies_stay_linear(monkeypatch):
+    # Openers inside one long string share its continuation: each fails after a few characters,
+    # but its extent (the copy it is decoded from) runs to the closing bracket at the end, so
+    # uncharged copies would cost about n * n / 12 characters.
+    text = '"' + ("[0 x\\\"" * 10_000) + '"]'
+    handed, passes = _record_work(monkeypatch)
+    with pytest.raises(verdict.VerdictParseError):
+        verdict.parse_hypotheses(text)
+    budget = verdict._FAILED_SCAN_FACTOR * len(text) + verdict._FAILED_SCAN_FLOOR
+    # Each failed decode is charged at least a _COPY_DIVISOR-th of its copy, less rounding.
+    copies = verdict._COPY_DIVISOR * (budget + len(text)) + verdict._COPY_DIVISOR * len(handed)
+    assert sum(handed) <= 2 * copies, (sum(handed), len(text))
+    assert sum(handed) < len(text) * len(text) // 40, (sum(handed), len(text))
+    assert sum(passes) <= 4 * len(text), (sum(passes), len(text))
+
+
+def _decode_error(piece):
+    try:
+        json.JSONDecoder().raw_decode(piece, 0)
+    except json.JSONDecodeError as error:
+        return error
+    raise AssertionError(piece)
+
+
+def test_an_unterminated_string_is_charged_the_whole_piece():
+    # The decoder reports an unterminated string where it starts, after reading to the end.
+    piece = '["' + "a" * 5_000
+    error = _decode_error(piece)
+    assert error.msg.startswith("Unterminated string") and error.pos == 1
+    assert verdict._failed_decode_cost(piece, error) >= len(piece)
+
+
+@pytest.mark.parametrize("piece", [
+    '["x" "y", ' + '"pad", ' * 2_000 + '"z"]',
+    '{"notes" "x", "pad": [' + '"pad", ' * 2_000 + '"z"]}',
+], ids=["missing-comma", "missing-colon"])
+def test_an_error_at_a_quote_is_charged_where_the_decoder_stopped(piece):
+    # A missing comma or colon between strings is reported at the next quote, a few characters
+    # in: the decoder stopped there, so it is not charged the rest of the piece.
+    error = _decode_error(piece)
+    assert piece.startswith('"', error.pos) and error.pos < 20
+    assert verdict._failed_decode_cost(piece, error) <= 20 + len(piece) // verdict._COPY_DIVISOR
+
+
+@pytest.mark.parametrize("wrappers", [3, 5, 6])
+@pytest.mark.parametrize("fault", ['["x" "y"]', '{"x" "y"}'], ids=["missing-comma", "missing-colon"])
+def test_a_wrapped_fault_at_a_quote_does_not_spend_the_budget(wrappers, fault):
+    # Each wrapper's decode stops at the same quote early on; an unbounded decoder reads the
+    # later verdict, and so must the bounded scan (charging each wrapper its whole extent, about
+    # 94 KB, refused from five wrappers on).
+    pad = ",".join(['"' + "z" * 60 + '"'] * 1500)
+    text = ("Here is my analysis:\n" + '{"w": ' * (wrappers - 1) + '{"notes": ' + fault
+            + ', "pad": [' + pad + "]" + "}" * wrappers + '\nFinal: {"verdict": "REFUTED", "reason": "ok"}')
+    assert len(text) > 90_000
+    result = verdict.parse_verdict(text)
+    assert (result.verdict, result.parse_mode) == ("REFUTED", "json")
 
 
 def test_a_failed_decode_reads_only_its_container(monkeypatch):
@@ -252,17 +332,27 @@ def test_interval_notation_in_a_long_reply_parses_like_an_unbounded_decoder(coun
 
 
 @pytest.mark.parametrize("count", [64, 65, 66, 100])
-def test_unmatched_brackets_past_the_depth_bound_refuse(count):
-    # Every later unmatched ``[`` nests inside the first, so the first is ``count`` deep.
+def test_unmatched_brackets_never_refuse_for_depth(monkeypatch, count):
+    # Every later unmatched ``[`` nests inside the first, so the first opens ``count`` levels,
+    # but a container that never closes can never decode: an unbounded decoder fails on each and
+    # returns the trailing answer, and so must the bounded scan, without decoding any of them.
     body = _interval_reply(count, 200 * count)
-    if count == 64:
-        with pytest.raises(verdict.VerdictParseError, match="no hypothesis list"):
-            verdict.parse_hypotheses(body)
-    else:
-        with pytest.raises(verdict.VerdictParseError, match="nesting bound"):
-            verdict.parse_hypotheses(body)
-        with pytest.raises(verdict.VerdictParseError, match="nesting bound"):
-            verdict.parse_hypotheses(body + '\n[{"hypothesis":"kept"}]')
+    with pytest.raises(verdict.VerdictParseError, match="no hypothesis list"):
+        verdict.parse_hypotheses(body)
+    handed, _passes = _record_work(monkeypatch)
+    hypotheses = verdict.parse_hypotheses(body + '\n[{"hypothesis":"kept"}]')
+    assert [item.hypothesis for item in hypotheses] == ["kept"]
+    assert len(handed) == 1, handed
+
+
+@pytest.mark.parametrize("prefix", ["", "[0, len) " * 70 + "\n"], ids=["alone", "after-unmatched"])
+def test_closed_nesting_past_the_depth_bound_still_refuses(prefix):
+    # A real container deeper than DEFAULT_MAX_DEPTH is refused where it stands, even among
+    # unmatched openers, and a later answer is not promoted past it.
+    with pytest.raises(verdict.VerdictParseError, match="nesting bound"):
+        verdict.parse_hypotheses(prefix + _arrays(65) + '\n[{"hypothesis":"kept"}]')
+    with pytest.raises(verdict.VerdictParseError, match="nesting bound"):
+        verdict.parse_verdict(prefix + '{"x":' + _arrays(64) + '}\n{"verdict":"REFUTED"}')
 
 
 _EXTENT_ALPHABETS = ('[]{}"\\', '[]{}"\\a ,:', '[[[]]{}"', '["\\]', '{}"\\\\x')
@@ -276,8 +366,22 @@ def test_container_extents_match_one_walk_per_opener():
     for trial in range(6_000):
         alphabet = _EXTENT_ALPHABETS[trial % len(_EXTENT_ALPHABETS)]
         text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
-        expected = {index: container_extent(text, index, max_depth=10**9)
-                    for index, char in enumerate(text) if char in "[{"}
-        assert container_extents(text) == expected, text
+        expected = {}
+        for index, char in enumerate(text):
+            if char in "[{":
+                deepest, end, closed = container_walk(text, index, max_depth=10**9)
+                assert (deepest, end) == container_extent(text, index, max_depth=10**9)
+                expected[index] = (deepest, end if closed else -1)
+        table = container_extents(text)
+        assert dict(table.items()) == expected, text
+        assert all(table.lookup(index) == extent for index, extent in expected.items()), text
         checked += len(expected)
     assert checked > 10_000
+
+
+def test_container_extents_lookup_refuses_offsets_without_an_opener():
+    table = container_extents('a["]')
+    assert table.lookup(1) == (1, -1)  # the quote's string runs to the end: never closes
+    for offset in (-1, 0, 2, 3, 4):
+        with pytest.raises(KeyError):
+            table.lookup(offset)
