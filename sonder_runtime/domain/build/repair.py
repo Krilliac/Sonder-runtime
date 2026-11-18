@@ -261,6 +261,95 @@ _AMBIGUOUS_SEPARATOR = ("a quote after a number that compilers lex differently (
                         "or character literal) is refused")
 _BAD_RAW_DELIMITER = ("a raw string prefix that compilers lex differently (a delimiter some compiler "
                       "rejects, or a prefix inside a number) is refused")
+_EVENT_HEADER_NAME = "header_name"  # a header-name whose text the comment/literal reading splits
+_HEADER_NAME_SPLIT = ("a comment opener, quote or escaped quote inside a header-name (<...> or \"...\" "
+                      "after #include, __has_include( and similar) is refused (compilers read it as "
+                      "part of the name, so it neither starts a comment nor a literal)")
+# Inside a ``<...>`` header-name: what the comment and literal reading would act on instead.
+_ANGLE_NAME_SPLIT_RE = re.compile(r"[\"']|/[*/]")
+# Inside a ``"..."`` header-name (which has no escapes): what makes it end before the literal does.
+_QUOTED_NAME_SPLIT_RE = re.compile(r'["\n]')
+_HEAD_GAP_RE = re.compile(r"[^\x21-\x7e\n]*")
+_HEAD_WORD_RE = re.compile(r"[A-Za-z0-9_]*")
+_HEADER_DIRECTIVE_WORDS = ("include", "import", "embed")
+_HEADER_PRAGMA_WORDS = ("dependency", "include_alias")
+
+
+def _run_end(pattern: re.Pattern[str], text: str, start: int) -> int:
+    """End of ``pattern`` matched at ``start``; the patterns passed here also match empty text."""
+    match = pattern.match(text, start)
+    return start if match is None else match.end()
+
+
+def _line_head(masked: str, start: int) -> tuple[str, str]:
+    """``("#", name)`` for a directive line, else ``("", first word)`` (``import`` after ``export``).
+
+    Blanks are anything outside printable ASCII, so an odd character before or after the ``#``
+    widens the match rather than hiding the directive.
+    """
+    position = _run_end(_HEAD_GAP_RE, masked, start)
+    mark = ""
+    if masked.startswith("#", position):
+        mark = "#"
+        position = _run_end(_HEAD_GAP_RE, masked, position + 1)
+    word_end = _run_end(_HEAD_WORD_RE, masked, position)
+    word = masked[position:word_end]
+    if not mark and word == "export":
+        gap = _run_end(_HEAD_GAP_RE, masked, word_end)
+        if gap > word_end:
+            return "", masked[gap:_run_end(_HEAD_WORD_RE, masked, gap)]
+    return mark, word
+
+
+def _header_name_suspect_in_context(masked: str, offsets: list[int]) -> bool:
+    """Whether any suspect sits where a compiler may lex a header-name.
+
+    ``offsets`` (ascending) are positions in the masked text of a ``<`` or ``"`` whose header-name
+    reading differs from the comment/literal reading. The contexts are a superset of where GCC,
+    clang and clang-cl lex one, skipped ``#if 0`` blocks included:
+
+    - anywhere on a directive line whose name holds include, import or embed (``#include``,
+      ``#include_next``, ``#import``, ``#embed``, ``#__include_macros``), or a ``#pragma`` line
+      naming ``dependency`` or ``include_alias``;
+    - anywhere after ``__has_`` on the same line (``__has_include(``, ``__has_embed(``, ...);
+    - right after ``(`` on an ``#if``/``#elif`` line (a macro alias of ``__has_include``);
+    - anywhere on a C++20 ``import`` or ``export import`` line.
+
+    Line starts are found incrementally and each line is classified once, so the work is linear.
+    """
+    line_start = 0
+    scanned = 0
+    classified = -1
+    header_line = conditional = False
+    first_has = -1
+    for offset in offsets:
+        newline = masked.rfind("\n", scanned, offset)
+        if newline >= 0:
+            line_start = newline + 1
+        scanned = offset
+        if classified != line_start:
+            classified = line_start
+            line_end = masked.find("\n", line_start)
+            line_end = len(masked) if line_end < 0 else line_end
+            mark, name = _line_head(masked, line_start)
+            if mark:
+                line = masked[line_start:line_end]
+                header_line = any(word in name for word in _HEADER_DIRECTIVE_WORDS) or (
+                    name == "pragma" and any(word in line for word in _HEADER_PRAGMA_WORDS))
+                conditional = name in ("if", "elif")
+            else:
+                header_line = name == "import"
+                conditional = False
+            first_has = masked.find("__has_", line_start, line_end)
+        if header_line or 0 <= first_has < offset:
+            return True
+        if conditional:
+            before = offset
+            while before > line_start and not "\x21" <= masked[before - 1] <= "\x7e":
+                before -= 1
+            if before > line_start and masked[before - 1] == "(":
+                return True
+    return False
 
 
 def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators: str = "cxx14",
@@ -276,11 +365,22 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
     caller can request another configured reading or refuse the input. This is a scanner-
     policy model, not a compiler comparison.
 
+    A header-name is one token to the compilers: a ``/*``, ``//``, ``"`` or ``'`` inside
+    ``<...>``, or an escaped quote inside ``"..."``, starts no comment or literal there. Such a
+    name in a header-name context (``_header_name_suspect_in_context``) records header_name,
+    which the caller refuses: the masking below keeps the comment/literal reading, and the two
+    readings can hide different lines.
+
     Pure except for mutations to the caller-owned events set; work is linear in value.
     """
     if separators not in _SEPARATOR_MODES:
         raise ValueError(f"separators must be one of {', '.join(_SEPARATOR_MODES)}")
     out: list[str] = []
+    # Indexes into ``out`` of a ``<`` or ``"`` whose header-name reading differs (events only).
+    suspects: list[int] | None = [] if events is not None else None
+    # After a ``<``: the next newline, ``>`` and split character. Each is searched again only
+    # once the scan passes it, so the searches cover the text once.
+    line_end = angle_close = angle_split = -1
     i = 0
     n = len(value)
     pp_number = False  # C++14 reading: inside a pp-number (started by an ASCII digit)
@@ -405,9 +505,24 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
             j = i + 1
             while j < n and value[j] != quote and value[j] != "\n":
                 j += 2 if value[j] == "\\" else 1
+            if suspects is not None and quote == '"' \
+                    and _QUOTED_NAME_SPLIT_RE.search(value, i + 1, min(j, n)) is not None:
+                suspects.append(len(out))  # the header-name ends at the escaped quote or newline
             out.append(value[i:min(j + 1, n)])
             i = j + 1
             continue
+        if ch == "<" and suspects is not None:
+            if line_end <= i:
+                line_end = value.find("\n", i)
+                line_end = n if line_end < 0 else line_end
+            if angle_close <= i:
+                angle_close = value.find(">", i + 1)
+                angle_close = n if angle_close < 0 else angle_close
+            if angle_split <= i:
+                split = _ANGLE_NAME_SPLIT_RE.search(value, i + 1)
+                angle_split = n if split is None else split.start()
+            if angle_split < angle_close < line_end:
+                suspects.append(len(out))  # ``<`` up to the first ``>`` holds a comment opener or quote
         if digraphs and ch in "<:%" and i + 1 < n:
             pair = value[i:i + 2]
             if pair == "<:":
@@ -436,7 +551,19 @@ def _mask_literals(value: str, *, raw_strings: bool, digraphs: bool, separators:
                 continue
         out.append(ch)
         i += 1
-    return "".join(out)
+    masked = "".join(out)
+    if suspects and events is not None and _EVENT_HEADER_NAME not in events:
+        offsets: list[int] = []
+        total = 0
+        chunk = 0
+        for index in suspects:  # ascending chunk indexes -> offsets in ``masked``
+            while chunk < index:
+                total += len(out[chunk])
+                chunk += 1
+            offsets.append(total)
+        if _header_name_suspect_in_context(masked, offsets):
+            events.add(_EVENT_HEADER_NAME)
+    return masked
 
 
 # Python whitespace includes characters beyond the scanner directive-head model.
@@ -493,7 +620,6 @@ _ATTR_BAD_RE = re.compile(r"\b_{0,2}(?:section|constructor|destructor|ifunc|alia
 # Every ``[[...]]`` body is checked, so ``[[__gnu__::constructor]]`` and
 # ``[[using gnu: constructor]]`` are caught like ``[[gnu::constructor]]``.
 _CXX_ATTR_OPEN_RE = re.compile(r"\[\s*\[")
-_STRING_RUN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"(?:\s*"(?:[^"\\\n]|\\.)*")+')
 # Suffixless ``<...>`` includes stay allowed (``<vector>``) except names
 # that are dotfiles or credentials reachable through an ``-I`` directory.
 _SECRET_INCLUDE_NAMES = frozenset({
@@ -501,7 +627,12 @@ _SECRET_INCLUDE_NAMES = frozenset({
     "authorized_keys", "known_hosts",
 })
 _DECLSPEC_RE = re.compile(r"\b__declspec\s*\(\s*(?:allocate|code_seg)\b")
-_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+# String literals are matched by ``_string_spans``/``_string_runs`` below. They return what the
+# backtracking patterns ``"(?:[^"\\\n]|\\.)*"`` and that pattern followed by
+# ``(?:\s*"(?:[^"\\\n]|\\.)*")+`` returned under ``findall``, without restarting at every escaped
+# quote of an unterminated literal (quadratic on a line of ``\"``).
+_STRING_PLAIN_RE = re.compile(r'[^"\\\n]*')
+_SPACE_RUN_RE = re.compile(r"\s*")
 
 
 class _ScanBudgetExceeded(Exception):
@@ -527,6 +658,106 @@ class _Budget:
 # character; past it the input is refused (fail closed), never accepted.
 _SCAN_BUDGET_BASE = 262_144
 _SCAN_BUDGET_PER_CHAR = 8
+
+
+def _literal_end(text: str, start: int, ends: dict[int, int], budget: _Budget | None) -> int:
+    """End of the string literal whose ``"`` is at ``start``, or ``-1 - stop`` when it never closes.
+
+    The literal closes at the first ``"`` that is not escaped; a backslash escapes any character
+    but a newline. It fails (at ``stop``) on a newline, on a backslash before a newline or at the
+    end of the text. Every ``"`` inside the walk is escaped, and a match tried at one of them walks
+    the same tail to the same result, so callers skip them instead of restarting there. Results are
+    memoised in the caller-owned ``ends``; each new walk is charged to ``budget``.
+    """
+    known = ends.get(start)
+    if known is not None:
+        return known
+    size = len(text)
+    j = start + 1
+    while True:
+        j = _run_end(_STRING_PLAIN_RE, text, j)
+        if j < size and text[j] == '"':
+            result = j + 1
+            break
+        if j >= size or text[j] == "\n" or j + 1 >= size or text[j + 1] == "\n":
+            result = -1 - j
+            break
+        j += 2  # a backslash and the character it escapes
+    if budget is not None:
+        budget.charge(j - start + 1)
+    ends[start] = result
+    return result
+
+
+def _string_spans(text: str, budget: _Budget | None = None,
+                  ends: dict[int, int] | None = None) -> list[tuple[int, int]]:
+    """``(start, end)`` of each string literal, left to right and non-overlapping.
+
+    The same literals ``findall`` with ``"(?:[^"\\\\\\n]|\\\\.)*"`` returns, in one linear pass.
+    """
+    ends = {} if ends is None else ends
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while (start := text.find('"', position)) >= 0:
+        end = _literal_end(text, start, ends, budget)
+        if end > 0:
+            spans.append((start, end))
+            position = end
+        else:
+            position = -1 - end
+    return spans
+
+
+def _string_runs(text: str, budget: _Budget | None = None,
+                 ends: dict[int, int] | None = None) -> list[list[tuple[int, int]]]:
+    """Each run of two or more literals separated only by whitespace, as its literals' spans.
+
+    The same runs ``findall`` with the literal pattern followed by ``(?:\\s*<literal>)+``
+    returns. When the literal at a quote starts no run, that pattern next tried the literal's
+    closing quote as an opener, pairing the quotes the other way round (which rejoins literals
+    that a ``'"'`` character literal misaligned); this does the same. Memoised walks keep each
+    character to a bounded number of visits, and ``budget`` is charged for every one.
+    """
+    ends = {} if ends is None else ends
+    size = len(text)
+    runs: list[list[tuple[int, int]]] = []
+    position = 0
+    while (start := text.find('"', position)) >= 0:
+        end = _literal_end(text, start, ends, budget)
+        if end < 0:
+            position = -1 - end
+            continue
+        run = [(start, end)]
+        cursor = end
+        while True:
+            following = _run_end(_SPACE_RUN_RE, text, cursor)
+            if budget is not None:
+                budget.charge(following - cursor + 1)
+            if following >= size or text[following] != '"':
+                break
+            close = _literal_end(text, following, ends, budget)
+            if close < 0:
+                break
+            run.append((following, close))
+            cursor = close
+        if len(run) >= 2:
+            runs.append(run)
+            position = cursor
+        else:
+            position = end - 1
+    return runs
+
+
+def _blank_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with each span replaced by one space."""
+    parts: list[str] = []
+    position = 0
+    for start, end in spans:
+        parts.append(text[position:start])
+        parts.append(" ")
+        position = end
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 def _balanced(text: str, start: int, limit: int = 4096, budget: _Budget | None = None) -> str:
@@ -731,9 +962,11 @@ def scan_hostile_directives(added_text: str, *,
     Every opener scan (``_Pragma(``, ``__pragma(``, ``__attribute__((``, ``asm``,
     ``[[``, ``__has_include``) charges the characters it walks to a budget of
     a fixed base plus 8 steps per input character, and each walk is capped
-    (4096 characters, 1026 for ``[[``), so the total work is linear in the
-    input. An input that exhausts the budget (thousands of unterminated
-    openers) is refused, never accepted.
+    (4096 characters, 1026 for ``[[``). The string-literal passes over the
+    whole text are single linear walks (``_string_spans``, ``_string_runs``)
+    charged to a second budget of the same size. Total work is therefore
+    linear in the input. An input that exhausts a budget (thousands of
+    unterminated openers) is refused, never accepted.
     """
     text = str(added_text or "")
     budget = _Budget(_SCAN_BUDGET_BASE + _SCAN_BUDGET_PER_CHAR * len(text))
@@ -790,7 +1023,7 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
                 refuse("#pragma %s is refused" % clip(rest.split("(")[0].strip(), 40))
     for match in _PRAGMA_OP_RE.finditer(text):
         body = _balanced(text, match.end(), budget=budget)
-        literals = _STRING_RE.findall(body)
+        literals = [body[start:end] for start, end in _string_spans(body)]
         if not literals:
             refuse("_Pragma without a string literal is refused")
             continue
@@ -816,15 +1049,20 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
         else:
             body = window[:256]
         budget.charge(4 * len(body) + 1)  # the string/regex passes below walk the whole body
-        joined = "".join(_unescape(item) for item in _STRING_RE.findall(body))
+        joined = "".join(_unescape(body[start:end]) for start, end in _string_spans(body))
         if _ASM_DIRECTIVE_RE.search(_asm_text(body)) or _ASM_DIRECTIVE_RE.search(_asm_text(joined)):
             refuse("inline assembly with an assembler file/section directive is refused")
-    if _ASM_DIRECTIVE_RE.search(_STRING_RE.sub(" ", text)):
+    # The whole-text literal passes have their own budget of the same size: the walks are
+    # linear, and the charge is a backstop that refuses rather than stalls.
+    strings_budget = _Budget(_SCAN_BUDGET_BASE + _SCAN_BUDGET_PER_CHAR * len(text))
+    ends: dict[int, int] = {}
+    strings = _string_spans(text, strings_budget, ends)
+    if _ASM_DIRECTIVE_RE.search(_blank_spans(text, strings)):
         refuse("assembler file/section directive in code or a macro is refused")
-    literals = [_unescape(item) for item in _STRING_RE.findall(text)]
+    literals = [_unescape(text[start:end]) for start, end in strings]
     # Adjacent literals concatenate (".inc" "bin"): each run is also one string.
-    literals.extend("".join(_unescape(item) for item in _STRING_RE.findall(run))
-                    for run in _STRING_RUN_RE.findall(text))
+    literals.extend("".join(_unescape(text[start:end]) for start, end in run)
+                    for run in _string_runs(text, strings_budget, ends))
     for literal in literals:
         if _ASM_DIRECTIVE_RE.search(_asm_text(literal)):
             refuse("string literal carrying an assembler directive is refused")
@@ -843,7 +1081,7 @@ def _scan_hostile_directives(text: str, *, include_ok: Callable[[str], bool],
             break
     if _DECLSPEC_RE.search(text):
         refuse("__declspec(allocate/code_seg) is refused")
-    growth = sum(len(item) - 2 for item in _STRING_RE.findall(text))
+    growth = sum(end - start - 2 for start, end in strings)
     if growth > MAX_STRING_GROWTH:
         refuse("string literal growth above 64 KiB is refused")
     return tuple(reasons)
@@ -1001,12 +1239,17 @@ def scan_added_lexings(before: str, after: str, *,
                 _mask_literals(new, raw_strings=raw_strings, digraphs=pairs, separators=mode, events=seen)))
             if mode == "none" and _EVENT_BAD_RAW in seen:  # C++11 has raw strings too
                 events.add(_EVENT_BAD_RAW)
-        # Anywhere in the old or the new text, not only in added lines: a quote or raw
-        # prefix lexed differently changes which later lines are hidden in a comment.
+            if _EVENT_HEADER_NAME in seen:
+                events.add(_EVENT_HEADER_NAME)
+        # Anywhere in the old or the new text, not only in added lines: a quote, raw
+        # prefix or header-name lexed differently changes which later lines are hidden
+        # in a comment.
         if _EVENT_AMBIGUOUS in events:
             note(_AMBIGUOUS_SEPARATOR)
         if _EVENT_BAD_RAW in events:
             note(_BAD_RAW_DELIMITER)
+        if _EVENT_HEADER_NAME in events:
+            note(_HEADER_NAME_SPLIT)
         for old_masked, new_masked in masked:
             added = _added_lines(old_masked, new_masked)
             mark = _digest(added)

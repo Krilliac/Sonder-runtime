@@ -121,3 +121,82 @@ def test_earlier_valid_json_wins_before_bounded_junk_and_conflicting_label(parse
     else:
         result = verdict.parse_hypotheses('[{"hypothesis":"trusted"}]' + suffix)
         assert [item.hypothesis for item in result] == ["trusted"]
+
+
+@pytest.mark.parametrize("text", [
+    '{"verdict":"REFUTED","x":' + _arrays(64) + '}\n{"verdict":"CONFIRMED"}',
+    '{"x":' + "[" * 64 + '{"verdict":"CONFIRMED"}' + "]" * 64 + ',"verdict":"REFUTED"}',
+], ids=["later-object", "nested-object"])
+def test_depth_refusal_never_promotes_a_later_or_nested_verdict(text):
+    # An unbounded decoder reads REFUTED from both replies. The bounded scan cannot decode the
+    # refused container, so it must refuse rather than return the CONFIRMED that follows it or
+    # sits inside it.
+    with pytest.raises(verdict.VerdictParseError):
+        verdict.parse_verdict(text)
+
+
+@pytest.mark.parametrize("later", [
+    '[{"hypothesis":"b"}]',
+    '{"hypotheses":[{"hypothesis":"b"}]}',
+], ids=["later-array", "later-object"])
+def test_depth_refusal_never_promotes_a_later_hypothesis_list(later):
+    # An unbounded decoder returns hypothesis "a" from the refused first list.
+    text = '[{"hypothesis":"a","x":' + _arrays(63) + "}]\n" + later
+    with pytest.raises(verdict.VerdictParseError):
+        verdict.parse_hypotheses(text)
+
+
+@pytest.mark.parametrize("parser", ["verdict", "hypotheses"])
+def test_values_before_a_depth_refusal_keep_their_precedence(parser):
+    if parser == "verdict":
+        text = '{"verdict":"REFUTED"}\n{"x":' + _arrays(64) + '}\n{"verdict":"CONFIRMED"}'
+        result = verdict.parse_verdict(text)
+        assert (result.verdict, result.parse_mode) == ("REFUTED", "json")
+    else:
+        text = '[{"hypothesis":"a"}]\n[' + _arrays(64) + ']\n[{"hypothesis":"b"}]'
+        assert [item.hypothesis for item in verdict.parse_hypotheses(text)] == ["a"]
+
+
+# Openers that pass the plausibility filter but do not decode, each at O(1) cost: line-range
+# citations and quoted dict literals, as security-analysis replies carry them.
+_CITATIONS = "".join("buf overflow at lines [%d-%d] in foo.c\n" % (n, n + 3) for n in range(1, 4000, 4))
+_DICT_LITERALS = "".join('cfg = {"k%d": os.environ}\n' % n for n in range(1000))
+
+
+def test_many_cheap_failed_openers_do_not_refuse_a_hypotheses_reply():
+    result = verdict.parse_hypotheses(_CITATIONS + '[{"hypothesis":"kept","file":"foo.c"}]')
+    assert [(item.hypothesis, item.file) for item in result] == [("kept", "foo.c")]
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ('{"verdict":"REFUTED"}', ("REFUTED", "json")),
+    ("VERDICT: REFUTED", ("REFUTED", "label_line")),
+], ids=["json", "label-line"])
+def test_many_cheap_failed_openers_do_not_refuse_a_verdict_reply(answer, expected):
+    result = verdict.parse_verdict(_DICT_LITERALS + answer)
+    assert (result.verdict, result.parse_mode) == expected
+
+
+@pytest.mark.parametrize("parser, text", [
+    # Nested unclosed containers inside the depth bound: every opener walks to the end of the text.
+    ("hypotheses", "[" * 60 + "[]" * 99_000),
+    ("verdict", '{"a":' * 63 + "{" + '"a":0,' * 33_000),
+    ("hypotheses", '{"hypotheses":' * 63 + "{" + '"a":0,' * 33_000),
+], ids=["arrays", "objects", "hypotheses-objects"])
+def test_failed_decode_work_stays_linear(monkeypatch, parser, text):
+    walked = []
+    real = verdict.container_extent
+
+    def recording(value, start, *args, **kwargs):
+        deepest, end = real(value, start, *args, **kwargs)
+        walked.append(end - start)
+        return deepest, end
+
+    monkeypatch.setattr(verdict, "container_extent", recording)
+    parse = verdict.parse_verdict if parser == "verdict" else verdict.parse_hypotheses
+    with pytest.raises(verdict.VerdictParseError):
+        parse(text)
+    # Each of the (at most two) scans may walk its failure budget, one attempt past it, and the
+    # disjoint successful values once.
+    per_scan = verdict._FAILED_SCAN_FACTOR * len(text) + verdict._FAILED_SCAN_FLOOR + 2 * len(text)
+    assert sum(walked) <= 2 * per_scan, (sum(walked), len(text))

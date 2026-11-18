@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ..common.bounded_json import JsonBoundsExceeded, check_container_depth
+from ..common.bounded_json import JsonBoundsExceeded, container_extent
 from .errors import DatasetRecordError
 from .records import LineRange, parse_line_range
 
@@ -89,7 +89,12 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
     return [match.span(1) for match in _FENCE_RE.finditer(text)]
 
 
-_MAX_FAILED_DECODES = 64
+# Failed decodes are charged the characters their bracket walk covered. One scan may spend this
+# many times the reply's length plus the floor; past that it is refused. A failed opener in prose
+# (``[10-13]``, ``{"k": os.environ}``) walks a few characters, so realistic replies stay far below
+# the budget, while nested unclosed openers that each walk to the end of the text exhaust it.
+_FAILED_SCAN_FACTOR = 4
+_FAILED_SCAN_FLOOR = 65_536
 _OBJECT_START = frozenset('"}')
 _ARRAY_START = frozenset('"-0123456789[{tfn]')
 _WHITESPACE = " \t\n\r"
@@ -109,31 +114,35 @@ def _plausible(text: str, index: int, opener: str) -> bool:
 
 
 def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
-    """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right."""
+    """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right.
+
+    A container the nesting bound refuses raises ``_JsonScanRefused`` where it stands: values
+    yielded before it keep their precedence, and nothing after it or nested inside it is ever
+    yielded, because an unbounded decoder might have read the refused container instead. Failed
+    decodes are charged the length of their bracket walk; once the charges pass
+    ``_FAILED_SCAN_FACTOR`` times the text length plus ``_FAILED_SCAN_FLOOR`` the scan is
+    refused, so total work stays linear in the text.
+    """
     index = text.find(opener)
-    failures = 0
-    bounds_refused = False
+    budget = _FAILED_SCAN_FACTOR * len(text) + _FAILED_SCAN_FLOOR
     while index >= 0:
         if not _plausible(text, index, opener):
             index = text.find(opener, index + 1)
             continue
         try:
-            check_container_depth(text, index)
+            _deepest, walked_to = container_extent(text, index)
             value, end = _DECODER.raw_decode(text, index)
-        except (JsonBoundsExceeded, ValueError, RecursionError) as exc:
-            if isinstance(exc, (JsonBoundsExceeded, RecursionError)):
-                bounds_refused = True
-            # A legitimate reply has a handful of brace groups; 64 failed
-            # decodes bound the scan so a long run of openers stays linear.
-            failures += 1
-            if failures >= _MAX_FAILED_DECODES:
-                raise _JsonScanRefused("the reply exceeds the JSON scan failure limit") from None
+        except (JsonBoundsExceeded, RecursionError):
+            raise _JsonScanRefused("the reply holds JSON refused by the nesting bound") from None
+        except ValueError:
+            # The decoder stops inside the walked span, so the walk is what this attempt cost.
+            budget -= walked_to - index
+            if budget < 0:
+                raise _JsonScanRefused("the reply exceeds the JSON scan work limit") from None
             index = text.find(opener, index + 1)
             continue
         yield index, value
         index = text.find(opener, end)
-    if bounds_refused:
-        raise _JsonScanRefused("the reply holds JSON refused by the nesting bound")
 
 
 def _reason(value: object) -> str:
@@ -193,28 +202,29 @@ def _hypothesis(item: object) -> ParsedHypothesis | None:
                             hypothesis=hypothesis.strip()[:4000], severity=text("severity", 32))
 
 
+def _usable(value: object, max_items: int) -> tuple[ParsedHypothesis, ...] | None:
+    """The hypotheses of a candidate list: None when it is not a list or holds only unusable items."""
+    if not isinstance(value, list):
+        return None
+    found = [parsed for parsed in (_hypothesis(item) for item in value) if parsed is not None]
+    return tuple(found[:max_items]) if found or not value else None
+
+
 def parse_hypotheses(text: str, max_items: int = 50) -> tuple[ParsedHypothesis, ...]:
-    """Return the hypotheses a model listed for a source chunk (a JSON array, or ``{"hypotheses": [...]}``)."""
+    """Return the hypotheses a model listed for a source chunk (a JSON array, or ``{"hypotheses": [...]}``).
+
+    Candidates rank as every array in reply order, then every ``{"hypotheses": [...]}`` object in
+    reply order; the first usable one wins. A scan refusal (``_JsonScanRefused``) propagates at the
+    point it occurs, so a candidate ranked after a refused container is never returned.
+    """
     cleaned = _clean(text)
-    candidates = []
-    scan_refusal: _JsonScanRefused | None = None
-    try:
-        for _start, value in _objects(cleaned, "["):
-            candidates.append(value)
-    except _JsonScanRefused as exc:
-        scan_refusal = exc
-    try:
-        for _start, value in _objects(cleaned, "{"):
-            if isinstance(value, dict) and isinstance(value.get("hypotheses"), list):
-                candidates.append(value["hypotheses"])
-    except _JsonScanRefused as exc:
-        if scan_refusal is None:
-            scan_refusal = exc
-    for value in candidates:
-        if isinstance(value, list):
-            found = [parsed for parsed in (_hypothesis(item) for item in value) if parsed is not None]
-            if found or not value:
-                return tuple(found[:max_items])
-    if scan_refusal is not None:
-        raise scan_refusal
+    for _start, value in _objects(cleaned, "["):
+        found = _usable(value, max_items)
+        if found is not None:
+            return found
+    for _start, value in _objects(cleaned, "{"):
+        if isinstance(value, dict):
+            found = _usable(value.get("hypotheses"), max_items)
+            if found is not None:
+                return found
     raise VerdictParseError("the reply holds no hypothesis list")

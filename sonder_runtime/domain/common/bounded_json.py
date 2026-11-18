@@ -38,6 +38,10 @@ DEFAULT_MAX_ITEM_BYTES = 65_536
 _STRING_TO_END = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.S)
 _NOT_BRACKET = re.compile(r'[^\[\]{}]+')
 _STRUCTURAL = re.compile(r'[\[\]{}",:]')
+# What the container walk acts on: brackets and string openers only, so the
+# ',' and ':' between them are skipped inside ``re`` rather than visited one
+# at a time in Python.
+_CONTAINER_TOKEN = re.compile(r'[\[\]{}"]')
 _IN_STRING = re.compile(r'["\\]')
 
 
@@ -85,32 +89,45 @@ def check_container_depth(text: str, start: int,
     """Bound the first container at ``start``, without scanning later values.
 
     Strings, including unterminated ones, are skipped with the same linear
-    matcher as ``check_depth``. Only structural tokens are walked in Python;
-    no suffix is copied. Malformed syntax remains the decoder's responsibility.
+    matcher as ``check_depth``. Only brackets and string openers are walked in
+    Python; no suffix is copied. Malformed syntax remains the decoder's
+    responsibility.
+    """
+    return container_extent(text, start, max_depth)[0]
+
+
+def container_extent(text: str, start: int,
+                     max_depth: int = DEFAULT_MAX_DEPTH) -> tuple[int, int]:
+    """``(deepest, end)`` for the container at ``start``; raises like ``check_container_depth``.
+
+    ``end`` is where the walk stopped: just past the bracket that closes the
+    container, or ``len(text)`` when it never closes. ``end - start`` is what
+    the walk cost in characters, so a caller can charge repeated walks to a
+    budget. Linear in ``end - start``.
     """
     value = _as_text(text)
     if start < 0 or start >= len(value) or value[start] not in "[{":
         raise JsonBoundsExceeded("JSON container does not start at the supplied offset")
     limit = max(1, int(max_depth))
     position, depth, deepest = start, 0, 0
-    while (match := _STRUCTURAL.search(value, position)) is not None:
+    while (match := _CONTAINER_TOKEN.search(value, position)) is not None:
         position = match.end()
         token = match.group()
         if token == '"':
             string = _STRING_TO_END.match(value, match.start())
             if string is None:
-                return deepest
+                return deepest, len(value)
             position = string.end()
         elif token in "[{":
             depth += 1
             if depth > limit:
                 raise JsonBoundsExceeded(f"JSON nesting exceeds depth {limit}")
             deepest = max(deepest, depth)
-        elif token in "]}":
+        else:
             depth -= 1
             if depth == 0:
-                return deepest
-    return deepest
+                return deepest, position
+    return deepest, len(value)
 
 
 def loads_bounded(text: object, *, max_bytes: int, max_depth: int = DEFAULT_MAX_DEPTH):
@@ -353,5 +370,6 @@ def iter_array_objects(chunks: Iterable[object], *, key: str | None = "traceEven
 
 __all__ = [
     "ArrayObjectScan", "DEFAULT_MAX_DEPTH", "DEFAULT_MAX_ITEM_BYTES",
-    "JsonBoundsExceeded", "check_container_depth", "check_depth", "iter_array_objects", "loads_bounded",
+    "JsonBoundsExceeded", "check_container_depth", "check_depth", "container_extent", "iter_array_objects",
+    "loads_bounded",
 ]
