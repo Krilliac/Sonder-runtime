@@ -273,6 +273,13 @@ _HEAD_GAP_RE = re.compile(r"[^\x21-\x7e\n]*")
 _HEAD_WORD_RE = re.compile(r"[A-Za-z0-9_]*")
 _HEADER_DIRECTIVE_WORDS = ("include", "import", "embed")
 _HEADER_PRAGMA_WORDS = ("dependency", "include_alias")
+# An operator that takes a header-name operand (``__has_include``, ``__has_include_next``,
+# ``__has_include__``, ``__has_embed``), or a piece of one that ``##`` can complete: ``__has_``
+# followed by a shorter prefix of ``include`` or ``embed`` that ends the identifier
+# (``CAT(__has_, include)``, ``__has_in##clude``). Other ``__has_`` names (``__has_builtin``,
+# ``__has_trivial_copy``, ...) take ordinary tokens and do not match.
+_HEADER_NAME_OPERATOR_RE = re.compile(
+    r"__has_(?:include|embed|(?:i(?:n(?:c(?:l(?:u(?:d)?)?)?)?)?|e(?:m(?:b(?:e)?)?)?)?(?![A-Za-z0-9_$]))")
 
 
 def _run_end(pattern: re.Pattern[str], text: str, start: int) -> int:
@@ -311,7 +318,9 @@ def _header_name_suspect_in_context(masked: str, offsets: list[int]) -> bool:
     - anywhere on a directive line whose name holds include, import or embed (``#include``,
       ``#include_next``, ``#import``, ``#embed``, ``#__include_macros``), or a ``#pragma`` line
       naming ``dependency`` or ``include_alias``;
-    - anywhere after ``__has_`` on the same line (``__has_include(``, ``__has_embed(``, ...);
+    - anywhere after ``__has_include`` or ``__has_embed`` on the same line, or after a piece of
+      one that ``##`` can complete (``_HEADER_NAME_OPERATOR_RE``); other ``__has_`` names such
+      as ``__has_builtin`` take no header-name;
     - right after ``(`` on an ``#if``/``#elif`` line (a macro alias of ``__has_include``);
     - anywhere on a C++20 ``import`` or ``export import`` line.
 
@@ -340,7 +349,8 @@ def _header_name_suspect_in_context(masked: str, offsets: list[int]) -> bool:
             else:
                 header_line = name == "import"
                 conditional = False
-            first_has = masked.find("__has_", line_start, line_end)
+            has_name = _HEADER_NAME_OPERATOR_RE.search(masked, line_start, line_end)
+            first_has = -1 if has_name is None else has_name.start()
         if header_line or 0 <= first_has < offset:
             return True
         if conditional:

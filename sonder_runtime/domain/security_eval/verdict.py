@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ..common.bounded_json import JsonBoundsExceeded, container_extent
+from ..common.bounded_json import DEFAULT_MAX_DEPTH, container_extents
 from .errors import DatasetRecordError
 from .records import LineRange, parse_line_range
 
@@ -89,12 +89,21 @@ def _fence_spans(text: str) -> list[tuple[int, int]]:
     return [match.span(1) for match in _FENCE_RE.finditer(text)]
 
 
-# Failed decodes are charged the characters their bracket walk covered. One scan may spend this
-# many times the reply's length plus the floor; past that it is refused. A failed opener in prose
-# (``[10-13]``, ``{"k": os.environ}``) walks a few characters, so realistic replies stay far below
-# the budget, while nested unclosed openers that each walk to the end of the text exhaust it.
+# What one scan guarantees. A single linear pass (``container_extents``) gives every opener its
+# extent and nesting depth, so a lookup is O(1). Each decode reads a copy of its opener's extent,
+# which the decoder never reads past; that keeps a failure's error position, and the line count
+# ``JSONDecodeError`` makes up to it, inside the extent instead of the whole reply. Each failed
+# decode is charged what it read plus a ``_COPY_DIVISOR``-th of its copy (``_failed_decode_cost``);
+# once a scan's charges pass ``_FAILED_SCAN_FACTOR`` times the reply's length plus the floor, the
+# scan is refused. No single charge exceeds 1 + 1/64 times the length, so the failed decodes of a
+# scan read at most about (factor + 1) times the length plus the floor and copy at most
+# ``_COPY_DIVISOR`` times that; successful decodes are disjoint and read the reply once. A failed
+# opener in prose (``[0, len)``, ``[10-13]``, ``{"k": os.environ}``) is charged a few characters
+# plus its copy, so realistic replies stay far below the budget, while nested openers whose
+# decodes each read to the end of the reply exhaust it.
 _FAILED_SCAN_FACTOR = 4
 _FAILED_SCAN_FLOOR = 65_536
+_COPY_DIVISOR = 64
 _OBJECT_START = frozenset('"}')
 _ARRAY_START = frozenset('"-0123456789[{tfn]')
 _WHITESPACE = " \t\n\r"
@@ -113,36 +122,57 @@ def _plausible(text: str, index: int, opener: str) -> bool:
     return text[following] in (_OBJECT_START if opener == "{" else _ARRAY_START)
 
 
+def _failed_decode_cost(piece: str, error: ValueError) -> int:
+    """The charge for a ``raw_decode`` of ``piece`` (one opener's extent) that raised ``error``.
+
+    The decoder reads up to the error position. The one error reported before what was read is at
+    a quote: an unterminated string is reported where it starts, after a read to the end. An error
+    at a quote, and a ``ValueError`` with no position (the int-string conversion limit), are
+    charged the whole piece. The copy adds a ``_COPY_DIVISOR``-th of its length.
+    """
+    read = len(piece)
+    if isinstance(error, json.JSONDecodeError) and not piece.startswith('"', error.pos):
+        read = error.pos
+    return max(1, read) + len(piece) // _COPY_DIVISOR
+
+
 def _objects(text: str, opener: str) -> Iterator[tuple[int, Any]]:
     """Yield ``(start, value)`` for each decodable JSON value starting at ``opener``, left to right.
 
     A container the nesting bound refuses raises ``_JsonScanRefused`` where it stands: values
     yielded before it keep their precedence, and nothing after it or nested inside it is ever
-    yielded, because an unbounded decoder might have read the refused container instead. Failed
-    decodes are charged the length of their bracket walk; once the charges pass
-    ``_FAILED_SCAN_FACTOR`` times the text length plus ``_FAILED_SCAN_FLOOR`` the scan is
+    yielded, because an unbounded decoder might have read the refused container instead. The
+    extents and depths come from one ``container_extents`` pass, made at the first plausible
+    opener. Each decode reads a copy of the opener's extent, which yields what decoding the
+    reply in place would. Failed decodes are charged ``_failed_decode_cost``; once the charges
+    pass ``_FAILED_SCAN_FACTOR`` times the text length plus ``_FAILED_SCAN_FLOOR`` the scan is
     refused, so total work stays linear in the text.
     """
     index = text.find(opener)
     budget = _FAILED_SCAN_FACTOR * len(text) + _FAILED_SCAN_FLOOR
+    extents: dict[int, tuple[int, int]] | None = None
     while index >= 0:
         if not _plausible(text, index, opener):
             index = text.find(opener, index + 1)
             continue
+        if extents is None:
+            extents = container_extents(text)
+        deepest, extent_end = extents[index]
+        if deepest > DEFAULT_MAX_DEPTH:
+            raise _JsonScanRefused("the reply holds JSON refused by the nesting bound")
+        piece = text[index:extent_end]
         try:
-            _deepest, walked_to = container_extent(text, index)
-            value, end = _DECODER.raw_decode(text, index)
-        except (JsonBoundsExceeded, RecursionError):
+            value, used = _DECODER.raw_decode(piece, 0)
+        except RecursionError:
             raise _JsonScanRefused("the reply holds JSON refused by the nesting bound") from None
-        except ValueError:
-            # The decoder stops inside the walked span, so the walk is what this attempt cost.
-            budget -= walked_to - index
+        except ValueError as error:
+            budget -= _failed_decode_cost(piece, error)
             if budget < 0:
                 raise _JsonScanRefused("the reply exceeds the JSON scan work limit") from None
             index = text.find(opener, index + 1)
             continue
         yield index, value
-        index = text.find(opener, end)
+        index = text.find(opener, index + used)
 
 
 def _reason(value: object) -> str:

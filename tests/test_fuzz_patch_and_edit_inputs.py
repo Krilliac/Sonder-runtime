@@ -1522,6 +1522,9 @@ _HEADER_NAME_BYPASSES = {
     "has-include-quoted-escape": ('#if __has_include("x\\") || 1 //"/*\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
     "skipped-include-quoted-escape": ('#if 0\n#include "x\\" "/*"\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
     "cxx20-import": ("import <a/*b.h>;\n", "#if 0 //*/\n#endif\n"),
+    # A __has_include pasted from pieces, with a macro-made ``(``: the pieces still name it.
+    "pasted-has-include": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has_, include) LP <a/*b.h>)\n#endif\n",
+                           "#if 0 //*/ c.h>)\n#endif\n"),
 }
 
 
@@ -1552,6 +1555,10 @@ def test_header_name_comment_bypass_is_refused_end_to_end():
     "#define LT(a, b) ((a) < (b)) /* a > b */\n",
     'if (a < b) { // x -> "y"\n}\n',
     'static_assert(N < 4, "N > 3 is unsupported");\n',
+    # Only __has_include and __has_embed take a header-name; other __has_ names take tokens.
+    'static_assert(__has_trivial_copy(T), "T must be \\"trivial\\"");\n',
+    'static_assert(__has_trivial_destructor(T) && sizeof(T) < 16, "size > 16");\n',
+    "#if __has_builtin(__builtin_expect) && N < 3 /* see a->b */\n#endif\n",
 ])
 def test_header_name_rule_keeps_ordinary_code(text):
     found = scan_added_lexings("", text, include_ok=OK)

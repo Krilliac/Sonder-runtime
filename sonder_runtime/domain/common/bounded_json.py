@@ -130,6 +130,100 @@ def container_extent(text: str, start: int,
     return deepest, len(value)
 
 
+def container_extents(text: object) -> dict[int, tuple[int, int]]:
+    """``container_extent`` for every container opener in ``text`` at once, without a depth limit.
+
+    Maps the offset of every ``[`` and ``{``, inside strings or not (a caller may
+    try any offset), to the ``(deepest, end)`` that ``container_extent(text,
+    offset)`` returns whenever it does not raise; the caller compares
+    ``deepest`` with its own limit. Linear in ``len(text)``.
+
+    A walk from an opener reads brackets up to the next quote, skips the string
+    that quote opens, and goes on right after that string closes. So every walk
+    that reaches a given quote continues identically from there, and the
+    quote-free stretches between quotes form a forest: each stretch continues
+    into the one after its next quote's string, or ends the text. One
+    right-to-left bracket match over each stretch, run on top of the state of
+    the stretch it continues into and undone before that stretch's other
+    continuations are visited, answers every opener in it. Each stretch is
+    matched and undone once.
+
+    Where a walk's string ends, for every quote: a quote strictly inside a
+    string matched from an earlier quote was escaped there, so a match started
+    at it rejoins that match and ends at the same place; every other quote is
+    matched with ``_STRING_TO_END``, and those matches overlap by at most one
+    character.
+    """
+    value = _as_text(text)
+    size = len(value)
+    tokens = [match.start() for match in _CONTAINER_TOKEN.finditer(value)]
+    quote_slots = [slot for slot, offset in enumerate(tokens) if value[offset] == '"']
+    quote_number = {tokens[slot]: number for number, slot in enumerate(quote_slots)}
+    string_ends: list[int] = []
+    matched_to = -1
+    for slot in quote_slots:
+        offset = tokens[slot]
+        if offset >= matched_to - 1:
+            matched_to = _STRING_TO_END.match(value, offset).end()
+        string_ends.append(matched_to)
+    # Stretch k holds the tokens before quote k (the last stretch: after the last quote) and
+    # continues into the stretch after the quote that closes quote k's string. ``final`` stands
+    # for the end of the text: a string that runs to it leaves nothing to walk.
+    stretches = len(quote_slots) + 1
+    final = stretches
+    children: list[list[int]] = [[] for _ in range(stretches + 1)]
+    for number, end in enumerate(string_ends):
+        children[final if end >= size else quote_number[end - 1] + 1].append(number)
+    children[final].append(stretches - 1)
+    extents: dict[int, tuple[int, int]] = {}
+    # Right-to-left match state: closers not yet matched (nearest last), and for each the
+    # deepest container closed before it while it was the nearest. Slot 0 is the end of the
+    # text; its depth is the deepest the unclosed rest reaches.
+    closers = [size]
+    inner = [0]
+    undo: list[tuple[int, ...]] = []
+    pending = [(stretch, -1) for stretch in children[final]]
+    while pending:
+        stretch, mark = pending.pop()
+        if mark >= 0:
+            while len(undo) > mark:
+                entry = undo.pop()
+                if not entry:
+                    closers.pop()
+                    inner.pop()
+                elif len(entry) == 3:
+                    inner[-1] = entry[2]
+                    closers.append(entry[0])
+                    inner.append(entry[1])
+                else:
+                    inner[0] = entry[0]
+            continue
+        pending.append((stretch, len(undo)))
+        low = quote_slots[stretch - 1] + 1 if stretch else 0
+        high = quote_slots[stretch] if stretch < len(quote_slots) else len(tokens)
+        for slot in range(high - 1, low - 1, -1):
+            offset = tokens[slot]
+            if value[offset] in "]}":
+                closers.append(offset)
+                inner.append(0)
+                undo.append(())
+            elif len(closers) > 1:
+                close = closers.pop()
+                nested = inner.pop()
+                outer = inner[-1]
+                if nested + 1 > outer:
+                    inner[-1] = nested + 1
+                undo.append((close, nested, outer))
+                extents[offset] = (nested + 1, close + 1)
+            else:
+                outer = inner[0]
+                inner[0] = outer + 1
+                undo.append((outer,))
+                extents[offset] = (outer + 1, size)
+        pending.extend((child, -1) for child in children[stretch])
+    return extents
+
+
 def loads_bounded(text: object, *, max_bytes: int, max_depth: int = DEFAULT_MAX_DEPTH):
     """``json.loads`` with a byte cap, a depth pre-scan and bounded failures."""
     if isinstance(text, (bytes, bytearray, memoryview)) and len(text) > int(max_bytes):
@@ -370,6 +464,7 @@ def iter_array_objects(chunks: Iterable[object], *, key: str | None = "traceEven
 
 __all__ = [
     "ArrayObjectScan", "DEFAULT_MAX_DEPTH", "DEFAULT_MAX_ITEM_BYTES",
-    "JsonBoundsExceeded", "check_container_depth", "check_depth", "container_extent", "iter_array_objects",
+    "JsonBoundsExceeded", "check_container_depth", "check_depth", "container_extent", "container_extents",
+    "iter_array_objects",
     "loads_bounded",
 ]
