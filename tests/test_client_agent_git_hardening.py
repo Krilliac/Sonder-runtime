@@ -293,3 +293,26 @@ def test_git_tools_still_work_on_a_normal_repository(tmp_path: Path):
     assert diff.ok and "+two" in diff.output
     assert log.ok and "first commit" in log.output
     assert branch.ok and branch.output.strip()
+
+
+def test_driver_name_containing_equals_fails_closed(tmp_path: Path):
+    """``-c filter.a=b.process=`` sets ``filter.a``: an '=' in the name must refuse, not mis-override."""
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    (ws / ".gitattributes").write_text("*.txt filter=a=b\n", encoding="utf-8")
+    (ws / "a.txt").write_text("same\n", encoding="utf-8")
+    _git(ws, "add", ".")
+    _git(ws, "commit", "-q", "-m", "init")
+    command, marker = _payload(tmp_path)
+    _append_config(ws, f'[filter "a=b"]\n\tclean = {command}\n')
+    stat = (ws / "a.txt").stat()
+    os.utime(ws / "a.txt", (stat.st_atime + 120, stat.st_mtime + 120))
+    policy = ClientAgentPolicy(workspace_root=ws, mode="acceptEdits")
+
+    res = execute_client_tool("git_status", {}, policy=policy)
+
+    assert not marker.exists()
+    assert res.ok is False
+    assert "refusing to run git" in res.error
+    subprocess.run(["git", "status"], cwd=ws, capture_output=True, check=False)
+    assert marker.exists(), "control: plain git must run the clean filter named 'a=b'"
