@@ -270,6 +270,33 @@ String clientToolRisk(String tool) {
   }
 }
 
+int _clientRiskRank(String risk) {
+  switch (risk.trim()) {
+    case 'read_only':
+      return 0;
+    case 'write':
+    case 'workspace_write':
+      return 1;
+    case 'execute':
+    case 'host_exec':
+      return 2;
+    default:
+      return 3; // unknown: the strictest
+  }
+}
+
+/// The risk to gate a client tool on: the STRICTER of what the server
+/// declared and what this app classifies [tool] as, so a server or model
+/// cannot downgrade a tool. An empty declared risk means "not declared"; an
+/// unknown declared value ranks above everything and is returned as is, so
+/// no mode except bypass runs it without a prompt.
+String effectiveClientToolRisk(String declared, String tool) {
+  final local = clientToolRisk(tool);
+  final d = declared.trim();
+  if (d.isEmpty) return local;
+  return _clientRiskRank(d) >= _clientRiskRank(local) ? d : local;
+}
+
 /// Whether [mode] allows executing a client tool of [risk] without prompting
 /// `"Approve on my PC"`.
 bool clientModeAllowsWithoutPrompt(String mode, String risk) {
