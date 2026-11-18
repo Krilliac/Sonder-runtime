@@ -14,6 +14,7 @@ from sonder_runtime.adapters.inference.rpc_cluster import (
     current_780m_profile,
     load_hardware_profiles,
     log_sharded_readiness,
+    log_sharded_readiness_from_env,
     probe_sharded_server,
     rx_9060_xt_16gb_profile,
 )
@@ -62,16 +63,52 @@ def test_readiness_never_raises(caplog: pytest.LogCaptureFixture) -> None:
     assert "probe failed (RpcClusterConfigError)" in caplog.text
 
 
-def test_serve_startup_uses_readiness_helper() -> None:
-    source = Path("sonder_runtime/interfaces/http/serve.py").read_text(encoding="utf-8")
-    assert "log_sharded_readiness(_serve_logger, rpc_base)" in source
-    assert "sharded_health.models" not in source
+def _healthy(url: str) -> ShardedServerHealth:
+    return ShardedServerHealth(base_url=url, healthy=True, model_ids=("sonder-rpc",))
+
+
+def test_startup_probe_runs_only_when_base_url_and_peers_are_set() -> None:
+    logger = logging.getLogger("test.rpc.startup")
+    seen: list[str] = []
+
+    def probe(url: str) -> ShardedServerHealth:
+        seen.append(url)
+        return _healthy(url)
+
+    both = {"SONDER_OPENAI_BASE_URL": " http://127.0.0.1:11438 ", "SONDER_RPC_PEERS": "10.77.0.2:50052"}
+    assert log_sharded_readiness_from_env(logger, both, probe=probe) is True
+    assert seen == ["http://127.0.0.1:11438"]
+    for env in (
+        {},
+        {"SONDER_OPENAI_BASE_URL": "http://127.0.0.1:11438"},
+        {"SONDER_RPC_PEERS": "10.77.0.2:50052"},
+        {"SONDER_OPENAI_BASE_URL": "  ", "SONDER_RPC_PEERS": "10.77.0.2:50052"},
+    ):
+        assert log_sharded_readiness_from_env(logger, env, probe=probe) is False
+    assert len(seen) == 1
+
+
+def test_serve_startup_calls_env_readiness_helper() -> None:
+    serve = Path(__file__).resolve().parents[1] / "sonder_runtime" / "interfaces" / "http" / "serve.py"
+    source = serve.read_text(encoding="utf-8")
+    assert "log_sharded_readiness_from_env(_serve_logger, os.environ)" in source
 
 
 def test_config_rejects_rpc_peers_outside_private_link_from_env() -> None:
     with pytest.raises(ConfigError) as info:
         load_config(env={"SONDER_RPC_PEERS": "192.168.1.5:50052"})
     assert "outside private link" in " ".join(info.value.errors)
+
+
+def test_config_reads_rpc_peers_from_os_environ_when_env_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SONDER_RPC_PEERS", "192.168.1.5:50052")
+    with pytest.raises(ConfigError) as info:
+        load_config()
+    assert "outside private link" in " ".join(info.value.errors)
+    monkeypatch.setenv("SONDER_RPC_PEERS", "10.77.0.2:50052")
+    load_config()
 
 
 def test_config_rejects_rpc_peers_from_secrets_file(tmp_path: Path) -> None:

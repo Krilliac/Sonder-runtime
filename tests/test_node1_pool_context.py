@@ -92,10 +92,14 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
     assert "vram_bytes" not in first
     assert "ram_bytes" not in first
     assert "kv_cache_type" not in first
-    # The first probe fetches /api/show (bounded), so tool support is real.
+    # The probe never waits on /api/show; a background fill caches it.
+    probe.wait_show_fill(10.0)
     assert len(show_calls) == 1
+    first = probe(NODE1)
     assert first["supports_tools"]["astra-cyber-35b-a3b:latest"] is True
-    assert first["model_contexts"]["astra-cyber-35b-a3b:latest"] == 262144
+    # Loaded model: /api/ps runtime context (32768) wins over the trained
+    # maximum (262144) that /api/show reports.
+    assert first["model_contexts"]["astra-cyber-35b-a3b:latest"] == 32768
 
     details = probe.show(NODE1, "astra-cyber-35b-a3b:latest", digest=digest)
     assert details["context_length"] == 262144
@@ -105,7 +109,7 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
 
     # Subsequent probe(NODE1) and show() calls with same digest reuse cached /api/show.
     second = probe(NODE1)
-    assert second["model_contexts"]["astra-cyber-35b-a3b:latest"] == 262144
+    assert second["model_contexts"]["astra-cyber-35b-a3b:latest"] == 32768
     assert second["supports_tools"]["astra-cyber-35b-a3b:latest"] is True
     probe.show(NODE1, "astra-cyber-35b-a3b:latest", digest=digest)
     assert len(show_calls) == 1
@@ -453,9 +457,12 @@ def test_default_capability_prober_bounds_show_fetches_per_probe():
         raise AssertionError(url)
 
     probe = _default_capability_prober(allow_remote=True, open_url=fake_open_url)
-    first = probe(NODE1)
+    probe(NODE1)
+    probe.wait_show_fill(10.0)
     assert len(show_calls) == ollama_pool._SHOW_FETCHES_PER_PROBE
+    first = probe(NODE1)
     assert len(first["supports_tools"]) == ollama_pool._SHOW_FETCHES_PER_PROBE
+    probe.wait_show_fill(10.0)
     second = probe(NODE1)
     # Cached models are not refetched; the remainder is filled in.
     assert len(show_calls) == len(names)
