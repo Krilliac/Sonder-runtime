@@ -240,6 +240,10 @@ def require_generation(
     """
     if text_only and rung is None:
         return
+    provider = str(getattr(rung, "provider", "") or "") if rung is not None else ""
+    raw_tier = str(getattr(rung, "tier", "") or "").strip() if rung is not None else ""
+    tier = raw_tier.lower()
+    is_sonder_model_pin = provider == "sonder_inference" and tier.startswith("model:")
     deny = generation_deny_list(policy)
     if not text_only:
         names = [model]
@@ -247,12 +251,18 @@ def require_generation(
             names.append(payload.get("model"))
         for name in names:
             verdict = _models.decide(name, deny, free_form=False)
-            if verdict.denied and not (rung is None and _generation_permit.permits(name, policy)):
+            if verdict.denied and not ((rung is None or is_sonder_model_pin) and _generation_permit.permits(name, policy)):
                 raise _generation_refused(_models.refusal_message(verdict.model, verdict.status, verdict.matched))
     if rung is None:
         return
-    provider = str(getattr(rung, "provider", "") or "")
-    tier = str(getattr(rung, "tier", "") or "").strip().lower()
+    if is_sonder_model_pin:
+        pinned = str((payload.get("model") if isinstance(payload, Mapping) else "") or raw_tier[len("model:"):] or model or "").strip()
+        if text_only or _generation_permit.permits(pinned or model, policy):
+            return
+        verdict = _models.decide_served(pinned, deny)
+        if verdict.status is _models.ModelLaneStatus.DENIED:
+            raise _generation_refused(_served_message(tier, provider, verdict))
+        return
     try:
         served = _provider_model(provider, tier, "", None)
     except Exception as exc:  # noqa: BLE001 - the reply's served model is judged instead
@@ -285,6 +295,9 @@ def require_served(
     provider = str(getattr(rung, "provider", "") or "")
     tier = str(getattr(rung, "tier", "") or "").strip().lower()
     verdict = _reported_verdict(reported, generation_deny_list(policy))
+    if provider == "sonder_inference" and tier.startswith("model:") and verdict.denied:
+        if text_only or _generation_permit.permits(verdict.model, policy):
+            return
     if _judge_reply(verdict, text_only):
         raise _generation_refused(_served_message(tier, provider, verdict))
 

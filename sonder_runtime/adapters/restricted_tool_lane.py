@@ -203,6 +203,13 @@ def admin_opt_in(enabled: bool = True) -> Iterator[None]:
         _ADMIN_OPT_IN.reset(token)
 
 
+_LOCAL_PRIVATE_PROVIDERS = frozenset({"", "ollama", "sonder_inference"})
+
+
+def _is_non_local_provider(provider: Any) -> bool:
+    return str(provider or "").strip().lower() not in _LOCAL_PRIVATE_PROVIDERS
+
+
 def admit(
     lane_entry: LaneEntry | None,
     selector: Any,
@@ -227,7 +234,7 @@ def admit(
     if admin_opt_in_active():
         target = tuple(resolve())
         model, cloud, _augment, label = target
-        if model is not None and not cloud and not provider_for(label) and str(label or "").startswith("model:"):
+        if model is not None and not cloud and not _is_non_local_provider(provider_for(label)) and str(label or "").startswith("model:"):
             return RestrictedRun(
                 lane=lane_entry.lane, model=str(model), tools=frozenset(),
                 profiles=("admin-opt-in",), secret_globs=(),
@@ -242,7 +249,7 @@ def admit(
         return None, _refusal(
             "model '%s' has a restricted tool grant but is not an installed local model." % (selector,)
         )
-    if cloud or provider_for(label):
+    if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
             "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
         )
