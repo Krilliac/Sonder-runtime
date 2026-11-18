@@ -37,6 +37,12 @@ _GIT_PROGRAM_KEY_RE = re.compile(
     r"(?P<key>clean|smudge|process|required|driver|textconv)$",
     re.IGNORECASE,
 )
+# Driver names an override can address.  ``-c`` splits at the first '=', so a
+# name containing '=' (``filter.a=b.clean=...`` sets ``filter.a``) would leave
+# the real driver live; quotes, whitespace, control and non-ASCII characters
+# are refused for the same reason.  Matched without IGNORECASE so no Unicode
+# case-fold (KELVIN SIGN, long s) slips into the ASCII ranges.
+_SAFE_DRIVER_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # ``git merge-file`` is git's own three-way text merge: what the built-in
 # driver does, with none of the repository's configuration.
 BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
@@ -90,6 +96,10 @@ def driver_overrides(keys: Iterable[str]) -> list[str]:
         if match is None:
             raise GitProgramConfigError("unexpected git driver configuration key: %s" % key)
         section, name = match.group("section").lower(), match.group("name")
+        if _SAFE_DRIVER_NAME_RE.fullmatch(name) is None:
+            raise GitProgramConfigError(
+                f"git {section} driver name {name!r} cannot be overridden safely"
+            )
         if (section, name) in seen:
             continue
         seen.add((section, name))
