@@ -1445,7 +1445,8 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    // A running row pulses for as long as it runs, so it never settles.
+    await tester.pump(const Duration(milliseconds: 500));
 
     final primaryFeed = find.byType(LiveExecutionFeed).first;
     Finder inPrimary(Finder matching) =>

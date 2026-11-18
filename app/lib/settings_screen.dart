@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -154,6 +155,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ConnectionDiagnosis? _connection;
   ActionOutcome? _launcherOutcome;
   ActionOutcome? _accountOutcome;
+  ActionOutcome? _apiOutcome;
   String? _keyringWarning;
   String? _saveError;
 
