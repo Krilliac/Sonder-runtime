@@ -7,6 +7,7 @@ uniform configuration or an exact tier dispatcher for a mixed configuration.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING
 
 from ..application.ports.model_gateway import ModelGateway
 from ..domain.common.errors import InvalidInput
@@ -14,14 +15,25 @@ from .inference.ollama_gateway import OllamaGateway
 from .provider_bindings import ProviderBindings, provider_bindings_from_env
 from .provider_dispatch.gateway import ProviderDispatchGateway
 
+if TYPE_CHECKING:
+    from ..application.ports.model_target import (
+        ModelGenerateFactory,
+        ModelTargetResolver,
+    )
+    from .provider_dispatch.fallback import FallbackObserver
+
 ProviderFactory = Callable[[], ModelGateway]
 
 
 def build_model_gateway(
     bindings: ProviderBindings | None = None,
     provider_factories: Mapping[str, ProviderFactory] | None = None,
-    *, target_resolver=None, generate_factory=None, embedding_provider=None,
-    backend: str | None = None, fallback_observer=None,
+    *,
+    target_resolver: ModelTargetResolver | None = None,
+    generate_factory: ModelGenerateFactory | None = None,
+    embedding_provider: object = None,
+    backend: str | None = None,
+    fallback_observer: FallbackObserver | None = None,
 ) -> ModelGateway:
     """Construct the configured direct or tier-dispatching model gateway.
 

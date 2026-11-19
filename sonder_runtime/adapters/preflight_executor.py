@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.application.ports.preflight import (
     PreflightConfig,
     PreflightReport,
 )
+
+if TYPE_CHECKING:
+    from sonder_runtime.platform.config import SonderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +28,7 @@ class PreflightExecutor:
         import sonder_runtime.adapters.preflight as implementation
 
         report = implementation.run_preflight(
-            config,
+            cast("SonderConfig", config),
             check_ollama=check_ollama,
             ollama_timeout=ollama_timeout,
         )

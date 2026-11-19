@@ -4,7 +4,7 @@ COMPLETE_DEFAULT_LIMIT = 12
 COMPLETE_MAX_LIMIT = 50
 
 
-def completion_limit(raw):
+def completion_limit(raw: object) -> int:
     """Clamp a completion ``limit`` into the supported 1..50 range."""
     try:
         value = int(str(raw).strip())

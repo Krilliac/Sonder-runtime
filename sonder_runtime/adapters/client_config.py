@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from typing import Mapping
 
 
-def parse_argv(argv):
+def parse_argv(argv: list[str]) -> tuple[str | None, str | None]:
     """Parse standalone-client ``--server`` and ``--key`` overrides."""
     server = None
     key = None
@@ -23,7 +24,7 @@ def parse_argv(argv):
     return server, key
 
 
-def resolve_config(argv, *, environ=None):
+def resolve_config(argv: list[str], *, environ: Mapping[str, str] | None = None) -> tuple[str, str]:
     """Resolve ``(server, api_key)`` from argv overrides and environment."""
     argv_server, argv_key = parse_argv(argv)
     values = os.environ if environ is None else environ
