@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 472,
+      "file_count": 473,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -248,6 +248,7 @@
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
         "sonder_runtime/adapters/inference/sse_stream.py",
+        "sonder_runtime/adapters/inference/startup_prewarm.py",
         "sonder_runtime/adapters/inference/static_membership.py",
         "sonder_runtime/adapters/inference/telemetry.py",
         "sonder_runtime/adapters/inference/vision.py",
@@ -516,7 +517,7 @@
       ]
     },
     {
-      "file_count": 423,
+      "file_count": 424,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -567,6 +568,7 @@
         "sonder_runtime/application/capabilities/lifecycle.py",
         "sonder_runtime/application/capabilities/observability.py",
         "sonder_runtime/application/chat/__init__.py",
+        "sonder_runtime/application/chat/admission_wait_status.py",
         "sonder_runtime/application/chat/handle_chat.py",
         "sonder_runtime/application/chat/handoff_receipts.py",
         "sonder_runtime/application/chat/honesty.py",

@@ -42,6 +42,63 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('a server wait status shows, repeats leave live untouched, a clear '
+      'frame drops it', (tester) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'sonder');
+    final sent = c.send('hello');
+    await tester.pump();
+    expect(c.live.value!.waitStatus, isNull);
+
+    backend.lastTurn.status('waiting for memory to load m: need ~6.5 GiB');
+    await tester.pump();
+    final shown = c.live.value;
+    expect(shown!.waitStatus, 'waiting for memory to load m: need ~6.5 GiB');
+
+    // The same text again is not news: the live value is not even replaced.
+    var notified = 0;
+    c.live.addListener(() => notified++);
+    backend.lastTurn.status('waiting for memory to load m: need ~6.5 GiB');
+    await tester.pump();
+    expect(notified, 0);
+    expect(identical(c.live.value, shown), isTrue);
+
+    // A changed text replaces it.
+    backend.lastTurn.status('waiting to load m: every gpu GPU slot is busy');
+    await tester.pump();
+    expect(c.live.value!.waitStatus,
+        'waiting to load m: every gpu GPU slot is busy');
+
+    // The clearing frame drops it; a clear with nothing shown changes nothing.
+    backend.lastTurn.status('');
+    await tester.pump();
+    expect(c.live.value!.waitStatus, isNull);
+    final cleared = c.live.value;
+    backend.lastTurn.status('');
+    await tester.pump();
+    expect(identical(c.live.value, cleared), isTrue);
+
+    backend.lastTurn.done('answer');
+    await sent;
+    c.dispose();
+  });
+
+  testWidgets('the first answer text clears the wait status', (tester) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'sonder');
+    final sent = c.send('hello');
+    await tester.pump();
+    backend.lastTurn.status('waiting for memory to load m');
+    await tester.pump();
+    expect(c.live.value!.waitStatus, 'waiting for memory to load m');
+    backend.lastTurn.delta('Hi');
+    await tester.pump();
+    expect(c.live.value!.waitStatus, isNull);
+    backend.lastTurn.done('Hi');
+    await sent;
+    c.dispose();
+  });
+
   testWidgets('status poll never overlaps and idles at 5 s', (tester) async {
     final backend = FakeChatBackend()..statusDelay = const Duration(seconds: 3);
     final c = await _start(tester, backend);
