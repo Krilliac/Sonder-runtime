@@ -7749,6 +7749,9 @@ class Handler(BaseHTTPRequestHandler):
                 if status in (429, 503, 504) else None
             )
             message = error.detail
+            if getattr(error, "pool_refusal", None):
+                # Sonder's own pool had no slot: say "busy", not "Ollama down".
+                message = error.pool_refusal
             if error.cloud and error.status == 429:
                 message = server._format_model_call_error(error)
             if self._end_early_stream_with_error(
@@ -8025,8 +8028,10 @@ class Handler(BaseHTTPRequestHandler):
             if callable(flush):
                 flush()
 
+        wait_state = server.ollama_pool.track_queue_wait()
         keepalive = SSEKeepAlive(
             write, STREAM_HEARTBEAT_SECONDS, thread_factory=owned_runtime_thread,
+            status=wait_state.line,
         )
         self._early_stream, self._stream_model = keepalive, model
         self.close_connection = True
@@ -8054,6 +8059,7 @@ class Handler(BaseHTTPRequestHandler):
         early = getattr(self, "_early_stream", None)
         if early is not None:
             early.stop()
+            server.ollama_pool.clear_queue_wait()
 
     def _end_early_stream_with_error(self, message, error_type, code, model):
         """Deliver an error on an already-committed SSE response; else ``False``."""

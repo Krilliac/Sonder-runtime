@@ -88,7 +88,19 @@ _MAX_MODELS_PER_WORKER = 2048
 _MAX_INFLIGHT_PER_WORKER = 64
 _MAX_QUEUE_DEPTH = 4096
 _MAX_ADMISSION_TIMEOUT_SECONDS = 60.0
+# A streamed interactive turn holds its HTTP connection open (keep-alive and
+# queue-status frames) and queues up to its remaining turn budget, so it has its
+# own, longer cap. Every other caller keeps ``_MAX_ADMISSION_TIMEOUT_SECONDS``.
+_MAX_STREAM_ADMISSION_TIMEOUT_SECONDS = 300.0
+_DEFAULT_STREAM_ADMISSION_TIMEOUT_SECONDS = 300.0
+_STREAM_CALLER = "interactive_stream"
 _LOCAL_CALLERS = frozenset({"agent", "autopilot", "fleet", "local"})
+_SCOPE_CALLERS = _LOCAL_CALLERS | {_STREAM_CALLER}
+# Seconds a refused caller is told to wait when the holder's latency is unknown,
+# and the bounds applied to a latency-derived hint.
+_MIN_BACKPRESSURE_RETRY_SECONDS = 2.0
+_MAX_BACKPRESSURE_RETRY_SECONDS = 120.0
+_DEFAULT_BACKPRESSURE_RETRY_SECONDS = 5.0
 _LOCAL_ADMISSION_SCOPE = contextvars.ContextVar(
     "sonder_ollama_local_admission", default=None,
 )
@@ -96,6 +108,8 @@ _LOCAL_ADMISSION_SCOPE = contextvars.ContextVar(
 # ``admitted()`` can attribute the GPU-admission phase to the held slot.
 _ACTIVE_LEASE = contextvars.ContextVar("sonder_ollama_active_lease", default=None)
 _DEFAULT_LEASE_WARN_AFTER_SECONDS = 120.0
+# The ``QueueWaitState`` of the streamed turn on this thread, if one is tracked.
+_QUEUE_WAIT = contextvars.ContextVar("sonder_ollama_queue_wait", default=None)
 _MAX_FAILURE_THRESHOLD = 100
 _MAX_COOLDOWN_SECONDS = 3600.0
 _MAX_CAPABILITY_TTL_SECONDS = 86_400.0
@@ -142,7 +156,21 @@ class CapabilityProbeDeferred(Exception):
 
 
 class WorkerPoolBackpressure(WorkerPoolError):
-    """No worker capacity or bounded queue slot was available."""
+    """No worker capacity or bounded queue slot was available.
+
+    ``queue_position`` is the caller's place in the wait queue when it joined
+    and ``queue_size`` the waiters then, when the refusal came from a wait.
+    Both are approximate: wakeups use ``notify_all``, so the queue is not FIFO.
+    A refusal because the queue was full carries neither (the caller never joined).
+    """
+
+    def __init__(
+        self, reason, *, retry_after_seconds: float | None = None,
+        queue_position: int | None = None, queue_size: int | None = None,
+    ):
+        super().__init__(reason, retry_after_seconds=retry_after_seconds)
+        self.queue_position = queue_position
+        self.queue_size = queue_size
 
 
 class WorkerPoolDraining(WorkerPoolError):
@@ -183,6 +211,11 @@ def _is_local_origin(origin: str) -> bool:
     return address.is_private or address.is_link_local
 
 
+def _gpu_caller(caller: str) -> str:
+    """GPU-admission caller name: a streamed turn keeps interactive priority."""
+    return "interactive" if caller == _STREAM_CALLER else caller
+
+
 @contextmanager
 def local_agent_admission(
     *, caller: str = "agent", timeout_seconds: float | None = None,
@@ -194,20 +227,131 @@ def local_agent_admission(
     are local; hosted/public pools retain interactive fail-fast admission.
     ``timeout_seconds`` is the remaining model-call budget and is capped by
     the pool's configured local admission limit when the request is admitted.
+
+    ``caller="interactive_stream"`` marks one streamed interactive turn: it
+    queues for up to ``timeout_seconds`` (the remaining turn budget), capped by
+    the pool's separate stream admission limit (default 300 s), on any pool.
+    Every other caller keeps the ordinary admission cap.
     """
     normalized = str(caller or "").strip().casefold()
-    if normalized not in _LOCAL_CALLERS:
-        raise ValueError("caller must be agent, autopilot, fleet, or local")
+    if normalized not in _SCOPE_CALLERS:
+        raise ValueError(
+            "caller must be agent, autopilot, fleet, local, or interactive_stream"
+        )
     if timeout_seconds is not None:
         timeout_seconds = float(timeout_seconds)
         if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
             raise ValueError("timeout_seconds must be a finite value >= 0")
-        timeout_seconds = min(timeout_seconds, _MAX_ADMISSION_TIMEOUT_SECONDS)
+        # Only a streamed turn may queue past the ordinary cap; the pool
+        # applies its configured cap when the request is admitted.
+        timeout_seconds = min(
+            timeout_seconds,
+            _MAX_STREAM_ADMISSION_TIMEOUT_SECONDS
+            if normalized == _STREAM_CALLER
+            else _MAX_ADMISSION_TIMEOUT_SECONDS,
+        )
     token = _LOCAL_ADMISSION_SCOPE.set((normalized, timeout_seconds))
     try:
         yield
     finally:
         _LOCAL_ADMISSION_SCOPE.reset(token)
+
+
+class QueueWaitState:
+    """Where one caller stands in the pool's wait queue, readable cross-thread.
+
+    The request thread updates it while ``OllamaWorkerPool._acquire`` waits for
+    a slot; a keep-alive writer on another thread polls ``line()`` and shows
+    the wait to the client. Fields change under ``_lock`` only; ``line()``
+    returns an immutable string, so no reference to pool state escapes.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._model = ""
+        self._position = 0
+        self._size = 0
+        self._waiting = False
+
+    def _begin(self, model: str | None, position: int, size: int) -> None:
+        with self._lock:
+            self._model = _safe_scalar(model or "model", limit=96)
+            self._position = max(1, int(position))
+            self._size = max(self._position, int(size))
+            self._waiting = True
+
+    def _advance(self, position: int, size: int) -> None:
+        with self._lock:
+            if self._waiting:
+                self._position = max(1, min(self._position, int(position)))
+                self._size = max(self._position, int(size))
+
+    def _end(self) -> None:
+        with self._lock:
+            self._waiting = False
+
+    @property
+    def waiting(self) -> bool:
+        with self._lock:
+            return self._waiting
+
+    def line(self) -> str | None:
+        """``queued for <model> (position k/N)`` while waiting, else ``None``."""
+        with self._lock:
+            if not self._waiting:
+                return None
+            return "queued for %s (position %d/%d)" % (
+                self._model, self._position, self._size,
+            )
+
+
+@contextmanager
+def queue_wait_tracker():
+    """Track this thread's pool queue waits; yields a ``QueueWaitState``.
+
+    Requests made by the entering thread (and contexts copied from it) update
+    the yielded state while they wait for a worker slot.
+    """
+    state = QueueWaitState()
+    token = _QUEUE_WAIT.set(state)
+    try:
+        yield state
+    finally:
+        _QUEUE_WAIT.reset(token)
+
+
+def track_queue_wait() -> QueueWaitState:
+    """Bind a fresh ``QueueWaitState`` to the current context and return it.
+
+    Unlike ``queue_wait_tracker`` there is no scope: the binding lasts until
+    ``clear_queue_wait`` (or the thread ends). Use it on a handler thread that
+    hands the state to a keep-alive writer.
+    """
+    state = QueueWaitState()
+    _QUEUE_WAIT.set(state)
+    return state
+
+
+def clear_queue_wait() -> None:
+    """Drop the current context's queue-wait binding."""
+    _QUEUE_WAIT.set(None)
+
+
+def _stamp_worker(error, state, *, origin=None):
+    """Record which worker served a failed request on the exception itself.
+
+    ``sonder_worker_origin``/``sonder_worker_id`` let a caller attribute the
+    failure to the host that produced it rather than to the primary endpoint.
+    """
+    served = state.endpoint.origin if state is not None else origin
+    if not served:
+        return
+    worker_id = state.endpoint.worker_id if state is not None else _worker_id(served)
+    try:
+        error.sonder_worker_origin = served
+        error.sonder_worker_id = worker_id
+    except (AttributeError, TypeError):
+        pass  # an exception type that rejects new attributes stays unattributed
 
 
 def _active_lease(pool, origin: str):
@@ -248,7 +392,7 @@ def admitted(pool, path: str, payload, origin: str, *, deadline: float | None = 
     entered = pool._clock() if lease is not None else 0.0
     with service.admit(
         path, payload, origin=origin, deadline=deadline,
-        caller=scope[0] if scope else "interactive", prewarm=prewarm_gate.is_prewarm(),
+        caller=_gpu_caller(scope[0] if scope else "interactive"), prewarm=prewarm_gate.is_prewarm(),
         **extra,
     ) as ticket:
         if lease is not None:
@@ -299,6 +443,28 @@ def _safe_error(error: BaseException) -> str:
 _DEFAULT_POOL_RETRY_SECONDS = 5
 
 
+def worker_attribution(error: BaseException) -> dict:
+    """``served_origin``/``worker_id`` kwargs naming the worker that failed ``error``."""
+    return {
+        "served_origin": getattr(error, "sonder_worker_origin", None),
+        "worker_id": getattr(error, "sonder_worker_id", None),
+    }
+
+
+def transport_failure_fields(error: BaseException) -> dict:
+    """``ModelCallError`` kwargs for a transport failure beyond the base ones.
+
+    A refusal by Sonder's own pool carries its wait estimate, so HTTP clients
+    get Retry-After and an honest "busy" message.
+    """
+    refusal = pool_refusal_reply(error)
+    return {
+        **worker_attribution(error),
+        "retry_after_seconds": getattr(error, "retry_after_seconds", None) if refusal else None,
+        "pool_refusal": refusal,
+    }
+
+
 def pool_refusal_reply(error: BaseException) -> str | None:
     """The chat reply for a pool refusal, or ``None`` for any other error.
 
@@ -316,7 +482,14 @@ def pool_refusal_reply(error: BaseException) -> str | None:
     if isinstance(error, WorkerPoolDraining):
         return "ERROR contacting Sonder's model pool: it is shutting down; retry in a few seconds."
     if isinstance(error, WorkerPoolBackpressure):
-        return "ERROR contacting Sonder's model pool: it is busy; retry in %ds." % seconds
+        position = getattr(error, "queue_position", None)
+        size = getattr(error, "queue_size", None)
+        where = (
+            " (queue position %d of %d)" % (position, size)
+            if isinstance(position, int) and isinstance(size, int) and 0 < position <= size
+            else ""
+        )
+        return "ERROR contacting Sonder's model pool: it is busy%s; retry in %ds." % (where, seconds)
     if isinstance(error, WorkerPoolUnavailable):
         return (
             "ERROR contacting Sonder's model pool: no model worker is available right now; "
@@ -387,6 +560,43 @@ def parse_worker_origins(
     if len(set(normalized)) != len(normalized):
         raise ValueError("worker origins contain a duplicate canonical origin")
     return normalized
+
+
+def parse_origin_slots(raw: str | None) -> dict[str, int]:
+    """Parse ``origin=slots`` pairs (comma/semicolon separated) into a canonical map.
+
+    ``SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN`` uses this to give one worker
+    a different slot count than ``SONDER_OLLAMA_WORKER_MAX_INFLIGHT`` (for
+    example a Node1 started with ``OLLAMA_NUM_PARALLEL=2``). The origin must
+    equal a configured pool worker; an unknown origin is refused when the pool
+    is built.
+    """
+    result: dict[str, int] = {}
+    for item in str(raw or "").replace(";", ",").split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        origin, separator, count = entry.rpartition("=")
+        if not separator or not origin.strip():
+            raise ValueError(
+                "SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN entries must be origin=slots"
+            )
+        try:
+            slots = int(count.strip())
+        except ValueError as error:
+            raise ValueError(
+                "SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN slots must be an integer"
+            ) from error
+        if not 1 <= slots <= _MAX_INFLIGHT_PER_WORKER:
+            raise ValueError(
+                "SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN slots must be within 1..%d"
+                % _MAX_INFLIGHT_PER_WORKER
+            )
+        key = ollama_policy.normalize(origin.strip()).rstrip("/")
+        if key in result:
+            raise ValueError("SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN repeats an origin")
+        result[key] = slots
+    return result
 
 
 def _model_key(name) -> str:
@@ -913,6 +1123,11 @@ def _extract_show_metadata(
     digest = str(tag_entry.get("digest") or "").strip() if isinstance(tag_entry, Mapping) else ""
     if digest:
         meta["digest"] = digest[:96]
+    size_bytes = (
+        _positive_int_value(tag_entry.get("size")) if isinstance(tag_entry, Mapping) else None
+    )
+    if size_bytes is not None:
+        meta["size_bytes"] = size_bytes
     return meta
 
 
@@ -1139,6 +1354,8 @@ class OllamaWorkerPool:
         queue_depth: int = _DEFAULT_QUEUE_DEPTH,
         admission_timeout_seconds: float = _DEFAULT_ADMISSION_TIMEOUT_SECONDS,
         local_admission_timeout_seconds: float = _DEFAULT_LOCAL_ADMISSION_TIMEOUT_SECONDS,
+        stream_admission_timeout_seconds: float = _DEFAULT_STREAM_ADMISSION_TIMEOUT_SECONDS,
+        max_inflight_by_origin: Mapping[str, int] | None = None,
         capability_ttl_seconds: float = _DEFAULT_CAPABILITY_TTL_SECONDS,
         max_workers: int = _DEFAULT_MAX_WORKERS,
         capability_probe_parallelism: int = _DEFAULT_CAPABILITY_PROBE_PARALLELISM,
@@ -1168,6 +1385,8 @@ class OllamaWorkerPool:
             raise ValueError("admission timeout must be within 0..60 seconds")
         if not 0 <= local_admission_timeout_seconds <= _MAX_ADMISSION_TIMEOUT_SECONDS:
             raise ValueError("local admission timeout must be within 0..60 seconds")
+        if not 0 <= stream_admission_timeout_seconds <= _MAX_STREAM_ADMISSION_TIMEOUT_SECONDS:
+            raise ValueError("stream admission timeout must be within 0..300 seconds")
         if not 1 <= capability_ttl_seconds <= _MAX_CAPABILITY_TTL_SECONDS:
             raise ValueError("capability TTL must be within 1..86400 seconds")
         if not 1 <= max_workers <= _MAX_POOL_WORKERS:
@@ -1238,6 +1457,19 @@ class OllamaWorkerPool:
         self._queue_depth = int(queue_depth)
         self._admission_timeout = float(admission_timeout_seconds)
         self._local_admission_timeout = float(local_admission_timeout_seconds)
+        self._stream_admission_timeout = float(stream_admission_timeout_seconds)
+        by_origin: dict[str, int] = {}
+        for raw_origin, raw_slots in dict(max_inflight_by_origin or {}).items():
+            slots = int(raw_slots)
+            if not 1 <= slots <= _MAX_INFLIGHT_PER_WORKER:
+                raise ValueError("max inflight for an origin must be within 1..64")
+            key = ollama_policy.normalize(str(raw_origin)).rstrip("/")
+            if key not in seen:
+                raise ValueError("max inflight names an origin that is not a pool worker")
+            by_origin[key] = slots
+        # Slots one worker may hold, by canonical origin; origins not listed
+        # use ``max_inflight_per_worker``.
+        self._max_inflight_by_origin = MappingProxyType(by_origin)
         self._capability_ttl = float(capability_ttl_seconds)
         self._max_workers = int(max_workers)
         self._probe_parallelism = int(capability_probe_parallelism)
@@ -1277,6 +1509,7 @@ class OllamaWorkerPool:
             "capability_probe_failures": 0,
             "reconnects": 0,
             "model_miss_refreshes": 0,
+            "slow_generation": 0,
         }
         self._metrics_observer = metrics
         # Production pools share their process registry. Lightweight injected
@@ -1630,7 +1863,11 @@ class OllamaWorkerPool:
 
     def _normalize_capabilities(
         self, payload: object, *, now: float, measured_ms: float,
+        origin: str | None = None,
     ) -> tuple[WorkerCapabilities, float]:
+        slot_cap = (
+            self._max_inflight if origin is None else self._origin_max_inflight(origin)
+        )
         model_contexts: dict[str, int] = {}
         loaded_models: tuple[str, ...] = ()
         vram_bytes: int | None = None
@@ -1669,9 +1906,9 @@ class OllamaWorkerPool:
                 })
             )[:_MAX_MODELS_PER_WORKER]
             try:
-                advertised = int(payload.get("max_inflight") or self._max_inflight)
+                advertised = int(payload.get("max_inflight") or slot_cap)
             except (TypeError, ValueError):
-                advertised = self._max_inflight
+                advertised = slot_cap
             try:
                 reported_latency = float(payload.get("latency_ms"))
             except (TypeError, ValueError):
@@ -1731,7 +1968,7 @@ class OllamaWorkerPool:
             version=_safe_scalar(version, limit=80),
             models=models,
             observed_at=now,
-            effective_max_inflight=min(self._max_inflight, advertised),
+            effective_max_inflight=min(slot_cap, advertised),
             model_contexts=MappingProxyType(model_contexts),
             loaded_models=loaded_models,
             vram_bytes=vram_bytes,
@@ -2092,6 +2329,7 @@ class OllamaWorkerPool:
                     try:
                         capabilities, latency_ms = self._normalize_capabilities(
                             payload, now=self._clock(), measured_ms=measured_ms,
+                            origin=state.endpoint.origin,
                         )
                     except (TypeError, ValueError) as capability_error:
                         self._metrics["capability_probe_failures"] += 1
@@ -2391,9 +2629,13 @@ class OllamaWorkerPool:
             raise last_error
         return {"models": list(merged.values())}
 
+    def _origin_max_inflight(self, origin: str) -> int:
+        """Slots ``origin`` may hold before its prober reports a lower value."""
+        return self._max_inflight_by_origin.get(origin, self._max_inflight)
+
     def _capacity(self, state: _WorkerState) -> int:
         if state.capabilities is None:
-            return self._max_inflight
+            return self._origin_max_inflight(state.endpoint.origin)
         return state.capabilities.effective_max_inflight
 
     def _choose(
@@ -2486,6 +2728,7 @@ class OllamaWorkerPool:
         required_num_ctx: int | None = None,
         _lease_box: list | None = None,
         _lease_caller: str = "",
+        _wait: QueueWaitState | None = None,
     ) -> _WorkerState:
         """Count one slot on a chosen worker and return that worker.
 
@@ -2496,6 +2739,7 @@ class OllamaWorkerPool:
         logger.debug(f"_acquire: model={model!r}, excluded={excluded}, timeout={admission_timeout:.3f}s")
         deadline = time.monotonic() + admission_timeout
         queued = False
+        position = 0
         with self._condition:
             while True:
                 if self._draining:
@@ -2573,9 +2817,16 @@ class OllamaWorkerPool:
                             f"waiters={self._waiters}/{self._queue_depth}"
                         )
                         self._metrics["backpressure_rejections"] += 1
-                        raise WorkerPoolBackpressure("Ollama worker queue is full")
+                        holder_state = self._lease_holder_state_locked(remaining_states, now)
+                        raise WorkerPoolBackpressure(
+                            "Ollama worker queue is full",
+                            retry_after_seconds=self._backpressure_retry_after(holder_state),
+                        )
                     self._waiters += 1
                     queued = True
+                    position = self._waiters
+                    if _wait is not None:
+                        _wait._begin(model, position, self._waiters)
                     if self._queue_depth > 0 and self._waiters >= self._queue_depth * 0.8:
                         logger.warning(
                             f"worker pool queue depth approaching limit: "
@@ -2591,15 +2842,23 @@ class OllamaWorkerPool:
                     self._waiters -= 1
                     self._metrics["backpressure_rejections"] += 1
                     holder = self._lease_holder_note_locked(remaining_states, now)
+                    holder_state = self._lease_holder_state_locked(remaining_states, now)
                     logger.warning(
                         f"admission timeout after {admission_timeout:.3f}s "
                         f"waiting for worker capacity, model={model!r}, "
                         f"waiters={self._waiters}/{self._queue_depth}{holder}"
                     )
+                    size = max(position, self._waiters + 1)
                     raise WorkerPoolBackpressure(
-                        "timed out waiting for Ollama worker capacity"
+                        "timed out waiting for Ollama worker capacity "
+                        "(queue position %d of %d)" % (position, size),
+                        retry_after_seconds=self._backpressure_retry_after(holder_state),
+                        queue_position=position,
+                        queue_size=size,
                     )
                 self._condition.wait(timeout=remaining)
+                if _wait is not None:
+                    _wait._advance(self._waiters, self._waiters)
 
     def _finish(
         self,
@@ -2744,17 +3003,36 @@ class OllamaWorkerPool:
                     lease.phase, thread_name, alive,
                 )
 
-    def _lease_holder_note_locked(self, states, now: float) -> str:
-        """``; held by lease #N ...`` for the oldest lease on saturated ``states``."""
+    def _lease_holder_lease_locked(self, states, now: float) -> _PoolLease | None:
+        """The oldest counted lease on saturated ``states``, or ``None``."""
         saturated = {
             id(state) for state in states
             if state.cooldown_until <= now and state.inflight >= self._capacity(state)
         }
         holders = [lease for lease in self._leases.values()
                    if lease.counted and id(lease.state) in saturated]
-        if not holders:
+        return min(holders, key=lambda lease: lease.started) if holders else None
+
+    def _lease_holder_state_locked(self, states, now: float) -> _WorkerState | None:
+        holder = self._lease_holder_lease_locked(states, now)
+        return None if holder is None else holder.state
+
+    @staticmethod
+    def _backpressure_retry_after(state: _WorkerState | None) -> float:
+        """Seconds to ask a refused caller to wait: one typical request on the holder."""
+        ewma = None if state is None else state.inference_ewma_ms
+        if ewma is None or not math.isfinite(ewma) or ewma <= 0:
+            return _DEFAULT_BACKPRESSURE_RETRY_SECONDS
+        return round(min(
+            _MAX_BACKPRESSURE_RETRY_SECONDS,
+            max(_MIN_BACKPRESSURE_RETRY_SECONDS, ewma / 1000.0),
+        ), 1)
+
+    def _lease_holder_note_locked(self, states, now: float) -> str:
+        """``; held by lease #N ...`` for the oldest lease on saturated ``states``."""
+        oldest = self._lease_holder_lease_locked(states, now)
+        if oldest is None:
             return ""
-        oldest = min(holders, key=lambda lease: lease.started)
         return "; held by lease #%d caller=%s model=%s phase=%s age=%.1fs" % (
             oldest.id, oldest.caller, oldest.model, oldest.phase,
             max(0.0, now - oldest.started),
@@ -2857,6 +3135,34 @@ class OllamaWorkerPool:
                 # Fresh requests queued behind this one may now be eligible.
                 self._condition.notify_all()
 
+    @staticmethod
+    def _is_generation_timeout(error: BaseException) -> bool:
+        """A bare ``TimeoutError``: the socket timed out after the request was sent.
+
+        urllib wraps connect-phase failures (including connect timeouts) in
+        ``URLError``; a read timeout while waiting for the response arrives
+        unwrapped. Connect-phase errors keep counting toward the circuit.
+        """
+        return isinstance(error, TimeoutError) and not isinstance(
+            error, urllib.error.URLError,
+        )
+
+    def _has_alternative_locked(
+        self, model: str | None, attempted: set[str],
+        evidence_allowed: set[str] | None,
+    ) -> bool:
+        """Whether another admissible worker carries ``model`` (lock held)."""
+        now = self._clock()
+        return any(
+            state.endpoint.worker_id not in attempted
+            and self._membership_admissible(state, now)
+            and not state.compatibility_error
+            and self._supports_model(state, model)
+            and (evidence_allowed is None
+                 or state.endpoint.worker_id in evidence_allowed)
+            for state in self._states
+        )
+
     def request_primary(self, sender, *, model=None, payload=None, origin=None):
         """Gate the single-host/local-only path without enabling remote failover.
 
@@ -2869,11 +3175,19 @@ class OllamaWorkerPool:
         )
 
         origin = origin or self._configured_origins[0]
+
+        def send_stamped(target):
+            try:
+                return sender(target)
+            except Exception as error:
+                _stamp_worker(error, None, origin=target)
+                raise
+
         if self._capability_routing == "off" or self._recent_evidence is None:
-            return sender(origin)
+            return send_stamped(origin)
         required = request_requirements(payload)
         if not required:
-            return sender(origin)
+            return send_stamped(origin)
 
         def observe():
             identity = None
@@ -2904,7 +3218,7 @@ class OllamaWorkerPool:
             return identity
 
         before = observe()
-        result = sender(origin)
+        result = send_stamped(origin)
         if self._capability_routing == "strict":
             after = observe()
             if after != before:
@@ -2941,10 +3255,19 @@ class OllamaWorkerPool:
         scope = _LOCAL_ADMISSION_SCOPE.get()
         scoped_caller, scoped_timeout = scope or ("interactive", None)
         caller = str(caller or scoped_caller).strip().casefold()
-        if caller not in _LOCAL_CALLERS and caller != "interactive":
-            raise ValueError("caller must be interactive, agent, autopilot, fleet, or local")
+        if caller not in _SCOPE_CALLERS and caller != "interactive":
+            raise ValueError(
+                "caller must be interactive, interactive_stream, agent, autopilot, fleet, or local"
+            )
         if admission_timeout_seconds is None:
-            if caller in _LOCAL_CALLERS and self._local_origins:
+            if caller == _STREAM_CALLER:
+                # A streamed turn queues up to its remaining budget (or the
+                # whole stream cap when no budget was scoped), on any pool.
+                admission_timeout = (
+                    self._stream_admission_timeout if scoped_timeout is None
+                    else min(scoped_timeout, self._stream_admission_timeout)
+                )
+            elif caller in _LOCAL_CALLERS and self._local_origins:
                 requested = scoped_timeout
                 admission_timeout = self._local_admission_timeout if requested is None else min(
                     requested, self._local_admission_timeout,
@@ -3054,6 +3377,7 @@ class OllamaWorkerPool:
                     )
         attempted: set[str] = set()
         last_error = None
+        wait_state = _QUEUE_WAIT.get()
         while True:
             if len(attempted) >= self._max_workers:
                 # Reconciliation cannot grow one logical request's retry set.
@@ -3065,6 +3389,7 @@ class OllamaWorkerPool:
             try:
                 try:
                     state = self._acquire(
+                        _wait=wait_state,
                         model=model,
                         excluded=attempted,
                         admission_timeout=max(
@@ -3084,6 +3409,9 @@ class OllamaWorkerPool:
                         )
                         raise last_error
                     raise
+                finally:
+                    if wait_state is not None:
+                        wait_state._end()
                 lease = leases[0]
                 with self._condition:
                     if attempted:
@@ -3161,16 +3489,36 @@ class OllamaWorkerPool:
                         _ACTIVE_LEASE.reset(token)
                 except Exception as error:
                     latency_ms = max(0.0, (self._clock() - started) * 1000.0)
-                    retryable = self._retryable(error)
+                    _stamp_worker(error, state)
+                    # A read timeout after the request went out means the model
+                    # was still generating: the worker is slow, not down, and a
+                    # replay would only start the same generation again.
+                    slow = self._is_generation_timeout(error)
+                    retryable = self._retryable(error) and not slow
                     logger.debug(
                         f"pool.request: error from {state.endpoint.worker_id} after {latency_ms:.1f}ms, "
-                        f"retryable={retryable}: {_safe_error(error)}"
+                        f"retryable={retryable}, slow_generation={slow}: {_safe_error(error)}"
                     )
+                    if slow:
+                        with self._condition:
+                            self._metrics["slow_generation"] += 1
                     self._close_lease(
                         lease, error=error, latency_ms=latency_ms,
                         count_failure=retryable,
                     )
                     if not idempotent or not retryable:
+                        raise
+                    with self._condition:
+                        has_alternative = self._has_alternative_locked(
+                            model, attempted, evidence_allowed,
+                        )
+                    if not has_alternative:
+                        # Nobody else carries the model: nothing to fail over to.
+                        logger.warning(
+                            f"worker {state.endpoint.worker_id} inference request failed "
+                            f"and no other worker carries model={model!r}, "
+                            f"elapsed_ms={latency_ms:.1f}, error={_safe_error(error)!r}"
+                        )
                         raise
                     logger.error(
                         f"worker {state.endpoint.worker_id} inference request failed, "
@@ -3283,6 +3631,70 @@ class OllamaWorkerPool:
                     free = min(1, free)
                 total += free
         return total if advertised else None
+
+    def _carriers_locked(self, model: str | None, now: float) -> list[_WorkerState]:
+        """Healthy, non-cooling workers whose fresh evidence advertises ``model``."""
+        return [
+            state for state in self._states
+            if self._membership_admissible(state, now)
+            and not state.compatibility_error
+            and state.cooldown_until <= now
+            and self._supports_model(state, model)
+        ]
+
+    def origins_for_model(self, model: str | None) -> tuple[str, ...]:
+        """Origins of the healthy workers that advertise ``model`` (``()`` if none)."""
+        now = self._clock()
+        with self._condition:
+            return tuple(state.endpoint.origin for state in self._carriers_locked(model, now))
+
+    def model_slot_counts(self, model: str | None) -> dict[str, int] | None:
+        """``{"workers", "total", "free", "local_total", "remote_total"}`` for ``model``'s carriers.
+
+        ``total`` sums each carrier's slot capacity and ``free`` its unused
+        slots (half-open workers count one probe), so a worker that lacks the
+        model contributes nothing. ``None`` means no worker advertises it:
+        unknown, never zero.
+        """
+        now = self._clock()
+        with self._condition:
+            carriers = self._carriers_locked(model, now)
+            if not carriers:
+                return None
+            total = free = local_total = 0
+            for state in carriers:
+                capacity = self._capacity(state)
+                total += capacity
+                if _is_loopback(state.endpoint.origin):
+                    local_total += capacity
+                if state.half_open_inflight:
+                    continue
+                unused = max(0, capacity - state.inflight)
+                if state.consecutive_failures >= self._failure_threshold:
+                    unused = min(1, unused)
+                free += unused
+            return {
+                "workers": len(carriers), "total": total, "free": free,
+                "local_total": local_total, "remote_total": total - local_total,
+            }
+
+    def model_size_bytes(self, model: str | None) -> int:
+        """On-disk size a carrier reported for ``model``, or 0 when unknown."""
+        now = self._clock()
+        wanted = _model_key(model)
+        if not wanted:
+            return 0
+        with self._condition:
+            for state in self._carriers_locked(model, now):
+                capabilities = state.capabilities
+                if capabilities is None:
+                    continue
+                for name, meta in capabilities.model_metadata.items():
+                    if _model_key(name) == wanted:
+                        size = _positive_int_value(meta.get("size_bytes"))
+                        if size is not None:
+                            return size
+        return 0
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
@@ -3542,12 +3954,27 @@ class OllamaWorkerPool:
             return {}
         return {"gpu_admission": service.snapshot()}
 
-    def summary(self) -> dict:
-        """Return cached aggregate state only; never probe or construct detail."""
+    def summary(self, model: str | None = None) -> dict:
+        """Return cached aggregate state only; never probe or construct detail.
+
+        With ``model``, the result also carries ``model``: the workers that
+        carry it and their total and free slots (``None`` counts when no
+        worker advertises it), so a caller can report the capacity that
+        applies to the tier it uses rather than the whole pool's.
+        """
         with self._condition:
             now = self._clock()
             self._reconcile_leases_locked(now)
-            return self._summary_locked(now)
+            result = self._summary_locked(now)
+        if model:
+            counts = self.model_slot_counts(model)
+            result["model"] = {
+                "name": _safe_scalar(model, limit=128),
+                "workers": None if counts is None else counts["workers"],
+                "capacity": None if counts is None else counts["total"],
+                "free": None if counts is None else counts["free"],
+            }
+        return result
 
     def pool_capacity_summary(self) -> dict[str, Any]:
         """Return cached pool-wide worker resource, residency, and context summary."""
@@ -3955,6 +4382,15 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         _DEFAULT_LOCAL_ADMISSION_TIMEOUT_SECONDS,
         maximum=_MAX_ADMISSION_TIMEOUT_SECONDS,
     )
+    stream_admission_timeout = _bounded_seconds(
+        env,
+        "SONDER_POOL_STREAM_ADMISSION_TIMEOUT_SECONDS",
+        _DEFAULT_STREAM_ADMISSION_TIMEOUT_SECONDS,
+        maximum=_MAX_STREAM_ADMISSION_TIMEOUT_SECONDS,
+    )
+    max_inflight_by_origin = parse_origin_slots(
+        env.get("SONDER_OLLAMA_WORKER_MAX_INFLIGHT_BY_ORIGIN"),
+    )
     probe_timeout_ms = (
         typed_probe if use_typed and typed_probe is not None
         else _positive_int(
@@ -4023,6 +4459,8 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         ),
         admission_timeout_seconds=admission_ms / 1000.0,
         local_admission_timeout_seconds=local_admission_timeout,
+        stream_admission_timeout_seconds=stream_admission_timeout,
+        max_inflight_by_origin=max_inflight_by_origin,
         capability_ttl_seconds=(
             typed_ttl if use_typed and typed_ttl is not None
             else _positive_int(
@@ -4057,8 +4495,13 @@ __all__ = [
     "configure_typed_pool",
     "from_environment",
     "has_configured_remote_workers",
+    "QueueWaitState",
+    "clear_queue_wait",
+    "track_queue_wait",
     "local_agent_admission",
+    "parse_origin_slots",
     "parse_worker_origins",
+    "queue_wait_tracker",
     "reset_typed_workers",
     "validate_worker_origin",
 ]
