@@ -35,17 +35,27 @@ Where each rule reads:
   scan: a delete verb (``rm``, ``del``, ``Remove-Item``...) with a root among
   its operands, a relative operand resolved against ``cwd`` (and any ``cd``
   before it), and a relative path that climbs past its anchor counted as a root.
+  A parameter expansion (``"${OUT:?}/"``) is one word, a brace expansion
+  (``./{a,b}/c``) is the words it expands to, and the operands end at a
+  ``#`` comment (except for cmd's ``del``/``rd``: cmd has no ``#`` comment).
 * Every command-bearing text, other code included (Python, JavaScript...),
   gets the token and text lists (``_BLOCK_TOKENS``, ``_BLOCK_TEXT``) and the
   download-and-execute checks.  Shell strings handed to ``os.system`` or
   ``subprocess`` inside other code are not parsed as shell.
 * An unescaped newline ends a command in every scan; a newline after ``\\``,
-  ``^``, a PowerShell backtick, a pipe or ``&&`` continues it.  Two checks
-  follow data rather than one command, so they span lines: a download whose
-  file a later command runs, and an evaluator (``iex``,
-  ``[scriptblock]::Create``) in the same text as a download.
+  ``^``, a PowerShell backtick, a pipe or ``&&`` continues it, and so does a
+  newline (or ``;``, ``|``, ``&``) inside a quote or a ``(``/``@(`` that a
+  delete's command has left open.  Two checks follow data rather than one
+  command, so they span lines: a download whose file a later command runs
+  (or a substitution reads into an interpreter, ``sh -c "$(cat F)"``), and an
+  evaluator (``iex``, ``[scriptblock]::Create``) in the same text as a download.
+* A ``cd`` (``pushd``, ``Set-Location``) is read as moving every later
+  command in the text, even one in a ``$(...)`` or ``( )`` (bash scopes
+  those; PowerShell does not).
 
 Every scan is one left-to-right pass over the text, linear in its length.
+A tracked directory is kept bounded (``_Place``), so ``cd`` floods and a long
+``cwd`` stay linear too; ``cwd`` counts toward ``_MAX_TEXT``.
 
 ``git_*`` tools ask whatever their catalog grade.  Otherwise the permission
 catalog's read-only (``safe``/``ask``) and file-edit (``mutation``) grades are
@@ -67,7 +77,7 @@ import posixpath
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
 VERDICTS = frozenset({ALLOW, ASK, BLOCK})
@@ -92,6 +102,14 @@ _BACKTICK_ESCAPES = frozenset({"pwsh", "powershell", "ps1"})
 _MAX_TEXT = 256 * 1024
 # Substitutions nested deeper than this are read as part of the deepest one.
 _MAX_DEPTH = 64
+# A brace expansion of more words than this is read as its pieces instead.
+_MAX_BRACE_WORDS = 16
+# A tracked directory keeps its first _KEPT components and its depth: no root
+# is decided past them (``/mnt/c/users/alice`` is the deepest, with one more
+# to tell it from a folder inside it).  A longer component than _LONG_NAME
+# names no root, so it is kept as a placeholder.
+_KEPT = 6
+_LONG_NAME = 64
 
 _ELEVATION_TOKENS = frozenset({"sudo", "su", "doas", "runas", "gsudo", "pkexec"})
 _ELEVATION_TEXT = ("-verb runas", "-verb:runas", "-verb 'runas'", '-verb "runas"')
@@ -111,7 +129,7 @@ _BLOCK_TEXT = (
 _PIPE_SHELLS = frozenset({
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "iex", "invoke-expression",
     "python", "py", "pwsh", "powershell", "cmd", "perl", "ruby", "node", "php", "lua",
-    "eval", "source", ".",
+    "eval", "source", ".", "ash",
 })
 _EVAL_TOKENS = frozenset({"iex", "invoke-expression"})
 # ``[scriptblock]::Create`` (and ``[System.Management.Automation.ScriptBlock]::Create``).
@@ -148,6 +166,7 @@ _HOME = "/~"
 _HOME_SPELLINGS = (
     "~", "$home", "$env:userprofile", "$env:home", "%userprofile%",
     "%homedrive%%homepath%", "%homepath%", "$env:homedrive$env:homepath", "$env:homepath",
+    "%homedrive%/%homepath%", "$env:homedrive/$env:homepath",
 )
 _SYSTEM_SPELLINGS = (
     ("%systemroot%", "c:/windows"), ("%windir%", "c:/windows"),
@@ -158,14 +177,25 @@ _SYSTEM_SPELLINGS = (
 )
 # ``${HOME}`` / ``${env:USERPROFILE}`` are the braced spellings of the same variables.
 _BRACED_VARIABLE = re.compile(r"\$\{([a-z_][a-z0-9_]*(?::[a-z_][a-z0-9_]*)?)\}")
+# A shell parameter expansion with an operator (``${OUT:?}``, ``${1%/}``,
+# ``${arr[0]}``, ``${#x}``) is its variable, one word.  A ``$(`` or backtick
+# inside it is not folded away, and PowerShell's ``${C:\x}`` is not one.
+_PARAMETER_EXPANSION = re.compile(
+    r"\$\{[#!]?([a-z_][a-z0-9_]*|[0-9]+|[@*#?$!-])"
+    r"(?:\}|(?::[-=?+0-9 ]|[-=?+#%/^,@\[])[^{}()`<\n]{0,256}\})")
 # ``~alice`` is alice's home directory.
 _USER_HOME = re.compile(r"~([^/]+)")
 # Win32 device paths ``\\?\`` and ``\\.\`` (after ``\`` -> ``/``); ``\\?\UNC\`` names a share.
 _DEVICE_PREFIX = re.compile(r"//[?.]/(unc/)?")
 # A UNC share ``//host/share/rest``; ``c$`` is the administrative share of drive C.
 _UNC = re.compile(r"//([^/]+)/([^/]+)(/.*)?")
+_SLASHES = re.compile(r"/+")
 _ADMIN_SHARE = re.compile(r"[a-z]\$")
-# A drive mounted as a directory: WSL ``/mnt/c``, Cygwin ``/cygdrive/c``, Git Bash ``/c``.
+# ``\\?\GLOBALROOT\Device\Harddisk0\Partition1``: the partition is the device.
+_HARDDISK = re.compile(r"harddisk[0-9]+")
+_PARTITION = re.compile(r"partition[0-9]+")
+# A drive mounted as a directory: WSL ``/mnt/c``, Cygwin ``/cygdrive/c``, Git Bash
+# ``/c``, matched on the resolved POSIX path (``/mnt//c`` and ``/tmp/../c`` too).
 _MOUNTED_DRIVE = re.compile(r"/(?:mnt/|cygdrive/)?([a-z])(/.*)?")
 # An 8.3 short name (``PROGRA~1``): its stem, ``~`` and a number.
 _SHORT_NAME = re.compile(r"([^/~. ]{1,6})~[0-9]{1,6}(?:\.[^/.]{0,3})?")
@@ -242,8 +272,13 @@ _PUNCTUATION = str.maketrans({c: " " for c in "()[]{},;'\"`"})
 _SPACES = re.compile(r"[^\S\n]+")
 
 # One token of command text.  ``(``, ``)``, ``[``, ``]``, ``{``, ``}``, ``,``
-# and whitespace separate words; quotes are their own tokens, so a quoted
-# root with a space (``"C:\\Program Files"``) is read whole as well.
+# and whitespace separate words, except inside a brace expansion
+# (``./{a,b}/c``, no spaces or quotes), which is part of its word; quotes are
+# their own tokens, so a quoted root with a space (``"C:\\Program Files"``) is
+# read whole as well.
+_BRACE_TEXT = r"[^\s{}()\[\]'\"`;|&<>,]*"
+_BRACE_GROUP = re.compile(r"\{([^{}]*)\}")
+_BRACE_MARKS = re.compile(r"[{},]")
 _TOKEN = re.compile(
     r"(?P<nl>`?\r?\n)"
     r"|(?P<sub>\$\(|<\()"
@@ -253,7 +288,8 @@ _TOKEN = re.compile(
     r"|(?P<pipe>\|[|&]?)"
     r"|(?P<end>&&?|;)"
     r"|(?P<quote>['\"])"
-    r"|(?P<word>(?:[^\s()\[\]{},'\"`;|&$<]|\$(?!\()|<(?!\())+)"
+    r"|(?P<word>(?:[^\s()\[\]{},'\"`;|&$<]|\$(?!\()|<(?!\()"
+    r"|\{" + _BRACE_TEXT + r"(?:," + _BRACE_TEXT + r")+\})+)"
 )
 
 
@@ -269,8 +305,8 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def _parts(arguments: Mapping[str, Any]) -> list[tuple[str, bool, bool]]:
-    """Every command-bearing argument as ``(text, is_shell, backtick_substitutes)``."""
+def _parts(name: str, arguments: Mapping[str, Any]) -> list[tuple[str, bool, bool]]:
+    """Every command-bearing argument of tool ``name`` as ``(text, is_shell, backtick_substitutes)``."""
     language = arguments.get("language")
     language = language.strip().casefold() if isinstance(language, str) else ""
     code_is_shell = language in _SHELL_LANGUAGES
@@ -287,9 +323,10 @@ def _parts(arguments: Mapping[str, Any]) -> list[tuple[str, bool, bool]]:
         argv.extend(_strings(value))
     if argv:
         parts.append((" ".join(argv), True, True))
-    is_code = "code" in arguments
+    is_code = name == "run_code"
     for key in _SHELL_KEYS:
-        # A run_code call's stdin is input to its language, not to a shell.
+        # A run_code call's stdin is input to its language, not to a shell;
+        # any other tool's stdin is shell text, whatever keys come with it.
         follows_code = key == "stdin" and is_code
         for text in _strings(arguments.get(key)):
             parts.append((text, code_is_shell if follows_code else True,
@@ -346,6 +383,9 @@ def _device_targets(target: str) -> tuple[list[tuple[str, str]], str]:
         target = target[len("globalroot/"):]
         if target.startswith("device/"):
             name, _, rest = target[len("device/"):].partition("/")
+            part, _, after = rest.partition("/")
+            if _HARDDISK.fullmatch(name) and _PARTITION.fullmatch(part):
+                name, rest = name + "/" + part, after
             return [_resolve("//device/" + name, "/" + rest)], ""
         target = target.removeprefix("??/")
     if _is_drive_letter(target):
@@ -394,19 +434,86 @@ def _normalize_targets(token: str) -> list[tuple[str, str]]:
     if _is_drive_letter(target):
         return [_resolve(target[:2], "/" + target[2:])]
     readings = []
-    if (share := _UNC.fullmatch(target)) and not target.startswith("///"):
-        host, name, rest = share.group(1), share.group(2), share.group(3) or "/"
-        drive = name[0] + ":" if _ADMIN_SHARE.fullmatch(name) else f"//{host}/{name}"
-        readings.append(_resolve(drive, rest))
-    if mounted := _MOUNTED_DRIVE.fullmatch(target):
+    if target.startswith("//") and not target.startswith("///"):
+        share = _UNC.fullmatch("//" + _SLASHES.sub("/", target[2:]))
+        if share:
+            host, name, rest = share.group(1), share.group(2), share.group(3) or "/"
+            drive = name[0] + ":" if _ADMIN_SHARE.fullmatch(name) else f"//{host}/{name}"
+            readings.append(_resolve(drive, rest))
+    posix = _resolve("", target)
+    if mounted := _MOUNTED_DRIVE.fullmatch(posix[1]):
         readings.append(_resolve(mounted.group(1) + ":", mounted.group(2) or "/"))
-    readings.append(_resolve("", target))
+    readings.append(posix)
     return readings
 
 
-def _targets(token: str, cwd: str) -> list[tuple[str, str]]:
-    """``_normalize_targets``, with a relative reading resolved against ``cwd`` when there is one."""
-    readings = _normalize_targets(token)
+class _Place(NamedTuple):
+    """One reading of a directory, bounded in size whatever its depth.
+
+    Whether a path is a root depends only on its drive, its first few
+    components and its depth (``_is_root_reading``), so a directory keeps
+    just those: ``head`` is its first ``_KEPT`` components (a longer one than
+    ``_LONG_NAME`` as a placeholder) and ``depth`` how many it has.  A
+    relative one also counts the ``..`` it starts with (``ups``).  Immutable.
+    """
+
+    drive: str
+    absolute: bool
+    ups: int
+    head: tuple[str, ...]
+    depth: int
+
+
+def _place(drive: str, path: str) -> _Place:
+    """The ``_Place`` of one ``_normalize_targets`` reading."""
+    parts = [part for part in path.split("/") if part and part != "."]
+    absolute = path.startswith("/")
+    ups = 0
+    if not absolute:
+        while ups < len(parts) and parts[ups] == "..":
+            ups += 1
+    head = tuple(part if len(part) <= _LONG_NAME else "\x01" for part in parts[ups:ups + _KEPT])
+    return _Place(drive, absolute, ups, head, len(parts) - ups)
+
+
+def _places(cwd: str) -> tuple[_Place, ...]:
+    return tuple(_place(drive, path) for drive, path in _normalize_targets(cwd)) if cwd else ()
+
+
+def _descend(place: _Place, relative: _Place) -> _Place:
+    """``place`` joined with a relative path: its ``..`` stop at a root and climb past a relative anchor."""
+    depth, ups = place.depth - relative.ups, place.ups
+    if depth < 0:
+        ups += 0 if place.absolute else -depth
+        depth = 0
+    # Past len(head), head is all _KEPT components and the joined head starts with them.
+    head = place.head[:depth] + relative.head if depth <= len(place.head) else place.head
+    return _Place(place.drive, place.absolute, ups, head[:_KEPT], depth + relative.depth)
+
+
+def _place_readings(place: _Place) -> list[tuple[str, str]]:
+    """``place`` as ``(drive, path)`` readings with the same answer from ``_is_root_reading``."""
+    if not place.absolute:
+        return [("", "../" if place.ups else ".")]
+    parts = place.head
+    if place.depth > len(parts):
+        parts += ("\x00",)  # deeper than the kept components
+    else:
+        while parts and parts[-1] == "*":  # ``/*`` is the directory itself, as in _resolve
+            parts = parts[:-1]
+    drive, path = place.drive, "/" + "/".join(parts)
+    readings = [(drive, path)]
+    if not drive and (mounted := _MOUNTED_DRIVE.fullmatch(path)):
+        readings.append((mounted.group(1) + ":", mounted.group(2) or "/"))
+    return readings
+
+
+def _against(readings: list[tuple[str, str]], cwd: tuple[_Place, ...],
+             relatives: dict[str, _Place] | None = None) -> list[tuple[str, str]]:
+    """``readings``, with a relative one resolved against each reading of ``cwd`` when there is one.
+
+    ``relatives`` caches the ``_Place`` of a relative reading across calls.
+    """
     if not cwd:
         return readings
     resolved: list[tuple[str, str]] = []
@@ -414,7 +521,13 @@ def _targets(token: str, cwd: str) -> list[tuple[str, str]]:
         if drive or path.startswith("/"):
             resolved.append((drive, path))
         else:
-            resolved.extend(_normalize_targets(cwd.rstrip("/\\") + "/" + token))
+            relative = relatives.get(path) if relatives is not None else None
+            if relative is None:
+                relative = _place("", path)
+                if relatives is not None:
+                    relatives[path] = relative
+            for place in cwd:
+                resolved.extend(_place_readings(_descend(place, relative)))
     return resolved
 
 
@@ -437,9 +550,9 @@ def _is_root_reading(drive: str, path: str) -> bool:
     return short is not None and (not rest or short.group(1) in _SHORT_TREE_STEMS)
 
 
-def _is_root_target(token: str, cwd: str = "") -> bool:
+def _is_root_target(token: str, cwd: tuple[_Place, ...] = ()) -> bool:
     """Whether any reading of ``token`` names a drive, share, filesystem or home root, or a path in a system tree."""
-    return any(_is_root_reading(drive, path) for drive, path in _targets(token, cwd))
+    return any(_is_root_reading(drive, path) for drive, path in _against(_normalize_targets(token), cwd))
 
 
 def _is_delete_verb(name: str) -> bool:
@@ -469,11 +582,49 @@ def _file_name(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def _ends_in_output_flag(word: str) -> bool:
+    """A bundle of short flags whose last one is ``-o`` (curl's ``-fsSLo FILE``)."""
+    return len(word) > 2 and word[0] == "-" and word[-1] == "o" and word[1:].isalpha()
+
+
+def _fold_variables(text: str) -> str:
+    """``${HOME}`` is ``$home``, and ``${OUT:?}``, ``${1%/}`` and ``${arr[0]}`` are ``$out``, ``$1`` and ``$arr``."""
+    text = _BRACED_VARIABLE.sub(r"$\1", text)
+    for _nested in range(2):  # ``${a:-${b:-c}}``
+        text = _PARAMETER_EXPANSION.sub(r"$\1", text)
+    return text
+
+
+def _brace_words(word: str) -> tuple[list[str], bool]:
+    """Bash's brace expansion of ``word`` (``./{a,b}/c`` is ``./a/c ./b/c``) and True.
+
+    Past ``_MAX_BRACE_WORDS`` words, the pieces between its braces and commas
+    and False.  ``_TOKEN`` lets a ``{`` into a word only as a group with a
+    comma, so every group found here expands.  Empty words are dropped, as
+    bash drops them (``{,}`` is no word).
+    """
+    done: list[str] = []
+    pending = [word]
+    while pending:
+        current = pending.pop()
+        group = _BRACE_GROUP.search(current)
+        if group is None:
+            if current:
+                done.append(current)
+            continue
+        head, tail = current[:group.start()], current[group.end():]
+        pending.extend(head + choice + tail for choice in reversed(group.group(1).split(",")))
+        if len(done) + len(pending) > _MAX_BRACE_WORDS:
+            return [piece for piece in _BRACE_MARKS.split(word) if piece], False
+    return done, True
+
+
 class _Command:
     """One command's words, and what the scan has learned about them so far."""
 
-    __slots__ = ("after_download", "delete_at", "downloads", "interpreter_at", "piped", "prefixed",
-                 "program_at", "quote", "quote_from", "saves_urls", "settled", "switches", "words")
+    __slots__ = ("after_download", "comment_at", "delete_at", "downloads", "interpreter_at", "parens",
+                 "piped", "prefixed", "program_at", "quote", "quote_from", "saves_urls", "settled",
+                 "switches", "words")
 
     def __init__(self, piped: bool = False, after_download: bool = False) -> None:
         self.words: list[str] = []
@@ -489,6 +640,8 @@ class _Command:
         self.saves_urls = False
         self.quote = ""  # the open quote character, if any
         self.quote_from = 0
+        self.comment_at = -1  # where an unquoted ``#`` word starts a shell comment
+        self.parens = 0  # ``(`` / ``@(`` opened in it and not yet closed
 
 
 class _Context:
@@ -516,18 +669,21 @@ class _Scan:
     """
 
     def __init__(self, cwd: str) -> None:
-        self.cwd0 = cwd
-        self.cwd = cwd
+        self.cwd0 = _places(cwd)
+        self.cwd = self.cwd0  # the directory a relative operand resolves against
         self.downloaded = False
         self.evaluated = False
         self.names: set[str] = set()  # the file names downloads have written
-        self.roots: dict[tuple[str, str], bool] = {}
+        self.readings: dict[str, list[tuple[str, str]]] = {}  # _normalize_targets per word
+        self.relatives: dict[str, _Place] = {}  # _place per relative reading
+        self.roots: dict[str, bool] = {}  # per word, for the current cwd: cleared when it changes
         self.shell = True
         self.line_download = False
         self.previous = ""
 
     def run(self, text: str, *, shell: bool, ticks: bool) -> bool:
-        self.shell, self.cwd, self.names = shell, self.cwd0, set()
+        self.shell, self.names = shell, set()
+        self._move(self.cwd0)
         self.line_download, self.previous = False, ""
         stack = [_Context("top")]
         joins = False  # the last token was a pipe or ``&&``: a newline continues the command
@@ -535,7 +691,7 @@ class _Scan:
         for match in _TOKEN.finditer(text):
             kind, token, context = match.lastgroup, match.group(), stack[-1]
             if kind == "word":
-                if self._word(context, token, match.start() == glue):
+                if self._words(context, token, match.start() == glue):
                     return True
             elif kind == "nl":
                 if token[0] == "`":
@@ -545,16 +701,20 @@ class _Scan:
                         return True
                     context = stack[-1]
                 start = match.start()
-                if joins or text[start - 1:start] in ("\\", "^"):
+                if joins or text[start - 1:start] in ("\\", "^") or self._held(context.command):
                     continue
                 if self._end(context):
                     return True
                 self.line_download = False
             elif kind == "pipe" or kind == "end":
+                if self._held(context.command):
+                    continue
                 if self._end(context, piped=kind == "pipe"):
                     return True
             elif kind == "quote":
                 command = context.command
+                if command.comment_at >= 0 and not command.switches:
+                    continue  # a quote inside a comment
                 quoted = bool(command.quote) and len(command.words) > command.quote_from
                 if self._quote(command, token):
                     return True
@@ -574,26 +734,60 @@ class _Scan:
             elif context.kind == "sub":
                 # A plain parenthesis, or past _MAX_DEPTH a substitution read as
                 # part of the deepest one: only its closing parenthesis is tracked.
+                command = context.command
                 if kind != "close":
                     context.parens += 1
+                    command.parens += 1
                 elif context.parens:
                     context.parens -= 1
+                    command.parens -= 1 if command.parens else 0
                 elif self._close(stack):
                     return True
                 else:
                     glue = match.end()
+            elif kind == "open":
+                context.command.parens += 1
+            elif kind == "close" and context.command.parens:
+                context.command.parens -= 1
             joins = kind == "pipe" or token == "&&"
         while len(stack) > 1:
             if self._close(stack):
                 return True
         return self._end(stack[0])
 
+    def _held(self, command: _Command) -> bool:
+        """Whether a separator or newline here is inside a quote or ``(`` a delete's command left open."""
+        return self.shell and command.delete_at >= 0 and bool(command.quote or command.parens)
+
+    def _move(self, cwd: tuple[_Place, ...]) -> None:
+        self.cwd = cwd
+        self.roots.clear()
+
     def _root(self, word: str) -> bool:
-        key = (word, self.cwd)
-        cached = self.roots.get(key)
+        cached = self.roots.get(word)
         if cached is None:
-            cached = self.roots[key] = _is_root_target(word, self.cwd)
+            cached = self.roots[word] = any(
+                _is_root_reading(drive, path)
+                for drive, path in _against(self._readings(word), self.cwd, self.relatives))
         return cached
+
+    def _readings(self, word: str) -> list[tuple[str, str]]:
+        readings = self.readings.get(word)
+        if readings is None:
+            readings = self.readings[word] = _normalize_targets(word)
+        return readings
+
+    def _words(self, context: _Context, token: str, glued: bool) -> bool:
+        """One word token, brace-expanded; every expanded word keeps what it is glued to."""
+        if "{" not in token:
+            return self._word(context, token, glued)
+        words, expanded = _brace_words(token)
+        command = context.command
+        prefix = command.words[-1] if expanded and glued and command.words else ""
+        for index, word in enumerate(words):
+            if self._word(context, word if index == 0 else prefix + word, glued and index == 0):
+                return True
+        return False
 
     def _word(self, context: _Context, word: str, glued: bool) -> bool:
         name = _program_name(word)
@@ -613,8 +807,12 @@ class _Scan:
         if glued and command.words:
             # ``"$HOME"/``, ``$(pwd)/c``: one shell word with what it follows.
             word = command.words[-1] = command.words[-1] + word
-            return self.shell and context.operands and self._root(word)
-        if self.shell and command.delete_at < 0 and _is_delete_verb(name):
+            return self.shell and context.operands and command.comment_at < 0 and self._root(word)
+        if self.shell and command.comment_at < 0 and not command.quote and word[0] == "#":
+            command.comment_at = len(command.words)
+        if command.comment_at >= 0:
+            pass  # a comment: not a delete, and not an operand
+        elif self.shell and command.delete_at < 0 and _is_delete_verb(name):
             command.delete_at = len(command.words)
             command.switches = name in _SWITCH_VERBS
         elif self.shell and context.operands and not _is_flag(word) and self._root(word):
@@ -658,7 +856,8 @@ class _Scan:
         command = parent.command
         return _Context(kind, feeds=command.interpreter_at >= 0,
                         at_start=self.shell and not command.words,
-                        operands=self.shell and (parent.operands or command.delete_at >= 0))
+                        operands=self.shell and command.comment_at < 0 and (
+                            parent.operands or command.delete_at >= 0))
 
     def _close(self, stack: list[_Context]) -> bool:
         child = stack.pop()
@@ -674,12 +873,18 @@ class _Scan:
     def _end(self, context: _Context, *, piped: bool = False) -> bool:
         """The command in ``context`` ends; the next one reads a pipe when ``piped``."""
         command = context.command
-        if command.words and self._ended(command):
-            return True
+        if command.words:
+            if self._ended(command):
+                return True
+            # ``sh -c "$(cat F)"`` after F was downloaded: the substitution's text is the download.
+            if context.kind != "top" and self.names and any(
+                    _file_name(word) in self.names for word in command.words):
+                context.downloaded = True
         if command.words or piped != command.piped:
             context.command = _Command(piped, piped and self.line_download)
         else:
-            command.quote = ""  # an empty command is reused: newline floods allocate nothing
+            # An empty command is reused: newline floods allocate nothing.
+            command.quote, command.parens = "", 0
         self.previous = ""
         return False
 
@@ -688,7 +893,9 @@ class _Scan:
         if command.piped and command.after_download and command.interpreter_at >= 0:
             return True  # ``curl x | sh``
         if self.shell and command.delete_at >= 0:
-            for word in words[command.delete_at + 1:]:
+            # The operands end at a comment; cmd (``del``, ``rd``) has no ``#`` comment.
+            end = command.comment_at if command.comment_at >= 0 and not command.switches else len(words)
+            for word in words[command.delete_at + 1:end]:
                 if not _is_operand_flag(word, command.switches) and self._root(word):
                     return True
         if self.names and self._runs_a_download(command):
@@ -728,7 +935,7 @@ class _Scan:
         previous = ""
         for index, word in enumerate(words):
             last_word_saver = last_word_saver or _program_name(word) in _LAST_WORD_SAVERS
-            if previous in _OUTPUT_FLAGS or previous in _REDIRECTS:
+            if previous in _OUTPUT_FLAGS or previous in _REDIRECTS or _ends_in_output_flag(previous):
                 self._note(word)
             elif word.startswith(_OUTPUT_ASSIGNMENTS):
                 self._note(word.split("=", 1)[1])
@@ -751,14 +958,18 @@ class _Scan:
 
     def _change_directory(self, operands: list[str]) -> None:
         target = next((word for word in operands if not _is_flag(word)), "~")
-        if any(drive or path.startswith("/") for drive, path in _normalize_targets(target)):
-            self.cwd = target
+        readings = self._readings(target)
+        if any(drive or path.startswith("/") for drive, path in readings):
+            self._move(tuple(_place(drive, path) for drive, path in readings))
         else:
-            self.cwd = (self.cwd.rstrip("/\\") + "/" + target) if self.cwd else target
+            # Each step is bounded (``_Place``), so a ``cd`` flood stays linear.
+            relatives = [_place("", path) for _drive, path in readings]
+            self._move(tuple(_descend(place, relative) for place in self.cwd or (_place("", ""),)
+                             for relative in relatives))
 
 
 def _blocked(parts: list[tuple[str, bool, bool]], cwd: str) -> bool:
-    texts = [(_BRACED_VARIABLE.sub(r"$\1", text), shell, ticks) for text, shell, ticks in parts]
+    texts = [(_fold_variables(text), shell, ticks) for text, shell, ticks in parts]
     every = _SPACES.sub(" ", "\n".join(text for text, _shell, _ticks in texts))
     if any(marker in every for marker in _BLOCK_TEXT):
         return True
@@ -820,7 +1031,7 @@ def _delete_target_blocked(arguments: Mapping[str, Any], cwd: str) -> bool:
     path = arguments.get("path")
     if not isinstance(path, str):
         raise _Unreadable("file_delete needs a path")
-    return _is_root_target(path, cwd) or path.strip().rstrip(" .") == ""
+    return _is_root_target(path, _places(cwd)) or path.strip().rstrip(" .") == ""
 
 
 def _classify(tool_name: str, arguments: Any, risk: str) -> str:
@@ -829,12 +1040,12 @@ def _classify(tool_name: str, arguments: Any, risk: str) -> str:
             return ASK
         arguments = {}
     name = str(tool_name or "").strip().lstrip("/")
-    parts = _parts(arguments)
-    if sum(len(text) for text, _shell, _ticks in parts) > _MAX_TEXT:
-        return ASK  # too long to read: fail closed
-    parts = [(text.lower(), shell, ticks) for text, shell, ticks in parts]
+    parts = _parts(name, arguments)
     cwd = arguments.get("cwd")
     cwd = cwd.lower() if isinstance(cwd, str) else ""
+    if sum(len(text) for text, _shell, _ticks in parts) + len(cwd) > _MAX_TEXT:
+        return ASK  # too long to read: fail closed
+    parts = [(text.lower(), shell, ticks) for text, shell, ticks in parts]
     if parts and _blocked(parts, cwd):
         return BLOCK
     if name in _DELETE_TOOLS and _delete_target_blocked(arguments, cwd):
