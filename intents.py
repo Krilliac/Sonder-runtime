@@ -7,6 +7,7 @@ on, /run), without hijacking real coding questions or requests. Stdlib only.
 import re
 
 from sonder_runtime.application.chat.tool_intent import classify_file_intent, suppresses_file_tools
+from sonder_runtime.application.command_surface.command_text import ascii_lower
 
 # Messages that open with one of these are almost always a real question or
 # task ("how do I...", "explain strict mode in javascript"), not a control
@@ -256,7 +257,7 @@ def classify(text):
     Conservative: only fires on SHORT control-like messages (<= 10 words), and
     never fires on messages that read as a real question or task.
     """
-    t = (text or "").strip().lower()
+    t = ascii_lower((text or "").strip())
     if not t or len(t.split()) > 10:
         return {}
 

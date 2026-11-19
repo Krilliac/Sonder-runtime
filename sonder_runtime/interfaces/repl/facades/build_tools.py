@@ -27,6 +27,8 @@ import shlex
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from ....application.command_surface.command_text import slash_head
+
 NOT_COMPOSED = "build tools are not composed in this runtime"
 BUILD_USAGE = (
     "usage: /build model [--dir D] [--preset P] [--detail summary|targets|compile_units|"
@@ -356,7 +358,7 @@ class BuildReplFacade:
 
     def dispatch(self, command: str, arg: str) -> BuildOutcome:
         """Run ``/build`` or ``/fix-build`` and return the structured outcome."""
-        entry = _COMMANDS.get(str(command or "").lower())
+        entry = _COMMANDS.get(slash_head(command))
         if entry is None:
             raise ValueError("not a build command: %s" % str(command)[:40])
         parser, usage = entry
@@ -379,7 +381,7 @@ def usage_error(command: str, arg: str) -> str:
     line is told how to type the command instead of being asked to approve
     (or refused) a build that would only have printed usage.
     """
-    entry = _COMMANDS.get(str(command or "").lower())
+    entry = _COMMANDS.get(slash_head(command))
     if entry is None:
         return ""
     parser, usage = entry
