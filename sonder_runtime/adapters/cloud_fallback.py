@@ -9,10 +9,17 @@ byte-for-byte intact.
 """
 from __future__ import annotations
 
+from typing import Any, Callable, Mapping
+
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
-def extra_usage_fallback(model, error, *, fallback_model):
+def extra_usage_fallback(
+    model: str | None,
+    error: object,
+    *,
+    fallback_model: str,
+) -> str | None:
     """Return the plan-covered Kimi fallback for an unfunded K3 request.
 
     Ollama currently bills Kimi K3 only against the separate extra-usage
@@ -34,10 +41,18 @@ def extra_usage_fallback(model, error, *, fallback_model):
 
 
 def chat_request_with_cloud_fallback(
-    payload, *, model, timeout=None, cancel_check=None,
-    accept_native_tool_calls=False, compact_cloud_reasoning=False,
-    allow_cloud_fallback=True, chat_request, apply_thinking_policy, fallback_model,
-):
+    payload: Mapping[str, Any],
+    *,
+    model: str,
+    timeout: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    accept_native_tool_calls: bool = False,
+    compact_cloud_reasoning: bool = False,
+    allow_cloud_fallback: bool = True,
+    chat_request: Callable[..., tuple[Any, Any]],
+    apply_thinking_policy: Callable[..., None],
+    fallback_model: str,
+) -> tuple[Any, Any, str]:
     """Make one cloud request, optionally falling back once on K3 HTTP 402.
 
     A normal single-model request may use the documented K3-to-K2.7

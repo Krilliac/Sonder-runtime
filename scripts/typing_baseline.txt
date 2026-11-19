@@ -11,7 +11,6 @@ sonder_runtime/adapters/accelerators/npu/service.py
 sonder_runtime/adapters/agent_artifact_gate.py
 sonder_runtime/adapters/agent_call_signature.py
 sonder_runtime/adapters/agent_decision_generation.py
-sonder_runtime/adapters/agent_generation_budget.py
 sonder_runtime/adapters/agent_terminal_evidence.py
 sonder_runtime/adapters/agent_work_coverage.py
 sonder_runtime/adapters/archive_create.py
@@ -35,23 +34,17 @@ sonder_runtime/adapters/build/source_editor.py
 sonder_runtime/adapters/build/tree_reader.py
 sonder_runtime/adapters/chat_file_routing.py
 sonder_runtime/adapters/cheat_trial_runner.py
-sonder_runtime/adapters/client_config.py
-sonder_runtime/adapters/client_endpoint.py
 sonder_runtime/adapters/client_fallback.py
 sonder_runtime/adapters/client_request.py
 sonder_runtime/adapters/client_transport.py
-sonder_runtime/adapters/cloud_fallback.py
 sonder_runtime/adapters/cluster/http_control_state.py
 sonder_runtime/adapters/code_check.py
 sonder_runtime/adapters/code_repair_persistence.py
 sonder_runtime/adapters/command_catalog.py
-sonder_runtime/adapters/command_completion.py
 sonder_runtime/adapters/compute_fabric/artifact_mobility.py
 sonder_runtime/adapters/compute_fabric/artifact_transfer.py
 sonder_runtime/adapters/compute_fabric/http_client.py
 sonder_runtime/adapters/compute_fabric/local_snapshot.py
-sonder_runtime/adapters/config_validation.py
-sonder_runtime/adapters/content_services.py
 sonder_runtime/adapters/conversational_subagents.py
 sonder_runtime/adapters/creation_workspace.py
 sonder_runtime/adapters/debug_tools_executor.py
@@ -69,8 +62,6 @@ sonder_runtime/adapters/desktop/windows.py
 sonder_runtime/adapters/developer_tools_executor.py
 sonder_runtime/adapters/embedding_cache.py
 sonder_runtime/adapters/embeddings.py
-sonder_runtime/adapters/evaluation_corpus.py
-sonder_runtime/adapters/evaluation_history_reader.py
 sonder_runtime/adapters/evaluation_history_store.py
 sonder_runtime/adapters/execution/codegen_container_build.py
 sonder_runtime/adapters/execution/compute_effect_verifier.py
@@ -90,7 +81,6 @@ sonder_runtime/adapters/extensions/memory_limits.py
 sonder_runtime/adapters/fanout_failures.py
 sonder_runtime/adapters/fanout_health.py
 sonder_runtime/adapters/fanout_receipt.py
-sonder_runtime/adapters/fanout_synthesis.py
 sonder_runtime/adapters/filesystem/atomic_json.py
 sonder_runtime/adapters/filesystem/child_migration_bundle.py
 sonder_runtime/adapters/filesystem/durable_locks.py
@@ -101,7 +91,6 @@ sonder_runtime/adapters/filesystem/text_patch.py
 sonder_runtime/adapters/filesystem/workbench.py
 sonder_runtime/adapters/filesystem/workflow_store.py
 sonder_runtime/adapters/filesystem/workspace_manifest.py
-sonder_runtime/adapters/fleet_aggregation.py
 sonder_runtime/adapters/fleet_creations.py
 sonder_runtime/adapters/fleet_workers.py
 sonder_runtime/adapters/gateway_generation.py
