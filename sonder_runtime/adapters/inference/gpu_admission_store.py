@@ -78,6 +78,53 @@ CREATE TABLE gpu_footprints(
 );
 """
 
+# Added in place under schema version "1" (an older build ignores the table).
+# ``gpu_footprints`` stays as the current windowed value for such a build.
+_SAMPLES_DDL = (
+    "CREATE TABLE IF NOT EXISTS gpu_footprint_samples("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, digest TEXT NOT NULL, num_ctx INTEGER NOT NULL, "
+    "working_set INTEGER NOT NULL, private_bytes INTEGER NOT NULL, measured_at REAL NOT NULL, "
+    "legacy INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS gpu_footprint_samples_key ON gpu_footprint_samples(digest, num_ctx)",
+)
+_SAMPLES_MIGRATED = "footprint_samples_migrated"
+
+FOOTPRINT_WINDOW = 16                   # newest samples kept per (digest, num_ctx)
+FOOTPRINT_MAX_AGE_SECONDS = 7 * 86400   # older samples stop counting once a newer one exists
+FOOTPRINT_PERCENTILE = 90               # nearest rank: the max while n <= 9, then trims the top
+FOOTPRINT_LEGACY_MIN_FRESH = 3          # fresh samples that retire an imported MAX row
+
+
+def window_percentile(values: list[int], percent: int) -> int:
+    """Nearest-rank percentile of a non-empty list."""
+    ordered = sorted(values)
+    rank = -(-len(ordered) * percent // 100)  # ceil
+    return ordered[max(1, min(len(ordered), rank)) - 1]
+
+
+def aggregate_footprint_samples(
+    samples: list[tuple[int, int, float, int]], now: float,
+) -> tuple[int, int, float] | None:
+    """(working set, private, newest time) of the live samples; None only for no samples.
+
+    Live: newer than ``FOOTPRINT_MAX_AGE_SECONDS``. Age retires a sample only in
+    favour of newer evidence: when every sample is older, the last window stands,
+    because dropping it would replace a measurement with a larger estimate and a
+    model that fit could then never be measured again. A sample imported from the
+    old keep-the-maximum row (``legacy``) stops counting once
+    ``FOOTPRINT_LEGACY_MIN_FRESH`` real samples exist, so a poisoned maximum
+    cannot outlive fresh evidence. Each column takes its own percentile.
+    """
+    fresh = [s for s in samples if now - s[2] <= FOOTPRINT_MAX_AGE_SECONDS]
+    live = fresh or list(samples)  # nothing newer: the last window stands
+    if sum(1 for s in live if not s[3]) >= FOOTPRINT_LEGACY_MIN_FRESH:
+        live = [s for s in live if not s[3]]
+    if not live:
+        return None
+    return (window_percentile([s[0] for s in live], FOOTPRINT_PERCENTILE),
+            window_percentile([s[1] for s in live], FOOTPRINT_PERCENTILE),
+            max(s[2] for s in live))
+
 
 class StoreUnavailable(RuntimeError):
     """The shared admission state cannot be read or does not match this build."""
@@ -168,7 +215,25 @@ class GpuAdmissionStore:
             if row is None or row[0] != SCHEMA_VERSION:
                 raise StoreUnavailable("admission store schema mismatch (expected version %s)"
                                        % SCHEMA_VERSION)
+        self._migrate_footprint_samples(connection)
         self._checked = True
+
+    @staticmethod
+    def _migrate_footprint_samples(connection: sqlite3.Connection) -> None:
+        """Create the sample table and import each old MAX row once, as one
+        ``legacy`` sample at its own ``measured_at``. Runs inside the caller's
+        ``BEGIN IMMEDIATE``, so two processes cannot both import."""
+        for statement in _SAMPLES_DDL:
+            connection.execute(statement)
+        done = connection.execute(
+            "SELECT 1 FROM gpu_meta WHERE key=?", (_SAMPLES_MIGRATED,)).fetchone()
+        if done is not None:
+            return
+        connection.execute(
+            "INSERT INTO gpu_footprint_samples(digest,num_ctx,working_set,private_bytes,"
+            "measured_at,legacy) SELECT digest,num_ctx,working_set,private_bytes,measured_at,1 "
+            "FROM gpu_footprints")
+        connection.execute("INSERT INTO gpu_meta(key,value) VALUES(?,?)", (_SAMPLES_MIGRATED, "1"))
 
     def _run(self, work: Callable[[sqlite3.Connection, float], _T]) -> _T:
         connection: sqlite3.Connection | None = None
@@ -348,26 +413,61 @@ class GpuAdmissionStore:
     # -- footprints -----------------------------------------------------------
     def record_footprint(self, digest: str, num_ctx: int, working_set_bytes: int,
                          private_bytes: int) -> None:
-        """Store the larger of the previous and the new measurement."""
+        """Add one sample to the bounded window of ``(digest, num_ctx)``.
+
+        The window keeps the newest ``FOOTPRINT_WINDOW`` samples; samples older
+        than ``FOOTPRINT_MAX_AGE_SECONDS`` are deleted here, only after this newer
+        one is inserted. The reported footprint is the ``FOOTPRINT_PERCENTILE``
+        (per column) of the live samples, so one outlier ages out instead of
+        being kept forever. ``gpu_footprints`` is rewritten with that value."""
         def work(connection: sqlite3.Connection, now: float) -> None:
+            ctx = int(num_ctx)
+            connection.execute(
+                "INSERT INTO gpu_footprint_samples(digest,num_ctx,working_set,private_bytes,"
+                "measured_at,legacy) VALUES(?,?,?,?,?,0)",
+                (digest, ctx, int(working_set_bytes), int(private_bytes), now))
+            connection.execute(
+                "DELETE FROM gpu_footprint_samples WHERE digest=? AND num_ctx=? AND (measured_at<? "
+                "OR id NOT IN (SELECT id FROM gpu_footprint_samples WHERE digest=? AND num_ctx=? "
+                "ORDER BY id DESC LIMIT ?))",
+                (digest, ctx, now - FOOTPRINT_MAX_AGE_SECONDS, digest, ctx, FOOTPRINT_WINDOW))
+            samples = [(int(a), int(b), float(c), int(d)) for a, b, c, d in connection.execute(
+                "SELECT working_set,private_bytes,measured_at,legacy FROM gpu_footprint_samples "
+                "WHERE digest=? AND num_ctx=?", (digest, ctx)).fetchall()]
+            summary = aggregate_footprint_samples(samples, now)
+            if summary is None:
+                return
             connection.execute(
                 "INSERT INTO gpu_footprints(digest,num_ctx,working_set,private_bytes,measured_at) "
                 "VALUES(?,?,?,?,?) ON CONFLICT(digest,num_ctx) DO UPDATE SET "
-                "working_set=MAX(working_set,excluded.working_set),"
-                "private_bytes=MAX(private_bytes,excluded.private_bytes),"
+                "working_set=excluded.working_set,private_bytes=excluded.private_bytes,"
                 "measured_at=excluded.measured_at",
-                (digest, int(num_ctx), int(working_set_bytes), int(private_bytes), now))
+                (digest, ctx, summary[0], summary[1], summary[2]))
 
         self._run(work)
 
     def footprints_for(self, digest: str) -> tuple[FootprintRecord, ...]:
-        rows = self._run(lambda connection, now: connection.execute(
-            "SELECT digest,num_ctx,working_set,private_bytes,measured_at FROM gpu_footprints "
-            "WHERE digest=?", (digest,)).fetchall())
-        return tuple(FootprintRecord(*row) for row in rows)
+        def work(connection: sqlite3.Connection, now: float) -> list[Any]:
+            return connection.execute(
+                "SELECT num_ctx,working_set,private_bytes,measured_at,legacy "
+                "FROM gpu_footprint_samples WHERE digest=? ORDER BY num_ctx,id", (digest,)).fetchall()
+
+        by_ctx: dict[int, list[tuple[int, int, float, int]]] = {}
+        for ctx, working_set, private, measured_at, legacy in self._run(work):
+            by_ctx.setdefault(int(ctx), []).append(
+                (int(working_set), int(private), float(measured_at), int(legacy)))
+        now = float(self._clock())
+        records = []
+        for ctx in sorted(by_ctx):
+            summary = aggregate_footprint_samples(by_ctx[ctx], now)
+            if summary is not None:
+                records.append(FootprintRecord(digest, ctx, summary[0], summary[1], summary[2]))
+        return tuple(records)
 
 
 __all__ = [
     "FULL", "FootprintRecord", "GpuAdmissionStore", "HELD", "LeaseRow", "PinRecord",
-    "SCHEMA_VERSION", "StoreUnavailable", "WAITING",
+    "SCHEMA_VERSION", "StoreUnavailable", "WAITING", "FOOTPRINT_LEGACY_MIN_FRESH",
+    "FOOTPRINT_MAX_AGE_SECONDS", "FOOTPRINT_PERCENTILE", "FOOTPRINT_WINDOW",
+    "aggregate_footprint_samples", "window_percentile",
 ]
