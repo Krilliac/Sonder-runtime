@@ -98,11 +98,28 @@ def _check_deadline(deadline):
         raise LogInspectError("log inspection exceeded the timeout ceiling")
 
 
-def _requested_path(raw):
+def _requested_text(raw):
+    """The caller's path text, refused if it is a UNC/device spelling.
+
+    Runs before anything touches the filesystem; an extended-length local
+    prefix (``\\\\?\\D:\\x``) is stripped and the stripped text returned.
+    """
     text = str(raw or "").strip()
-    if not text or "\x00" in text or file_ops._foreign_absolute(text):
+    if not text or "\x00" in text:
         raise LogInspectError("log path must be a non-empty native path")
-    candidate = Path(text).expanduser()
+    try:
+        text = file_ops._reject_network_path(text)
+    except PermissionError:
+        raise LogInspectError(
+            "log path must not use a UNC, device or network spelling"
+        ) from None
+    if file_ops._foreign_absolute(text):
+        raise LogInspectError("log path must be a non-empty native path")
+    return text
+
+
+def _requested_path(raw):
+    candidate = Path(_requested_text(raw)).expanduser()
     if not candidate.is_absolute():
         candidate = file_ops.workspace_root() / candidate
     return candidate.absolute()
@@ -120,11 +137,12 @@ def _reject_reparse_components(path):
 
 
 def resolve_log_path(path, *, extra_roots=""):
-    requested = _requested_path(path)
+    text = _requested_text(path)
+    requested = _requested_path(text)
     _reject_reparse_components(requested)
     try:
         target = file_ops.resolve_repository_read_path(
-            str(path), allow_workspace_root=False, reject_sensitive=True,
+            text, allow_workspace_root=False, reject_sensitive=True,
             extra_roots=extra_roots,
         )
         metadata = target.lstat()

@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 from ...domain.compute_fabric import (
     ComputeCapability,
@@ -16,6 +16,19 @@ from ...domain.compute_fabric import (
     NodeSnapshot,
 )
 from ...platform import environment_probe, system_profile
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _HasLoadAvg(Protocol):
+        def getloadavg(self) -> tuple[float, float, float]: ...
+
+    class _DiskUsage(Protocol):
+        @property
+        def total(self) -> int: ...
+
+        @property
+        def free(self) -> int: ...
 
 
 _TOOL_CAPABILITIES = {
@@ -38,7 +51,7 @@ _TOOL_CAPABILITIES = {
 }
 
 
-def _bytes_from_gib(value: Any) -> int | None:
+def _bytes_from_gib(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         return None
     return int(round(float(value) * (1 << 30)))
@@ -48,7 +61,7 @@ def _default_load(cpu_count: int | None) -> float | None:
     if not cpu_count:
         return None
     try:
-        one_minute = os.getloadavg()[0]
+        one_minute = cast("_HasLoadAvg", os).getloadavg()[0]
     except (AttributeError, OSError):
         return None
     return max(0.0, min(1.0, one_minute / cpu_count))
@@ -60,12 +73,12 @@ class LocalComputeSnapshotSource:
     def __init__(
         self,
         *,
-        environment_probe: Callable[[], Mapping[str, Any]] = environment_probe.probe,
-        hardware_probe: Callable[[], Any] = system_profile.detect_hardware,
-        disk_probe: Callable[[Path], Any] = shutil.disk_usage,
+        environment_probe: Callable[[], Mapping[str, object]] = environment_probe.probe,
+        hardware_probe: Callable[[], object] = system_profile.detect_hardware,
+        disk_probe: Callable[[Path], _DiskUsage] = shutil.disk_usage,
         active_jobs: Callable[[], int] = lambda: 0,
         load_probe: Callable[[int | None], float | None] = _default_load,
-        storage_path: Path | None = None,
+        storage_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self._environment_probe = environment_probe
         self._hardware_probe = hardware_probe
@@ -95,7 +108,7 @@ class LocalComputeSnapshotSource:
         if total_ram:
             capabilities.add(ComputeCapability.RAM)
 
-        tools: dict[str, Any] = {}
+        tools: dict[object, object] = {}
         for section in ("toolchains", "specialist_tools"):
             values = environment.get(section, {})
             if isinstance(values, Mapping):

@@ -11,9 +11,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import TYPE_CHECKING
 
 from ..provider_bindings import provider_bindings_from_env
 from .sonder_inference_gateway import config_from_env
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 _OBSERVED: ContextVar[dict[str, str] | None] = ContextVar(
@@ -22,7 +26,7 @@ _OBSERVED: ContextVar[dict[str, str] | None] = ContextVar(
 
 
 @contextmanager
-def observation_scope():
+def observation_scope() -> Iterator[None]:
     """Keep successful provider outcomes within one routed work request."""
     token = _OBSERVED.set({})
     try:
@@ -76,7 +80,9 @@ def served_prompt_model(
     return str(served or "").strip() or model
 
 
-def served_tier_models(tiers: Mapping[str, str], env: Mapping[str, str] | None = None) -> dict:
+def served_tier_models(
+    tiers: Mapping[str, str], env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Label Inference tiers by configuration or a scoped successful response.
 
     If bindings cannot be read, keep policy labels except for successful calls

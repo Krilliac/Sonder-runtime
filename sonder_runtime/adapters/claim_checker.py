@@ -30,6 +30,25 @@ from sonder_runtime.platform.claim_check_config import ClaimCheckConfig
 _MIN_NEEDLE = 3
 _NOT_NEEDLES = frozenset({"if", "for", "new", "get", "set", "var", "int", "the"})
 _NO_SUCH_FILE = "no such file in the repository"
+_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+
+
+def _local_spelling(name: str) -> str | None:
+    """``name`` with a local extended-length prefix stripped, or None for a network spelling.
+
+    Lexical only, so it runs before any ``realpath``/``stat`` can open an SMB
+    connection for ``\\\\host\\share`` (an NTLM leak). Mirrors
+    ``file_ops._reject_network_path`` without importing the host file layer:
+    ``\\\\?\\D:\\x`` (either slash flavour) becomes ``D:\\x``; every other name
+    starting with ``\\\\`` or ``\\??\\`` after flattening ``/`` to ``\\`` is refused.
+    """
+    text = name.strip()
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        return text[extended.start(1):]
+    if text.replace("/", "\\").startswith(("\\\\", "\\??\\")):
+        return None
+    return name
 
 
 def _split_lines(text: str) -> list[str]:
@@ -72,7 +91,11 @@ class ClaimChecker:
         """The real path of ``name`` inside the root, or the failing/unreadable result."""
         if "\x00" in name:
             return None, CheckResult("file_in_root", CheckStatus.FAIL, "path holds a NUL byte")
-        raw = Path(name)
+        local = _local_spelling(name)
+        if local is None:
+            return None, CheckResult(
+                "file_in_root", CheckStatus.FAIL, "refusing a UNC or network path spelling")
+        raw = Path(local)
         candidate = raw if raw.is_absolute() else self._root / raw
         real = Path(os.path.realpath(candidate))
         if not self._within(real):
