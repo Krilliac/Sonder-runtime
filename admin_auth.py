@@ -210,7 +210,8 @@ def init(conn: sqlite3.Connection) -> None:
             key_id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
             key_hash TEXT NOT NULL UNIQUE,
-            created_ts INTEGER NOT NULL
+            created_ts INTEGER NOT NULL,
+            expires_ts INTEGER
         );
         CREATE INDEX IF NOT EXISTS account_api_keys_username ON account_api_keys(username);
         CREATE TABLE IF NOT EXISTS usage_stats (
@@ -224,6 +225,16 @@ def init(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Key tables created before key expiry existed gain the one nullable column
+    # (NULL: the key never expires).
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(account_api_keys)")}
+    if "expires_ts" not in columns:
+        try:
+            conn.execute("ALTER TABLE account_api_keys ADD COLUMN expires_ts INTEGER")
+        except sqlite3.OperationalError as exc:
+            # Another process upgraded the same database since the check.
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.commit()
 
 
@@ -532,7 +543,25 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
         return False, "%s role required" % role
     if account.get("banned"):
         return False, "account is banned"
+    # An assigned API key is a long-lived bearer that can leak; it never
+    # carries admin authority, which needs a signed-in session.
+    if role == "admin" and account.get("via_api_key"):
+        return False, "admin authority requires a signed-in session"
     return True, ""
+
+
+def has_developer_authority(account: dict | None) -> bool:
+    """True when the account's role, or a ``developer`` entry in its dev_flags, grants developer.
+
+    ``dev_flags`` is a comma- or space-separated list set by an admin; only the
+    exact ``developer`` entry counts.
+    """
+    if require(account, "developer")[0]:
+        return True
+    if not account or account.get("banned"):
+        return False
+    flags = str(account.get("dev_flags") or "").replace(",", " ").split()
+    return "developer" in flags
 
 
 @coordinated_account_mutation
@@ -562,6 +591,9 @@ def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
                 "UPDATE account_sessions SET revoked=1 WHERE username=? AND revoked=0",
                 (username,),
             )
+            # Assigned API keys are bearer credentials too: delete them, so
+            # un-banning does not silently restore a key issued before the ban.
+            conn.execute("DELETE FROM account_api_keys WHERE username=?", (username,))
         conn.commit()
     return public_account(conn, username)
 
@@ -724,14 +756,46 @@ def meter_usage(conn: sqlite3.Connection, account: dict | None, tokens: int) -> 
 API_KEY_PREFIX = "sk-"
 MAX_API_KEYS_PER_ACCOUNT = 10
 _MAX_API_KEY_LENGTH = 128
+# ``saas_settings`` row holding the lifetime of newly minted keys in seconds.
+# Absent or 0: keys never expire (the default).
+API_KEY_TTL_SETTING = "api_key_ttl_seconds"
+
+
+def set_api_key_ttl(conn: sqlite3.Connection, seconds: int) -> None:
+    """Set the lifetime of keys minted from now on; 0 means they never expire.
+
+    Keys already issued keep the expiry they were minted with.
+    ``ValueError`` for anything but a non-negative integer.
+    """
+    if type(seconds) is not int or seconds < 0:
+        raise ValueError("api key ttl must be a non-negative integer")
+    init(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO saas_settings(key, value) VALUES(?, ?)",
+        (API_KEY_TTL_SETTING, str(seconds)),
+    )
+    conn.commit()
+
+
+def _api_key_ttl(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT value FROM saas_settings WHERE key=?", (API_KEY_TTL_SETTING,)
+    ).fetchone()
+    try:
+        seconds = int(str(row[0]).strip()) if row else 0
+    except ValueError:  # an unparsable row is no TTL, like an absent one
+        return 0
+    return max(0, seconds)
 
 
 @coordinated_account_mutation
 def generate_api_key(conn: sqlite3.Connection, username: str) -> dict:
-    """Mint a key for an existing account: ``{"key", "key_id", "created_ts"}``.
+    """Mint a key for an existing account: ``{"key", "key_id", "created_ts", "expires_ts"}``.
 
-    ``ValueError`` for an unknown account or one already holding
-    ``MAX_API_KEYS_PER_ACCOUNT`` keys.
+    ``expires_ts`` is None unless ``API_KEY_TTL_SETTING`` sets a lifetime.
+    The account's expired keys are deleted first, so they do not count
+    against the limit.  ``ValueError`` for an unknown account or one already
+    holding ``MAX_API_KEYS_PER_ACCOUNT`` live keys.
     """
     init(conn)
     username = _username(username)
@@ -742,20 +806,27 @@ def generate_api_key(conn: sqlite3.Connection, username: str) -> dict:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM accounts WHERE username=?", (username,)).fetchone() is None:
             raise ValueError("unknown account")
+        conn.execute(
+            "DELETE FROM account_api_keys WHERE username=? AND expires_ts IS NOT NULL AND expires_ts <= ?",
+            (username, created),
+        )
         held = conn.execute(
             "SELECT COUNT(*) FROM account_api_keys WHERE username=?", (username,)
         ).fetchone()[0]
         if int(held) >= MAX_API_KEYS_PER_ACCOUNT:
             raise ValueError("api key limit reached")
+        ttl = _api_key_ttl(conn)
+        expires = created + ttl if ttl else None
         conn.execute(
-            "INSERT INTO account_api_keys(key_id, username, key_hash, created_ts) VALUES(?, ?, ?, ?)",
-            (key_id, username, _hash_token(key), created),
+            "INSERT INTO account_api_keys(key_id, username, key_hash, created_ts, expires_ts) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (key_id, username, _hash_token(key), created, expires),
         )
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
-    return {"key": key, "key_id": key_id, "created_ts": created}
+    return {"key": key, "key_id": key_id, "created_ts": created, "expires_ts": expires}
 
 
 @coordinated_account_mutation
@@ -774,26 +845,31 @@ def revoke_api_key(conn: sqlite3.Connection, username: str, key_id: str | None =
 
 
 def list_api_keys(conn: sqlite3.Connection, username: str) -> list[dict]:
-    """``username``'s keys, oldest first, as ``{"key_id", "created_ts"}`` (never a key or hash)."""
+    """``username``'s keys, oldest first, as ``{"key_id", "created_ts", "expires_ts"}``.
+
+    Never a key or its hash.  ``expires_ts`` is None for a key that never expires.
+    """
     init(conn)
     username = _username(username)
     rows = conn.execute(
-        "SELECT key_id, created_ts FROM account_api_keys WHERE username=? ORDER BY created_ts, key_id",
+        "SELECT key_id, created_ts, expires_ts FROM account_api_keys WHERE username=? "
+        "ORDER BY created_ts, key_id",
         (username,),
     ).fetchall()
-    return [{"key_id": row[0], "created_ts": row[1]} for row in rows]
+    return [{"key_id": row[0], "created_ts": row[1], "expires_ts": row[2]} for row in rows]
 
 
 def authenticate_api_key(conn: sqlite3.Connection, key: str) -> str | None:
-    """The username owning ``key`` when it is live and the account is not banned, else None."""
+    """The username owning ``key`` when it is live, unexpired and the account is not banned, else None."""
     if (type(key) is not str or not key.startswith(API_KEY_PREFIX)
             or len(key) > _MAX_API_KEY_LENGTH or any(not 33 <= ord(c) <= 126 for c in key)):
         return None
     init(conn)
     row = conn.execute(
         "SELECT k.username FROM account_api_keys AS k JOIN accounts AS a ON a.username = k.username "
-        "WHERE k.key_hash=? AND COALESCE(a.banned, 0) = 0",
-        (_hash_token(key),),
+        "WHERE k.key_hash=? AND COALESCE(a.banned, 0) = 0 "
+        "AND (k.expires_ts IS NULL OR k.expires_ts > ?)",
+        (_hash_token(key), _now()),
     ).fetchone()
     return row[0] if row else None
 
@@ -801,8 +877,10 @@ def authenticate_api_key(conn: sqlite3.Connection, key: str) -> str | None:
 def api_key_account(conn: sqlite3.Connection, key: str) -> dict | None:
     """The public account (role, tier, dev_flags) a live ``key`` stands for, else None.
 
-    None for a malformed, unknown or revoked key and for a banned or deleted
-    account, so the caller sees no difference between them.
+    None for a malformed, unknown, revoked or expired key and for a banned or
+    deleted account, so the caller sees no difference between them.  The
+    account is marked ``via_api_key=True``: :func:`require` then refuses it
+    admin authority, while its tier, rate limit and metering still apply.
     """
     username = authenticate_api_key(conn, key)
     if username is None:
@@ -811,4 +889,7 @@ def api_key_account(conn: sqlite3.Connection, key: str) -> dict | None:
         account = public_account(conn, username)
     except ValueError:  # the account was deleted after the key lookup
         return None
-    return None if account["banned"] else account
+    if account["banned"]:
+        return None
+    account["via_api_key"] = True
+    return account

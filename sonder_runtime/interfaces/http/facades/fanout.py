@@ -1,7 +1,8 @@
 """HTTP model-fanout routes: run history, one receipt, and its mutations.
 
 * ``GET /v1/fanout`` lists recent runs (developer or admin authority; a
-  non-admin account sees only its own runs, keyed by its opaque owner);
+  caller without admin authority sees only its own runs, keyed by its
+  opaque owner);
 * ``GET /v1/fanout/<run_id>`` returns one caller-authorized receipt;
 * ``POST /v1/fanout/<run_id>/cancel``, ``resume`` and ``synthesize`` mutate
   it, each bound to an opt-in ``Idempotency-Key`` replay guard over the run
@@ -22,11 +23,13 @@ from typing import Any, Callable
 
 def serve_get(handler: Any, route: str, *, parse_query: Callable[[], dict],
               developer_authorized: Callable[[Any], bool],
+              admin_authorized: Callable[[Any], bool],
               request_owner_of: Callable[[Any], str], runtime: Any) -> bool:
     """``GET /v1/fanout`` (run history) and ``GET /v1/fanout/<run_id>``.
 
     ``route`` is the request path without a trailing slash; ``parse_query``
-    parses the request's query string. Returns ``False`` for another route.
+    parses the request's query string; ``admin_authorized`` decides whether
+    the caller may see every owner's runs. Returns ``False`` for another route.
     """
     if route == "/v1/fanout":
         context = handler._request_auth_context()
@@ -57,9 +60,10 @@ def serve_get(handler: Any, route: str, *, parse_query: Callable[[], dict],
         if finished_text not in ("true", "false"):
             handler._send_json_payload({"error": {"message": "include_finished must be true or false", "type": "invalid_request"}}, status=400)
             return True
-        account = context.get("account") or {}
         request_owner = None
-        if context.get("mode") != "local-open" and account.get("role") != "admin":
+        # The all-owners view is an admin operation: an account's API key
+        # never carries admin authority, whatever the account's role.
+        if context.get("mode") != "local-open" and not admin_authorized(context):
             request_owner = request_owner_of(context)
         handler._send_json_payload({"runs": runtime.fanout_store.recent_run_summaries(
             request_owner=request_owner, include_finished=finished_text == "true",
