@@ -227,6 +227,8 @@ def _first_object(text: str):
     decoder = json.JSONDecoder()
     index = text.find("{")
     failures = 0
+    extents = {}
+    scans = 0
     while index != -1:
         following = index + 1
         while following < len(text) and text[following] in " \t\n\r":
@@ -243,12 +245,47 @@ def _first_object(text: str):
             failures += 1
             if failures >= 64:
                 return None
-            index = text.find("{", index + 1)
+            # Skip the failed object's whole balanced extent so a nested object
+            # is never returned; a truncated outer object (never closes) keeps
+            # its inner objects findable.
+            if index not in extents:
+                # A legitimate reply needs one scan; quoting crafted to defeat
+                # the cache fails closed, like the 64-failure bound.
+                scans += 1
+                if scans > 2:
+                    return None
+                _record_extents(text, index, extents)
+            end = extents[index]
+            index = text.find("{", index + 1 if end is None else end)
             continue
         if isinstance(value, dict):
             return value
         index = text.find("{", index + 1)
     return None
+
+
+def _record_extents(text, start, extents):
+    """Map each '{' a string-aware scan from ``start`` sees to its extent end (None: never closes)."""
+    stack = []
+    in_string = escaped = False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(i)
+        elif char in "}]" and stack:
+            opener = stack.pop()
+            extents.setdefault(opener, i + 1)
+    for opener in stack:
+        extents.setdefault(opener, None)
 
 
 def parse_critique(text: str) -> dict:
