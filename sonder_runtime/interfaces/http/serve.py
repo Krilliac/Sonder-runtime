@@ -2007,6 +2007,39 @@ def _effective_auth_mode():
     return AUTH_MODE
 
 
+def _log_sharded_backend_readiness(rpc_base, probe=None):
+    """Probe the RPC sharded backend once at startup and log the result.
+
+    Only the failures ``probe_sharded_server`` can signal are downgraded to a
+    warning: config errors (``ValueError``), socket/HTTP transport errors
+    (``OSError``, ``http.client.HTTPException``) and ``RecursionError`` (a
+    deeply nested JSON reply from the backend is data, not a bug).  Programming
+    errors such as AttributeError/TypeError propagate.
+
+    Called from ``main()`` after the listener is bound, and only when both
+    ``SONDER_OPENAI_BASE_URL`` and ``SONDER_RPC_PEERS`` are set.  An unexpected
+    exception is deliberately not caught: it stops startup (``main``'s
+    ``finally`` closes the listener) so a probe bug fails fast.
+    """
+    import http.client
+
+    from sonder_runtime.adapters.inference import rpc_cluster
+
+    probe_fn = rpc_cluster.probe_sharded_server if probe is None else probe
+    try:
+        sharded_health = probe_fn(rpc_base)
+    except (OSError, ValueError, http.client.HTTPException, RecursionError) as exc:
+        _serve_logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
+        return None
+    log = _serve_logger.info if sharded_health.healthy else _serve_logger.warning
+    log(
+        "RPC sharded backend status: healthy=%s models=%s",
+        sharded_health.healthy,
+        list(sharded_health.model_ids),
+    )
+    return sharded_health
+
+
 def _warn_if_local_open():
     """Warn about an unauthenticated listener from the *effective* mode only."""
     if _effective_auth_mode() != "local-open":
@@ -8252,17 +8285,7 @@ def main(
         rpc_base = os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
         rpc_peers = os.environ.get("SONDER_RPC_PEERS", "").strip()
         if rpc_base and rpc_peers:
-            try:
-                from sonder_runtime.adapters.inference.rpc_cluster import probe_sharded_server
-
-                sharded_health = probe_sharded_server(rpc_base)
-                _serve_logger.info(
-                    "RPC sharded backend status: healthy=%s models=%s",
-                    sharded_health.healthy,
-                    list(sharded_health.models),
-                )
-            except Exception as exc:
-                _serve_logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
+            _log_sharded_backend_readiness(rpc_base)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())
