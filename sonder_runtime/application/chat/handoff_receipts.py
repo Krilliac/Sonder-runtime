@@ -14,6 +14,13 @@ from ..ports.session_repository import SessionEvent, SessionRepository
 from .lanes import ChatHandoff
 
 
+# The outcomes a work admission can end in; each becomes ``chat.work.<status>``.
+# ``refused`` and ``failed`` keep a declined or errored lane from being recorded
+# as a return; ``busy`` is a retryable capacity failure; ``delegated`` hands the
+# work to a fleet or Autopilot run that continues under its own id.
+OUTCOME_STATUSES = frozenset({"returned", "unknown", "refused", "failed", "busy", "delegated"})
+
+
 @dataclass(frozen=True, slots=True)
 class ChatSourceEvent:
     event_id: str
@@ -43,6 +50,9 @@ class ChatWorkResult:
     # Deterministic host acknowledgement returned before a long-running lane
     # begins.  This is plain text assembled from the lane decision.
     acknowledgement: str = ""
+    # The fleet or Autopilot run a ``delegated`` work run started; it continues
+    # under its own id after this work run finishes.
+    child_run_id: str = ""
 
     def public_receipt(self) -> dict[str, str]:
         fields = {
@@ -55,6 +65,7 @@ class ChatWorkResult:
             "return_event_id": self.return_event_id,
             "source_event_id": self.source_event_id,
             "acknowledgement": self.acknowledgement,
+            "child_run_id": self.child_run_id,
         }
         receipt = {key: value for key, value in fields.items() if value}
         if self.work_run_id:
@@ -110,8 +121,8 @@ class ChatWorkReceiptService:
     def finish(
         self, session_id: str, admission: SessionEvent, status: str,
     ) -> SessionEvent:
-        if status not in {"returned", "unknown"}:
-            raise ValueError("work outcome must be returned or unknown")
+        if status not in OUTCOME_STATUSES:
+            raise ValueError("work outcome must be one of: " + ", ".join(sorted(OUTCOME_STATUSES)))
         return self._repository.append(session_id, "chat.work." + status, {
             "version": 1,
             "status": status,
@@ -119,4 +130,4 @@ class ChatWorkReceiptService:
         })
 
 
-__all__ = ["ChatSourceEvent", "ChatWorkReceiptService", "ChatWorkResult"]
+__all__ = ["OUTCOME_STATUSES", "ChatSourceEvent", "ChatWorkReceiptService", "ChatWorkResult"]

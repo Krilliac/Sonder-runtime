@@ -187,6 +187,9 @@ class ServerConfig:
     work_wait_seconds: int = 240
     work_budget_seconds: int = 1800
     work_max_running: int = 2
+    # Live routed runs in total, parked-on-approval ones included.  0 means
+    # max(8, work_max_running).
+    work_max_live: int = 0
     # SSE keep-alive comment interval while a streamed chat turn generates.
     stream_heartbeat_seconds: int = 10
     # Load the default chat model as soon as the listener is bound so the first
@@ -1557,6 +1560,9 @@ def _apply_environment(
         work_max_running=_env_int(
             "SONDER_HTTP_WORK_MAX_RUNNING", env, server.work_max_running, errors,
         ),
+        work_max_live=_env_int(
+            "SONDER_HTTP_WORK_MAX_LIVE", env, server.work_max_live, errors,
+        ),
         stream_heartbeat_seconds=_env_int(
             "SONDER_STREAM_HEARTBEAT_SECONDS", env, server.stream_heartbeat_seconds, errors,
         ),
@@ -2022,6 +2028,11 @@ def _validate(config: SonderConfig, errors: list[str], *, rpc_peers_raw: str | N
         errors.append("[server].work_wait_seconds must be within 1..work_budget_seconds")
     if not 1 <= server.work_max_running <= 64:
         errors.append("[server].work_max_running must be within 1..64")
+    if server.work_max_live != 0 and not server.work_max_running <= server.work_max_live <= 256:
+        errors.append(
+            "[server].work_max_live must be 0 (automatic) or within work_max_running..256 "
+            f"(got {server.work_max_live}, work_max_running {server.work_max_running})"
+        )
     if not 1 <= server.stream_heartbeat_seconds <= 300:
         errors.append("[server].stream_heartbeat_seconds must be within 1..300")
     if len(server.allowed_hosts) > 64:

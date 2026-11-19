@@ -57,7 +57,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 from sonder_runtime.interfaces.http.work_runs import (
     WorkCapacityExhausted, WorkRunner, current_run_id as current_work_run_id,
 )
-from sonder_runtime.bootstrap.http_work_narration import deferred_post as _deferred_post, enrich_work_record as _enrich_work_record, run_scoped as _run_work_scoped, work_ack as _work_ack, start_work as _start_narrated_work, admission_result as _work_admission_result
+from sonder_runtime.bootstrap.http_work_narration import WORK_RUN_OUTCOMES, classify_work_output, deferred_post as _deferred_post, enrich_work_record as _enrich_work_record, run_scoped as _run_work_scoped, work_ack as _work_ack, start_work as _start_narrated_work, admission_result as _work_admission_result
 from sonder_runtime.bootstrap.work_narration import enrich_status as _narrated_status, cancel_linked_work as _cancel_linked_work
 from sonder_runtime.bootstrap.http_command_narration import dispatch as _dispatch_narrated_command
 
@@ -1265,6 +1265,7 @@ def configure_typed_config(config) -> None:
         wait_seconds=server_config.work_wait_seconds,
         budget_seconds=server_config.work_budget_seconds,
         max_running=server_config.work_max_running,
+        max_live=server_config.work_max_live,
     )
     global _HEALTH_STATUS_FACADE, _TRUSTED_PROXY_NETWORKS
     _HEALTH_STATUS_FACADE = HealthStatusFacade(
@@ -3900,6 +3901,7 @@ _WORK_RUNNER = WorkRunner(
     wait_seconds=_env_int("SONDER_HTTP_WORK_WAIT_SECONDS", 240),
     budget_seconds=_env_int("SONDER_HTTP_WORK_BUDGET_SECONDS", 1800),
     max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
+    max_live=_env_int("SONDER_HTTP_WORK_MAX_LIVE", 0),
     stop_reason=_work_run_stop_reason,
     lifetime=_work_run_lifetime,
     thread_factory=owned_runtime_thread,
@@ -3909,7 +3911,7 @@ _WORK_RUNNER = WorkRunner(
 def _work_run_record(result):
     """Durable (status, answer) for one finished work run."""
     if isinstance(result, ChatWorkResult):
-        status = result.status if result.status in ("returned", "unknown", "refused") else "unknown"
+        status = result.status if result.status in WORK_RUN_OUTCOMES else "unknown"
         return status, result.text
     if isinstance(result, str):
         return "refused", result
@@ -4009,7 +4011,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 with contextlib.suppress(Exception):
                     receipts.finish(session_id, admission, "unknown")
                 raise
-            status = "returned" if isinstance(output, str) and output.strip() else "unknown"
+            status, child_run_id = classify_work_output(output, http_work_runs, current_work_run_id())
             try:
                 terminal = receipts.finish(session_id, admission, status)
             except Exception as error:
@@ -4020,6 +4022,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 terminal.event_id, source.event_id if source else "",
                 routing_reason=decision.reason,
                 work_run_id=current_work_run_id(),
+                child_run_id=child_run_id,
             )
 
         # Bound work retains its cancel/budget and persisted answer by run id.
