@@ -284,13 +284,15 @@ def test_file_range_uses_same_renderer_without_changing_raw_read(monkeypatch):
 
 @pytest.mark.parametrize("alias", ["file", "filename", "file_path"])
 def test_dispatch_policies_and_project_scoping_receive_canonical_alias_path(monkeypatch, alias):
+    from sonder_runtime.adapters.filesystem import file_ops
     from sonder_runtime.bootstrap import prepared_workbench
 
     source = (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8")
     functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
-                 and node.name in {"_agent_dispatch", "_project_scope_args"}]
+                 and node.name in {"_agent_dispatch", "_project_scope_args",
+                                   "_scope_arg_is_rooted", "_is_network_spelling_raw"}]
     namespace = {
-        "os": os, "re": re, "_require_managed_agent_admission": lambda: None,
+        "os": os, "re": re, "file_ops": file_ops, "_require_managed_agent_admission": lambda: None,
         "unsafe_lab": SimpleNamespace(active=lambda: False),
         "_canonical_agent_tool_name": lambda name: name,
         "_AGENT_SYSTEM_OPERATOR_TOOLS": set(),
