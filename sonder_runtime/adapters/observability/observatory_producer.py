@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 from ...application.ports.telemetry_feed import (
     FeedBatch,
@@ -39,6 +39,9 @@ from ...application.ports.telemetry_feed import (
     rfc3339_millis,
 )
 from ...application.ports.telemetry_sink import TelemetryEvent
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 EVENT_SCHEMA = "sonder.observatory.event/1"
 DISCOVERY_SCHEMA = "sonder.telemetry.producer/1"
@@ -60,7 +63,7 @@ VOCABULARIES = {"sonder.runtime.events": 1}
 def clamp_buffer(value: object) -> int:
     """Clamp a configured ring size to the supported 256..65536 range."""
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(cast(int, value))
     except (TypeError, ValueError):
         return DEFAULT_BUFFER
     return max(MIN_BUFFER, min(MAX_BUFFER, number))
@@ -79,7 +82,7 @@ def parse_event_id(value: object) -> tuple[str, int] | None:
 class _Subscription:
     """One cursor into the producer ring (see TelemetrySubscription)."""
 
-    def __init__(self, producer: "ObservatoryProducer", next_sequence: int,
+    def __init__(self, producer: ObservatoryProducer, next_sequence: int,
                  gap: ResumeGap | None) -> None:
         self._producer = producer
         self._next = next_sequence
@@ -262,7 +265,7 @@ class ObservatoryProducer:
                 self._next_sequence += 1
                 event_id = "%s-%d" % (self._instance_id, sequence)
                 line = '{"event_id":"%s","sequence":%d,"mono_ns":%d,%s' % (
-                    event_id, sequence, mono_ns, rest,
+                    event_id, sequence, cast(int, mono_ns), rest,
                 )
                 self._ring.append(FeedEvent(event_id, sequence, line))
                 if self._subscribers:

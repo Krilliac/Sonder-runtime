@@ -22,7 +22,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from sonder_runtime.application.context import OperationContext
 from sonder_runtime.application.execution.world_control import (
@@ -40,6 +40,12 @@ from sonder_runtime.application.ports.execution_world import (
     TerminalService,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from typing import TypeAlias
+
+    _SessionRow: TypeAlias = tuple[str, str, str, int, int, int | None]
+
 
 class PersistentTerminalError(RuntimeError):
     """The durable terminal state cannot support the requested operation."""
@@ -55,16 +61,53 @@ class TerminalCleanup:
     active_resources: int
 
 
+class _ReadablePipe(Protocol):
+    def read(self, size: int = ..., /) -> bytes | str: ...
+
+
+class _WritablePipe(Protocol):
+    def write(self, data: bytes, /) -> int: ...
+    def flush(self) -> object: ...
+
+
 class _ProcessLike(Protocol):
-    pid: int
-    stdin: object | None
-    stdout: object | None
-    stderr: object | None
+    @property
+    def pid(self) -> int: ...
+    @property
+    def stdin(self) -> _WritablePipe | None: ...
+    @property
+    def stdout(self) -> _ReadablePipe | None: ...
+    @property
+    def stderr(self) -> _ReadablePipe | None: ...
 
     def poll(self) -> int | None: ...
     def terminate(self) -> None: ...
     def kill(self) -> None: ...
     def wait(self, timeout: float | None = None) -> int: ...
+
+
+class _PopenFactory(Protocol):
+    def __call__(
+        self,
+        args: tuple[str, ...],
+        *,
+        cwd: str | None = ...,
+        env: dict[str, str] | None = ...,
+        stdin: int = ...,
+        stdout: int = ...,
+        stderr: int = ...,
+        bufsize: int = ...,
+    ) -> _ProcessLike: ...
+
+
+class _ThreadFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        target: Callable[[], None],
+        name: str,
+        daemon: bool,
+    ) -> threading.Thread: ...
 
 
 def _now() -> str:
@@ -94,7 +137,7 @@ CREATE TABLE IF NOT EXISTS terminal_output (
 
 
 class _SQLiteTerminalJournal:
-    def __init__(self, db_path: str | Path, *, max_events: int, max_bytes: int):
+    def __init__(self, db_path: str | os.PathLike[str], *, max_events: int, max_bytes: int) -> None:
         if type(max_events) is not int or max_events < 1:
             raise ValueError("max_events must be positive")
         if type(max_bytes) is not int or max_bytes < 1:
@@ -108,7 +151,7 @@ class _SQLiteTerminalJournal:
             connection.executescript(_DDL)
 
     @contextmanager
-    def _connect(self):
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         with owned_sqlite_transaction(str(self.path), timeout=5.0) as connection:
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys=ON")
@@ -133,7 +176,7 @@ class _SQLiteTerminalJournal:
                 (world_id, columns, rows, pid, _now(), terminal_id),
             )
 
-    def session(self, terminal_id: str) -> tuple[object, ...]:
+    def session(self, terminal_id: str) -> _SessionRow:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT terminal_id,world_id,status,columns,rows,pid FROM terminal_sessions WHERE terminal_id=?",
@@ -141,7 +184,7 @@ class _SQLiteTerminalJournal:
             ).fetchone()
         if row is None:
             raise KeyError(f"unknown terminal {terminal_id!r}")
-        return row
+        return cast("_SessionRow", row)
 
     def mark_stopped(self, terminal_id: str) -> None:
         with self.lock, self._connect() as connection:
@@ -225,7 +268,7 @@ class _SQLiteTerminalJournal:
 
 
 class _SubprocessTerminalHandle:
-    def __init__(self, service: "SQLitePersistentTerminalService", terminal_id: str, process: _ProcessLike):
+    def __init__(self, service: SQLitePersistentTerminalService, terminal_id: str, process: _ProcessLike) -> None:
         self._service = service
         self._terminal_id = terminal_id
         self._process = process
@@ -278,13 +321,13 @@ class SQLitePersistentTerminalService(TerminalService):
 
     def __init__(
         self,
-        db_path: str | Path,
+        db_path: str | os.PathLike[str],
         *,
         world_id: str,
         max_events: int = 256,
         max_bytes: int = 64 * 1024,
         max_read_bytes: int = 16 * 1024,
-        popen_factory: Callable[..., _ProcessLike] | None = None,
+        popen_factory: _PopenFactory | None = None,
     ) -> None:
         if not world_id.strip():
             raise ValueError("world_id must be non-empty")
@@ -295,7 +338,7 @@ class SQLitePersistentTerminalService(TerminalService):
         self._journal = _SQLiteTerminalJournal(
             db_path, max_events=max_events, max_bytes=max_bytes
         )
-        self._popen = popen_factory or subprocess.Popen
+        self._popen: _PopenFactory = popen_factory or subprocess.Popen
         self._processes: dict[str, _ProcessLike] = {}
         self._lock = threading.RLock()
         self._closing = False
@@ -421,14 +464,14 @@ class SQLitePersistentTerminalService(TerminalService):
         except Exception as exc:
             raise PersistentTerminalError("terminal process could not be started") from exc
 
-    def _start_reader(self, terminal_id: str, process: _ProcessLike, stream: str, pipe: object | None) -> None:
+    def _start_reader(self, terminal_id: str, process: _ProcessLike, stream: str, pipe: _ReadablePipe | None) -> None:
         if pipe is None:
             raise PersistentTerminalError("terminal process did not expose output")
 
         def read_loop() -> None:
             try:
                 while True:
-                    chunk = pipe.read(4096)  # type: ignore[attr-defined]
+                    chunk = pipe.read(4096)
                     if not chunk:
                         return
                     if isinstance(chunk, bytes):
@@ -438,7 +481,9 @@ class SQLitePersistentTerminalService(TerminalService):
                 # Process teardown closes pipes; no output is fabricated.
                 return
 
-        owned_runtime_thread(target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True).start()
+        cast(_ThreadFactory, owned_runtime_thread)(
+            target=read_loop, name=f"sonder-terminal-{terminal_id}-{stream}", daemon=True
+        ).start()
 
     def _send(self, terminal_id: str, process: _ProcessLike, data: str) -> None:
         if not isinstance(data, str):
@@ -449,8 +494,8 @@ class SQLitePersistentTerminalService(TerminalService):
         try:
             if process.stdin is None:
                 raise OSError("terminal stdin is unavailable")
-            process.stdin.write(data.encode("utf-8"))  # type: ignore[attr-defined]
-            process.stdin.flush()  # type: ignore[attr-defined]
+            process.stdin.write(data.encode("utf-8"))
+            process.stdin.flush()
         except (OSError, ValueError) as exc:
             raise TerminalCleanupError("terminal input could not be delivered") from exc
 
