@@ -1540,6 +1540,14 @@ _HEADER_NAME_BYPASSES = {
     # ``#if A < B``.
     "pasted-lone-object-like": ("#define HIP __has_##include (\n#if HIP <a/*b.h>)\n#endif\n",
                                 "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    # The same with a quoted name: the escaped quote hides ``//`` and opens ``/*``.
+    "pasted-lone-object-like-quoted": ("#define HIP __has_##include (\n#if HIP \"x\\\" ) || 1 //\"/*\n#endif\n",
+                                       "#if 0 //*/\n#endif\n"),  # gcc
+    # Other spellings of the directive head reach the same rule.
+    "pasted-lone-object-like-digraph-head": ("#define HIP __has_##include (\n%:if HIP <a/*b.h>)\n#endif\n",
+                                             "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    "pasted-lone-object-like-spliced-elif": ("#define HIP __has_##include (\n#if 0\n#el\\\nif HIP <a/*b.h>)\n#endif\n",
+                                             "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
     # A builtin the same text redefines to paste it.
     "pasted-redefined-builtin": (("#define __has_feature(a, b) a##b\n#define LP (\n"
                                   "#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n"),
