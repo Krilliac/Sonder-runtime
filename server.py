@@ -9243,11 +9243,12 @@ def permission_approve(
                     "revoked, or mistyped; see /approvals)." % revoke
                 )
                 return error
-            _record_direct_tool(
-                "permission_approve", {"revoke": approval.nonce}, ok=True, started=started,
-                summary="revoked %s call %s" % (approval.tool, approval.call_id),
+            ref = approval_ledger_module.call_ref(approval.digest, approval.owner)
+            _record_direct_tool(  # the owner tag (after '@') names whose approval it was
+                "permission_approve", {"revoke": approval.nonce, "owner": ref.split("@", 1)[1]},
+                ok=True, started=started, summary="revoked %s call %s" % (approval.tool, ref),
             )
-            return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, approval.call_id)
+            return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, ref)
         try:
             if call_id:
                 pending = ledger.resolve_call(call_id)  # exactly one row: its owner, never a guess
@@ -9284,19 +9285,22 @@ def permission_approve(
         except approval_ledger_module.ApprovalLedgerError as exc:
             error = "ERROR: %s" % exc
             return error
-    _record_direct_tool(
+    _record_direct_tool(  # the owner tag names whose call this approval is bound to
         "permission_approve",
         {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         "owner": approval_ledger_module.owner_tag(approval.owner),
          **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
         ("overrode a denial: " if overrode else "")
-        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        + "approved %s call %s once%s: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (
-            approval.tool, approval.call_id, approval.nonce, approval.approver,
+            approval.tool, approval.call_id,
+            " for owner " + approval_ledger_module.owner_tag(approval.owner) if approval.owner else "",
+            approval.nonce, approval.approver,
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(approval.expires_ts)),
             approval.tool, approval.nonce,
         )

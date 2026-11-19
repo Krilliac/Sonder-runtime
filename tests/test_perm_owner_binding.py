@@ -160,6 +160,80 @@ def test_denying_one_owners_call_leaves_the_other_alone(ledger):
         assert not ledger.denied_for(tool, digest)
 
 
+def _unowned_and_alice(ledger):
+    tool, digest = _refuse(ledger, "account:alice")
+    _refuse(ledger, "")  # the same call, refused for the unowned key
+    return tool, digest
+
+
+def test_every_displayed_reference_names_its_own_row_the_unowned_one_too(ledger):
+    tool, digest = _unowned_and_alice(ledger)
+    with ledger_module.operator_scope():
+        rows = {item.owner: item.ref for item in ledger.pending()}
+        assert set(rows) == {"", _owner_of("account:alice")}
+        for owner, ref in rows.items():
+            assert ledger.resolve_call(ref).owner == owner, ref
+        listed = {item["call_ref"] for item in facade.approvals_payload(ledger)["pending"]}
+        assert listed == set(rows.values())
+        status = ledger.format_status()
+        assert all(ref in status.split() for ref in rows.values()), status
+        with pytest.raises(ledger_module.AmbiguousCallError) as resolved:
+            ledger.resolve_call(digest[:16])
+        with pytest.raises(ledger_module.AmbiguousCallError) as issued:
+            ledger.issue(tool, digest, approver="admin")
+    for caught in (resolved, issued):
+        named = [word.strip(",") for word in str(caught.value).split(": ", 1)[1].split()]
+        assert sorted(named) == sorted(rows.values()), caught.value
+
+
+def test_the_facade_approves_the_unowned_row_by_its_listed_reference(ledger):
+    tool, digest = _unowned_and_alice(ledger)
+    with ledger_module.operator_scope():
+        listed = facade.approvals_payload(ledger)["pending"]
+        unowned = next(item for item in listed if "@ap-" not in item["call_ref"])
+        result = facade.approve_call(ledger, unowned["call_ref"], {}, approver="admin")
+        assert result.status == 201, result.body
+    assert ledger.consume(tool, digest, surface="console") is not None
+    assert not _spends(ledger, "account:alice", tool, digest)
+
+
+def test_the_console_approves_the_unowned_row_by_its_listed_reference(ledger):
+    tool, digest = _unowned_and_alice(ledger)
+    listing = server.control_command("/approvals", operator_approved=True)
+    refs = [word for word in listing.split() if word.startswith(digest[:16])]
+    unowned = [ref for ref in refs if "@ap-" not in ref]
+    assert len(refs) == 2 and len(unowned) == 1, listing
+    out = server.control_command("/approve %s" % unowned[0], operator_approved=True)
+    assert out.startswith("approved file_write call"), out
+    assert ledger.consume(tool, digest, surface="console") is not None
+    assert not _spends(ledger, "account:alice", tool, digest)
+
+
+def test_a_developer_scope_prefers_its_own_row_over_the_unowned_one(ledger):
+    tool, digest = _refuse(ledger, "account:dev")
+    _refuse(ledger, "")
+    with ledger.scope(_owner_of("account:dev"), include_unowned=True):
+        assert ledger.resolve_call(digest[:16]).owner == _owner_of("account:dev")
+        assert ledger.resolve_call(digest[:16] + "@-").owner == ""
+        assert ledger.issue(tool, digest, approver="dev").owner == _owner_of("account:dev")
+    assert _spends(ledger, "account:dev", tool, digest)
+
+
+def test_the_mcp_approval_audit_names_the_owner_it_is_bound_to(ledger, monkeypatch):
+    seen = []
+    monkeypatch.setattr(server, "_record_direct_tool",
+                        lambda name, args, **kw: seen.append(dict(args)))
+    tool, digest = _refuse(ledger, "account:alice")
+    out = server.control_command("/approve %s" % digest[:16], operator_approved=True)
+    alice_tag = ledger_module.owner_tag(_owner_of("account:alice"))
+    assert out.startswith("approved file_write call %s once for owner %s:" % (digest[:16], alice_tag)), out
+    assert seen and seen[-1].get("owner") == alice_tag
+    with ledger_module.operator_scope():
+        nonce = ledger.approvals()[0].nonce
+    server.control_command("/approve revoke %s" % nonce, operator_approved=True)
+    assert seen[-1].get("owner") == ledger_module.owner_tag(_owner_of("account:alice")), seen
+
+
 def test_issue_reports_the_denial_it_overrode_on_the_row_it_matched(ledger):
     tool, digest = _refuse(ledger, "account:alice")
     with ledger_module.operator_scope():

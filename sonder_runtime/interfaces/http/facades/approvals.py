@@ -138,7 +138,8 @@ def pending_view(item, *, show_detail: bool = True) -> dict:
     has_bidi, bidi = detect_bidi_chars(detail) if (show_detail and detail) else (False, [])
     return {
         "call_id": str(item.call_id),
-        # Names exactly this row when the same call is pending for two owners.
+        # Names exactly this row (``<call id>@-`` for the unowned one), even
+        # when the same call is pending for more than one owner.
         "call_ref": str(getattr(item, "ref", "") or item.call_id),
         "digest": str(item.digest),
         "tool": str(item.tool),
