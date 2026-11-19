@@ -388,6 +388,119 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
     return _attenuate_managed_roots(out)
 
 
+def lane_grant_roots(configured=()) -> tuple[str, ...]:
+    """The one root set agent lanes, fleets and HTTP tool contexts are scoped to.
+
+    It is ``allowed_roots()`` minus the two roots no caller may be handed as a
+    work area: the state home and Sonder's own checkout. What remains is the
+    configured ``[state].workspace_roots`` (*configured*), ``SONDER_FILE_ROOTS``,
+    the ``file_roots.local`` file and the default workspace root, so a folder
+    that the read tools already reach is also a folder a lane may be scoped to.
+    Whether a lane may *write* there is still decided per call by the
+    permission mode and the caller's role, not by this list. A managed root
+    scope in force narrows the set exactly as it narrows ``allowed_roots``.
+
+    The local-owner lane context (``server._agent_lane_context``) is scoped to
+    this set and also inherits the configured remote-Ollama consent
+    (decision 14); a non-owner caller never reaches that context, so neither
+    widens anyone else's reach.
+    """
+    excluded = []
+    for root in (workspace_root(), Path(runtime_paths.default_home())):
+        try:
+            excluded.append(root.resolve())
+        except OSError:
+            excluded.append(_normalized_absolute(root))
+    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
+    roots = []
+    roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
+    roots.extend(_roots_from_file())
+    default_root = None
+    with contextlib.suppress(RuntimeError, OSError, ValueError):
+        default_root = runtime_paths.default_workspace_root()
+    if default_root is not None and os.path.isdir(default_root):
+        roots.append(Path(default_root))
+    out: list[str] = []
+    for root in explicit + roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = _normalized_absolute(root)
+        text = str(resolved)
+        # An operator's own [state].workspace_roots entry is kept as written;
+        # only the ambient sources may not hand out the state home or checkout.
+        if text in out or (root not in explicit and resolved in excluded):
+            continue
+        out.append(text)
+    return tuple(str(root) for root in _attenuate_managed_roots([Path(text) for text in out]))
+
+
+# An absolute path a prompt may name as its project directory: a drive path or
+# a rooted POSIX path. The look-behinds keep URL schemes ("https://") and words
+# joined by slashes ("and/or") from matching.
+_NAMED_DIRECTORY = re.compile(
+    r"(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![\w:./\\-])/)[^\s'\"<>|?*`]*"
+)
+
+
+def _unc_or_device(token: str) -> bool:
+    """Whether *token* starts with two separators (UNC or device namespace)."""
+    return len(token) >= 2 and token[0] in "/\\" and token[1] in "/\\"
+
+
+def named_directory(text: str, roots: "tuple[object, ...] | list[object]" = ()) -> str:
+    """The first directory *text* names inside *roots*, or ``""``.
+
+    *roots* is the caller's own grant (for the HTTP surfaces
+    ``serve._http_workspace_roots``: ``lane_grant_roots`` for an owner/admin
+    and ``()`` for anyone else), never ``allowed_roots()``, so prompt text can
+    never select the state home or Sonder's checkout. Empty *roots* returns
+    ``""`` without touching the filesystem.
+
+    Prompt text is untrusted, so containment is decided on the lexical
+    spelling BEFORE the filesystem is touched (as ``DelegationService`` does
+    for a requested workspace). A token that is shorter than three
+    characters, holds a NUL, starts with two separators (UNC or device path)
+    or lies lexically outside every root is skipped without any I/O: the
+    answer never depends on whether such a path exists, and prompt text can
+    never make the host open a remote share. Only an in-root candidate is
+    resolved, and the resolved directory must still lie inside the same
+    roots (resolved) so a link beneath a root cannot lead out. Bypass mode
+    widens nothing here.
+    """
+    granted = [str(root) for root in (roots or ()) if str(root).strip()]
+    if not granted:
+        return ""
+    prefixes: tuple[str, ...] | None = None
+    resolved_prefixes: tuple[str, ...] | None = None
+    for match in _NAMED_DIRECTORY.finditer(str(text or "")):
+        token = match.group(0).rstrip(".,;:)]}")
+        if len(token) < 3 or "\0" in token or _unc_or_device(token):
+            continue
+        try:
+            if prefixes is None:
+                prefixes = tuple(
+                    os.path.join(os.path.normcase(os.path.abspath(root)), "") for root in granted
+                )
+            lexical = os.path.join(os.path.normcase(os.path.abspath(token)), "")
+        except (OSError, ValueError):
+            continue
+        if not lexical.startswith(prefixes):
+            continue
+        try:
+            if resolved_prefixes is None:
+                resolved_prefixes = tuple(
+                    os.path.join(os.path.normcase(os.path.realpath(root)), "") for root in granted
+                )
+            resolved = os.path.realpath(os.path.abspath(token))
+            inside = os.path.join(os.path.normcase(resolved), "").startswith(resolved_prefixes)
+            if inside and os.path.isdir(resolved):
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
 def bypass_enabled() -> bool:
     return os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
         "1", "true", "yes", "on"

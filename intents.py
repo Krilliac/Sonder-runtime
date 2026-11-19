@@ -204,9 +204,11 @@ _EXECUTION_NO_BACKGROUND_RE = re.compile(
 )
 _EXECUTION_FLEET_RE = re.compile(
     r"\b(?:fleet|swarm|fan[- ]?out|paral+el (?:sub)?agents?|paral+el workflow|"
-    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max)?\s*"
+    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max|"
+    r"[2-9]|1[0-2]|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)?\s*"
     r"(?:sub)?agents?|"
-    r"as many (?:sub)?agents? as (?:possible|the hardware allows))\b"
+    r"as many (?:sub)?agents?(?: and tools)? as (?:possible|you can|the hardware allows)|"
+    r"(?<!\bnot )(?<!n't )(?<!never )(?:hand|delegate) (?:this|it|that)?\s*(?:off )?to (?:sub)?agents?)\b"
 )
 _EXECUTION_AUTOPILOT_RE = re.compile(
     r"\b(?:autonomously|autonomous(?:ly)?|autopilot|in the background|"

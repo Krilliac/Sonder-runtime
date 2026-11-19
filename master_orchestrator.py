@@ -179,8 +179,8 @@ EVIDENCE_REQUIRED = (
 
 _REPOSITORY_REQUEST = re.compile(
     r"(?:\brepository\s*:|\brepo\s*:|\bcurrent\s+(?:file|code|diff|uncommitted)|"
-    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}\b(?:repo|repository|codebase|"
-    r"workspace|files?)\b|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
+    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}(?:\b(?:repo|repository|codebase|"
+    r"workspace|files?|modules?|packages?|source|src|code)\b|(?<![A-Za-z0-9])[A-Za-z]:[\\/](?=[\w.~-])|(?<![\w:./\\-])/(?=[\w.~-]))|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
     re.IGNORECASE | re.DOTALL,
 )
 _EMBEDDED_EVIDENCE = re.compile(
@@ -203,7 +203,7 @@ _REPO_FILE_PATH = re.compile(
 _FLEET_REQUEST = re.compile(
     r"(?:\bfleet\b|\bswarm\b|\bfan[- ]?out\b|\bparallel\s+agents?\b|"
     r"\bspawn\s+(?:as\s+much|as\s+many|the\s+maximum|maximum|parallel|subagents?)\b|"
-    r"\bas\s+many\s+(?:subagents?|agents?)\b|\bparallel\s+workflow\b|"
+    r"\bas\s+many\s+(?:subagents?|agents?)\b|\bparallel\s+workflow\b|(?<!\bnot\s)(?<!n't\s)(?<!never\s)\b(?:hand|delegate)\s+(?:this|it|that)?\s*(?:off\s+)?to\s+(?:sub)?agents?\b|"
     r"\bspawn\s+workflow\b|\bworkflow\b|\bmax(?:imum)?\s+agents?\b)",
     re.IGNORECASE,
 )
@@ -566,10 +566,10 @@ def explicit_agent_ceiling() -> int:
 
 _AFFIRMATIVE_WORKER_REQUEST = re.compile(
     r"(?i)^\s*(?:please\s+)?(?:use|run|spawn|launch)\s+"
-    r"(?P<count>[1-9]\d*)\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
+    r"(?P<count>" + fleet_briefing.COUNT_TOKEN + r")\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
 _WORKER_COUNT_MENTION = re.compile(
-    r"(?i)(?<!\d)(?P<count>[1-9]\d*)(?!\d)\s+"
+    r"(?i)(?<!\w)(?P<count>" + fleet_briefing.COUNT_TOKEN + r")(?!\w)\s+"
     r"(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
 _WORKER_REQUEST_NEGATION = re.compile(
@@ -601,7 +601,7 @@ def requested_worker_cap(task: str) -> int | None:
     mentions = list(_WORKER_COUNT_MENTION.finditer(text))
     if len(mentions) != 1 or mentions[0].start("count") != match.start("count"):
         return None
-    value, error = _positive_int(match.group("count"))
+    value, error = _positive_int(str(fleet_briefing.NUMBER_WORDS.get(match.group("count").lower(), match.group("count"))))
     return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
 
 
@@ -884,7 +884,7 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
     if inferred:
         return inferred
     raise ValueError(
-        "repository work requires an explicit existing project root; no cwd fallback is allowed"
+        "repository work requires an explicit existing project root; no cwd fallback is allowed. Name it with a 'Repository: <absolute path>' line or select a project inside the configured file roots"
     )
 
 

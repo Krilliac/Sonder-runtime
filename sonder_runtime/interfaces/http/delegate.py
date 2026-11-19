@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ...application.agents.delegation import DelegationService
+from ...application.errors import SonderError
 
 
 def _text(value, name, maximum=160):
@@ -18,6 +19,17 @@ def _text(value, name, maximum=160):
 def _plain_directory(path):
     if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
         raise PermissionError("creation folders must not be links or junctions")
+
+
+_PRE_PERSISTENCE_CODES = frozenset({"FORBIDDEN", "INVALID_INPUT", "CAPACITY_EXCEEDED"})
+
+
+def _refused_before_persistence(error):
+    """Whether *error* is a refusal raised before any lane was persisted."""
+    if isinstance(error, (PermissionError, ValueError, TypeError)):
+        return True
+    return (isinstance(error, SonderError)
+            and str(getattr(error, "code", "")).upper() in _PRE_PERSISTENCE_CODES)
 
 
 def dispatch_delegate(service, payload, context, *, state_home, allow_creation=False):
@@ -67,6 +79,7 @@ def dispatch_delegate(service, payload, context, *, state_home, allow_creation=F
     lane_id = "lane-" + uuid.uuid5(
         uuid.NAMESPACE_URL, "%s\0%s\0%s" % (principal, parent, command_id)
     ).hex
+    made_here = False
     if selected:
         effective = context
         workspace = project
@@ -81,6 +94,9 @@ def dispatch_delegate(service, payload, context, *, state_home, allow_creation=F
             raise PermissionError("creation root escaped state home")
         root = creations / lane_id
         _plain_directory(root)
+        # Only a folder made by this call may be removed again: a retry of an
+        # already-persisted command reuses the same lane folder.
+        made_here = not root.exists()
         root.mkdir(parents=True, exist_ok=True)
         if root.resolve().parent != creations:
             raise PermissionError("delegation folder escaped creation root")
@@ -88,18 +104,28 @@ def dispatch_delegate(service, payload, context, *, state_home, allow_creation=F
         effective = replace(context, workspace_roots=tuple(context.workspace_roots) + (root,))
         kind = "creation"
     # After dispatch, a transport failure cannot prove that no lane was
-    # persisted or started. Never remove a workspace on an uncertain result.
-    return DelegationService(service).delegate(
-            task,
-            context=effective,
-            parent_session_id=parent,
-            project=project if selected else None,
-            command_id=command_id,
-            workspace_root=None if selected else workspace,
-            lane_id=lane_id,
-            folder_kind=kind,
-            **options,
-        )
+    # persisted or started. Never remove a workspace on an uncertain result;
+    # only an error that is raised before anything is persisted (a refusal or
+    # a rejected request) proves the folder is still the empty one made above.
+    try:
+        return DelegationService(service).delegate(
+                task,
+                context=effective,
+                parent_session_id=parent,
+                project=project if selected else None,
+                command_id=command_id,
+                workspace_root=None if selected else workspace,
+                lane_id=lane_id,
+                folder_kind=kind,
+                **options,
+            )
+    except Exception as error:
+        if kind == "creation" and made_here and _refused_before_persistence(error):
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+        raise
 
 
 __all__ = ["dispatch_delegate"]
