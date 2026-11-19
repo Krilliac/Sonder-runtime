@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 473,
+      "file_count": 474,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -215,6 +215,7 @@
         "sonder_runtime/adapters/inference/anthropic_spend.py",
         "sonder_runtime/adapters/inference/capability_evidence.py",
         "sonder_runtime/adapters/inference/capability_refresh.py",
+        "sonder_runtime/adapters/inference/exchange_transport.py",
         "sonder_runtime/adapters/inference/external_membership.py",
         "sonder_runtime/adapters/inference/gpu_admission.py",
         "sonder_runtime/adapters/inference/gpu_admission_store.py",

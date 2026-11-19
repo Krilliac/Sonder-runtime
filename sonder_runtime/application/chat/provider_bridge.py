@@ -62,7 +62,7 @@ _FORWARDED_OPTIONS = (
 # when the server advertises support, refusing True otherwise).
 THINKING_PROVIDERS = frozenset({"sonder_inference"})
 # Providers whose gateway can forward content deltas to a live turn stream.
-STREAMING_PROVIDERS = frozenset({"sonder_inference"})
+STREAMING_PROVIDERS = frozenset({"sonder_inference", "openai_compatible"})
 _ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 _RUNG: ContextVar["RungBinding | None"] = ContextVar(
