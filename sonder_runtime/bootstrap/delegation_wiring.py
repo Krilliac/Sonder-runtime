@@ -599,13 +599,18 @@ class AgentImplBridge:
         self._closed = False
         self._depth = _rt.current_depth()
         self._prompt_preview = compact_text(prompt, limit=180)
-        _rt.emit_agent_event(
-            phase="starting",
-            step=0,
-            max_steps=self._max_steps,
-            model=model,
-            summary=self._prompt_preview,
-        )
+        try:
+            _rt.emit_agent_event(
+                phase="starting",
+                step=0,
+                max_steps=self._max_steps,
+                model=model,
+                summary=self._prompt_preview,
+            )
+        except BaseException:
+            self._closed = True
+            stack.close()
+            raise
 
     def maybe_preamble(self, *, transcript_chars: int = 0, num_ctx: int = 0) -> str:
         """Return compact coordinator/drive guidance when context budget comfortably permits."""

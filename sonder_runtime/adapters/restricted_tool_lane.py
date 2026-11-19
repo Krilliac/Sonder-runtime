@@ -286,12 +286,24 @@ def _sonder_inference_on_loopback() -> bool:
     loopback primary is the only Sonder Inference endpoint that counts as local:
     the approved private workers it places work on (Node1) are reached through
     it.  A remote endpoint (``SONDER_ALLOW_REMOTE_INFERENCE=1``) does not count,
-    and neither does a configuration that cannot be read.
+    and neither does a configuration that cannot be read.  A loopback endpoint
+    with a remote route behind it does not count either: private inference
+    workers (``SONDER_INFERENCE_PRIVATE_WORKERS``), or the Ollama fallback
+    (``SONDER_INFERENCE_FALLBACK=ollama``) together with remote Ollama workers
+    (``SONDER_OLLAMA_WORKERS``), can place the prompt on another machine.
     """
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
+        from sonder_runtime.adapters.provider_bindings import inference_fallback_from_env
 
-        return bool(config_from_env().loopback)
+        config = config_from_env()
+        if not config.loopback or config.workers:
+            return False
+        if inference_fallback_from_env(os.environ) == "ollama" and str(
+            os.environ.get("SONDER_OLLAMA_WORKERS", "") or ""
+        ).strip():
+            return False
+        return True
     except Exception:
         return False
 
