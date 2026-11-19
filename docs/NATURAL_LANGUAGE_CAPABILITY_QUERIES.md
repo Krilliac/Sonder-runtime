@@ -6,9 +6,9 @@ converged, and what standing instructions it is carrying.
 
 Every command in this guide is catalogued **`safe`**: it reads runtime state
 and returns text. Nothing here writes a file, runs a command, or starts a
-workflow. `/status` queries the configured Ollama endpoint; that remains local
-with Sonder's default loopback endpoint, but can reach a remote Ollama host if
-an operator explicitly configures one.
+workflow. `/status` reads cached session and inference-pool state without
+contacting Ollama workers; its endpoint row only checks whether Sonder's own
+HTTP listener accepts a connection.
 
 ## Where each form works
 
@@ -19,7 +19,9 @@ an operator explicitly configures one.
 | Direct tool call | MCP tool `tool_manifest` (`mcp__sonder__tool_manifest` from an MCP client) | Any MCP client; the agent loop |
 
 `command_router` — the module that maps a phrase to a slash line — is imported
-by `sonder_repl` and by nothing else. The HTTP API and MCP clients therefore
+by the console REPL (`sonder_runtime.interfaces.repl.repl`), its root
+compatibility shim `command_router.py`, and test/audit tooling, and by nothing
+else. The HTTP API and MCP clients therefore
 never see natural phrasing; they take the exact contracts, which is what makes
 those contracts scriptable.
 
@@ -36,7 +38,7 @@ Each line below is a complete turn. Type it on its own and it dispatches.
 | You type | Runs | Answers |
 |---|---|---|
 | `what tools do you have?` · `list your tools` · `show me your tools` | `/tool_manifest` | the MCP tool list and what each one is for |
-| `what model are you running?` · `which models are loaded` · `model status` | `/status` | local-model state and current VRAM residency |
+| `what model are you running?` · `which models are loaded` · `model status` | `/status` | active tier and its configured model, session state, and a cached Ollama pool summary (live residency is not probed) |
 | `how reliable are you?` · `how well calibrated are you` · `show your calibration` | `/calibration_status` | measured reliability, split by population |
 | `learning health` · `how is your learning going?` · `show your learning health` | `/learning_health_status` | outcome coverage, positive signals, lesson provenance |
 | `mcp status` · `show me the mcp runtime status` | `/mcp_runtime_status` | live tool-registry convergence and fail-closed refresh state |
@@ -62,12 +64,18 @@ through to ordinary chat/work handling and dispatches nothing:
 | `how do I list your tools` | a question *about* the command, not the command |
 | `show me your calibration data for the last week` | the trailing scope is not something `/calibration_status` takes |
 | `explain how mcp status works` | asks for an explanation, not a status read |
-| `update your standing instructions to prefer tabs` | reading is `/system_profile_text`; *writing* is `/update_system_profile`, which is never reached from a phrase here |
+| `update your standing instructions to prefer tabs` | reading is `/system_profile_text`; *writing* is `/update_system_profile`, which has no phrase rule here |
 
-That last row is the shape of the whole boundary: the read tool gets natural
-phrasings, its mutating neighbour does not. `/update_system_profile` and
-`/runtime_policy_update` stay reachable only by naming them, under the
-catalog's adjacency rule for risky commands.
+That last row is the shape of the phrase table: the read tool gets natural
+phrasings, its mutating neighbour gets none. Neither `/update_system_profile` nor
+`/runtime_policy_update` has a phrase rule, but the catalog fallback can still
+reach them. `/runtime_policy_update` is
+catalogued `dangerous`, so the catalog reaches it only when the turn names it
+with adjacent tokens. `/update_system_profile` is catalogued `ask`, which is
+outside the router's `_RISKY` set, so the adjacency rule does not apply to it:
+a loose turn such as `update the profile of the system tabs` resolves to
+`/update_system_profile tabs`. What stops that from writing anything is the
+`ask` permission prompt, not the router.
 
 When a phrase does not fire, the exact form always still works:
 
@@ -87,7 +95,7 @@ handler is called. A `deny` rule refuses it:
 ```text
 sonder > list your tools
 (interpreted as: /tool_manifest)
-refused /tool_manifest: denied by rule (mode: manual)
+refused /tool_manifest: rule denies this tool (pattern 'tool_manifest'); an explicit deny outranks every mode, including auto (mode: manual)
 ```
 
 Practical consequences:

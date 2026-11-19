@@ -7,12 +7,16 @@ legacy module or any network capability.
 from __future__ import annotations
 
 import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class WebIntentProvider:
     _module_name = "web_intents"
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         return getattr(importlib.import_module(self._module_name), name)
 
 

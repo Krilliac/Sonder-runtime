@@ -5,7 +5,7 @@ from __future__ import annotations
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
-def inventory_rows(payload, endpoint):
+def inventory_rows(payload: object, endpoint: str) -> list[dict[str, object]]:
     """Return valid inventory rows or raise for a malformed provider envelope.
 
     A provider response must be an object whose ``models`` member is a list.
