@@ -65,6 +65,7 @@ import sonder_runtime.adapters.model_tool_policy as _mtp
 import sonder_runtime.adapters.runtime_policy as _policy
 import sonder_runtime.adapters.tool_lane_guard as _guard
 from sonder_runtime.domain import model_tool_grants as _rules
+from sonder_runtime.domain import network_path_spelling as _network_spelling
 from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, refusal_message
 
 # None: no entry point has spoken (lane defaults apply); "": suppressed.
@@ -341,7 +342,13 @@ class RestrictedRun:
     # -- path checks --------------------------------------------------------
 
     def _relative(self, value: str) -> str | None:
-        """``value`` relative to the project root (posix), or None when it is outside."""
+        """``value`` relative to the project root (posix), or None when it is outside.
+
+        A UNC, device or NT-namespace spelling is None before ``realpath``
+        can open it (an SMB access can leak NTLM credentials).
+        """
+        if _network_spelling.is_network_spelling(value):
+            return None
         root = Path(self.project_root)
         candidate = Path(os.path.expanduser(value))
         if not _is_absolute(str(candidate)):
@@ -390,6 +397,11 @@ class RestrictedRun:
         if values is None:
             return _refusal("tool '%s': the path list could not be read." % tool_name)
         for key, value in values:
+            if _network_spelling.is_network_spelling(value):
+                return _refusal(
+                    "tool '%s': %s %r uses a %s; restricted model '%s' may not use it."
+                    % (tool_name, key, value, _network_spelling.REFUSAL, self.model)
+                )
             alias = _path_aliases.win32_alias_component(value)
             if alias:
                 return _refusal(
@@ -467,7 +479,7 @@ class RestrictedRun:
         symlink inside the project can spell an inside path for a file that is
         outside it, and the glob applies to either name.
         """
-        if not path_text.strip() or not self.project_root:
+        if not path_text.strip() or not self.project_root or _network_spelling.is_network_spelling(path_text):
             return True
         lexical = os.path.normpath(os.path.join(base, path_text.strip()))
         root = os.path.realpath(self.project_root)
