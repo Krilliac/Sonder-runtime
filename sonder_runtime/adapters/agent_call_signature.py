@@ -5,8 +5,10 @@ call; the signature resolves every local path-bearing argument through the real
 filesystem so speculative and repeated calls match. A UNC, device or NT
 spelling is kept lexical and never resolved (see ``_canonical_path``). It touches the
 filesystem and the archive adapter, so it lives with the adapters. Moved
-from ``server.py`` in the WP1 Three-Hundred-Twentieth Slice with its
-behaviour byte-for-byte intact.
+from ``server.py`` in the WP1 Three-Hundred-Twentieth Slice; since then an
+archive_create value is checked for a network spelling before it is joined
+to the root, so on POSIX an extended-length Windows spelling now keys like
+its plain form under the root, as dispatch treats it.
 """
 from __future__ import annotations
 
@@ -33,6 +35,22 @@ def _canonical_path(text: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.normpath(local)))
 
 
+def _canonical_path_under(root: str, raw: str) -> str:
+    """Return ``_canonical_path`` of ``raw``, joined to ``root`` when relative.
+
+    The network check runs on ``raw`` before the join, and relativity is judged on the value it
+    returns (an extended-length ``\\\\?\\C:\\`` prefix already stripped). ``os.path.isabs`` is false
+    for a backslash spelling such as ``\\\\host\\share\\x`` on POSIX, and for ``\\??\\C:\\x`` on
+    Windows from Python 3.13; joining either to ``root`` would hide the spelling from the check in
+    ``_canonical_path``.
+    """
+    try:
+        local = file_ops._reject_network_path(raw)
+    except PermissionError:
+        return os.path.normcase(os.path.normpath(raw))
+    return _canonical_path(local if os.path.isabs(local) else os.path.join(root, local))
+
+
 def call_signature(tool_name, args, *, project_scoped_path_tools, project_scoped_path_key):
     """Return a stable signature for equivalent host-scoped tool calls.
 
@@ -47,17 +65,12 @@ def call_signature(tool_name, args, *, project_scoped_path_tools, project_scoped
             canonical["root"] = root
             destination = str(canonical.get("destination") or "")
             if destination:
-                if not os.path.isabs(destination):
-                    destination = os.path.join(root, destination)
-                canonical["destination"] = _canonical_path(destination)
+                canonical["destination"] = _canonical_path_under(root, destination)
             try:
                 inputs = archive_create_tool._parse_inputs(
                     canonical.get("inputs_json", canonical.get("inputs", []))
                 )
-                canonical["inputs_json"] = [
-                    _canonical_path(value if os.path.isabs(value) else os.path.join(root, value))
-                    for value in inputs
-                ]
+                canonical["inputs_json"] = [_canonical_path_under(root, value) for value in inputs]
                 canonical.pop("inputs", None)
             except ValueError:
                 pass
