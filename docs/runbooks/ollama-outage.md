@@ -25,9 +25,11 @@ free -h            # OOM-killed model runners
 1. `systemctl restart ollama`
 2. Watch Sonder recover on its own: the dependency probe runs every 15s;
    `/ready` flips back to 200 without a Sonder restart.
-3. If Ollama flaps repeatedly, check GPU/driver state and disk, then hold
-   Sonder in a drained state if needed:
-   `python -m sonder_runtime drain --config /etc/sonder/sonder.toml`
+3. If Ollama flaps repeatedly, check GPU/driver state and disk, then drain
+   and stop Sonder if needed (drain waits for in-flight work up to the drain
+   deadline; work still running at the deadline is left `interrupted`; the server
+   then exits with code 0, so systemd's `Restart=on-failure` does not restart it):
+   `python -m sonder_runtime drain --config /etc/sonder/sonder.toml --secrets /etc/sonder/sonder.env`
 
 ## Aftermath
 
