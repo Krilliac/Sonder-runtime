@@ -78,6 +78,10 @@ def test_command_and_compaction_tools(monkeypatch, tmp_path):
 
 def test_permission_policy_tool(monkeypatch, tmp_path):
     monkeypatch.setattr(server.sonder_paths, "default_home", lambda: tmp_path)
+    out = server.permission_policy("admin_private_chain_of_thought")
+    assert "permission check: admin_private_chain_of_thought" in out
+    assert "action: deny" in out
+    # Deletes always ask: the shipped file_delete row, not the no-match "ask".
     out = server.permission_policy("file_delete")
     assert "permission check: file_delete" in out
-    assert "action: deny" in out
+    assert "action: ask" in out and "matched: file_delete" in out

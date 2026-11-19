@@ -41,6 +41,7 @@ sonder_runtime/adapters/fanout_execution.py
 sonder_runtime/adapters/filesystem/__init__.py
 sonder_runtime/adapters/filesystem/operator_only_paths.py
 sonder_runtime/adapters/filesystem/path_aliases.py
+sonder_runtime/adapters/filesystem/read_only_root_gate.py
 sonder_runtime/adapters/filesystem/sealed_python_main.py
 sonder_runtime/adapters/filesystem/typed.py
 sonder_runtime/adapters/fleet_synthesis.py
@@ -525,6 +526,7 @@ sonder_runtime/domain/scheduler_partition.py
 sonder_runtime/domain/security/__init__.py
 sonder_runtime/domain/security/credential_egress.py
 sonder_runtime/domain/security/credential_formats.py
+sonder_runtime/domain/security/delete_calls.py
 sonder_runtime/domain/security/tool_call_classifier.py
 sonder_runtime/domain/security_eval/__init__.py
 sonder_runtime/domain/security_eval/context_select.py

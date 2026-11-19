@@ -169,8 +169,12 @@ def test_http_global_change_is_a_safety_stop_for_scoped_bypass():
         pm.set_mode(pm.BYPASS)
     with pm.mode_scope("account:admin", "mine"):
         pm.set_mode(pm.AUTO)
-    payload, status = _post_mode({"mode": "manual"}, headers={"X-Sonder-Session": "mine"})
-    assert status == 200 and payload["mode"] == pm.MANUAL
+    # A request naming a session changes that session only (decision 22); the
+    # safety stop is the explicit global scope.
+    payload, status = _post_mode(
+        {"mode": "manual", "scope": "global"}, headers={"X-Sonder-Session": "mine"},
+    )
+    assert status == 200 and payload["mode"] == pm.MANUAL and payload["scope"] == "global"
     with pm.mode_scope("account:bob", "s1"):
         assert pm.current_mode() == pm.MANUAL
     with pm.mode_scope("account:admin", "mine"):
@@ -212,14 +216,18 @@ def test_bypass_keeps_an_explicit_operator_deny(tool):
         assert decision.source == "rule"
 
 
-def test_bypass_keeps_the_shipped_default_denies_too():
+def test_bypass_skips_the_shipped_file_delete_ask_but_keeps_the_cot_deny():
+    # Deleting is approvable now: the shipped row is "ask", every mode asks per
+    # call, and bypass alone skips it like any other ask (decision 23).
     shipped = _shipped("file_delete")
-    decision = pm.decide("file_delete", interactive=False, mode=pm.BYPASS,
-                         rule_lookup=lambda _n: dict(shipped))
-    assert decision.action == pm.DENY and decision.source == "rule"
-    # The same shipped row refuses outside bypass.
-    assert pm.decide("file_delete", interactive=False, mode=pm.AUTO,
-                     rule_lookup=lambda _n: dict(shipped)).action == pm.DENY
+    assert shipped["action"] == "ask"
+    args = {"path": "notes/old.txt"}
+    assert pm.decide("file_delete", interactive=False, mode=pm.BYPASS, arguments=args,
+                     rule_lookup=lambda _n: dict(shipped)).action == pm.ALLOW
+    # Outside bypass the same call is refused unattended, in auto too.
+    auto = pm.decide("file_delete", interactive=False, mode=pm.AUTO, arguments=args,
+                     rule_lookup=lambda _n: dict(shipped), record=False)
+    assert auto.action == pm.DENY and auto.source == "unattended"
     # The chain-of-thought guard is a shipped deny that bypass never skips.
     cot = _shipped("admin_private_chain_of_thought")
     assert pm.decide("admin_private_chain_of_thought", interactive=True, mode=pm.BYPASS,

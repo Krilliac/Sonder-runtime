@@ -170,10 +170,32 @@ def _operator_state_is_never_consulted_or_changed(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", pm.MODES)
-def test_file_delete_is_refused_by_the_shipped_rule_in_every_mode(mode):
-    decision = eh.decide_tool_policy(_policy(tool="file_delete", mode=mode))
+def test_the_shipped_deny_rule_refuses_in_every_mode(mode):
+    decision = eh.decide_tool_policy(_policy(tool="admin_private_chain_of_thought", mode=mode))
     assert decision.action == pm.DENY
     assert decision.source == "rule"
+
+
+# Deletes always ask, in every mode but bypass: unattended, nobody answers the
+# ask, so it is refused; plan refuses it as a mode; bypass runs it.
+_UNATTENDED_DELETE = {
+    pm.PLAN: (pm.DENY, "mode"),
+    pm.MANUAL: (pm.DENY, "unattended"),
+    pm.ACCEPT_EDITS: (pm.DENY, "unattended"),
+    pm.AUTO: (pm.DENY, "unattended"),
+    pm.BYPASS: (pm.ALLOW, "mode:bypass"),
+}
+
+
+@pytest.mark.parametrize("mode", pm.MODES)
+def test_file_delete_always_asks_under_the_shipped_rules_in_every_mode(mode):
+    assert set(_UNATTENDED_DELETE) == set(pm.MODES)
+    decision = eh.decide_tool_policy(_policy(tool="file_delete", mode=mode))
+    assert (decision.action, decision.source) == _UNATTENDED_DELETE[mode]
+    if mode not in (pm.PLAN, pm.BYPASS):
+        attended = eh.decide_tool_policy(_policy(
+            tool="file_delete", mode=mode, surface="repl", interactive=True, expected="ask"))
+        assert attended.action == pm.ASK
 
 
 def test_an_unattended_file_write_is_refused_in_manual_and_allowed_in_acceptedits():

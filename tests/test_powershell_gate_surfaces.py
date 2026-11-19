@@ -205,7 +205,7 @@ def test_legacy_non_powershell_intent_is_unchanged():
     {"type": "workspace_run", "program": "git", "args": ["status"]},
     {"type": "file_write", "path": "a.txt", "content": "x"},
 ])
-def test_loop_gate_keeps_no_arguments_for_other_actions(monkeypatch, action):
+def test_loop_gate_keeps_no_arguments_for_non_host_actions(monkeypatch, action):
     seen = {}
 
     def decide(tool, **kwargs):
@@ -214,7 +214,11 @@ def test_loop_gate_keeps_no_arguments_for_other_actions(monkeypatch, action):
 
     monkeypatch.setattr(permission_modes, "decide", decide)
     server._loop_permission_refusal(action["type"], action)
-    assert seen.get("arguments", None) is None
+    if action["type"] in ("run_code", "workspace_run"):
+        # A host program can delete files, so decision 23 sees its arguments.
+        assert seen["arguments"]["code" if action["type"] == "run_code" else "program"]
+    else:
+        assert seen.get("arguments", None) is None
 
 
 @pytest.mark.parametrize("tool,kwargs", [
