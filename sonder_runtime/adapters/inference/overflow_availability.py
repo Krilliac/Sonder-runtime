@@ -8,7 +8,7 @@ model while every worker has reported makes it ``unavailable`` with a reason.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from ...application.routing.long_context_overflow import (
@@ -18,16 +18,37 @@ from ...application.routing.long_context_overflow import (
     Availability,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+    from typing import Protocol
+
+    class _WorkerSnapshot(Protocol):
+        @property
+        def worker_id(self) -> str: ...
+        @property
+        def origin(self) -> str: ...
+        @property
+        def state(self) -> str: ...
+        @property
+        def healthy(self) -> bool: ...
+        @property
+        def models(self) -> Sequence[str]: ...
+
+    class _WorkerPool(Protocol):
+        @property
+        def enabled(self) -> bool: ...
+        def snapshots(self) -> Iterable[_WorkerSnapshot]: ...
+
 _UNREPORTED = frozenset({"unknown", "stale", "reconnecting", "saturated"})
 _SERVING = frozenset({"ready", "stale", "saturated"})
 
 
-def _key(name) -> str:
+def _key(name: str) -> str:
     text = str(name or "").strip().casefold()
     return text if ":" in text or not text else text + ":latest"
 
 
-def _worker_label(snapshot) -> str:
+def _worker_label(snapshot: _WorkerSnapshot) -> str:
     """``host:port`` from the worker's origin; a static worker's id is opaque."""
     origin = str(getattr(snapshot, "origin", "") or "")
     try:
@@ -40,7 +61,10 @@ def _worker_label(snapshot) -> str:
 
 
 def pool_model_availability(
-    pool, model: str, *, local_has_model: Callable[[str], bool] | None = None,
+    pool: _WorkerPool | None,
+    model: str,
+    *,
+    local_has_model: Callable[[str], object] | None = None,
 ) -> Availability:
     """Availability of ``model`` on the Ollama worker pool behind ``pool``.
 

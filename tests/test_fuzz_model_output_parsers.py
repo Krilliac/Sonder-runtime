@@ -61,6 +61,7 @@ from sonder_runtime.domain.security_eval.records import (
 )
 from sonder_runtime.domain.security_eval.scoring import match_findings
 from sonder_runtime.domain.security_eval.verdict import (
+    MAX_TEXT_CHARS,
     VERDICTS,
     ParsedHypothesis,
     ParsedVerdict,
@@ -74,7 +75,15 @@ pytestmark = pytest.mark.unit
 SEED = int(os.environ.get("SONDER_FUZZ_SEED", "20261116"))
 ITER = 1500
 BLOB = 30_000
+# BLOB_BUDGET (0.1 s) applies to every blob except the three scanner shapes in _SCANNER_HEAVY_SHAPES, which cost
+# ~25-50 ms here and over 100 ms on a slow shared CI runner. Only those shapes get SCANNER_BLOB_BUDGET (0.5 s), and
+# each of them is also under the scaling check (SCALE_*) and the machine-unit check below, which separate a
+# quadratic from a slow runner whatever the machine speed. Every other blob keeps 0.1 s.
 BLOB_BUDGET = 0.1
+SCANNER_BLOB_BUDGET = 0.5
+_SCANNER_HEAVY_SHAPES = frozenset({"open-brackets", "nested-arrays", "nested-objects"})
+SCALE_FACTOR = 4          # the blob is grown 4x: linear costs ~4x, quadratic ~16x
+SCALE_RATIO_LIMIT = 9.0   # between the two, with room for timer noise
 
 
 # --------------------------------------------------------------------------- harness
@@ -781,13 +790,15 @@ def test_extract_agent_json_unbalanced_and_truncated_raise_value_error():
         assert json.loads(json.dumps(value)) == value  # a prefix may itself be complete JSON (for example "{}"); that is fine
 
 
-def _hostile_blob_test(label: str, fn, allowed: tuple, extra: dict[str, str] | None = None) -> None:
+def _hostile_blob_test(label: str, fn, allowed: tuple, extra: dict[str, str] | None = None,
+                       heavy_budget: float | None = None) -> None:
     run = _Run()
     blobs = _blobs()
     blobs.update(extra or {})
     for name, blob in blobs.items():
         before = len(run.failures)
-        run.call(fn, (blob,), allowed, budget=BLOB_BUDGET)
+        budget = heavy_budget if heavy_budget is not None and name in _SCANNER_HEAVY_SHAPES else BLOB_BUDGET
+        run.call(fn, (blob,), allowed, budget=budget)
         for index in range(before, len(run.failures)):
             run.failures[index] = "[%s] %s" % (name, run.failures[index][:200])
     assert not run.failures, "%s: %s" % (label, _where(run.failures))
@@ -1414,12 +1425,28 @@ _THINK_BLOBS = {
 }
 
 
+def _think_blobs(n: int) -> dict[str, str]:
+    """Size-parametric think blobs; unlike _THINK_BLOBS these stay under MAX_TEXT_CHARS for n up to BLOB * SCALE_FACTOR."""
+    return {
+        "early-closer-then-openers": "<think></think>x" + "<think>" * (n // 7),
+        "closed-blocks-then-opener": "<think>a</think>" * (n // 16) + "<think>",
+        "closer-spam": "</think>" * (n // 8) + "<think>",
+        "upper-case-openers": "<THINK></THINK>x" + "<THINK>" * (n // 7),
+    }
+
+
+def _scaled_blobs(n: int) -> dict[str, str]:
+    return {**_blobs(n), **_think_blobs(n)}
+
+
 def test_parse_verdict_hostile_blobs_stay_in_budget_and_typed():
-    _hostile_blob_test("parse_verdict", parse_verdict, (VerdictParseError,), _THINK_BLOBS)
+    _hostile_blob_test("parse_verdict", parse_verdict, (VerdictParseError,), _THINK_BLOBS,
+                       heavy_budget=SCANNER_BLOB_BUDGET)
 
 
 def test_parse_hypotheses_hostile_blobs_stay_in_budget_and_typed():
-    _hostile_blob_test("parse_hypotheses", parse_hypotheses, (VerdictParseError,), _THINK_BLOBS)
+    _hostile_blob_test("parse_hypotheses", parse_hypotheses, (VerdictParseError,), _THINK_BLOBS,
+                       heavy_budget=SCANNER_BLOB_BUDGET)
 
 
 def test_think_blocks_are_stripped_case_insensitively_and_unterminated_ones_drop_the_rest():
@@ -1489,15 +1516,133 @@ def test_scanner_skips_implausible_openers_without_spending_the_failure_cap():
     assert parse_critique('{"result": {"score": 4, "issues": []}')["score"] == 4
 
 
-def test_scanner_opener_runs_stay_in_budget():
-    for blob in ("{" * BLOB, "{ " * (BLOB // 2), '{"' * (BLOB // 2), "[" * BLOB, "[ " * (BLOB // 2)):
-        for fn in (parse_verdict, parse_hypotheses, parse_critique):
-            started = time.perf_counter()
-            try:
-                fn(blob)
-            except VerdictParseError:
-                pass
-            assert time.perf_counter() - started < BLOB_BUDGET, "%s took too long on %.12r" % (fn.__name__, blob)
+def _best_time(fn, blob: str, repeats: int = 3) -> float:
+    best = float("inf")
+    for _ in range(repeats):
+        started = time.perf_counter()
+        try:
+            fn(blob)
+        except VerdictParseError:
+            pass
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def _time_once(fn, blob: str) -> float:
+    started = time.perf_counter()
+    try:
+        fn(blob)
+    except VerdictParseError:
+        pass
+    return time.perf_counter() - started
+
+
+def _assert_scales_linearly(fn, small_blob: str, big_blob: str, budget: float) -> None:
+    """The cost on ``big_blob`` must grow roughly with its size relative to ``small_blob``, and ``small_blob`` must be in budget.
+
+    Small and big timings are interleaved and the running minima kept over up to three rounds (3, 5, 8 repeats); the
+    check passes at the first round whose ratio is under the limit, so scheduler noise cannot fail it but a real
+    quadratic (x16 here) stays above the limit in every round.
+    """
+    assert len(big_blob) >= 3 * len(small_blob)
+    if fn is not parse_critique:
+        # past the cap the input is truncated and the ratio would be vacuous
+        assert len(big_blob) <= MAX_TEXT_CHARS, "blob of %d chars is past MAX_TEXT_CHARS" % len(big_blob)
+    small = big = float("inf")
+    ratio = 0.0
+    for repeats in (3, 5, 8):
+        for _ in range(repeats):
+            small = min(small, _time_once(fn, small_blob))
+            big = min(big, _time_once(fn, big_blob))
+        ratio = big / max(small, 1e-3)
+        if ratio < SCALE_RATIO_LIMIT:
+            break
+    factor = round(len(big_blob) / len(small_blob))
+    assert ratio < SCALE_RATIO_LIMIT, "%s: x%d input cost x%.1f (%.0f ms -> %.0f ms), super-linear on %.12r" % (
+        fn.__name__, factor, ratio, small * 1000, big * 1000, small_blob)
+    assert small < budget, "%s took %.0f ms (budget %.0f ms) on %.12r" % (fn.__name__, small * 1000, budget * 1000, small_blob)
+
+
+_OPENER_RUN_SHAPES = {
+    "braces": lambda n: "{" * n,
+    "brace-blank": lambda n: "{ " * (n // 2),
+    "brace-quote": lambda n: '{"' * (n // 2),
+    "brackets": lambda n: "[" * n,
+    "bracket-blank": lambda n: "[ " * (n // 2),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OPENER_RUN_SHAPES))
+def test_scanner_opener_runs_stay_in_budget(shape):
+    make = _OPENER_RUN_SHAPES[shape]
+    for fn in (parse_verdict, parse_hypotheses, parse_critique):
+        budget = BLOB_BUDGET if fn is parse_critique else SCANNER_BLOB_BUDGET
+        _assert_scales_linearly(fn, make(BLOB), make(BLOB * SCALE_FACTOR), budget)
+
+
+@pytest.mark.parametrize("name", sorted(_scaled_blobs(70)))
+def test_verdict_and_hypotheses_scale_linearly_on_every_hostile_blob(name):
+    small = _scaled_blobs(BLOB)[name]
+    big = _scaled_blobs(BLOB * SCALE_FACTOR)[name]
+    budget = SCANNER_BLOB_BUDGET if name in _SCANNER_HEAVY_SHAPES else BLOB_BUDGET
+    for fn in (parse_verdict, parse_hypotheses):
+        _assert_scales_linearly(fn, small, big, budget)
+
+
+def test_scaling_check_detects_a_fence_quadratic(monkeypatch):
+    """Self-test: a quadratic injected into the fence scan must trip the ratio check, so the check cannot go vacuous."""
+    from sonder_runtime.domain.security_eval import verdict as verdict_module
+
+    real = verdict_module._FENCE_RE
+
+    class _QuadraticFence:
+        @staticmethod
+        def finditer(text):
+            for match in real.finditer(text):
+                text.lower()  # one O(len(text)) pass per match
+                yield match
+
+    monkeypatch.setattr(verdict_module, "_FENCE_RE", _QuadraticFence)
+    assert verdict_module._FENCE_RE is _QuadraticFence
+    with pytest.raises(AssertionError, match="super-linear"):
+        _assert_scales_linearly(parse_verdict, _blobs(BLOB)["fence-spam"], _blobs(BLOB * SCALE_FACTOR)["fence-spam"], BLOB_BUDGET)
+
+
+def _machine_unit() -> float:
+    """Seconds one fixed pure-Python loop takes on this machine: the yardstick that makes a budget machine-relative."""
+    best = float("inf")
+    for _ in range(5):
+        started = time.perf_counter()
+        total = 0
+        for index in range(200_000):
+            total += index & 3
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+# Linear scanning costs up to ~7 machine units on these blobs (a loop of 200k additions is one unit, ~4 ms here);
+# losing the extent table in ``_objects`` makes it ~80-105 units (a constant 15x, bounded by the scan work limit, so
+# the scaling check above cannot see it). 30 units separates the two on any machine speed.
+HOSTILE_UNIT_LIMIT = 30
+
+
+_MACHINE_UNIT_SHAPES = ["open-brackets", "nested-arrays", "nested-objects", "open-braces"]
+
+
+def test_every_loosened_blob_is_under_a_scaling_check():
+    """The 0.5 s budget may only go to shapes that are also ratio-checked and machine-unit-checked."""
+    assert _SCANNER_HEAVY_SHAPES <= set(_scaled_blobs(70))
+    assert set(_blobs()) <= set(_scaled_blobs(70))
+    assert _SCANNER_HEAVY_SHAPES <= set(_MACHINE_UNIT_SHAPES)
+
+
+@pytest.mark.parametrize("name", _MACHINE_UNIT_SHAPES)
+def test_verdict_and_hypotheses_scanner_cost_stays_within_machine_units(name):
+    unit = _machine_unit()
+    for fn in (parse_verdict, parse_hypotheses):
+        cost = _best_time(fn, _blobs()[name]) / unit
+        assert cost < HOSTILE_UNIT_LIMIT, "%s on %s: %.0f machine units (limit %d, unit %.1f ms)" % (
+            fn.__name__, name, cost, HOSTILE_UNIT_LIMIT, unit * 1000)
 
 
 def test_parse_verdict_and_hypotheses_deep_nesting_regression():
