@@ -2067,7 +2067,8 @@ def _developer_authorized(context):
     if not context["authorized"]:
         return False
     account = context.get("account")
-    role_ok = bool(account) and account.get("role") in ("developer", "admin")
+    # Role or a dev_flags grant; an account's API key gets exactly that, no more.
+    role_ok = admin_auth.has_developer_authority(account)
     if context["mode"] == "both":
         return role_ok
     return bool(context.get("api_key")) or role_ok
@@ -2085,9 +2086,10 @@ def _execution_feed_detail_allowed(context):
 def _admin_authorized(context):
     """Administrator authorization for privileged operations (SPEC-2).
 
-    In account-bearing modes the account must hold the admin role; in
-    api-key-only deployments the single owner key is the administrator
-    credential.
+    In account-bearing modes the account must hold the admin role through a
+    signed-in session (an account's assigned API key never does, see
+    ``admin_auth.require``); in api-key-only deployments the single owner key
+    is the administrator credential.
     """
     if context.get("mode") == "local-open":
         return True
@@ -6254,7 +6256,7 @@ class Handler(BaseHTTPRequestHandler):
         if run is None:
             return None, (404, "fanout run was not found")
         account = context.get("account") or {}
-        is_admin = account.get("role") == "admin"
+        is_admin = admin_auth.require(account, "admin")[0]  # never an account's API key
         if context.get("mode") != "local-open" and not is_admin:
             if run.get("request_owner") != _fanout_request_owner(context):
                 # Do not disclose another developer's run identifier.
@@ -6279,6 +6281,8 @@ class Handler(BaseHTTPRequestHandler):
             parse_query=lambda: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
             developer_authorized=_developer_authorized,
+            # As in _fanout_run_for_context: an admin account, never its API key.
+            admin_authorized=lambda context: admin_auth.require(context.get("account") or {}, "admin")[0],
             request_owner_of=_fanout_request_owner, runtime=server,
         )
 

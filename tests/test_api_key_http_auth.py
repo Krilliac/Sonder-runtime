@@ -13,6 +13,7 @@ import pytest
 
 import admin_auth
 import sonder_runtime.interfaces.http.serve as ts
+from sonder_runtime.bootstrap import chat_tools_wiring
 from tests import test_app_control_http as _wire
 from tests.test_serve_auth import _http_server, _request
 
@@ -122,3 +123,225 @@ def test_a_key_is_not_an_app_control_session(served):
         status, body = _control(port, route, key)
         assert status == 401, (route, body)
     assert [row["key_id"] for row in _control(port, "api-keys/list", admin_token)[1]["keys"]] != []
+
+
+def _with_db(open_db, action):
+    conn = open_db()
+    try:
+        return action(conn)
+    finally:
+        conn.close()
+
+
+def _admin_account_edit(port, headers):
+    body = json.dumps({"username": "alice", "tier": "pro"}).encode()
+    status, _, raw = _request(port, "POST", "/v1/sonder/admin/account", body=body,
+                              headers={"Content-Type": "application/json", **headers})
+    return status, raw
+
+
+def test_an_admin_accounts_key_has_no_admin_authority(served, monkeypatch):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    # A leaked key of an admin account is not an admin credential: admin needs
+    # a signed-in session or the deployment key.
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    assert keyed["authorized"] and keyed["account"]["role"] == "admin"
+    assert ts._admin_authorized(keyed) is False
+    assert keyed["account"]["via_api_key"] is True
+    session = ts._auth_context("Bearer " + DEPLOYMENT_KEY, admin_token)
+    assert ts._admin_authorized(session) is True and not session["account"].get("via_api_key")
+
+    assert _admin_account_edit(port, _both_mode(key))[0] in (401, 403)
+    status, _, _ = _request(port, "POST", "/v1/admin/drain", body=b"{}",
+                            headers={"Content-Type": "application/json", **_both_mode(key)})
+    assert status in (401, 403)
+    # The same route still serves the admin's signed-in session.
+    status, raw = _admin_account_edit(port, _both_mode(admin_token))
+    assert status == 200, raw
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    assert ts._admin_authorized(ts._auth_context("Bearer " + key)) is False
+    assert _admin_account_edit(port, {"Authorization": "Bearer " + key})[0] in (401, 403)
+
+
+def test_a_developer_key_runs_chat_tools_and_a_user_key_does_not(served, monkeypatch):
+    port, _, open_db, _ = served
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+
+    def mint(conn):
+        admin_auth.register(conn, "dev", "dev-password", role="developer", trusted_local=True)
+        admin_auth.register(conn, "flagged", "flag-password", trusted_local=True)
+        admin_auth.set_account(conn, "flagged", dev_flags="unlimited,developer")
+        admin_auth.register(conn, "carol", "carol-password", trusted_local=True)
+        admin_auth.set_account(conn, "carol", dev_flags="nondeveloper")
+        return {name: admin_auth.generate_api_key(conn, name)["key"]
+                for name in ("dev", "flagged", "carol")}
+
+    keys = _with_db(open_db, mint)
+    authorized = []
+
+    def build_http_chat_tool_turn(**kwargs):
+        authorized.append(kwargs["authorized_tools"])
+        return None
+
+    monkeypatch.setattr(chat_tools_wiring, "build_http_chat_tool_turn", build_http_chat_tool_turn)
+    for name, expected in (("dev", True), ("flagged", True), ("carol", False)):
+        context = ts._auth_context("Bearer " + keys[name])
+        assert context["account"]["username"] == name
+        assert ts._developer_authorized(context) is expected, name
+        assert (ts._restricted_tool_role(context) is None) is expected, name
+        assert ts._admin_authorized(context) is False, name
+        status, body = _chat(port, {"Authorization": "Bearer " + keys[name]})
+        assert status == 200, (name, body)
+        assert authorized and authorized[-1] is expected, name
+
+
+def test_banning_an_account_revokes_its_keys_for_good(served):
+    port, _, open_db, _ = served
+
+    def mint(conn):
+        admin_auth.register(conn, "bob", "other-password", trusted_local=True)
+        return admin_auth.generate_api_key(conn, "bob")["key"]
+
+    key = _with_db(open_db, mint)
+    assert _with_db(open_db, lambda conn: admin_auth.api_key_account(conn, key))["username"] == "bob"
+    _with_db(open_db, lambda conn: admin_auth.set_account(conn, "bob", banned=True))
+    _with_db(open_db, lambda conn: admin_auth.set_account(conn, "bob", banned=False))
+    # Un-banning does not bring back a key issued before the ban.
+    assert _with_db(open_db, lambda conn: admin_auth.api_key_account(conn, key)) is None
+    assert _with_db(open_db, lambda conn: admin_auth.list_api_keys(conn, "bob")) == []
+    assert _chat(port, _both_mode(key))[0] == 401
+
+
+def test_metering_on_refuses_an_over_budget_key_chat_with_429(served):
+    port, _, open_db, _ = served
+
+    def mint(conn):
+        admin_auth.register(conn, "bob", "other-password", trusted_local=True)
+        return admin_auth.generate_api_key(conn, "bob")["key"]
+
+    key = _with_db(open_db, mint)
+    # Metering off (the default): the tier budget is not charged.
+    _with_db(open_db, lambda conn: admin_auth.set_saas_tier_limit(conn, "free", 0))
+    assert _chat(port, _both_mode(key))[0] == 200
+    _with_db(open_db, lambda conn: admin_auth.set_saas_feature(conn, "usage_metering_enabled", True))
+    status, body = _chat(port, _both_mode(key))
+    assert status == 429, body
+    assert body["error"]["type"] == "rate_limit" and "monthly token limit" in body["error"]["message"]
+
+
+def test_keys_do_not_expire_unless_a_ttl_is_configured(served, monkeypatch):
+    port, _, open_db, _ = served
+    now = [1_900_000_000]
+    monkeypatch.setattr(admin_auth, "_now", lambda: now[0])
+
+    def mint(conn):
+        admin_auth.register(conn, "bob", "other-password", trusted_local=True)
+        return admin_auth.generate_api_key(conn, "bob")
+
+    forever = _with_db(open_db, mint)
+    assert forever["expires_ts"] is None
+    _with_db(open_db, lambda conn: admin_auth.set_api_key_ttl(conn, 3600))
+    timed = _with_db(open_db, lambda conn: admin_auth.generate_api_key(conn, "bob"))
+    assert timed["expires_ts"] == now[0] + 3600
+    listed = _with_db(open_db, lambda conn: admin_auth.list_api_keys(conn, "bob"))
+    assert sorted((row["key_id"], row["expires_ts"]) for row in listed) == sorted(
+        [(forever["key_id"], None), (timed["key_id"], now[0] + 3600)])
+    assert _chat(port, _both_mode(timed["key"]))[0] == 200
+
+    now[0] += 3600
+    assert _with_db(open_db, lambda conn: admin_auth.api_key_account(conn, timed["key"])) is None
+    assert _chat(port, _both_mode(timed["key"]))[0] == 401
+    # A key minted with no TTL still works, and clearing the TTL restores the default.
+    assert _chat(port, _both_mode(forever["key"]))[0] == 200
+    _with_db(open_db, lambda conn: admin_auth.set_api_key_ttl(conn, 0))
+    assert _with_db(open_db, lambda conn: admin_auth.generate_api_key(conn, "bob"))["expires_ts"] is None
+
+
+def _get_json(port, path, headers):
+    status, _, raw = _request(port, "GET", path, headers=headers)
+    return status, json.loads(raw)
+
+
+def test_an_admin_key_sees_only_its_own_fanout_runs(served, monkeypatch):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    owners = []
+
+    def recent_run_summaries(*, request_owner, include_finished, limit):
+        owners.append(request_owner)
+        return []
+
+    monkeypatch.setattr(ts.server.fanout_store, "recent_run_summaries", recent_run_summaries)
+    # The all-owners operator view needs admin authority, which a key never has.
+    status, body = _get_json(port, "/v1/fanout", _both_mode(key))
+    assert status == 200, body
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    assert owners[-1] == ts._fanout_request_owner(keyed)
+    status, body = _get_json(port, "/v1/fanout", _both_mode(admin_token))
+    assert status == 200, body
+    assert owners[-1] is None
+
+    monkeypatch.setattr(ts, "API_KEY", "")
+    monkeypatch.setattr(ts, "AUTH_MODE", "account")
+    assert _get_json(port, "/v1/fanout", {"Authorization": "Bearer " + key})[0] == 200
+    assert owners[-1] == ts._fanout_request_owner(ts._auth_context("Bearer " + key))
+
+
+def test_an_admin_key_cannot_read_another_owners_fanout_run(served, monkeypatch):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    run = {"id": "fr-other", "request_owner": "fo-someone-else"}
+    monkeypatch.setattr(ts.server.fanout_store, "get_run",
+                        lambda run_id: dict(run) if run_id == run["id"] else None)
+    monkeypatch.setattr(ts.server, "_fanout_receipt", lambda run_id: {"id": run_id, "object": "fanout.run"})
+    # Another owner's run is not disclosed to an admin account's key ...
+    status, body = _get_json(port, "/v1/fanout/fr-other", _both_mode(key))
+    assert status == 404, body
+    # ... but the admin's signed-in session keeps the recovery path.
+    status, body = _get_json(port, "/v1/fanout/fr-other", _both_mode(admin_token))
+    assert status == 200 and body["id"] == "fr-other", body
+
+
+class _RacingConnection:
+    """A connection whose expires_ts column is added by another process mid-``init``."""
+
+    def __init__(self, conn, rival):
+        self._conn, self._rival = conn, rival
+
+    def executescript(self, script):
+        return self._conn.executescript(script)
+
+    def execute(self, sql, *args):
+        result = self._conn.execute(sql, *args).fetchall()
+        if sql.startswith("PRAGMA table_info(account_api_keys)") and self._rival is not None:
+            rival, self._rival = self._rival, None
+            rival.execute("ALTER TABLE account_api_keys ADD COLUMN expires_ts INTEGER")
+            rival.commit()
+        return result
+
+    def commit(self):
+        return self._conn.commit()
+
+
+def test_a_concurrent_expiry_upgrade_of_an_old_key_table_does_not_fail(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "accounts.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE account_api_keys (key_id TEXT PRIMARY KEY, username TEXT NOT NULL, "
+                "key_hash TEXT NOT NULL UNIQUE, created_ts INTEGER NOT NULL)")
+    old.commit()
+    old.close()
+    conn, rival = sqlite3.connect(path), sqlite3.connect(path)
+    try:
+        # The other process adds the column after this one checked for it.
+        admin_auth.init(_RacingConnection(conn, rival))
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(account_api_keys)")]
+        assert columns.count("expires_ts") == 1
+    finally:
+        conn.close()
+        rival.close()
