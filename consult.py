@@ -50,24 +50,13 @@ def _failure(text):
 
 
 def _judge_verdict(text):
-    """Return YES/NO for an internally consistent judge output."""
+    """Return YES/NO only for one-line, internally consistent judge output."""
     value = str(text or "").strip()
-    if not value:
-        return None
-    match = re.match(r"^(?:\*{1,2}|`|_)?(YES|NO)\b", value, re.IGNORECASE)
+    match = re.fullmatch(r"(YES|NO)\b[^\r\n]*", value, re.IGNORECASE)
     if match is None:
         return None
-    verdict = match.group(1).upper()
-    opposite = "NO" if verdict == "YES" else "YES"
-    # Reject explicit contradictory verdicts (e.g. "YES... NO..." or a new
-    # sentence starting with "No."/"Yes:"), without rejecting ordinary prose
-    # like "YES. There is no contradiction."
-    if re.search(r"\b%s\b" % opposite, value):
-        return None
-    if re.search(r"(?:^|[.!?\r\n]\s*)(?:\*{1,2}|`|_)?%s\b(?:\s*$|[.,:;!])" % opposite,
-                 value, re.IGNORECASE):
-        return None
-    return verdict
+    verdicts = re.findall(r"\b(?:YES|NO)\b", value, re.IGNORECASE)
+    return match.group(1).upper() if len(verdicts) == 1 else None
 
 
 def _substance(text):
