@@ -316,7 +316,7 @@ def test_other_providers_never_claim_the_stream():
             return ModelResponse(text="answer", model="m", tier="general")
 
     live = stream_sink.LiveTurnStream(lambda text: True)
-    with stream_sink.armed(live), bridge.bind_rung("openai_compatible", "general"):
+    with stream_sink.armed(live), bridge.bind_rung("openrouter", "general"):
         bridge.generate_via_gateway(
             Gateway(), {"messages": [{"role": "user", "content": "hi"}]},
             tier="general", context=_ctx(),

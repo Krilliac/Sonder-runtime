@@ -68,6 +68,7 @@ sonder_runtime/adapters/host_tools/linux.py
 sonder_runtime/adapters/inference/__init__.py
 sonder_runtime/adapters/inference/anthropic_gateway.py
 sonder_runtime/adapters/inference/anthropic_spend.py
+sonder_runtime/adapters/inference/exchange_transport.py
 sonder_runtime/adapters/inference/gpu_admission.py
 sonder_runtime/adapters/inference/gpu_admission_store.py
 sonder_runtime/adapters/inference/log_safe.py
