@@ -3,13 +3,43 @@ from __future__ import annotations
 
 import collections
 import time
+from typing import TYPE_CHECKING
 
 from ..prompt_store import current_provenance
 
-_TURN_TRACES = collections.deque(maxlen=8)
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from typing import TypedDict
+
+    class TraceContext(TypedDict, total=False):
+        augmented_prompt: str
+        lessons: Sequence[str]
+        facts_omitted: int
+
+    class TurnTraceRecord(TypedDict):
+        ts: str
+        model: str
+        tier: str
+        interaction_id: str
+        prompt: str
+        augmented_prompt: str
+        lessons: list[str]
+        facts_omitted: int
+        response_head: str
+        prompts: dict[str, str]
 
 
-def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
+_TURN_TRACES: collections.deque[TurnTraceRecord] = collections.deque(maxlen=8)
+
+
+def _capture_turn(
+    model: str | None,
+    tier: str | None,
+    trace_ctx: TraceContext | None,
+    prompt: str | None,
+    response: str | None,
+    iid: str | None = None,
+) -> None:
     """Keep a bounded, in-memory trace of the most recent completed turns."""
     if not isinstance(trace_ctx, dict):
         return
@@ -33,7 +63,12 @@ def _capture_turn(model, tier, trace_ctx, prompt, response, iid=None):
         pass
 
 
-def _format_trace(model, tier, params, trace):
+def _format_trace(
+    model: str,
+    tier: str,
+    params: Mapping[str, object],
+    trace: TraceContext,
+) -> str:
     lessons = trace.get("lessons", [])
     lines = [
         "",

@@ -21,7 +21,7 @@ Rules that keep this from becoming a second error system:
 from __future__ import annotations
 
 
-def error_hint(text) -> str:
+def error_hint(text: str | None) -> str:
     """Return one short next-step hint for a known error, or ``""``.
 
     The return value is bare prose without a ``hint:`` prefix or styling;
