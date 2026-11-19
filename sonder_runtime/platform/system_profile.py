@@ -22,6 +22,8 @@ from sonder_runtime.platform.config_environment import (
     env_bool_from_env as _env_bool,
     env_float as _env_float,
 )
+import sonder_runtime.platform.paths as _runtime_paths
+from sonder_runtime.platform.private_files import ensure_private_dir
 
 
 DEFAULT_TEXT = """# Sonder standing instructions
@@ -93,6 +95,11 @@ def _resolve_path(path=None):
         path = os.path.join(workspace_root(), path)
     path = os.path.abspath(path)
     root = workspace_root()
+    # Under a sealed payload the state-home copy is the one admitted exception.
+    if _sealed_payload_root() and os.path.normcase(path) == os.path.normcase(
+        os.path.abspath(live_path())
+    ):
+        return path
     try:
         inside = os.path.commonpath([root, path]) == root
     except ValueError:
@@ -102,8 +109,60 @@ def _resolve_path(path=None):
     return path
 
 
-def read_profile(path=None):
+def _sealed_payload_root():
+    """The workspace when it is a managed runtime's hashed payload, else None.
+
+    ManagedRuntimeOwner hashes ``<root>/runtime-payload`` (manifest beside it
+    in ``<root>/runtime-artifacts.json``) and refuses the next launch if any
+    byte in it changes. The managed child resolves the workspace to that
+    payload, so a profile create or edit there would brick the runtime.
+    """
+    payload = os.path.abspath(workspace_root())
+    if os.path.basename(payload) != "runtime-payload":
+        return None
+    manifest = os.path.join(os.path.dirname(payload), "runtime-artifacts.json")
+    return payload if os.path.isfile(manifest) else None
+
+
+def _in_sealed_payload(path):
+    """True when ``path`` is inside a managed runtime's hashed payload."""
+    payload = _sealed_payload_root()
+    if payload is None:
+        return False
+    try:
+        return os.path.commonpath([payload, os.path.abspath(path)]) == payload
+    except ValueError:
+        return False
+
+
+def live_path():
+    """The operator's writable copy below the Sonder state home."""
+    return os.path.join(str(_runtime_paths.default_home()), "system_profile.md")
+
+
+def _read_path(path):
+    """Resolved profile path to read; a sealed payload yields to the live copy.
+
+    The payload's own file is the bundled default, never written. Edits land
+    in the state home, which is read in preference once it exists.
+    """
     path = _resolve_path(path)
+    if _in_sealed_payload(path) and os.path.exists(live_path()):
+        return live_path()
+    return path
+
+
+def _write_path(path):
+    """Resolved profile path to write; never a file inside a sealed payload."""
+    path = _resolve_path(path)
+    if not _in_sealed_payload(path):
+        return path
+    ensure_private_dir(Path(live_path()).parent)
+    return live_path()
+
+
+def read_profile(path=None):
+    path = _read_path(path)
     if not os.path.exists(path):
         return ""
     with open(path, "r", encoding="utf-8") as f:
@@ -111,15 +170,16 @@ def read_profile(path=None):
 
 
 def ensure_profile(path=None):
-    path = _resolve_path(path)
+    path = _read_path(path)
     if not os.path.exists(path):
+        path = _write_path(path)
         with open(path, "w", encoding="utf-8") as f:
             f.write(DEFAULT_TEXT)
     return read_profile(path), path
 
 
 def write_profile(text, path=None):
-    path = _resolve_path(path)
+    path = _write_path(path)
     with open(path, "w", encoding="utf-8") as f:
         f.write((text or "").rstrip() + "\n")
     return path
@@ -138,7 +198,7 @@ def system_prompt():
     path = default_path()
     try:
         text = read_profile(path)
-        if not os.path.exists(_resolve_path(path)):
+        if not os.path.exists(_read_path(path)):
             text, _ = ensure_profile(path)
     except (OSError, ValueError):
         # A read-only install should still be usable; diagnostics reports the
