@@ -1,9 +1,36 @@
 """Human-readable formatting for persisted checklist records."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def _format_checklist(data: dict) -> str:
-    symbols = {"done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]"}
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import TypedDict
+
+    class _TaskRecord(TypedDict, total=False):
+        id: str
+        title: str
+        detail: str
+        status: str
+        priority: int
+        project: str
+        owner: str
+        parent_id: str
+
+    class _ChecklistRecord(TypedDict, total=False):
+        id: str
+        title: str
+        status: str
+        project: str
+        owner: str
+        items: Sequence[_TaskRecord]
+        summary: str
+
+
+def _format_checklist(data: _ChecklistRecord) -> str:
+    symbols: dict[str | None, str] = {
+        "done": "[x]", "in_progress": "[~]", "blocked": "[!]", "canceled": "[-]",
+    }
     lines = [
         "sonder checklist %s" % data.get("id", "")[:8],
         "  %s [%s] %s" % (
@@ -21,7 +48,7 @@ def _format_checklist(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_task(row: dict) -> str:
+def _format_task(row: _TaskRecord) -> str:
     if not row:
         return "(no task)"
     detail = (" - " + row.get("detail", "")) if row.get("detail") else ""

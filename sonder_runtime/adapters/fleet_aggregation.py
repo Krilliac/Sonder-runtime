@@ -1,10 +1,37 @@
 """Fleet synthesis instructions and host-owned build reports, without model effects."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import sonder_runtime.adapters.fleet_creations as fleet_creations
 
+if TYPE_CHECKING:
+    import os
+    from collections.abc import Collection, Iterable, Mapping
+    from typing import Protocol
 
-def render_repository_result(result):
+    class BuildReceiptLike(Protocol):
+        @property
+        def produced_files(self) -> Collection[str]: ...
+
+        @property
+        def checks_run(self) -> bool: ...
+
+        @property
+        def checks_passed(self) -> bool | None: ...
+
+    class RepositoryResultLike(BuildReceiptLike, Protocol):
+        @property
+        def project(self) -> str: ...
+
+        @property
+        def tools(self) -> Iterable[str]: ...
+
+        @property
+        def output(self) -> str: ...
+
+
+def render_repository_result(result: RepositoryResultLike) -> str:
     rendered = (
         "=== HOST REPOSITORY SCOPE ===\nproject=%s\ntools=%s\n\n%s"
         % (result.project, ",".join(result.tools), result.output)
@@ -21,7 +48,15 @@ def render_repository_result(result):
     return rendered
 
 
-def audit_prompt(task, outputs, *, repository_task, project, objective_contract="", creation_root=""):
+def audit_prompt(
+    task: str,
+    outputs: Iterable[tuple[str, object]],
+    *,
+    repository_task: bool,
+    project: str,
+    objective_contract: str = "",
+    creation_root: str = "",
+) -> str:
     """Keep existing advice/objective prompts stable; build audits consume receipts."""
     if creation_root:
         lines = [
@@ -81,7 +116,11 @@ def audit_prompt(task, outputs, *, repository_task, project, objective_contract=
     return "\n".join(lines)
 
 
-def build_report(creation_root, lane_projects, outputs):
+def build_report(
+    creation_root: str | os.PathLike[str],
+    lane_projects: Mapping[str, str],
+    outputs: Iterable[tuple[str, BuildReceiptLike | None]],
+) -> str:
     """Always name every folder; rank only candidates with host-observed files.
 
     Checks outrank file count. Stable lane order breaks ties. A missing receipt
