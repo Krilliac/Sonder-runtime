@@ -30,6 +30,7 @@ This module pins the decision that now hangs off the measurement:
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -120,28 +121,71 @@ INSPECT = '{"tool":"project_detect","args":{"path":"."}}'
 INSPECTED = '{"root":".","manifests":[{"path":"pyproject.toml"}],"errors":[]}'
 PASSING_RUN = "test run (pytest)\n  ok: True\n  returncode: 0"
 FAILING_RUN = "test run (pytest)\n  ok: False\n  returncode: 1"
+WROTE = "wrote 1 byte"
+
+
+def _write(path):
+    """A scripted file_write.
+
+    Decision 21 (2026-11-18): the UNVERIFIED banner is shown only on a run
+    that mutated or delegated, so every test that proves a gate property
+    through the banner drives a real mutation first.
+    """
+    return (
+        '{"tool":"file_write","args":{"path":"%s","content":"x","mode":"overwrite"}}'
+        % path.as_posix()
+    )
+
+
+def _verify(root, **extra):
+    """A scripted test_run rooted at ``root``."""
+    return json.dumps({"tool": "test_run", "args": {"root": root.as_posix(), **extra}})
 
 
 # --- the standing itself --------------------------------------------------
 
 
 @pytest.mark.parametrize("counts", [UNMEASURED_RECORD, POOR_RECORD])
-def test_an_unbacked_completion_claim_is_reported_unverified(monkeypatch, counts):
+def test_an_unbacked_completion_claim_is_reported_unverified(
+    monkeypatch, tmp_path, counts,
+):
     """Poor *and* unmeasured both demand a citation; neither is a pass."""
     _record(monkeypatch, counts)
 
-    out = _run(monkeypatch, [FINAL])
+    receipt = _run(
+        monkeypatch, [_write(tmp_path / "a.py"), FINAL], [WROTE],
+        return_host_receipt=True,
+    )
 
-    assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
-    assert "the work is complete" in out
+    assert receipt.mutation_observed is True
+    assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    assert "the work is complete" in receipt.output
 
 
-def test_unbacked_completion_downgrades_the_activity_status(monkeypatch):
-    _record(monkeypatch, UNMEASURED_RECORD)
+@pytest.mark.parametrize("counts", [UNMEASURED_RECORD, POOR_RECORD])
+def test_a_run_that_changed_nothing_carries_no_unverified_banner(monkeypatch, counts):
+    """Decision 21: the banner is never shown on a non-mutating run.
+
+    The record still demands verification; what goes away is a banner on an
+    answer that changed nothing on disk.
+    """
+    _record(monkeypatch, counts)
+    assert _expected_reason()[0] is True
     activity_tracker.reset_for_tests()
 
     with activity_tracker.response_span("agent:test", "do the work"):
         out = _run(monkeypatch, [FINAL])
+
+    assert out == "the work is complete"
+    assert activity_tracker.latest()["status"] != "unverified"
+
+
+def test_unbacked_completion_downgrades_the_activity_status(monkeypatch, tmp_path):
+    _record(monkeypatch, UNMEASURED_RECORD)
+    activity_tracker.reset_for_tests()
+
+    with activity_tracker.response_span("agent:test", "do the work"):
+        out = _run(monkeypatch, [_write(tmp_path / "a.py"), FINAL], [WROTE])
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
     latest = activity_tracker.latest()
@@ -164,13 +208,15 @@ def test_nested_agent_report_preserves_an_unverified_outer_response(monkeypatch)
 
 
 @pytest.mark.parametrize("counts", [UNMEASURED_RECORD, POOR_RECORD])
-def test_the_standing_quotes_the_measured_reason_verbatim(monkeypatch, counts):
+def test_the_standing_quotes_the_measured_reason_verbatim(
+    monkeypatch, tmp_path, counts,
+):
     """Measured, never generated: the words are a projection of the counts."""
     _record(monkeypatch, counts)
     verify, reason = _expected_reason()
     assert verify is True
 
-    out = _run(monkeypatch, [FINAL])
+    out = _run(monkeypatch, [_write(tmp_path / "a.py"), FINAL], [WROTE])
 
     assert reason in out
     # The reason carries the counts, not a mood.
@@ -231,33 +277,83 @@ def test_a_verification_followed_by_a_mutation_is_not_verified(
     assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
 
 
-def test_a_later_failing_verification_invalidates_an_earlier_pass(monkeypatch):
-    """Latest-wins, exactly as the existing validation ledger does."""
+def test_a_later_failing_verification_invalidates_an_earlier_pass(
+    monkeypatch, tmp_path,
+):
+    """Latest-wins, exactly as the existing validation ledger does.
+
+    The mutation comes first, so the passing run really did cover it (the
+    control below proves that): only the later failing run can un-verify it.
+    """
     _record(monkeypatch, POOR_RECORD)
 
     out = _run(
         monkeypatch,
         [
-            '{"tool":"test_run","args":{"root":"."}}',
-            '{"tool":"test_run","args":{"root":".","pattern":"broader"}}',
+            _write(tmp_path / "a.py"),
+            _verify(tmp_path),
+            _verify(tmp_path, pattern="broader"),
             FINAL,
         ],
-        [PASSING_RUN, FAILING_RUN],
+        [WROTE, PASSING_RUN, FAILING_RUN],
     )
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
 
 
-def test_a_failing_verification_is_not_a_citation(monkeypatch):
+def test_a_later_passing_verification_restores_an_earlier_failure(
+    monkeypatch, tmp_path,
+):
+    """The control for latest-wins: the same calls in the other order are clean."""
     _record(monkeypatch, POOR_RECORD)
 
     out = _run(
         monkeypatch,
-        ['{"tool":"test_run","args":{"root":"."}}', FINAL],
-        [FAILING_RUN],
+        [
+            _write(tmp_path / "a.py"),
+            _verify(tmp_path, pattern="broader"),
+            _verify(tmp_path),
+            FINAL,
+        ],
+        [WROTE, FAILING_RUN, PASSING_RUN],
+    )
+
+    assert out == "the work is complete"
+
+
+def test_a_failing_verification_is_not_a_citation(monkeypatch, tmp_path):
+    _record(monkeypatch, POOR_RECORD)
+
+    out = _run(
+        monkeypatch,
+        [_write(tmp_path / "a.py"), _verify(tmp_path), FINAL],
+        [WROTE, FAILING_RUN],
     )
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+
+
+def test_a_failing_verification_on_an_unchanged_tree_is_a_report_not_a_banner(
+    monkeypatch,
+):
+    """Decision 21 / F15: "run the tests" that finds failures changed nothing.
+
+    The model's report of the failures is the answer; the host receipt still
+    says the validation did not pass.
+    """
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        ['{"tool":"test_run","args":{"root":"."}}', FINAL],
+        [FAILING_RUN],
+        return_host_receipt=True,
+    )
+
+    assert receipt.mutation_observed is False
+    assert receipt.output == "the work is complete"
+    assert receipt.validation_attempted is True
+    assert receipt.validation_passed is False
 
 
 # --- the trap: coverage is keyed on `root`, not `path` --------------------
@@ -455,11 +551,35 @@ def test_a_verifier_on_one_subdirectory_does_not_validate_the_project(
     assert "test_run" in receipt.tools
     assert receipt.mutation_observed is False
 
-    assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    # Decision 21: nothing changed, so there is no banner -- but the host
+    # receipt still refuses to count a slice of the project as the project.
+    assert server._AGENT_UNVERIFIED_PREFIX not in receipt.output
     assert receipt.validation_passed is False
     ok, why = autopilot_controller._task_passed(receipt, {"kind": "validate"})
     assert ok is False
     assert "coverage" in why
+
+
+def test_a_verifier_on_one_subdirectory_does_not_clear_a_change_beside_it(
+    monkeypatch, tmp_path,
+):
+    """The same slice, on a run that did change the project: still unverified."""
+    project = tmp_path / "project"
+    (project / "pkg").mkdir(parents=True)
+    _record(monkeypatch, POOR_RECORD)
+
+    receipt = _run(
+        monkeypatch,
+        [_write(project / "top.py"), _verify(project / "pkg"), FINAL],
+        [WROTE, PASSING_RUN],
+        project=str(project),
+        return_host_receipt=True,
+    )
+
+    assert "test_run" in receipt.tools
+    assert receipt.mutation_observed is True
+    assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    assert receipt.validation_passed is False
 
 
 def test_a_verifier_rooted_at_the_project_does_validate_it(
@@ -546,7 +666,9 @@ def test_both_statements_read_as_written_english(monkeypatch, tmp_path):
     """
     composed = _failed_validation_run(monkeypatch, tmp_path).output
     _record(monkeypatch, UNMEASURED_RECORD)
-    standalone = _run(monkeypatch, [FINAL])
+    standalone = _run(monkeypatch, [_write(tmp_path / "b.py"), FINAL], [WROTE])
+    assert composed.startswith("VALIDATION_FAILED:")
+    assert standalone.startswith(server._AGENT_UNVERIFIED_PREFIX)
 
     for text in (composed, standalone):
         assert server._AGENT_VERIFIERS_PHRASE in text
@@ -671,17 +793,19 @@ def test_an_unverified_run_still_passes_the_workbench_acceptance_check(
 
     receipt = _run(
         monkeypatch,
-        ['{"tool":"file_read","args":{"path":"%s"}}' % (tmp_path / "x").as_posix(), FINAL],
-        ["contents"],
+        [_write(tmp_path / "x.py"), FINAL],
+        [WROTE],
         return_host_receipt=True,
     )
 
     assert receipt.output.startswith(server._AGENT_UNVERIFIED_PREFIX)
-    ok, why = autopilot_controller._task_passed(receipt, {"kind": "inspect"})
+    ok, why = autopilot_controller._task_passed(receipt, {"kind": "implement"})
     assert ok, why
 
 
-def test_the_activity_summary_still_names_the_work_not_the_standing(monkeypatch):
+def test_the_activity_summary_still_names_the_work_not_the_standing(
+    monkeypatch, tmp_path,
+):
     """The standing must not evict the model's own first line from the feed."""
     _record(monkeypatch, UNMEASURED_RECORD)
     captured = []
@@ -689,7 +813,7 @@ def test_the_activity_summary_still_names_the_work_not_the_standing(monkeypatch)
         server.activity_tracker, "set_result_summary", captured.append,
     )
 
-    out = _run(monkeypatch, [FINAL])
+    out = _run(monkeypatch, [_write(tmp_path / "a.py"), FINAL], [WROTE])
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
     assert captured == ["the work is complete"]
@@ -752,13 +876,45 @@ def test_the_lane_tables_match_what_the_gates_actually_admit():
 
 
 @pytest.mark.parametrize("lane", sorted(LANES_THAT_CAN_VERIFY))
-def test_every_lane_that_can_verify_is_gated(monkeypatch, lane):
-    """Gating on ``mutated``/``auto_checklist`` would exempt most of these."""
+def test_every_lane_that_can_verify_is_gated(monkeypatch, tmp_path, lane):
+    """Every such lane states the standing on a run that changed something.
+
+    The standing is gated on ``mutated or delegated`` (decision 21,
+    2026-11-18), never on the lane or on ``auto_checklist``: gating on the
+    lane would exempt most of these. A checklist lane states it as the second
+    line of its VALIDATION_FAILED block (composed, never stacked); the others
+    lead with the UNVERIFIED banner.
+    """
+    _record(monkeypatch, UNMEASURED_RECORD)
+    reason = _expected_reason()[1]
+    options = LANES_THAT_CAN_VERIFY[lane]
+
+    receipt = _run(
+        monkeypatch,
+        [INSPECT, _write(tmp_path / "a.py"), FINAL],
+        [INSPECTED, WROTE],
+        return_host_receipt=True,
+        **options,
+    )
+
+    assert receipt.mutation_observed is True, lane
+    block = receipt.output.split("\n\n")[0]
+    if options.get("auto_checklist"):
+        assert block.startswith("VALIDATION_FAILED:"), lane
+        assert "claimed completion without" in block, lane
+    else:
+        assert block.startswith(server._AGENT_UNVERIFIED_PREFIX), lane
+    assert reason in block, lane
+
+
+@pytest.mark.parametrize("lane", sorted(LANES_THAT_CAN_VERIFY))
+def test_no_lane_banners_a_run_that_changed_nothing(monkeypatch, lane):
+    """Decision 21, for every lane the gate applies to."""
     _record(monkeypatch, UNMEASURED_RECORD)
 
     out = _run(monkeypatch, [FINAL], **LANES_THAT_CAN_VERIFY[lane])
 
-    assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    assert out == "the work is complete"
 
 
 @pytest.mark.parametrize("lane", sorted(LANES_THAT_CAN_VERIFY))
@@ -818,7 +974,7 @@ def test_scoping_is_read_from_the_gates_not_from_a_list_of_lane_names():
 
 
 def test_an_unreadable_record_demands_verification_rather_than_assuming(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     """Below MIN_SAMPLE and below *any* sample both fail closed."""
     def _boom():
@@ -827,9 +983,14 @@ def test_an_unreadable_record_demands_verification_rather_than_assuming(
     monkeypatch.setattr(server, "_open_db", _boom)
     monkeypatch.setattr(server, "_open_db_readonly", _boom)
 
-    out = _run(monkeypatch, [FINAL])
+    out = _run(monkeypatch, [_write(tmp_path / "a.py"), FINAL], [WROTE])
 
     assert out.startswith(server._AGENT_UNVERIFIED_PREFIX)
+    assert "could not be read" in out
+    # Decision 21 still holds when the record is unreadable: a run that changed
+    # nothing carries no banner, while the standing itself still fails closed.
+    assert _run(monkeypatch, [FINAL]) == "the work is complete"
+    assert server._agent_verification_standing()[0] is True
 
 
 def test_reading_the_standing_never_creates_or_migrates_the_store(
@@ -945,3 +1106,35 @@ def test_a_narrowing_path_is_read_for_the_no_mutation_case_too(tmp_path):
         "test_run", {"root": str(project)}, [],
         project_scope=str(project),
     ) is True
+
+
+def test_a_delegated_run_that_did_not_mutate_still_leads_with_the_banner(monkeypatch):
+    """The ``delegated`` half of ``mutated or delegated`` is load-bearing.
+
+    A mutant ``if mutated:`` would silently drop the banner from a run that
+    delegated work and changed nothing itself.
+    """
+    from sonder_runtime.interfaces import standalone_agent_lanes as lanes
+
+    _record(monkeypatch, UNMEASURED_RECORD)
+    activity_tracker.reset_for_tests()
+    controller = lanes.StandaloneLaneController(lambda: None)
+    controller.delegated_work = True
+    monkeypatch.setattr(lanes, "current", lambda: controller)
+    monkeypatch.setattr(
+        controller, "verify_delegated",
+        lambda *a, **k: type("V", (), {
+            "valid": False, "certificate_id": "", "generation": 0, "code": "none",
+        })(),
+    )
+
+    with activity_tracker.response_span("agent:test", "do the work"):
+        out = _run(monkeypatch, [FINAL])
+        status = activity_tracker.current()["status"]
+
+    text = out.output if hasattr(out, "output") else out
+    # The delegated report wraps the model outcome; the gate's own banner must
+    # still lead that outcome, not be absent.
+    assert "Unverified model outcome:\n" + server._AGENT_UNVERIFIED_PREFIX in text, text
+    assert "claimed completion without" in text
+    assert status == "unverified"
