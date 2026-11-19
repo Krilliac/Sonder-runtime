@@ -468,6 +468,8 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     if not account:
         return False, "login required"
     ranks = {"user": 0, "developer": 1, "admin": 2}
+    if role not in ranks:
+        return False, "unknown role"
     if ranks.get(account.get("role", "user"), 0) < ranks.get(role, 0):
         return False, "%s role required" % role
     if account.get("banned"):

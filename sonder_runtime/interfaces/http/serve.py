@@ -38,6 +38,7 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -2118,6 +2119,7 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    "cloud_opt_in": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
     "runtime_source_stash": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
@@ -2427,7 +2429,7 @@ def _dangerous_http_slash(content):
     if not stripped.startswith("/"):
         return False
     pieces = stripped.split(None, 2)
-    command = pieces[0].lower()
+    command = _slash_head(pieces[0])
     if command in ("/autopilot", "/auto"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
@@ -3198,7 +3200,7 @@ def _slash_system_operation(command, argument):
     choke point prevents a role declaration from becoming decorative merely
     because a command has two spellings.
     """
-    command = str(command or "").strip().lower()
+    command = _slash_head(command)
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
@@ -3304,15 +3306,15 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return None
 
     parts = stripped.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
-    _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
+    _serve_logger.debug("_handle_slash: slash command received")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).
     from sonder_runtime.adapters.security.powershell_gate import slash_run_arguments
     run_args = slash_run_arguments(cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block)
     refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
-        _serve_logger.debug(f"_handle_slash: refused cmd={cmd!r}: {refusal!r}")
+        _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
     operation = _slash_system_operation(cmd, arg)
     if operation and context is not None:

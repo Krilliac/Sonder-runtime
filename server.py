@@ -57,6 +57,7 @@ import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.bootstrap import playbook_context
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
@@ -3670,7 +3671,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if not text.startswith("/"):
         return None
     parts = text.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
 
     try:
@@ -18128,7 +18129,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     # behaviour or unload their models.
     "set_context_size", "unload", "update_emotion_vectors",
     "tune_emotion_vectors", "learn_preference",
-    "ollama_pool_admin_status",
+    "ollama_pool_admin_status", "cloud_opt_in",
 })
 
 
@@ -18146,7 +18147,14 @@ def _agent_dispatch(
         read_only = False
         allow_location = True
         repository_extra_roots = ""
-    tool_name = _canonical_agent_tool_name((tool_name or "").strip())
+    raw_tool_name = (tool_name or "").strip()
+    if raw_tool_name.startswith("/"):
+        if role_refusal := _role_tool_policy.agent_refusal(raw_tool_name):
+            return role_refusal
+        # The permission gate reads "/x" as "x" but dispatch does not, so a
+        # slash spelling would spend a one-shot approval and run nothing.
+        return f"{_generic_agent_dispatch.LEGACY_ERROR_PREFIX} unknown tool '{raw_tool_name}'."
+    tool_name = _canonical_agent_tool_name(raw_tool_name)
     from sonder_runtime.bootstrap.prepared_workbench import require_prepared_tool
     require_prepared_tool(tool_name)
     args = args or {}
