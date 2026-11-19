@@ -306,6 +306,101 @@ def test_an_admin_key_cannot_read_another_owners_fanout_run(served, monkeypatch)
     assert status == 200 and body["id"] == "fr-other", body
 
 
+def test_an_admin_accounts_key_is_not_offered_host_bypass_or_admin_features(served):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    for path in ("/v1/sonder/whoami", "/v1/sonder/capabilities"):
+        status, body = _get_json(port, path, _both_mode(key))
+        assert status == 200, (path, body)
+        features = body["allowed_features"]
+        assert body["host_bypass_allowed"] is False, (path, body)
+        assert features["host_bypass"] is False and features["host_admin"] is False, (path, body)
+        # The key keeps the developer authority its account's role grants.
+        assert features["host_tools"] is True and features["approvals"] is True, (path, body)
+        # The same account's signed-in session is the administrator.
+        status, body = _get_json(port, path, _both_mode(admin_token))
+        assert status == 200, (path, body)
+        assert body["host_bypass_allowed"] is True, (path, body)
+        assert body["allowed_features"]["host_bypass"] is True, (path, body)
+        assert body["allowed_features"]["host_admin"] is True, (path, body)
+
+
+def test_an_admin_accounts_key_cannot_reach_bypass_or_admin_commands_in_chat(served):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    body = json.dumps({"mode": "bypass", "confirm_bypass": True}).encode()
+    status, _, raw = _request(port, "POST", "/v1/permission-mode", body=body,
+                              headers={"Content-Type": "application/json", **_both_mode(key)})
+    assert status == 403, raw
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    for line in ("/cloud_opt_in status", "/permission_rule_set file_write allow"):
+        out = str(ts._handle_slash(line, context=keyed))
+        assert out.startswith("refused /") and "administrator" in out, (line, out)
+
+
+@pytest.mark.parametrize("bypass_session", ["", "chat-1"], ids=["principal-wide", "same-session"])
+def test_an_admin_accounts_key_does_not_inherit_the_bypass_its_session_turned_on(
+        served, monkeypatch, bypass_session):
+    import permission_modes
+
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    seen = []
+
+    def build_http_chat_tool_turn(**kwargs):
+        policy = kwargs["permission_policy"]
+        seen.append((policy.current_mode(), policy.decide("file_write", interactive=False).action))
+        return None
+
+    monkeypatch.setattr(chat_tools_wiring, "build_http_chat_tool_turn", build_http_chat_tool_turn)
+    chat = json.dumps({"model": "sonder", "session": "chat-1",
+                       "messages": [{"role": "user", "content": "hello"}]}).encode()
+    mode = json.dumps({"mode": "bypass", "confirm_bypass": True, "session_id": bypass_session}).encode()
+    try:
+        status, _, raw = _request(port, "POST", "/v1/permission-mode", body=mode,
+                                  headers={"Content-Type": "application/json", **_both_mode(admin_token)})
+        assert status == 200 and json.loads(raw)["mode"] == "bypass", raw
+        for credential in (admin_token, key):
+            status, _, raw = _request(port, "POST", "/v1/chat/completions", body=chat,
+                                      headers={"Content-Type": "application/json", **_both_mode(credential)})
+            assert status == 200, raw
+        # The signed-in session runs its turn in the bypass it turned on ...
+        assert seen[0] == ("bypass", "allow"), seen
+        # ... but the same account's key does not: a mutation tool is not run unprompted.
+        assert seen[1][0] != "bypass" and seen[1][1] in ("ask", "deny"), seen
+        keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+        with permission_modes.mode_scope(ts._mode_principal(keyed), "chat-1"):
+            assert permission_modes.current_mode() != "bypass"
+    finally:
+        permission_modes._reset_for_tests()
+
+
+def test_an_admin_accounts_key_carries_developer_not_admin_into_typed_contexts(served):
+    from sonder_runtime.adapters.web import lifecycle
+
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    assert lifecycle.get().operation_context("corr-key", keyed).auth_level == "developer"
+    session = ts._auth_context("Bearer " + DEPLOYMENT_KEY, admin_token)
+    assert lifecycle.get().operation_context("corr-session", session).auth_level == "admin"
+
+
+def test_an_admin_accounts_key_is_metered_and_its_session_is_not(served):
+    port, admin_token, open_db, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    tier = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)["account"]["tier"]
+    _with_db(open_db, lambda conn: admin_auth.set_saas_tier_limit(conn, tier, 0))
+    _with_db(open_db, lambda conn: admin_auth.set_saas_feature(conn, "usage_metering_enabled", True))
+    # A leaked admin key spends against the tier budget like any other key ...
+    status, body = _chat(port, _both_mode(key))
+    assert status == 429, body
+    assert "monthly token limit" in body["error"]["message"]
+    # ... while the admin's signed-in session stays exempt.
+    status, body = _chat(port, _both_mode(admin_token))
+    assert status == 200, body
+
+
 class _RacingConnection:
     """A connection whose expires_ts column is added by another process mid-``init``."""
 

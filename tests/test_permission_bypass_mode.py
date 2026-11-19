@@ -66,6 +66,19 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
         assert pm.decide(tool, interactive=True, mode=pm.BYPASS, rule_lookup=lambda _n: None).action == pm.ASK
 
 
+def test_bypass_holds_process_wide_cloud_consent():
+    """A scoped bypass never turns on cloud egress for every caller unprompted."""
+    assert pm.DURABLE_AUTHORITY_TOOLS < pm.BYPASS_HELD_TOOLS
+    assert "cloud_opt_in" in pm.BYPASS_HELD_TOOLS
+    none = lambda _n: None  # noqa: E731
+    unattended = pm.decide("cloud_opt_in", interactive=False, mode=pm.BYPASS, rule_lookup=none)
+    assert unattended.action == pm.DENY and unattended.source == "durable-authority"
+    assert pm.decide("cloud_opt_in", interactive=True, mode=pm.BYPASS, rule_lookup=none).action == pm.ASK
+    # An explicit allow rule is the written-down way through, as in every other mode.
+    allow = lambda _n: {"pattern": "cloud_opt_in", "action": pm.ALLOW, "note": "operator"}  # noqa: E731
+    assert pm.decide("cloud_opt_in", interactive=False, mode=pm.BYPASS, rule_lookup=allow).action == pm.ALLOW
+
+
 def test_bypass_file_ops_containment_keeps_user_role_blocked(monkeypatch, tmp_path):
     state_file = tmp_path / "permission_mode.json"
     monkeypatch.setenv("SONDER_PERMISSION_STATE", str(state_file))

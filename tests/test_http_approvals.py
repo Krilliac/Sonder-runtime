@@ -356,6 +356,26 @@ def test_revoke_over_http(ledger, monkeypatch):
     assert denied.action == "deny"
 
 
+def test_an_encoded_reference_is_decoded_once_and_a_double_encoded_one_is_refused(ledger, monkeypatch):
+    _local_open(monkeypatch)
+    decision = _refuse_write(ledger)
+    with _http_server(monkeypatch) as port:
+        for raw_ref in (decision.call_id + "%2540-", decision.call_id + "%40%ff", decision.call_id + "%4"):
+            status, _, payload = _request(port, "POST", "/v1/approvals/" + raw_ref,
+                                          body="{}", headers=JSON)
+            assert status == 400, (raw_ref, payload)
+        assert ledger.approvals() == []
+        # A client that percent-encodes '@' names the same row as a raw '@'.
+        status, _, payload = _request(port, "POST", "/v1/approvals/%s%%40-" % decision.call_id,
+                                      body="{}", headers=JSON)
+        assert status == 201, payload
+        nonce = json.loads(payload)["approval"]["nonce"]
+        status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce.replace("_", "%5F"),
+                                      body="{}", headers=JSON)
+        assert status == 200, payload
+        assert json.loads(payload)["approval"]["state"] == "revoked"
+
+
 def test_ledger_unavailable_is_503(monkeypatch):
     _local_open(monkeypatch)
     monkeypatch.setattr(pm, "_approval_ledger", lambda: None)
