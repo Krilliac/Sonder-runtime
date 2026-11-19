@@ -1300,7 +1300,7 @@
       "category": "security",
       "name": "/permission_approvals",
       "risk": "safe",
-      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued."
+      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token)."
     },
     {
       "category": "security",

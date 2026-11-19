@@ -213,7 +213,7 @@ def test_bypass_mode_allows_restricted_tool_lane_and_dangerous_tools_while_keepi
     monkeypatch.setenv("SONDER_PERMISSION_STATE", str(tmp_path / "permission_mode.json"))
     pm._reset_for_tests()
     denied_rules = {
-        # The unmodified shipped default: the one deny bypass steps past.
+        # The unmodified shipped default: a deny, so it holds in bypass too.
         "file_delete": {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
         "sqlite_mutate": {"pattern": "sqlite_mutate", "action": "ask", "note": "db mutate"},
         "admin_private_chain_of_thought": {
@@ -244,9 +244,10 @@ def test_bypass_mode_allows_restricted_tool_lane_and_dangerous_tools_while_keepi
     assert policy("file_delete", {"path": str(tmp_path / "x.txt")}) == ""
     assert run.filter_observation("text_search", {}, "raw lines") == "raw lines"
 
-    # The shipped file_delete deny and a sqlite_mutate ask are bypassed for local-open/admin;
-    # a deny the operator wrote is not (tests/test_permission_lane_semantics.py).
-    assert server._agent_permission_gate_error("file_delete", {"path": "x.txt"}, rule_lookup=denied_rules.get) == ""
+    # A sqlite_mutate ask is bypassed for local-open/admin; bypass skips ``ask`` only, so
+    # every deny rule, the shipped file_delete one included, still holds
+    # (tests/test_perm_owner_binding.py).
+    assert "rule denies" in server._agent_permission_gate_error("file_delete", {"path": "x.txt"}, rule_lookup=denied_rules.get)
     assert server._agent_permission_gate_error("sqlite_mutate", {"path": "a.db"}, rule_lookup=denied_rules.get) == ""
     # Protected boundaries remain enforced even in BYPASS.
     assert "system operation" in server._agent_dispatch("permission_mode", {"mode": "auto"})
