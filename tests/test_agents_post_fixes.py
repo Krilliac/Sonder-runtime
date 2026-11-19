@@ -19,7 +19,6 @@ def test_composite_with_event_notices_the_event_promptly():
     """An Event inside a composite with a slow check token is noticed at the Event's rate."""
     event = threading.Event()
     composite = gateway_module._CompositeCancellation(lambda: False, event)
-    assert gateway_module._cancel_poll_seconds(composite) <= 0.05 + 1e-9
     with gateway_module._ExchangeBudget(30.0, cancellation=composite) as budget:
         started = time.monotonic()
         event.set()
@@ -109,3 +108,78 @@ def test_bridge_close_closes_the_stack_when_the_terminal_event_raises(monkeypatc
     with pytest.raises(RuntimeError):
         bridge.close(ok=True)
     assert closed == [True]
+
+
+def test_cancel_poll_helper_has_one_source_of_truth():
+    assert not hasattr(gateway_module, "_cancel_poll_seconds")
+
+
+def test_bridge_init_closes_the_stack_when_the_starting_event_raises(monkeypatch):
+    closed = []
+
+    class _Stack:
+        def close(self):
+            closed.append(True)
+
+    def boom(**kwargs):
+        raise RuntimeError("sink failed")
+
+    monkeypatch.setattr(rt, "emit_agent_event", boom)
+    with pytest.raises(RuntimeError):
+        delegation_wiring.AgentImplBridge(
+            stack=_Stack(), prompt="p", model="m", max_steps=1, cloud=False, read_only=True, project_scope="",
+        )
+    assert closed == [True]
+
+
+_LOCAL_ENV = {
+    "SONDER_INFERENCE_BASE_URL": "http://127.0.0.1:8765",
+    "SONDER_INFERENCE_FALLBACK": "",
+    "SONDER_OLLAMA_WORKERS": "",
+    "SONDER_ALLOW_REMOTE_OLLAMA": "",
+    "SONDER_ALLOW_REMOTE_INFERENCE": "",
+    "SONDER_INFERENCE_PRIVATE_WORKERS": "",
+}
+
+
+def _env(monkeypatch, **overrides):
+    for name, value in {**_LOCAL_ENV, **overrides}.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_sonder_inference_on_loopback_without_remote_routes_is_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    _env(monkeypatch)
+    assert lane._is_non_local_provider("sonder_inference") is False
+    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama")
+    assert lane._is_non_local_provider("sonder_inference") is False
+
+
+def test_sonder_inference_with_ollama_fallback_and_remote_workers_is_non_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    _env(
+        monkeypatch, SONDER_INFERENCE_FALLBACK="ollama",
+        SONDER_OLLAMA_WORKERS="https://10.0.0.5:11434", SONDER_ALLOW_REMOTE_OLLAMA="1",
+    )
+    assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_private_workers_is_non_local(monkeypatch, tmp_path):
+    import json
+
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    ca = tmp_path / "ca.pem"
+    ca.write_text("x")
+    workers = json.dumps([{"url": "https://10.0.0.7:8443", "ca_bundle": str(ca), "token_env": "WORKER_TOKEN_X"}])
+    _env(monkeypatch, SONDER_ALLOW_REMOTE_INFERENCE="1", SONDER_INFERENCE_PRIVATE_WORKERS=workers)
+    assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_unreadable_fallback_setting_is_non_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="bogus")
+    assert lane._is_non_local_provider("sonder_inference") is True

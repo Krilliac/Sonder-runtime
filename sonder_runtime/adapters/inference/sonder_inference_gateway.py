@@ -331,17 +331,6 @@ def _cancel_leaves(token: object | None) -> list[object]:
     return [] if token is None else [token]
 
 
-def _cancel_poll_seconds(token: object | None) -> float:
-    """The fastest poll interval any part of ``token`` needs."""
-    return min(
-        (
-            _EVENT_POLL_SECONDS if callable(getattr(leaf, "is_set", None)) else _CHECK_POLL_SECONDS
-            for leaf in _cancel_leaves(token)
-        ),
-        default=_EVENT_POLL_SECONDS,
-    )
-
-
 @contextmanager
 def _cancellation_scope(token: object | None):
     if token is None:
