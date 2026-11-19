@@ -203,9 +203,12 @@ def owner_tag(owner: str) -> str:
 
 
 def call_ref(digest: str, owner: str = "") -> str:
-    """What an operator types to name one pending row: the call id, qualified
-    by its owner tag (``<call id>@<owner tag>``) when the row has an owner."""
-    return call_id(digest) if not owner else "%s@%s" % (call_id(digest), owner_tag(owner))
+    """What an operator types to name exactly one pending row: the call id
+    qualified by its owner tag, ``<call id>@<owner tag>``; the unowned row is
+    ``<call id>@-``. The bare call id stays accepted while only one owner has
+    that call pending, but it is never shown, since a second owner's identical
+    call would make it ambiguous."""
+    return "%s@%s" % (call_id(digest), owner_tag(owner))
 
 
 def _split_ref(text: str) -> tuple[str, str | None]:
@@ -245,6 +248,16 @@ def _owner_sql(kind: str, owner_key: str) -> tuple[str, tuple[str, ...]]:
     if kind == _WITH_UNOWNED:
         return "owner IN (?, '')", (owner_key,)
     return "owner=?", (owner_key,)
+
+
+def _prefer_own(kind: str, owner_key: str, rows: list) -> list:
+    """In an own-plus-unowned view (a developer), the caller's own row of a
+    call also pending unowned: the caller's own call, not a guess between
+    owners. Every other view, the operator's included, keeps all the rows."""
+    if kind != _WITH_UNOWNED:
+        return rows
+    own = [row for row in rows if str(row["owner"]) == owner_key]
+    return own or rows
 
 
 # One definition of "spendable" shared by ``open_for`` and ``consume``, so the
@@ -605,7 +618,8 @@ class ApprovalLedger:
         an owner tag, ``<call id>@<owner tag>`` (``@-`` names the unowned key).
         A call pending for more than one owner in this view (the same tool and
         arguments) raises ``AmbiguousCallError`` listing each row's reference:
-        the owner is never guessed.
+        the owner is never guessed. A developer's own-plus-unowned view
+        resolves a bare id to the developer's own row (``_prefer_own``).
         """
         prefix, tag = _split_ref(call_id_or_digest)
         if len(prefix) < MIN_CALL_ID_CHARS or any(c not in "0123456789abcdef" for c in prefix):
@@ -636,6 +650,7 @@ class ApprovalLedger:
                 + " AND digest=? ORDER BY last_ts DESC LIMIT 20",
                 (*params, str(digests[0]["digest"])),
             ).fetchall()
+        rows = _prefer_own(kind, owner_key, rows)
         if len(rows) > 1:
             raise AmbiguousCallError(
                 "call %s is pending for more than one owner; name one: %s" % (
@@ -672,8 +687,8 @@ class ApprovalLedger:
         that owner's next unchanged call spends it. A caller that resolved a
         pending row passes that row's ``owner``. Without one, in a view wider
         than one owner (the operator, a developer), it is the one owner in view
-        with this call pending; more than one raises ``AmbiguousCallError``
-        instead of guessing. With no pending call to answer it belongs to the
+        with this call pending (a developer's own row first); more than one
+        raises ``AmbiguousCallError`` instead of guessing. With no pending call to answer it belongs to the
         caller's own owner. The returned approval has ``overrode_denial`` set
         when it cleared a standing denial.
         """
@@ -700,6 +715,7 @@ class ApprovalLedger:
                     "SELECT owner FROM pending_calls WHERE " + where + " AND digest=? LIMIT 20",
                     (*params, digest),
                 ).fetchall()
+                matches = _prefer_own(kind, owner_key, matches)
                 if len(matches) > 1:
                     raise AmbiguousCallError(
                         "call %s is pending for more than one owner; approve one by its "
@@ -945,7 +961,7 @@ class ApprovalLedger:
         pending = self.pending(limit)
         approvals = self.approvals(include_spent=True, limit=limit)
         lines = ["one-shot approvals"]
-        lines.append("  pending calls (refused unattended; approve one with /approve <call id>):")
+        lines.append("  pending calls (refused unattended; approve one with /approve <call ref>):")
         if not pending:
             lines.append("    (none)")
         for item in pending:
