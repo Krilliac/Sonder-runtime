@@ -388,3 +388,69 @@ def test_manifest_records_the_running_interpreter_minor(tmp_path):
         assert owner._payload.manifest["python"] == list(sys.version_info[:2])
     finally:
         owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows payload profile required")
+@pytest.mark.usefixtures("small_managed_runtime_layout")
+def test_child_prompt_build_leaves_the_hashed_payload_unchanged(tmp_path, monkeypatch):
+    # The managed child's first prompt build (the start-up prewarm's system
+    # prefix, or the first chat) reads <payload>/system_profile.md and creates
+    # it when missing. That write changed the payload inventory, so the next
+    # launch was refused with "runtime artifact content or identity changed".
+    from sonder_runtime.adapters.execution.runtime_payload import PROFILE_NAME
+    from sonder_runtime.platform import system_profile
+
+    owner = _selected_owner(tmp_path)
+    try:
+        payload = owner._payload.path
+        monkeypatch.setattr(system_profile, "workspace_root", lambda: str(payload))
+        monkeypatch.delenv("SONDER_SYSTEM_PROFILE", raising=False)
+        assert system_profile.system_prompt().startswith("Standing instructions")
+        owner._payload.validate(())  # raises OwnerRefused if the payload changed
+        profile = payload / PROFILE_NAME
+        assert str(profile) in {row[0] for row in owner._payload.manifest["files"]}
+    finally:
+        owner.close()
+
+
+def test_payload_carries_the_sources_standing_instructions(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import (
+        PROFILE_NAME, _place_standing_instructions,
+    )
+
+    source, payload = tmp_path / "source", tmp_path / "payload"
+    source.mkdir()
+    payload.mkdir()
+    (source / PROFILE_NAME).write_bytes(b"- operator instruction\r\n")
+    size = _place_standing_instructions(source, payload)
+    assert (payload / PROFILE_NAME).read_bytes() == b"- operator instruction\r\n"
+    assert size == len(b"- operator instruction\r\n")
+
+
+def test_payload_without_source_instructions_gets_the_first_use_default(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import (
+        PROFILE_NAME, _place_standing_instructions,
+    )
+    from sonder_runtime.platform import system_profile
+
+    source, payload = tmp_path / "source", tmp_path / "payload"
+    source.mkdir()
+    payload.mkdir()
+    size = _place_standing_instructions(source, payload)
+    placed = payload / PROFILE_NAME
+    assert placed.read_text(encoding="utf-8") == system_profile.DEFAULT_TEXT
+    assert size == placed.stat().st_size
+    assert not (source / PROFILE_NAME).exists()
+
+
+def test_payload_refuses_standing_instructions_that_are_not_a_file(tmp_path):
+    from sonder_runtime.adapters.execution.runtime_payload import (
+        PROFILE_NAME, _place_standing_instructions,
+    )
+
+    source, payload = tmp_path / "source", tmp_path / "payload"
+    (source / PROFILE_NAME).mkdir(parents=True)
+    payload.mkdir()
+    with pytest.raises(OwnerRefused, match="not an ordinary file"):
+        _place_standing_instructions(source, payload)
+    assert not (payload / PROFILE_NAME).exists()

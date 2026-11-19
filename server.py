@@ -167,6 +167,7 @@ import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
@@ -5538,7 +5539,7 @@ def _post(
 _PREWARM_LOAD_TIMEOUT = 60
 
 
-def prewarm_model(tier: str = "") -> bool:
+def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     """Speculatively load the tier's local model while context is assembled.
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
@@ -5573,8 +5574,9 @@ def prewarm_model(tier: str = "") -> bool:
                 _platform_local_model_options(0.2, 1, _auto_model_context(model),
                     native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
-        except Exception:
-            pass
+            _startup_prewarm.load_finished(model, announce=announce)
+        except Exception as exc:
+            _startup_prewarm.load_failed(model, exc, announce=announce)
         finally:
             prewarm_gate.finish(model)
 

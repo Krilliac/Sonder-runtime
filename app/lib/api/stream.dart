@@ -104,6 +104,18 @@ class ChatStreamKeepAlive extends ChatStreamEvent {
   const ChatStreamKeepAlive();
 }
 
+/// The server says why the turn is waiting (`: sonder-status …` comment, for
+/// example while GPU admission queues it). [text] is plain text, at most
+/// [maxStatusChars] long; never render it as markup. An empty [text] is the
+/// clearing frame: the wait is over, drop any status shown.
+class ChatStreamStatus extends ChatStreamEvent {
+  final String text;
+  const ChatStreamStatus(this.text);
+}
+
+/// Longest status text kept from a `: sonder-status` comment.
+const maxStatusChars = 200;
+
 /// New answer text. [text] is the fragment; [accumulated] the answer so far.
 class ChatStreamDelta extends ChatStreamEvent {
   final String text;
@@ -121,10 +133,20 @@ class ChatStreamDone extends ChatStreamEvent {
 class SseFrame {
   final bool comment;
   final String data;
+
+  /// Text of a `: sonder-status` comment ('' for the clearing frame); null for
+  /// any other frame.
+  final String? status;
   const SseFrame.comment()
       : comment = true,
+        data = '',
+        status = null;
+  const SseFrame.statusComment(String this.status)
+      : comment = true,
         data = '';
-  const SseFrame.data(this.data) : comment = false;
+  const SseFrame.data(this.data)
+      : comment = false,
+        status = null;
 
   bool get isDone => !comment && data.trim() == '[DONE]';
 }
@@ -149,7 +171,20 @@ class SseFrameParser {
       _size = 0;
       return [frame];
     }
-    if (line.startsWith(':')) return const [SseFrame.comment()];
+    if (line.startsWith(':')) {
+      var body = line.substring(1);
+      if (body.startsWith(' ')) body = body.substring(1);
+      const name = 'sonder-status';
+      if (body.trimRight() == name || body.startsWith('$name ')) {
+        var text = body.substring(name.length).trim();
+        if (text.length > maxStatusChars) {
+          text = text.substring(0, maxStatusChars).trimRight();
+        }
+        // An empty text is the server's clearing frame (the wait is over).
+        return [SseFrame.statusComment(text)];
+      }
+      return const [SseFrame.comment()];
+    }
     if (line.startsWith('data:')) {
       var value = line.substring(5);
       if (value.startsWith(' ')) value = value.substring(1);
@@ -406,7 +441,10 @@ Stream<ChatStreamEvent> openChatStream(
     void handle(SseFrame frame) {
       if (finished) return;
       if (frame.comment) {
-        controller.add(const ChatStreamKeepAlive());
+        final status = frame.status;
+        controller.add(status == null
+            ? const ChatStreamKeepAlive()
+            : ChatStreamStatus(status));
         return;
       }
       if (frame.isDone) {
