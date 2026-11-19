@@ -157,7 +157,7 @@ def _verified_label(shot: desktop.Capture, px: int, py: int) -> str:
     ny = round(py * rules.NORMALIZED_SCALE / shot.client_height)
     try:
         text = _vision(shot.png, _VERIFY_PROMPT.format(x=nx, y=ny), timeout=_VERIFY_TIMEOUT_SECONDS)
-        return rules.clean_text(json.loads(rules._JSON_OBJECT.search(text).group(0)).get("label"))
+        return rules.clean_text(json.loads(rules.json_object_text(text)).get("label"))
     except Exception:
         # A reading we cannot get is not evidence the click is harmless.
         return "unverified control (treat as submit)"
