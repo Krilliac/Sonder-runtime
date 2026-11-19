@@ -68,14 +68,21 @@ _BLOCK_TEXT = (
     "of=/dev/hd", "> /dev/sd", ":(){", "downloadstring", "allprofiles state off",
     "shutdown /s", "shutdown /r", "shutdown -h", "shutdown -r", "shutdown now",
 )
-# What a download is piped into: shells, interpreters and PowerShell's evaluator.
+# What a download is piped or substituted into: shells, interpreters, ``eval``
+# and ``source``, and PowerShell's evaluator.
 _PIPE_SHELLS = frozenset({
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "iex", "invoke-expression",
     "python", "py", "pwsh", "powershell", "cmd", "perl", "ruby", "node", "php", "lua",
+    "eval", "source",
 })
+# ``|`` and ``|&`` (stdout and stderr) both feed the next command.
+_PIPE = re.compile(r"\|&?")
+# ``$(...)``, ``<(...)`` and backticks: a download handed to a command as its text or a file.
+_SUBSTITUTION = re.compile(r"\$\(|<\(|`")
+_COMMAND_END = re.compile(r"[;|&]")
 _EVAL_TOKENS = frozenset({"iex", "invoke-expression"})
-# Words that may stand before the pipe target (``| sudo -E bash``).
-_PIPE_PREFIXES = _ELEVATION_TOKENS | {"env", "exec", "command", "nohup", "time"}
+# Words that may stand before the pipe target (``| sudo -E bash``, ``| xargs sh -c``).
+_PIPE_PREFIXES = _ELEVATION_TOKENS | {"env", "exec", "command", "nohup", "time", "xargs"}
 _DOWNLOADERS = frozenset({
     "curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod",
     "start-bitstransfer", "bitsadmin", "certutil",
@@ -97,6 +104,13 @@ _SYSTEM_SPELLINGS = (
 )
 # ``${HOME}`` / ``${env:USERPROFILE}`` are the braced spellings of the same variables.
 _BRACED_VARIABLE = re.compile(r"\$\{([a-z_][a-z0-9_]*(?::[a-z_][a-z0-9_]*)?)\}")
+# ``~alice`` is alice's home directory.
+_USER_HOME = re.compile(r"~([^/]+)")
+# Win32 device paths ``\\?\`` and ``\\.\`` (after ``\`` -> ``/``); ``\\?\UNC\`` names a share.
+_DEVICE_PREFIX = re.compile(r"//[?.]/(unc/)?")
+# A UNC share ``//host/share/rest``; ``c$`` is the administrative share of drive C.
+_UNC = re.compile(r"//([^/]+)/([^/]+)(/.*)?")
+_ADMIN_SHARE = re.compile(r"[a-z]\$")
 # The root itself (a drive root is ``/`` after its drive letter).
 _EXACT_ROOTS = frozenset({
     "/", _HOME, "/home", "/users", "/root", "/var", "/opt", "/srv", "/mnt", "/media",
@@ -163,6 +177,9 @@ _SAFE_PROGRAMS: Mapping[str, tuple[str, frozenset[str], frozenset[str]]] = Mappi
     "tree": ("aCdDfFghiILnPpsu", frozenset({"--noreport", "--dirsfirst"}), frozenset({"/f", "/a"})),
 })
 _PUNCTUATION = str.maketrans({c: " " for c in "()[]{},;'\"`"})
+# ``;``, ``|`` and ``&`` end a command; each becomes the token ``;``.
+_SEPARATOR = ";"
+_SEPARATORS = str.maketrans({**{c: " " for c in "()[]{},'\"`"}, **{c: " ; " for c in ";|&"}})
 
 
 class _Unreadable(ValueError):
@@ -188,6 +205,12 @@ def _command_text(arguments: Mapping[str, Any]) -> str:
             except ValueError:
                 pass  # inspect the raw text instead
         parts.extend(_strings(value))
+    # A standalone verification payload carries its commands as ``checks[].argv``;
+    # ``;`` keeps one check's operands from running into the next.
+    checks = arguments.get("checks")
+    for check in checks if isinstance(checks, (list, tuple)) else ():
+        if isinstance(check, Mapping) and (argv := _strings(check.get("argv"))):
+            parts.extend([";", *argv])
     return " ".join(" ".join(parts).lower().split())
 
 
@@ -196,13 +219,38 @@ def _is_drive_root(token: str) -> bool:
             and token[1] == ":" and token[2:] in ("", "\\", "/", "\\*", "/*"))
 
 
-def _normalize_target(token: str) -> str:
-    """One spelling per path: case-folded, ``/`` separators, variables mapped, ``.``/``..``/``/*`` resolved.
+def _strip_components(path: str) -> str:
+    """Win32 drops trailing dots and spaces from every component but ``.`` and ``..``.
 
-    The home directory becomes ``/~``.  A drive letter stays in front
-    (``c:/windows``).  A relative path stays relative.
+    ``C:\\Windows.`` is ``C:\\Windows`` and ``C:\\ .`` is ``C:\\``; a component
+    that is only dots and spaces (``...``, ``.. ``) vanishes.
+    """
+    return "/".join(part if part in (".", "..") else part.rstrip(" .") for part in path.split("/"))
+
+
+def _resolve(drive: str, target: str) -> tuple[str, str]:
+    """``(drive, path)`` with trailing dots, ``/*``, ``.`` and ``..`` resolved."""
+    target = _strip_components(target)
+    while target.endswith("/*"):
+        target = target[:-2] or "/"
+    if target.startswith("/"):
+        target = posixpath.normpath("/" + target.lstrip("/"))
+    return drive, target
+
+
+def _normalize_targets(token: str) -> list[tuple[str, str]]:
+    """Every reading of a path as ``(drive, path)``: case-folded, ``/`` separators, variables mapped, resolved.
+
+    The home directory becomes ``/~`` and ``~alice`` becomes ``/home/alice``.
+    A drive letter is the drive (``("c:", "/windows")``), and a device path
+    (``\\\\?\\C:\\``) is read as the path it names.  A UNC path
+    (``\\\\host\\c$\\``) is read both as a share, whose root is ``/`` (the
+    administrative share ``c$`` is drive ``c:``), and as a POSIX path.  A
+    relative path stays relative.
     """
     target = _BRACED_VARIABLE.sub(r"$\1", token.strip().strip("'\"").casefold()).replace("\\", "/")
+    if device := _DEVICE_PREFIX.match(target):
+        target = ("//" if device.group(1) else "") + target[device.end():]
     for spelling in _HOME_SPELLINGS:
         if target == spelling or target.startswith(spelling + "/"):
             target = _HOME + target[len(spelling):]
@@ -212,24 +260,29 @@ def _normalize_target(token: str) -> str:
             if target == spelling or target.startswith(spelling + "/"):
                 target = root + target[len(spelling):]
                 break
-    drive = ""
+        else:
+            if user := _USER_HOME.fullmatch(target.split("/", 1)[0]):
+                target = "/home/" + user.group(1) + target[len(user.group(0)):]
     if len(target) >= 2 and target[1] == ":" and target[0].isascii() and target[0].isalpha():
-        drive, target = target[:2], "/" + target[2:]
-    while target.endswith("/*"):
-        target = target[:-2] or "/"
-    if target.startswith("/"):
-        target = posixpath.normpath("/" + target.lstrip("/"))
-    return drive + target
+        return [_resolve(target[:2], "/" + target[2:])]
+    readings = []
+    if (share := _UNC.fullmatch(target)) and not target.startswith("///"):
+        host, name, rest = share.group(1), share.group(2), share.group(3) or "/"
+        drive = name[0] + ":" if _ADMIN_SHARE.fullmatch(name) else f"//{host}/{name}"
+        readings.append(_resolve(drive, rest))
+    readings.append(_resolve("", target))
+    return readings
+
+
+def _is_root_path(path: str) -> bool:
+    return path.startswith("/") and (
+        path in _EXACT_ROOTS or posixpath.dirname(path) in _HOME_PARENTS
+        or any(path == tree or path.startswith(tree + "/") for tree in _ROOT_TREES))
 
 
 def _is_root_target(token: str) -> bool:
-    """Whether ``token`` names a drive, filesystem or home root, or a path in a system tree."""
-    target = _normalize_target(token)
-    path = target[2:] if target[1:2] == ":" else target
-    if not path.startswith("/"):
-        return False
-    return (path in _EXACT_ROOTS or posixpath.dirname(path) in _HOME_PARENTS
-            or any(path == tree or path.startswith(tree + "/") for tree in _ROOT_TREES))
+    """Whether any reading of ``token`` names a drive, share, filesystem or home root, or a path in a system tree."""
+    return any(_is_root_path(path) for _drive, path in _normalize_targets(token))
 
 
 def _is_delete_verb(token: str) -> bool:
@@ -247,14 +300,39 @@ def _interpreter_name(word: str) -> str:
     return unversioned if unversioned in _PIPE_SHELLS else name
 
 
-def _pipe_target(words: list[str]) -> str:
-    """The program a pipe feeds, past ``sudo``/``env``-style prefixes and their flags."""
+def _command_programs(words: list[str]) -> set[str]:
+    """The program a command runs, or every word after a ``sudo``/``env``-style prefix.
+
+    A prefix's flags can take a value (``sudo -u root bash``) that cannot be
+    told from the program, so past a prefix every word counts.  Flags and
+    ``NAME=value`` assignments are skipped.
+    """
+    names: set[str] = set()
+    prefixed = False
     for word in words:
-        name = _interpreter_name(word)
-        if name in _PIPE_PREFIXES or _is_flag(word):
+        if _is_flag(word) or "=" in word:
             continue
-        return name
-    return ""
+        name = _interpreter_name(word)
+        if name in _PIPE_PREFIXES:
+            prefixed = True
+            continue
+        names.add(name)
+        if not prefixed:
+            break
+    return names
+
+
+def _substitutes_a_download(text: str) -> bool:
+    """``sh -c "$(curl x)"``, ``bash <(curl x)``: a download substituted into an interpreter."""
+    for marker in _SUBSTITUTION.finditer(text):
+        command = _COMMAND_END.split(text[:marker.start()])[-1].translate(_PUNCTUATION).split()
+        if not _command_programs(command) & _PIPE_SHELLS:
+            continue
+        inner = text[marker.end():]
+        end = inner.find("`" if marker.group() == "`" else ")")
+        if _downloads((inner[:end] if end >= 0 else inner).translate(_PUNCTUATION).split()):
+            return True
+    return False
 
 
 def _blocked(text: str) -> bool:
@@ -267,14 +345,18 @@ def _blocked(text: str) -> bool:
     for index, token in enumerate(tokens[:-1]):
         if token == "format" and _is_drive_root(tokens[index + 1]):
             return True
-    if any(_is_delete_verb(token) and _deletes_a_root(tokens[index + 1:index + 6])
-           for index, token in enumerate(tokens)):
+    # Command separators stay tokens here, so a delete's operands end with its command.
+    commands = text.translate(_SEPARATORS).split()
+    if any(_is_delete_verb(token) and _deletes_a_root(commands[index + 1:index + 8])
+           for index, token in enumerate(commands)):
         return True
-    segments = [segment.translate(_PUNCTUATION).split() for segment in text.split("|")]
+    segments = [segment.translate(_PUNCTUATION).split() for segment in _PIPE.split(text)]
     for index, words in enumerate(segments[1:], start=1):
-        if _pipe_target(words) in _PIPE_SHELLS and any(
+        if _command_programs(words) & _PIPE_SHELLS and any(
                 _downloads(earlier) for earlier in segments[:index]):
             return True
+    if _substitutes_a_download(text):
+        return True
     # ``iex (iwr ...)``: PowerShell evaluates a download with no pipe at all.
     return any(token in _EVAL_TOKENS for token in tokens) and _downloads(tokens)
 
@@ -286,11 +368,12 @@ def _is_flag(token: str) -> bool:
 
 
 def _deletes_a_root(following: list[str]) -> bool:
-    """Whether the first operand after a delete verb (past its flags) is a root target."""
+    """Whether any operand of a delete verb, up to the end of its command, is a root target."""
     for token in following:
-        if _is_flag(token):
-            continue
-        return _is_root_target(token)
+        if token == _SEPARATOR:
+            return False
+        if not _is_flag(token) and _is_root_target(token):
+            return True
     return False
 
 
