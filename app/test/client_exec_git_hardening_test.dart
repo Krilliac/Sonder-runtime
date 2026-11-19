@@ -199,9 +199,10 @@ void main() {
       });
     }
 
-    // A root that is part of the store: the pair, directory-pair and triple
-    // rules see the root's trailing components, and a root that is itself a
-    // credential directory makes every write there a credential write.
+    // A root that is part of the store: the credential rules see every
+    // component of the root, so a root that is, or sits anywhere inside, a
+    // credential directory (~/.aws/sub/dir) or directory pair
+    // (~/.config/gcloud/x) makes every write there a credential write.
     final underRoot = <(String, String)>[
       ('.aws', 'credentials'),
       ('.aws', 'config'),
@@ -213,6 +214,12 @@ void main() {
       ('.docker', 'config.json'),
       ('.cargo', 'credentials'),
       ('AppData/Roaming', 'gcloud/credentials.db'),
+      ('.aws/sub/dir', 'notes.txt'),
+      ('.aws/sso', 'cache/tok.json'),
+      ('.config/gcloud/x', 'notes.txt'),
+      ('.config/gcloud/configurations', 'config_default'),
+      ('AppData/Roaming/gcloud/legacy_credentials/me', 'adc.json'),
+      ('.ssh/projects/app', 'notes.txt'),
     ];
     for (final (rootRel, rel) in underRoot) {
       test('file_write refuses $rel under a root of ~/$rootRel, bypass included',
@@ -240,7 +247,10 @@ void main() {
       final home = await Directory.systemTemp.createTemp('sonder_cred_root_');
       addTearDown(() => home.delete(recursive: true));
       for (final (rootRel, rel) in <(String, String)>[
-        ('.ssh/projects/app', 'notes.txt'),
+        ('ssh/projects/app', 'notes.txt'),
+        ('projects/.aws-notes/app', 'notes.txt'),
+        ('gcloud/x', 'notes.txt'),
+        ('.config/app/gcloud', 'readme.md'),
         ('.config', 'app/settings.json'),
         ('.config', 'gh/config.yml'),
         ('docker', 'config.json'),
@@ -355,6 +365,36 @@ void main() {
       Process.runSync('git', ['status'], workingDirectory: ws.path);
       expect(marker.existsSync(), isTrue,
           reason: "control: plain git must run the clean filter named 'a=b'");
+    }, skip: skipGit);
+
+    // Only [A-Za-z0-9_.-] driver names are overridden, as in
+    // sonder_runtime/adapters/git_program_guard.py; anything else refuses.
+    for (final name in ['a/b', 'a+b', 'a~b']) {
+      test('a driver name "$name" outside the allowlist fails closed',
+          () async {
+        final ws = await filterRepo(name);
+        final (command, marker) = _payload(ws);
+        _appendConfig(ws, '[filter "$name"]\n\tclean = $command\n');
+        bumpMtime(ws);
+
+        final res = await _run(ws, 'git_status', {});
+
+        expect(marker.existsSync(), isFalse);
+        expect(res.ok, isFalse);
+        expect(res.error, contains('refusing to run git'));
+      }, skip: skipGit);
+    }
+
+    test('an allowlisted driver name is still neutralised', () async {
+      final ws = await filterRepo('my-filter_2.x');
+      final (command, marker) = _payload(ws);
+      _appendConfig(ws, '[filter "my-filter_2.x"]\n\tclean = $command\n');
+      bumpMtime(ws);
+
+      final res = await _run(ws, 'git_status', {});
+
+      expect(res.ok, isTrue, reason: res.error);
+      expect(marker.existsSync(), isFalse);
     }, skip: skipGit);
 
     for (final kind in ['external', 'textconv']) {

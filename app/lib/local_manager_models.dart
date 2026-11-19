@@ -270,8 +270,15 @@ String clientToolRisk(String tool) {
   }
 }
 
-int _clientRiskRank(String risk) {
+/// The one ranking of client tool risk values, least strict first. An empty
+/// value ("not declared") ranks below everything; an unknown value ranks
+/// above everything, so it is never treated as safer than a known one. Used
+/// by [effectiveClientToolRisk] (both client executors and the chat gate) and
+/// by the stream frame merge.
+int clientRiskRank(String risk) {
   switch (risk.trim()) {
+    case '':
+      return -1;
     case 'read_only':
       return 0;
     case 'write':
@@ -294,7 +301,7 @@ String effectiveClientToolRisk(String declared, String tool) {
   final local = clientToolRisk(tool);
   final d = declared.trim();
   if (d.isEmpty) return local;
-  return _clientRiskRank(d) >= _clientRiskRank(local) ? d : local;
+  return clientRiskRank(d) >= clientRiskRank(local) ? d : local;
 }
 
 /// Whether [mode] allows executing a client tool of [risk] without prompting
