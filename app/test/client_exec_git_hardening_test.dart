@@ -199,6 +199,62 @@ void main() {
       });
     }
 
+    // A root that is part of the store: the pair, directory-pair and triple
+    // rules see the root's trailing components, and a root that is itself a
+    // credential directory makes every write there a credential write.
+    final underRoot = <(String, String)>[
+      ('.aws', 'credentials'),
+      ('.aws', 'config'),
+      ('.ssh', 'authorized_keys'),
+      ('.config', 'gcloud/application_default_credentials.json'),
+      ('.config', 'gcloud/access_tokens.db'),
+      ('.config', 'gh/hosts.yml'),
+      ('.config/gh', 'hosts.yml'),
+      ('.docker', 'config.json'),
+      ('.cargo', 'credentials'),
+      ('AppData/Roaming', 'gcloud/credentials.db'),
+    ];
+    for (final (rootRel, rel) in underRoot) {
+      test('file_write refuses $rel under a root of ~/$rootRel, bypass included',
+          () async {
+        final home = await Directory.systemTemp.createTemp('sonder_cred_root_');
+        addTearDown(() => home.delete(recursive: true));
+        final root = Directory(
+            '${home.path}$_sep${rootRel.replaceAll('/', _sep)}')
+          ..createSync(recursive: true);
+        for (final mode in ['acceptEdits', 'bypass']) {
+          for (final path in [rel, _file(root, rel).path]) {
+            final res = await _run(
+                root, 'file_write', {'path': path, 'content': 'x'},
+                mode: mode);
+            expect(res.ok, isFalse, reason: '$mode $path');
+            expect(res.denied, isTrue, reason: '$mode $path');
+            expect(res.error, contains('credential'), reason: '$mode $path');
+          }
+        }
+        expect(_file(root, rel).existsSync(), isFalse);
+      });
+    }
+
+    test('root context does not refuse ordinary files', () async {
+      final home = await Directory.systemTemp.createTemp('sonder_cred_root_');
+      addTearDown(() => home.delete(recursive: true));
+      for (final (rootRel, rel) in <(String, String)>[
+        ('.ssh/projects/app', 'notes.txt'),
+        ('.config', 'app/settings.json'),
+        ('.config', 'gh/config.yml'),
+        ('docker', 'config.json'),
+        ('gcloud', 'readme.md'),
+      ]) {
+        final root = Directory(
+            '${home.path}$_sep${rootRel.replaceAll('/', _sep)}')
+          ..createSync(recursive: true);
+        final res =
+            await _run(root, 'file_write', {'path': rel, 'content': 'ok\n'});
+        expect(res.ok, isTrue, reason: '$rootRel + $rel: ${res.error}');
+      }
+    });
+
     test('ordinary files with similar names stay writable', () async {
       final ws = await _initRepo();
       for (final rel in [

@@ -87,6 +87,66 @@ def test_credential_path_reached_through_dotdot_is_refused(tmp_path: Path):
     assert not (tmp_path / ".ssh" / "config").exists()
 
 
+# A workspace root inside the home directory: the context rules (pairs,
+# directory pairs, triples) see the root's trailing components, and a root
+# that is itself a credential directory makes every write there a credential
+# write. The server's mutation guard judges the full path the same way.
+_REFUSED_UNDER_ROOT = [
+    (".aws", "credentials"),
+    (".aws", "config"),
+    (".ssh", "authorized_keys"),
+    (".config", "gcloud/application_default_credentials.json"),
+    (".config", "gcloud/access_tokens.db"),
+    (".config", "gh/hosts.yml"),
+    (".config/gh", "hosts.yml"),
+    (".docker", "config.json"),
+    (".cargo", "credentials"),
+    ("AppData/Roaming", "gcloud/credentials.db"),
+]
+
+
+@pytest.mark.parametrize(("root_rel", "rel_path"), _REFUSED_UNDER_ROOT)
+@pytest.mark.parametrize("mode", ["acceptEdits", "bypass"])
+def test_credential_path_is_refused_when_the_root_is_part_of_the_store(
+    tmp_path: Path, root_rel: str, rel_path: str, mode: str,
+):
+    root = tmp_path / "home" / root_rel
+    root.mkdir(parents=True)
+    policy = ClientAgentPolicy(workspace_root=root, mode="manual")
+    policy.set_mode(mode, confirm_bypass=True)
+
+    res = execute_client_tool("file_write", {"path": rel_path, "content": "x\n"}, policy=policy)
+    absolute = execute_client_tool(
+        "file_write", {"path": str(root / rel_path), "content": "x\n"}, policy=policy,
+    )
+
+    for result in (res, absolute):
+        assert result.ok is False
+        assert result.denied is True
+        assert "credential" in result.error
+    assert not (root / rel_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("root_rel", "rel_path"),
+    [
+        (".ssh/projects/app", "notes.txt"),
+        (".config", "app/settings.json"),
+        (".config", "gh/config.yml"),
+        ("docker", "config.json"),
+        ("gcloud", "readme.md"),
+    ],
+)
+def test_root_context_does_not_refuse_ordinary_files(tmp_path: Path, root_rel: str, rel_path: str):
+    root = tmp_path / "home" / root_rel
+    root.mkdir(parents=True)
+    policy = ClientAgentPolicy(workspace_root=root, mode="acceptEdits")
+
+    res = execute_client_tool("file_write", {"path": rel_path, "content": "ok\n"}, policy=policy)
+
+    assert res.ok is True, res.error
+
+
 @pytest.mark.parametrize(
     "rel_path",
     ["config.json", "env.py", "docs/ssh.md", "environment.yml", "keys.txt", "src/secretary.py", "pem/readme.md"],
