@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import struct
 
@@ -211,6 +212,7 @@ def test_secret_and_credential_files_are_refused(root, relative):
     assert _code(caught) == "CAPTURE_REJECTED"
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs and device nodes")
 def test_fifos_and_devices_are_refused_without_blocking(root):
     fifo = root / "trap.dmp"
     os.mkfifo(fifo)
@@ -222,6 +224,29 @@ def test_fifos_and_devices_are_refused_without_blocking(root):
         os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
         with pytest.raises(SonderError):
             GuardedCaptureSource().open_reader(str(device))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows device names")
+def test_windows_nul_device_under_a_root_is_refused_as_not_a_regular_file(root):
+    # <root>\NUL resolves to the NUL device on Windows, so this exercises the
+    # regular-file check itself (names like nul.dmp or CON are plain missing
+    # files on current Windows and would pass for an unrelated reason).
+    with pytest.raises(SonderError) as caught:
+        GuardedCaptureSource().open_reader(str(root / "NUL"))
+    assert _code(caught) == "CAPTURE_REJECTED"
+    assert "regular file" in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows device namespace")
+@pytest.mark.parametrize(("target", "reason"), [
+    (r"\\.\NUL", "native path"),  # device namespace fails the path syntax check
+    (r"\\.\pipe\x.dmp", "outside every authorized root"),  # a pipe is never under a root
+])
+def test_windows_device_namespace_paths_are_refused_before_any_open(target, reason):
+    with pytest.raises(SonderError) as caught:
+        GuardedCaptureSource().open_reader(target)
+    assert _code(caught) == "CAPTURE_REJECTED"
+    assert reason in str(caught.value)
 
 
 def test_oversized_captures_are_refused_by_kind(root, monkeypatch):
@@ -264,7 +289,8 @@ def test_directory_listing_is_capped_flat_and_regular_files_only(root):
     (folder / "nested" / "deep.dmp").write_bytes(minidump_header([3]))
     (folder / "zz-link.dmp").symlink_to(folder / "crash_00.dmp")
     (folder / ".env").write_text("SECRET=1")
-    os.mkfifo(folder / "zz-fifo.dmp")
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(folder / "zz-fifo.dmp")
     source = GuardedCaptureSource()
     assert source.is_dir(str(folder)) and not source.is_dir(str(folder / "crash_00.dmp"))
     listed = source.list_dir(str(folder), max_files=64)
@@ -302,10 +328,23 @@ def test_copy_staging_is_private_and_exact(root, tmp_path):
     source = GuardedCaptureSource()
     ident = _open(source, capture)
     rundir = tmp_path / "run"
-    (rundir / "in").mkdir(parents=True)
+    if os.name == "nt":  # as the launcher creates them (launcher.py)
+        os.mkdir(rundir, 0o700)
+        os.mkdir(rundir / "in", 0o700)
+    else:
+        (rundir / "in").mkdir(parents=True)
     staged = source.stage(ident, str(rundir), strategy="copy")
     assert open(staged, "rb").read() == capture.read_bytes()
-    assert stat.S_IMODE(os.stat(staged).st_mode) == 0o600
+    if os.name != "nt":  # Windows st_mode carries only the read-only bit
+        assert stat.S_IMODE(os.stat(staged).st_mode) == 0o600
+    else:
+        from sonder_runtime.platform import private_files
+
+        dacl_information = 0x4  # DACL_SECURITY_INFORMATION
+        sddl = private_files._windows_sddl(str(staged), dacl_information)
+        trustees = re.findall(r"\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)", sddl)
+        broad = {"WD", "BU", "AU", "IU", "S-1-1-0", "S-1-5-32-545", "S-1-5-11", "S-1-5-4"}
+        assert not broad & set(trustees), sddl
     assert os.stat(staged).st_ino != ident.ino
 
 
@@ -356,7 +395,9 @@ def test_staging_strategy_by_size_and_device(root, tmp_path):
     assert GuardedCaptureSource.staging_for(ident, str(tmp_path)) == "copy"
     big = cs.CaptureIdentity("/x", "x", cs.COPY_STAGING_MAX_BYTES + 1, os.stat(tmp_path).st_dev,
                              1, 1, "s", "elf_core")
-    assert GuardedCaptureSource.staging_for(big, str(tmp_path)) == "hardlink"
+    # Windows holds a share-deny handle on the original instead of hardlinking.
+    assert GuardedCaptureSource.staging_for(big, str(tmp_path)) == (
+        "path" if os.name == "nt" else "hardlink")
     other = cs.CaptureIdentity("/x", "x", cs.COPY_STAGING_MAX_BYTES + 1, -1, 1, 1, "s", "elf_core")
     assert GuardedCaptureSource.staging_for(other, str(tmp_path)) == "path"
 

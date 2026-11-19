@@ -18,8 +18,9 @@ A ``FileByteReader`` gives lane A's pure readers exact-length random access
 evaluator's plan and the executor's plan hash a capture once.
 
 Staging (``stage``) copies captures of at most 512 MiB into the private run
-directory (0600), hardlinks larger ones on the state directory's device (a
-rename swap then cannot redirect the debugger; content changes are caught by
+directory (0600 on POSIX; on Windows the launcher's protected run
+directory keeps it private), hardlinks larger ones on the state
+directory's device (a rename swap then cannot redirect the debugger; content changes are caught by
 the post-run identity check) and otherwise passes the canonical path. On
 Windows a handle that shares read only is held for the run, so writers and
 deleters are denied.
@@ -529,12 +530,20 @@ class GuardedCaptureSource:
         return identity.path
 
     def stage_file(self, source: str, dest: str, *, extra_roots: str = "") -> None:
-        """Copy a contained symbol file (PE, PDB, ELF) to ``dest`` (0600, exclusive)."""
+        """Copy a contained symbol file (PE, PDB, ELF) to ``dest`` (exclusive).
+
+        The file is 0600 on POSIX; on Windows privacy comes from the
+        launcher's protected run directory.
+        """
         copy_file_guarded(self._opener, source, Path(dest), extra_roots)
 
 
 def copy_guarded(opener, identity: CaptureIdentity, dest: Path, extra_roots: str = "") -> None:
-    """Copy a capture into a new 0600 file through the guarded no-follow open."""
+    """Copy a capture into a new file through the guarded no-follow open.
+
+    The file is 0600 on POSIX; on Windows privacy comes from the launcher's
+    protected run directory.
+    """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) \
         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
