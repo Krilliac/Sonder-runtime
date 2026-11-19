@@ -2382,48 +2382,76 @@ def _fill(unit: str, head: str = "", tail: str = "", size: int = 640 * 1024) -> 
 
 
 _MIX_UNIT = "%:if __has_include\\ \n(<a.h>) ??/\f\n"
-_ALL_LEXING_SHAPES = {
-    "if_many_ok": _fill("__has_include(<a.h>) && ", "#if ", "1\n"),
-    "unterminated_angle": _fill("__has_include(<"),
-    "if_unterminated_angle": _fill("__has_include(<", "#if "),
-    "defined_blanks": _fill(" ", "#if ", "defined __has_include\n"),
-    "defined_many": _fill("defined   __has_include || ", "#if ", "1\n"),
-    "parens_then": _fill("(", "#if ", "__has_include(<a.h>)\n"),
-    "call_parens": _fill("F(", "#if ", "__has_include(<a.h>)\n"),
-    "identifiers_then": _fill("A ", "#if ", "__has_include(<a.h>)\n"),
-    "string_then": _fill("__has_include(<a.h>)", '#if "'),
-    "define_lines": _fill("#define __has_include(x) 0\n"),
-    "define_literal_lines": _fill('#define __has_include("a.h")\n'),
-    "token_lines": _fill("__has_include\n"),
-    "token_blank": _fill("\f", "#if __has_include", "(<a.h>)\n"),
-    "token_newlines": _fill("\n", "#define __has_include", '("a.h")\n'),
-    "token_no_paren": _fill("__has_include "),
-    "blank_splice": _fill("\\ \n"),
-    "form_feed_splice": _fill("\\\f\n"),
-    "trigraph_splice": _fill("??/ \n"),
-    "digraph": _fill("%:<:"),
-    "mix": _fill(_MIX_UNIT),
-    "mix_raw": _fill('R"(a)" ??( ' + _MIX_UNIT),
-    "pound_lines_head": _fill("#    \t   define\t\t\t__has_include\n"),
-    "blank_head": _fill(" ", "", "#define __has_include(x) 0\n"),
-    "ifs_quotes": _fill('#if __has_include("a.h") && "x" && __has_include(<b.h>)\n'),
-    "elif_many": _fill("#elif __has_include(<a.h>)\n"),
-    "defined_paren_blanks": _fill(" ", "#if defined(", "__has_include)\n"),
-    "unterminated_quote": _fill('__has_include("'),
-    "plain": _fill("int add(int a, int b) { return a + b; } // scale\n"),
+_ALL_LEXING_SHAPE_MAKERS = {
+    "if_many_ok": lambda size: _fill("__has_include(<a.h>) && ", "#if ", "1\n", size=size),
+    "unterminated_angle": lambda size: _fill("__has_include(<", size=size),
+    "if_unterminated_angle": lambda size: _fill("__has_include(<", "#if ", size=size),
+    "defined_blanks": lambda size: _fill(" ", "#if ", "defined __has_include\n", size=size),
+    "defined_many": lambda size: _fill("defined   __has_include || ", "#if ", "1\n", size=size),
+    "parens_then": lambda size: _fill("(", "#if ", "__has_include(<a.h>)\n", size=size),
+    "call_parens": lambda size: _fill("F(", "#if ", "__has_include(<a.h>)\n", size=size),
+    "identifiers_then": lambda size: _fill("A ", "#if ", "__has_include(<a.h>)\n", size=size),
+    "string_then": lambda size: _fill("__has_include(<a.h>)", '#if "', size=size),
+    "define_lines": lambda size: _fill("#define __has_include(x) 0\n", size=size),
+    "define_literal_lines": lambda size: _fill('#define __has_include("a.h")\n', size=size),
+    "token_lines": lambda size: _fill("__has_include\n", size=size),
+    "token_blank": lambda size: _fill("\f", "#if __has_include", "(<a.h>)\n", size=size),
+    "token_newlines": lambda size: _fill("\n", "#define __has_include", '("a.h")\n', size=size),
+    "token_no_paren": lambda size: _fill("__has_include ", size=size),
+    "blank_splice": lambda size: _fill("\\ \n", size=size),
+    "form_feed_splice": lambda size: _fill("\\\f\n", size=size),
+    "trigraph_splice": lambda size: _fill("??/ \n", size=size),
+    "digraph": lambda size: _fill("%:<:", size=size),
+    "mix": lambda size: _fill(_MIX_UNIT, size=size),
+    "mix_raw": lambda size: _fill('R"(a)" ??( ' + _MIX_UNIT, size=size),
+    "pound_lines_head": lambda size: _fill("#    \t   define\t\t\t__has_include\n", size=size),
+    "blank_head": lambda size: _fill(" ", "", "#define __has_include(x) 0\n", size=size),
+    "ifs_quotes": lambda size: _fill('#if __has_include("a.h") && "x" && __has_include(<b.h>)\n', size=size),
+    "elif_many": lambda size: _fill("#elif __has_include(<a.h>)\n", size=size),
+    "defined_paren_blanks": lambda size: _fill(" ", "#if defined(", "__has_include)\n", size=size),
+    "unterminated_quote": lambda size: _fill('__has_include("', size=size),
+    "plain": lambda size: _fill("int add(int a, int b) { return a + b; } // scale\n", size=size),
 }
+_ALL_LEXING_SHAPES = {name: make(640 * 1024) for name, make in _ALL_LEXING_SHAPE_MAKERS.items()}
+
+
+# The shape of the cost is what is asserted, so the check does not depend on how fast the machine is: every
+# shape is lexed at half size and at full size (640 kB), and doubling the input must not much more than double
+# the time (linear measures 1.6-2.3, a memchr-speed quadratic 3.1-3.4, a full one 4; 2.8 sits between them). The absolute ceiling is a
+# backstop only: linear lexing takes ~1 s here and ~2.5 s on a slow shared CI runner.
+_ALL_LEXINGS_RATIO_LIMIT = 2.8
+_ALL_LEXINGS_RATIO_FLOOR = 0.25  # below this the full-size run is too short for a ratio to mean anything
+_ALL_LEXINGS_BUDGET = 8.0
+
+
+def _best_lexing_time(before: str, text: str, repeats: int = 3) -> float:
+    best = float("inf")
+    for _ in range(repeats):
+        started = time.perf_counter()
+        scan_added_lexings(before, text, include_ok=OK)
+        best = min(best, time.perf_counter() - started)
+    return best
 
 
 @pytest.mark.parametrize("shape", sorted(_ALL_LEXING_SHAPES))
 def test_regression_all_lexings_of_a_640_kb_file_stay_under_two_seconds(shape):
     """The whole of ``scan_added_lexings`` (every reading), as a new file and as a half-changed file."""
     text = _ALL_LEXING_SHAPES[shape]
+    half = _ALL_LEXING_SHAPE_MAKERS[shape](320 * 1024)
     assert 600_000 <= len(text) <= 660_000, len(text)
-    for label, before in (("new file", ""), ("half changed", text[: len(text) // 2])):
-        started = time.perf_counter()
-        scan_added_lexings(before, text, include_ok=OK)
-        elapsed = time.perf_counter() - started
-        assert elapsed < 2.0, f"{shape} ({label}): {elapsed:.2f}s for every lexing of {len(text)} chars ({TAG})"
+    for label, make_before in (("new file", lambda t: ""), ("half changed", lambda t: t[: len(t) // 2])):
+        for _attempt in range(3):  # a loaded machine can spike one pair of runs; a real quadratic fails every pair
+            small = _best_lexing_time(make_before(half), half)
+            big = _best_lexing_time(make_before(text), text)
+            assert big < _ALL_LEXINGS_BUDGET, (
+                f"{shape} ({label}): {big:.2f}s for every lexing of {len(text)} chars ({TAG})")
+            ratio = big / max(small, 1e-3)
+            if big < _ALL_LEXINGS_RATIO_FLOOR or ratio < _ALL_LEXINGS_RATIO_LIMIT:
+                break
+        else:
+            raise AssertionError(
+                f"{shape} ({label}): doubling {len(half)} -> {len(text)} chars cost x{ratio:.2f} "
+                f"({small:.2f}s -> {big:.2f}s) in 3 attempts, super-linear ({TAG})")
 
 
 def test_lexing_work_budget_refuses_a_large_file_that_needs_many_readings():
