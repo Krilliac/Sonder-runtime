@@ -1,7 +1,24 @@
 """Canonical evaluation-history adapter for the typed application port."""
 from __future__ import annotations
 
-from typing import Mapping
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Protocol
+
+    class _HistoryStatus(Protocol):
+        def __call__(
+            self,
+            *,
+            model: str = ...,
+            model_digest: str = ...,
+            suite: str = ...,
+            suite_version: str = ...,
+            suite_digest: str = ...,
+            tolerance: float = ...,
+            max_records: int = ...,
+        ) -> Mapping[str, object]: ...
 
 
 class EvaluationHistoryReaderAdapter:
@@ -22,7 +39,9 @@ class EvaluationHistoryReaderAdapter:
         # initialize persistence or read mutable runtime state.
         import sonder_runtime.adapters.evaluation_history_store as evaluation_history_store
 
-        return evaluation_history_store.history_status(
+        return cast(
+            "_HistoryStatus", evaluation_history_store.history_status
+        )(
             model=model,
             model_digest=model_digest,
             suite=suite,
