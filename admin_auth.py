@@ -229,7 +229,12 @@ def init(conn: sqlite3.Connection) -> None:
     # (NULL: the key never expires).
     columns = {row[1] for row in conn.execute("PRAGMA table_info(account_api_keys)")}
     if "expires_ts" not in columns:
-        conn.execute("ALTER TABLE account_api_keys ADD COLUMN expires_ts INTEGER")
+        try:
+            conn.execute("ALTER TABLE account_api_keys ADD COLUMN expires_ts INTEGER")
+        except sqlite3.OperationalError as exc:
+            # Another process upgraded the same database since the check.
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.commit()
 
 

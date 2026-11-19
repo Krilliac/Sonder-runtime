@@ -6281,6 +6281,8 @@ class Handler(BaseHTTPRequestHandler):
             parse_query=lambda: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
             developer_authorized=_developer_authorized,
+            # As in _fanout_run_for_context: an admin account, never its API key.
+            admin_authorized=lambda context: admin_auth.require(context.get("account") or {}, "admin")[0],
             request_owner_of=_fanout_request_owner, runtime=server,
         )
 
