@@ -242,8 +242,9 @@ def test_windows_nul_device_under_a_root_is_refused_as_not_a_regular_file(root):
     # Python <= 3.12 calls \\.\NUL not absolute, so it fails the native-path
     # syntax check; 3.13+ calls it absolute, so the root check refuses it.
     # Either way it is refused before any open.
-    (r"\\.\NUL", ("native path", "outside every authorized root")),
-    (r"\\.\pipe\x.dmp", ("outside every authorized root",)),  # a pipe is never under a root
+    # The shared log-path guard (UNC/device/network spelling) refuses both first.
+    (r"\\.\NUL", ("UNC, device or network spelling", "native path", "outside every authorized root")),
+    (r"\\.\pipe\x.dmp", ("UNC, device or network spelling", "outside every authorized root")),
 ])
 def test_windows_device_namespace_paths_are_refused_before_any_open(target, reasons):
     def no_open(*_args, **_kwargs):
