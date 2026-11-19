@@ -139,7 +139,19 @@ _LOCAL_ENV = {
     "SONDER_ALLOW_REMOTE_OLLAMA": "",
     "SONDER_ALLOW_REMOTE_INFERENCE": "",
     "SONDER_INFERENCE_PRIVATE_WORKERS": "",
+    "OLLAMA_HOST": "http://127.0.0.1:11434",
 }
+
+
+@pytest.fixture(autouse=True)
+def _reset_typed_ollama_state():
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+
+    ollama_endpoint.reset_typed_endpoint()
+    ollama_pool.reset_typed_workers()
+    yield
+    ollama_endpoint.reset_typed_endpoint()
+    ollama_pool.reset_typed_workers()
 
 
 def _env(monkeypatch, **overrides):
@@ -183,3 +195,81 @@ def test_sonder_inference_with_unreadable_fallback_setting_is_non_local(monkeypa
 
     _env(monkeypatch, SONDER_INFERENCE_FALLBACK="bogus")
     assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_remote_ollama_primary_fallback_is_non_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    _env(
+        monkeypatch, SONDER_INFERENCE_FALLBACK="ollama",
+        OLLAMA_HOST="https://10.0.0.5:11434", SONDER_ALLOW_REMOTE_OLLAMA="1",
+    )
+    assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_typed_remote_workers_only_is_non_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+    from sonder_runtime.adapters.inference import ollama_pool
+
+    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama")
+    ollama_pool.configure_typed_workers(("https://10.0.0.5:11434",), allow_remote=True)
+    assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_typed_remote_endpoint_is_non_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama")
+    ollama_endpoint.configure_typed_endpoint("https://10.0.0.5:11434")
+    assert lane._is_non_local_provider("sonder_inference") is True
+
+
+def test_sonder_inference_with_loopback_only_ollama_workers_is_local(monkeypatch):
+    from sonder_runtime.adapters import restricted_tool_lane as lane
+
+    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama", SONDER_OLLAMA_WORKERS="http://127.0.0.1:11435")
+    assert lane._is_non_local_provider("sonder_inference") is False
+
+
+def test_bridge_init_closes_the_stack_when_setup_before_the_event_raises(monkeypatch):
+    closed = []
+
+    class _Stack:
+        def close(self):
+            closed.append(True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("preview failed")
+
+    monkeypatch.setattr(delegation_wiring, "compact_text", boom)
+    with pytest.raises(RuntimeError):
+        delegation_wiring.AgentImplBridge(
+            stack=_Stack(), prompt="p", model="m", max_steps=1, cloud=False, read_only=True, project_scope="",
+        )
+    assert closed == [True]
+
+
+def test_open_agent_run_closes_the_stack_when_origin_lookup_raises(monkeypatch):
+    closed = []
+
+    class _Stack:
+        def enter_context(self, ctx):
+            return ctx
+
+        def callback(self, fn):
+            return fn
+
+        def close(self):
+            closed.append(True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("origin failed")
+
+    monkeypatch.setattr(delegation_wiring.contextlib, "ExitStack", _Stack)
+    monkeypatch.setattr(delegation_wiring, "_selected_origin_for_model", boom)
+    with pytest.raises(RuntimeError):
+        delegation_wiring.open_agent_run(
+            object(), prompt="p", model="m", max_steps=1, cloud=False, read_only=True,
+        )
+    assert closed == [True]
