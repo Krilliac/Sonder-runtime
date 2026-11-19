@@ -2,7 +2,7 @@
 
 ## Lock storms (SQLITE_BUSY)
 
-Symptoms: slow requests, `sonder_sqlite_lock_wait_seconds` climbing,
+Symptoms: slow requests,
 "database is locked" in logs, or a durable-job operation returning the stable
 `CONCURRENCY_CONFLICT` code.
 
@@ -34,7 +34,8 @@ job store.
 4. Restore from the newest verified backup (backup-restore.md). A single
    corrupted store can be restored alone: restore to staging, copy only
    that store's file in, keeping the rest of the live state.
-5. Run `python -m sonder_runtime restore smoke` against the staged state
+5. Smoke-test the staged state with
+   `SONDER_HOME=<staged-dir> python -m sonder_runtime smoke --skip-ollama`
    before switching, then start and verify `/ready`.
 6. Record the incident and check the disk (smartctl, dmesg) — SQLite
    corruption on a healthy host is rare; suspect hardware or power loss.
