@@ -21,12 +21,27 @@ timing, feedback offer, and the interaction id the footer previously carried).
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import TypedDict
+
+    class TurnPayload(TypedDict):
+        schema: str
+        label: str
+        answer: str
+        error: bool
+        elapsed_ms: int
+        interaction_id: str | None
+        feedback_offered: bool
+        hint: str
 
 REPL_TURN_SCHEMA = "sonder.repl-turn.v1"
 ENV_FLAG = "SONDER_REPL_NDJSON"
 
 
-def enabled(environ) -> bool:
+def enabled(environ: Mapping[str, str] | None) -> bool:
     """Whether the caller explicitly opted into NDJSON turn output."""
     try:
         value = (environ or {}).get(ENV_FLAG, "")
@@ -35,8 +50,16 @@ def enabled(environ) -> bool:
     return str(value).strip() == "1"
 
 
-def turn_payload(answer, *, elapsed_ms, error=False, interaction_id=None,
-                 feedback_offered=False, label="Sonder", hint="") -> dict:
+def turn_payload(
+    answer: str | None,
+    *,
+    elapsed_ms: float | str | None,
+    error: bool = False,
+    interaction_id: str | None = None,
+    feedback_offered: bool = False,
+    label: str | None = "Sonder",
+    hint: str | None = "",
+) -> TurnPayload:
     """Build the stable ``sonder.repl-turn.v1`` mapping for one turn.
 
     ``hint`` carries the same known-failure next step the interactive error
@@ -61,7 +84,7 @@ def turn_payload(answer, *, elapsed_ms, error=False, interaction_id=None,
     }
 
 
-def ndjson_line(payload) -> str:
+def ndjson_line(payload: Mapping[str, object]) -> str:
     """Serialize one payload as a single sorted-key ASCII JSON line."""
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
