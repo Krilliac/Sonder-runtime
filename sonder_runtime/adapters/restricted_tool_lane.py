@@ -289,8 +289,10 @@ def _sonder_inference_on_loopback() -> bool:
     and neither does a configuration that cannot be read.  A loopback endpoint
     with a remote route behind it does not count either: private inference
     workers (``SONDER_INFERENCE_PRIVATE_WORKERS``), or the Ollama fallback
-    (``SONDER_INFERENCE_FALLBACK=ollama``) together with remote Ollama workers
-    (``SONDER_OLLAMA_WORKERS``), can place the prompt on another machine.
+    (``SONDER_INFERENCE_FALLBACK=ollama``) when its primary origin (typed
+    endpoint or ``OLLAMA_HOST``) is not loopback, or when remote Ollama
+    workers are configured (typed, or ``SONDER_OLLAMA_WORKERS``; loopback-only
+    workers do not count), can place the prompt on another machine.
     """
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
@@ -299,10 +301,13 @@ def _sonder_inference_on_loopback() -> bool:
         config = config_from_env()
         if not config.loopback or config.workers:
             return False
-        if inference_fallback_from_env(os.environ) == "ollama" and str(
-            os.environ.get("SONDER_OLLAMA_WORKERS", "") or ""
-        ).strip():
-            return False
+        if inference_fallback_from_env(os.environ) == "ollama":
+            from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+
+            if ollama_pool.has_configured_remote_workers():
+                return False
+            if not ollama_endpoint.is_loopback(ollama_endpoint.normalize()):
+                return False
         return True
     except Exception:
         return False
