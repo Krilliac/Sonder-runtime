@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 
 class ReplServiceProvider:
     def __init__(self, module_name: str) -> None:
         self.module_name = module_name
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(importlib.import_module(self.module_name), name)
 
 
