@@ -10,8 +10,8 @@ families that fill each role.
 
 - Sonder installed and running against a reachable Ollama
   ([install-workstation-local](install-workstation-local.md)).
-- Developer/admin auth for `/runtime` edits (a bare local-open loopback session
-  is developer-authorized by default).
+- Admin auth for `/runtime` edits (a bare local-open loopback session
+  is admin-authorized by default).
 - Disk for the model files and enough VRAM (or unified/system memory) for the
   band you are targeting.
 
@@ -29,7 +29,7 @@ one by default, but chat remains available without it. Add `reasoning` and
 `vision` only if the band supports keeping or swapping them.
 
 For an intentionally chat-only bootstrap, run
-`python setup_alias.py --no-embedding`; `/runtime` will show semantic memory as
+`python setup_alias.py --no-embedding`; `/runtime status refresh` will show semantic memory as
 unavailable until you install and bind an embedding model.
 
 The report keeps the largest single accelerator separate from auxiliary GPUs
@@ -75,7 +75,9 @@ unbound by default; bind models suited to the live host with
 `/runtime set reasoning=<model> vision=<model>`, or leave one **unset** with an
 empty value (`/runtime set vision=`). An
 unset tier is not offered at all and the router degrades to `general`/`code`
-automatically — nothing breaks. `oracle` is still consent-gated escalation
+automatically — nothing breaks. `oracle` is not wired into live escalation (automatic escalation stays on
+bound local tiers; hosted `cloud-*` tiers are explicit picks after
+`SONDER_ALLOW_CLOUD=1`); it is a router name
 only, not a policy tier. Inspect the live mapping with `/runtime` or
 `runtime_policy_status()`.
 
@@ -84,7 +86,8 @@ only, not a policy tier. Inspect the live mapping with `/runtime` or
 Keep the small, constantly-used tiers warm and let the large specialists swap in:
 
 ```bash
-export OLLAMA_KEEP_ALIVE=30m          # hold warm models longer
+export SONDER_KEEP_ALIVE=30m          # hold warm generative models longer
+export SONDER_EMBED_KEEP_ALIVE=30m    # hold the embedder warm too
 export OLLAMA_MAX_LOADED_MODELS=2     # if memory allows more than one resident
 ```
 
@@ -104,25 +107,32 @@ ollama ps                             # which models are currently resident
 
 Then send one request of each kind and confirm the reported mode/tier:
 
-- "hi" → `fast`
-- "implement quicksort in Python" → `code`
+- "hi" → `general` (the `chat` lane's default tier)
+- "implement quicksort in Python" → `general` (chat lane; a workspace request such as "implement a quicksort module in Python" → `workbench` / `code`)
 - "prove step by step why merge sort is O(n log n)" → `reasoning` (or `general`
   if no reasoning tier is configured)
-- "what's the latest news on X" → `fast` + web (if web tools are enabled)
+- "what's the latest news on X" → `code` + web (if web tools are enabled)
 
 ## 6. The oracle / escalation tier (optional)
 
 For the genuinely hard minority, pick one:
 
 - **Large local model** — only if the memory band supports it (a 70B at Q4 needs
-  roughly 48 GB). Point the heavy lane at it and raise `OLLAMA_KEEP_ALIVE` so its
-  long load is not re-paid. Private, slow.
+  roughly 48 GB). Bind it to a ladder tier such as `reasoning` and raise
+  `SONDER_KEEP_ALIVE` so its long load is not re-paid. Private, slow. A tier on
+  the ladder is an automatic escalation rung (see below).
 - **Consented cloud** — set `SONDER_ALLOW_CLOUD=1` and route the `cloud-*` tier.
   Prompts leave the machine on that tier only; every other tier stays local.
 
-The router reaches `oracle` only on an explicit escalation signal (a failed run,
-an empty/low-confidence answer, or "think hard"), so the expensive path stays
-rare.
+Automatic escalation never reaches a `cloud-*` tier: after a failed run, an
+empty answer, or runnable code that still fails verification after a repair, it
+steps up only through locally bound tiers. The `cloud-*` tiers (`cloud-code`,
+`cloud-general`) run only when you pick them explicitly after
+`SONDER_ALLOW_CLOUD=1`. `oracle` is not reachable at all, automatically or by
+choice: the current runtime never offers it (see above). A large local model
+bound to a ladder tier such as `reasoning` is different: it is an automatic
+escalation rung, so a failed or empty attempt on a lower tier can reach it. Bind
+it to `reasoning` only if that is acceptable.
 
 ## Rollback
 
@@ -132,7 +142,9 @@ remain in Ollama's store; remove any with `ollama rm <model>`.
 ## Notes
 
 - Policy can never enable cloud, widen permissions/roots, or store credentials
-  ([Security Model](../wiki/09-security-model.md)) — it only selects local
+  ([Security Model](../wiki/09-security-model.md)) — apart from `provider_models`,
+  which names the model an already-bound, already-consented OpenRouter tier
+  serves, it only selects local
   aliases and lanes. Cloud remains a separate host-owned consent gate.
 - Changing hardware changes only the model sizes, not this procedure; re-run
   `sonder_hardware.py` and re-pick from the band table.
