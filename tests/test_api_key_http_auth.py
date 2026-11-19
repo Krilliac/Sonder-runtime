@@ -306,6 +306,64 @@ def test_an_admin_key_cannot_read_another_owners_fanout_run(served, monkeypatch)
     assert status == 200 and body["id"] == "fr-other", body
 
 
+def test_an_admin_accounts_key_is_not_offered_host_bypass_or_admin_features(served):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    for path in ("/v1/sonder/whoami", "/v1/sonder/capabilities"):
+        status, body = _get_json(port, path, _both_mode(key))
+        assert status == 200, (path, body)
+        features = body["allowed_features"]
+        assert body["host_bypass_allowed"] is False, (path, body)
+        assert features["host_bypass"] is False and features["host_admin"] is False, (path, body)
+        # The key keeps the developer authority its account's role grants.
+        assert features["host_tools"] is True and features["approvals"] is True, (path, body)
+        # The same account's signed-in session is the administrator.
+        status, body = _get_json(port, path, _both_mode(admin_token))
+        assert status == 200, (path, body)
+        assert body["host_bypass_allowed"] is True, (path, body)
+        assert body["allowed_features"]["host_bypass"] is True, (path, body)
+        assert body["allowed_features"]["host_admin"] is True, (path, body)
+
+
+def test_an_admin_accounts_key_cannot_reach_bypass_or_admin_commands_in_chat(served):
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    body = json.dumps({"mode": "bypass", "confirm_bypass": True}).encode()
+    status, _, raw = _request(port, "POST", "/v1/permission-mode", body=body,
+                              headers={"Content-Type": "application/json", **_both_mode(key)})
+    assert status == 403, raw
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    for line in ("/cloud_opt_in status", "/permission_rule_set file_write allow"):
+        out = str(ts._handle_slash(line, context=keyed))
+        assert out.startswith("refused /") and "administrator" in out, (line, out)
+
+
+def test_an_admin_accounts_key_carries_developer_not_admin_into_typed_contexts(served):
+    from sonder_runtime.adapters.web import lifecycle
+
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+    assert lifecycle.get().operation_context("corr-key", keyed).auth_level == "developer"
+    session = ts._auth_context("Bearer " + DEPLOYMENT_KEY, admin_token)
+    assert lifecycle.get().operation_context("corr-session", session).auth_level == "admin"
+
+
+def test_an_admin_accounts_key_is_metered_and_its_session_is_not(served):
+    port, admin_token, open_db, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    tier = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)["account"]["tier"]
+    _with_db(open_db, lambda conn: admin_auth.set_saas_tier_limit(conn, tier, 0))
+    _with_db(open_db, lambda conn: admin_auth.set_saas_feature(conn, "usage_metering_enabled", True))
+    # A leaked admin key spends against the tier budget like any other key ...
+    status, body = _chat(port, _both_mode(key))
+    assert status == 429, body
+    assert "monthly token limit" in body["error"]["message"]
+    # ... while the admin's signed-in session stays exempt.
+    status, body = _chat(port, _both_mode(admin_token))
+    assert status == 200, body
+
+
 class _RacingConnection:
     """A connection whose expires_ts column is added by another process mid-``init``."""
 

@@ -65,7 +65,8 @@ Bypass
 without asking. It skips prompts (``ask``) only. Every deny rule -- one the
 operator wrote, a shipped default such as ``file_delete: deny``, the
 degraded-policy deny, the chain-of-thought guard -- and privilege
-(elevation), durable-authority tools, the effect fence and a name nothing can
+(elevation), durable-authority tools, process-wide cloud consent
+(``BYPASS_HELD_TOOLS``), the effect fence and a name nothing can
 classify still stop it. Entering it needs an attended confirmation
 (``/mode bypass`` answered at the console, or an administrator's
 ``confirm_bypass``). Over HTTP it applies to that caller's principal and
@@ -850,6 +851,15 @@ DURABLE_AUTHORITY_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account",
     "elevate", "permission_rule_set", "permission_approve",
 })
+
+# What ``bypass`` still holds besides the durable-authority tools. Over HTTP a
+# bypass is one principal's and one session's, but ``cloud_opt_in`` is
+# process-wide: turning it on sends every later ``cloud-*`` prompt of every
+# caller off the machine, and enabling it is explicit consent, which a skipped
+# prompt is not. Bypass holds these as it holds the durable-authority tools: an
+# unattended caller is refused, the console is asked, and an explicit allow
+# rule still lets them run, as in every other mode.
+BYPASS_HELD_TOOLS = DURABLE_AUTHORITY_TOOLS | frozenset({"cloud_opt_in"})
 
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
@@ -1975,7 +1985,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
                         source="privilege", call_id=call)
 
-    if active == BYPASS and name in DURABLE_AUTHORITY_TOOLS and rule_action != ALLOW:
+    if active == BYPASS and name in BYPASS_HELD_TOOLS and rule_action != ALLOW:
         if not interactive:
             return Decision(
                 DENY, active, risk,

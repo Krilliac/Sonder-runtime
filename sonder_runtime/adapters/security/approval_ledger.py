@@ -80,7 +80,6 @@ MIN_CALL_ID_CHARS = 8
 MAX_PREVIEW_CHARS = 200
 MAX_DETAIL_CHARS = 4000
 DENIAL_TTL_SECONDS = 900
-OWNER_TAG_CHARS = 11  # "ap-" and 8 hex characters of the owner key
 UNOWNED_TAG = "-"
 PENDING_RETENTION_SECONDS = 7 * 86_400
 APPROVAL_RETENTION_SECONDS = 30 * 86_400
@@ -197,9 +196,11 @@ def operator_view() -> bool:
 
 
 def owner_tag(owner: str) -> str:
-    """The short owner part of a call reference: ``-`` for the unowned key."""
+    """The owner part of a call reference: the whole owner key, so two owners
+    never share one (a prefix of it can collide), and ``-`` for the unowned key.
+    ``resolve_call`` still accepts any typed prefix of it."""
     owner = str(owner or "")
-    return owner[:OWNER_TAG_CHARS] if owner else UNOWNED_TAG
+    return owner if owner else UNOWNED_TAG
 
 
 def call_ref(digest: str, owner: str = "") -> str:

@@ -383,6 +383,14 @@ def auth_response_extra_fields(
     }
 
 
+def _feature_role(role: str, account: Any) -> str:
+    """The role whose features a caller holds: an account's API key never holds
+    admin (``admin_auth.require``), so an admin account's key gets a developer's."""
+    if role == "admin" and isinstance(account, Mapping) and account.get("via_api_key"):
+        return "developer"
+    return role
+
+
 def capabilities_payload(
     context: Mapping[str, Any] | None,
     *,
@@ -398,7 +406,7 @@ def capabilities_payload(
         role = str(account.get("role")).strip().lower()
     elif context and context.get("authorized"):
         role = "admin" if admin_authorized else "user"
-    effective_role = role or ("admin" if auth_mode == "local-open" else "user")
+    effective_role = _feature_role(role, account) or ("admin" if auth_mode == "local-open" else "user")
     payload: dict[str, Any] = {
         "object": "capabilities",
         "auth_mode": auth_mode,
@@ -433,6 +441,7 @@ def whoami_payload(
 ) -> dict[str, Any]:
     account = dict((context or {}).get("account") or {})
     role = str(account.get("role") or ("admin" if admin_authorized else "user")).strip().lower()
+    feature_role = _feature_role(role, account)
     return {
         "ok": True,
         "username": str(account.get("username") or ""),
@@ -440,9 +449,9 @@ def whoami_payload(
         "auth_mode": auth_mode,
         "public_hosting": bool(public_hosting),
         "client_exec_supported": True,
-        "host_bypass_allowed": bool(role == "admin"),
+        "host_bypass_allowed": bool(feature_role == "admin"),
         "allowed_features": _public_policy.allowed_features_for_role(
-            role,
+            feature_role,
             public_hosting=bool(public_hosting),
             client_exec_supported=True,
         ),
