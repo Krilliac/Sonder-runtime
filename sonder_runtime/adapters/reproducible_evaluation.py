@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Mapping, cast
 
 from sonder_runtime.application.evaluation.reproducible import (
     EvaluationMatrixReport,
@@ -24,6 +24,9 @@ from sonder_runtime.application.evaluation.reproducible import (
     ReproducibleEvaluationError,
 )
 
+if TYPE_CHECKING:
+    from typing import Any
+
 
 PROVIDER_SCHEMA = "sonder.deterministic-provider.v1"
 MAX_FIXTURE_BYTES = 2 * 1024 * 1024
@@ -34,7 +37,7 @@ MAX_REPORT_BYTES = 16 * 1024 * 1024
 @dataclass(frozen=True)
 class ScriptedProviderResult:
     kind: str
-    output: Any = None
+    output: object = None
     latency_ms: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -51,7 +54,7 @@ class DeterministicLocalProvider:
             raise ReproducibleEvaluationError("deterministic provider responses are empty or unbounded")
         self._responses = dict(responses)
 
-    def invoke(self, request: Any, *, timeout_ms: int) -> ProviderResponse:
+    def invoke(self, request: object, *, timeout_ms: int) -> ProviderResponse:
         key = _canonical(request)
         scripted = self._responses.get(key)
         if scripted is None:
@@ -61,11 +64,11 @@ class DeterministicLocalProvider:
         if scripted.kind == "error":
             raise ProviderFailure(scripted.error_code or "protocol", scripted.error_message or "scripted provider error")
         if scripted.kind == "invalid_response":
-            return scripted.output  # type: ignore[return-value] - intentional protocol fixture
+            return cast(ProviderResponse, scripted.output)
         return ProviderResponse(scripted.output, scripted.latency_ms, scripted.tokens_in, scripted.tokens_out)
 
 
-def load_scenario_fixture(path: str | Path) -> EvaluationScenario:
+def load_scenario_fixture(path: str | os.PathLike[str]) -> EvaluationScenario:
     """Load and digest-check one bounded golden scenario fixture."""
     payload = _read_json(path, "scenario fixture")
     if "scenario_digest" not in payload:
@@ -73,7 +76,7 @@ def load_scenario_fixture(path: str | Path) -> EvaluationScenario:
     return EvaluationScenario.from_dict(payload)
 
 
-def load_provider_fixture(path: str | Path) -> DeterministicLocalProvider:
+def load_provider_fixture(path: str | os.PathLike[str]) -> DeterministicLocalProvider:
     """Load a bounded deterministic provider fixture and bind its identity."""
     payload = _read_json(path, "provider fixture")
     allowed = {"schema", "provider_id", "model_id", "revision", "responses", "provider_digest"}
@@ -126,7 +129,7 @@ def load_provider_fixture(path: str | Path) -> DeterministicLocalProvider:
 class JsonEvaluationRunRepository:
     """Explicit, atomic persistence for a raw replay-capable run report."""
 
-    def __init__(self, path: str | Path, *, max_bytes: int = MAX_REPORT_BYTES) -> None:
+    def __init__(self, path: str | os.PathLike[str], *, max_bytes: int = MAX_REPORT_BYTES) -> None:
         self.path = Path(path)
         if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_REPORT_BYTES:
             raise ReproducibleEvaluationError("report max_bytes is outside the bounded range")
@@ -143,7 +146,7 @@ class JsonEvaluationRunRepository:
 class JsonEvaluationMatrixRepository:
     """Atomic, digest-verifying persistence for provider/model matrices."""
 
-    def __init__(self, path: str | Path, *, max_bytes: int = MAX_REPORT_BYTES) -> None:
+    def __init__(self, path: str | os.PathLike[str], *, max_bytes: int = MAX_REPORT_BYTES) -> None:
         self.path = Path(path)
         if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_REPORT_BYTES:
             raise ReproducibleEvaluationError("matrix max_bytes is outside the bounded range")
@@ -157,14 +160,14 @@ class JsonEvaluationMatrixRepository:
         return EvaluationMatrixReport.from_dict(_read_json(self.path, "evaluation matrix", max_bytes=self._max_bytes))
 
 
-def provider_fixture_digest(payload: Mapping[str, Any]) -> str:
+def provider_fixture_digest(payload: Mapping[str, object]) -> str:
     """Return the digest to place in a provider fixture during authoring."""
     unsigned = dict(payload)
     unsigned.pop("provider_digest", None)
     return _digest(unsigned)
 
 
-def _read_json(path: str | Path, label: str, *, max_bytes: int = MAX_FIXTURE_BYTES) -> Mapping[str, Any]:
+def _read_json(path: str | os.PathLike[str], label: str, *, max_bytes: int = MAX_FIXTURE_BYTES) -> Mapping[str, Any]:
     path = Path(path)
     try:
         size = path.stat().st_size
@@ -203,18 +206,18 @@ def _atomic_write(path: Path, encoded: bytes, max_bytes: int) -> None:
         raise
 
 
-def _canonical(value: Any) -> str:
+def _canonical(value: object) -> str:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ReproducibleEvaluationError("provider fixture values must be JSON-compatible") from exc
 
 
-def _digest(value: Any) -> str:
+def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-def _reject_unknown(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+def _reject_unknown(value: Mapping[str, object], allowed: set[str], label: str) -> None:
     unknown = sorted(str(key) for key in value if key not in allowed)
     if unknown:
         raise ReproducibleEvaluationError(f"{label} contains unsupported fields: {', '.join(unknown)}")

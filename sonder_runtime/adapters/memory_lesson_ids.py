@@ -5,11 +5,11 @@ import json
 import re
 
 
-def _parse_lesson_ids(value):
+def _parse_lesson_ids(value: object) -> list[str]:
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            values = []
+            values: object = []
         elif text.startswith("["):
             values = json.loads(text)
         else:
@@ -20,7 +20,7 @@ def _parse_lesson_ids(value):
         raise ValueError("lesson IDs must be a JSON list or comma-separated text")
     if len(values) > 50:
         raise ValueError("at most 50 lesson IDs can be reviewed at once")
-    out = []
+    out: list[str] = []
     for raw in values:
         lesson_id = str(raw or "").strip()
         if not lesson_id or len(lesson_id) > 128 or any(ord(ch) < 32 for ch in lesson_id):

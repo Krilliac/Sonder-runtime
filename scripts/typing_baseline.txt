@@ -144,17 +144,14 @@ sonder_runtime/adapters/inspection/workspace_compare.py
 sonder_runtime/adapters/inspection_executor.py
 sonder_runtime/adapters/lane_tests.py
 sonder_runtime/adapters/launcher_idempotency.py
-sonder_runtime/adapters/launcher_output.py
 sonder_runtime/adapters/learning_health.py
 sonder_runtime/adapters/legacy_chat_bridge.py
 sonder_runtime/adapters/loaded_source.py
 sonder_runtime/adapters/local_observability.py
 sonder_runtime/adapters/location.py
 sonder_runtime/adapters/mcp_subprocess.py
-sonder_runtime/adapters/memory_lesson_ids.py
 sonder_runtime/adapters/memory_replication/http_client.py
 sonder_runtime/adapters/memory_repository.py
-sonder_runtime/adapters/memory_rerank.py
 sonder_runtime/adapters/memory_store.py
 sonder_runtime/adapters/meshgen/blender_runner.py
 sonder_runtime/adapters/meshgen/harness.py
@@ -164,8 +161,6 @@ sonder_runtime/adapters/meshgen/replay.py
 sonder_runtime/adapters/meshgen/sandbox_win.py
 sonder_runtime/adapters/model_error_details.py
 sonder_runtime/adapters/model_error_formatting.py
-sonder_runtime/adapters/model_gateway_factory.py
-sonder_runtime/adapters/model_inventory.py
 sonder_runtime/adapters/model_inventory_formatting.py
 sonder_runtime/adapters/model_pace.py
 sonder_runtime/adapters/model_request_admission.py
@@ -185,7 +180,6 @@ sonder_runtime/adapters/observability/run_result_formatting.py
 sonder_runtime/adapters/observability/session_list_formatting.py
 sonder_runtime/adapters/observability/session_replay_formatting.py
 sonder_runtime/adapters/observability/trace_buffer.py
-sonder_runtime/adapters/offload_schema_argument.py
 sonder_runtime/adapters/ollama_lifecycle.py
 sonder_runtime/adapters/operations_event_sink.py
 sonder_runtime/adapters/optional_slash_menu.py
@@ -257,7 +251,6 @@ sonder_runtime/adapters/playbook_telemetry.py
 sonder_runtime/adapters/preference_adapters.py
 sonder_runtime/adapters/preference_codec.py
 sonder_runtime/adapters/preflight.py
-sonder_runtime/adapters/preflight_executor.py
 sonder_runtime/adapters/process_liveness.py
 sonder_runtime/adapters/process_risk.py
 sonder_runtime/adapters/process_termination.py
@@ -265,18 +258,13 @@ sonder_runtime/adapters/prompt_store.py
 sonder_runtime/adapters/provider_dispatch/fallback.py
 sonder_runtime/adapters/provider_dispatch/gateway.py
 sonder_runtime/adapters/recall.py
-sonder_runtime/adapters/recall_gateway.py
 sonder_runtime/adapters/reference_index.py
 sonder_runtime/adapters/reference_lookup_lanes.py
-sonder_runtime/adapters/repl_services.py
 sonder_runtime/adapters/repo_repair_runner.py
-sonder_runtime/adapters/repository_errors.py
-sonder_runtime/adapters/reproducible_evaluation.py
 sonder_runtime/adapters/resource_leases.py
 sonder_runtime/adapters/runtime_container.py
 sonder_runtime/adapters/runtime_policy.py
 sonder_runtime/adapters/runtime_policy_repository.py
-sonder_runtime/adapters/runtime_readiness_formatting.py
 sonder_runtime/adapters/sandbox.py
 sonder_runtime/adapters/scenario_validation/process.py
 sonder_runtime/adapters/secret_scan.py
@@ -298,7 +286,6 @@ sonder_runtime/adapters/session_turn_claims.py
 sonder_runtime/adapters/static_artifact_validation.py
 sonder_runtime/adapters/storage.py
 sonder_runtime/adapters/subagents.py
-sonder_runtime/adapters/task_formatting.py
 sonder_runtime/adapters/task_repository.py
 sonder_runtime/adapters/testing/artifacts.py
 sonder_runtime/adapters/testing/detection.py
@@ -319,7 +306,6 @@ sonder_runtime/adapters/web/listener_probe.py
 sonder_runtime/adapters/web/live_reload.py
 sonder_runtime/adapters/web/managed_http.py
 sonder_runtime/adapters/web_fetch.py
-sonder_runtime/adapters/web_intents.py
 sonder_runtime/adapters/web_provider.py
 sonder_runtime/adapters/web_search.py
 sonder_runtime/adapters/workflow_loop_runner.py

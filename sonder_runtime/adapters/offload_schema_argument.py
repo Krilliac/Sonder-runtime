@@ -14,7 +14,7 @@ import json
 from sonder_runtime.adapters.model_transport import ModelCallError
 
 
-def parse_schema_arg(schema):
+def parse_schema_arg(schema: object) -> dict[str, object] | None:
     """Normalize an offload `schema` argument to a schema object, or None.
 
     Accepts an already-parsed object (internal callers) or the JSON text the

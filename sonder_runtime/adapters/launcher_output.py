@@ -1,15 +1,16 @@
 """Pure output, timeout, and retention policy for the launcher."""
 from __future__ import annotations
 
+from typing import Any
 
 MAX_OPERATION_OUTPUT = 20_000
 DEFAULT_OPERATION_RETENTION = 100
 MAX_OPERATION_RETENTION = 1_000
 
 
-def output_text(*values, limit=MAX_OPERATION_OUTPUT):
+def output_text(*values: object, limit: int = MAX_OPERATION_OUTPUT) -> str:
     """Join non-empty values and retain only the bounded output tail."""
-    chunks = []
+    chunks: list[str] = []
     for value in values:
         if not value:
             continue
@@ -25,7 +26,7 @@ def output_text(*values, limit=MAX_OPERATION_OUTPUT):
     return marker + output[-(limit - len(marker)):]
 
 
-def bounded_seconds(value, default, maximum):
+def bounded_seconds(value: Any, default: float, maximum: float) -> float:
     """Coerce a timeout into the launcher's inclusive safe range."""
     try:
         parsed = float(value)
@@ -35,10 +36,10 @@ def bounded_seconds(value, default, maximum):
 
 
 def retention_limit(
-    value,
-    default=DEFAULT_OPERATION_RETENTION,
-    maximum=MAX_OPERATION_RETENTION,
-):
+    value: Any,
+    default: int = DEFAULT_OPERATION_RETENTION,
+    maximum: int = MAX_OPERATION_RETENTION,
+) -> int:
     """Coerce operation retention to a positive bounded integer."""
     try:
         parsed = int(value)
