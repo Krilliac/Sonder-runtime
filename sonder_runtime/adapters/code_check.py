@@ -148,14 +148,18 @@ def check_file(path: str | os.PathLike[str], max_items: int = 30, *, project_roo
     requested = str(path)
     limit = max(1, min(100, int(max_items)))
     try:
-        from .filesystem.file_ops import resolve_repository_read_path
+        from .filesystem.file_ops import (
+            _reject_network_path,
+            resolve_repository_read_path,
+        )
         if project_root is None:
             # Reuse the guarded repository-read resolver.  It consults the
             # operator's configured roots and rejects credentials/control data.
             target = resolve_repository_read_path(requested)
         else:
             root = Path(project_root).expanduser().resolve()
-            candidate = Path(requested).expanduser()
+            # Refuse a UNC/device spelling before resolve() can touch it.
+            candidate = Path(_reject_network_path(requested)).expanduser()
             target = (root / candidate if not candidate.is_absolute() else candidate).resolve()
             target.relative_to(root)
             # Keep the ordinary credential/control-plane guard in force even

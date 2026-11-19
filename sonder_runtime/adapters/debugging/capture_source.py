@@ -431,7 +431,15 @@ class GuardedCaptureSource:
 
     def _contained_dir(self, path: str, extra_roots: str) -> Path | None:
         text = str(path or "").strip()
-        if not text or "\x00" in text or file_ops._foreign_absolute(text):
+        if not text or "\x00" in text:
+            return None
+        try:
+            # First, before any stat/resolve: a UNC or device spelling never
+            # reaches the filesystem. Use the returned (prefix-stripped) text.
+            text = file_ops._reject_network_path(text)
+        except PermissionError:
+            return None
+        if file_ops._foreign_absolute(text):
             return None
         candidate = Path(text).expanduser()
         if not candidate.is_absolute():

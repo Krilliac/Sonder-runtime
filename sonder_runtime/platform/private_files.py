@@ -372,6 +372,29 @@ def low_integrity_readable(path: str | os.PathLike[str]) -> bool:
     return True
 
 
+_INHERITABLE_NO_READ_UP_LABEL = "S:(ML;OICI;NRNW;;;ME)"
+
+
+def label_new_tree_no_read_up(path: str | os.PathLike[str]) -> bool:
+    """Give an existing directory an inheritable medium no-read-up/no-write-up label.
+
+    Objects created inside it afterwards inherit the label; existing children
+    are not relabelled. True only when the directory now carries the label;
+    False off Windows.
+    """
+    if _windows_api() is None:
+        return False
+    text = os.fspath(path)
+    if _is_reparse_point(text) or not os.path.isdir(text):
+        return False
+    try:
+        _windows_set_sddl(text, _LABEL_SECURITY_INFORMATION, _INHERITABLE_NO_READ_UP_LABEL)
+    except OSError as error:
+        _logger.debug("could not label private directory: %s", type(error).__name__)
+        return False
+    return not low_integrity_readable(text)
+
+
 def _is_regular(path: str) -> bool:
     try:
         return stat.S_ISREG(os.lstat(path).st_mode)

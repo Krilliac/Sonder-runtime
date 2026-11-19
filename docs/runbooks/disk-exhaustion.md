@@ -1,7 +1,7 @@
 # Disk exhaustion
 
 Preflight enforces `[state].minimum_free_disk_bytes` (default 5 GiB) and
-`sonder_disk_free_bytes` is exported per path class. Act before zero.
+`sonder_disk_free_bytes` (labelled by path class) is registered but nothing sets it yet, so `/metrics` carries no samples for it; `doctor` reports free space for the state and model roots. Act before zero.
 
 ## Immediate triage (service degraded or failing writes)
 
@@ -14,12 +14,15 @@ du -sh /var/backups/sonder/* | sort -h | tail
 Reclaim in this order — safest first:
 
 1. Old release directories (keep current + previous):
-   `ls -dt /opt/sonder/releases/* | tail -n +3 | xargs rm -rf`
-2. Backup retention: `python -m sonder_runtime backup prune --config /etc/sonder/sonder.toml`
+   run `python -m sonder_runtime update status` and delete only directories under `/opt/sonder/releases/` that are neither the `active_release` nor the `previous_release` `install_path` (failed releases are kept there too, so modification time does not identify current + previous)
+2. Backup retention: `python -m sonder_runtime backup prune --config /etc/sonder/sonder.toml --secrets /etc/sonder/sonder.env`
    (never removes the newest verified backup).
 3. Operation-event retention (default 90 days) — lower
-   `[observability].audit_retention_days` and restart if the events table
-   dominates.
+   `[observability].audit_retention_days` and restart; `serve` deletes old
+   `operation_event` rows only after preflight passes (below
+   `[state].minimum_free_disk_bytes` that needs `--skip-preflight`), and the
+   plain `DELETE` frees pages for SQLite reuse without shrinking
+   `operations.db`. Use this when the `operation_event` table dominates.
 4. Ollama model cache: `ollama list` and remove unused models — this is
    model storage, not Sonder state.
 

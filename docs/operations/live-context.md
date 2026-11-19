@@ -19,10 +19,12 @@ Discovery precedence is bundled, global, project, then configured, with later
 sources replacing an earlier record of the same logical name. The producer
 scans only bounded known instruction files and skill manifests, preserves the
 last complete snapshot when a refresh becomes partial, and marks the request
-incomplete when no usable snapshot exists. Dynamic turns, retrieval, and memory
+incomplete whenever a refresh fails, even when that snapshot exists, so the
+request reports live stable context as unavailable. Dynamic turns, retrieval, and memory
 remain outside the reusable prefix.
 
 The runtime composition root creates `LiveAgentContextProducer` from the typed
-configuration before constructing `AgentLaneService`. Missing roots are safe
-and contribute no records; malformed relative or link roots fail configuration
+configuration before constructing `AgentLaneService`. A missing configured root makes the refresh incomplete: the producer
+reuses the last complete snapshot, marked incomplete, or supplies no records
+when none exists; malformed relative or link roots fail configuration
 validation rather than silently widening discovery.

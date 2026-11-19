@@ -8,14 +8,25 @@ heartbeats. A crash, drain deadline, or kill leaves work in an explicit
 
 1. Check state: `GET /v1/sonder/status` (autopilot + agents sections), or
    the REPL `/autopilot status`.
-2. Interrupted runs list their last completed step. Review what the run
+2. Interrupted runs show `[interrupted/interrupted]` in the ledger.
+   `/autopilot status <id>` lists the first 12 plan tasks with their status:
+   passed tasks are done, and the task that was in flight still shows
+   `[running]`. The full plan is in `autopilot.runs[].plan` of
+   `GET /v1/sonder/status`. Review what the run
    was doing before resuming — interrupted mid-write workspace changes
-   should be inspected first (`/activity`, execution evidence).
+   should be inspected directly in the workspace first (`git status` /
+   `git diff`); `/activity` and the execution feed are held in process memory
+   and do not survive the stop.
 3. Resume explicitly (`/autopilot resume <id>`) or cancel
    (`/autopilot cancel <id>`). Resume re-claims ownership with a fresh
-   heartbeat; a stale owner cannot overwrite the new one.
+   heartbeat; a stale owner cannot overwrite the new one. A task that was
+   running at the interruption is never replayed: resume marks it
+   `uncertain` and pauses the run again for operator review. An `uncertain`
+   task never counts as passed, so that run cannot complete; cancel it and
+   start a fresh scoped run.
 
-Cancelling a run closes its open tasks: the task that was running shows
+Cancelling a run closes its pending and running tasks (a task waiting on a
+provider retry keeps `infra_retry`): the task that was running shows
 `[cancelled]` with a note that its result was discarded and any tool
 effects it already made were not rolled back. Pending tasks show
 `[cancelled]` too. Passed, failed, and `uncertain` tasks keep their
@@ -34,7 +45,8 @@ to continue with fresh budgets.
 ## Provider retries and verifier availability
 
 `SONDER_AUTOPILOT_INFRA_RETRIES` defaults to `3` (clamped to 0..3;
-invalid values use 3). Classified provider outages retry after 30, 60,
+invalid values use 3). Classified provider outages during task execution (planner and reviewer
+outages fail the run) retry after 30, 60,
 and 120 seconds without consuming task attempts, cycles, or failures.
 Exhaustion pauses the run with `provider unavailable`; the retry count
 survives an explicit resume.
@@ -44,7 +56,9 @@ is advisory: start and status show `verifiers: allowed [...] refused [...]`
 and, when none are allowed, a warning that validate tasks cannot pass
 unattended in the current permission mode. This preserves starting runs
 in the default `manual` mode. Set this variable to exactly `1` to refuse
-new starts before run creation when no verifier is allowed unattended.
+direct starts (`/autopilot run|start|plan` without `--goal`,
+`autopilot_start`) before run creation when no verifier is allowed unattended;
+goal- and mission-bound starts skip this preflight.
 Other values keep the advisory behavior. Preflight does not change
 permission rules, spend approvals, or relax validation evidence gates.
 
@@ -56,7 +70,11 @@ running with a dead PID for more than a few minutes:
 
 1. Confirm the PID is gone: `ps -p <pid>`
 2. Restart the service (drain-aware): `systemctl restart sonder`
-3. The claim reaper marks the work interrupted on startup; resume it.
+3. Startup reconciliation marks an Autopilot run with an expired lease or a
+   dead local owner interrupted; resume it (`/autopilot resume <id>`). Fleet
+   work is marked interrupted on a later reconcile pass (a status read at least
+   10 s after startup first sees the dead owner); retry it with
+   `/agentretry <id>`.
 
 ## Invariants (violations are bugs, file them)
 
