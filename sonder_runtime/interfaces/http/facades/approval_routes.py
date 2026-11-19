@@ -52,6 +52,8 @@ class HttpApprovalPorts:
     audit: Callable[[str, Any, float], None]
     clock: Callable[[], float]
     log: Any
+    # Percent-decodes one path segment; raises ValueError for one that is not UTF-8.
+    unquote: Callable[[str], str]
 
 
 def _forbidden(handler: Any, ports: HttpApprovalPorts, message: str) -> None:
@@ -106,10 +108,36 @@ def _approval_owner_for_context(context: Any) -> str:
     return "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
 
 
-def _approval_include_unowned(context: Any) -> bool:
+def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
+    """Split the raw path on '/' first, then percent-decode each segment once.
+
+    A client that encodes the '@' of a call reference (``%40``) names the same
+    row as a raw '@'. A segment that still holds '%' after one decode (a
+    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
+    """
+    segments = []
+    for segment in raw.split("/"):
+        try:
+            decoded = unquote(segment)
+        except ValueError:
+            return None
+        if "%" in decoded:
+            return None
+        segments.append(decoded)
+    return segments
+
+
+def _approval_role(context: Any) -> str:
+    """The account's role here: an account's API key never holds admin
+    (``admin_auth.require``), so an admin account's key counts as a developer."""
     account = (context or {}).get("account") or {}
     role = str(account.get("role") or "").strip().lower()
-    return role in ("developer", "admin") or (context or {}).get("mode") in _SINGLE_OWNER_MODES
+    return "developer" if role == "admin" and account.get("via_api_key") else role
+
+
+def _approval_include_unowned(context: Any) -> bool:
+    return (_approval_role(context) in ("developer", "admin")
+            or (context or {}).get("mode") in _SINGLE_OWNER_MODES)
 
 
 def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
@@ -165,9 +193,19 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
 
     The approval is bound to that call's digest, single-use and expiring,
     recorded as the caller's approver label with surface ``http``, and
-    audited on the direct-tool path as ``permission_approve``.
+    audited on the direct-tool path as ``permission_approve``. Each path
+    segment is percent-decoded exactly once (``_decoded_segments``).
     """
-    parts = path[len(ROUTE):].strip("/").split("/")
+    parts = _decoded_segments(path[len(ROUTE):].strip("/"), ports.unquote)
+    if parts is None:
+        handler._send_json_payload(
+            {"error": {"message": "the path is percent-decoded exactly once; a segment "
+                                  "still holding '%' after that, or one that is not "
+                                  "UTF-8, is refused",
+                       "type": "invalid_request", "code": "INVALID_PATH"}},
+            status=400,
+        )
+        return
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
         action, target = "revoke", parts[1]
     elif len(parts) == 2 and parts[0] == "deny" and parts[1]:
