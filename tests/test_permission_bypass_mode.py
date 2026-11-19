@@ -44,7 +44,7 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     assert pm._MATRIX[pm.BYPASS][pm.UNCLASSIFIED] == pm.ASK
 
     rules = {
-        # The unmodified shipped default, which bypass alone steps past.
+        # The unmodified shipped default: bypass skips ``ask`` only, so it holds.
         "file_delete": {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
         "admin_private_chain_of_thought": {
             "pattern": "admin_private_chain_of_thought",
@@ -54,7 +54,7 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     }
     lookup = lambda name: rules.get(name)  # noqa: E731
     del_decision = pm.decide("file_delete", interactive=False, mode=pm.BYPASS, rule_lookup=lookup)
-    assert del_decision.allowed and del_decision.source == "mode:bypass"
+    assert del_decision.action == pm.DENY and del_decision.source == "rule"
 
     cot_decision = pm.decide(
         "admin_private_chain_of_thought", interactive=False, mode=pm.BYPASS, rule_lookup=lookup

@@ -7,13 +7,12 @@ Each test pins one decision:
 * ``POST /v1/permission-mode`` changes the process-global mode for anything
   but bypass (the administrator's safety stop reaches every surface), while
   bypass stays scoped to the caller's principal and session;
-* bypass skips prompts only: an explicit deny rule the operator wrote, and the
-  degraded-policy deny, still refuse; only the unmodified shipped
-  ``file_delete`` default (a "be careful" default, not an operator decision)
-  steps aside;
-* the console and MCP (no owner scope bound) and an explicit operator scope see
-  and approve every pending call, including account turns', and the approval
-  is spent by the account that asked; an account sees only its own;
+* bypass skips prompts only: every deny rule (one the operator wrote, a
+  shipped default, the degraded-policy deny) still refuses;
+* the explicit operator scope (which the console and the MCP entry bind after
+  an admin-level check) sees and approves every pending call, including
+  account turns', and the approval is spent by the account that asked; an
+  account sees only its own;
 * a non-stream client handoff is a one-way handoff: its result endpoint stays
   open for ``DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS`` and the model is told the
   result does not come back in this turn.
@@ -213,12 +212,12 @@ def test_bypass_keeps_an_explicit_operator_deny(tool):
         assert decision.source == "rule"
 
 
-def test_bypass_steps_past_only_the_unmodified_shipped_file_delete_default():
+def test_bypass_keeps_the_shipped_default_denies_too():
     shipped = _shipped("file_delete")
     decision = pm.decide("file_delete", interactive=False, mode=pm.BYPASS,
                          rule_lookup=lambda _n: dict(shipped))
-    assert decision.allowed and decision.source == "mode:bypass"
-    # The same shipped row still refuses outside bypass.
+    assert decision.action == pm.DENY and decision.source == "rule"
+    # The same shipped row refuses outside bypass.
     assert pm.decide("file_delete", interactive=False, mode=pm.AUTO,
                      rule_lookup=lambda _n: dict(shipped)).action == pm.DENY
     # The chain-of-thought guard is a shipped deny that bypass never skips.
@@ -259,12 +258,14 @@ def _account_refusal(ledger, principal="account:dev", tool="file_write", args=No
 
 def test_console_sees_and_approves_an_account_call_and_the_account_spends_it(ledger):
     tool, digest = _account_refusal(ledger)
-    # Console / MCP: no owner scope bound.
-    listed = ledger.pending()
-    assert [item.digest for item in listed] == [digest]
-    assert listed[0].owner == _owner_of("account:dev")
-    pending = ledger.resolve_call(digest[:16])
-    approval = ledger.issue(pending.tool, pending.digest, approver="console", surface="console")
+    # Console / MCP: the operator scope they bind after an admin-level check.
+    with ledger_module.operator_scope():
+        listed = ledger.pending()
+        assert [item.digest for item in listed] == [digest]
+        assert listed[0].owner == _owner_of("account:dev")
+        pending = ledger.resolve_call(digest[:16])
+        approval = ledger.issue(pending.tool, pending.digest, approver="console",
+                                surface="console", owner=pending.owner)
     assert "open" == approval.state(approval.issued_ts)
     with pm.mode_scope("account:dev", "s1"):
         assert ledger.open_for(tool, digest)
@@ -276,16 +277,18 @@ def test_console_sees_and_approves_an_account_call_and_the_account_spends_it(led
 
 def test_console_approval_by_tool_and_arguments_reaches_the_account(ledger):
     tool, digest = _account_refusal(ledger)
-    ledger.issue(tool, digest, approver="console", surface="console")
+    with ledger_module.operator_scope():
+        ledger.issue(tool, digest, approver="console", surface="console")
     with pm.mode_scope("account:dev", "s1"):
         assert ledger.consume(tool, digest, surface="http") is not None
 
 
 def test_console_can_deny_and_revoke_account_calls(ledger):
     tool, digest = _account_refusal(ledger)
-    approval = ledger.issue(tool, digest, approver="console")
-    assert ledger.revoke(approval.nonce) is not None
-    denied = ledger.deny(digest[:16])
+    with ledger_module.operator_scope():
+        approval = ledger.issue(tool, digest, approver="console")
+        assert ledger.revoke(approval.nonce) is not None
+        denied = ledger.deny(digest[:16])
     assert denied.owner == _owner_of("account:dev")
     with pm.mode_scope("account:dev", "s1"):
         assert ledger.denied_for(tool, digest)
@@ -313,13 +316,20 @@ def test_developer_scope_keeps_own_plus_unowned(ledger):
         assert [item.digest for item in ledger.pending()] == [dev_digest]
 
 
-def test_same_call_from_console_and_account_resolves_without_ambiguity(ledger):
+def test_same_call_from_console_and_account_resolves_to_each_callers_own_row(ledger):
     tool, digest = _account_refusal(ledger)
     ledger.record_pending(tool, digest, surface="console")  # the console's own refusal
     pending = ledger.resolve_call(digest[:16])
     assert pending.owner == ""
     with pm.mode_scope("account:dev", "s1"):
         assert ledger.resolve_call(digest[:16]).owner == _owner_of("account:dev")
+    # The operator sees both rows: the bare id is ambiguous, each ref names one.
+    with ledger_module.operator_scope():
+        with pytest.raises(ledger_module.AmbiguousCallError):
+            ledger.resolve_call(digest[:16])
+        assert ledger.resolve_call(digest[:16] + "@-").owner == ""
+        dev_ref = ledger_module.call_ref(digest, _owner_of("account:dev"))
+        assert ledger.resolve_call(dev_ref).owner == _owner_of("account:dev")
 
 
 def test_owner_migration_survives_an_orphaned_rebuild_table(tmp_path):
