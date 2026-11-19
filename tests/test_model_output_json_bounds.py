@@ -345,6 +345,43 @@ def test_unmatched_brackets_never_refuse_for_depth(monkeypatch, count):
     assert len(handed) == 1, handed
 
 
+def _count_tables(monkeypatch):
+    """Record the text of every ``container_extents`` table a parse builds."""
+    built = []
+    real = verdict.container_extents
+
+    def extents(text):
+        built.append(text)
+        return real(text)
+
+    monkeypatch.setattr(verdict, "container_extents", extents)
+    return built
+
+
+@pytest.mark.parametrize("parse, text, expected", [
+    (verdict.parse_hypotheses, 'Found: [{"hypothesis":"a","file":"x.c"}] and [1, 2]', ["a"]),
+    (verdict.parse_hypotheses, '{"hypotheses": [{"hypothesis":"b"}]}', ["b"]),
+    (verdict.parse_verdict, 'Prose {"verdict":"REFUTED","reason":"ok"} then {"x": [1, {"y": 2}]}', "REFUTED"),
+], ids=["hypotheses-array", "hypotheses-object", "verdict"])
+def test_a_valid_reply_takes_the_walk_path_and_builds_no_table(monkeypatch, parse, text, expected):
+    # Until a decode fails, each opener is walked on its own; the shared table is never needed.
+    built = _count_tables(monkeypatch)
+    result = parse(text)
+    got = result.verdict if parse is verdict.parse_verdict else [item.hypothesis for item in result]
+    assert got == expected
+    assert built == [], len(built)
+
+
+def test_both_hypotheses_scans_share_one_table(monkeypatch):
+    # In each scan the first opener closes but fails to decode, so the next one is looked up in
+    # the table: the array scan builds it and the object scan reuses it.
+    text = '["a" x] ["b" y] {"a" x} {"b" y}'
+    built = _count_tables(monkeypatch)
+    with pytest.raises(verdict.VerdictParseError, match="no hypothesis list"):
+        verdict.parse_hypotheses(text)
+    assert built == [text], built
+
+
 @pytest.mark.parametrize("prefix", ["", "[0, len) " * 70 + "\n"], ids=["alone", "after-unmatched"])
 def test_closed_nesting_past_the_depth_bound_still_refuses(prefix):
     # A real container deeper than DEFAULT_MAX_DEPTH is refused where it stands, even among

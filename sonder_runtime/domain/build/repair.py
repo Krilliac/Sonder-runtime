@@ -278,34 +278,10 @@ _HEADER_PRAGMA_WORDS = ("dependency", "include_alias")
 # shorter prefix of ``include`` or ``embed`` that ends the identifier (``CAT(__has_, include)``,
 # ``__has_in##clude``). Other ``__has_`` names (``__has_builtin``, ``__has_trivial_copy``, ...)
 # do not match. A name pasted from pieces split anywhere else (``CAT(__ha, s_include)``,
-# ``CAT(_, _has_include)``) is caught on ``#if``/``#elif`` lines by ``_conditional_trigger``.
+# ``CAT(_, _has_include)``) or from a macro body the scanner cannot see is caught only on
+# ``#if``/``#elif`` lines, where every suspect is refused whatever precedes it.
 _HEADER_NAME_OPERATOR_RE = re.compile(
     r"__has_(?:include|embed|(?:i(?:n(?:c(?:l(?:u(?:d)?)?)?)?)?|e(?:m(?:b(?:e)?)?)?)?(?![A-Za-z0-9_$]))")
-# One token of an ``#if``/``#elif`` line in masked text, for ``_conditional_trigger``: a string or
-# character literal (read as ``_mask_literals`` reads it) or a pp-number, skipped; ``##``; an
-# identifier (``$``, ``\`` and non-ASCII characters included, so a UCN or a non-ASCII character
-# stays inside the identifier); ``(``; any other printable character. Blanks (everything else
-# below ``!`` and DEL) are not tokens.
-_IF_LINE_TOKEN_RE = re.compile(
-    r"""(?P<skip>"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?"""
-    r"""|\.?[0-9](?:[eEpP][+-]|'(?=[A-Za-z0-9_])|[A-Za-z0-9_.$\\\x80-\U0010ffff])*)"""
-    r"|(?P<paste>##)"
-    r"|(?P<name>[A-Za-z_$\\\x80-\U0010ffff][A-Za-z0-9_$\\\x80-\U0010ffff]*)"
-    r"|(?P<open>\()"
-    r"|[\x21-\x7e]")
-# Compiler builtins an ``#if`` line may call that take ordinary tokens, never a header-name.
-_IF_LINE_BUILTINS = frozenset((
-    "defined", "__has_builtin", "__has_constexpr_builtin", "__has_feature", "__has_extension",
-    "__has_attribute", "__has_cpp_attribute", "__has_c_attribute", "__has_declspec_attribute",
-    "__has_warning", "__is_identifier", "__building_module"))
-# ... and the type-trait families (``__has_trivial_copy``, ``__is_pod``, ...), by prefix.
-_IF_LINE_BUILTIN_PREFIXES = ("__has_trivial_", "__is_")
-# A ``#define`` of a name in the builtin families. Clang accepts redefining every one of them
-# except ``defined`` (with a warning), and then the "builtin" may paste a ``__has_include``; a
-# text holding such a define gets no builtin exemption at all.
-_BUILTIN_REDEFINE_RE = re.compile(
-    r"^[^\x21-\x7e\n]*#[^\x21-\x7e\n]*define[^\x21-\x7e\n]+(?:__has_|__is_|__building_module)",
-    re.MULTILINE)
 
 
 def _run_end(pattern: re.Pattern[str], text: str, start: int) -> int:
@@ -314,9 +290,8 @@ def _run_end(pattern: re.Pattern[str], text: str, start: int) -> int:
     return start if match is None else match.end()
 
 
-def _line_head(masked: str, start: int) -> tuple[str, str, int]:
-    """``("#", name, end)`` for a directive line, else ``("", first word, end)`` (``import`` after
-    ``export``); ``end`` is where that word ends.
+def _line_head(masked: str, start: int) -> tuple[str, str]:
+    """``("#", name)`` for a directive line, else ``("", first word)`` (``import`` after ``export``).
 
     Blanks are anything outside printable ASCII, so an odd character before or after the ``#``
     widens the match rather than hiding the directive.
@@ -331,86 +306,42 @@ def _line_head(masked: str, start: int) -> tuple[str, str, int]:
     if not mark and word == "export":
         gap = _run_end(_HEAD_GAP_RE, masked, word_end)
         if gap > word_end:
-            end = _run_end(_HEAD_WORD_RE, masked, gap)
-            return "", masked[gap:end], end
-    return mark, word, word_end
-
-
-def _conditional_trigger(masked: str, start: int, end: int, builtins_redefined: bool) -> int:
-    """Where an ``#if``/``#elif`` expression (``masked[start:end]``) may first build a header-name
-    operator from tokens a scanner cannot resolve, or -1.
-
-    A macro can paste ``__has_include`` together from pieces split anywhere
-    (``CAT(__ha, s_include)``), and another macro can supply its ``(``, after which clang lexes
-    the raw ``<...>`` that follows as a header-name. The macro bodies may live elsewhere, so the
-    expression is judged by its own tokens; the first of these is returned:
-
-    - ``##`` (``%:%:`` and ``??=??=`` arrive here normalised);
-    - an identifier followed by ``(`` that is not a compiler builtin (``_IF_LINE_BUILTINS`` or a
-      ``_IF_LINE_BUILTIN_PREFIXES`` family), or any but ``defined`` (which no compiler lets a
-      macro redefine) when ``builtins_redefined`` (the text defines a name in those families);
-    - two adjacent identifiers, unless the first is ``defined`` (``HI LP`` with an object-like
-      ``HI`` that pastes ``__has_include`` and an ``LP`` that expands to ``(``);
-    - an identifier holding a ``\\`` (a UCN) or a non-ASCII character, which compilers may read
-      as another name or as a blank between two names.
-
-    Literals and pp-numbers are skipped; blanks are not tokens. Linear in ``end - start``.
-    """
-    previous = ""
-    previous_start = -1
-    for token in _IF_LINE_TOKEN_RE.finditer(masked, start, end):
-        kind = token.lastgroup
-        if kind == "paste":
-            return token.start()
-        if kind == "name":
-            word = token.group()
-            if not word.isascii() or "\\" in word:
-                return token.start()
-            if previous and previous != "defined":
-                return previous_start
-            previous, previous_start = word, token.start()
-            continue
-        if kind == "open" and previous and previous != "defined" and (builtins_redefined or not (
-                previous in _IF_LINE_BUILTINS or previous.startswith(_IF_LINE_BUILTIN_PREFIXES))):
-            return previous_start
-        previous = ""
-    return -1
+            return "", masked[gap:_run_end(_HEAD_WORD_RE, masked, gap)]
+    return mark, word
 
 
 def _header_name_suspect_in_context(masked: str, offsets: list[int]) -> bool:
     """Whether any suspect sits where a compiler may lex a header-name.
 
     ``offsets`` (ascending) are positions in the masked text of a ``<`` or ``"`` whose header-name
-    reading differs from the comment/literal reading. The contexts are a superset of where GCC,
-    clang and clang-cl lex one, skipped ``#if 0`` blocks included:
+    reading differs from the comment/literal reading: a ``<`` whose text up to the first ``>`` on
+    its line holds a comment opener or a quote, or a ``"`` whose literal reading runs past an
+    escaped quote or newline, where a header-name (which has no escapes) ends. The masked text has had trigraphs, splices and ``%:``
+    normalised, so ``??=if``, ``%:if`` and a ``#`` spliced to its name all read as ``#if``. A
+    suspect is refused in each of these contexts, skipped ``#if 0`` blocks included:
 
+    - anywhere on an ``#if`` or ``#elif`` line, whatever tokens come before it. A macro there may
+      expand to ``__has_include (`` built from pieces split anywhere or pasted inside a body the
+      scanner cannot see (``#define HIP __has_##include (`` then ``#if HIP <a/*b.h>)``, which GCC
+      reads as a header-name), or be a builtin such as ``__has_feature`` that another file of the
+      patch redefines; after it the compilers lex the raw ``<...>`` or ``"..."`` as a header-name.
+      Ordinary comparisons pay for it only when a comment opener or quote follows the ``<`` before
+      a ``>`` on the same line (``#if A < B /* > */``, ``#if A < B // c > d``);
     - anywhere on a directive line whose name holds include, import or embed (``#include``,
       ``#include_next``, ``#import``, ``#embed``, ``#__include_macros``), or a ``#pragma`` line
       naming ``dependency`` or ``include_alias``;
-    - anywhere after ``__has_include`` or ``__has_embed`` on the same line, or after ``__has_``
+    - on any other line, anywhere after ``__has_include`` or ``__has_embed``, or after ``__has_``
       followed by a shorter prefix of either (``_HEADER_NAME_OPERATOR_RE``); other ``__has_``
-      names such as ``__has_builtin`` take no header-name;
-    - on an ``#if``/``#elif`` line, anywhere after a ``##``, a call of anything but a compiler
-      builtin, two adjacent identifiers, or a UCN or non-ASCII identifier
-      (``_conditional_trigger``): a macro there may paste ``__has_include`` from pieces split
-      anywhere and supply its ``(``. A user macro call such as ``#if MYVER(1, 2) < 3 /* a->b */``
-      is refused with them;
-    - right after ``(`` on an ``#if``/``#elif`` line (a macro alias of ``__has_include``);
+      names such as ``__has_trivial_copy`` take no header-name;
     - anywhere on a C++20 ``import`` or ``export import`` line.
-
-    Not covered: a lone object-like macro whose expansion ends in a pasted ``__has_include (``
-    (``#define HIP __has_##include (`` then ``#if HIP <a/*b.h>)``, which GCC reads as a
-    header-name), because ``#if HIP <`` is spelled like ``#if A < B``; and a builtin such as
-    ``__has_feature`` redefined in another file (a header the patch adds) to paste one.
 
     Line starts are found incrementally and each line is classified once, so the work is linear.
     """
     line_start = 0
     scanned = 0
     classified = -1
-    header_line = conditional = False
+    refused_line = False
     first_has = -1
-    builtins_redefined: bool | None = None
     for offset in offsets:
         newline = masked.rfind("\n", scanned, offset)
         if newline >= 0:
@@ -420,31 +351,18 @@ def _header_name_suspect_in_context(masked: str, offsets: list[int]) -> bool:
             classified = line_start
             line_end = masked.find("\n", line_start)
             line_end = len(masked) if line_end < 0 else line_end
-            mark, name, name_end = _line_head(masked, line_start)
+            mark, name = _line_head(masked, line_start)
             if mark:
                 line = masked[line_start:line_end]
-                header_line = any(word in name for word in _HEADER_DIRECTIVE_WORDS) or (
-                    name == "pragma" and any(word in line for word in _HEADER_PRAGMA_WORDS))
-                conditional = name in ("if", "elif")
+                refused_line = name in ("if", "elif") \
+                    or any(word in name for word in _HEADER_DIRECTIVE_WORDS) \
+                    or (name == "pragma" and any(word in line for word in _HEADER_PRAGMA_WORDS))
             else:
-                header_line = name == "import"
-                conditional = False
+                refused_line = name == "import"
             has_name = _HEADER_NAME_OPERATOR_RE.search(masked, line_start, line_end)
             first_has = -1 if has_name is None else has_name.start()
-            if conditional:
-                if builtins_redefined is None:
-                    builtins_redefined = _BUILTIN_REDEFINE_RE.search(masked) is not None
-                trigger = _conditional_trigger(masked, name_end, line_end, builtins_redefined)
-                if 0 <= trigger and (first_has < 0 or trigger < first_has):
-                    first_has = trigger
-        if header_line or 0 <= first_has < offset:
+        if refused_line or 0 <= first_has < offset:
             return True
-        if conditional:
-            before = offset
-            while before > line_start and not "\x21" <= masked[before - 1] <= "\x7e":
-                before -= 1
-            if before > line_start and masked[before - 1] == "(":
-                return True
     return False
 
 

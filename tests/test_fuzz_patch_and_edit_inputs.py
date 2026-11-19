@@ -1506,27 +1506,27 @@ def test_linear_string_matchers_agree_with_the_regex_reference():
                 text[run[0][0]:run[-1][1]]), (text, joined, TAG)
 
 
-# A header-name (after #include and its kin, inside __has_include( or an alias of it in #if, or
-# after a C++20 import) is one token to the compilers: a comment opener or quote inside it starts
-# neither a comment nor a literal. Each head below hid the tail lines from a scanner that read
-# one; the comment names the compilers (gcc -E, clang -E, clang-cl /E) that still reach the
-# hidden #include.
+# A header-name (after #include and its kin, inside __has_include( or anything that expands to
+# it on an #if/#elif line, or after a C++20 import) is one token to the compilers: a comment
+# opener or quote inside it starts neither a comment nor a literal. Each head below hid the tail
+# lines from a scanner that read one; the comment names the compilers (gcc -E, clang -E,
+# clang-cl /E) that still reach the hidden #include. On an #if/#elif line every such ``<`` or
+# ``"`` is refused, whatever precedes it, so the scanner never has to resolve a macro.
 _HIDDEN_TAIL = '#include "../../../outside/secret.h"\n#pragma comment(lib, "evil")\n'
 _HEADER_NAME_BYPASSES = {
     "has-include-angle-comment": ("#if __has_include(<a/*b.h>)\n#endif\n", "#if 0 //*/ c.h>)\n#endif\n"),  # all three
-    "has-include-angle-apostrophe": ("#if __has_include(<a'b.h>) || '/*'\n#endif\n", "#if 0 //*/\n#endif\n"),  # gcc, clang
+    "has-include-angle-apostrophe": ("#if __has_include(<a'b.h>) || '/*'\n#endif\n", "#if 0 //*/\n#endif\n"),  # all three
     "skipped-include-angle-quote": ('#if 0\n#include <a"b.h> "/*"\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
     "skipped-include-angle-comment": ("#if 0\n#include <a/*b.h>\n#endif\n", "#if 0 //*/\n#endif\n"),  # gcc
     "alias-has-include": ("#define H __has_include\n#if H(<a/*b.h>)\n#endif\n", "#if 0 //*/ c.h>)\n#endif\n"),  # all
-    "comment-in-directive-head": ("#if 0\n#/**/include /**/ <a/*b.h>\n#endif\n", "#if 0 //*/\n#endif\n"),
+    "comment-in-directive-head": ("#if 0\n#/**/include /**/ <a/*b.h>\n#endif\n", "#if 0 //*/\n#endif\n"),  # gcc
     "has-include-quoted-escape": ('#if __has_include("x\\") || 1 //"/*\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
     "skipped-include-quoted-escape": ('#if 0\n#include "x\\" "/*"\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
-    "cxx20-import": ("import <a/*b.h>;\n", "#if 0 //*/\n#endif\n"),
+    "cxx20-import": ("import <a/*b.h>;\n", "#if 0 //*/\n#endif\n"),  # clang, clang-cl (-std=c++20)
     # A __has_include pasted from pieces, with a macro-made ``(``: the pieces still name it.
     "pasted-has-include": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has_, include) LP <a/*b.h>)\n#endif\n",
                            "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
-    # The same, split where no piece looks like __has_include: the user macro call on the #if
-    # line is what is refused.
+    # The same, split where no piece looks like __has_include.
     "pasted-split-ha": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__ha, s_include) LP <a/*b.h>)\n#endif\n",
                         "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
     "pasted-split-has": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has, _include) LP <a/*b.h>)\n#endif\n",
@@ -1536,11 +1536,21 @@ _HEADER_NAME_BYPASSES = {
     # An object-like macro pastes it and the next one supplies the ``(``: two adjacent names.
     "pasted-object-like": ("#define HI __has_##include\n#define LP (\n#if HI LP <a/*b.h>)\n#endif\n",
                            "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
-    # A builtin a text redefines is no longer exempt as a builtin.
+    # One object-like macro pastes it and supplies the ``(``: ``#if HIP <`` is spelled like
+    # ``#if A < B``.
+    "pasted-lone-object-like": ("#define HIP __has_##include (\n#if HIP <a/*b.h>)\n#endif\n",
+                                "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    # A builtin the same text redefines to paste it.
     "pasted-redefined-builtin": (("#define __has_feature(a, b) a##b\n#define LP (\n"
                                   "#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n"),
                                  "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl (with a warning)
+    # The same with both defines in another file of the patch (``_CROSS_FILE_DEFINES``): this
+    # text holds only a builtin call and a name.
+    "pasted-builtin-redefined-elsewhere": ("#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n",
+                                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl (with a warning)
 }
+# What "pasted-builtin-redefined-elsewhere" needs from a header the same patch edits.
+_CROSS_FILE_DEFINES = "#define __has_feature(a, b) a##b\n#define LP (\n"
 
 
 @pytest.mark.parametrize("name", sorted(_HEADER_NAME_BYPASSES))
@@ -1560,12 +1570,30 @@ def test_header_name_comment_bypass_is_refused_end_to_end():
     assert texts == {} and any("header-name" in reason for reason in reasons), (reasons, TAG)
 
 
+def test_builtin_redefined_in_another_file_of_the_patch_is_refused_end_to_end():
+    # Each file is scanned on its own, so math.cpp shows only a builtin call; the #if line's
+    # suspect ``<`` is refused without knowing what the header defines.
+    head, close = _HEADER_NAME_BYPASSES["pasted-builtin-redefined-elsewhere"]
+    patch = CandidatePatch(hunks=(
+        PatchHunk("src/core/feat.h", "#pragma once\n", "#pragma once\n" + _CROSS_FILE_DEFINES),
+        PatchHunk("src/core/math.cpp", "    return l;\n}\n",
+                  '    return l;\n}\n#include "feat.h"\n' + head + _HIDDEN_TAIL + close),
+    ))
+    current = {"src/core/feat.h": "#pragma once\n", "src/core/math.cpp": _MATH_SOURCE}
+    texts, reasons = validate_patch(patch, scope=SCOPE, current=current)
+    assert texts == {} and any("header-name" in reason and "math.cpp" in reason for reason in reasons), (
+        reasons, TAG)
+
+
 @pytest.mark.parametrize("text", [
     '#include <vector> // a "quoted" note\n',
     "#include <sys/types.h> /* <inner> */\n",
     '#include "win\\path.h"\n',
     '#if __has_include(<vector>) // "x"\n#endif\n',
-    '#if A < B // a "note" > b\n#endif\n',
+    "#if A < B\n#endif\n",
+    "#if A < B /* x */\n#endif\n",
+    "#if A < B && C > D\n#endif\n",
+    "#elif A < B && C > D // a->b\n",
     '#define LOG(x) printf("\\"%s\\"\\n", x)\n',
     "#define LT(a, b) ((a) < (b)) /* a > b */\n",
     'if (a < b) { // x -> "y"\n}\n',
@@ -1573,11 +1601,11 @@ def test_header_name_comment_bypass_is_refused_end_to_end():
     # Only __has_include and __has_embed take a header-name; other __has_ names take tokens.
     'static_assert(__has_trivial_copy(T), "T must be \\"trivial\\"");\n',
     'static_assert(__has_trivial_destructor(T) && sizeof(T) < 16, "size > 16");\n',
-    "#if __has_builtin(__builtin_expect) && N < 3 /* see a->b */\n#endif\n",
-    '#if __has_feature(cxx_rtti) && X < 2 // "y" > z\n#endif\n',
-    "#if __has_cpp_attribute(nodiscard) && A < B /* a->b */\n#endif\n",
-    '#if __has_warning("-Wfoo") && A < B /* a->b */\n#endif\n',
-    "#if defined FOO && defined(BAR) && N < 3 /* see a->b */\n#endif\n",
+    "#if __has_feature(x) && N < 3\n#endif\n",
+    "#if __has_builtin(__builtin_expect) && N < 3 /* see a, b */\n#endif\n",
+    '#if __has_warning("-Wfoo") && A < B\n#endif\n',
+    "#if MYVER(1, 2) < 3 // a user macro call\n#endif\n",
+    "#if defined FOO && defined(BAR) && N < 3 /* see a */\n#endif\n",
 ])
 def test_header_name_rule_keeps_ordinary_code(text):
     found = scan_added_lexings("", text, include_ok=OK)
@@ -1585,17 +1613,28 @@ def test_header_name_rule_keeps_ordinary_code(text):
 
 
 @pytest.mark.parametrize("text", [
+    "#if A < B /* > */\n#endif\n",
+    "#if A < B // c > d\n#endif\n",
+    '#if A < B // a "note" > b\n#endif\n',
+    "#elif A < B /* > */\n",
     "#if MYVER(1, 2) < 3 /* a->b */\n#endif\n",
-    "#elif MYVER(1, 2) < 3 /* a->b */\n",
     "#if A B < 3 /* a->b */\n#endif\n",
+    "#if __has_builtin(__builtin_expect) && N < 3 /* see a->b */\n#endif\n",
+    '#if __has_feature(cxx_rtti) && X < 2 // "y" > z\n#endif\n',
+    "#if defined FOO && defined(BAR) && N < 3 /* see a->b */\n#endif\n",
+    "#if 201703L <= 1'000'000 && __has_include(<version>)\n#endif\n",
 ])
-def test_header_name_rule_refuses_user_macros_before_a_split_name_on_if_lines(text):
-    """Pinned refusal, by design: a user macro on an #if line may paste ``__has_include``.
+def test_header_name_rule_refuses_every_split_name_on_if_lines(text):
+    """Pinned refusal, by design: on an #if/#elif line any ``<`` whose text up to the first ``>``
+    holds a comment opener or a quote (a digit separator included) is refused, whatever precedes
+    it.
 
-    ``MYVER`` here is an ordinary version macro, but the scanner cannot see a macro's body, and
-    ``CAT(__ha, s_include) LP <a/*b.h>)`` has the same shape, so a ``<`` whose name holds a
-    comment opener or quote after a user macro call (or two adjacent names) on an #if line is
-    refused. It fails closed; such a line is rare in real code.
+    Each line here is an ordinary comparison, but the scanner cannot see macro bodies: ``A``,
+    ``MYVER`` or a ``__has_feature`` another file redefines may expand to ``__has_include (``
+    (``#define HIP __has_##include (`` makes ``#if HIP <a/*b.h>)`` a header-name to gcc), and
+    then ``< B /* >`` is one header-name token whose ``/*`` opens no comment. Telling the two
+    apart needs the macro definitions, so the line fails closed. No ``#if``/``#elif`` line of
+    the MSVC STL, Windows SDK, clang or gcc headers measured has this shape.
     """
     found = scan_added_lexings("", text, include_ok=OK)
     assert any("header-name" in reason for reason in found), (text, found, TAG)
@@ -2041,7 +2080,9 @@ def test_regression_has_include_shim_exemption_is_anchored_to_the_line_start(tex
     "#if defined __has_include && __has_include(<version>)\n#endif\n",
     '#if !defined( __has_include ) || !__has_include("detail/impl.inl")\n#endif\n',
     "#if (defined(__has_include) && (__has_include(<a.h>) || __has_include_next(<b.h>)))\n#endif\n",
-    "#if defined(_WIN32) && !defined SPARK_NO_X && 201703L <= 1'000'000 && 0x1F && __has_include(<version>)\n#endif\n",
+    # Digit separators after a ``<`` and before a later ``>`` are refused on an #if line
+    # (test_header_name_rule_refuses_every_split_name_on_if_lines), so this compares with ``>=``.
+    "#if defined(_WIN32) && !defined SPARK_NO_X && 1'000'000 >= 201703L && 0x1F && __has_include(<version>)\n#endif\n",
     '#if __cplusplus >= 201703L && __has_include("detail/impl.inl")\n#endif\n',
     '#if 0\n#elif __has_include(<sys/types.h>) && __has_include("math.h")\n#endif\n',
     "#if __has_include__(<version>)\n#endif\n",
