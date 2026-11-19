@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import os
 
 
 DEFAULT_CHUNK_SIZE = 262144
 
 
-def file_sha256(path: str | os.PathLike[str], chunk: int = DEFAULT_CHUNK_SIZE) -> str:
+def file_sha256(path, chunk=DEFAULT_CHUNK_SIZE):
     """Return the SHA-256 hex digest of *path*, streaming in bounded chunks."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:

@@ -1,44 +1,13 @@
 """Compatibility offloads through the application ChatService."""
-from __future__ import annotations
-
 import os
-from typing import TYPE_CHECKING
 
 from .model_transport import ModelCallError
 from ..application.chat import provider_bridge
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from typing import Protocol
 
-    from sonder_runtime.application.chat.handle_chat import ChatCommand
-    from sonder_runtime.application.context import OperationContext
-
-    class _ChatResult(Protocol):
-        @property
-        def response_text(self) -> str: ...
-
-    class _ChatCompleter(Protocol):
-        def complete(self, command: ChatCommand, context: OperationContext) -> _ChatResult: ...
-
-    class _ChatApplication(Protocol):
-        @property
-        def chat(self) -> _ChatCompleter: ...
-
-
-def gateway_generate_text(
-    application: Callable[[], _ChatApplication],
-    prompt: str,
-    tier: str = "fast",
-    system: str = "",
-    temperature: float | None = 0.2,
-    num_predict: int | None = 256,
-    num_ctx: int | None = None,
-    timeout: float | None = None,
-    *,
-    cloud_allowed: bool = False,
-    remote_ollama_allowed: bool = False,
-) -> str:
+def gateway_generate_text(application, prompt, tier="fast", system="", temperature=0.2,
+                           num_predict=256, num_ctx=None, timeout=None, *,
+                          cloud_allowed=False, remote_ollama_allowed=False):
     """offload_fn routed through the SPEC-3 ChatService over the ModelGateway.
 
     The port enforces the operation-context cloud-consent gate and returns

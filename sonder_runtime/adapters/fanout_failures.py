@@ -11,16 +11,12 @@ from __future__ import annotations
 
 import math
 import time
-from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.domain.fanout_redaction import redact_prompt_echo
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
 
-
-def failure_class(exc: object) -> str:
+def failure_class(exc):
     """Map a transport failure into the durable, non-content receipt enum."""
     if not isinstance(exc, ModelCallError):
         return "unknown"
@@ -49,7 +45,7 @@ def failure_class(exc: object) -> str:
     return "unknown"
 
 
-def safe_error(exc: object, prompt: str) -> str:
+def safe_error(exc, prompt):
     """Render a useful failure without allowing an echoed prompt into a receipt."""
     if isinstance(exc, ModelCallError):
         # Provider-controlled details may contain only a *partial* request
@@ -67,17 +63,17 @@ def safe_error(exc: object, prompt: str) -> str:
     return redact_prompt_echo(rendered, prompt)[:4000]
 
 
-def no_eligible_models_error(plan: Mapping[str, object], scope: str | None) -> ModelCallError:
+def no_eligible_models_error(plan, scope):
     """Explain a zero-target plan without exposing model names or prompts."""
-    counts: dict[str, int] = {}
-    earliest_retry: float | None = None
+    counts = {}
+    earliest_retry = None
     now = time.time()
-    for row in cast("Iterable[Mapping[str, object]]", plan.get("skipped", [])):
+    for row in plan.get("skipped", []):
         reason = str(row.get("reason") or "not eligible")[:160]
         counts[reason] = counts.get(reason, 0) + 1
         if reason == "health cooldown active":
             try:
-                remaining = float(cast("float | int | str", row.get("retry_after_ts"))) - now
+                remaining = float(row.get("retry_after_ts")) - now
             except (TypeError, ValueError):
                 remaining = 0
             if remaining > 0:

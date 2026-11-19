@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import urllib.error
-from typing import Any, Callable
 
 from .client_endpoint import same_server
 from sonder_runtime.platform.client_fallback import enabled as fallback_enabled
 
 
 def send_prompt_with_fallback(
-    server: str,
-    api_key: str,
-    prompt: str,
-    fallback_server: str | None = None,
+    server,
+    api_key,
+    prompt,
+    fallback_server=None,
     *,
-    sender: Callable[[str, str, str], Any],
-    fallback_policy: Callable[[], bool] = fallback_enabled,
-) -> tuple[Any, str, str]:
+    sender,
+    fallback_policy=fallback_enabled,
+):
     """Try the hosted endpoint, then local Sonder on connection failure."""
     try:
         return sender(server, api_key, prompt), server, ""

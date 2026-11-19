@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import urllib.parse
-from typing import Mapping
 
 from sonder_runtime.platform.unsafe_lab_policy import is_loopback
 
@@ -12,7 +11,7 @@ class InsecureKeyTransportError(ValueError):
     """Raised instead of sending the API key over a channel that exposes it."""
 
 
-def require_secure_key_transport(url: str | None) -> None:
+def require_secure_key_transport(url):
     """Refuse to attach the bearer key to ``url`` unless the channel is safe.
 
     The key may travel over ``https://`` to any host, or over plaintext
@@ -38,7 +37,7 @@ def require_secure_key_transport(url: str | None) -> None:
     )
 
 
-def build_chat_request(server: str, api_key: str, prompt: str) -> tuple[str, Mapping[str, str], bytes]:
+def build_chat_request(server, api_key, prompt):
     """Return the URL, headers, and encoded body for one chat request."""
     url = server.rstrip("/") + "/v1/chat/completions"
     body = json.dumps({
@@ -46,7 +45,7 @@ def build_chat_request(server: str, api_key: str, prompt: str) -> tuple[str, Map
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }).encode("utf-8")
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
     if api_key:
         require_secure_key_transport(url)
         headers["Authorization"] = "Bearer " + api_key
