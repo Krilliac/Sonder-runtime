@@ -951,7 +951,15 @@ def resolve_repository_read_path(
     """
     if not isinstance(path, str) or not path.strip():
         raise ValueError("repository path must be a non-empty path")
-    raw = path.strip()
+    try:
+        # Before any stat/resolve: a UNC or device spelling must never reach
+        # the filesystem (an SMB connection can leak NTLM credentials). An
+        # extended-length local path comes back with its prefix stripped.
+        raw = _reject_network_path(path.strip())
+    except PermissionError:
+        raise PermissionError(
+            "repository path uses a UNC, device or network spelling"
+        ) from None
     _require_plain_name_spelling(raw)
     if _foreign_absolute(raw):
         # e.g. a Windows drive/UNC path reaching a POSIX host: Path() would
