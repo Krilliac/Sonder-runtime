@@ -214,19 +214,29 @@ def _is_credential_name(name: str) -> bool:
     return suffix in _NAMED_CREDENTIAL_CONFIG_SUFFIXES and ("credential" in name or "secret" in name)
 
 
-def _is_credential_path(names: list[str]) -> bool:
-    """``names`` (canonical components, leaf last) name a credential store."""
+def _is_credential_path(names: list[str], context: list[str]) -> bool:
+    """``names`` (canonical components below the root, leaf last) name a credential store.
+
+    ``context`` holds the canonical trailing components of the workspace root
+    (at most two; empty for a path outside the root). The pair, directory-pair
+    and triple rules name parent directories, so they run on ``context`` plus
+    ``names``: a root of ``~/.config`` still sees ``gcloud/...``. The
+    single-directory rule also sees the root's own name (a root of ``~/.aws``
+    is the store) but nothing above it, so a workspace that merely sits
+    somewhere under ``.ssh`` is not refused wholesale.
+    """
     if not names:
         return False
-    if any(name in _CREDENTIAL_DIRECTORIES for name in names):
+    if any(name in _CREDENTIAL_DIRECTORIES for name in (*context[-1:], *names)):
         return True
-    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in zip(names, names[1:], strict=False)):
+    window = [*context, *names]
+    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in itertools.pairwise(window)):
         return True
     if _is_credential_name(names[-1]):
         return True
-    if len(names) >= 2 and (names[-2], names[-1]) in _CREDENTIAL_PAIRS:
+    if len(window) >= 2 and (window[-2], window[-1]) in _CREDENTIAL_PAIRS:
         return True
-    return len(names) >= 3 and (names[-3], names[-2], names[-1]) in _CREDENTIAL_TRIPLES
+    return len(window) >= 3 and (window[-3], window[-2], window[-1]) in _CREDENTIAL_TRIPLES
 
 
 def _canonical_component(part: str) -> str:
@@ -240,11 +250,15 @@ def _canonical_component(part: str) -> str:
     return part.split(":", 1)[0].rstrip(" .").casefold()
 
 
-def _components_under(path: Path, root: Path) -> tuple[str, ...]:
+def _components_under(path: Path, root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(the root's last two components, ``path``'s components below the root).
+
+    A path outside the root yields no root context and all its components.
+    """
     try:
-        return path.relative_to(root).parts
+        return root.parts[-2:], path.relative_to(root).parts
     except ValueError:
-        return path.parts
+        return (), path.parts
 
 
 def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | None:
@@ -255,12 +269,17 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
     for existing directories) reaches ``.git`` or a credential store.
     Components above the workspace root are not inspected, so a workspace that
     itself sits under a directory named ``.git`` or ``.ssh`` is not refused
-    wholesale; a path outside the root (bypass) is inspected in full.
+    wholesale; a path outside the root (bypass) is inspected in full. The
+    credential rules also see the root's trailing components (see
+    ``_is_credential_path``).
     """
     lexical = Path(text)
-    lexical_parts = _components_under(lexical, root) if lexical.is_absolute() else lexical.parts
-    for parts in (lexical_parts, _components_under(resolved, root)):
+    lexical_split = (
+        _components_under(lexical, root) if lexical.is_absolute() else (root.parts[-2:], lexical.parts)
+    )
+    for context_parts, parts in (lexical_split, _components_under(resolved, root)):
         names = [_canonical_component(part) for part in parts]
+        context = [_canonical_component(part) for part in context_parts]
         if _GIT_METADATA_DIRECTORY in names:
             return GitControlPathRefused(
                 f"refusing to modify git repository metadata '{text}': hooks and config there "
@@ -271,7 +290,7 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
                 f"refusing to modify git control file '{text}': it selects programs git runs; "
                 "use run_program (execute approval) if this is intended"
             )
-        if _is_credential_path(names):
+        if _is_credential_path(names, context):
             return CredentialPathRefused(
                 f"refusing to modify credential store '{text}' from a client tool; "
                 "use run_program (execute approval) if this is intended"
