@@ -258,10 +258,10 @@ without a reply and the frame guard is still needed.
 the sorted pin lines of `requirements-runtime.txt`
 (`engine_bundle.py:70-87`, `runtime_contract_fingerprint`), written at assembly
 (`scripts/assemble_engine_bundle.py:525`). Bootstrap recomputes it from the
-checkout and compares (`bootstrap_engine.py:402-405`). A bundle built with
+checkout and compares (`bootstrap_engine.py:417-420`). A bundle built with
 `mcp==2.0.0` therefore mismatches. It is not refused: the mismatch is passed to
-`ensure_python_deps` (`bootstrap_engine.py:416`), which skips its
-"already available" short-circuit (`:210`) and runs
-`pip install --only-binary=:all: -r requirements-runtime.txt` (`:229-240`). With
-`--offline` it returns an error instead (`:212-224`), so an old bundle needs a
+`ensure_python_deps` (`bootstrap_engine.py:428-433`), which skips its
+"already available" short-circuit (`:225-226`) and runs
+`pip install --only-binary=:all: -r requirements-runtime.txt` (`:244-257`). With
+`--offline` it returns an error instead (`:227-240`), so an old bundle needs a
 rebuild or a non-offline bootstrap.
