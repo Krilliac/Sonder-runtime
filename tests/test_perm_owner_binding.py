@@ -121,6 +121,28 @@ def test_identical_calls_from_two_owners_get_one_call_id_each(ledger):
     assert not _spends(ledger, "account:bob", tool, digest)
 
 
+def test_owners_whose_keys_share_a_long_prefix_still_get_one_reference_each(ledger):
+    tool = "file_write"
+    digest = pm.call_digest(tool, ARGS)
+    shared = "ap-" + "5" * 40
+    owners = (shared + "a" * 24, shared + "b" * 24)
+    for owner in owners:
+        ledger.record_pending(tool, digest, surface="http", preview="notes", owner=owner)
+    with ledger_module.operator_scope():
+        refs = {item.owner: item.ref for item in ledger.pending()}
+        assert set(refs) == set(owners) and len(set(refs.values())) == 2, refs
+        with pytest.raises(ledger_module.AmbiguousCallError) as caught:
+            ledger.resolve_call(digest[:16])
+        assert all(ref in str(caught.value) for ref in refs.values()), str(caught.value)
+        for owner, ref in refs.items():
+            assert ledger.resolve_call(ref).owner == owner
+            result = facade.approve_call(ledger, ref, {}, approver="admin", surface="http")
+            assert result.status == 201, result.body
+        assert sorted(item.owner for item in ledger.approvals()) == sorted(owners)
+    # A real account's tag carries far more than 8 hex characters of its key.
+    assert len(ledger_module.owner_tag(_owner_of("account:alice"))) >= len("ap-") + 16
+
+
 def test_approving_one_owners_call_does_not_approve_the_others(ledger):
     tool, digest = _refuse(ledger, "account:alice")
     _refuse(ledger, "account:bob")  # the most recent row with that digest

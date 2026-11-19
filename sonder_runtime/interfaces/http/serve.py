@@ -6200,6 +6200,7 @@ class Handler(BaseHTTPRequestHandler):
             send_idempotency_refusal=_send_idempotency_refusal,
             approver_of=_http_approver, audit=_audit_http_approval,
             clock=lambda: time.time(), log=_serve_logger,
+            unquote=lambda segment: urllib.parse.unquote(segment, errors="strict"),
         )
 
     def _handle_approvals_get(self):

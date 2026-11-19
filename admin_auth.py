@@ -704,15 +704,18 @@ def set_saas_tier_limit(conn: sqlite3.Connection, tier: str, limit: int) -> SaaS
 def meter_usage(conn: sqlite3.Connection, account: dict | None, tokens: int) -> tuple[bool, str]:
     """Charge ``tokens`` to the account's monthly tier budget when SaaS metering is on.
 
-    Never metered: callers with no account (key-only, local-open), admins, and
-    ``unlimited`` accounts; and nobody at all while ``usage_metering_enabled``
-    is off.  The check and the charge are one ``BEGIN IMMEDIATE`` transaction,
+    Never metered: callers with no account (key-only, local-open), admins
+    signed in through a session, and ``unlimited`` accounts; and nobody at all
+    while ``usage_metering_enabled`` is off.  An admin account's API key is
+    metered like any other key: it carries no admin authority (``require``).
+    The check and the charge are one ``BEGIN IMMEDIATE`` transaction,
     so concurrent requests cannot both spend the last of a budget, and a
     refused request is not charged.  A usage period is a fixed 30-day bucket.
     """
     if not account:
         return True, ""
-    if account.get("role") == "admin" or "unlimited" in (account.get("dev_flags") or ""):
+    session_admin = account.get("role") == "admin" and not account.get("via_api_key")
+    if session_admin or "unlimited" in (account.get("dev_flags") or ""):
         return True, ""
     config = saas_config(conn)
     if not config.is_feature_enabled("usage_metering_enabled"):
