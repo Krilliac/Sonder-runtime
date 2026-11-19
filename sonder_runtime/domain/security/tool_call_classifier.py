@@ -7,12 +7,14 @@ Three verdicts:
   program it is an allowlist: a bare program name from ``_SAFE_PROGRAMS``
   whose every flag is on that program's read-only list.
 * ``ASK``: a person must confirm the call first: file deletes, elevated
-  commands (``sudo``, ``runas``, ``-Verb RunAs``...), every ``git`` call (the
-  repository's ``.git/config`` can name an fsmonitor, a pager or a diff driver,
-  so even ``git status`` can run code), a program named by a path instead of a
-  bare name, a flag outside a safe program's read-only list, host programs and
-  code the classifier cannot show to be read-only, and every tool or argument
-  shape it does not know.  ASK is the default for anything not recognised.
+  commands (``sudo``, ``runas``, ``-Verb RunAs``...), every ``git`` call and
+  every ``git_*`` tool (the repository's hooks and ``.git/config`` can name an
+  fsmonitor, a pager or a diff driver, so even ``git status`` can run code),
+  a program named by a path instead of a bare name, a flag outside a safe
+  program's read-only list, host programs and code the classifier cannot
+  show to be read-only, command text above ``_MAX_TEXT`` characters, and
+  every tool or argument shape it does not know.  ASK is the default for
+  anything not recognised.
 * ``BLOCK``: refused in every permission mode, bypass included: recognised
   destructive commands (disk formatting and partitioning, boot and shadow-copy
   deletion, shutdown, download-and-execute, fork bombs) and deletes aimed at a
@@ -24,17 +26,39 @@ is not blocked by it.  It is a last net (in bypass, the only one), never a
 finding that a call is harmless; that is why ALLOW is an allowlist and
 everything unrecognised asks.
 
-``git_commit`` and the permission catalog's read-only (``safe``/``ask``) and
-file-edit (``mutation``) grades are ``ALLOW``.  The caller passes the grade
-(``risk``) it read from the permission catalog; an unknown or missing grade
-is ``ASK``.
+Where each rule reads:
+
+* Shell text is the argv of a program (``program``/``args_json``/``args``/
+  ``argv``, and ``checks[].argv``), ``command``/``cmd``/``script``/``stdin``,
+  and ``run_code`` in a shell language (``_SHELL_LANGUAGES``; ``stdin`` of a
+  ``run_code`` call follows its language).  Only shell text gets the delete
+  scan: a delete verb (``rm``, ``del``, ``Remove-Item``...) with a root among
+  its operands, a relative operand resolved against ``cwd`` (and any ``cd``
+  before it), and a relative path that climbs past its anchor counted as a root.
+* Every command-bearing text, other code included (Python, JavaScript...),
+  gets the token and text lists (``_BLOCK_TOKENS``, ``_BLOCK_TEXT``) and the
+  download-and-execute checks.  Shell strings handed to ``os.system`` or
+  ``subprocess`` inside other code are not parsed as shell.
+* An unescaped newline ends a command in every scan; a newline after ``\\``,
+  ``^``, a PowerShell backtick, a pipe or ``&&`` continues it.  Two checks
+  follow data rather than one command, so they span lines: a download whose
+  file a later command runs, and an evaluator (``iex``,
+  ``[scriptblock]::Create``) in the same text as a download.
+
+Every scan is one left-to-right pass over the text, linear in its length.
+
+``git_*`` tools ask whatever their catalog grade.  Otherwise the permission
+catalog's read-only (``safe``/``ask``) and file-edit (``mutation``) grades are
+``ALLOW``.  The caller passes the grade (``risk``) it read from the permission
+catalog; an unknown or missing grade is ``ASK``.
 
 It fails closed: any fault while classifying answers ``ASK``, never ``ALLOW``.
 It is purely static (no model call, no I/O), so there is no timeout path.
 Arguments are inspected in memory and never logged or kept.
 
-Everything here is a pure function over immutable tables: safe to call from
-any thread, no state, no ownership.
+The tables are immutable and every function is pure; the scan state
+(``_Scan``) is created per call and never shared, so ``classify`` is safe to
+call from any thread.
 """
 from __future__ import annotations
 
@@ -48,13 +72,26 @@ from typing import Any
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
 VERDICTS = frozenset({ALLOW, ASK, BLOCK})
 
-_ALWAYS_ALLOWED = frozenset({"git_commit"})
 _ALWAYS_ASK = frozenset({"file_delete"})
+# Tool names that ask whatever their catalog grade.
+_ASK_PREFIXES = ("git_",)
 _DELETE_TOOLS = frozenset({"file_delete"})
 _RISK_VERDICTS: Mapping[str, str] = {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW}
 _ARGV_TOOLS = frozenset({"workspace_run"})
-# Argument keys whose values are a program, a command line or code to run.
-_COMMAND_KEYS = ("program", "args_json", "args", "argv", "code", "command", "cmd", "script")
+# Keys whose values together are one program and its arguments.
+_ARGV_KEYS = ("program", "args_json", "args", "argv")
+# Keys whose values are shell command lines, a shell script or a shell's input.
+_SHELL_KEYS = ("command", "cmd", "script", "stdin")
+# ``run_code`` languages whose code is shell text.
+_SHELL_LANGUAGES = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "shell", "pwsh", "powershell", "ps1", "cmd", "bat",
+})
+# Languages whose backtick is an escape character, not a command substitution.
+_BACKTICK_ESCAPES = frozenset({"pwsh", "powershell", "ps1"})
+# Above this many characters of command text the classifier does not read it: ASK.
+_MAX_TEXT = 256 * 1024
+# Substitutions nested deeper than this are read as part of the deepest one.
+_MAX_DEPTH = 64
 
 _ELEVATION_TOKENS = frozenset({"sudo", "su", "doas", "runas", "gsudo", "pkexec"})
 _ELEVATION_TEXT = ("-verb runas", "-verb:runas", "-verb 'runas'", '-verb "runas"')
@@ -62,44 +99,61 @@ _BLOCK_TOKENS = frozenset({
     "diskpart", "format-volume", "clear-disk", "initialize-disk", "remove-partition",
     "bcdedit", "stop-computer", "restart-computer", "set-mppreference",
 })
+_MKFS = re.compile(r"mkfs(?:\.[a-z0-9]+)?")
 _BLOCK_TEXT = (
     "--no-preserve-root", "vssadmin delete", "wbadmin delete", "cipher /w",
     "reg delete hklm", "reg delete hkey_local_machine", "of=/dev/sd", "of=/dev/nvme",
     "of=/dev/hd", "> /dev/sd", ":(){", "downloadstring", "allprofiles state off",
     "shutdown /s", "shutdown /r", "shutdown -h", "shutdown -r", "shutdown now",
 )
-# What a download is piped or substituted into: shells, interpreters, ``eval``
-# and ``source``, and PowerShell's evaluator.
+# What a download is piped or substituted into, or a downloaded file is run
+# by: shells, interpreters, ``eval``, ``source``/``.``, and PowerShell's evaluator.
 _PIPE_SHELLS = frozenset({
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "iex", "invoke-expression",
     "python", "py", "pwsh", "powershell", "cmd", "perl", "ruby", "node", "php", "lua",
-    "eval", "source",
+    "eval", "source", ".",
 })
-# ``|`` and ``|&`` (stdout and stderr) both feed the next command.
-_PIPE = re.compile(r"\|&?")
-# ``$(...)``, ``<(...)`` and backticks: a download handed to a command as its text or a file.
-_SUBSTITUTION = re.compile(r"\$\(|<\(|`")
-_COMMAND_END = re.compile(r"[;|&]")
 _EVAL_TOKENS = frozenset({"iex", "invoke-expression"})
-# Words that may stand before the pipe target (``| sudo -E bash``, ``| xargs sh -c``).
-_PIPE_PREFIXES = _ELEVATION_TOKENS | {"env", "exec", "command", "nohup", "time", "xargs"}
+# ``[scriptblock]::Create`` (and ``[System.Management.Automation.ScriptBlock]::Create``).
+_SCRIPTBLOCK = "scriptblock]::create"
+# Words that may stand before the program they run (``| sudo -E bash``,
+# ``| timeout 5 bash``); past one, every later word may be that program.
+_PIPE_PREFIXES = _ELEVATION_TOKENS | {
+    "env", "exec", "command", "nohup", "time", "xargs", "timeout", "nice", "stdbuf", "busybox",
+    "ionice",
+}
 _DOWNLOADERS = frozenset({
     "curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod",
     "start-bitstransfer", "bitsadmin", "certutil",
 })
+# Downloaders that write the file named by the URL's last path segment.
+_URL_SAVERS = frozenset({"wget", "bitsadmin", "certutil", "start-bitstransfer"})
+# Downloaders whose last word is the file they write.
+_LAST_WORD_SAVERS = frozenset({"bitsadmin", "certutil"})
+# Flags whose value is the downloaded file (``-O``/``-o`` are the same after lowercasing).
+_OUTPUT_FLAGS = frozenset({"-o", "--output", "--output-document", "-outfile", "-destination"})
+_OUTPUT_ASSIGNMENTS = ("--output=", "--output-document=")
+_REDIRECTS = frozenset({">", ">>", "1>", "1>>"})
+# Commands that write their input to the files they name.
+_WRITERS = frozenset({"tee", "out-file", "set-content", "add-content"})
+_NOT_A_FILE = frozenset({"", "-", ".", "..", "null", "nul", "$null"})
 _DELETE_VERBS = frozenset({"rm", "del", "erase", "rd", "rmdir", "remove-item", "ri", "rimraf"})
+# cmd's delete verbs, whose two-character ``/x`` words are switches, not paths.
+_SWITCH_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
+_CD_VERBS = frozenset({"cd", "chdir", "pushd", "set-location", "sl"})
 
-# Protected roots, compared after ``_normalize_target``.  The home directory
+# Protected roots, compared after ``_normalize_targets``.  The home directory
 # is the sentinel ``/~`` so that ``~/..`` normalizes to ``/``.
 _HOME = "/~"
 _HOME_SPELLINGS = (
     "~", "$home", "$env:userprofile", "$env:home", "%userprofile%",
-    "%homedrive%%homepath%", "%homepath%",
+    "%homedrive%%homepath%", "%homepath%", "$env:homedrive$env:homepath", "$env:homepath",
 )
 _SYSTEM_SPELLINGS = (
     ("%systemroot%", "c:/windows"), ("%windir%", "c:/windows"),
     ("$env:systemroot", "c:/windows"), ("$env:windir", "c:/windows"),
     ("%systemdrive%", "c:"), ("$env:systemdrive", "c:"),
+    ("%homedrive%", "c:"), ("$env:homedrive", "c:"),
     ("%programfiles%", "c:/program files"), ("$env:programfiles", "c:/program files"),
 )
 # ``${HOME}`` / ``${env:USERPROFILE}`` are the braced spellings of the same variables.
@@ -111,17 +165,25 @@ _DEVICE_PREFIX = re.compile(r"//[?.]/(unc/)?")
 # A UNC share ``//host/share/rest``; ``c$`` is the administrative share of drive C.
 _UNC = re.compile(r"//([^/]+)/([^/]+)(/.*)?")
 _ADMIN_SHARE = re.compile(r"[a-z]\$")
+# A drive mounted as a directory: WSL ``/mnt/c``, Cygwin ``/cygdrive/c``, Git Bash ``/c``.
+_MOUNTED_DRIVE = re.compile(r"/(?:mnt/|cygdrive/)?([a-z])(/.*)?")
+# An 8.3 short name (``PROGRA~1``): its stem, ``~`` and a number.
+_SHORT_NAME = re.compile(r"([^/~. ]{1,6})~[0-9]{1,6}(?:\.[^/.]{0,3})?")
 # The root itself (a drive root is ``/`` after its drive letter).
 _EXACT_ROOTS = frozenset({
     "/", _HOME, "/home", "/users", "/root", "/var", "/opt", "/srv", "/mnt", "/media",
 })
-# A home directory: one level below these.
+# A home directory: exactly one level below these (not the folders inside it).
 _HOME_PARENTS = frozenset({"/home", "/users"})
 # System trees: the root and anything below it.
 _ROOT_TREES = (
     "/etc", "/usr", "/boot", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/sys", "/proc",
     "/dev", "/system", "/windows", "/program files", "/program files (x86)", "/programdata",
 )
+# The 8.3 stems of the drive-root system trees that have a short name (``progra``).
+_SHORT_TREE_STEMS = frozenset(
+    tree[1:].replace(" ", "").replace(".", "")[:6] for tree in _ROOT_TREES
+    if "/" not in tree[1:] and (len(tree) > 9 or " " in tree))
 
 # Per safe program, the flags that only read: (bundlable short letters, long
 # flags matched up to their ``=``, Windows ``/x`` switches matched up to their
@@ -177,9 +239,22 @@ _SAFE_PROGRAMS: Mapping[str, tuple[str, frozenset[str], frozenset[str]]] = Mappi
     "tree": ("aCdDfFghiILnPpsu", frozenset({"--noreport", "--dirsfirst"}), frozenset({"/f", "/a"})),
 })
 _PUNCTUATION = str.maketrans({c: " " for c in "()[]{},;'\"`"})
-# ``;``, ``|`` and ``&`` end a command; each becomes the token ``;``.
-_SEPARATOR = ";"
-_SEPARATORS = str.maketrans({**{c: " " for c in "()[]{},'\"`"}, **{c: " ; " for c in ";|&"}})
+_SPACES = re.compile(r"[^\S\n]+")
+
+# One token of command text.  ``(``, ``)``, ``[``, ``]``, ``{``, ``}``, ``,``
+# and whitespace separate words; quotes are their own tokens, so a quoted
+# root with a space (``"C:\\Program Files"``) is read whole as well.
+_TOKEN = re.compile(
+    r"(?P<nl>`?\r?\n)"
+    r"|(?P<sub>\$\(|<\()"
+    r"|(?P<tick>`)"
+    r"|(?P<open>\()"
+    r"|(?P<close>\))"
+    r"|(?P<pipe>\|[|&]?)"
+    r"|(?P<end>&&?|;)"
+    r"|(?P<quote>['\"])"
+    r"|(?P<word>(?:[^\s()\[\]{},'\"`;|&$<]|\$(?!\()|<(?!\())+)"
+)
 
 
 class _Unreadable(ValueError):
@@ -194,24 +269,39 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def _command_text(arguments: Mapping[str, Any]) -> str:
-    """Every command-bearing argument, lowercased and whitespace-collapsed."""
-    parts: list[str] = []
-    for key in _COMMAND_KEYS:
+def _parts(arguments: Mapping[str, Any]) -> list[tuple[str, bool, bool]]:
+    """Every command-bearing argument as ``(text, is_shell, backtick_substitutes)``."""
+    language = arguments.get("language")
+    language = language.strip().casefold() if isinstance(language, str) else ""
+    code_is_shell = language in _SHELL_LANGUAGES
+    code_ticks = language not in _BACKTICK_ESCAPES
+    parts: list[tuple[str, bool, bool]] = []
+    argv: list[str] = []
+    for key in _ARGV_KEYS:
         value = arguments.get(key)
         if key == "args_json" and isinstance(value, str):
             try:
                 value = json.loads(value)
             except ValueError:
                 pass  # inspect the raw text instead
-        parts.extend(_strings(value))
-    # A standalone verification payload carries its commands as ``checks[].argv``;
-    # ``;`` keeps one check's operands from running into the next.
+        argv.extend(_strings(value))
+    if argv:
+        parts.append((" ".join(argv), True, True))
+    is_code = "code" in arguments
+    for key in _SHELL_KEYS:
+        # A run_code call's stdin is input to its language, not to a shell.
+        follows_code = key == "stdin" and is_code
+        for text in _strings(arguments.get(key)):
+            parts.append((text, code_is_shell if follows_code else True,
+                          code_ticks if follows_code else True))
+    for text in _strings(arguments.get("code")):
+        parts.append((text, code_is_shell, code_ticks))
+    # A standalone verification payload carries its commands as ``checks[].argv``.
     checks = arguments.get("checks")
     for check in checks if isinstance(checks, (list, tuple)) else ():
-        if isinstance(check, Mapping) and (argv := _strings(check.get("argv"))):
-            parts.extend([";", *argv])
-    return " ".join(" ".join(parts).lower().split())
+        if isinstance(check, Mapping) and (check_argv := _strings(check.get("argv"))):
+            parts.append((" ".join(check_argv), True, True))
+    return parts
 
 
 def _is_drive_root(token: str) -> bool:
@@ -219,23 +309,52 @@ def _is_drive_root(token: str) -> bool:
             and token[1] == ":" and token[2:] in ("", "\\", "/", "\\*", "/*"))
 
 
-def _strip_components(path: str) -> str:
-    """Win32 drops trailing dots and spaces from every component but ``.`` and ``..``.
+def _is_drive_letter(target: str) -> bool:
+    return len(target) >= 2 and target[1] == ":" and target[0].isascii() and target[0].isalpha()
 
-    ``C:\\Windows.`` is ``C:\\Windows`` and ``C:\\ .`` is ``C:\\``; a component
-    that is only dots and spaces (``...``, ``.. ``) vanishes.
+
+def _strip_component(part: str) -> str:
+    part = part.split(":", 1)[0]  # an NTFS stream suffix (``::$INDEX_ALLOCATION``)
+    return part if part in (".", "..") else part.rstrip(" .")
+
+
+def _strip_components(path: str) -> str:
+    """Win32 drops a stream suffix and trailing dots and spaces from every component but ``.`` and ``..``.
+
+    ``C:\\Windows.`` and ``C:\\Windows::$INDEX_ALLOCATION`` are
+    ``C:\\Windows`` and ``C:\\ .`` is ``C:\\``; a component that is only dots
+    and spaces (``...``, ``.. ``) vanishes.
     """
-    return "/".join(part if part in (".", "..") else part.rstrip(" .") for part in path.split("/"))
+    return "/".join(_strip_component(part) for part in path.split("/"))
 
 
 def _resolve(drive: str, target: str) -> tuple[str, str]:
-    """``(drive, path)`` with trailing dots, ``/*``, ``.`` and ``..`` resolved."""
+    """``(drive, path)`` with stream suffixes, trailing dots, ``/*``, ``.`` and ``..`` resolved."""
     target = _strip_components(target)
     while target.endswith("/*"):
         target = target[:-2] or "/"
     if target.startswith("/"):
         target = posixpath.normpath("/" + target.lstrip("/"))
+    elif target:
+        target = posixpath.normpath(target)
     return drive, target
+
+
+def _device_targets(target: str) -> tuple[list[tuple[str, str]], str]:
+    """A Win32 device path's remainder: its readings, or ``[]`` and the drive-letter or share path it names."""
+    if target.startswith("globalroot/"):
+        target = target[len("globalroot/"):]
+        if target.startswith("device/"):
+            name, _, rest = target[len("device/"):].partition("/")
+            return [_resolve("//device/" + name, "/" + rest)], ""
+        target = target.removeprefix("??/")
+    if _is_drive_letter(target):
+        return [], target
+    if target.startswith("unc/"):
+        return [], "//" + target[4:]
+    # ``Volume{guid}``, ``PhysicalDrive0``, ``HarddiskVolume3``: the device is the drive.
+    name, _, rest = target.partition("/")
+    return [_resolve("//./" + name, "/" + rest)], ""
 
 
 def _normalize_targets(token: str) -> list[tuple[str, str]]:
@@ -243,14 +362,23 @@ def _normalize_targets(token: str) -> list[tuple[str, str]]:
 
     The home directory becomes ``/~`` and ``~alice`` becomes ``/home/alice``.
     A drive letter is the drive (``("c:", "/windows")``), and a device path
-    (``\\\\?\\C:\\``) is read as the path it names.  A UNC path
-    (``\\\\host\\c$\\``) is read both as a share, whose root is ``/`` (the
-    administrative share ``c$`` is drive ``c:``), and as a POSIX path.  A
-    relative path stays relative.
+    (``\\\\?\\C:\\``, ``\\??\\C:\\``, ``\\\\?\\GLOBALROOT\\Device\\X``) is read
+    as the path it names.  A UNC path (``\\\\host\\c$\\``) is read both as a
+    share, whose root is ``/`` (the administrative share ``c$`` is drive
+    ``c:``), and as a POSIX path; ``/mnt/c``, ``/cygdrive/c`` and ``/c`` are
+    read both as drive ``c:`` and as POSIX paths.  A relative path stays relative.
     """
     target = _BRACED_VARIABLE.sub(r"$\1", token.strip().strip("'\"").casefold()).replace("\\", "/")
-    if device := _DEVICE_PREFIX.match(target):
-        target = ("//" if device.group(1) else "") + target[device.end():]
+    device = target.startswith("/??/")
+    if device:
+        target = target[4:]
+    elif match := _DEVICE_PREFIX.match(target):
+        device = not match.group(1)
+        target = ("" if device else "//") + target[match.end():]
+    if device:
+        device_readings, target = _device_targets(target)
+        if device_readings:
+            return device_readings
     for spelling in _HOME_SPELLINGS:
         if target == spelling or target.startswith(spelling + "/"):
             target = _HOME + target[len(spelling):]
@@ -263,15 +391,31 @@ def _normalize_targets(token: str) -> list[tuple[str, str]]:
         else:
             if user := _USER_HOME.fullmatch(target.split("/", 1)[0]):
                 target = "/home/" + user.group(1) + target[len(user.group(0)):]
-    if len(target) >= 2 and target[1] == ":" and target[0].isascii() and target[0].isalpha():
+    if _is_drive_letter(target):
         return [_resolve(target[:2], "/" + target[2:])]
     readings = []
     if (share := _UNC.fullmatch(target)) and not target.startswith("///"):
         host, name, rest = share.group(1), share.group(2), share.group(3) or "/"
         drive = name[0] + ":" if _ADMIN_SHARE.fullmatch(name) else f"//{host}/{name}"
         readings.append(_resolve(drive, rest))
+    if mounted := _MOUNTED_DRIVE.fullmatch(target):
+        readings.append(_resolve(mounted.group(1) + ":", mounted.group(2) or "/"))
     readings.append(_resolve("", target))
     return readings
+
+
+def _targets(token: str, cwd: str) -> list[tuple[str, str]]:
+    """``_normalize_targets``, with a relative reading resolved against ``cwd`` when there is one."""
+    readings = _normalize_targets(token)
+    if not cwd:
+        return readings
+    resolved: list[tuple[str, str]] = []
+    for drive, path in readings:
+        if drive or path.startswith("/"):
+            resolved.append((drive, path))
+        else:
+            resolved.extend(_normalize_targets(cwd.rstrip("/\\") + "/" + token))
+    return resolved
 
 
 def _is_root_path(path: str) -> bool:
@@ -280,85 +424,26 @@ def _is_root_path(path: str) -> bool:
         or any(path == tree or path.startswith(tree + "/") for tree in _ROOT_TREES))
 
 
-def _is_root_target(token: str) -> bool:
+def _is_root_reading(drive: str, path: str) -> bool:
+    """A root, a system tree, an 8.3 name directly under a drive root, or a relative path above its anchor."""
+    if not path.startswith("/"):
+        return path == ".." or path.startswith("../")
+    if _is_root_path(path):
+        return True
+    if not (len(drive) == 2 and _is_drive_letter(drive)):
+        return False
+    first, _, rest = path[1:].partition("/")
+    short = _SHORT_NAME.fullmatch(first)
+    return short is not None and (not rest or short.group(1) in _SHORT_TREE_STEMS)
+
+
+def _is_root_target(token: str, cwd: str = "") -> bool:
     """Whether any reading of ``token`` names a drive, share, filesystem or home root, or a path in a system tree."""
-    return any(_is_root_path(path) for _drive, path in _normalize_targets(token))
+    return any(_is_root_reading(drive, path) for drive, path in _targets(token, cwd))
 
 
-def _is_delete_verb(token: str) -> bool:
-    return token in _DELETE_VERBS or token == "rmtree" or token.endswith(".rmtree")
-
-
-def _downloads(words: list[str]) -> bool:
-    return any(_program_name(word) in _DOWNLOADERS for word in words)
-
-
-def _interpreter_name(word: str) -> str:
-    """``python3.12`` -> ``python``; ``/bin/sh`` -> ``sh``; any other word its program name."""
-    name = _program_name(word)
-    unversioned = name.rstrip("0123456789.")
-    return unversioned if unversioned in _PIPE_SHELLS else name
-
-
-def _command_programs(words: list[str]) -> set[str]:
-    """The program a command runs, or every word after a ``sudo``/``env``-style prefix.
-
-    A prefix's flags can take a value (``sudo -u root bash``) that cannot be
-    told from the program, so past a prefix every word counts.  Flags and
-    ``NAME=value`` assignments are skipped.
-    """
-    names: set[str] = set()
-    prefixed = False
-    for word in words:
-        if _is_flag(word) or "=" in word:
-            continue
-        name = _interpreter_name(word)
-        if name in _PIPE_PREFIXES:
-            prefixed = True
-            continue
-        names.add(name)
-        if not prefixed:
-            break
-    return names
-
-
-def _substitutes_a_download(text: str) -> bool:
-    """``sh -c "$(curl x)"``, ``bash <(curl x)``: a download substituted into an interpreter."""
-    for marker in _SUBSTITUTION.finditer(text):
-        command = _COMMAND_END.split(text[:marker.start()])[-1].translate(_PUNCTUATION).split()
-        if not _command_programs(command) & _PIPE_SHELLS:
-            continue
-        inner = text[marker.end():]
-        end = inner.find("`" if marker.group() == "`" else ")")
-        if _downloads((inner[:end] if end >= 0 else inner).translate(_PUNCTUATION).split()):
-            return True
-    return False
-
-
-def _blocked(text: str) -> bool:
-    if any(marker in text for marker in _BLOCK_TEXT):
-        return True
-    text = _BRACED_VARIABLE.sub(r"$\1", text)
-    tokens = text.translate(_PUNCTUATION).split()
-    if any(token in _BLOCK_TOKENS or token.startswith("mkfs") for token in tokens):
-        return True
-    for index, token in enumerate(tokens[:-1]):
-        if token == "format" and _is_drive_root(tokens[index + 1]):
-            return True
-    # Command separators stay tokens here, so a delete's operands end with its command.
-    commands = text.translate(_SEPARATORS).split()
-    if any(_is_delete_verb(token) and _deletes_a_root(commands[index + 1:index + 8])
-           for index, token in enumerate(commands)):
-        return True
-    segments = [segment.translate(_PUNCTUATION).split() for segment in _PIPE.split(text)]
-    for index, words in enumerate(segments[1:], start=1):
-        if _command_programs(words) & _PIPE_SHELLS and any(
-                _downloads(earlier) for earlier in segments[:index]):
-            return True
-    if _substitutes_a_download(text):
-        return True
-    # ``iex (iwr ...)``: PowerShell evaluates a download with no pipe at all.
-    return any(token in _EVAL_TOKENS for token in tokens) and _downloads(tokens)
+def _is_delete_verb(name: str) -> bool:
+    return name in _DELETE_VERBS or name == "rmtree" or name.endswith(".rmtree")
 
 
 def _is_flag(token: str) -> bool:
@@ -367,14 +452,321 @@ def _is_flag(token: str) -> bool:
         len(token) == 2 and token[0] == "/" and token[1].isalpha())
 
 
-def _deletes_a_root(following: list[str]) -> bool:
-    """Whether any operand of a delete verb, up to the end of its command, is a root target."""
-    for token in following:
-        if token == _SEPARATOR:
-            return False
-        if not _is_flag(token) and _is_root_target(token):
+def _is_operand_flag(token: str, switches: bool) -> bool:
+    """A flag of a delete verb; ``/x`` is a switch only for cmd's verbs (``rm /c`` names a path)."""
+    return (len(token) > 1 and token[0] == "-") or (
+        switches and len(token) == 2 and token[0] == "/" and token[1].isalpha())
+
+
+def _program_name(program: str) -> str:
+    name = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _file_name(path: str) -> str:
+    """The last component of a path or URL, without a query or fragment."""
+    path = path.split("?", 1)[0].split("#", 1)[0].replace("\\", "/").rstrip("/")
+    return path.rsplit("/", 1)[-1]
+
+
+class _Command:
+    """One command's words, and what the scan has learned about them so far."""
+
+    __slots__ = ("after_download", "delete_at", "downloads", "interpreter_at", "piped", "prefixed",
+                 "program_at", "quote", "quote_from", "saves_urls", "settled", "switches", "words")
+
+    def __init__(self, piped: bool = False, after_download: bool = False) -> None:
+        self.words: list[str] = []
+        self.piped = piped  # it reads a pipe
+        self.after_download = after_download  # a download ran earlier on its line
+        self.settled = False  # its program is known
+        self.prefixed = False  # a ``sudo``/``env``-style prefix stands before its program
+        self.program_at = -1
+        self.interpreter_at = -1
+        self.delete_at = -1
+        self.switches = False
+        self.downloads = False
+        self.saves_urls = False
+        self.quote = ""  # the open quote character, if any
+        self.quote_from = 0
+
+
+class _Context:
+    """The top level, or one ``$(...)``, ``<(...)`` or backtick substitution."""
+
+    __slots__ = ("at_start", "command", "downloaded", "feeds", "kind", "operands", "parens")
+
+    def __init__(self, kind: str, *, feeds: bool = False, at_start: bool = False,
+                 operands: bool = False) -> None:
+        self.kind = kind  # "top", "sub" or "tick"
+        self.command = _Command()
+        self.parens = 0  # plain parentheses open inside this substitution
+        self.feeds = feeds  # its output is the text or script of an interpreter
+        self.at_start = at_start  # its output is run as a command
+        self.downloaded = False  # a downloader ran inside it
+        self.operands = operands  # its words are operands of an enclosing delete
+
+
+class _Scan:
+    """One left-to-right pass over the command texts of one call.
+
+    Owned by a single ``classify`` call and dropped with it.  Each method
+    answers True as soon as a BLOCK shape is seen.  Every word is visited a
+    bounded number of times, so the pass is linear in the text.
+    """
+
+    def __init__(self, cwd: str) -> None:
+        self.cwd0 = cwd
+        self.cwd = cwd
+        self.downloaded = False
+        self.evaluated = False
+        self.names: set[str] = set()  # the file names downloads have written
+        self.roots: dict[tuple[str, str], bool] = {}
+        self.shell = True
+        self.line_download = False
+        self.previous = ""
+
+    def run(self, text: str, *, shell: bool, ticks: bool) -> bool:
+        self.shell, self.cwd, self.names = shell, self.cwd0, set()
+        self.line_download, self.previous = False, ""
+        stack = [_Context("top")]
+        joins = False  # the last token was a pipe or ``&&``: a newline continues the command
+        glue = -1  # where a closing quote or substitution ended: a word there continues it
+        for match in _TOKEN.finditer(text):
+            kind, token, context = match.lastgroup, match.group(), stack[-1]
+            if kind == "word":
+                if self._word(context, token, match.start() == glue):
+                    return True
+            elif kind == "nl":
+                if token[0] == "`":
+                    if not (ticks and context.kind == "tick"):
+                        continue  # PowerShell's line continuation
+                    if self._close(stack):  # the backtick closes a substitution
+                        return True
+                    context = stack[-1]
+                start = match.start()
+                if joins or text[start - 1:start] in ("\\", "^"):
+                    continue
+                if self._end(context):
+                    return True
+                self.line_download = False
+            elif kind == "pipe" or kind == "end":
+                if self._end(context, piped=kind == "pipe"):
+                    return True
+            elif kind == "quote":
+                command = context.command
+                quoted = bool(command.quote) and len(command.words) > command.quote_from
+                if self._quote(command, token):
+                    return True
+                if quoted and not command.quote:  # a closing quote after a quoted word
+                    glue = match.end()
+            elif kind == "tick":
+                if not ticks:
+                    pass  # an escape character
+                elif context.kind == "tick":
+                    if self._close(stack):
+                        return True
+                    glue = match.end()
+                elif len(stack) <= _MAX_DEPTH:
+                    stack.append(self._open("tick", context))
+            elif kind == "sub" and len(stack) <= _MAX_DEPTH:
+                stack.append(self._open("sub", context))
+            elif context.kind == "sub":
+                # A plain parenthesis, or past _MAX_DEPTH a substitution read as
+                # part of the deepest one: only its closing parenthesis is tracked.
+                if kind != "close":
+                    context.parens += 1
+                elif context.parens:
+                    context.parens -= 1
+                elif self._close(stack):
+                    return True
+                else:
+                    glue = match.end()
+            joins = kind == "pipe" or token == "&&"
+        while len(stack) > 1:
+            if self._close(stack):
+                return True
+        return self._end(stack[0])
+
+    def _root(self, word: str) -> bool:
+        key = (word, self.cwd)
+        cached = self.roots.get(key)
+        if cached is None:
+            cached = self.roots[key] = _is_root_target(word, self.cwd)
+        return cached
+
+    def _word(self, context: _Context, word: str, glued: bool) -> bool:
+        name = _program_name(word)
+        if word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs") or _MKFS.fullmatch(name):
             return True
-    return False
+        if self.previous == "format" and _is_drive_root(word):
+            return True
+        self.previous = word
+        command = context.command
+        if name in _DOWNLOADERS:
+            command.downloads = context.downloaded = self.downloaded = self.line_download = True
+            command.saves_urls = command.saves_urls or name in _URL_SAVERS
+        if name in _EVAL_TOKENS:
+            self.evaluated = True
+        if word == "--remote-name" or word == "--remote-name-all":
+            command.saves_urls = True
+        if glued and command.words:
+            # ``"$HOME"/``, ``$(pwd)/c``: one shell word with what it follows.
+            word = command.words[-1] = command.words[-1] + word
+            return self.shell and context.operands and self._root(word)
+        if self.shell and command.delete_at < 0 and _is_delete_verb(name):
+            command.delete_at = len(command.words)
+            command.switches = name in _SWITCH_VERBS
+        elif self.shell and context.operands and not _is_flag(word) and self._root(word):
+            return True
+        self._add(command, word, name)
+        return False
+
+    @staticmethod
+    def _add(command: _Command, word: str, name: str) -> None:
+        """Append ``word``, tracking the program it may be (``_command_programs`` as a stream)."""
+        index = len(command.words)
+        command.words.append(word)
+        if command.settled or _is_flag(word) or "=" in word:
+            return
+        unversioned = name.rstrip("0123456789.")
+        interpreter = unversioned if unversioned in _PIPE_SHELLS else name
+        if interpreter in _PIPE_PREFIXES:
+            command.prefixed = True
+            return
+        if command.program_at < 0:
+            command.program_at = index
+        if interpreter in _PIPE_SHELLS and command.interpreter_at < 0:
+            command.interpreter_at = index
+        command.settled = not command.prefixed
+
+    def _quote(self, command: _Command, mark: str) -> bool:
+        """At a closing quote, a delete's quoted operand with spaces is checked whole."""
+        if not command.quote:
+            command.quote, command.quote_from = mark, len(command.words)
+            return False
+        if mark != command.quote:
+            return False
+        command.quote = ""
+        start = command.quote_from
+        if (self.shell and 0 <= command.delete_at < start
+                and len(command.words) - start > 1):
+            return self._root(" ".join(command.words[start:]))
+        return False
+
+    def _open(self, kind: str, parent: _Context) -> _Context:
+        command = parent.command
+        return _Context(kind, feeds=command.interpreter_at >= 0,
+                        at_start=self.shell and not command.words,
+                        operands=self.shell and (parent.operands or command.delete_at >= 0))
+
+    def _close(self, stack: list[_Context]) -> bool:
+        child = stack.pop()
+        if self._end(child):
+            return True
+        if child.downloaded and (child.feeds or child.at_start):
+            return True
+        parent = stack[-1]
+        parent.downloaded = parent.downloaded or child.downloaded
+        self._add(parent.command, "$()", "$()")  # the substitution stands as one word
+        return False
+
+    def _end(self, context: _Context, *, piped: bool = False) -> bool:
+        """The command in ``context`` ends; the next one reads a pipe when ``piped``."""
+        command = context.command
+        if command.words and self._ended(command):
+            return True
+        if command.words or piped != command.piped:
+            context.command = _Command(piped, piped and self.line_download)
+        else:
+            command.quote = ""  # an empty command is reused: newline floods allocate nothing
+        self.previous = ""
+        return False
+
+    def _ended(self, command: _Command) -> bool:
+        words = command.words
+        if command.piped and command.after_download and command.interpreter_at >= 0:
+            return True  # ``curl x | sh``
+        if self.shell and command.delete_at >= 0:
+            for word in words[command.delete_at + 1:]:
+                if not _is_operand_flag(word, command.switches) and self._root(word):
+                    return True
+        if self.names and self._runs_a_download(command):
+            return True
+        if command.downloads or (command.piped and command.after_download):
+            self._record_outputs(command)
+        if self.shell and command.program_at >= 0 and _program_name(words[command.program_at]) in _CD_VERBS:
+            self._change_directory(words[command.program_at + 1:])
+        return False
+
+    def _runs_a_download(self, command: _Command) -> bool:
+        """Whether the command runs a file a download wrote: ``./tool``, ``bash a.sh``, ``pwsh -File a.ps1``."""
+        words = command.words
+        if command.program_at >= 0:
+            program = words[command.program_at]
+            name = _file_name(program)
+            if name in self.names and ("/" in program or "\\" in program or "." in name):
+                return True
+        if command.interpreter_at < 0:
+            return False
+        previous, script = "", ""
+        for word in words[command.interpreter_at + 1:]:
+            if previous == "-file" or previous == "-f":
+                if _file_name(word) in self.names:
+                    return True
+            elif not script and word != "<" and not _is_flag(word):
+                script = word.removeprefix("<")
+            previous = word
+        return bool(script) and _file_name(script) in self.names
+
+    def _record_outputs(self, command: _Command) -> None:
+        """Note the files this download (or the writer it pipes into) names."""
+        words = command.words
+        writer = command.piped and command.program_at >= 0 and (
+            _program_name(words[command.program_at]) in _WRITERS)
+        last_word_saver = False
+        previous = ""
+        for index, word in enumerate(words):
+            last_word_saver = last_word_saver or _program_name(word) in _LAST_WORD_SAVERS
+            if previous in _OUTPUT_FLAGS or previous in _REDIRECTS:
+                self._note(word)
+            elif word.startswith(_OUTPUT_ASSIGNMENTS):
+                self._note(word.split("=", 1)[1])
+            elif word[:1] == ">" and word not in _REDIRECTS:
+                self._note(word.lstrip(">"))
+            elif word.startswith("-o") and len(word) > 2 and word[2] != "-" and word not in _OUTPUT_FLAGS:
+                self._note(word[2:])  # curl's ``-oFILE``
+            if "://" in word and command.saves_urls and "/" in word.split("://", 1)[1]:
+                self._note(word)
+            if writer and index > command.program_at and not _is_flag(word):
+                self._note(word)
+            previous = word
+        if last_word_saver:
+            self._note(words[-1])  # ``certutil -urlcache -f URL FILE``, ``bitsadmin /transfer j URL FILE``
+
+    def _note(self, path: str) -> None:
+        name = _file_name(path)
+        if name not in _NOT_A_FILE:
+            self.names.add(name)
+
+    def _change_directory(self, operands: list[str]) -> None:
+        target = next((word for word in operands if not _is_flag(word)), "~")
+        if any(drive or path.startswith("/") for drive, path in _normalize_targets(target)):
+            self.cwd = target
+        else:
+            self.cwd = (self.cwd.rstrip("/\\") + "/" + target) if self.cwd else target
+
+
+def _blocked(parts: list[tuple[str, bool, bool]], cwd: str) -> bool:
+    texts = [(_BRACED_VARIABLE.sub(r"$\1", text), shell, ticks) for text, shell, ticks in parts]
+    every = _SPACES.sub(" ", "\n".join(text for text, _shell, _ticks in texts))
+    if any(marker in every for marker in _BLOCK_TEXT):
+        return True
+    scan = _Scan(cwd)
+    if any(scan.run(text, shell=shell, ticks=ticks) for text, shell, ticks in texts):
+        return True
+    # ``iex (iwr ...)``, ``[scriptblock]::Create((iwr ...))``: a download evaluated with no pipe at all.
+    return scan.downloaded and (scan.evaluated or _SCRIPTBLOCK in every)
 
 
 def _elevated(text: str) -> bool:
@@ -394,11 +786,6 @@ def _argv(arguments: Mapping[str, Any]) -> list[str]:
             isinstance(item, str) for item in args):
         raise _Unreadable("program and args_json must be strings")
     return [program, *args]
-
-
-def _program_name(program: str) -> str:
-    name = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name[:-4] if name.endswith(".exe") else name
 
 
 def _bare_program(program: str) -> str:
@@ -429,11 +816,11 @@ def _safe_argv(argv: list[str]) -> bool:
     return flags is not None and all(_arg_reads_only(arg, *flags) for arg in argv[1:])
 
 
-def _delete_target_blocked(arguments: Mapping[str, Any]) -> bool:
+def _delete_target_blocked(arguments: Mapping[str, Any], cwd: str) -> bool:
     path = arguments.get("path")
     if not isinstance(path, str):
         raise _Unreadable("file_delete needs a path")
-    return _is_root_target(path) or path.strip().rstrip(" .") == ""
+    return _is_root_target(path, cwd) or path.strip().rstrip(" .") == ""
 
 
 def _classify(tool_name: str, arguments: Any, risk: str) -> str:
@@ -442,14 +829,19 @@ def _classify(tool_name: str, arguments: Any, risk: str) -> str:
             return ASK
         arguments = {}
     name = str(tool_name or "").strip().lstrip("/")
-    text = _command_text(arguments)
-    if text and _blocked(text):
+    parts = _parts(arguments)
+    if sum(len(text) for text, _shell, _ticks in parts) > _MAX_TEXT:
+        return ASK  # too long to read: fail closed
+    parts = [(text.lower(), shell, ticks) for text, shell, ticks in parts]
+    cwd = arguments.get("cwd")
+    cwd = cwd.lower() if isinstance(cwd, str) else ""
+    if parts and _blocked(parts, cwd):
         return BLOCK
-    if name in _DELETE_TOOLS and _delete_target_blocked(arguments):
+    if name in _DELETE_TOOLS and _delete_target_blocked(arguments, cwd):
         return BLOCK
-    if name in _ALWAYS_ALLOWED:
-        return ALLOW
-    if name in _ALWAYS_ASK or (text and _elevated(text)):
+    if name in _ALWAYS_ASK or name.startswith(_ASK_PREFIXES):
+        return ASK
+    if any(_elevated(_SPACES.sub(" ", text)) for text, _shell, _ticks in parts):
         return ASK
     if name in _ARGV_TOOLS:
         return ALLOW if _safe_argv(_argv(arguments)) else ASK
