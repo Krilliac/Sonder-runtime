@@ -1320,6 +1320,46 @@ def set_mode(name: str) -> str:
     return match
 
 
+def global_mode() -> str:
+    """The process-global mode, whatever scope is bound: the ceiling for every session."""
+    _load()
+    with _LOCK:
+        return _STATE["mode"]
+
+
+def set_session_mode(name: str) -> str:
+    """Set the bound scope's mode, never above the global mode; returns the new mode.
+
+    This is the administrator's per-session control: a session may be made
+    stricter than the global mode, or left level with it, and never looser
+    (``MODES`` runs strictest first). ``bypass`` is not entered here -- it has
+    its own confirmed route (``set_mode`` under ``mode_scope``) -- and a scope
+    that is already in bypass may be lowered to any mode at or below the
+    global mode. Raises ``ValueError`` for an unknown mode, for ``bypass``, for
+    a call with no bound scope, and for a mode above the global one.
+    """
+    _load()
+    match = resolve_mode(name)
+    if match == BYPASS:
+        raise ValueError("bypass is entered with its own confirmation, not as a session mode")
+    pair = _MODE_SCOPE.get()
+    if pair is None:
+        raise ValueError("a session mode needs a principal or a session")
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
+    # One hold of the (re-entrant) lock across the ceiling check and the scoped
+    # write: a concurrent set_global_mode that lowers the global mode must not
+    # run between them, or the scope would be written above the new ceiling.
+    with _LOCK:
+        ceiling = _STATE["mode"]
+        if order[match] > order.get(ceiling, order[DEFAULT_MODE]):
+            raise ValueError(
+                "a session cannot be raised above the global mode (%s): %s is more "
+                "autonomous. Lower the request, or have an administrator change the "
+                "global mode with scope \"global\"." % (ceiling, match)
+            )
+        return set_mode(match)
+
+
 def set_global_mode(name: str) -> str:
     """Set the process-global mode for every caller; returns the new mode.
 
@@ -1868,23 +1908,90 @@ def _modes_allowing(risk: str) -> list:
     return [m for m in _CYCLE_MODES if _MATRIX[m].get(risk) == ALLOW]
 
 
-def _unattended_reason(name: str, active: str, risk: str, call: str = "") -> str:
+# Surfaces whose caller reaches the approval ledger over HTTP, not at a console.
+HTTP_APPROVAL_SURFACES = frozenset({"http", "agent", "chat-tool", "chat_tool"})
+
+NO_ROUTE_AROUND = (
+    "Do not route around this refusal with another tool or a host program: "
+    "the operator's decision applies to the effect, not to the tool's name."
+)
+
+
+def http_approval_text(call: str) -> str:
+    """The HTTP routes that approve or decline exactly one pending call."""
+    return (
+        "approve exactly this call once with POST /v1/approvals/%s, or decline "
+        "it with POST /v1/approvals/deny/%s" % (call, call)
+    )
+
+
+def _unattended_reason(name: str, active: str, risk: str, call: str = "",
+                       surface: str = "", always_ask: bool = False) -> str:
     """Name what was refused and every route out, so the refusal can be acted on."""
-    remedies = ["write an explicit allow rule with /permissions"]
-    modes = [m for m in _modes_allowing(risk) if m != active]
-    if modes:
-        remedies.append("switch to %s" % " or ".join(modes))
+    over_http = surface in HTTP_APPROVAL_SURFACES
+    remedies = []
+    if not always_ask:
+        remedies.append("write an explicit allow rule with /permissions")
+        modes = [m for m in _modes_allowing(risk) if m != active]
+        if modes:
+            remedies.append("switch to %s" % " or ".join(modes))
     remedies.append("run it from the console and answer the prompt")
     if call:
         remedies.append(
             "approve exactly this call once at the console with /approve %s" % call
         )
+        if over_http:
+            remedies.append(http_approval_text(call))
     noun = _EFFECT_NOUNS.get(risk, "is graded %s" % risk)
-    return (
+    if always_ask:
+        noun = "deletes files, which always asks in every mode but bypass"
+    text = (
         "%s %s and nobody is here to answer %s's ask, so it is refused "
         "rather than assumed; %s"
         % (name or "(empty name)", noun, MODE_LABELS.get(active, active),
            ", or ".join(remedies))
+    )
+    if over_http:
+        text += ". " + NO_ROUTE_AROUND
+    return text
+
+
+def always_asks(tool_name: str, arguments=None) -> bool:
+    """Whether this call asks every time, in every mode but ``bypass``.
+
+    Deleting files: the ``file_delete`` tool, and a host program or code
+    (``git rm``, ``rm``, ``del``, ``Remove-Item``, ``os.remove``...) run
+    through a host-program tool (``delete_calls.HOST_PROGRAM_TOOLS``). The
+    ask is answered per call: an approval is one-shot and bound to the exact
+    call (see ``decide``), and no mode, rule or grant makes it a standing
+    yes. Bypass alone skips it, like every other ask. A fault while deciding
+    fails closed for those tools: it answers ``True``.
+    """
+    from sonder_runtime.domain.security import delete_calls
+
+    name = str(tool_name or "").strip().lstrip("/")
+    try:
+        return delete_calls.deletes_files(name, arguments)
+    except Exception:
+        return name in delete_calls.DELETE_TOOLS or name in delete_calls.HOST_PROGRAM_TOOLS
+
+
+def _rule_file_hint(pattern: str, rule_lookup) -> str:
+    """Where the operator's rule lives and the command that changes it ("" if unknown)."""
+    if rule_lookup is not None or _rule_lookup is not _default_rule_lookup:
+        return ""
+    try:
+        import sonder_paths
+        import permission_rules
+
+        path = permission_rules.policy_path(sonder_paths.default_home())
+    except Exception:
+        return ""
+    if not pattern or pattern.startswith("<"):
+        return "; repair or remove %s" % path
+    return (
+        "; the rule is in %s, and `permission_rule_set %s ask` (or allow) changes it"
+        % (path, pattern)
     )
 
 
@@ -1972,7 +2079,8 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
-            "every mode, including auto" % (rule_pattern or name),
+            "every mode, including auto%s"
+            % (rule_pattern or name, _rule_file_hint(rule_pattern, rule_lookup)),
             name,
             source="rule", call_id=call,
         )
@@ -2005,11 +2113,19 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
 
     mode_action = _MATRIX[active].get(risk, ASK)
 
+    # 2b. Deleting files asks every time in every mode but bypass: the mode
+    #     cannot allow it, an allow rule cannot waive it, and (below) the
+    #     unattended answer is a one-shot approval of exactly this call, never
+    #     a standing grant. ``plan`` keeps denying it outright.
+    always_ask = active != BYPASS and always_asks(name, arguments)
+    if always_ask and mode_action == ALLOW:
+        mode_action = ASK
+
     # 3. An explicit allow loosens an ask into an allow -- but only an ask:
     #    it must not appear to have decided anything when the mode already
     #    allowed the tool, and (4) plan's denials are never a mode's "ask" in
     #    the first place, so this branch naturally never fires under plan.
-    if rule_action == ALLOW and mode_action == ASK:
+    if rule_action == ALLOW and mode_action == ASK and not always_ask:
         return Decision(
             ALLOW, active, risk,
             "rule allows this tool (pattern %r), satisfying %s's ask"
@@ -2027,7 +2143,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         #     what it is confirming. An explicit ``allow`` rule already
         #     resolved above (3), so an operator who wants this name to run
         #     has a written way to say so.
-        if risk == UNCLASSIFIED:
+        if risk == UNCLASSIFIED and not always_ask:
             return Decision(
                 DENY, active, risk,
                 "nothing could classify %r, and there is no one to ask; "
@@ -2064,7 +2180,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         #     approval is spent atomically on the way through, and only for a
         #     live decision -- a preflight neither spends one nor leaves a
         #     pending request behind.
-        if risk in UNATTENDED_REFUSED_RISKS:
+        if risk in UNATTENDED_REFUSED_RISKS or always_ask:
             ledger = _ledger_for(approval_ledger) if (digest and live) else None
             if ledger is not None:
                 try:
@@ -2097,7 +2213,8 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                     pass
             _note_first_refusal()
             return Decision(
-                DENY, active, risk, _unattended_reason(name, active, risk, call), name,
+                DENY, active, risk,
+                _unattended_reason(name, active, risk, call, surface, always_ask), name,
                 source="unattended", call_id=call,
             )
         # 5d. The ``ask`` class proceeds on the record: it is the grade the
@@ -2115,7 +2232,10 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         "mode:bypass" if active == BYPASS and risk == "dangerous"
         else "mode"
     )
-    return Decision(action, active, risk, mode_reason(action, active, risk), name,
+    reason = mode_reason(action, active, risk)
+    if always_ask and action == ASK:
+        reason = "deleting files asks every time, in every mode but bypass (%s)" % reason
+    return Decision(action, active, risk, reason, name,
                     source=decision_source, call_id=call)
 
 

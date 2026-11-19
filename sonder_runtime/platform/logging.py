@@ -183,6 +183,26 @@ _PATTERNS: tuple[re.Pattern, ...] = (
 # redact further.
 _MAX_PASSES = 8
 
+# Byte-identical to domain/security/redaction.py (see that copy's note): a
+# second stage, run last (after the path-prefix labels), over the settled text
+# that only ever adds redaction.
+_CREDENTIAL_VALUE = re.compile(
+    r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"[\"']?\s*[:=]\s*)"
+    r'''("(?:[^\s"\\]|\\(?!")){4,}"|'(?:[^\s'\\]|\\(?!')){4,}'|\\"(?:[^\s"\\]|\\(?!")){4,}\\"|\\'(?:[^\s'\\]|\\(?!')){4,}\\'|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*)'''
+)
+
+
+def _sub_credential_values(text):
+    """The second stage over settled text, repeated until stable (bounded)."""
+    for _ in range(_MAX_PASSES):
+        after = _CREDENTIAL_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
+        if after == text:
+            break
+        text = after
+    return text
+
 _PEM_BEGIN_MARK = "-----BEGIN "
 _PEM_END_MARK = "-----END "
 _PEM_LABEL = re.compile(r"[A-Z ]*")
@@ -290,6 +310,7 @@ class Redactor:
             for prefix in self._path_prefixes:
                 if prefix in text:
                     text = text.replace(prefix, "[WORKSPACE]")
+            text = _sub_credential_values(text)
             return text
         except Exception:
             if self._failure_hook is not None:

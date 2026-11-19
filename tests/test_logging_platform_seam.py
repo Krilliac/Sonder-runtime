@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 
 import sonder_logging
 from sonder_runtime.adapters import local_observability
@@ -32,6 +33,8 @@ def test_platform_seam_preserves_configured_handler_and_json_output():
 def test_legacy_module_private_pattern_patch_targets_canonical_implementation(monkeypatch):
     original = runtime_logging._PATTERNS
     monkeypatch.setattr(sonder_logging, "_PATTERNS", ())
+    # The second credential stage reads the canonical module too.
+    monkeypatch.setattr(sonder_logging, "_CREDENTIAL_VALUE", re.compile("(?!)"))
     assert runtime_logging.Redactor(env={}).redact("token=secret-value") == "token=secret-value"
     monkeypatch.setattr(sonder_logging, "_PATTERNS", original)
 

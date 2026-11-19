@@ -12,9 +12,12 @@ from sonder_runtime.domain.execution import policy
 
 # --- execution policy -------------------------------------------------------
 
-def test_default_rules_deny_delete_and_allow_status():
+def test_default_rules_deny_cot_ask_delete_and_allow_status():
     rules = policy.default_rules()
-    assert policy.evaluate(rules, "file_delete")["action"] == "deny"
+    assert policy.evaluate(rules, "admin_private_chain_of_thought")["action"] == "deny"
+    # Deletes always ask: the shipped row, not NO_MATCH_RULE's "ask".
+    delete = policy.evaluate(rules, "file_delete")
+    assert delete["action"] == "ask" and delete["pattern"] == "file_delete"
     assert policy.evaluate(rules, "status")["action"] == "allow"
 
 
@@ -59,7 +62,9 @@ def test_upsert_rule_rejects_bad_input():
 def test_permission_rules_delegates(tmp_path):
     # The root module's behavior is unchanged after delegation.
     home = str(tmp_path)
-    assert permission_rules.check(home, "file_delete")["action"] == "deny"
+    assert permission_rules.check(home, "admin_private_chain_of_thought")["action"] == "deny"
+    shipped = permission_rules.check(home, "file_delete")
+    assert shipped["action"] == "ask" and shipped["pattern"] == "file_delete"
     permission_rules.add_rule(home, "file_delete", "allow", "ok")
     assert permission_rules.check(home, "file_delete")["action"] == "allow"
 

@@ -517,7 +517,10 @@ def test_manual_refuses_exactly_the_effect_classes_and_written_denials():
     assert refused == denied_by_rule | pm.DURABLE_AUTHORITY_TOOLS | effect_classes
     # And the default policy really does deny something, so an empty set on
     # both sides can never pass this vacuously.
-    assert "file_delete" in denied_by_rule
+    assert "admin_private_chain_of_thought" in denied_by_rule
+    # file_delete's shipped row asks (deletes always ask), and an unattended
+    # ask is still refused.
+    assert "file_delete" not in denied_by_rule and "file_delete" in refused
     assert "file_write" in effect_classes and "run_code" in effect_classes
     assert "task_create" in by_risk["ask"] and "task_create" not in refused
     # A model must not be able to grant itself authority, and "there is no
@@ -865,12 +868,13 @@ def test_manual_prompts_before_every_named_branch_and_a_no_stops_it(
 ):
     """Manual asks first, and a "no" means the branch does not run.
 
-    Two of these never reach the prompt, and must not: `/delete` and `/cot`
-    front tools the shipped rules deny outright (`file_delete`,
-    `admin_private_chain_of_thought`), and an explicit deny outranks every
-    mode -- including manual's ask. Downgrading such a rule to a y/N prompt
-    would let one keystroke defeat a written-down denial, so they are
-    asserted here as refusals rather than excused from the parametrization.
+    One of these never reaches the prompt, and must not: `/cot` fronts a tool
+    the shipped rules deny outright (`admin_private_chain_of_thought`), and an
+    explicit deny outranks every mode -- including manual's ask. Downgrading
+    such a rule to a y/N prompt would let one keystroke defeat a written-down
+    denial, so it is asserted here as a refusal rather than excused from the
+    parametrization. `/delete` (`file_delete`) asks: deletes always ask, and
+    the "no" here stops it like any other branch.
     """
     del tool
     denied = _rule_denied_tools(command)
@@ -904,7 +908,10 @@ def test_the_deny_rule_branches_are_exactly_the_two_the_shipped_rules_name():
         if _rule_denied_tools(command)
     }
 
-    assert denied == {"/delete", "/cot"}
+    assert denied == {"/cot"}
+    # `/delete` left the deny set because its row asks, and deletes ask every
+    # time in every mode but bypass -- not because the lookup went blind.
+    assert pm.always_asks("file_delete")
 
 
 def test_a_console_command_that_fronts_no_tool_is_never_gated(monkeypatch):
@@ -1013,9 +1020,15 @@ def test_a_piped_console_is_not_an_open_door(monkeypatch):
     _piped_console(monkeypatch, "")
 
     pm.set_mode(pm.MANUAL)
-    may_run, refusal = sonder_repl._named_command_gate("/delete")
+    may_run, refusal = sonder_repl._named_command_gate("/cot")
     assert not may_run
     assert "rule denies this tool" in refusal
+
+    # A delete always asks; piped, nobody answers, so it is refused too.
+    may_run, refusal = sonder_repl._named_command_gate("/delete")
+    assert not may_run
+    assert refusal.startswith("refused /delete:")
+    assert "always asks" in refusal and "nobody is here" in refusal
 
     pm.set_mode(pm.PLAN)
     may_run, refusal = sonder_repl._named_command_gate("/write")
