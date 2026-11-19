@@ -20835,6 +20835,12 @@
       "type": "int"
     },
     {
+      "default": 0,
+      "field": "work_max_live",
+      "section": "server",
+      "type": "int"
+    },
+    {
       "default": 10,
       "field": "stream_heartbeat_seconds",
       "section": "server",
@@ -20923,13 +20929,13 @@
   "counts": {
     "capabilities": 246,
     "commands": 365,
-    "configuration": 318,
+    "configuration": 319,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
     "tools": 246
   },
-  "digest": "b873697c677e8109b2e3ce85d0f3f65d32b09d984db8f4cfb9fe27ea6b05f411",
+  "digest": "38876d7dafc754ea9f7ae5c08387b74ab2a95a7a47b14a0fbd88a81e5016c570",
   "events": [
     {
       "name": "session.started",
@@ -52777,13 +52783,13 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "8ebb404a703429265f917fe1efa9e19259957b869568ef71dfa43c8e74e41d31",
+    "server.py": "a1f5dfefe51d65bb316daeb6b0bb87e3a081e07267383e7080f0b9d9f9638f90",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "41d40afc8a04017c2402f39ca32bbf29a58d6080ad3796820b4eab6365f10bf5",
+    "sonder_runtime/platform/config.py": "6f02687f2f4c50a17bdaffd86715122150d3bf9bbdadc421808335322be08d2b",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
