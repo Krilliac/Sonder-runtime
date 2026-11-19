@@ -238,15 +238,21 @@ def test_windows_nul_device_under_a_root_is_refused_as_not_a_regular_file(root):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows device namespace")
-@pytest.mark.parametrize(("target", "reason"), [
-    (r"\\.\NUL", "native path"),  # device namespace fails the path syntax check
-    (r"\\.\pipe\x.dmp", "outside every authorized root"),  # a pipe is never under a root
+@pytest.mark.parametrize(("target", "reasons"), [
+    # Python <= 3.12 calls \\.\NUL not absolute, so it fails the native-path
+    # syntax check; 3.13+ calls it absolute, so the root check refuses it.
+    # Either way it is refused before any open.
+    (r"\\.\NUL", ("native path", "outside every authorized root")),
+    (r"\\.\pipe\x.dmp", ("outside every authorized root",)),  # a pipe is never under a root
 ])
-def test_windows_device_namespace_paths_are_refused_before_any_open(target, reason):
+def test_windows_device_namespace_paths_are_refused_before_any_open(target, reasons):
+    def no_open(*_args, **_kwargs):
+        raise AssertionError("a device-namespace path reached the guarded open")
+
     with pytest.raises(SonderError) as caught:
-        GuardedCaptureSource().open_reader(target)
+        GuardedCaptureSource(opener=no_open).open_reader(target)
     assert _code(caught) == "CAPTURE_REJECTED"
-    assert reason in str(caught.value)
+    assert any(reason in str(caught.value) for reason in reasons), str(caught.value)
 
 
 def test_oversized_captures_are_refused_by_kind(root, monkeypatch):
