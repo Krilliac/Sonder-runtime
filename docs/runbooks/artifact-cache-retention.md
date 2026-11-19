@@ -22,7 +22,9 @@ Use `ArtifactCachePage`, `ArtifactReferencePage`, and
 `ArtifactTombstonePage` to mark whether each scan is complete and to carry its
 revision/cursor. Never claim a page is complete after a bounded query stopped
 at its limit. If a source cannot produce a complete page, pass `complete=False`;
-the policy will defer cleanup.
+an incomplete reference or tombstone page defers every candidate in the pass,
+while an incomplete cache page still decides the entries it holds and returns
+`plan.complete` as false with a `plan.next_cursor` for the next page.
 
 ```python
 from datetime import datetime, timezone

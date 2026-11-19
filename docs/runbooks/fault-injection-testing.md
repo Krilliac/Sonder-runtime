@@ -20,7 +20,7 @@ quotas, or killing operator processes. The shared fixtures live in
 | Restart recovery | reopened SQLite registry plus cleanup supervisor | only a complete, identity-matched receipt marks orphaned work interrupted |
 
 The SQLite connector is constructor-injected only for tests. Production still
-uses `sqlite3.connect`, a five-second busy timeout, foreign keys, and the same
+uses `owned_sqlite.connect`, a five-second busy timeout, foreign keys, and the same
 database path. Errors are classified without returning SQLite messages or
 paths to callers:
 
