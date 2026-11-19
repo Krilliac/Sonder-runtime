@@ -7,10 +7,15 @@ that allows the class, and the console prompt: an operator approves *exactly
 one call* (one tool, one argument digest) and the next unchanged call from
 any surface runs once -- the next one made by the owner whose refused call it
 answers: an account's turns record and spend under that account's owner key,
-the operator's own surfaces under the unowned key ''. The operator (the
-console and MCP, which bind no owner, or an explicit ``operator_scope``) sees
-and approves every owner's calls; an account sees only its own; a developer
-its own plus the unowned ones. Nothing here widens a rule, nothing survives one use
+the operator's own surfaces under the unowned key ''. Only an explicit
+``operator_scope`` (bound by the console and the MCP entry after an
+admin-level check, and by the HTTP routes for an administrator) sees and
+approves every owner's calls; with no scope bound a caller sees exactly the
+unowned ones; an account sees only its own; a developer its own plus the
+unowned ones. Approve and deny bind to the exact pending row (its owner and
+digest): two owners with an identical call get one reference each,
+``<call id>@<owner tag>``, and the owner is never guessed. Nothing here widens
+a rule, nothing survives one use
 or its expiry. The ledger stores no argument values, with one exception: a
 ``run_code`` pending call carries a bounded, redacted copy of its code
 (``detail``) so the operator can read what they approve. Otherwise the digest
@@ -61,7 +66,7 @@ import contextvars
 import secrets
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -75,6 +80,8 @@ MIN_CALL_ID_CHARS = 8
 MAX_PREVIEW_CHARS = 200
 MAX_DETAIL_CHARS = 4000
 DENIAL_TTL_SECONDS = 900
+OWNER_TAG_CHARS = 11  # "ap-" and 8 hex characters of the owner key
+UNOWNED_TAG = "-"
 PENDING_RETENTION_SECONDS = 7 * 86_400
 APPROVAL_RETENTION_SECONDS = 30 * 86_400
 DATABASE_NAME = "approvals.db"
@@ -125,10 +132,13 @@ _PENDING_COLUMNS = (
     ("detail_chars", "INTEGER NOT NULL DEFAULT 0"),
 )
 
-# Who is asking. ``None`` means no owner scope was ever bound on this context:
-# the operator's own process surfaces (the console, MCP, a local-open or
-# deployment-key HTTP turn). An account turn always binds its owner key
-# (``permission_modes.mode_scope`` does it for every ``account:`` principal).
+# Who is asking. ``None`` means no owner scope was ever bound on this context;
+# it reads, writes and approves exactly the unowned ('') rows, the same as
+# ``owner_scope("")``. It never grants the all-owners view: that takes an
+# explicit ``operator_scope``, so a path that loses its context (a thread
+# started without ``copy_context``) fails closed. An account turn always binds
+# its owner key (``permission_modes.mode_scope`` does it for every
+# ``account:`` principal).
 _OWNER_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "sonder_approval_ledger_owner", default=None
 )
@@ -165,7 +175,11 @@ def owner_scope(owner: str = "", *, include_unowned: bool = False,
 
 
 def operator_scope() -> contextlib.AbstractContextManager[None]:
-    """The operator view: every owner's pending calls and approvals."""
+    """The operator view: every owner's pending calls and approvals.
+
+    Bind it only after an admin-level check (the attended console, an
+    administrator's token or session, the deployment key).
+    """
     return owner_scope("", all_owners=True)
 
 
@@ -176,12 +190,28 @@ def current_owner() -> str:
 def operator_view() -> bool:
     """True when this context sees every owner's calls.
 
-    Either an explicit ``operator_scope`` / ``owner_scope(all_owners=True)``,
-    or no owner scope bound at all: the console and MCP run with none, and
-    their ``/approvals`` and ``/approve`` must reach the calls account turns
-    left behind.
+    Only inside an explicit ``operator_scope`` / ``owner_scope(all_owners=True)``.
+    An unbound context is not the operator: it sees the unowned rows only.
     """
-    return bool(_ALL_OWNERS.get()) or _OWNER_SCOPE.get() is None
+    return bool(_ALL_OWNERS.get())
+
+
+def owner_tag(owner: str) -> str:
+    """The short owner part of a call reference: ``-`` for the unowned key."""
+    owner = str(owner or "")
+    return owner[:OWNER_TAG_CHARS] if owner else UNOWNED_TAG
+
+
+def call_ref(digest: str, owner: str = "") -> str:
+    """What an operator types to name one pending row: the call id, qualified
+    by its owner tag (``<call id>@<owner tag>``) when the row has an owner."""
+    return call_id(digest) if not owner else "%s@%s" % (call_id(digest), owner_tag(owner))
+
+
+def _split_ref(text: str) -> tuple[str, str | None]:
+    """``(lowercased digest prefix, owner tag or None)`` from a call reference."""
+    head, sep, tag = str(text or "").strip().partition("@")
+    return head.strip().lower(), (tag.strip() if sep else None)
 
 
 _ALL = "all"
@@ -239,6 +269,13 @@ class ApprovalDeniedError(ApprovalLedgerError):
     denied = True
 
 
+class AmbiguousCallError(ApprovalLedgerError):
+    """A call id that names more than one call, or one call pending for more
+    than one owner; the message lists the references that each name one row."""
+
+    ambiguous = True
+
+
 def call_id(digest: str) -> str:
     """The short form an operator types: the first 16 hex characters."""
     return str(digest or "")[:CALL_ID_CHARS]
@@ -269,6 +306,11 @@ class PendingCall:
         return call_id(self.digest)
 
     @property
+    def ref(self) -> str:
+        """The reference that names exactly this row (see ``call_ref``)."""
+        return call_ref(self.digest, self.owner)
+
+    @property
     def denied(self) -> bool:
         """Denied and still within ``DENIAL_TTL_SECONDS``."""
         return self.denied_ts is not None and self.denied_ts > time.time() - DENIAL_TTL_SECONDS
@@ -291,6 +333,9 @@ class Approval:
     consumed_ts: float | None = None
     consumed_surface: str = ""
     revoked_ts: float | None = None
+    owner: str = ""
+    # Set only on the value ``issue`` returns: it cleared a standing denial.
+    overrode_denial: bool = field(default=False, compare=False)
 
     @property
     def call_id(self) -> str:
@@ -554,14 +599,27 @@ class ApprovalLedger:
 
     def resolve_call(self, call_id_or_digest: str, *, owner: str | None = None,
                      include_unowned: bool | None = None) -> PendingCall:
-        """The one pending call whose digest starts with ``call_id_or_digest``."""
-        prefix = str(call_id_or_digest or "").strip().lower()
+        """The one pending row ``call_id_or_digest`` names.
+
+        The reference is a digest prefix (the call id), optionally qualified by
+        an owner tag, ``<call id>@<owner tag>`` (``@-`` names the unowned key).
+        A call pending for more than one owner in this view (the same tool and
+        arguments) raises ``AmbiguousCallError`` listing each row's reference:
+        the owner is never guessed.
+        """
+        prefix, tag = _split_ref(call_id_or_digest)
         if len(prefix) < MIN_CALL_ID_CHARS or any(c not in "0123456789abcdef" for c in prefix):
             raise ApprovalLedgerError(
                 "a call id is at least %d hex characters (see /approvals)" % MIN_CALL_ID_CHARS
             )
+        if tag is not None and not tag:
+            raise ApprovalLedgerError("an owner tag follows '@' (see /approvals)")
         kind, owner_key = _read_scope(owner, include_unowned)
         where, params = _owner_sql(kind, owner_key)
+        if tag == UNOWNED_TAG:
+            where += " AND owner=''"
+        elif tag is not None:
+            where, params = where + " AND substr(owner, 1, ?)=?", (*params, len(tag), tag)
         with self._read() as conn:
             digests = conn.execute(
                 "SELECT DISTINCT digest FROM pending_calls WHERE " + where
@@ -569,19 +627,22 @@ class ApprovalLedger:
                 (*params, prefix + "%"),
             ).fetchall()
             if not digests:
-                raise ApprovalLedgerError("no pending call starts with %r" % prefix)
+                raise ApprovalLedgerError("no pending call starts with %r%s" % (
+                    prefix, "" if tag is None else " for owner %s" % tag))
             if len(digests) > 1:
-                raise ApprovalLedgerError("call id %r is ambiguous; give more characters" % prefix)
-            # One call, possibly asked for by more than one owner (the same
-            # tool and arguments): the caller's own row first, then the most
-            # recent. ``issue`` picks the same row, so an approval made from
-            # this answer is spendable by the owner shown.
-            row = conn.execute(
+                raise AmbiguousCallError("call id %r is ambiguous; give more characters" % prefix)
+            rows = conn.execute(
                 "SELECT * FROM pending_calls WHERE " + where
-                + " AND digest=? ORDER BY (owner=?) DESC, last_ts DESC LIMIT 1",
-                (*params, str(digests[0]["digest"]), owner_key),
-            ).fetchone()
-        return self._pending(row)
+                + " AND digest=? ORDER BY last_ts DESC LIMIT 20",
+                (*params, str(digests[0]["digest"])),
+            ).fetchall()
+        if len(rows) > 1:
+            raise AmbiguousCallError(
+                "call %s is pending for more than one owner; name one: %s" % (
+                    call_id(str(rows[0]["digest"])),
+                    ", ".join(call_ref(str(r["digest"]), str(r["owner"])) for r in rows))
+            )
+        return self._pending(rows[0])
 
     def pending(self, limit: int = 20, *, owner: str | None = None,
                 include_unowned: bool | None = None) -> list[PendingCall]:
@@ -608,10 +669,13 @@ class ApprovalLedger:
         console ``/approve`` command passes it.
 
         The approval belongs to the owner whose pending call it answers, so
-        that owner's next unchanged call spends it. In the operator view that
-        is any owner (the caller's own row first, then the most recent, as
-        ``resolve_call`` picks); for a developer, its own row or an unowned
-        one. With no pending call to answer it belongs to the caller's owner.
+        that owner's next unchanged call spends it. A caller that resolved a
+        pending row passes that row's ``owner``. Without one, in a view wider
+        than one owner (the operator, a developer), it is the one owner in view
+        with this call pending; more than one raises ``AmbiguousCallError``
+        instead of guessing. With no pending call to answer it belongs to the
+        caller's own owner. The returned approval has ``overrode_denial`` set
+        when it cleared a standing denial.
         """
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
@@ -632,13 +696,19 @@ class ApprovalLedger:
             self._prune(conn, now)
             if kind != _EXACT:
                 where, params = _owner_sql(kind, owner_key)
-                match = conn.execute(
-                    "SELECT owner FROM pending_calls WHERE " + where
-                    + " AND digest=? ORDER BY (owner=?) DESC, last_ts DESC LIMIT 1",
-                    (*params, digest, owner_key),
-                ).fetchone()
-                if match is not None:
-                    owner_key = str(match["owner"])
+                matches = conn.execute(
+                    "SELECT owner FROM pending_calls WHERE " + where + " AND digest=? LIMIT 20",
+                    (*params, digest),
+                ).fetchall()
+                if len(matches) > 1:
+                    raise AmbiguousCallError(
+                        "call %s is pending for more than one owner; approve one by its "
+                        "reference: %s" % (call_id(digest), ", ".join(
+                            call_ref(digest, str(m["owner"])) for m in matches))
+                    )
+                if matches:
+                    owner_key = str(matches[0]["owner"])
+            overrode = False
             standing = conn.execute(
                 "SELECT denied_ts FROM pending_calls WHERE owner=? AND digest=?",
                 (owner_key, digest),
@@ -655,6 +725,7 @@ class ApprovalLedger:
                     "UPDATE pending_calls SET denied_ts=NULL WHERE owner=? AND digest=?",
                     (owner_key, digest),
                 )
+                overrode = True
             if not clean:
                 row = conn.execute(
                     "SELECT preview FROM pending_calls WHERE owner=? AND digest=?",
@@ -670,7 +741,7 @@ class ApprovalLedger:
                 (nonce, owner_key, tool, digest, approver, str(surface or ""), clean, now, now + ttl),
             )
             row = conn.execute("SELECT * FROM approvals WHERE nonce=?", (nonce,)).fetchone()
-        return self._approval(row)
+        return replace(self._approval(row), overrode_denial=overrode)
 
     def consume(self, tool: str, digest: str, *, surface: str = "",
                 owner: str | None = None) -> Approval | None:
@@ -741,7 +812,8 @@ class ApprovalLedger:
         while the denial stands ``consume``, ``open_for`` and ``issue`` refuse
         the call. A denial authorises nothing and is scoped to one digest. It
         lasts ``DENIAL_TTL_SECONDS``; a refusal inside that window does not
-        clear it.
+        clear it. A caller that already resolved the row passes its digest and
+        ``owner``, so the denial lands on exactly that row.
         """
         pending = self.resolve_call(
             call_id_or_digest, owner=owner, include_unowned=include_unowned,
@@ -878,7 +950,7 @@ class ApprovalLedger:
             lines.append("    (none)")
         for item in pending:
             lines.append("    %s  %s  x%d  via %s  last %s  %s" % (
-                item.call_id, item.tool, item.count, item.surface or "-",
+                item.ref, item.tool, item.count, item.surface or "-",
                 _stamp(item.last_ts), item.preview or "",
             ))
         lines.append("  approvals:")
@@ -921,6 +993,7 @@ class ApprovalLedger:
             consumed_ts=None if row["consumed_ts"] is None else float(row["consumed_ts"]),
             consumed_surface=str(row["consumed_surface"] or ""),
             revoked_ts=None if row["revoked_ts"] is None else float(row["revoked_ts"]),
+            owner=str(row["owner"] or "") if "owner" in row.keys() else "",
         )
 
 
@@ -932,8 +1005,9 @@ def default_ledger() -> ApprovalLedger:
 
 
 __all__ = [
-    "Approval", "ApprovalDeniedError", "ApprovalLedger", "ApprovalLedgerError",
-    "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS",
-    "MAX_DETAIL_CHARS", "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PendingCall", "call_id", "clamp_ttl",
-    "current_owner", "default_ledger", "operator_scope", "operator_view", "owner_scope",
+    "AmbiguousCallError", "Approval", "ApprovalDeniedError", "ApprovalLedger",
+    "ApprovalLedgerError", "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS",
+    "MAX_DETAIL_CHARS", "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PendingCall", "call_id", "call_ref",
+    "clamp_ttl", "current_owner", "default_ledger", "operator_scope", "operator_view",
+    "owner_scope", "owner_tag",
 ]
