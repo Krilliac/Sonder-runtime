@@ -9,9 +9,21 @@ from __future__ import annotations
 
 import calendar
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import TypedDict
+
+    class SessionRow(TypedDict, total=False):
+        session_id: str | None
+        title: str | None
+        updated_ts: str | None
+        project: str | None
+        turn_count: int | None
 
 
-def relative_age(updated_ts, *, now=None) -> str:
+def relative_age(updated_ts: str | None, *, now: float | None = None) -> str:
     """Render a SQLite ``CURRENT_TIMESTAMP`` value as a short relative age.
 
     ``CURRENT_TIMESTAMP`` is UTC ``YYYY-MM-DD HH:MM:SS``.  Any other shape is
@@ -40,7 +52,9 @@ def relative_age(updated_ts, *, now=None) -> str:
     return "%dd ago" % (delta // 86400)
 
 
-def format_sessions(rows, *, now=None) -> str:
+def format_sessions(
+    rows: Iterable[SessionRow] | None, *, now: float | None = None
+) -> str:
     """Render the session listing, or the stable empty-state line."""
     rows = list(rows or [])
     if not rows:
