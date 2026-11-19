@@ -390,12 +390,13 @@ def _relative_path(path: Path, root: Path) -> Path:
 
 
 def _resolve_root(root: str, extra_roots: str) -> Path:
-    requested = Path(str(root or ".")).expanduser()
+    local = file_ops._reject_network_path(str(root or "."))
+    requested = Path(local).expanduser()
     if not requested.is_absolute():
         requested = file_ops.workspace_root() / requested
     _reject_linked_request(requested, "archive root")
     resolved = file_ops.resolve_repository_read_path(
-        str(root or "."), allow_workspace_root=True, reject_sensitive=True,
+        local, allow_workspace_root=True, reject_sensitive=True,
         extra_roots=extra_roots,
     )
     if not resolved.is_dir():
@@ -410,7 +411,7 @@ def _resolve_destination(
 ) -> Path:
     if not str(destination or "").strip():
         raise ValueError("archive destination is required")
-    candidate = Path(str(destination)).expanduser()
+    candidate = Path(file_ops._reject_network_path(str(destination))).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
     _reject_linked_request(candidate, "archive destination parent", parent_only=True)
@@ -535,7 +536,7 @@ def _plan(
                 raise PermissionError("archive input tree contains a special file: %s" % child)
 
     for raw in inputs:
-        candidate = Path(raw).expanduser()
+        candidate = Path(file_ops._reject_network_path(raw)).expanduser()
         if not candidate.is_absolute():
             candidate = root / candidate
         _reject_linked_request(candidate, "archive input")
