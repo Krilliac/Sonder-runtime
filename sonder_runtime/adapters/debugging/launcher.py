@@ -55,7 +55,11 @@ from ...application.execution.world_control import OutputWatermark
 from ...application.ports.jobs import JobIdentity, JobStatus
 from ...domain.common.errors import SonderError
 from ...platform import runtime_threads
-from ...platform.private_files import ensure_private_dir
+from ...platform.private_files import (
+    ensure_private_dir,
+    label_new_tree_no_read_up,
+    low_integrity_readable,
+)
 from .capture_source import share_deny_handle
 
 logger = logging.getLogger(__name__)
@@ -210,11 +214,19 @@ class ProcessDebugLauncher:
             raise PermissionError("debug run root is a symlink")
         if os.name != "nt":
             os.chmod(self._root, 0o700)
+        elif not label_new_tree_no_read_up(self._root):
+            # Labelling the root as well means a new run dir inherits the label
+            # when it is created, so no low process can open it in the moment
+            # before the run dir's own label below is applied.
+            raise PermissionError("debug run root could not be labelled against low-integrity reads")
         self._prune()
         rundir = self._rundir(run_id)
         os.mkdir(rundir, 0o700)  # exclusive: FileExistsError on reuse
         if os.name != "nt":
             os.chmod(rundir, 0o700)
+        elif not label_new_tree_no_read_up(rundir):
+            shutil.rmtree(rundir, ignore_errors=True)
+            raise PermissionError("debug run directory could not be labelled against low-integrity reads")
         for rel in _BASE_DIRS + tuple(plan.mkdirs):
             target = rundir.joinpath(*_safe_relative(rel).parts)
             target.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -311,6 +323,9 @@ class ProcessDebugLauncher:
                 run.stack.enter_context(share_deny_handle(plan.input_identity.path))
             run.staged_input = self._source.stage(plan.input_identity, str(rundir),
                                                   strategy=plan.staging)
+            if (os.name == "nt" and plan.staging == "copy"
+                    and low_integrity_readable(run.staged_input)):
+                raise PermissionError("staged capture is readable at low integrity")
             for source_path, rel in plan.staged_files:
                 dest = rundir.joinpath(*_safe_relative(rel).parts)
                 dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
