@@ -161,7 +161,6 @@ def policy_error(value=None, *, allow_remote=False) -> str:
     if "%" in host:
         return "OLLAMA_HOST must not contain a zone id or percent escape"
     if parsed.username is not None or parsed.password is not None:
-        logger.critical("OLLAMA_HOST contains inline credentials -- credential exposure risk, origin rejected for security")
         logger.error("OLLAMA_HOST contains inline credentials, origin rejected for security")
         return "OLLAMA_HOST must not contain inline credentials"
     if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
@@ -187,9 +186,7 @@ def policy_error(value=None, *, allow_remote=False) -> str:
             "would leave this machine; set %s=1 to opt in explicitly" % REMOTE_OPT_IN
         )
     if parsed.scheme.lower() != "https":
-        logger.error("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts and embeddings in transit")
-        logger.warning("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts in transit")
-        logger.info("ollama origin rejected: non-loopback origin requires https")
+        logger.warning("non-loopback OLLAMA_HOST rejected: plain HTTP would expose prompts and embeddings in transit")
         return "non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit"
     if _first_acceptance_log(origin, "remote"):
         logger.warning("remote Ollama origin accepted -- prompts and embeddings will leave this machine")

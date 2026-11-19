@@ -117,6 +117,7 @@ from sonder_runtime.application.routing import long_context_overflow as _overflo
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health
 from sonder_runtime.domain import public_policy
+from sonder_runtime.domain import thinking_controls as _thinking_controls
 from sonder_runtime.domain.common.errors import (
     Conflict,
     DependencyUnavailable,
@@ -4550,7 +4551,7 @@ def _chat_completion_object(
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
+            "finish_reason": "length" if isinstance(receipt, dict) and receipt.get("truncated") else "stop",
         }],
         "usage": chat_formatting.chat_usage(activity_response),
         "sonder_activity": activity,
@@ -7374,6 +7375,8 @@ class Handler(BaseHTTPRequestHandler):
         # receipt can carry the call id a client needs to approve it once.
         turn_refusals = []
         refusal_scope = _CHAT_REFUSALS.set(turn_refusals)
+        # Whether the latest model reply of this turn was cut at its budget.
+        truncation_flag, truncation_scope = _thinking_controls.begin_reply_truncation()
         _ensure_refusal_observer()
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
@@ -7525,8 +7528,7 @@ class Handler(BaseHTTPRequestHandler):
                             gateway_bound=True,
                         )
                         web_routed = reply is not None
-                    if (structured_schema is None and reply is None and
-                            (allow_control_routes or (model_operation != "responses" and intents.classify_file_intent(prompt)))):
+                    if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
@@ -7818,6 +7820,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         finally:
             _CHAT_REFUSALS.reset(refusal_scope)
+            _thinking_controls.REPLY_TRUNCATION.reset(truncation_scope)
             _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
@@ -7849,6 +7852,8 @@ class Handler(BaseHTTPRequestHandler):
             receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        if turn is not None and reply is None and truncation_flag[0]:
+            receipt["truncated"] = True
         from sonder_runtime.interfaces.orchestration_commands import reply_receipt_fields
         receipt.update(reply_receipt_fields(reply))
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
@@ -8013,7 +8018,7 @@ class Handler(BaseHTTPRequestHandler):
         from sonder_runtime.application.chat import tool_loop as _tool_loop
         with _tool_loop.bind_turn(tool_turn), _live_stream.armed_for(
             self, _chunk, hold_code=server._code_gate_enabled(),
-        ):
+        ), _live_stream.stream_admission(self, server._bound_request_timeout(None, server.TIMEOUT), bool(kwargs.get("capture_stream")), admission=server._http_chat_tools().stream_turn_admission):
             return _run_prompt(*args, **kwargs)
 
     def _begin_early_stream(self, model="sonder"):

@@ -72,7 +72,8 @@ _ACTION_PREFIX = re.compile(
     r"^\s*(?:/delegate\s+)?(?:please\s+|can\s+you\s+|could\s+you\s+|"
     r"would\s+you\s+|will\s+you\s+)*(?:create|save|edit|modify|update|"
     r"write|overwrite|append|rename|move|copy|delete|remove|run|execute|"
-    r"deploy|compile|test|find|read|show|list|inspect|count)\b",
+    r"deploy|compile|test|find|read|show|list|inspect|count|"
+    r"fix|patch|search|scan|check|review)\b",
     re.IGNORECASE,
 )
 _NO_TOOLS_OR_NEGATION = re.compile(
