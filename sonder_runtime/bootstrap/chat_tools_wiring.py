@@ -747,11 +747,49 @@ def clear_work_run_pending_refusal(run_id: str) -> None:
         pass
 
 
+def record_agent_pending_refusal(
+    decision: Any,
+    tool_name: str,
+    arguments: Mapping[str, Any] | None,
+    *,
+    modes_allowing: tuple[str, ...] | list[str] | None = None,
+) -> str:
+    """Record one unattended agent refusal on the current HTTP work-run row; return that run's id.
+
+    ``modes_allowing`` defaults to the modes whose matrix allows
+    ``decision.risk``; pass ``()`` for a refusal no mode lifts.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+    from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
+    from sonder_runtime.interfaces.http.work_runs import current_run_id
+
+    run_id = current_run_id()
+    record_work_run_pending_refusal(
+        run_id, decision, tool_name, arguments,
+        refusal_receipt_fn=refusal_receipt,
+        mode_label=permission_policy.mode_label(decision.mode),
+        modes_allowing=(
+            permission_policy._modes_allowing(decision.risk)
+            if modes_allowing is None else modes_allowing
+        ),
+    )
+    return run_id
+
+
+def record_restricted_pending_refusal(
+    decision: Any, tool_name: str, arguments: Mapping[str, Any] | None,
+) -> None:
+    """The restricted tool lane's recorder: a safety-classifier ask, which no mode lifts."""
+    record_agent_pending_refusal(decision, tool_name, arguments, modes_allowing=())
+
+
 __all__ = [
     "audit_mode_transition",
     "build_http_chat_tool_turn",
     "clear_work_run_pending_refusal",
     "maybe_open_mcp_chat_tool_turn",
+    "record_agent_pending_refusal",
+    "record_restricted_pending_refusal",
     "record_work_run_pending_refusal",
     "slash_run_arguments",
     "start_default_prewarm",
