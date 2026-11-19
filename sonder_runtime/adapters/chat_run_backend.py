@@ -74,14 +74,16 @@ def format_agent_gate_refusal(name: str, decision: Any) -> str:
         call = decision.call_id
         remedy = (
             f" This exact call is recorded as pending call {call}; an operator can "
-            f"approve it once at the console (/approve {call}), after which one "
-            "unchanged retry runs."
+            f"approve it once at the console (/approve {call}) or over HTTP "
+            f"(POST /v1/approvals/{call}, or POST /v1/approvals/deny/{call} to decline), "
+            "after which one unchanged retry runs."
         )
     msg = (
         f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{name}' is refused by the active permission "
         f"gate ({decision.reason}, mode={decision.mode}, risk={decision.risk}). This is the host's "
         "standing policy, not a transient failure: retrying it unchanged will be refused again. "
-        f"Choose a different tool or finalize with what you have.{remedy}"
+        "Do not route around this refusal with another tool or a host program; "
+        f"finalize with what you have and say what was refused.{remedy}"
     )
     return msg
 

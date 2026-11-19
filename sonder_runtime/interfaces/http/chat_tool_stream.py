@@ -65,22 +65,33 @@ def handle_permission_mode_post(
     """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit.
 
     The caller already holds the administrator authority this route needs.
-    Any mode but bypass is process-global, as it always was: it changes the
-    mode for every caller and surface (MCP, loops, autopilot, every account)
-    and clears every per-session scope, so lowering it stops a session in
-    bypass too. Bypass alone is scoped to this caller's principal and session
-    (``X-Sonder-Session`` or the body's ``session_id``; without one, every
-    session of the principal), lives only in memory, and needs
-    ``confirm_bypass: true``.
+    A request that names a session (``X-Sonder-Session``, the body's
+    ``session_id``, or ``scope: "session"``) changes that session's mode only:
+    it may make the session stricter than the global mode, never looser
+    (``set_session_mode``). Without a session, or with ``scope: "global"``, a
+    mode is process-global: it changes the mode for every caller and surface
+    (MCP, loops, autopilot, every account) and clears every per-session scope
+    that is not stricter, so lowering it stops a session in bypass too. Bypass
+    is always scoped to this caller's principal and session (without a session,
+    every session of the principal), lives only in memory, and needs
+    ``confirm_bypass: true``. The response echoes ``scope`` and ``session_id``.
     """
     wanted = ""
     confirm_bypass = False
+    scope = ""
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
     if isinstance(req, dict):
         wanted = str(req.get("mode") or "").strip()
         confirm_bypass = req.get("confirm_bypass") is True
+        scope = str(req.get("scope") or "").strip().lower()
         if not session_id:
             session_id = str(req.get("session_id") or "").strip()
+    if scope not in ("", "session", "global"):
+        handler._send_json_payload(
+            {"error": "scope must be 'session' or 'global'", "modes": list(permission_policy.modes())},
+            status=400,
+        )
+        return
     if not wanted:
         handler._send_json_payload(
             {"error": "mode is required", "modes": list(permission_policy.modes())},
@@ -106,15 +117,21 @@ def handle_permission_mode_post(
         )
         return
     principal = principal_of(context)
-    scoped = resolved == getattr(permission_policy, "BYPASS", "bypass")
-    change = permission_policy.set_mode if scoped else permission_policy.set_global_mode
+    is_bypass = resolved == getattr(permission_policy, "BYPASS", "bypass")
+    scoped = is_bypass or scope == "session" or (scope != "global" and bool(session_id))
+    if is_bypass:
+        change = permission_policy.set_mode
+    elif scoped:
+        change = permission_policy.set_session_mode
+    else:
+        change = permission_policy.set_global_mode
     try:
         with permission_policy.mode_scope(principal, session_id):
             previous = permission_policy.current_mode()
             result = idempotent_action(
                 context,
                 handler.headers.get("Idempotency-Key", ""),
-                f"permission-mode\0{principal}\0{session_id}\0{resolved}",
+                f"permission-mode\0{principal}\0{session_id}\0{resolved}\0{scoped}",
                 lambda: change(resolved),
             )
     except ValueError as exc:
@@ -134,6 +151,8 @@ def handle_permission_mode_post(
         observe_state()
         payload = dict(mode_data())
     payload["can_bypass"] = True
+    payload["scope"] = "session" if scoped else "global"
+    payload["session_id"] = session_id if scoped else ""
     handler._send_json_payload(payload)
 
 

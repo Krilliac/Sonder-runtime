@@ -347,11 +347,21 @@ def test_set_global_mode_keeps_a_session_that_is_stricter_than_the_new_mode():
 # --- every deny rule holds in bypass --------------------------------------
 
 
-def test_bypass_keeps_the_shipped_file_delete_deny():
+def test_bypass_keeps_the_shipped_deny_rule():
+    tool = "admin_private_chain_of_thought"
+    shipped = next(dict(rule) for rule in rule_policy.DEFAULT_RULES if rule["pattern"] == tool)
+    assert shipped["action"] == "deny"
+    for interactive in (False, True):
+        decision = pm.decide(tool, interactive=interactive, mode=pm.BYPASS,
+                             rule_lookup=lambda _n: dict(shipped))
+        assert decision.action == pm.DENY and decision.source == "rule", interactive
+
+
+def test_bypass_runs_a_delete_under_the_shipped_ask_row():
     shipped = next(dict(rule) for rule in rule_policy.DEFAULT_RULES
                    if rule["pattern"] == "file_delete")
-    assert shipped["action"] == "deny"
+    assert shipped["action"] == "ask"  # deletes always ask, and bypass skips every ask
     for interactive in (False, True):
         decision = pm.decide("file_delete", interactive=interactive, mode=pm.BYPASS,
                              rule_lookup=lambda _n: dict(shipped))
-        assert decision.action == pm.DENY and decision.source == "rule", interactive
+        assert decision.action == pm.ALLOW, (interactive, decision)

@@ -521,13 +521,13 @@ def test_login_slash_requires_an_operator_approval(monkeypatch):
 
 
 def test_file_slash_commands_route_to_server(monkeypatch):
-    """The routing, with the shipped `file_delete: deny` rule out of the way.
+    """The routing, with the gate out of the way.
 
-    `/delete` reaches `file_delete`, which ships a default `deny` rule, and the
-    app's slash chain now enforces it -- see the next test. An explicit allow
-    rule for every tool keeps this test about routing, which is what it is
-    named for: a written allow satisfies the ask in every mode, and nothing
-    else lets a destructive tool through to a caller with nobody to ask.
+    An explicit allow rule for every tool keeps this test about routing, which
+    is what it is named for: a written allow satisfies the ask in every mode.
+    `/delete` reaches `file_delete`, and a delete always asks in every mode but
+    bypass (an allow rule does not waive it; see the next test), so its leg
+    runs under bypass.
     """
     monkeypatch.setattr(
         permission_modes, "_rule_lookup",
@@ -539,15 +539,22 @@ def test_file_slash_commands_route_to_server(monkeypatch):
 
     assert ts._handle_slash("/files *.py") == "found"
     assert ts._handle_slash("/read README.md") == "read"
-    assert ts._handle_slash("/delete README.md") == "dry delete"
+    before = permission_modes.current_mode()
+    permission_modes.set_mode(permission_modes.BYPASS)
+    try:
+        assert ts._handle_slash("/delete README.md") == "dry delete"
+    finally:
+        permission_modes.set_mode(before)
 
 
-def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
-    """And with the real lookup, the rule wins and the tool is never entered.
+def test_the_shipped_delete_ask_binds_on_this_surface(monkeypatch):
+    """And with the real lookup, the delete's ask binds and the tool is never entered.
 
     This is the sentence the permission-gate plan opened with, at the last
     surface it was still true of: before the chain was gated, the only thing
-    stopping this call was `file_delete`'s own `dry_run` default.
+    stopping this call was `file_delete`'s own `dry_run` default. The shipped
+    row asks (deletes always ask), and this caller has nobody to answer it.
+    The shipped deny rule's binding here is `/cot`'s test above.
     """
     def _never_runs(**_kwargs):
         raise AssertionError("a refused tool was dispatched anyway")
@@ -557,7 +564,7 @@ def test_the_shipped_delete_rule_binds_on_this_surface(monkeypatch):
     reply = ts._handle_slash("/delete README.md")
 
     assert reply.startswith("refused /delete:")
-    assert "rule denies this tool" in reply
+    assert "always asks" in reply and "nobody is here" in reply
 
 
 def test_artifact_and_game_slash_commands_route_to_server(monkeypatch, unattended_effects_allowed):
