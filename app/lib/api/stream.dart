@@ -295,6 +295,65 @@ class ChatStreamToolEvent extends ChatStreamEvent {
         result: result ?? this.result,
       );
 
+  /// This frame laid over the [previous] frame of the same call: what this
+  /// frame states wins, and what it leaves out (the arguments, the code, the
+  /// risk) is kept from [previous] instead of being lost. The risk is never
+  /// lowered by a later frame: the stricter of the two stays. A terminal
+  /// outcome (`ok`, `error`, `result`) is the one this frame states, so a
+  /// later `ok: true` frame does not keep an earlier error.
+  ChatStreamToolEvent mergedOnto(ChatStreamToolEvent previous) {
+    String pick(String now, String before) => now.isNotEmpty ? now : before;
+    final hasArgs = args.isNotEmpty || argumentsReported;
+    return ChatStreamToolEvent(
+      id: pick(id, previous.id),
+      callId: pick(callId, previous.callId),
+      digest: pick(digest, previous.digest),
+      tool: pick(tool, previous.tool),
+      language: pick(language, previous.language),
+      code: pick(code, previous.code),
+      args: hasArgs ? args : previous.args,
+      rawArgs: hasArgs ? rawArgs : previous.rawArgs,
+      preview: pick(preview, previous.preview),
+      detail: detail.isNotEmpty ? detail : previous.detail,
+      detailTruncated: detail.isNotEmpty ? detailTruncated : previous.detailTruncated,
+      detailChars: detail.isNotEmpty ? detailChars : previous.detailChars,
+      argumentsReported: argumentsReported || previous.argumentsReported,
+      timeout: timeout ?? previous.timeout,
+      backend: pick(backend, previous.backend),
+      executionTarget: pick(executionTarget, previous.executionTarget),
+      phase: pick(phase, previous.phase),
+      risk: _stricterRisk(previous.risk, risk),
+      session: pick(session, previous.session),
+      ok: ok ?? previous.ok,
+      denied: ok != null ? denied : (denied || previous.denied),
+      bidiWarning: bidiWarning || previous.bidiWarning,
+      bidiChars: bidiChars.isNotEmpty ? bidiChars : previous.bidiChars,
+      state: pick(state, previous.state),
+      error: ok != null ? error : (error ?? previous.error),
+      result: result ?? previous.result,
+    );
+  }
+
+  static int _riskRank(String risk) {
+    switch (risk.trim()) {
+      case '':
+        return -1;
+      case 'read_only':
+        return 0;
+      case 'write':
+      case 'workspace_write':
+        return 1;
+      case 'execute':
+      case 'host_exec':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  static String _stricterRisk(String before, String now) =>
+      _riskRank(now) > _riskRank(before) ? now : before;
+
   factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
     final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
     final callId =
