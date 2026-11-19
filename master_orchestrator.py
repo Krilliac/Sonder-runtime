@@ -455,11 +455,10 @@ def fleet_model_bytes() -> int:
         return cached[1]
     size = 0
     try:
-        import sonder_runtime.adapters.runtime_policy as runtime_policy  # local import: runtime_policy never imports this module
-
-        policy = runtime_policy.load(create=True)
-        tier = runtime_policy.route_tier("fleet", policy=policy)
-        wanted = str((policy.get("local_models") or {}).get(tier) or "").strip()
+        from sonder_runtime.bootstrap import delegation_wiring as _dw  # imports this module
+        route = _dw.fleet_pool_route(sys.modules.get("server"))
+        wanted = "" if route else _dw.fleet_model_name()  # pool carriers, never the local host
+        size = int(route[0].model_size_bytes(route[1]) or 0) if route else 0
         if wanted:
             host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
             host = host.replace("0.0.0.0", "127.0.0.1")
@@ -683,7 +682,9 @@ def capacity(
         ram_slots = max(1, usable // RAM_PER_WORKER_BYTES)
     else:
         ram_slots = DEFAULT_MAX_WORKERS
-    gpu_slots = gpu_worker_slots()
+    from sonder_runtime.bootstrap import delegation_wiring as _dw
+    pool_route = _dw.fleet_pool_route(sys.modules.get("server"))  # its carriers replace the local GPU/parallel limits
+    gpu_slots = 0 if pool_route else gpu_worker_slots()
 
     limits = {
         "requested": int(requested),
@@ -701,10 +702,9 @@ def capacity(
         limits["reserved_capacity"] = max(1, int(requested) - reserved)
     # Ollama's own batching width is the hard ceiling on REAL concurrency --
     # handing it more concurrent requests than it will batch just queues them.
-    from sonder_runtime.bootstrap import delegation_wiring as _dw
-    ollama_parallel = _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
+    ollama_parallel = int(pool_route[2]["total"]) if pool_route else _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
     if ollama_parallel > 0:
-        limits["ollama_num_parallel"] = int(ollama_parallel)
+        limits["pool_model_capacity" if pool_route else "ollama_num_parallel"] = int(ollama_parallel)
     automatic = max(1, min(limits.values()))
     bound_by = min(limits, key=lambda key: (limits[key], key))
 
@@ -729,9 +729,9 @@ def capacity(
             bound_by = "requested agents"
         else:
             bound_by = "per-run worker_cap"
+    pool_note, slots, bound_by = _dw.pool_capacity_note(pool_route, requested, slots, bound_by)
     gpu_total, gpu_free = gpu_memory_bytes()
-    warning = ""
-    warnings = [message for message in (operator_error, cap_error) if message]
+    warnings = [message for message in (operator_error, cap_error, pool_note) if message]
     if ollama_parallel <= 0 and slots > 1:
         warnings.append(
             "OLLAMA_NUM_PARALLEL is unset -- Ollama auto-selects its batch width and "
