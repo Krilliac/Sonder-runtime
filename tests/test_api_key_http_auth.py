@@ -338,6 +338,43 @@ def test_an_admin_accounts_key_cannot_reach_bypass_or_admin_commands_in_chat(ser
         assert out.startswith("refused /") and "administrator" in out, (line, out)
 
 
+@pytest.mark.parametrize("bypass_session", ["", "chat-1"], ids=["principal-wide", "same-session"])
+def test_an_admin_accounts_key_does_not_inherit_the_bypass_its_session_turned_on(
+        served, monkeypatch, bypass_session):
+    import permission_modes
+
+    port, admin_token, _, _ = served
+    key = _control(port, "api-keys/generate", admin_token)[1]["key"]
+    seen = []
+
+    def build_http_chat_tool_turn(**kwargs):
+        policy = kwargs["permission_policy"]
+        seen.append((policy.current_mode(), policy.decide("file_write", interactive=False).action))
+        return None
+
+    monkeypatch.setattr(chat_tools_wiring, "build_http_chat_tool_turn", build_http_chat_tool_turn)
+    chat = json.dumps({"model": "sonder", "session": "chat-1",
+                       "messages": [{"role": "user", "content": "hello"}]}).encode()
+    mode = json.dumps({"mode": "bypass", "confirm_bypass": True, "session_id": bypass_session}).encode()
+    try:
+        status, _, raw = _request(port, "POST", "/v1/permission-mode", body=mode,
+                                  headers={"Content-Type": "application/json", **_both_mode(admin_token)})
+        assert status == 200 and json.loads(raw)["mode"] == "bypass", raw
+        for credential in (admin_token, key):
+            status, _, raw = _request(port, "POST", "/v1/chat/completions", body=chat,
+                                      headers={"Content-Type": "application/json", **_both_mode(credential)})
+            assert status == 200, raw
+        # The signed-in session runs its turn in the bypass it turned on ...
+        assert seen[0] == ("bypass", "allow"), seen
+        # ... but the same account's key does not: a mutation tool is not run unprompted.
+        assert seen[1][0] != "bypass" and seen[1][1] in ("ask", "deny"), seen
+        keyed = ts._auth_context("Bearer " + DEPLOYMENT_KEY, key)
+        with permission_modes.mode_scope(ts._mode_principal(keyed), "chat-1"):
+            assert permission_modes.current_mode() != "bypass"
+    finally:
+        permission_modes._reset_for_tests()
+
+
 def test_an_admin_accounts_key_carries_developer_not_admin_into_typed_contexts(served):
     from sonder_runtime.adapters.web import lifecycle
 

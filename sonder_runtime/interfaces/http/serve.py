@@ -1299,6 +1299,14 @@ def _state_principal(context):
     return "local-open"
 
 
+def _mode_principal(context):
+    """The permission-mode scope: an account's API key never shares its session's (so never its bypass)."""
+    principal = _state_principal(context)
+    account = (context or {}).get("account") or {}
+    # Not "account:"-prefixed, so a nested mode_scope keeps the outer approval owner.
+    return "api-key-of:" + principal if isinstance(account, dict) and account.get("via_api_key") else principal
+
+
 def _account_identity(account) -> str:
     """Return one bounded identity or ``""`` for malformed auth output."""
     if not isinstance(account, dict):
@@ -6237,7 +6245,7 @@ class Handler(BaseHTTPRequestHandler):
         if route != "/v1/permission-mode":
             return False
         _chat_tool_stream.handle_permission_mode_get(
-            self, permission_policy=permission_policy, principal_of=_state_principal,
+            self, permission_policy=permission_policy, principal_of=_mode_principal,
             authority_error=_system_operation_authority_error,
             observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
         )
@@ -6313,7 +6321,7 @@ class Handler(BaseHTTPRequestHandler):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         _chat_tool_stream.handle_permission_mode_post(
             self, req, context, permission_policy=permission_policy,
-            principal_of=_state_principal, idempotent_action=_idempotent_http_action,
+            principal_of=_mode_principal, idempotent_action=_idempotent_http_action,
             send_idempotency_refusal=_send_idempotency_refusal,
             observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
             approver_of=_http_approver, audit_transition=server._http_chat_tools().audit_mode_transition,
@@ -7401,6 +7409,8 @@ class Handler(BaseHTTPRequestHandler):
         ) if getattr(self, "_turn_stack", None) is not None else []
         if getattr(self, "_turn_stack", None) is not None:
             self._turn_stack.enter_context(permission_policy.mode_scope(_state_principal(context), session))
+            if _mode_principal(context) != _state_principal(context):
+                self._turn_stack.enter_context(permission_policy.mode_scope(_mode_principal(context), session))
             self._turn_stack.enter_context(_serve_policy.maybe_temperature_override(
                 request_temperature, session_override=bool(apply_session_temperature and session_temperature is not None),
             ))
