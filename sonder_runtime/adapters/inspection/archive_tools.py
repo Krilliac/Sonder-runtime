@@ -115,7 +115,7 @@ def _is_reparse(path: Path) -> bool:
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(str(path or "")).expanduser()
+    candidate = Path(file_ops._reject_network_path(str(path or ""))).expanduser()
     if not candidate.is_absolute():
         candidate = file_ops.workspace_root() / candidate
     return candidate.absolute()
