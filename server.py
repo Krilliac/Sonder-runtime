@@ -16317,7 +16317,7 @@ def system_profile_text() -> str:
     # This status tool is catalogued as safe and can be reached by natural
     # language. Do not bootstrap a missing profile here: creating the default
     # file is an explicit setup/edit operation, not an observation.
-    path = system_profile._resolve_path()
+    path = system_profile._read_path(None)
     text = system_profile.read_profile(path)
     return "profile: %s\n\n%s" % (path, text or "(empty; profile has not been created)")
 

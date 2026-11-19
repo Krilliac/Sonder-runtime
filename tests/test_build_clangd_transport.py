@@ -198,7 +198,8 @@ def test_a_silent_server_times_out_and_is_killed(tmp_path):
 def test_find_clangd_uses_the_inventory_only():
     record = SimpleNamespace(path="/opt/llvm/bin/clangd-18")
     lookup = SimpleNamespace(lookup=lambda name: record if name == "clangd-18" else None)
-    assert find_clangd(lookup) == "/opt/llvm/bin/clangd-18"
+    # find_clangd normalises to the host path form (backslashes on Windows).
+    assert find_clangd(lookup) == str(Path("/opt/llvm/bin/clangd-18"))
     assert find_clangd(SimpleNamespace(lookup=lambda name: None)) == ""
     assert find_clangd(None) == ""
 
