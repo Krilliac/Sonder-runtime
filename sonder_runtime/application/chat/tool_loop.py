@@ -29,6 +29,7 @@ from sonder_runtime.domain.chat_tools import (
     parse_tool_arguments,
     preview_tool_arguments,
 )
+from sonder_runtime.domain.security import tool_call_classifier as _classifier
 
 _ACTIVE_TURN: contextvars.ContextVar["ChatToolTurn | None"] = contextvars.ContextVar(
     "sonder_active_chat_tool_turn", default=None,
@@ -113,6 +114,12 @@ class ChatToolTurn:
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
         if self.delegate_client_tool is not None and name in self.client_exec_tools:
+            # A client-run call never reaches the host dispatch gate, so the
+            # classifier's BLOCK is applied here, in every mode, bypass included.
+            if _classifier.classify(name, args, risk="") == _classifier.BLOCK:
+                msg = f"ERROR: HOST POLICY: the safety classifier blocks tool '{name}'."
+                self.records.append(ChatToolRecord("", name, "refused", "client", reason=msg[:200]))
+                return msg, run_count
             if name in _EXECUTION_CAP_TOOLS and run_count >= self.budget.max_runs:
                 msg = (
                     f"ERROR: HOST POLICY: chat turn execution budget reached "
