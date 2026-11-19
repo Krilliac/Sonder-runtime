@@ -97,6 +97,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
+from sonder_runtime.adapters.inference import startup_prewarm
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
@@ -1255,7 +1256,7 @@ def configure_typed_config(config) -> None:
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
     global STREAM_HEARTBEAT_SECONDS, PREWARM_ON_START
     STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
-    PREWARM_ON_START = getattr(server_config, "prewarm_on_start", PREWARM_ON_START)
+    PREWARM_ON_START = server_config.prewarm_on_start
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -8257,12 +8258,11 @@ def main(
             target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
         ).start()
         BOUND_PORT = port
-        server._http_chat_tools().start_default_prewarm(
+        startup_prewarm.start_default_model_prewarm(
             setting=PREWARM_ON_START,
             prewarm=lambda tier: server.prewarm_model(tier, announce=True),
             enabled=lambda: server.sonder_speculation.prewarm_enabled(),
-            thread_factory=owned_runtime_thread,
-        )
+            thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         from sonder_runtime.adapters.inference.rpc_cluster import log_sharded_readiness_from_env

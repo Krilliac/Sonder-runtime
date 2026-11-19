@@ -47,24 +47,6 @@ def slash_run_arguments(
     return dict(result) if isinstance(result, Mapping) else None
 
 
-def start_default_prewarm(
-    *,
-    setting: bool,
-    prewarm: Callable[..., Any],
-    enabled: bool,
-    thread_factory: Callable[..., Any],
-) -> None:
-    """Delegate startup prewarm when ``startup_prewarm`` is composed."""
-    import importlib
-    try:
-        startup_prewarm = importlib.import_module("sonder_runtime.adapters.inference.startup_prewarm")
-    except ImportError:
-        return
-    fn: Any = getattr(startup_prewarm, "start_default_model_prewarm", None)
-    if callable(fn):
-        fn(setting=setting, prewarm=prewarm, enabled=enabled, thread_factory=thread_factory)
-
-
 def audit_mode_transition(
     previous: str,
     current: str,
@@ -754,5 +736,4 @@ __all__ = [
     "maybe_open_mcp_chat_tool_turn",
     "record_work_run_pending_refusal",
     "slash_run_arguments",
-    "start_default_prewarm",
 ]
