@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme.dart';
 import 'motion.dart';
+import 'text_field.dart';
 
 /// One page of a categorized surface (Runtime, Settings): its rail entry and
 /// the builder for its content.
@@ -18,9 +19,6 @@ class SonderCategory {
   /// Rail group heading; consecutive categories with the same group share it.
   final String? group;
 
-  /// The role required to see this category.
-  final String? requiredRole;
-
   /// Trailing rail widget: a count or a status. It must carry text, never
   /// colour alone (see `CountBadge` and `StatusPill`).
   final Widget? badge;
@@ -36,7 +34,6 @@ class SonderCategory {
     required this.builder,
     this.description,
     this.group,
-    this.requiredRole,
     this.badge,
     this.keywords = const [],
   });
@@ -86,7 +83,6 @@ class CategoryScaffold extends StatefulWidget {
   final String? selectedId;
   final String? initialId;
   final ValueChanged<String>? onSelected;
-  final String? userRole;
 
   /// App bar actions, shown in both layouts.
   final List<Widget> actions;
@@ -122,7 +118,6 @@ class CategoryScaffold extends StatefulWidget {
     this.selectedId,
     this.initialId,
     this.onSelected,
-    this.userRole,
     this.actions = const [],
     this.leading,
     this.leadingWidth,
@@ -151,24 +146,16 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
   late bool _narrowDetail =
       widget.initialId != null || widget.selectedId != null;
 
-  List<SonderCategory> get _allowedCategories {
-    if (widget.userRole == null) return widget.categories;
-    return widget.categories.where((c) {
-      if (c.requiredRole == null) return true;
-      return c.requiredRole == widget.userRole;
-    }).toList();
-  }
-
   String get _selected {
     final wanted = widget.selectedId ?? _internal ?? widget.initialId;
-    if (wanted != null && _allowedCategories.any((c) => c.id == wanted)) {
+    if (wanted != null && widget.categories.any((c) => c.id == wanted)) {
       return wanted;
     }
-    return _allowedCategories.first.id;
+    return widget.categories.first.id;
   }
 
   SonderCategory get _current =>
-      _allowedCategories.firstWhere((c) => c.id == _selected);
+      widget.categories.firstWhere((c) => c.id == _selected);
 
   void _select(String id) {
     setState(() {
@@ -237,7 +224,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
   Widget _rail(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
-    final visible = _allowedCategories.where((c) => c.matches(_query)).toList();
+    final visible = widget.categories.where((c) => c.matches(_query)).toList();
     final children = <Widget>[];
     String? group;
     for (final c in visible) {
@@ -320,7 +307,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
     }
     final text = Theme.of(context).textTheme;
     final tokens = SonderTokens.of(context);
-    final visible = _allowedCategories.where((c) => c.matches(_query)).toList();
+    final visible = widget.categories.where((c) => c.matches(_query)).toList();
     final rows = <Widget>[];
     String? group;
     for (final c in visible) {

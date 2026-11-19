@@ -31,8 +31,8 @@ editing a file is recoverable from git, launching a process is not.
 
 Why ``dangerous`` always asks
 -----------------------------
-Claude Code offers a full bypass. This deliberately does not: in every mode,
-including ``auto``, the tools the catalog classes ``dangerous`` (``file_delete``,
+In every mode but ``bypass``, including ``auto``, the tools the catalog classes
+``dangerous`` (``file_delete``,
 ``sqlite_mutate``, ``task_delete``, ``git_merge``, ``self_heal_repair``,
 ``admin_register``/``admin_set_account``, and the policy-changing
 ``runtime_policy_update``/``permission_rule_set``) still stop and ask.
@@ -58,6 +58,20 @@ tools is not a combination worth shipping as a single keystroke. A standing
 exemption for a specific tool is still available -- as an explicit, persistent,
 auditable rule via ``permission_rule_set`` -- which is the right shape for that
 decision because it is narrow and it is written down.
+
+Bypass
+------
+``bypass`` is the one mode that skips the prompts: every graded class runs
+without asking. It skips prompts (``ask``) only. Every deny rule -- one the
+operator wrote, a shipped default such as ``file_delete: deny``, the
+degraded-policy deny, the chain-of-thought guard -- and privilege
+(elevation), durable-authority tools, process-wide cloud consent
+(``BYPASS_HELD_TOOLS``), the effect fence and a name nothing can
+classify still stop it. Entering it needs an attended confirmation
+(``/mode bypass`` answered at the console, or an administrator's
+``confirm_bypass``). Over HTTP it applies to that caller's principal and
+session only, and a process-global bypass is not applied to scoped turns.
+It is never saved to disk, for the global mode or any scope.
 
 Enforcement scope
 -----------------
@@ -444,8 +458,9 @@ ASK_CAVEAT = (
     "'ask' means a prompt at the console; with nobody to ask, file changes, "
     "host programs, and destructive tools are refused (write an allow rule, "
     "pick a mode that allows the class, or answer at the console), while "
-    "ask-class tools proceed and are recorded; plan denies, and tools nothing "
-    "can classify are always refused."
+    "ask-class tools proceed and are recorded; plan denies, bypass skips the "
+    "prompts but not an explicit deny rule, and tools nothing can classify are "
+    "always refused."
 )
 
 MODE_BLURBS = {
@@ -711,8 +726,11 @@ _MATRIX = {
                    "execution": ASK, "dangerous": ASK, UNCLASSIFIED: ASK},
     AUTO: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
            "execution": ALLOW, "dangerous": ASK, UNCLASSIFIED: ASK},
+    # Bypass skips the prompts for every graded class. ``unclassified`` stays
+    # ASK: "nothing could classify this" is not a prompt to skip, so a person
+    # at the console is asked and an unattended caller is refused (5a below).
     BYPASS: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
-             "execution": ALLOW, "dangerous": ALLOW, UNCLASSIFIED: ALLOW},
+             "execution": ALLOW, "dangerous": ALLOW, UNCLASSIFIED: ASK},
 }
 
 # Tools that start a host process. Kept here rather than imported from server
@@ -833,6 +851,15 @@ DURABLE_AUTHORITY_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account",
     "elevate", "permission_rule_set", "permission_approve",
 })
+
+# What ``bypass`` still holds besides the durable-authority tools. Over HTTP a
+# bypass is one principal's and one session's, but ``cloud_opt_in`` is
+# process-wide: turning it on sends every later ``cloud-*`` prompt of every
+# caller off the machine, and enabling it is explicit consent, which a skipped
+# prompt is not. Bypass holds these as it holds the durable-authority tools: an
+# unattended caller is refused, the console is asked, and an explicit allow
+# rule still lets them run, as in every other mode.
+BYPASS_HELD_TOOLS = DURABLE_AUTHORITY_TOOLS | frozenset({"cloud_opt_in"})
 
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
@@ -996,7 +1023,9 @@ def _load() -> None:
             for key, value in raw_scopes.items():
                 scope_key = str(key or "").strip()
                 scope_mode = str(value or "").strip()
-                if scope_key and scope_mode in _MATRIX:
+                # Bypass is never restored, for a scope any more than for the
+                # global mode: each entry needs a fresh, attended confirmation.
+                if scope_key and scope_mode in _MATRIX and scope_mode != BYPASS:
                     _SCOPED_MODES[scope_key] = scope_mode
         # Elevation is deliberately NOT restored from disk. It is a decision
         # about this session made by whoever is at the keyboard now; silently
@@ -1022,11 +1051,14 @@ def _write_state(mode: str, scopes: dict[str, str] | None = None) -> None:
     path = _state_path()
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    # Never persist bypass as the global fallback mode across restarts.
+    # Never persist bypass across restarts: not as the global fallback mode,
+    # and not for any (principal, session) scope. A bypass scope lives only in
+    # this process's memory.
     persisted_default = DEFAULT_MODE if mode == BYPASS else mode
     payload: dict = {"mode": persisted_default}
-    if scopes:
-        payload["scopes"] = dict(scopes)
+    kept = {key: value for key, value in (scopes or {}).items() if value != BYPASS}
+    if kept:
+        payload["scopes"] = kept
     handle, temporary = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp-", dir=directory,
     )
@@ -1055,8 +1087,13 @@ def _discard_saved_state() -> bool:
     return True
 
 
-def _save(previous: str, *, scope: str | None = None) -> None:
-    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed."""
+def _save(previous: str, *, scope: str | None = None, scope_prior: str | None = None) -> None:
+    """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed.
+
+    ``scope_prior`` is the scope's own entry before the change (``None`` when it
+    had none), so a refused raise puts back exactly that: a scope that was
+    following the global mode keeps following it.
+    """
     mode = _SCOPED_MODES[scope] if (scope and scope in _SCOPED_MODES) else _STATE["mode"]
     try:
         _write_state(_STATE["mode"], dict(_SCOPED_MODES) if _SCOPED_MODES else None)
@@ -1066,8 +1103,8 @@ def _save(previous: str, *, scope: str | None = None) -> None:
     order = {name: index for index, name in enumerate(MODES)}
     if order.get(mode, len(MODES)) > order.get(previous, -1):
         if scope:
-            if previous in _MATRIX:
-                _SCOPED_MODES[scope] = previous
+            if scope_prior in _MATRIX:
+                _SCOPED_MODES[scope] = scope_prior
             else:
                 _SCOPED_MODES.pop(scope, None)
         else:
@@ -1273,12 +1310,50 @@ def set_mode(name: str) -> str:
     with _LOCK:
         if scope:
             previous = _scoped_mode_unlocked(pair) or _STATE["mode"]
+            prior = _SCOPED_MODES.get(scope)
             _SCOPED_MODES[scope] = match
-            _save(previous, scope=scope)
+            _save(previous, scope=scope, scope_prior=prior)
         else:
             previous = _STATE["mode"]
             _STATE["mode"] = match
             _save(previous)
+    return match
+
+
+def set_global_mode(name: str) -> str:
+    """Set the process-global mode for every caller; returns the new mode.
+
+    The administrator's mode control (``POST /v1/permission-mode`` for any mode
+    but bypass) uses this. It ignores any bound ``mode_scope`` and clears every
+    (principal, session) scope that is not stricter than the new mode, so the
+    mode it sets is the one MCP clients, loops, autopilot and every account
+    turn now run under -- including a session that was in bypass. That makes
+    lowering it a real safety stop. It never loosens a scope: a session a user
+    put in a stricter mode (``plan`` under a new global ``auto``) keeps it.
+    Bypass is refused here: it is only ever entered for one caller's scope (or
+    at the attended console) and never applies process-wide over HTTP.
+    """
+    _load()
+    match = resolve_mode(name)
+    if match == BYPASS:
+        raise ValueError("bypass is entered per session, never as the global mode over HTTP")
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
+    with _LOCK:
+        previous = _STATE["mode"]
+        prior_scopes = dict(_SCOPED_MODES)
+        _STATE["mode"] = match
+        for scope, scoped in prior_scopes.items():
+            if order.get(scoped, len(MODES)) >= order[match]:
+                del _SCOPED_MODES[scope]
+        try:
+            _save(previous)
+        except ModePersistenceError:
+            # A refused raise restored the global mode; the scopes it would
+            # have cleared come back too. A lowering that could not be saved
+            # still holds for this process, looser scopes cleared.
+            if _STATE["mode"] != match:
+                _SCOPED_MODES.update(prior_scopes)
+            raise
     return match
 
 
@@ -1295,8 +1370,9 @@ def cycle_mode(step: int = 1) -> str:
         else:
             new = _CYCLE_MODES[0] if step >= 0 else _CYCLE_MODES[-1]
         if scope:
+            prior = _SCOPED_MODES.get(scope)
             _SCOPED_MODES[scope] = new
-            _save(previous, scope=scope)
+            _save(previous, scope=scope, scope_prior=prior)
         else:
             _STATE["mode"] = new
             _save(previous)
@@ -1637,8 +1713,8 @@ def approval_ledger():
     return _ledger_for(None)
 
 
-def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
-    """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "").
+def _rule_for(tool_name: str, rule_lookup) -> tuple[str | None, str, dict | None]:
+    """Resolve ``(action, pattern, rule)`` for a tool, or ``(None, "", None)``.
 
     Only ``allow``/``deny`` are meaningful here -- see the module docstring.
     A missing/failing/malformed lookup, or a rule that says ``ask`` (or
@@ -1646,17 +1722,23 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
     """
     lookup = rule_lookup if rule_lookup is not None else _rule_lookup
     if lookup is None:
-        return None, ""
+        return None, "", None
     try:
         rule = lookup(tool_name)
     except Exception:
-        return None, ""
+        return None, "", None
     if not isinstance(rule, dict):
-        return None, ""
+        return None, "", None
     action = str(rule.get("action", "")).strip().lower()
     if action not in (ALLOW, DENY):
-        return None, ""
-    return action, str(rule.get("pattern", "")).strip()
+        return None, "", None
+    return action, str(rule.get("pattern", "")).strip(), rule
+
+
+def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
+    """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "")."""
+    action, pattern, _rule = _rule_for(tool_name, rule_lookup)
+    return action, pattern
 
 
 def decide_for_caller(tool_name: str, *, interactive: bool,
@@ -1879,14 +1961,14 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 name, source="fence", call_id=call,
             )
 
-    rule_action, rule_pattern = _rule_action_for(name, rule_lookup)
+    rule_action, rule_pattern, _rule_row = _rule_for(name, rule_lookup)
 
     # 1. An explicit deny is a narrower, written-down decision than any mode
-    #    dial, so it wins outright -- including over auto, and immune to the
-    #    unattended rule below. In bypass mode, non-protected tool-level
-    #    permissions.json restrictions (e.g. file_delete: deny) are bypassed,
-    #    while admin_private_chain_of_thought stays guarded.
-    if rule_action == DENY and (active != BYPASS or name == "admin_private_chain_of_thought"):
+    #    dial, so it wins outright -- including over auto and bypass, and
+    #    immune to the unattended rule below. Bypass skips ``ask`` only: every
+    #    deny rule holds in it, the shipped defaults (``file_delete``) and the
+    #    degraded-policy deny included, with no exception.
+    if rule_action == DENY:
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
@@ -1903,7 +1985,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
                         source="privilege", call_id=call)
 
-    if active == BYPASS and name in DURABLE_AUTHORITY_TOOLS and rule_action != ALLOW:
+    if active == BYPASS and name in BYPASS_HELD_TOOLS and rule_action != ALLOW:
         if not interactive:
             return Decision(
                 DENY, active, risk,
@@ -2030,7 +2112,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             source="non-interactive", call_id=call,
         )
     decision_source = (
-        "mode:bypass" if active == BYPASS and (risk == "dangerous" or rule_action == DENY)
+        "mode:bypass" if active == BYPASS and risk == "dangerous"
         else "mode"
     )
     return Decision(action, active, risk, mode_reason(action, active, risk), name,

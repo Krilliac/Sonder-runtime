@@ -97,6 +97,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
+from sonder_runtime.adapters.inference import startup_prewarm
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
@@ -1255,7 +1256,7 @@ def configure_typed_config(config) -> None:
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
     global STREAM_HEARTBEAT_SECONDS, PREWARM_ON_START
     STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
-    PREWARM_ON_START = getattr(server_config, "prewarm_on_start", PREWARM_ON_START)
+    PREWARM_ON_START = server_config.prewarm_on_start
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -1297,6 +1298,14 @@ def _state_principal(context):
     if context.get("api_key"):
         return "api-key"
     return "local-open"
+
+
+def _mode_principal(context):
+    """The permission-mode scope: an account's API key never shares its session's (so never its bypass)."""
+    principal = _state_principal(context)
+    account = (context or {}).get("account") or {}
+    # Not "account:"-prefixed, so a nested mode_scope keeps the outer approval owner.
+    return "api-key-of:" + principal if isinstance(account, dict) and account.get("via_api_key") else principal
 
 
 def _account_identity(account) -> str:
@@ -1974,7 +1983,15 @@ def _auth_account(auth_header):
     token = _bearer_token(auth_header)
     if not token:
         return None
-    return _legacy_runtime()._admin_account_from_token(token)
+    if not token.startswith(admin_auth.API_KEY_PREFIX):
+        return _legacy_runtime()._admin_account_from_token(token)
+    # An account's assigned API key stands for that account, so its role, tier and
+    # dev_flags apply (rate limit, metering). Revoked or banned: None.
+    conn = _legacy_runtime()._open_db()
+    try:
+        return admin_auth.api_key_account(conn, token)
+    finally:
+        conn.close()
 
 
 def _app_control_deployment_authorized(authorization, config):
@@ -2059,7 +2076,8 @@ def _developer_authorized(context):
     if not context["authorized"]:
         return False
     account = context.get("account")
-    role_ok = bool(account) and account.get("role") in ("developer", "admin")
+    # Role or a dev_flags grant; an account's API key gets exactly that, no more.
+    role_ok = admin_auth.has_developer_authority(account)
     if context["mode"] == "both":
         return role_ok
     return bool(context.get("api_key")) or role_ok
@@ -2077,9 +2095,10 @@ def _execution_feed_detail_allowed(context):
 def _admin_authorized(context):
     """Administrator authorization for privileged operations (SPEC-2).
 
-    In account-bearing modes the account must hold the admin role; in
-    api-key-only deployments the single owner key is the administrator
-    credential.
+    In account-bearing modes the account must hold the admin role through a
+    signed-in session (an account's assigned API key never does, see
+    ``admin_auth.require``); in api-key-only deployments the single owner key
+    is the administrator credential.
     """
     if context.get("mode") == "local-open":
         return True
@@ -6190,6 +6209,7 @@ class Handler(BaseHTTPRequestHandler):
             send_idempotency_refusal=_send_idempotency_refusal,
             approver_of=_http_approver, audit=_audit_http_approval,
             clock=lambda: time.time(), log=_serve_logger,
+            unquote=lambda segment: urllib.parse.unquote(segment, errors="strict"),
         )
 
     def _handle_approvals_get(self):
@@ -6226,7 +6246,7 @@ class Handler(BaseHTTPRequestHandler):
         if route != "/v1/permission-mode":
             return False
         _chat_tool_stream.handle_permission_mode_get(
-            self, permission_policy=permission_policy, principal_of=_state_principal,
+            self, permission_policy=permission_policy, principal_of=_mode_principal,
             authority_error=_system_operation_authority_error,
             observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
         )
@@ -6246,7 +6266,7 @@ class Handler(BaseHTTPRequestHandler):
         if run is None:
             return None, (404, "fanout run was not found")
         account = context.get("account") or {}
-        is_admin = account.get("role") == "admin"
+        is_admin = admin_auth.require(account, "admin")[0]  # never an account's API key
         if context.get("mode") != "local-open" and not is_admin:
             if run.get("request_owner") != _fanout_request_owner(context):
                 # Do not disclose another developer's run identifier.
@@ -6271,6 +6291,8 @@ class Handler(BaseHTTPRequestHandler):
             parse_query=lambda: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
             developer_authorized=_developer_authorized,
+            # As in _fanout_run_for_context: an admin account, never its API key.
+            admin_authorized=lambda context: admin_auth.require(context.get("account") or {}, "admin")[0],
             request_owner_of=_fanout_request_owner, runtime=server,
         )
 
@@ -6300,7 +6322,7 @@ class Handler(BaseHTTPRequestHandler):
         """Switch the autonomy mode. Deliberately cannot grant elevation."""
         _chat_tool_stream.handle_permission_mode_post(
             self, req, context, permission_policy=permission_policy,
-            principal_of=_state_principal, idempotent_action=_idempotent_http_action,
+            principal_of=_mode_principal, idempotent_action=_idempotent_http_action,
             send_idempotency_refusal=_send_idempotency_refusal,
             observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
             approver_of=_http_approver, audit_transition=server._http_chat_tools().audit_mode_transition,
@@ -6558,7 +6580,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
-                work_binding=_app_managed_work_binding):
+                work_binding=_app_managed_work_binding, accounts=admin_auth,
+                swarm_status=lambda: server.master_orchestrator.get_swarm_status()):
             return
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
@@ -7180,23 +7203,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = server._open_db()
         try:
-            # Need to know the estimated token cost here. This might require
-            # inspecting the request or model. For now, using a placeholder cost
-            # or 0 until model-based estimation is implemented.
-            estimated_tokens = 500
-            print(f"DEBUG: Calling rate_limit with account: {account}")
-            # Mock account for test environment
-            test_account = account.copy()
-            test_account.setdefault('tier', 'enterprise')
-            print(f"DEBUG: Modified account for test: {test_account}")
-            ok, msg = admin_auth.rate_limit(conn, test_account, token_cost=estimated_tokens)
-            
-            if ok:
-                # Increment usage
-                admin_auth.increment_usage(conn, account["username"], estimated_tokens)
+            # account is None for key-only and local-open callers: neither limit applies.
+            ok, msg = admin_auth.rate_limit(conn, account)
+            if ok:  # monthly token metering; a no-op unless SaaS metering is switched on
+                ok, msg = admin_auth.meter_usage(conn, account, admin_auth.CHAT_REQUEST_TOKEN_ESTIMATE)
         finally:
             conn.close()
-            
         if not ok:
             record_early_chat_metric("rate_limited")
             self._send_json_payload({"error": {"message": msg, "type": "rate_limit"}}, status=429)
@@ -7398,6 +7410,8 @@ class Handler(BaseHTTPRequestHandler):
         ) if getattr(self, "_turn_stack", None) is not None else []
         if getattr(self, "_turn_stack", None) is not None:
             self._turn_stack.enter_context(permission_policy.mode_scope(_state_principal(context), session))
+            if _mode_principal(context) != _state_principal(context):
+                self._turn_stack.enter_context(permission_policy.mode_scope(_mode_principal(context), session))
             self._turn_stack.enter_context(_serve_policy.maybe_temperature_override(
                 request_temperature, session_override=bool(apply_session_temperature and session_temperature is not None),
             ))
@@ -8255,28 +8269,16 @@ def main(
             target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
         ).start()
         BOUND_PORT = port
-        server._http_chat_tools().start_default_prewarm(
+        startup_prewarm.start_default_model_prewarm(
             setting=PREWARM_ON_START,
             prewarm=lambda tier: server.prewarm_model(tier, announce=True),
             enabled=lambda: server.sonder_speculation.prewarm_enabled(),
-            thread_factory=owned_runtime_thread,
-        )
+            thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
-        rpc_base = os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
-        rpc_peers = os.environ.get("SONDER_RPC_PEERS", "").strip()
-        if rpc_base and rpc_peers:
-            try:
-                from sonder_runtime.adapters.inference.rpc_cluster import probe_sharded_server
+        from sonder_runtime.adapters.inference.rpc_cluster import log_sharded_readiness_from_env
 
-                sharded_health = probe_sharded_server(rpc_base)
-                _serve_logger.info(
-                    "RPC sharded backend status: healthy=%s models=%s",
-                    sharded_health.healthy,
-                    list(sharded_health.models),
-                )
-            except Exception as exc:
-                _serve_logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
+        log_sharded_readiness_from_env(_serve_logger, os.environ)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())

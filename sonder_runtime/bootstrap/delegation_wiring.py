@@ -6,8 +6,9 @@ import contextvars
 import json
 import logging
 import os
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -588,23 +589,28 @@ class AgentImplBridge:
         project_scope: str,
     ) -> None:
         self._stack = stack
-        self._model = model
-        self._max_steps = max(1, int(max_steps or 1))
-        self._cloud = cloud
-        self._read_only = read_only
-        self._project_scope = project_scope
-        self._started = time.monotonic()
-        self._board_cursor = 0
         self._closed = False
-        self._depth = _rt.current_depth()
-        self._prompt_preview = compact_text(prompt, limit=180)
-        _rt.emit_agent_event(
-            phase="starting",
-            step=0,
-            max_steps=self._max_steps,
-            model=model,
-            summary=self._prompt_preview,
-        )
+        try:
+            self._model = model
+            self._max_steps = max(1, int(max_steps or 1))
+            self._cloud = cloud
+            self._read_only = read_only
+            self._project_scope = project_scope
+            self._started = time.monotonic()
+            self._board_cursor = 0
+            self._depth = _rt.current_depth()
+            self._prompt_preview = compact_text(prompt, limit=180)
+            _rt.emit_agent_event(
+                phase="starting",
+                step=0,
+                max_steps=self._max_steps,
+                model=model,
+                summary=self._prompt_preview,
+            )
+        except BaseException:
+            self._closed = True
+            stack.close()
+            raise
 
     def maybe_preamble(self, *, transcript_chars: int = 0, num_ctx: int = 0) -> str:
         """Return compact coordinator/drive guidance when context budget comfortably permits."""
@@ -668,16 +674,18 @@ class AgentImplBridge:
         if self._closed:
             return
         self._closed = True
-        _rt.emit_agent_event(
-            phase="completed" if ok else "failed",
-            step=0,
-            max_steps=self._max_steps,
-            ok=ok,
-            elapsed_ms=int((time.monotonic() - self._started) * 1000),
-            model=self._model,
-            summary=compact_text(summary, limit=180),
-        )
-        self._stack.close()
+        try:
+            _rt.emit_agent_event(
+                phase="completed" if ok else "failed",
+                step=0,
+                max_steps=self._max_steps,
+                ok=ok,
+                elapsed_ms=int((time.monotonic() - self._started) * 1000),
+                model=self._model,
+                summary=compact_text(summary, limit=180),
+            )
+        finally:
+            self._stack.close()
 
 
 def _find_sonder_inference_gateway(server: Any) -> Any:
@@ -821,28 +829,32 @@ def open_agent_run(
 ) -> AgentImplBridge:
     """Bind board, executor, identity, and observers around one ``_agent_impl`` run."""
     stack = contextlib.ExitStack()
-    board = _rt.current_board()
-    if board is None:
-        board = _rt.AgentProgressBoard()
-        stack.enter_context(_rt.bind_board(board))
-        detach = attach_board_observers(board)
-        stack.callback(detach)
-    if _rt.current_delegation_executor() is None and _rt.can_delegate():
-        stack.enter_context(_rt.bind_delegation_executor(make_delegation_executor(server)))
-    origin_hint = ""
-    if not cloud and model:
-        origin_hint = _selected_origin_for_model(
-            getattr(server, "OLLAMA_POOL", None),
-            model,
-            default_origin=str(getattr(server, "BASE", "") or ""),
-        )
-    if _rt.current_depth() == 0:
-        stack.enter_context(
-            _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
-        )
-    else:
-        _rt.note_agent_execution(model=model, origin=origin_hint)
-    return AgentImplBridge(
+    try:
+        board = _rt.current_board()
+        if board is None:
+            board = _rt.AgentProgressBoard()
+            stack.enter_context(_rt.bind_board(board))
+            detach = attach_board_observers(board)
+            stack.callback(detach)
+        if _rt.current_delegation_executor() is None and _rt.can_delegate():
+            stack.enter_context(_rt.bind_delegation_executor(make_delegation_executor(server)))
+        origin_hint = ""
+        if not cloud and model:
+            origin_hint = _selected_origin_for_model(
+                getattr(server, "OLLAMA_POOL", None),
+                model,
+                default_origin=str(getattr(server, "BASE", "") or ""),
+            )
+        if _rt.current_depth() == 0:
+            stack.enter_context(
+                _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
+            )
+        else:
+            _rt.note_agent_execution(model=model, origin=origin_hint)
+    except BaseException:
+        stack.close()
+        raise
+    bridge = AgentImplBridge(
         stack=stack,
         prompt=prompt,
         model=model,
@@ -851,11 +863,54 @@ def open_agent_run(
         read_only=read_only,
         project_scope=project_scope,
     )
+    scope = _OPEN_RUNS.get()
+    if scope is not None and scope[0] == threading.get_ident():
+        scope[1].append(bridge)
+    return bridge
+
+
+# Bridges opened inside the innermost ``agent_run_scope`` on its own thread.
+_OPEN_RUNS: contextvars.ContextVar[tuple[int, list[AgentImplBridge]] | None] = contextvars.ContextVar(
+    "delegation_open_agent_runs", default=None,
+)
+
+
+@contextlib.contextmanager
+def agent_run_scope() -> Iterator[None]:
+    """Close every bridge ``open_agent_run`` opened in this scope that its run left open.
+
+    A run closes its bridge on its finish/fail paths.  A run that unwinds by an
+    exception (``ensure_not_cancelled``, KeyboardInterrupt, a raising helper)
+    does not, and its board, executor and identity bindings would stay set in
+    the caller's context: the next run in that context would reuse the stale
+    board and no terminal progress event would be sent.  On exit this closes
+    them, newest first, in the thread and context that opened them: as failed
+    when the body raised, else as completed.  ``close`` is idempotent, so a run
+    that already closed its bridge is not reported twice.  Only bridges opened
+    on the scope's own thread are tracked (a bridge's bindings can only be
+    reset in the context that set them).
+    """
+    opened: list[AgentImplBridge] = []
+    token = _OPEN_RUNS.set((threading.get_ident(), opened))
+    ok = False
+    try:
+        yield
+        ok = True
+    finally:
+        try:
+            with contextlib.ExitStack() as cleanup:
+                for bridge in opened:
+                    cleanup.callback(
+                        bridge.close, ok=ok, summary="" if ok else "agent run ended by an exception",
+                    )
+        finally:
+            _OPEN_RUNS.reset(token)
 
 
 __all__ = [
     "DEFAULT_AGENT_PERSONAS",
     "AgentImplBridge",
+    "agent_run_scope",
     "attach_board_observers",
     "build_runtime_identity_preamble",
     "dispatch_agent_tool",

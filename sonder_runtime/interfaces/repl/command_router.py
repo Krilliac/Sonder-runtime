@@ -171,14 +171,14 @@ _FACT_PROSE_STARTERS = frozenset({
 
 
 def _fact_action(match):
-    verb = (match.group("verb") or "").lower()
+    verb = _command_text.slash_head(match.group("verb") or "")
     cue = (match.group("cue") or "").strip()
     arg = (match.group("arg") or "").strip()
     if not arg or arg.endswith("?"):
         return None
     if verb == "note" and not cue:
         return None
-    first = arg.split(None, 1)[0].lower().rstrip(",:;")
+    first = _command_text.slash_head(arg.split(None, 1)[0]).rstrip(",:;")
     if first in _FACT_PROSE_STARTERS:
         return None
     if re.search(
@@ -240,7 +240,7 @@ _MASTER_NON_COMMAND_STARTERS = frozenset({
 
 
 def _master_action(match):
-    verb = (match.group("verb") or "").lower()
+    verb = _command_text.slash_head(match.group("verb") or "")
     arg = (match.group("arg") or "").strip()
     if not arg:
         return None
@@ -248,7 +248,7 @@ def _master_action(match):
         return "/master %s" % arg
     if arg.endswith("?"):
         return None
-    first = arg.split(None, 1)[0].lower().rstrip(",:;")
+    first = _command_text.slash_head(arg.split(None, 1)[0]).rstrip(",:;")
     if first in _MASTER_NON_COMMAND_STARTERS:
         return None
     return "/master %s" % arg

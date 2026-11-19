@@ -3260,6 +3260,10 @@ def test_ordinary_account_cannot_trigger_natural_control_intents(
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
     )
+    # The fake connection has no tables: the metering step is faked with it.
+    monkeypatch.setattr(
+        ts.admin_auth, "meter_usage", lambda conn, account, tokens: (True, "")
+    )
     monkeypatch.setattr(
         ts._legacy_runtime(),
         "answer_with_history",
@@ -3305,6 +3309,10 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
     monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
+    )
+    # The fake connection has no tables: the metering step is faked with it.
+    monkeypatch.setattr(
+        ts.admin_auth, "meter_usage", lambda conn, account, tokens: (True, "")
     )
     forwarded = []
 
@@ -3583,7 +3591,8 @@ def test_bounded_idempotency_key_still_replays(
     monkeypatch.setattr(ts.served_action_receipts, "claim", lambda *a, **k: "claimed")
     monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
     applied = []
-    monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # Any mode but bypass is process-global over HTTP (set_global_mode).
+    monkeypatch.setattr(ts.permission_policy, "set_global_mode", lambda mode: applied.append(mode))
     headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
     try:
         with _http_server(monkeypatch) as port:

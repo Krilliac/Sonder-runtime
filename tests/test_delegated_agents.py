@@ -721,3 +721,67 @@ def test_109_blocked_node1_sonder_inference_model_in_bypass_and_text_only(monkey
     assert ext_run is None and ext_refusal == ""
     assert seen == [(f"model:{blocked_model}", blocked_model), (f"model:{blocked_model}", blocked_model)]
     assert provider_bridge.provider_for_tier("code", bindings) == "sonder_inference"
+
+
+def test_agent_run_unwound_by_cancellation_unbinds_board_and_reports_failed(monkeypatch):
+    """open_agent_run binds board/executor/identity; an exception must not leave them bound.
+
+    ``ensure_not_cancelled`` raises ``ModelCallError('cancelled')`` out of the
+    step loop, which never reaches finish_final/_early_exit.  The bridge's
+    context variables then stayed set in the caller's context, so the next run
+    reused the stale board (and replayed its peer messages), and no terminal
+    'failed' progress event was ever sent.
+    """
+    pm.set_mode(pm.AUTO)
+    phases = []
+    real_emit = rt.emit_agent_event
+
+    def record(**kwargs):
+        phases.append(kwargs.get("phase"))
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(rt, "emit_agent_event", record)
+    monkeypatch.setattr(server, "_serve_target", lambda *_a, **_k: ("stub-model", False, False, "stub-tier"))
+
+    asked = []
+
+    def fake_make_generate(*_a, **_k):
+        def generate(prompt, history=None):
+            asked.append(prompt)  # the cancel arrives while this step is in flight
+            return '{"tool": "list_dir", "args": {"path": "."}}'
+        return generate
+
+    monkeypatch.setattr(server, "_make_generate", fake_make_generate)
+    assert rt.current_board() is None
+    with pytest.raises(server.ModelCallError) as raised:
+        server._agent_impl("summarise the repository", max_steps=2, cancel_check=lambda: bool(asked))
+    assert len(asked) == 1
+    assert raised.value.kind == "cancelled"
+    assert rt.current_board() is None, "the aborted run's board is still bound"
+    assert rt.current_delegation_executor() is None
+    assert phases[0] == "starting" and phases[-1] == "failed"
+
+
+def test_agent_run_scope_does_not_report_a_bridge_its_run_already_closed(monkeypatch):
+    phases = []
+    monkeypatch.setattr(rt, "emit_agent_event", lambda **kwargs: phases.append(kwargs.get("phase")))
+    server_stub = SimpleNamespace()
+    with delegation_wiring.agent_run_scope():
+        bridge = delegation_wiring.open_agent_run(
+            server_stub, prompt="p", model="", max_steps=1, cloud=True, read_only=True)
+        assert rt.current_board() is not None
+        bridge.close(ok=True, summary="done")
+        assert rt.current_board() is None
+    assert phases == ["starting", "completed"]
+
+
+def test_agent_run_scope_closes_a_bridge_left_open_as_failed_on_an_exception(monkeypatch):
+    phases = []
+    monkeypatch.setattr(rt, "emit_agent_event", lambda **kwargs: phases.append(kwargs.get("phase")))
+    with pytest.raises(KeyboardInterrupt):
+        with delegation_wiring.agent_run_scope():
+            delegation_wiring.open_agent_run(
+                SimpleNamespace(), prompt="p", model="", max_steps=1, cloud=True, read_only=True)
+            raise KeyboardInterrupt
+    assert rt.current_board() is None and rt.current_delegation_executor() is None
+    assert phases == ["starting", "failed"]

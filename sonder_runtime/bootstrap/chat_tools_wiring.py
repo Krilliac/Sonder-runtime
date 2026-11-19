@@ -31,6 +31,7 @@ from sonder_runtime.domain.client_tools import (
     client_tools_payload,
     resolve_client_slash_command,
 )
+from sonder_runtime.interfaces.http.client_tools import DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS
 
 
 def slash_run_arguments(
@@ -44,24 +45,6 @@ def slash_run_arguments(
     fn: Any = _powershell_gate.runnable_arguments
     result = fn(sources(), extract)
     return dict(result) if isinstance(result, Mapping) else None
-
-
-def start_default_prewarm(
-    *,
-    setting: bool,
-    prewarm: Callable[..., Any],
-    enabled: bool,
-    thread_factory: Callable[..., Any],
-) -> None:
-    """Delegate startup prewarm when ``startup_prewarm`` is composed."""
-    import importlib
-    try:
-        startup_prewarm = importlib.import_module("sonder_runtime.adapters.inference.startup_prewarm")
-    except ImportError:
-        return
-    fn: Any = getattr(startup_prewarm, "start_default_model_prewarm", None)
-    if callable(fn):
-        fn(setting=setting, prewarm=prewarm, enabled=enabled, thread_factory=thread_factory)
 
 
 def audit_mode_transition(
@@ -252,13 +235,22 @@ def build_http_chat_tool_turn(
     handoffs: list[dict[str, Any]] = []
 
     def delegate_client(tool_name: str, args: dict[str, Any]) -> tuple[str, ChatToolRecord]:
+        """Run one tool on the caller's PC.
+
+        Streamed: wait in this turn for the client's posted result and give it
+        to the model. Non-streamed: a one-way handoff. The turn ends with the
+        call in ``sonder_receipt.client_tool_handoff``; the result endpoint
+        stays open for ``DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS``, and nothing
+        feeds the posted result back to the model in this turn or the next --
+        a client that wants the model to see it sends it in its next message.
+        """
         call = client_broker.create_call(
             principal=client_principal,
             session=client_session,
             tool=tool_name,
             args=args,
             risk=client_tool_risk(tool_name),
-            timeout_seconds=wait_timeout_seconds,
+            timeout_seconds=wait_timeout_seconds if stream else DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS,
             mode="stream" if stream else "handoff",
         )
         if not stream:
@@ -273,7 +265,8 @@ def build_http_chat_tool_turn(
             msg = (
                 f"CLIENT TOOL HANDOFF ({call.call_id}): tool '{tool_name}' requires execution on "
                 f"the client PC (result endpoint /v1/client-tools/{call.call_id}/result). "
-                "Stop calling tools and report the pending client handoff."
+                "Its result is not returned to you in this turn. Stop calling tools and "
+                "report the pending client handoff."
             )
             return msg, record
         on_event(call.sse_event("awaiting_client_result"))
@@ -372,6 +365,14 @@ def auth_response_extra_fields(
     }
 
 
+def _feature_role(role: str, account: Any) -> str:
+    """The role whose features a caller holds: an account's API key never holds
+    admin (``admin_auth.require``), so an admin account's key gets a developer's."""
+    if role == "admin" and isinstance(account, Mapping) and account.get("via_api_key"):
+        return "developer"
+    return role
+
+
 def capabilities_payload(
     context: Mapping[str, Any] | None,
     *,
@@ -387,7 +388,7 @@ def capabilities_payload(
         role = str(account.get("role")).strip().lower()
     elif context and context.get("authorized"):
         role = "admin" if admin_authorized else "user"
-    effective_role = role or ("admin" if auth_mode == "local-open" else "user")
+    effective_role = _feature_role(role, account) or ("admin" if auth_mode == "local-open" else "user")
     payload: dict[str, Any] = {
         "object": "capabilities",
         "auth_mode": auth_mode,
@@ -422,6 +423,7 @@ def whoami_payload(
 ) -> dict[str, Any]:
     account = dict((context or {}).get("account") or {})
     role = str(account.get("role") or ("admin" if admin_authorized else "user")).strip().lower()
+    feature_role = _feature_role(role, account)
     return {
         "ok": True,
         "username": str(account.get("username") or ""),
@@ -429,9 +431,9 @@ def whoami_payload(
         "auth_mode": auth_mode,
         "public_hosting": bool(public_hosting),
         "client_exec_supported": True,
-        "host_bypass_allowed": bool(role == "admin"),
+        "host_bypass_allowed": bool(feature_role == "admin"),
         "allowed_features": _public_policy.allowed_features_for_role(
-            role,
+            feature_role,
             public_hosting=bool(public_hosting),
             client_exec_supported=True,
         ),
@@ -743,5 +745,4 @@ __all__ = [
     "maybe_open_mcp_chat_tool_turn",
     "record_work_run_pending_refusal",
     "slash_run_arguments",
-    "start_default_prewarm",
 ]

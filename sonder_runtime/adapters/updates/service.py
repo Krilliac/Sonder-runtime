@@ -572,8 +572,12 @@ def resumable_download(
 
     total = partial.stat().st_size
     if expected_length is not None and total != expected_length:
-        partial.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
+        # A short body (clean close mid-transfer) keeps the prefix and its
+        # validators so the validator-guarded resume can continue; only an
+        # overlong file is discarded.
+        if total > expected_length:
+            partial.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
         raise UpdateError(
             "downloaded length %d != expected %d" % (total, expected_length)
         )

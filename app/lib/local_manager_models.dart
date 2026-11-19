@@ -270,6 +270,40 @@ String clientToolRisk(String tool) {
   }
 }
 
+/// The one ranking of client tool risk values, least strict first. An empty
+/// value ("not declared") ranks below everything; an unknown value ranks
+/// above everything, so it is never treated as safer than a known one. Used
+/// by [effectiveClientToolRisk] (both client executors and the chat gate) and
+/// by the stream frame merge.
+int clientRiskRank(String risk) {
+  switch (risk.trim()) {
+    case '':
+      return -1;
+    case 'read_only':
+      return 0;
+    case 'write':
+    case 'workspace_write':
+      return 1;
+    case 'execute':
+    case 'host_exec':
+      return 2;
+    default:
+      return 3; // unknown: the strictest
+  }
+}
+
+/// The risk to gate a client tool on: the STRICTER of what the server
+/// declared and what this app classifies [tool] as, so a server or model
+/// cannot downgrade a tool. An empty declared risk means "not declared"; an
+/// unknown declared value ranks above everything and is returned as is, so
+/// no mode except bypass runs it without a prompt.
+String effectiveClientToolRisk(String declared, String tool) {
+  final local = clientToolRisk(tool);
+  final d = declared.trim();
+  if (d.isEmpty) return local;
+  return clientRiskRank(d) >= clientRiskRank(local) ? d : local;
+}
+
 /// Whether [mode] allows executing a client tool of [risk] without prompting
 /// `"Approve on my PC"`.
 bool clientModeAllowsWithoutPrompt(String mode, String risk) {

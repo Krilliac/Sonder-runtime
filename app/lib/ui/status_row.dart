@@ -35,10 +35,38 @@ class _StatusMarkState extends State<StatusMark>
   void initState() {
     super.initState();
     _controller = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1000))
-      ..repeat(reverse: true);
+        vsync: this, duration: const Duration(milliseconds: 1000));
     _animation = Tween<double>(begin: 0.5, end: 1.0).animate(CurvedAnimation(
         parent: _controller, curve: Curves.easeInOut));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncPulse();
+  }
+
+  @override
+  void didUpdateWidget(StatusMark oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncPulse();
+  }
+
+  /// Only a running mark pulses, and not under reduced motion.
+  bool get _pulses =>
+      widget.kind == StatusKind.running &&
+      !MediaQuery.disableAnimationsOf(context);
+
+  void _syncPulse() {
+    if (_pulses) {
+      // A few breaths, then rest at full opacity: the word and glyph carry
+      // the status, and an endless animation keeps the frame scheduler busy.
+      if (!_controller.isAnimating && _controller.value == 0) {
+        _controller.repeat(reverse: true, count: 3);
+      }
+    } else {
+      _controller.stop();
+    }
   }
 
   @override
@@ -66,7 +94,7 @@ class _StatusMarkState extends State<StatusMark>
       ),
     ]);
 
-    if (widget.kind == StatusKind.running) {
+    if (_pulses) {
       markContent = FadeTransition(opacity: _animation, child: markContent);
     }
 
