@@ -154,7 +154,8 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
                 **({"ttft_ms": int(ttft)} if ttft is not None else {}),
             }
         handler.wfile.write(chunk(
-            iid, model, {}, finish_reason="stop", elapsed_ms=elapsed_ms,
+            iid, model, {}, finish_reason="length" if (receipt or {}).get("truncated") else "stop",
+            elapsed_ms=elapsed_ms,
             receipt=receipt, activity=activity,
         ).encode("utf-8"))
         if usage is not None:
@@ -165,5 +166,36 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
 
 __all__ = [
     "CODE_FENCE", "arm", "arm_wait_status", "armed_for", "response_id",
-    "wait_status_frame", "write_stream_body",
+    "stream_admission", "wait_status_frame", "write_stream_body",
 ]
+
+_admission_warned = False
+
+
+def stream_admission(handler, total_seconds, enabled=True, *, admission=None):
+    """Admit the model calls of a streamed turn as ``interactive_stream`` work.
+
+    ``admission`` is the composition root's scope factory, called as
+    ``admission(timeout_seconds=...)``; this module never imports the adapter.
+    The scope's wait bound is the rest of the turn budget: ``total_seconds``
+    less the time since the handler's ``_request_started``.  GPU admission ranks
+    by caller name, so a streamed turn keeps interactive priority only through
+    the ``interactive_stream`` caller.  A pool that does not know that caller
+    yet gets no scope: the turn is then admitted as plain ``interactive`` work,
+    exactly as before, never as background ``local`` work.  ``enabled`` false
+    (a turn that is not streamed) or no ``admission`` adds no scope.
+    """
+    global _admission_warned
+    stack = contextlib.ExitStack()
+    if not enabled or admission is None:
+        return stack
+    started = getattr(handler, "_request_started", None)
+    elapsed = 0.0 if started is None else max(0.0, time.monotonic() - started)
+    try:
+        # The pool validates the caller when the scope is entered.
+        stack.enter_context(admission(timeout_seconds=max(0.0, float(total_seconds) - elapsed)))
+    except ValueError:
+        if not _admission_warned:
+            _admission_warned = True
+            _logger.warning("stream admission scope unavailable: pool rejects caller interactive_stream")
+    return stack
