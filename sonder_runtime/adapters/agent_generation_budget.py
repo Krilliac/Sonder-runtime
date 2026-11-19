@@ -12,7 +12,7 @@ def _limit(name: str) -> int:
     return min(value, 8192) if value > 0 else 4096
 
 
-def decision_num_predict(provider, cloud=False, thinking_pinned=False) -> int:
+def decision_num_predict(provider: str | None, cloud: bool = False, thinking_pinned: bool = False) -> int:
     """Reserve reasoning headroom on Inference, including unknown pin state.
 
     A disabled/unknown thinking pin does not lower the cap: visible tool JSON
@@ -23,7 +23,7 @@ def decision_num_predict(provider, cloud=False, thinking_pinned=False) -> int:
     return _limit("SONDER_AGENT_NUM_PREDICT")
 
 
-def json_num_predict(provider=None, cloud=False, thinking_pinned=False) -> int:
+def json_num_predict(provider: str | None = None, cloud: bool = False, thinking_pinned: bool = False) -> int:
     """Planner/reviewer cap; Ollama keeps its historical 1,800 tokens."""
     if provider != "sonder_inference" or cloud:
         return 1800

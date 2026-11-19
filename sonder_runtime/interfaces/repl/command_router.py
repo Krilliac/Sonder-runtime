@@ -499,8 +499,10 @@ _RULES = [
     # runs a command, or reaches the network. Their mutating neighbours are
     # deliberately absent: ``/update_system_profile`` rewrites the standing
     # instructions and ``/runtime_policy_update`` rewrites model mappings, so
-    # both stay reachable only by naming them, under the catalog's adjacency
-    # rule for risky commands.
+    # neither has a phrase rule. The catalog fallback can still reach them:
+    # ``/runtime_policy_update`` (``dangerous``) only under the adjacency rule
+    # for ``_RISKY`` commands; ``/update_system_profile`` is graded ``ask``, so
+    # a loose turn can resolve to it and the permission prompt gates it.
     #
     # Every pattern is a complete turn (``resolve`` uses ``fullmatch``) and
     # captures no prose, so "what tools do you have for editing images and can
