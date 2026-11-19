@@ -23,7 +23,8 @@ def _argv(program, *args):
     ("git_commit", {"message": "fix"}, rules.ALLOW),
     ("text_search", {"pattern": "TODO"}, rules.ALLOW),
     ("file_read", {"path": "a.txt"}, rules.ALLOW),
-    ("workspace_run", _argv("git", "status"), rules.ALLOW),
+    # Every git call asks: .git/config can make even ``git status`` run code.
+    ("workspace_run", _argv("git", "status"), rules.ASK),
     ("workspace_run", _argv("ls", "-la"), rules.ALLOW),
     ("file_delete", {"path": "build/out.txt"}, rules.ASK),
     ("workspace_run", _argv("sudo", "apt", "install", "x"), rules.ASK),

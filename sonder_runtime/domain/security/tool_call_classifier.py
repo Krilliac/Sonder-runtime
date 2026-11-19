@@ -3,15 +3,26 @@
 Three verdicts:
 
 * ``ALLOW``: no objection.  It never loosens anything: the operator's
-  permission mode and rules still decide the call at dispatch.
+  permission mode and rules still decide the call at dispatch.  For a host
+  program it is an allowlist: a bare program name from ``_SAFE_PROGRAMS``
+  whose every flag is on that program's read-only list.
 * ``ASK``: a person must confirm the call first: file deletes, elevated
-  commands (``sudo``, ``runas``, ``-Verb RunAs``...), host programs and code
-  the classifier cannot show to be read-only, and every tool or argument shape
-  it does not know.
+  commands (``sudo``, ``runas``, ``-Verb RunAs``...), every ``git`` call (the
+  repository's ``.git/config`` can name an fsmonitor, a pager or a diff driver,
+  so even ``git status`` can run code), a program named by a path instead of a
+  bare name, a flag outside a safe program's read-only list, host programs and
+  code the classifier cannot show to be read-only, and every tool or argument
+  shape it does not know.  ASK is the default for anything not recognised.
 * ``BLOCK``: refused in every permission mode, bypass included: recognised
   destructive commands (disk formatting and partitioning, boot and shadow-copy
-  deletion, shutdown, download-and-execute pipes, fork bombs) and deletes
-  aimed at a drive, filesystem or home root.
+  deletion, shutdown, download-and-execute, fork bombs) and deletes aimed at a
+  drive, filesystem, home or system root.
+
+BLOCK is a denylist, and a denylist is not complete: it refuses the
+destructive shapes it recognises, and the same effect spelled some other way
+is not blocked by it.  It is a last net (in bypass, the only one), never a
+finding that a call is harmless; that is why ALLOW is an allowlist and
+everything unrecognised asks.
 
 ``git_commit`` and the permission catalog's read-only (``safe``/``ask``) and
 file-edit (``mutation``) grades are ``ALLOW``.  The caller passes the grade
@@ -28,7 +39,10 @@ any thread, no state, no ownership.
 from __future__ import annotations
 
 import json
+import posixpath
+import re
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
@@ -54,19 +68,99 @@ _BLOCK_TEXT = (
     "of=/dev/hd", "> /dev/sd", ":(){", "downloadstring", "allprofiles state off",
     "shutdown /s", "shutdown /r", "shutdown -h", "shutdown -r", "shutdown now",
 )
-_PIPE_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "iex", "invoke-expression"})
-_DOWNLOADERS = frozenset({"curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod"})
+# What a download is piped into: shells, interpreters and PowerShell's evaluator.
+_PIPE_SHELLS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "iex", "invoke-expression",
+    "python", "py", "pwsh", "powershell", "cmd", "perl", "ruby", "node", "php", "lua",
+})
+_EVAL_TOKENS = frozenset({"iex", "invoke-expression"})
+# Words that may stand before the pipe target (``| sudo -E bash``).
+_PIPE_PREFIXES = _ELEVATION_TOKENS | {"env", "exec", "command", "nohup", "time"}
+_DOWNLOADERS = frozenset({
+    "curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod",
+    "start-bitstransfer", "bitsadmin", "certutil",
+})
 _DELETE_VERBS = frozenset({"rm", "del", "erase", "rd", "rmdir", "remove-item", "ri", "rimraf"})
-_ROOT_TARGETS = frozenset({
-    "/", "/*", "~", "~/", "~/*", "\\", "$home", "%userprofile%", "%systemroot%",
-    "/etc", "/usr", "/home", "/boot", "/var", "c:\\windows", "c:/windows",
+
+# Protected roots, compared after ``_normalize_target``.  The home directory
+# is the sentinel ``/~`` so that ``~/..`` normalizes to ``/``.
+_HOME = "/~"
+_HOME_SPELLINGS = (
+    "~", "$home", "$env:userprofile", "$env:home", "%userprofile%",
+    "%homedrive%%homepath%", "%homepath%",
+)
+_SYSTEM_SPELLINGS = (
+    ("%systemroot%", "c:/windows"), ("%windir%", "c:/windows"),
+    ("$env:systemroot", "c:/windows"), ("$env:windir", "c:/windows"),
+    ("%systemdrive%", "c:"), ("$env:systemdrive", "c:"),
+    ("%programfiles%", "c:/program files"), ("$env:programfiles", "c:/program files"),
+)
+# ``${HOME}`` / ``${env:USERPROFILE}`` are the braced spellings of the same variables.
+_BRACED_VARIABLE = re.compile(r"\$\{([a-z_][a-z0-9_]*(?::[a-z_][a-z0-9_]*)?)\}")
+# The root itself (a drive root is ``/`` after its drive letter).
+_EXACT_ROOTS = frozenset({
+    "/", _HOME, "/home", "/users", "/root", "/var", "/opt", "/srv", "/mnt", "/media",
 })
-_SAFE_PROGRAMS = frozenset({
-    "ls", "dir", "pwd", "echo", "cat", "type", "head", "tail", "wc", "which", "where",
-    "whoami", "findstr", "grep", "rg", "tree",
+# A home directory: one level below these.
+_HOME_PARENTS = frozenset({"/home", "/users"})
+# System trees: the root and anything below it.
+_ROOT_TREES = (
+    "/etc", "/usr", "/boot", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/sys", "/proc",
+    "/dev", "/system", "/windows", "/program files", "/program files (x86)", "/programdata",
+)
+
+# Per safe program, the flags that only read: (bundlable short letters, long
+# flags matched up to their ``=``, Windows ``/x`` switches matched up to their
+# ``:``).  Any other flag asks.  Long flags match exactly, so a GNU-style
+# abbreviation (``tail --fo`` for ``--follow``) asks too.  Left out on purpose:
+# ``rg --pre/--pre-glob/-z/--search-zip/--hostname-bin`` (run programs),
+# ``rg -u/--hidden/--no-ignore/-L``, ``tree -o`` (writes), ``tree -R/-H``,
+# ``tail -f/-F/--follow`` (never exits).  ``git`` is not here: every git call asks.
+_LS_SHORT = "1aAdFhilnrRStp"
+_LS_LONG = frozenset({
+    "--all", "--almost-all", "--directory", "--classify", "--human-readable", "--inode",
+    "--numeric-uid-gid", "--reverse", "--recursive", "--size", "--color", "--sort",
 })
-_SAFE_GIT = frozenset({
-    "status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "grep", "describe", "commit",
+_HEAD_TAIL_LONG = frozenset({"--lines", "--bytes", "--quiet", "--silent", "--verbose"})
+_GREP_LONG = frozenset({
+    "--ignore-case", "--line-number", "--recursive", "--files-with-matches",
+    "--files-without-match", "--count", "--invert-match", "--word-regexp", "--line-regexp",
+    "--extended-regexp", "--fixed-strings", "--basic-regexp", "--only-matching",
+    "--no-filename", "--with-filename", "--no-messages", "--quiet", "--silent", "--regexp",
+    "--after-context", "--before-context", "--context", "--max-count", "--include",
+    "--exclude", "--exclude-dir", "--color", "--colour",
+})
+_RG_LONG = frozenset({
+    "--ignore-case", "--smart-case", "--case-sensitive", "--word-regexp", "--line-regexp",
+    "--files-with-matches", "--files-without-match", "--count", "--count-matches",
+    "--invert-match", "--fixed-strings", "--regexp", "--glob", "--iglob", "--type",
+    "--type-not", "--after-context", "--before-context", "--context", "--max-count",
+    "--line-number", "--no-line-number", "--with-filename", "--no-filename",
+    "--only-matching", "--quiet", "--heading", "--no-heading", "--color", "--json",
+    "--files", "--type-list", "--max-columns", "--max-depth", "--multiline", "--vimgrep",
+    "--stats", "--sort", "--column",
+})
+_NO_FLAGS: frozenset[str] = frozenset()
+_SAFE_PROGRAMS: Mapping[str, tuple[str, frozenset[str], frozenset[str]]] = MappingProxyType({
+    "ls": (_LS_SHORT, _LS_LONG, _NO_FLAGS),
+    "dir": (_LS_SHORT, _LS_LONG, frozenset({"/a", "/b", "/o", "/s", "/w", "/q", "/l", "/n", "/x"})),
+    "pwd": ("LP", _NO_FLAGS, _NO_FLAGS),
+    "echo": ("neE", _NO_FLAGS, _NO_FLAGS),
+    "cat": ("AbeEnstTuv", frozenset({"--number", "--number-nonblank", "--show-all", "--squeeze-blank"}),
+            _NO_FLAGS),
+    "type": ("", _NO_FLAGS, _NO_FLAGS),
+    "head": ("cnqv", _HEAD_TAIL_LONG, _NO_FLAGS),
+    "tail": ("cnqv", _HEAD_TAIL_LONG, _NO_FLAGS),
+    "wc": ("clmwL", frozenset({"--lines", "--words", "--bytes", "--chars", "--max-line-length"}),
+           _NO_FLAGS),
+    "which": ("a", _NO_FLAGS, _NO_FLAGS),
+    "where": ("", _NO_FLAGS, frozenset({"/r", "/q", "/f", "/t"})),
+    "whoami": ("", _NO_FLAGS, frozenset({"/user", "/groups", "/priv", "/all", "/fo", "/nh"})),
+    "findstr": ("", _NO_FLAGS, frozenset({
+        "/s", "/i", "/n", "/m", "/c", "/r", "/l", "/v", "/x", "/b", "/e", "/o", "/p"})),
+    "grep": ("ABCcEeFGHhiLlmnoqrsvwx", _GREP_LONG, _NO_FLAGS),
+    "rg": ("0ABCcFeHgIijlMmNnoqSsTtvwxU", _RG_LONG, _NO_FLAGS),
+    "tree": ("aCdDfFghiILnPpsu", frozenset({"--noreport", "--dirsfirst"}), frozenset({"/f", "/a"})),
 })
 _PUNCTUATION = str.maketrans({c: " " for c in "()[]{},;'\"`"})
 
@@ -102,17 +196,71 @@ def _is_drive_root(token: str) -> bool:
             and token[1] == ":" and token[2:] in ("", "\\", "/", "\\*", "/*"))
 
 
+def _normalize_target(token: str) -> str:
+    """One spelling per path: case-folded, ``/`` separators, variables mapped, ``.``/``..``/``/*`` resolved.
+
+    The home directory becomes ``/~``.  A drive letter stays in front
+    (``c:/windows``).  A relative path stays relative.
+    """
+    target = _BRACED_VARIABLE.sub(r"$\1", token.strip().strip("'\"").casefold()).replace("\\", "/")
+    for spelling in _HOME_SPELLINGS:
+        if target == spelling or target.startswith(spelling + "/"):
+            target = _HOME + target[len(spelling):]
+            break
+    else:
+        for spelling, root in _SYSTEM_SPELLINGS:
+            if target == spelling or target.startswith(spelling + "/"):
+                target = root + target[len(spelling):]
+                break
+    drive = ""
+    if len(target) >= 2 and target[1] == ":" and target[0].isascii() and target[0].isalpha():
+        drive, target = target[:2], "/" + target[2:]
+    while target.endswith("/*"):
+        target = target[:-2] or "/"
+    if target.startswith("/"):
+        target = posixpath.normpath("/" + target.lstrip("/"))
+    return drive + target
+
+
 def _is_root_target(token: str) -> bool:
-    return token in _ROOT_TARGETS or _is_drive_root(token)
+    """Whether ``token`` names a drive, filesystem or home root, or a path in a system tree."""
+    target = _normalize_target(token)
+    path = target[2:] if target[1:2] == ":" else target
+    if not path.startswith("/"):
+        return False
+    return (path in _EXACT_ROOTS or posixpath.dirname(path) in _HOME_PARENTS
+            or any(path == tree or path.startswith(tree + "/") for tree in _ROOT_TREES))
 
 
 def _is_delete_verb(token: str) -> bool:
     return token in _DELETE_VERBS or token == "rmtree" or token.endswith(".rmtree")
 
 
+def _downloads(words: list[str]) -> bool:
+    return any(_program_name(word) in _DOWNLOADERS for word in words)
+
+
+def _interpreter_name(word: str) -> str:
+    """``python3.12`` -> ``python``; ``/bin/sh`` -> ``sh``; any other word its program name."""
+    name = _program_name(word)
+    unversioned = name.rstrip("0123456789.")
+    return unversioned if unversioned in _PIPE_SHELLS else name
+
+
+def _pipe_target(words: list[str]) -> str:
+    """The program a pipe feeds, past ``sudo``/``env``-style prefixes and their flags."""
+    for word in words:
+        name = _interpreter_name(word)
+        if name in _PIPE_PREFIXES or _is_flag(word):
+            continue
+        return name
+    return ""
+
+
 def _blocked(text: str) -> bool:
     if any(marker in text for marker in _BLOCK_TEXT):
         return True
+    text = _BRACED_VARIABLE.sub(r"$\1", text)
     tokens = text.translate(_PUNCTUATION).split()
     if any(token in _BLOCK_TOKENS or token.startswith("mkfs") for token in tokens):
         return True
@@ -124,15 +272,17 @@ def _blocked(text: str) -> bool:
         return True
     segments = [segment.translate(_PUNCTUATION).split() for segment in text.split("|")]
     for index, words in enumerate(segments[1:], start=1):
-        if words and words[0] in _PIPE_SHELLS and any(
-                word in _DOWNLOADERS for earlier in segments[:index] for word in earlier):
+        if _pipe_target(words) in _PIPE_SHELLS and any(
+                _downloads(earlier) for earlier in segments[:index]):
             return True
-    return False
+    # ``iex (iwr ...)``: PowerShell evaluates a download with no pipe at all.
+    return any(token in _EVAL_TOKENS for token in tokens) and _downloads(tokens)
 
 
 def _is_flag(token: str) -> bool:
-    """``-rf``, ``--force``, ``-Recurse`` or a Windows switch such as ``/s``; not a bare ``/``."""
-    return (len(token) > 1 and token[0] == "-") or (len(token) == 2 and token[0] == "/")
+    """``-rf``, ``--force``, ``-Recurse`` or a Windows switch such as ``/s``; not ``/``, ``/.`` or ``//``."""
+    return (len(token) > 1 and token[0] == "-") or (
+        len(token) == 2 and token[0] == "/" and token[1].isalpha())
 
 
 def _deletes_a_root(following: list[str]) -> bool:
@@ -168,19 +318,39 @@ def _program_name(program: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
+def _bare_program(program: str) -> str:
+    """The program name when ``program`` is a bare name; ``""`` for a path, a drive or padding.
+
+    A path (``./rg``, ``C:/evil/grep.exe``, ``C:grep.exe``) may name a binary
+    the model planted, so it is never a safe program.
+    """
+    if not program or program != program.strip() or any(mark in program for mark in "/\\:"):
+        return ""
+    return _program_name(program)
+
+
+def _arg_reads_only(arg: str, short: str, long_flags: frozenset[str], switches: frozenset[str]) -> bool:
+    if switches and arg.startswith("/"):
+        return arg.split(":", 1)[0].casefold() in switches
+    if arg == "--":
+        return True
+    if arg.startswith("--"):
+        return arg.split("=", 1)[0] in long_flags
+    if len(arg) > 1 and arg[0] == "-":
+        return all(letter in short for letter in arg[1:])
+    return True  # an operand
+
+
 def _safe_argv(argv: list[str]) -> bool:
-    name = _program_name(argv[0])
-    if name == "git":
-        return len(argv) > 1 and argv[1].lower() in _SAFE_GIT and "--force" not in argv
-    return name in _SAFE_PROGRAMS
+    flags = _SAFE_PROGRAMS.get(_bare_program(argv[0]))
+    return flags is not None and all(_arg_reads_only(arg, *flags) for arg in argv[1:])
 
 
 def _delete_target_blocked(arguments: Mapping[str, Any]) -> bool:
     path = arguments.get("path")
     if not isinstance(path, str):
         raise _Unreadable("file_delete needs a path")
-    target = path.strip().lower().rstrip(" .")
-    return _is_root_target(target) or target in ("", ".", "..")
+    return _is_root_target(path) or path.strip().rstrip(" .") == ""
 
 
 def _classify(tool_name: str, arguments: Any, risk: str) -> str:
