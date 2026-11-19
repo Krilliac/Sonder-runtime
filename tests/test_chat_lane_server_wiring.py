@@ -414,6 +414,8 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
             assert finished_unknown["result_receipt"]["status"] == "unknown"
             assert not finished_unknown["output"].strip()
         monkeypatch.setattr(server, "route_work_request", original_work_route)
+        # Hermetic explicit step: no live catalog read for the tool-capability check.
+        monkeypatch.setattr(server, "_runtime_installed_model_records", lambda *_a, **_k: ())
         monkeypatch.setattr(serve._legacy_runtime(), "answer_with_history", model_answer)
         monkeypatch.setattr(
             serve, "_handle_work_intent",

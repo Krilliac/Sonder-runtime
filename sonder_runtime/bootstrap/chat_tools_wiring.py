@@ -1,6 +1,7 @@
 """Composition-root wiring for HTTP/MCP chat-tool turns, slash runners, and work-run refusals."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import uuid
@@ -60,6 +61,9 @@ def audit_mode_transition(
     )
 
 
+# Tools a plan-mode turn may use: read-only, so planning can look at the project.
+PLAN_MODE_TOOLS = frozenset({"file_read", "directory_tree", "text_search", "tool_search"})
+
 def _model_supports_tools(server: Any, model: str) -> bool:
     candidates: list[str] = []
     raw_model = str(model or "").strip()
@@ -68,7 +72,12 @@ def _model_supports_tools(server: Any, model: str) -> bool:
     resolve_fn = getattr(server, "_serve_target", None)
     if callable(resolve_fn) and raw_model:
         try:
-            resolved = resolve_fn(raw_model)
+            try:
+                resolved = resolve_fn(raw_model, None)
+            except TypeError:
+                resolved = resolve_fn(raw_model)
+            if isinstance(resolved, (tuple, list)) and resolved:
+                resolved = resolved[0]
             if isinstance(resolved, str) and resolved.strip() and resolved.strip() not in candidates:
                 candidates.append(resolved.strip())
         except Exception:
@@ -115,6 +124,59 @@ def _model_supports_tools(server: Any, model: str) -> bool:
         return any(bool(server._runtime_model_has_capability(c, "tools", records)) for c in candidates)
     except Exception:
         return False
+
+
+def _admitted_core_tools(mode: str, depth: int) -> list[str]:
+    """Core chat tools a plain (non client-exec) turn admits in ``mode`` at ``depth``."""
+    return [
+        item.name for item in CORE_CHAT_TOOL_DEFINITIONS
+        if not role_tool_policy.agent_refusal(item.name)
+        and (depth == 0 or item.name not in DELEGATION_TOOLS)
+        and (mode != "plan" or item.name in PLAN_MODE_TOOLS)
+    ]
+
+
+def stream_turn_admission(*, timeout_seconds: float) -> Any:
+    """The pool admission scope for a streamed turn (caller ``interactive_stream``)."""
+    from sonder_runtime.adapters.inference import ollama_pool
+
+    return ollama_pool.local_agent_admission(
+        caller="interactive_stream", timeout_seconds=timeout_seconds,
+    )
+
+
+STREAMING_APPROVAL_HINT = (
+    " This turn is not streaming, so it cannot wait for an approval; "
+    "resend the request with stream=true to approve this call."
+)
+
+
+class _NonStreamApprovalPolicy:
+    """The turn's permission policy, with a streaming hint on unattended refusals.
+
+    A non-stream native turn has no approval wait hook, so a refusal that an
+    operator could have approved on a streamed turn ends there.  Only the
+    refusal text changes; every decision keeps its action, source and call id.
+    Every other attribute is the wrapped policy's own.
+    """
+
+    def __init__(self, policy: Any) -> None:
+        self._policy = policy
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._policy, name)
+
+    def decide(self, *args: Any, **kwargs: Any) -> Any:
+        decision = self._policy.decide(*args, **kwargs)
+        if (
+            getattr(decision, "allowed", False)
+            or getattr(decision, "source", "") != "unattended"
+            or not dataclasses.is_dataclass(decision)
+        ):
+            return decision
+        replace_fn: Any = dataclasses.replace
+        reason: Any = getattr(decision, "reason", "")
+        return replace_fn(decision, reason=str(reason or "") + STREAMING_APPROVAL_HINT)
 
 
 def _container_running(server: Any = None) -> bool:
@@ -171,7 +233,7 @@ def build_http_chat_tool_turn(
         mode = str(permission_policy.current_mode() or "")
     except Exception:
         mode = ""
-    if (not use_client_exec and mode == "plan") or not _model_supports_tools(server, model):
+    if not _model_supports_tools(server, model):
         return None
     depth = _delegation.current_depth()
     if use_client_exec and not authorized_tools:
@@ -193,11 +255,7 @@ def build_http_chat_tool_turn(
         tools_payload = [*client_tools_payload(), *core_non_client]
         turn_client_tools = CLIENT_DELEGATABLE_TOOLS
     else:
-        admitted = [
-            item.name for item in CORE_CHAT_TOOL_DEFINITIONS
-            if not role_tool_policy.agent_refusal(item.name)
-            and (depth == 0 or item.name not in DELEGATION_TOOLS)
-        ]
+        admitted = _admitted_core_tools(mode, depth)
         tools_payload = chat_tools_payload(allowed_names=admitted, depth=depth)
         turn_client_tools = frozenset()
     if not admitted:
@@ -325,7 +383,7 @@ def build_http_chat_tool_turn(
         manifest=manifest,
         tools_payload=tools_payload,
         backend=backend,
-        permission_policy=permission_policy,
+        permission_policy=permission_policy if stream else _NonStreamApprovalPolicy(permission_policy),
         blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
         on_tool_event=on_event if (stream and write_tool_chunk_fn is not None) else None,
         on_agent_event=on_agent_ev if (stream and write_agent_chunk_fn is not None) else None,

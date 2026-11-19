@@ -336,6 +336,7 @@ from sonder_runtime.domain.thinking_controls import (
     with_local_thinking_budget as _with_local_thinking_budget,
 )
 from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
+from sonder_runtime.domain import thinking_controls as _thinking_controls
 from sonder_runtime.domain import verification_progress
 from sonder_runtime.domain import batch_coalescing as _batch_coalescing
 from sonder_runtime.domain.fanout_receipts import (
@@ -912,10 +913,14 @@ def _remember_thinking_model(model):
         _THINKING_CAPABILITY_CACHE[name] = True
 
 
-def _known_thinking_model(model) -> bool:
+def _known_thinking_model(model):
     """Whether we already know this model reasons. Never performs I/O."""
     with _THINKING_CAPABILITY_LOCK:
-        return _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+        known = _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+    return known or _thinking_controls.pool_says_thinking(OLLAMA_POOL, model)
+
+
+_chat_reply_num_predict = functools.partial(_thinking_controls.reply_num_predict, _env_int_option)
 
 
 def _think_option_supported(model) -> bool:
@@ -5331,7 +5336,7 @@ def _chat_request(
         # content, so a tight cap hits done_reason "length" having emitted
         # nothing. Give thinking headroom, as the cloud path does. Cache-only:
         # this must not add a speculative round trip to the hot path.
-        payload = _model_pace.up_front(_with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), planned=payload)
+        payload = _model_pace.up_front(_with_local_thinking_budget(payload, headroom=_thinking_controls.LOCAL_STEP_THINKING_HEADROOM if tools and not text_only else None), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), planned=payload)
         # Never override an explicit choice; the cloud policy sets `think`
         # itself. Ollama returns message.thinking for these models regardless,
         # so this is belt-and-braces rather than the mechanism.
@@ -5501,12 +5506,7 @@ def _chat_request(
             # once with thinking disabled so the caller receives an answer.
             remaining = request_deadline - time.monotonic()
             if remaining < 1.0:
-                raise ModelCallError(
-                    "timeout",
-                    "thinking retry exceeded request timeout",
-                    attempts=attempts,
-                    cloud=cloud,
-                )
+                raise ModelCallError("timeout", "thinking retry exceeded request timeout", attempts=attempts, cloud=cloud)
             fallback_payload = dict(payload)
             fallback_payload["think"] = False
             return _chat_request(
@@ -5529,12 +5529,7 @@ def _chat_request(
         ):
             remaining = request_deadline - time.monotonic()
             if remaining < 1.0:
-                raise ModelCallError(
-                    "timeout",
-                    "thinking retry exceeded request timeout",
-                    attempts=attempts,
-                    cloud=cloud,
-                )
+                raise ModelCallError("timeout", "thinking retry exceeded request timeout", attempts=attempts, cloud=cloud)
             retry_timeout = max(1, math.floor(remaining))
             roomier = _model_pace.room_to_retry(payload, _with_local_thinking_budget(payload), caller_payload, model, retry_timeout)
             if exhausted_thinking and not _budget_retried and roomier != payload:
@@ -5564,6 +5559,7 @@ def _chat_request(
                 fallback_payload["think"] = False
                 activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
                                               reason="thinking_exhausted_budget" if exhausted_thinking else "thinking_without_answer")
+                _model_pace.note_thinking_exhausted(model)
                 try:
                     return _chat_request(
                         fallback_payload,
@@ -5584,12 +5580,14 @@ def _chat_request(
                     activity_tracker.record_event(
                         "model_thinking_fallback_failed", model=str(model or "")[:80],
                         failure=str(fallback_error.kind or "")[:40])
+                    logging.getLogger("sonder.server").warning("thinking fallback for %s also failed (%s)", str(model or "")[:80], str(fallback_error.kind or "")[:40])
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),
             attempts=attempts,
             cloud=cloud,
         )
+    _model_pace.note_reply(model, out, thinking_requested=not cloud and not reasoning_continuation and payload.get("think") is not False)
     if return_message:
         return out, (message if isinstance(message, dict) else {"role": "assistant", "content": content})
     return out, content
@@ -7280,7 +7278,7 @@ def _answer_with_history_impl(
                 from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
                 _handled_tools, _tool_resp = _chat_run_backend.maybe_answer_chat_tools(
                     chat_request=_chat_request, model=model, cloud=cloud, temperature=temperature,
-                    num_predict=1024, num_ctx=req_ctx, keep_alive=_keep_alive_for(model),
+                    num_predict=_chat_reply_num_predict(explicit=True), num_ctx=req_ctx, keep_alive=_keep_alive_for(model),
                     local_options_fn=lambda t, np, nc: _platform_local_model_options(t, np, nc, native_context=context_policy.native, environ=os.environ),
                     system=effective_system, prompt=prompt, history=history,
                 )
@@ -7292,7 +7290,7 @@ def _answer_with_history_impl(
                     # later grounded outcome cannot become an unscoped raw recall.
                     capture_project = project_id
                     response, iid, trace_ctx = _answer(
-                        conn, prompt, model, effective_system, temperature, 1024, req_ctx,
+                        conn, prompt, model, effective_system, temperature, _chat_reply_num_predict(explicit=_explicit_serve_selection(tier, "")), req_ctx,
                         session_id, capture_project, history or None, trace=trace,
                         # ``augment`` is an HTTP-owned privacy boundary.  A model
                         # route can further opt out (for example cloud teacher mode),
@@ -7350,7 +7348,7 @@ def _answer_with_history_impl(
                         request_cache_status = "hit" if response is not None else "miss"
                     if response is None:
                         gen = _reference_lookup_lanes.chat_generate(
-                            _make_generate, prompt, model, effective_system, temperature, 1024, req_ctx,
+                            _make_generate, prompt, model, effective_system, temperature, _chat_reply_num_predict(explicit=_explicit_serve_selection(tier, "")), req_ctx,
                             cloud=cloud, text_only=True,
                             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
                         )
@@ -7387,7 +7385,7 @@ def _answer_with_history_impl(
                         _gate_answer_code(
                             response, iid=iid, prompt=prompt, history=history,
                             model=model, system=effective_system,
-                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=1024,
+                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=_chat_reply_num_predict(explicit=_explicit_serve_selection(tier, "")),
                             num_ctx=req_ctx, cloud=cloud, tier_label=tier_label,
                         )
                     )
