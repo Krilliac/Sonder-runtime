@@ -87,10 +87,11 @@ def test_credential_path_reached_through_dotdot_is_refused(tmp_path: Path):
     assert not (tmp_path / ".ssh" / "config").exists()
 
 
-# A workspace root inside the home directory: the context rules (pairs,
-# directory pairs, triples) see the root's trailing components, and a root
-# that is itself a credential directory makes every write there a credential
-# write. The server's mutation guard judges the full path the same way.
+# A workspace root inside the home directory: the credential rules see every
+# component of the resolved root, so a root that is, or sits anywhere inside,
+# a credential directory (``~/.aws/sub/dir``) or directory pair
+# (``~/.config/gcloud/x``) makes every write there a credential write. The
+# server's mutation guard judges the full path the same way.
 _REFUSED_UNDER_ROOT = [
     (".aws", "credentials"),
     (".aws", "config"),
@@ -102,6 +103,12 @@ _REFUSED_UNDER_ROOT = [
     (".docker", "config.json"),
     (".cargo", "credentials"),
     ("AppData/Roaming", "gcloud/credentials.db"),
+    (".aws/sub/dir", "notes.txt"),
+    (".aws/sso", "cache/tok.json"),
+    (".config/gcloud/x", "notes.txt"),
+    (".config/gcloud/configurations", "config_default"),
+    ("AppData/Roaming/gcloud/legacy_credentials/me", "adc.json"),
+    (".ssh/projects/app", "notes.txt"),
 ]
 
 
@@ -130,7 +137,10 @@ def test_credential_path_is_refused_when_the_root_is_part_of_the_store(
 @pytest.mark.parametrize(
     ("root_rel", "rel_path"),
     [
-        (".ssh/projects/app", "notes.txt"),
+        ("ssh/projects/app", "notes.txt"),
+        ("projects/.aws-notes/app", "notes.txt"),
+        ("gcloud/x", "notes.txt"),
+        (".config/app/gcloud", "readme.md"),
         (".config", "app/settings.json"),
         (".config", "gh/config.yml"),
         ("docker", "config.json"),

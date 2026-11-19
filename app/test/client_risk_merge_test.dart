@@ -45,6 +45,16 @@ void main() {
       expect(clientModeAllowsWithoutPrompt('auto', r), isFalse);
       expect(clientModeAllowsWithoutPrompt('acceptEdits', r), isFalse);
     });
+
+    test('one shared ranking orders every risk value', () {
+      expect(clientRiskRank(''), lessThan(clientRiskRank('read_only')));
+      expect(clientRiskRank(' read_only '), clientRiskRank('read_only'));
+      expect(clientRiskRank('read_only'), lessThan(clientRiskRank('write')));
+      expect(clientRiskRank('write'), clientRiskRank('workspace_write'));
+      expect(clientRiskRank('write'), lessThan(clientRiskRank('execute')));
+      expect(clientRiskRank('execute'), clientRiskRank('host_exec'));
+      expect(clientRiskRank('execute'), lessThan(clientRiskRank('bogus')));
+    });
   });
 
   group('ChatController client tool handling', () {
