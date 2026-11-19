@@ -12,13 +12,23 @@ intact.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from sonder_runtime.adapters.fanout_failures import safe_error
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.persistence import fanout_store
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def record_health(model, exc, prompt, *, is_cloud_model_name):
+
+def record_health(
+    model: str,
+    exc: object,
+    prompt: str,
+    *,
+    is_cloud_model_name: Callable[[str], bool],
+) -> None:
     """Record advisory model health and cool down repeatable model failures.
 
     A fanout is explicitly opt-in, but repeating a target that just timed out,
@@ -34,7 +44,7 @@ def record_health(model, exc, prompt, *, is_cloud_model_name):
     if exc is None:
         fanout_store.record_model_health(model, model_class="cloud" if is_cloud_model_name(model) else "local", success=True)
         return
-    disabled_until = None
+    disabled_until: float | None = None
     availability_failure = False
     if isinstance(exc, ModelCallError):
         if is_cloud_model_name(model) and exc.status in (402, 404, 410):

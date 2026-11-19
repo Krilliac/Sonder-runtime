@@ -3,15 +3,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.adapters.fanout_receipt import synthesis_rows
 from sonder_runtime.adapters.model_transport import ModelCallError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from typing import Protocol
 
-def sources(run, *, rows, load_prompt, max_source_chars):
+    class _SynthesisRows(Protocol):
+        def __call__(
+            self,
+            run: Mapping[str, object],
+            rows: Sequence[Mapping[str, object]],
+        ) -> Sequence[tuple[Mapping[str, object], str]]: ...
+
+
+def sources(
+    run: Mapping[str, object],
+    *,
+    rows: Sequence[Mapping[str, object]],
+    load_prompt: Callable[[], str],
+    max_source_chars: int,
+) -> tuple[str, list[dict[str, str]]]:
     if run.get("status") != "completed":
         raise ModelCallError("configuration", "fanout run must be completed before synthesis")
-    slots = synthesis_rows(run, rows)
+    slots = cast("_SynthesisRows", synthesis_rows)(run, rows)
     if sum(row.get("status") == "answered" for row, _ in slots) < 2:
         raise ModelCallError("configuration", "fanout synthesis requires at least two answered results")
     if sum(not error for _, error in slots) < 2:
@@ -22,13 +40,15 @@ def sources(run, *, rows, load_prompt, max_source_chars):
             ),
         )
     original_prompt = load_prompt()
+    source_rows: list[dict[str, object]]
+    hashes: list[dict[str, str]]
     source_rows, hashes = [], []
     for row, error in slots:
         if error:
             source_rows.append({"model": str(row["model"]), "status": "not_ready", "error": error})
             continue
-        preview = row["answer"]
-        source = {
+        preview = cast(str, row["answer"])
+        source: dict[str, object] = {
             "model": str(row.get("model") or ""),
             "answer": preview,
             "elapsed_ms": row.get("elapsed_ms"),
@@ -40,7 +60,7 @@ def sources(run, *, rows, load_prompt, max_source_chars):
         }
         source_rows.append(source)
         hashes.append({
-            "model": source["model"],
+            "model": cast(str, source["model"]),
             "preview_sha256": hashlib.sha256(preview.encode("utf-8")).hexdigest(),
         })
     try:

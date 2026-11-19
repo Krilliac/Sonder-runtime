@@ -6,10 +6,14 @@ This adapter grants no permissions and never resolves model text as authority.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import sonder_runtime.adapters.restricted_tool_lane as restricted_tool_lane
 from sonder_runtime.platform import paths
+
+if TYPE_CHECKING:
+    import os
 
 INSPECTION_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "text_search",
@@ -17,7 +21,7 @@ INSPECTION_TOOLS = frozenset({
 })
 
 
-def creation_folder(*, state_home=None, lane_id=None) -> Path:
+def creation_folder(*, state_home: str | os.PathLike[str] | None = None, lane_id: str | None = None) -> Path:
     """A prospective directory only: callers must authorize before creating it."""
     home = Path(state_home if state_home is not None else paths.default_home()).resolve()
     name = lane_id or "chat-" + uuid4().hex
@@ -30,12 +34,12 @@ def creation_folder(*, state_home=None, lane_id=None) -> Path:
     return candidate
 
 
-def suggested_folder(host, project="") -> str:
+def suggested_folder(host: Any, project: str = "") -> str:
     """Describe the destination without creating state for an ordinary chat turn."""
     return host.served_work_project(project) or str(paths.default_home() / "creations" / "<lane-id>")
 
 
-def route_file_request(host, prompt, mode, project, tier, *, state_home=None, pinned=False):
+def route_file_request(host: Any, prompt: str, mode: str, project: str, tier: str, *, state_home: str | os.PathLike[str] | None = None, pinned: bool = False) -> tuple[str, str]:
     """Run an already-classified file request; retain every existing tool gate."""
     if mode not in {"inspection", "workbench"}:
         return "Refused: unknown file chat lane.", tier

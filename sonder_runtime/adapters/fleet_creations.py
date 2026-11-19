@@ -12,8 +12,18 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.platform.paths import default_home
+
+if TYPE_CHECKING:
+    from dataclasses import Field
+    from typing import Any, ClassVar, Protocol, TypeVar
+
+    _ResultT = TypeVar("_ResultT")
+
+    class _DataclassInstance(Protocol):
+        __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
 
 
 # Host-created roots are the authority for receipts.  Keeping this registry
@@ -140,7 +150,7 @@ def inventory_files(worker_root: str | os.PathLike[str]) -> tuple[str, ...]:
     return _files(_checked_root(root, root))
 
 
-def attach_receipt(result, worker_root: str | os.PathLike[str]):
+def attach_receipt(result: _ResultT, worker_root: str | os.PathLike[str]) -> _ResultT:
     """Attach host-observed files and check status to a worker result."""
     from dataclasses import replace
 
@@ -157,11 +167,19 @@ def attach_receipt(result, worker_root: str | os.PathLike[str]):
     if passed is None:
         passed = getattr(result, "validation_passed", None)
     if hasattr(result, "produced_files"):
-        return replace(result, produced_files=produced, checks_run=bool(attempted), checks_passed=passed)
+        return cast(
+            "_ResultT",
+            replace(
+                cast("_DataclassInstance", result),
+                produced_files=produced,
+                checks_run=bool(attempted),
+                checks_passed=passed,
+            ),
+        )
     return result
 
 
-def host_report(worker_id: str, worker_root: str | os.PathLike[str], result) -> str:
+def host_report(worker_id: str, worker_root: str | os.PathLike[str], result: object) -> str:
     """Return a deterministic host receipt suitable for aggregate output."""
     files = tuple(getattr(result, "produced_files", ()) or ())
     attempted = bool(getattr(result, "checks_run", False))

@@ -20,7 +20,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from sonder_runtime.application.evaluation.cheat_trials import (
     DEFAULT_BATTERY,
@@ -43,7 +43,7 @@ class LoopbackSolutionServer:
         self._hits: list[str] = []
         self._body = b""
         self._server: ThreadingHTTPServer | None = None
-        self._thread = None
+        self._thread: Thread | None = None
 
     @property
     def hits(self) -> int:
@@ -82,7 +82,7 @@ class LoopbackSolutionServer:
 
             do_GET = do_POST = do_HEAD = _record
 
-            def log_message(self, *args, **kwargs) -> None:  # silence stderr
+            def log_message(self, *args: Any, **kwargs: Any) -> None:  # silence stderr
                 return None
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -91,7 +91,7 @@ class LoopbackSolutionServer:
         self._thread.start()
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, *exc: object) -> None:
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()

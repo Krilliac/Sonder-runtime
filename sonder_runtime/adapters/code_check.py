@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 MAX_BYTES = 1_000_000
 MAX_SECONDS = 10.0
@@ -37,7 +38,7 @@ class CheckIssue:
 
 
 @contextmanager
-def check_budget():
+def check_budget() -> Iterator[float]:
     """Share one ten-second budget across automatic checks of a patch."""
     deadline = min(time.monotonic() + MAX_SECONDS, _DEADLINE.get() or float("inf"))
     token = _DEADLINE.set(deadline)
