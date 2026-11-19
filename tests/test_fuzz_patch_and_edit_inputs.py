@@ -71,13 +71,14 @@ class _Run:
         self.samples: list[float] = []
 
     def __call__(self, fn, *args, **kwargs):
-        started = time.perf_counter()
+        # CPU time, not wall clock: load on the machine must not fail these budgets. On Windows it ticks in 15.6 ms steps, so keep every limit above 3 ticks.
+        started = time.process_time()
         try:
             return "ok", fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - the caller classifies every exception type
             return "err", exc
         finally:
-            self.samples.append(time.perf_counter() - started)
+            self.samples.append(time.process_time() - started)
 
     def check(self, label: str, p99_limit: float = 0.05) -> None:
         samples = sorted(self.samples)

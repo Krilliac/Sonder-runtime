@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -135,6 +136,20 @@ class JsonMinimizedFailureStore:
                     continue
                 if time.monotonic() >= deadline:
                     raise DivergenceError("minimized failure store lock is held by another writer") from None
+                time.sleep(0.02)
+                continue
+            except PermissionError as exc:
+                # On Windows, opening a lock whose unlink is still pending
+                # (another handle is open) fails with PermissionError: treat
+                # it as held.  Elsewhere it is a real permission problem.
+                # Chain the error so a real ACL problem stays visible.
+                if sys.platform != "win32":
+                    raise
+                if time.monotonic() >= deadline:
+                    raise DivergenceError(
+                        "minimized failure store lock is held by another writer"
+                        " (or the store directory denies writes)"
+                    ) from exc
                 time.sleep(0.02)
                 continue
             try:

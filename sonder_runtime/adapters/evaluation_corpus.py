@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from sonder_runtime.application.evaluation.corpus_inventory import (
+    CorpusRecord,
     CorpusSourceKind,
     CorpusSourceReport,
     CorpusSourceSpec,
@@ -75,7 +76,7 @@ class BoundedEvaluationCorpusScanner:
                 max_record_bytes=self._max_record_bytes,
                 max_total_bytes=self._max_total_bytes,
             )
-            records = []
+            records: list[CorpusRecord] = []
             total = 0
             for index, row in enumerate(rows):
                 if index >= self._max_records:
