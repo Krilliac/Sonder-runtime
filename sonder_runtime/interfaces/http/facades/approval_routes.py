@@ -6,8 +6,9 @@
 
 Approving a refused call is the attended answer to the gate's ask, the same
 authority ``/approve`` needs at the console: a developer or administrator
-(the single-user local-open listener counts, exactly as for
-``/v1/permission-mode``). The ledger semantics live in ``approvals.py``.
+(the single-user local-open listener counts here; at
+``/v1/permission-mode`` it may only lower the mode). The ledger semantics
+live in ``approvals.py``.
 
 ``handler`` is serve.py's request handler: these functions use its auth
 check, its correlation id, its headers and its JSON sender, so the wire

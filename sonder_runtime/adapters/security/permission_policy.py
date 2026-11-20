@@ -58,6 +58,17 @@ class PermissionPolicyProvider:
     def set_mode(self, name: str) -> str:
         return _engine().set_mode(name)
 
+    def set_mode_without_escalation(self, name: str) -> str:
+        """Set the mode, refusing a raise above both current and manual.
+
+        Raises ``mode_escalation_refused()`` instances; see the engine.
+        """
+        return _engine().set_mode_without_escalation(name)
+
+    def mode_escalation_refused(self) -> type[ValueError]:
+        """The exception type ``set_mode_without_escalation`` raises."""
+        return _engine().ModeEscalationRefused
+
     def attended_mode_change(self):
         """Context for a mode change a present person makes (console only)."""
         return _engine().attended_mode_change()

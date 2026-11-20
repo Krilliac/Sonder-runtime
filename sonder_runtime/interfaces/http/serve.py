@@ -126,7 +126,7 @@ from sonder_runtime.domain.launcher_health import token_is_configured
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
-from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades import HealthStatusFacade, permission_mode_post as _mode_post
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades import client_protocol as _client_protocol
 from sonder_runtime.interfaces.http.facades.client_protocol import (
@@ -6383,7 +6383,7 @@ class Handler(BaseHTTPRequestHandler):
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
-                lambda: permission_policy.set_mode(wanted),
+                _mode_post.mode_applier(permission_policy, context, wanted),
             )
         except ValueError as exc:
             self._send_json_payload(
@@ -6392,6 +6392,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if _send_idempotency_refusal(self, result):
+            return
+        if _mode_post.send_escalation_refusal(
+                self, permission_policy, result, sonder_lifecycle.error_envelope):
             return
         _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
