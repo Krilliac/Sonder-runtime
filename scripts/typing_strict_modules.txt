@@ -194,6 +194,7 @@ sonder_runtime/application/compaction/legacy.py
 sonder_runtime/application/compute_fabric/__init__.py
 sonder_runtime/application/compute_fabric/capacity.py
 sonder_runtime/application/compute_fabric/deployment_admission.py
+sonder_runtime/application/config/saas_config.py
 sonder_runtime/application/context.py
 sonder_runtime/application/context_health.py
 sonder_runtime/application/context_manifest.py
