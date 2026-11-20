@@ -3,9 +3,13 @@
 * The delete-verb and root-target scan reads shell text only: argv tools,
   ``command``/``cmd``/``script``/``stdin`` and ``run_code`` in a shell
   language.  Python, JavaScript and other code get the token and text BLOCK
-  lists and the download-and-execute checks, never the delete scan.
-* An unescaped newline ends a command in every scan.
-* Every scan is one linear pass; text above the size cap answers ASK.
+  lists and the download-and-execute checks; only the string literals they
+  hand to an exec call (``os.system``, ``execSync``...) get the delete scan,
+  and a delete call (``shutil.rmtree``) on a literal root blocks.
+* An unescaped newline ends a command in every shell scan.  run_program's
+  ``command`` is also read as the one argv the client runs (``shlex.split``,
+  no shell), where a newline and ``#`` are blanks and words like any other.
+* Every scan is one linear pass; text above the size cap answers BLOCK.
 
 Every command below is classifier input only: it is inspected as text and never run.
 """
@@ -57,7 +61,8 @@ def test_ordinary_code_never_blocks(code, language):
 def test_a_newline_ends_the_delete_command(code):
     for language in ("bash", "powershell", "cmd"):
         assert rtl.classifier_verdict("run_code", {"code": code, "language": language}) == rules.ASK
-    assert rtl.classifier_verdict("run_program", {"command": code}) != rules.BLOCK
+    # The client splits run_program's command into one argv: the delete also gets the next line's path.
+    assert rtl.classifier_verdict("run_program", {"command": code}) == rules.BLOCK
 
 
 @pytest.mark.parametrize("code", [
@@ -93,9 +98,10 @@ def test_run_code_in_a_shell_language_gets_the_delete_scan(language):
     assert rtl.classifier_verdict("run_code", {"code": "rm -rf /", "language": language}) == rules.BLOCK
 
 
-def test_python_delete_of_a_root_is_not_attempted():
-    # Shell strings and filesystem calls inside other code are not parsed.
-    assert rtl.classifier_verdict("run_code", {"code": "shutil.rmtree('/')", "language": "python"}) == rules.ASK
+def test_python_delete_of_a_literal_root_blocks():
+    # A delete call on a literal root blocks; any other code is not parsed as shell.
+    assert rtl.classifier_verdict("run_code", {"code": "shutil.rmtree('/')", "language": "python"}) == rules.BLOCK
+    assert rtl.classifier_verdict("run_code", {"code": "shutil.rmtree(p)", "language": "python"}) != rules.BLOCK
 
 
 # (a) stdin is command text.
@@ -121,7 +127,12 @@ _ORDINARY_SHELL_DELETES = [
     'rm -rf -- "${BUILD_DIR:?}/"*', 'rm -rf "${OUT:?}/"', 'rm -rf "${OUT:-build}/"', 'rm -rf "${OUT%/}/"*',
     'rm -rf "${OUT:?}/x"', 'rm -rf "${1:?}/"*', 'rm -rf "${TMP:-/tmp}/x"', 'rm -rf "${PREFIX:?}/bin/tool"',
     'rm -rf "${arr[0]}/"', "rm -rf ./{a,b}/c", 'rm -rf "$OUT"/{a,b}', "rm -rf build/{obj,bin}",
-    "rm -rf build # remove / stuff", "rm -rf build # don't touch /\nls", "rm -rf build #/",
+    "rm -rf build #/",
+]
+# Harmless in a shell, where ``#`` starts a comment and a newline ends the delete; run_program's
+# command has no shell, so there rm also gets the ``/`` after them.
+_SHELL_ONLY_DELETES = [
+    "rm -rf build # remove / stuff", "rm -rf build # don't touch /\nls",
     "(\n  cd build\n  rm -rf out\n  ls /\n)", "(\nrm -rf out\nls /\n)",
 ]
 
@@ -130,6 +141,12 @@ _ORDINARY_SHELL_DELETES = [
 def test_ordinary_shell_deletes_do_not_block(code):
     assert rtl.classifier_verdict("run_program", {"command": code}) != rules.BLOCK
     assert rtl.classifier_verdict("run_code", {"code": code, "language": "bash"}) != rules.BLOCK
+
+
+@pytest.mark.parametrize("code", _SHELL_ONLY_DELETES)
+def test_a_shell_comment_or_newline_ends_a_delete_only_in_a_shell(code):
+    assert rtl.classifier_verdict("run_code", {"code": code, "language": "bash"}) != rules.BLOCK
+    assert rtl.classifier_verdict("run_program", {"command": code}) == rules.BLOCK
 
 
 @pytest.mark.parametrize("code", [
@@ -382,20 +399,83 @@ _ADVERSARIAL = {
     "comments": ("bash", "rm a # don't\n", "", ""),
     "quoted separators": ("bash", '"a;b|c&d\n" ', "rm -rf ", ""),
     "open parentheses": ("powershell", "(\n", "Remove-Item -Recurse ", ""),
+    # One word glued from many quotes: read once, not at every quote.
+    "glued quotes after a reader": ("bash", '"a"a', "echo ", ""),
+    "glued quotes after an interpreter": ("bash", '"a"a', "sh -c a", ""),
+    "glued assignment after an interpreter": ("bash", '"a"a', "sh -c a=", ""),
+    "glued quotes in a delete substitution": ("bash", '"a"a', "rm -rf $(x a", ")"),
+    "quoted parentheses of a printed delete": ("bash", "()", 'echo rm -rf "', '"'),
+    "quoted operands of a printed delete": ("bash", "'a b' ", "echo rm -rf ", ""),
+    # Flags read as possible run flags (prefixes, bundles) and path-named programs.
+    "one long reader flag": ("bash", "a-", "grep --", ""),
+    "long reader flags": ("bash", "--a-b-c-d-e-f-g-h-i-j-k-p ", "grep ", ""),
+    "short-flag bundles after a reader": ("bash", "-nwiOxyz ", "git grep ", ""),
+    "quotes glued to a bundle": ("bash", "a'b'", "git grep -n", ""),
+    "path-named readers": ("bash", "./echo x | ", "", ""),
+    "quotes glued to a reader's name": ("bash", 'echo"x" a; ', "", ""),
+    # Finders: every path after the finder is read once a delete is seen (``_finder_at``).
+    "finder search paths": ("bash", "d1/s ", "find ", " -delete"),
+    "finder exec flags": ("bash", "-exec ", "find . ", " rm"),
+    "fd exec bundles": ("bash", "-HIx", "fd . ", " rm"),
+    "finder words": ("bash", "find ", "", "-delete"),
 }
 
 
+# _classify and _floor._blocks, not classify: a fault must fail this test, not answer a fast
+# verdict.  classify runs the base rules and, unless they block, the floor's: each is bounded here.
+_RULES = {
+    "base": lambda tool, arguments: rules._classify(tool, arguments, ""),
+    "floor": lambda tool, arguments: rules.BLOCK if rules._floor._blocks(tool, arguments) else rules.ASK,
+}
+
+
+@pytest.mark.parametrize("which", sorted(_RULES))
 @pytest.mark.parametrize("size,limit", [(64 * _K, 0.25), (256 * _K, 1.0)])
 @pytest.mark.parametrize("shape", sorted(_ADVERSARIAL))
-def test_adversarial_input_classifies_in_bounded_time(shape, size, limit):
+def test_adversarial_input_classifies_in_bounded_time(shape, size, limit, which):
     language, unit, head, tail = _ADVERSARIAL[shape]
     code = _flood(unit, size, head, tail)
     assert len(code) == size
-    # _classify, not classify: a fault must fail this test, not answer a fast ASK.
-    verdict, elapsed = _timed(lambda: rules._classify("run_code", {"code": code, "language": language}, ""),
-                              limit)
+    verdict, elapsed = _timed(lambda: _RULES[which]("run_code", {"code": code, "language": language}), limit)
     assert verdict in rules.VERDICTS
     assert elapsed < limit, f"{shape}: {size} chars took {elapsed:.3f}s"
+
+
+# run_program's command is also read as the argv the client runs, split both ways (``_shlex_words``).
+@pytest.mark.parametrize("size,limit", [(64 * _K, 0.5), (256 * _K, 2.0)])
+@pytest.mark.parametrize("shape", sorted(_ADVERSARIAL))
+def test_adversarial_command_text_classifies_in_bounded_time(shape, size, limit):
+    _language, unit, head, tail = _ADVERSARIAL[shape]
+    command = _flood(unit, size, head, tail)
+    verdict, elapsed = _timed(lambda: _RULES["floor"]("run_program", {"command": command}), limit)
+    assert verdict in rules.VERDICTS
+    assert elapsed < limit, f"{shape}: {size} chars took {elapsed:.3f}s"
+
+
+# A space str.strip() drops but shlex keeps (\xa0) at each end: the command is read as
+# given and stripped, each split both ways (``_client_texts``), and as the desktop client
+# splits it (``_dart_words``): up to five linear readings.  The slowest shape takes about
+# 1.6 s here; the limit leaves over 40% headroom for a loaded machine.
+@pytest.mark.parametrize("shape", sorted(_ADVERSARIAL))
+def test_padded_command_text_classifies_in_bounded_time(shape):
+    _language, unit, head, tail = _ADVERSARIAL[shape]
+    command = _flood(unit, 256 * _K, "\xa0" + head, tail + "\xa0")
+    assert command.strip() != command.strip(" \t\r\n")
+    verdict, elapsed = _timed(lambda: _RULES["floor"]("run_program", {"command": command}), 3.0)
+    assert verdict in rules.VERDICTS
+    assert elapsed < 3.0, f"{shape}: {len(command)} chars took {elapsed:.3f}s"
+
+
+# Blanks Dart trims and splits at (U+FEFF, which str.strip keeps; U+3000) at each end and as
+# every space of the shape: the desktop client's split (``_dart_words``) is one more linear reading.
+@pytest.mark.parametrize("pad", ["\ufeff", "\u3000"], ids=["U+FEFF", "U+3000"])
+@pytest.mark.parametrize("shape", sorted(_ADVERSARIAL))
+def test_dart_padded_command_text_classifies_in_bounded_time(shape, pad):
+    _language, unit, head, tail = _ADVERSARIAL[shape]
+    command = _flood(unit.replace(" ", pad), 256 * _K, pad + head.replace(" ", pad), tail.replace(" ", pad) + pad)
+    verdict, elapsed = _timed(lambda: _RULES["floor"]("run_program", {"command": command}), 3.0)
+    assert verdict in rules.VERDICTS
+    assert elapsed < 3.0, f"{shape}: {len(command)} chars took {elapsed:.3f}s"
 
 
 def test_distinct_delete_operands_classify_in_bounded_time():
@@ -447,12 +527,13 @@ def test_text_up_to_the_cap_is_read():
     assert rules._classify("run_code", {"code": code, "language": "bash"}, "") == rules.BLOCK
 
 
-def test_text_above_the_cap_asks():
+def test_text_above_the_cap_blocks():
+    # Bypass skips an ASK, so text the classifier will not read blocks.
     code = _flood("echo hi\n", 256 * _K + 1, tail="rm -rf /")
-    assert rules.classify("run_code", {"code": code, "language": "bash"}, risk="") == rules.ASK
+    assert rules.classify("run_code", {"code": code, "language": "bash"}, risk="") == rules.BLOCK
     padded = {"command": "ls", "stdin": "x" * (256 * _K)}
-    assert rules.classify("run_program", padded, risk="safe") == rules.ASK
+    assert rules.classify("run_program", padded, risk="safe") == rules.BLOCK
     # The cwd counts toward the cap.
     padded = {"command": "ls", "cwd": "/w/" + "a" * (256 * _K)}
-    assert rules.classify("run_program", padded, risk="safe") == rules.ASK
+    assert rules.classify("run_program", padded, risk="safe") == rules.BLOCK
     assert rules.classify("run_program", {"command": "ls", "cwd": "/w/a"}, risk="safe") == rules.ALLOW
