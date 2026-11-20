@@ -39,6 +39,11 @@ $global:MockOut = [string]$scenario.outDir
 $global:MockRules = New-Object System.Collections.ArrayList
 foreach ($r in @($scenario.rules)) { if ($null -ne $r) { [void]$global:MockRules.Add($r) } }
 $global:MockProfiles = @($scenario.profiles)
+$global:MockPersistentProfiles = @($scenario.persistentProfiles)
+$global:MockPersistentFails = [bool]$scenario.persistentFails
+$global:MockProcesses = @($scenario.processes)
+$global:MockLaunchPid = [int]$scenario.launchPid
+$global:MockCimFails = [bool]$scenario.cimFails
 $global:MockEnsureFails = [bool]$scenario.ensureFails
 $global:MockRuleReadFails = [bool]$scenario.ruleReadFails
 $global:MockIpFails = [bool]$scenario.ipFails
@@ -114,6 +119,11 @@ function Get-NetFirewallApplicationFilter {
 function Get-NetFirewallProfile {
     [CmdletBinding()]
     param([string]$PolicyStore, [switch]$All)
+    Write-MockLog 'get-profile.jsonl' @{ PolicyStore = $PolicyStore }
+    if ($PolicyStore -eq 'PersistentStore') {
+        if ($global:MockPersistentFails) { Write-Error -Message 'mock: Access is denied.' -Category PermissionDenied; return }
+        return $global:MockPersistentProfiles
+    }
     $global:MockProfiles
 }
 function Remove-NetFirewallRule {
@@ -128,7 +138,8 @@ function Remove-NetFirewallRule {
 function New-NetFirewallRule {
     [CmdletBinding()]
     param([string]$DisplayName, [string]$Direction, [string]$Action, [string]$Protocol, [string[]]$LocalPort,
-          [string[]]$LocalAddress, [string[]]$RemoteAddress, [string]$Profile, [string]$Description, [string]$Program)
+          [string[]]$LocalAddress, [string[]]$RemoteAddress, [string]$Profile, [string]$Description, [string]$Program,
+          [string[]]$InterfaceAlias)
     Write-MockLog 'new-rule.jsonl' $PSBoundParameters
     if ($global:MockEnsureFails) { throw 'mock New-NetFirewallRule: Access is denied.' }
     [void]$global:MockRules.Add([pscustomobject]@{
@@ -179,7 +190,20 @@ function Invoke-CimMethod {
     [CmdletBinding()]
     param([string]$ClassName, [string]$MethodName, [hashtable]$Arguments)
     Write-MockLog 'launch.json' @{ ClassName = $ClassName; MethodName = $MethodName }
+    # launchPid > 0: the launch "succeeds" with that wrapper PID (no process is started).
+    if ($global:MockLaunchPid -gt 0) { return [pscustomobject]@{ ReturnValue = 0; ProcessId = $global:MockLaunchPid } }
     [pscustomobject]@{ ReturnValue = 9; ProcessId = 0 }
+}
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([string]$ClassName, [string]$Filter)
+    Write-MockLog 'get-cim.jsonl' @{ ClassName = $ClassName }
+    if ($global:MockCimFails) { Write-Error -Message 'mock: Access is denied.' -Category PermissionDenied; return }
+    foreach ($proc in @($global:MockProcesses)) {
+        if ($null -ne $proc) {
+            [pscustomobject]@{ ProcessId = [int]$proc.pid; ParentProcessId = [int]$proc.parent; CreationDate = [datetime]$proc.created }
+        }
+    }
 }
 function New-Object {
     # Only the TcpClient used by Test-TcpPort is mocked: it never connects.
@@ -202,7 +226,7 @@ function New-Object {
 foreach ($cmd in 'Get-NetFirewallRule', 'Get-NetFirewallPortFilter', 'Get-NetFirewallAddressFilter',
                  'Get-NetFirewallApplicationFilter', 'Get-NetFirewallProfile', 'Remove-NetFirewallRule',
                  'New-NetFirewallRule', 'Get-NetTCPConnection', 'Invoke-CimMethod', 'New-Object',
-                 'Get-NetIPAddress', 'Get-Process', 'Stop-Process', 'Wait-Process') {
+                 'Get-NetIPAddress', 'Get-Process', 'Stop-Process', 'Wait-Process', 'Get-CimInstance') {
     if ((Get-Command $cmd).CommandType -ne 'Function') { throw "mock for $cmd is not active" }
 }
 
@@ -238,6 +262,11 @@ PEER = {
 # ActiveStore profiles report DisabledInterfaceAliases as null when nothing is excluded.
 PROFILES_ON = [
     {"Name": n, "Enabled": "True", "DefaultInboundAction": "Block", "DisabledInterfaceAliases": None}
+    for n in ("Domain", "Private", "Public")
+]
+# PersistentStore profiles report DisabledInterfaceAliases as {NotConfigured} (seen on a real PC).
+PERSISTENT_ON = [
+    {"Name": n, "Enabled": "True", "DefaultInboundAction": "NotConfigured", "DisabledInterfaceAliases": ["NotConfigured"]}
     for n in ("Domain", "Private", "Public")
 ]
 BIND_ALIAS = "Private Link"
@@ -278,6 +307,7 @@ def _run(
     script: Path = START_SCRIPT,
     args: dict | None = None,
     profiles: list[dict] | None = None,
+    persistent: list[dict] | None = None,
     ensure_fails: bool = False,
     extra: dict | None = None,
 ) -> Outcome:
@@ -298,6 +328,7 @@ def _run(
         "script": str(script),
         "rules": rules,
         "profiles": PROFILES_ON if profiles is None else profiles,
+        "persistentProfiles": PERSISTENT_ON if persistent is None else persistent,
         "ensureFails": ensure_fails,
         "ipAliases": [BIND_ALIAS],
         "args": script_args,
@@ -311,7 +342,7 @@ def _run(
         ["powershell", "-NoProfile", "-NonInteractive", "-File", str(wrapper), "-ScenarioPath", str(scenario_path)],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
     outcome = Outcome(proc, out_dir)
     # The wrapper aborts before running the script if any mock is not active.
@@ -444,56 +475,96 @@ def test_ensure_script_is_peer_only_and_parameterised() -> None:
     assert "-LocalAddress 10.77.0.2" in text
 
 
-def _profiles(**aliases: object) -> list[dict]:
-    """PROFILES_ON with DisabledInterfaceAliases set per profile name."""
-    profiles = [dict(p) for p in PROFILES_ON]
+def _profiles(base: list[dict] | None = None, **aliases: object) -> list[dict]:
+    """PROFILES_ON (or ``base``) with DisabledInterfaceAliases set per profile name."""
+    profiles = [dict(p) for p in (PROFILES_ON if base is None else base)]
     for p in profiles:
         if p["Name"] in aliases:
             p["DisabledInterfaceAliases"] = aliases[p["Name"]]
     return profiles
 
 
-# --- Firewall excluded from the bind interface (DisabledInterfaceAliases) ---
+# --- Any interface excluded from filtering (DisabledInterfaceAliases) ---
+# rpc-server's COMM_INIT listener binds 0.0.0.0 (ggml-rpc.cpp b12494 :2352), so
+# an exclusion of ANY interface leaves it unfiltered there: every entry other
+# than NotConfigured refuses, in either store, whatever it names.
 
 
 def test_bind_interface_excluded_on_one_profile_refuses(tmp_path: Path) -> None:
-    # Alias comparison is case-insensitive, like Windows interface aliases.
     profiles = _profiles(Domain=["NotConfigured"], Public=["Wi-Fi", "PRIVATE LINK"])
     outcome = _run(tmp_path, [PEER], profiles=profiles)
-    _assert_refused(outcome, "does not filter the interface carrying 10.77.0.2", "'Private Link'",
-                    "Public: 'PRIVATE LINK'", "Set-NetFirewallProfile -Name Public -DisabledInterfaceAliases NotConfigured")
-    assert "Wi-Fi" not in outcome.error, outcome.error
-    assert outcome.log("get-ip.jsonl") == [{"IPAddress": "10.77.0.2"}]
+    _assert_refused(outcome, "exclude interfaces from filtering", "ActiveStore Public: 'PRIVATE LINK'",
+                    "ActiveStore Public: 'Wi-Fi'", "0.0.0.0",
+                    "Set-NetFirewallProfile -Name Public -DisabledInterfaceAliases NotConfigured")
+    assert "Domain" not in outcome.error, outcome.error
 
 
-def test_unrelated_interface_excluded_allows_start(tmp_path: Path) -> None:
+def test_unrelated_interface_excluded_on_one_profile_refuses(tmp_path: Path) -> None:
+    """Flipped from cycle 2 (which let this start): an excluded Wi-Fi is not the
+    private link, but the firewall does not filter Wi-Fi at all, and the comm
+    listener rpc-server opens on COMM_INIT binds 0.0.0.0, so it would be open to
+    anything on Wi-Fi. Any exclusion now refuses, whatever interface it names."""
     profiles = _profiles(Domain=["NotConfigured"], Private=["Wi-Fi", "vEthernet (Default Switch)"])
     outcome = _run(tmp_path, [PEER], profiles=profiles)
+    _assert_refused(outcome, "ActiveStore Private: 'Wi-Fi'", "ActiveStore Private: 'vEthernet (Default Switch)'",
+                    "Set-NetFirewallProfile -Name Private -DisabledInterfaceAliases NotConfigured")
+
+
+def test_exclusion_only_in_persistent_store_refuses(tmp_path: Path) -> None:
+    persistent = _profiles(PERSISTENT_ON, Public=["Ethernet 3"])
+    outcome = _run(tmp_path, [PEER], persistent=persistent)
+    _assert_refused(outcome, "PersistentStore Public: 'Ethernet 3'", "Set-NetFirewallProfile -Name Public")
+    assert "ActiveStore Public:" not in outcome.error, outcome.error
+    assert {e["PolicyStore"] for e in outcome.log("get-profile.jsonl")} == {"ActiveStore", "PersistentStore"}
+
+
+def test_exclusions_from_both_stores_are_united(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER], profiles=_profiles(Domain=["Wi-Fi"]),
+                   persistent=_profiles(PERSISTENT_ON, Private=["Ethernet 3"]))
+    _assert_refused(outcome, "ActiveStore Domain: 'Wi-Fi'", "PersistentStore Private: 'Ethernet 3'",
+                    "Set-NetFirewallProfile -Name Domain,Private")
+
+
+def test_persistent_store_unreadable_refuses(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER], extra={"persistentFails": True})
+    _assert_refused(outcome, "cannot read Windows Firewall profiles from the PersistentStore", "Access is denied")
+
+
+def test_persistent_store_without_profiles_refuses(tmp_path: Path) -> None:
+    _assert_refused(_run(tmp_path, [PEER], persistent=[]), "no profiles from the PersistentStore")
+
+
+def test_persistent_alias_list_unreadable_refuses(tmp_path: Path) -> None:
+    persistent = _profiles(PERSISTENT_ON)
+    del persistent[2]["DisabledInterfaceAliases"]
+    _assert_refused(_run(tmp_path, [PEER], persistent=persistent),
+                    "cannot read DisabledInterfaceAliases", "in the PersistentStore: Public")
+
+
+def test_guid_form_exclusion_refuses(tmp_path: Path) -> None:
+    guid = "{4d36e972-e325-11ce-bfc1-08002be10318}"
+    outcome = _run(tmp_path, [PEER], profiles=_profiles(Public=[guid]))
+    _assert_refused(outcome, f"ActiveStore Public: '{guid}'")
+
+
+def test_not_configured_only_allows_start(tmp_path: Path) -> None:
+    profiles = _profiles(Domain=["NotConfigured"], Private=["NotConfigured"], Public=["NotConfigured"])
+    outcome = _run(tmp_path, [PEER], profiles=profiles, persistent=_profiles(PERSISTENT_ON))
     assert outcome.launched, outcome.error or outcome.text
 
 
 def test_disabled_interface_aliases_unreadable_refuses(tmp_path: Path) -> None:
     profiles = _profiles()
     del profiles[1]["DisabledInterfaceAliases"]
-    _assert_refused(_run(tmp_path, [PEER], profiles=profiles), "cannot read DisabledInterfaceAliases", "Private")
+    _assert_refused(_run(tmp_path, [PEER], profiles=profiles), "cannot read DisabledInterfaceAliases",
+                    "in the ActiveStore: Private")
 
 
-def test_unresolved_bind_interface_with_any_exclusion_refuses(tmp_path: Path) -> None:
-    profiles = _profiles(Private=["Wi-Fi"])
-    outcome = _run(tmp_path, [PEER], profiles=profiles, extra={"ipFails": True})
-    _assert_refused(outcome, "cannot resolve the interface carrying 10.77.0.2", "No MSFT_NetIPAddress",
-                    "Private: 'Wi-Fi'", "Set-NetFirewallProfile -Name Private")
-
-
-def test_unresolved_bind_interface_with_no_address_and_exclusion_refuses(tmp_path: Path) -> None:
-    profiles = _profiles(Domain=["Ethernet 2"])
-    outcome = _run(tmp_path, [PEER], profiles=profiles, extra={"ipAliases": []})
-    _assert_refused(outcome, "cannot resolve the interface carrying 10.77.0.2", "no interface has address 10.77.0.2")
-
-
-def test_unresolved_bind_interface_without_exclusions_allows_start(tmp_path: Path) -> None:
-    outcome = _run(tmp_path, [PEER], profiles=_profiles(Domain=["NotConfigured"]), extra={"ipFails": True})
+def test_start_no_longer_depends_on_resolving_the_bind_interface(tmp_path: Path) -> None:
+    # The bind-alias match is gone: Start never asks Get-NetIPAddress.
+    outcome = _run(tmp_path, [PEER], extra={"ipFails": True})
     assert outcome.launched, outcome.error or outcome.text
+    assert outcome.log("get-ip.jsonl") == []
 
 
 # --- A refused Start stops an instance that is already running ---
@@ -626,3 +697,126 @@ def test_ensure_helper_exiting_non_zero_refuses(tmp_path: Path) -> None:
     (alt / "ensure-node1-rpc-fw.ps1").write_text("param([int]$Port)\nexit 3\n", encoding="utf-8")
     outcome = _run(tmp_path, [PEER], script=copy, args={"EnsureFirewall": True})
     _assert_refused(outcome, "ensure-node1-rpc-fw.ps1 -Port 50052' exited with code 3")
+
+
+# --- The comm port (<Port> + 1000) is protected like <Port> ---
+# b12494: COMM_INIT makes the rank-0 rpc-server listen on 0.0.0.0:port0+1000
+# (ggml-rpc.cpp :2352, :3258), so 51052 for the default port.
+
+COMM_PORT_SHAPES = [
+    pytest.param({"localPort": ["51052"]}, id="exact-port"),
+    pytest.param({"localPort": ["51000-51100"]}, id="range"),
+    pytest.param({"protocol": "Any", "localPort": ["51052"]}, id="protocol-any"),
+    pytest.param({"localPort": ["80", "51052"]}, id="port-list"),
+]
+
+
+@pytest.mark.parametrize("remote", ["LocalSubnet", "Any"])
+@pytest.mark.parametrize("shape", COMM_PORT_SHAPES)
+def test_rule_covering_only_the_comm_port_from_beyond_peer_refuses(tmp_path: Path, shape: dict, remote: str) -> None:
+    # program=Any (from PEER): the rule is not bound to another program.
+    wide = _rule(name="comm-wide", displayName="Comm port open", remoteAddress=[remote], localAddress=["Any"], **shape)
+    outcome = _run(tmp_path, [PEER, wide])
+    _assert_refused(outcome, "'Comm port open'", "comm port TCP 51052", "Disable-NetFirewallRule -Name 'comm-wide'")
+
+
+@pytest.mark.parametrize("shape", COMM_PORT_SHAPES)
+def test_rule_covering_the_comm_port_from_exactly_peer_allows_start(tmp_path: Path, shape: dict) -> None:
+    comm = _rule(name="comm-peer", displayName="Comm port from Main", remoteAddress=["10.77.0.1"],
+                 localAddress=["Any"], **shape)
+    outcome = _run(tmp_path, [PEER, comm])
+    assert outcome.launched, outcome.error or outcome.text
+
+
+def test_comm_port_follows_a_custom_port(tmp_path: Path) -> None:
+    peer = _rule(localPort=["50999"])
+    wide = _rule(name="comm-wide", displayName="Comm 51999 open", localPort=["51999"], remoteAddress=["Any"])
+    _assert_refused(_run(tmp_path, [peer, wide], args={"Port": 50999}), "'Comm 51999 open'", "comm port TCP 51999")
+
+
+def test_port_whose_comm_port_does_not_fit_refuses(tmp_path: Path) -> None:
+    peer = _rule(localPort=["64600"])
+    _assert_refused(_run(tmp_path, [peer], args={"Port": 64600}), "comm port", "above 65535")
+
+
+# --- Fix commands quote rule names safely ---
+
+
+def test_rule_name_with_single_quote_is_escaped_in_fix_command(tmp_path: Path) -> None:
+    wide = _rule(name="Bob's open rule", displayName="Quote rule", remoteAddress=["Any"])
+    outcome = _run(tmp_path, [PEER, wide])
+    _assert_refused(outcome, "Disable-NetFirewallRule -Name 'Bob''s open rule'")
+    assert "-Name 'Bob's" not in outcome.error, outcome.error
+
+
+# --- No-listener timeout stops the whole process tree ---
+
+
+def test_listen_timeout_stops_the_whole_process_tree(tmp_path: Path) -> None:
+    # Wrapper 5000 -> rpc-server 5001 -> helper 5002; 6000 is unrelated; 7000 claims
+    # parent 5000 but is older than it (a recycled PID), so it is not part of the tree.
+    processes = [
+        {"pid": 5000, "parent": 900, "created": "2026-11-19T10:00:00"},
+        {"pid": 5001, "parent": 5000, "created": "2026-11-19T10:00:01"},
+        {"pid": 5002, "parent": 5001, "created": "2026-11-19T10:00:02"},
+        {"pid": 6000, "parent": 900, "created": "2026-11-19T10:00:03"},
+        {"pid": 7000, "parent": 5000, "created": "2026-11-19T09:00:00"},
+    ]
+    extra = {"launchPid": 5000, "livePids": [5000, 5001, 5002, 6000, 7000], "processes": processes}
+    outcome = _run(tmp_path, [PEER], extra=extra)
+    assert outcome.returncode != 0, outcome.text
+    assert outcome.launched
+    assert "did not start listening on 10.77.0.2:50052 within 20s" in outcome.error, outcome.error
+    assert "stopped the wrapper (PID 5000) and its child processes" in outcome.error, outcome.error
+    stopped = [e["Id"] for e in outcome.log("stop.jsonl")]
+    assert sorted(stopped) == [5000, 5001, 5002], stopped
+    # Deepest first: the wrapper goes last.
+    assert stopped[-1] == 5000, stopped
+    assert outcome.log("get-cim.jsonl") == [{"ClassName": "Win32_Process"}]
+
+
+def test_listen_timeout_reports_when_the_process_tree_cannot_be_read(tmp_path: Path) -> None:
+    extra = {"launchPid": 5000, "livePids": [5000], "cimFails": True}
+    outcome = _run(tmp_path, [PEER], extra=extra)
+    assert "did not start listening" in outcome.error, outcome.error
+    assert "Could not list its child processes" in outcome.error, outcome.error
+    assert "check for a stray rpc-server process" in outcome.error, outcome.error
+    assert [e["Id"] for e in outcome.log("stop.jsonl")] == [5000]
+
+
+# --- ensure-node1-rpc-fw.ps1 pins the peer rule to the private-link interface ---
+
+
+def test_ensure_pins_the_rule_to_the_interface_owning_the_bind_address(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [], args={"EnsureFirewall": True})
+    created = outcome.log("new-rule.jsonl")
+    assert len(created) == 1, outcome.text
+    assert created[0]["InterfaceAlias"] == [BIND_ALIAS]
+    assert created[0]["LocalAddress"] == ["10.77.0.2"]
+    assert {"IPAddress": "10.77.0.2"} in outcome.log("get-ip.jsonl")
+    assert outcome.launched, outcome.error or outcome.text
+
+
+@pytest.mark.parametrize(
+    ("extra", "needle"),
+    [
+        pytest.param({"ipFails": True}, "Cannot resolve the interface that owns 10.77.0.2", id="lookup-error"),
+        pytest.param({"ipAliases": []}, "(found: none)", id="no-interface"),
+        pytest.param({"ipAliases": ["Ethernet 2", "Wi-Fi"]}, "(found: 'Ethernet 2', 'Wi-Fi')", id="two-interfaces"),
+        pytest.param({"ipAliases": ["Link[1]"]}, "contains wildcard characters", id="wildcard-name"),
+    ],
+)
+def test_ensure_fails_without_creating_a_rule_when_the_interface_is_unresolved(
+    tmp_path: Path, extra: dict, needle: str
+) -> None:
+    outcome = _run(tmp_path, [PEER], args={"EnsureFirewall": True}, extra=extra)
+    _assert_refused(outcome, "ensure-node1-rpc-fw.ps1 -Port 50052' failed", needle, "no firewall rule was created")
+    assert outcome.log("new-rule.jsonl") == []
+    # The existing rule is left alone (removal happens only after the interface is resolved).
+    assert outcome.log("remove-rule.jsonl") == []
+
+
+def test_existing_unpinned_peer_rule_still_allows_start(tmp_path: Path) -> None:
+    # PEER carries no interface condition: Start does not add a refusal for that.
+    outcome = _run(tmp_path, [PEER], extra={"ipFails": True})
+    assert outcome.launched, outcome.error or outcome.text
