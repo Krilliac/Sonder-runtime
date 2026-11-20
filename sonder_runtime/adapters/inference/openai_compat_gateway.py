@@ -30,6 +30,7 @@ body only up to a fixed byte ceiling.
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
 import ipaddress
 import json
@@ -47,6 +48,7 @@ from types import SimpleNamespace
 from typing import Sequence
 from urllib.parse import urlsplit
 
+import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
 from .exchange_transport import (
     DEFAULT_TIMEOUT_SECONDS as _EXCHANGE_DEFAULT_TIMEOUT,
     ERROR_BODY_LIMIT,
@@ -85,6 +87,7 @@ from ...domain.common.errors import (
     InvalidInput,
     SonderError,
 )
+from ...domain.gpu_admission import RefusalReason
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_EMBEDDINGS,
@@ -210,6 +213,18 @@ CAPABILITIES = frozenset({
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 })
+
+
+class BackendAdmissionRefused(CapacityExceeded):
+    """Local GPU/host-memory admission refused the request.
+
+    ``reason`` is the ``RefusalReason`` value; ``retry_after`` is in seconds
+    (or None)."""
+
+    def __init__(self, message: str, *, reason: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -637,6 +652,36 @@ class OpenAICompatibleGateway:
             return None
         return self._connect_error_classifier(reason)
 
+    @staticmethod
+    def _backend_admission(
+        path: str, payload: dict, cfg: OpenAICompatibleConfig,
+        context: OperationContext | None,
+    ):
+        """GPU-slot admission for a chat request to a declared streamed model.
+
+        It takes the shared GPU slot (queueing for it), and checks host memory
+        only when a residency callback answers False; production passes none,
+        so the gateway path queues but does not refuse on memory. Only a loopback endpoint whose model has a declaration in
+        ``SONDER_GPU_STREAMED_MODELS`` is gated; everything else passes through.
+        A remote endpoint never touches admission. A refusal raises
+        ``GpuAdmissionRefused``, which ``_post`` maps to a domain error; an
+        invalid declaration on a loopback endpoint raises ``InternalFailure``."""
+        model = payload.get("model")
+        if path != "/v1/chat/completions" or not isinstance(model, str) or not model:
+            return contextlib.nullcontext()
+        try:
+            service = gpu_admission.backend_service_for(cfg.base_url)
+        except ValueError as error:
+            raise InternalFailure("GPU admission is misconfigured: %s" % error) from error
+        if service is None:
+            return contextlib.nullcontext()
+        footprint = service.declared_backend_footprint(model)
+        if footprint is None:
+            return contextlib.nullcontext()
+        deadline = context.deadline_monotonic if context is not None else None
+        return service.admit_backend(
+            model, origin=cfg.base_url, footprint=footprint, deadline=deadline)
+
     def _post(
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
         *, context: OperationContext | None = None,
@@ -657,14 +702,36 @@ class OpenAICompatibleGateway:
         headers = self._headers(cfg, context)
         failure: SonderError | None = None
         http_cause: urllib.error.HTTPError | None = None
+        cause: BaseException | None = None
+        gate = self._backend_admission(path, payload, cfg, context)
         try:
-            if path == "/v1/chat/completions":
-                data = dispatch_provider(
-                    self._provider_label, path, payload,
-                    lambda: transport(url, payload, headers, timeout),
-                )
+            with gate:
+                if context is not None:
+                    # The admission wait can be long; the request may have been
+                    # cancelled or expired meanwhile, and the transport budget
+                    # must be what is left, not what was left before the wait.
+                    left = self._check_liveness(context, phase="after local admission")
+                    if left is not None:
+                        timeout = left if timeout is None else min(timeout, left)
+                if path == "/v1/chat/completions":
+                    data = dispatch_provider(
+                        self._provider_label, path, payload,
+                        lambda: transport(url, payload, headers, timeout),
+                    )
+                else:
+                    data = transport(url, payload, headers, timeout)
+        except gpu_admission.GpuAdmissionRefused as exc:
+            # A typed refusal, not a transport failure; it must stay ahead of
+            # the URLError clause because it is one.
+            cause = exc
+            refusal = exc.refusal
+            if refusal.reason is RefusalReason.STORE_UNAVAILABLE:
+                failure = DependencyUnavailable("GPU admission store is unavailable")
             else:
-                data = transport(url, payload, headers, timeout)
+                failure = BackendAdmissionRefused(
+                    "local model admission refused (%s): %s"
+                    % (refusal.reason.value, refusal.detail),
+                    reason=refusal.reason.value, retry_after=exc.retry_after_seconds)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
             retry_after = next((value for key, value in (exc.headers or {}).items()
@@ -748,7 +815,7 @@ class OpenAICompatibleGateway:
                 failure = DependencyUnavailable("cannot reach endpoint")
         # Raise after the handlers so no raw transport error becomes context.
         if failure is not None:
-            raise failure from http_cause
+            raise failure from (cause if cause is not None else http_cause)
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")
         return data

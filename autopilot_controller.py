@@ -57,11 +57,84 @@ def _infra_retry_limit() -> int:
 def _provider_unavailable(error: ModelCallError) -> bool:
     """Only classified model transport failures qualify, never tool output."""
     return error.kind in {
-        "provider_unavailable", "transport", "busy_timeout",
+        "provider_unavailable", "transport", "busy_timeout", "rate",
     } or (
         error.kind == "http" and error.status == 503
         and "backend_unavailable" in error.detail.lower()
     )
+
+
+def _plan_with_infra_retry(run, owner_id, plan_fn, wall_started, wall_budget):
+    """Run ``plan_fn`` with the same provider-unavailable handling as a task.
+
+    A planner whose model transport is down is infrastructure, not a failed
+    plan: retry up to the infra limit with the task backoff
+    (``min(120, 30 * 2**n)``), then pause with ``provider unavailable; resume
+    to retry``. Returns ``(plan, run, early)``; ``early`` is a finished run row
+    to return when the run was cancelled, paused or out of wall budget.
+    Non-provider errors propagate unchanged.
+    """
+    infra_limit = _infra_retry_limit()
+    retried = 0
+    while True:
+        try:
+            return plan_fn(run), run, None
+        except ModelCallError as exc:
+            if not _provider_unavailable(exc):
+                raise
+            flags = autopilot_store.control_flags(run["id"], owner_id)
+            if flags.get("lost"):
+                raise AutopilotError("autopilot ownership was lost during planning") from exc
+            if flags.get("cancel"):
+                return None, run, autopilot_store.finish_run(
+                    run["id"], owner_id, "cancelled",
+                    summary="cancelled during provider failure",
+                ) or run
+            retry = retried < infra_limit and not flags.get("pause")
+            saved = autopilot_store.save_progress(
+                run["id"], owner_id, infra_retries_delta=int(retry),
+                event_kind="infra_retry" if retry else "infra_pause",
+                event_message="planning: provider unavailable (%s)" % exc.kind,
+            )
+            if saved is None:
+                # A refused save must never grant another planner call.
+                raise AutopilotError(
+                    "autopilot ownership was lost during planning",
+                ) from exc
+            run = saved
+            if not retry:
+                return None, run, autopilot_store.finish_run(
+                    run["id"], owner_id, "paused", last_error="provider unavailable",
+                    summary="provider unavailable; resume to retry",
+                    final_report=format_report(run),
+                ) or run
+            wake = _monotonic() + min(120, 30 * 2 ** retried)
+            retried += 1
+            while _monotonic() < wake:
+                elapsed = _monotonic() - wall_started
+                if elapsed >= wall_budget:
+                    return None, run, autopilot_store.finish_run(
+                        run["id"], owner_id, "paused",
+                        summary=(
+                            "per-invocation wall-clock budget reached (%.0fs of "
+                            "%.0fs); resume to continue" % (elapsed, wall_budget)
+                        ),
+                        final_report=format_report(run),
+                    ) or run
+                waiting = autopilot_store.control_flags(run["id"], owner_id)
+                if waiting.get("lost"):
+                    raise AutopilotError("autopilot ownership was lost during planning") from exc
+                if waiting.get("cancel"):
+                    return None, run, autopilot_store.finish_run(
+                        run["id"], owner_id, "cancelled",
+                        summary="cancelled while waiting to retry planning",
+                    ) or run
+                if waiting.get("pause"):
+                    return None, run, autopilot_store.finish_run(
+                        run["id"], owner_id, "paused",
+                        summary="paused at a host checkpoint",
+                    ) or run
+                _sleep(max(0.0, min(1.0, wake - _monotonic(), wall_budget - elapsed)))
 
 
 def max_wall_seconds(value=None) -> float:
@@ -176,6 +249,16 @@ class HostTaskResult:
     validation_evidence: tuple[dict, ...] = ()
     verification_deferred: bool = False
     verification_required: str = ""
+    # Typed kind of the ModelCallError that ended the run (host state, never
+    # parsed from model text); empty when the run did not end on one. A fleet
+    # worker's caller uses it to report model capacity instead of "no evidence".
+    model_failure_kind: str = ""
+    model_failure_transient: bool = False
+    # Typed pool refusal ("backpressure", "draining", "unavailable" or empty)
+    # and the seconds of admission window left when it was raised (None when
+    # unknown); a retry policy reads these instead of parsing message text.
+    model_failure_pool_refusal: str = ""
+    model_failure_admission_remaining: float | None = None
 
     def receipt(self) -> dict:
         receipt = {
@@ -874,8 +957,13 @@ def execute_run(
                                                   summary=pause_reason, last_error=pause_reason) or run
             plan = [dict(task) for task in run.get("plan", ())]
         if not plan:
+            planned, run, early = _plan_with_infra_retry(
+                run, owner_id, plan_fn, wall_started, wall_budget,
+            )
+            if early is not None:
+                return early
             proposed = normalize_plan(
-                plan_fn(run), run["objective"], run.get("max_tasks") or 12,
+                planned, run["objective"], run.get("max_tasks") or 12,
             )
             flags = autopilot_store.control_flags(run["id"], owner_id)
             if flags.get("lost"):

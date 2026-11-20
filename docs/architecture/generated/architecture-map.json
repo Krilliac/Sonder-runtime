@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 474,
+      "file_count": 475,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -58,6 +58,7 @@
         "sonder_runtime/adapters/agent_call_signature.py",
         "sonder_runtime/adapters/agent_decision_generation.py",
         "sonder_runtime/adapters/agent_generation_budget.py",
+        "sonder_runtime/adapters/agent_outcomes.py",
         "sonder_runtime/adapters/agent_terminal_evidence.py",
         "sonder_runtime/adapters/agent_work_coverage.py",
         "sonder_runtime/adapters/application_lifecycle.py",

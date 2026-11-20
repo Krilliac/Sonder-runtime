@@ -82,6 +82,7 @@ class HostFloorMode(enum.Enum):
 class FootprintSource(enum.Enum):
     MEASURED = "measured"
     ESTIMATED = "estimated"
+    STREAMED = "streamed"  # experts live on disk / CPU: dense + KV + expert cache
 
 
 class CtxCheck(enum.Enum):
@@ -171,10 +172,12 @@ class GpuAdmissionPolicy:
     unmeasured_host_factor_pct: int = 125
     host_overhead_bytes: int = 1024 * 1024 * 1024
     chars_per_token: float = 3.5
+    streamed_workspace_bytes: int = 1024 * 1024 * 1024
 
     def __post_init__(self) -> None:
         for name in ("min_available_ram_bytes", "min_commit_headroom_bytes",
-                     "max_repins_per_model", "host_overhead_bytes"):
+                     "max_repins_per_model", "host_overhead_bytes",
+                     "streamed_workspace_bytes"):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
@@ -357,11 +360,207 @@ def estimate_host_footprint(
     return Footprint(total, total, FootprintSource.ESTIMATED, digest, int(num_ctx))
 
 
+_DEFAULT_VOCAB = 160_000  # assumed when metadata names none: over-counts dense, never under
+_KV_ELEMENT_BYTES = 2     # f16 K and V
+_DEFAULT_WINDOW = 4096    # a server's usual default window, when nothing else names one
+
+
+@dataclass(frozen=True, slots=True)
+class StreamedPlacement:
+    """What a binding declares about a model whose experts stream from disk.
+
+    ``expert_cache_bytes`` is the host memory the backend is configured to keep
+    expert tensors in; the rest of the experts is file-backed and not resident.
+    ``dense_bytes`` and ``kv_bytes_per_token`` override what would be derived
+    from the model's metadata; ``state_bytes`` is fixed recurrent state
+    (linear-attention or SSM layers) that does not grow with the window.
+    ``num_ctx`` is the window the backend serves when a request names none.
+    """
+
+    expert_cache_bytes: int
+    dense_bytes: int | None = None
+    kv_bytes_per_token: int | None = None
+    state_bytes: int = 0
+    num_ctx: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("expert_cache_bytes", "state_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        for name in ("dense_bytes", "kv_bytes_per_token"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be None or a non-negative integer")
+        if self.num_ctx is not None and (type(self.num_ctx) is not int or self.num_ctx < 1):
+            raise ValueError("num_ctx must be None or a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpertModelShape:
+    """The architecture numbers of a mixture-of-experts model (GGUF metadata)."""
+
+    block_count: int
+    embedding_length: int
+    head_count: int
+    head_count_kv: int
+    key_length: int
+    value_length: int
+    expert_count: int
+    expert_used_count: int
+    expert_ff_length: int
+    shared_expert_count: int = 0
+    shared_expert_ff_length: int = 0
+    leading_dense_blocks: int = 0
+    ff_length: int = 0
+    vocab_size: int = 0
+    context_length: int = 0
+
+
+def _info_int(info: Mapping[str, object], arch: str, suffix: str) -> int:
+    """A positive int (the largest of a per-layer list) at ``<arch>.<suffix>``, else 0.
+
+    Only when ``arch`` is empty does any key ending in ``.<suffix>`` stand in, so a
+    sibling block such as ``clip.vision.attention.head_count`` is never read."""
+    if arch:
+        keys = [f"{arch}.{suffix}"]
+    else:
+        keys = sorted(key for key in info if key.endswith("." + suffix))
+    for key in keys:
+        value = info.get(key)
+        if isinstance(value, (list, tuple)):
+            numbers = [v for v in value if isinstance(v, int) and not isinstance(v, bool)]
+            value = max(numbers) if numbers else 0
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return 0
+
+
+def expert_model_shape(model_info: Mapping[str, object] | None) -> ExpertModelShape | None:
+    """Parse ``/api/show`` ``model_info``; None unless it describes an expert model
+    with enough numbers to size attention and KV (blocks, width, heads, experts)."""
+    if not isinstance(model_info, Mapping):
+        return None
+    arch = str(model_info.get("general.architecture") or "")
+
+    def get(suffix: str) -> int:
+        return _info_int(model_info, arch, suffix)
+
+    blocks, width, heads = get("block_count"), get("embedding_length"), get("attention.head_count")
+    experts = get("expert_count")
+    if not (blocks and width and heads and experts > 1):
+        return None
+    kv_heads = get("attention.head_count_kv") or heads
+    key_length = get("attention.key_length") or width // heads
+    value_length = get("attention.value_length") or key_length
+    return ExpertModelShape(
+        blocks, width, heads, kv_heads, key_length, value_length, experts,
+        get("expert_used_count"), get("expert_feed_forward_length"),
+        get("expert_shared_count"), get("expert_shared_feed_forward_length"),
+        min(get("leading_dense_block_count"), blocks), get("feed_forward_length"),
+        get("vocab_size"), get("context_length"))
+
+
+def kv_bytes_per_token(shape: ExpertModelShape) -> int:
+    """f16 K and V bytes one token adds across every block.
+
+    Multi-head latent attention and sliding-window models need less than this, so
+    they are over-counted, which is the fail-safe direction."""
+    return shape.block_count * shape.head_count_kv * (
+        shape.key_length + shape.value_length) * _KV_ELEMENT_BYTES
+
+
+def _expert_and_dense_params(shape: ExpertModelShape) -> tuple[int, int]:
+    """(expert parameters, everything-else parameters), a structural estimate.
+
+    Experts: three ``width x ff`` matrices each, on the non-leading blocks.
+    Dense: attention projections, router, shared experts, leading dense FFNs and
+    input/output embeddings (a large vocabulary is assumed when none is named,
+    so the dense share is over- rather than under-counted).
+    """
+    width = shape.embedding_length
+    moe_blocks = shape.block_count - shape.leading_dense_blocks
+    experts = moe_blocks * shape.expert_count * 3 * width * shape.expert_ff_length
+    attention = shape.block_count * width * (
+        2 * shape.head_count * shape.key_length
+        + shape.head_count_kv * (shape.key_length + shape.value_length))
+    router = moe_blocks * width * shape.expert_count
+    shared = moe_blocks * shape.shared_expert_count * 3 * width * (
+        shape.shared_expert_ff_length or shape.expert_ff_length)
+    leading = shape.leading_dense_blocks * 3 * width * shape.ff_length
+    embeddings = 2 * (shape.vocab_size or _DEFAULT_VOCAB) * width
+    return experts, attention + router + shared + leading + embeddings
+
+
+def estimate_streamed_footprint(
+    *, file_size_bytes: int, num_ctx: int, placement: StreamedPlacement,
+    shape: ExpertModelShape | None, policy: GpuAdmissionPolicy, digest: str = "",
+) -> Footprint | None:
+    """Resident host memory of an expert-streaming model, or None if undecidable.
+
+    ``dense + KV/state + workspace + expert cache + reserve``:
+
+    * dense: ``placement.dense_bytes``, else the file size times the dense share
+      of the structural parameter count (``_expert_and_dense_params``);
+    * KV: ``placement.kv_bytes_per_token`` (else f16 K+V from ``shape``) times
+      the window, plus ``placement.state_bytes``. A request that names no window
+      (``num_ctx`` of 0) is charged ``placement.num_ctx``, else the model's own
+      ``context_length``, else ``_DEFAULT_WINDOW``: the server loads it at some
+      window, and this estimate is too tight to leave that uncounted;
+    * expert cache: configured, clamped to the expert bytes that exist;
+    * workspace and reserve: ``policy.streamed_workspace_bytes`` and
+      ``policy.host_overhead_bytes``.
+
+    Working set and private bytes are both the resident total: the cache is
+    anonymous memory and file-backed expert pages are reclaimable, so neither
+    the file size nor ``size * 1.25`` is charged. None means neither the
+    placement nor the metadata gives the dense size or the KV rate. Models with
+    latent attention or sliding windows are over-counted (their KV is smaller),
+    which fails safe.
+    """
+    size = max(0, int(file_size_bytes))
+    expert_bytes: int | None = None
+    if placement.dense_bytes is not None:
+        dense = min(placement.dense_bytes, size) if size else placement.dense_bytes
+        expert_bytes = max(0, size - dense) if size else None
+    elif shape is not None and shape.expert_ff_length > 0 and size > 0:
+        expert_params, dense_params = _expert_and_dense_params(shape)
+        expert_bytes = size * expert_params // (expert_params + dense_params)
+        dense = size - expert_bytes
+    else:
+        return None
+    if placement.kv_bytes_per_token is not None:
+        per_token = placement.kv_bytes_per_token
+    elif shape is not None:
+        per_token = kv_bytes_per_token(shape)
+    else:
+        return None
+    window = int(num_ctx)
+    if window <= 0:
+        window = (placement.num_ctx
+                  or (shape.context_length if shape is not None else 0)
+                  or _DEFAULT_WINDOW)
+    cache = placement.expert_cache_bytes
+    if expert_bytes is not None:
+        cache = min(cache, expert_bytes)
+    total = (dense + per_token * window + placement.state_bytes
+             + policy.streamed_workspace_bytes + cache + policy.host_overhead_bytes)
+    return Footprint(total, total, FootprintSource.STREAMED, digest, window)
+
+
 def select_footprint(
     *, measured_exact: Footprint | None, measured_other: Sequence[Footprint],
     file_size_bytes: int, requested_ctx: int, policy: GpuAdmissionPolicy, digest: str = "",
+    streamed: Footprint | None = None,
 ) -> Footprint:
-    """Measured beats estimated; a measurement at another window beats a guess."""
+    """Measured beats estimated; a measurement at another window beats a guess.
+
+    A ``streamed`` footprint (declared expert streaming) beats every measurement:
+    a runner's working set counts file-backed expert pages that are not resident
+    cost, so a sample of it would over-state the model.
+    """
+    if streamed is not None:
+        return streamed
     if measured_exact is not None:
         return measured_exact
     if measured_other:
@@ -422,10 +621,11 @@ def check_effective_ctx(sent: int | None, effective: int | None) -> CtxCheck:
 
 __all__ = [
     "AdmissionDecision", "AdmissionLane", "Admitted", "CtxAction", "CtxCheck",
-    "CtxDecision", "CtxPolicy", "Footprint", "FootprintSource", "GpuAdmissionPolicy",
-    "HostFloorMode", "HostMemoryReading", "QueueEntry", "Queued", "Refused",
-    "RefusalReason", "check_effective_ctx", "classify_operation",
-    "estimate_host_footprint", "estimate_prompt_tokens", "host_memory_verdict",
-    "is_zero_keep_alive", "priority_rank", "queue_order", "requested_num_ctx",
-    "requested_reserve_tokens", "resolve_num_ctx", "select_footprint",
+    "CtxDecision", "CtxPolicy", "ExpertModelShape", "Footprint", "FootprintSource",
+    "GpuAdmissionPolicy", "HostFloorMode", "HostMemoryReading", "QueueEntry", "Queued",
+    "RefusalReason", "Refused", "StreamedPlacement", "check_effective_ctx",
+    "classify_operation", "estimate_host_footprint", "estimate_prompt_tokens",
+    "estimate_streamed_footprint", "expert_model_shape", "host_memory_verdict",
+    "is_zero_keep_alive", "kv_bytes_per_token", "priority_rank", "queue_order",
+    "requested_num_ctx", "requested_reserve_tokens", "resolve_num_ctx", "select_footprint",
 ]

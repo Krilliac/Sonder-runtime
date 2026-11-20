@@ -1167,6 +1167,8 @@ _ENTRIES = [
      "/v1/chat/completions", 1, CHOKE, _TRANSPORT),
     ("sonder_runtime/adapters/inference/openai_compat_gateway.py", "OpenAICompatibleGateway.generate",
      "/v1/chat/completions", 1, CHOKE, _TRANSPORT),
+    ("sonder_runtime/adapters/inference/openai_compat_gateway.py", "OpenAICompatibleGateway._backend_admission",
+     "/v1/chat/completions", 1, CHOKE, "GPU admission gate for the chat path; " + _TRANSPORT),
     ("sonder_runtime/adapters/inference/openai_protocol_probe.py", "OpenAICompatibleProtocolProbe._request",
      "/v1/chat/completions", 1, TEXT, _PROBE),
     ("sonder_runtime/adapters/inference/openrouter_gateway.py", "OpenRouterGateway.generate",
