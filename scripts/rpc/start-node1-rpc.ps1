@@ -198,6 +198,75 @@ function Get-RpcFwRuleFilter($Rule, [hashtable]$Map, [string]$Kind) {
     return $filter
 }
 
+function Get-RpcFwRuleKeywords($Rule) {
+    # A rule's dynamic keyword addresses widen its remote address condition: the
+    # rule also admits every address the keywords resolve to. They live on the
+    # rule object (RemoteDynamicKeywordAddresses), not on its address filter.
+    $id = [string]$Rule.InstanceID
+    try {
+        $prop = $Rule.PSObject.Properties['RemoteDynamicKeywordAddresses']
+        if ($null -eq $prop) {
+            throw 'the rule object has no RemoteDynamicKeywordAddresses property'
+        }
+        return @(ConvertTo-RpcFwTokens $prop.Value)
+    }
+    catch {
+        throw "Refusing to start rpc-server: cannot read RemoteDynamicKeywordAddresses of firewall rule '$($Rule.DisplayName)' [$id]: $($_.Exception.Message)."
+    }
+}
+
+function Get-RpcFwPortProxyEntries {
+    # Parses `netsh interface portproxy show all`. Each section starts with a
+    # header such as "Listen on ipv4:  Connect to ipv4:", then a column header
+    # row, a dashed separator and rows of "<listen addr> <port> <connect addr> <port>".
+    # Throws on a netsh failure or on any line it cannot classify.
+    $global:LASTEXITCODE = 0
+    try {
+        $out = @(& netsh interface portproxy show all 2>&1)
+    }
+    catch {
+        throw "cannot run 'netsh interface portproxy show all': $($_.Exception.Message)"
+    }
+    $code = $LASTEXITCODE
+    $lines = @($out | ForEach-Object { ([string]$_).Trim() })
+    if ($code -ne 0) {
+        throw "'netsh interface portproxy show all' exited with code ${code}: $(($lines | Where-Object { $_ -ne '' }) -join ' ')"
+    }
+    $entries = @()
+    $unparsed = @()
+    $section = ''
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -eq '') { continue }
+        if ($line -match '^-[-\s]*$') { continue }
+        $next = ''
+        for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+            if ($lines[$j] -ne '') { $next = $lines[$j]; break }
+        }
+        if ($next -match '^-[-\s]*$') { continue }  # column header row
+        if ($line -match '(?i)ipv([46])\s*:.*ipv([46])\s*:\s*$') {
+            $section = "v$($Matches[1])tov$($Matches[2])"
+            continue
+        }
+        $tokens = @($line -split '\s+')
+        if ($tokens.Count -eq 4 -and $tokens[1] -match '^\d{1,5}$' -and $tokens[3] -match '^\d{1,5}$') {
+            $entries += [pscustomobject]@{
+                Section        = $section
+                ListenAddress  = $tokens[0]
+                ListenPort     = [int]$tokens[1]
+                ConnectAddress = $tokens[2]
+                ConnectPort    = [int]$tokens[3]
+            }
+            continue
+        }
+        $unparsed += $line
+    }
+    if ($unparsed.Count -gt 0) {
+        throw "cannot parse the output of 'netsh interface portproxy show all' (line(s): $(($unparsed | ForEach-Object { "'$_'" }) -join ', '))"
+    }
+    return $entries
+}
+
 function Assert-RpcFirewallLockdown {
     param(
         [Parameter(Mandatory = $true)][string]$BindHost,
@@ -210,6 +279,18 @@ function Assert-RpcFirewallLockdown {
     $commPort = $TargetPort + $script:RpcCommPortOffset
     if ($commPort -gt 65535) {
         throw "${prefix}: the rpc-server comm port (${TargetPort} + $($script:RpcCommPortOffset) = $commPort) is above 65535, so the port the COMM_INIT listener would bind cannot be checked. Use a port of 64535 or lower."
+    }
+
+    # The rules below only filter while the Windows Defender Firewall service runs.
+    try {
+        $svc = Get-Service -Name mpssvc -ErrorAction Stop
+    }
+    catch {
+        throw "${prefix}: cannot read the state of the Windows Defender Firewall service (mpssvc): $($_.Exception.Message)"
+    }
+    $svcStatus = [string](@($svc) | Select-Object -First 1).Status
+    if ($svcStatus -ne 'Running') {
+        throw "${prefix}: the Windows Defender Firewall service (mpssvc) is not running (Status=$svcStatus), so no firewall rule is enforced. Fix (elevated): Start-Service mpssvc"
     }
 
     try {
@@ -270,6 +351,25 @@ function Assert-RpcFirewallLockdown {
         throw "${prefix}: Windows Firewall profile(s) exclude interfaces from filtering (DisabledInterfaceAliases): $listed. Traffic on an excluded interface is not filtered at all, and rpc-server's comm listener binds 0.0.0.0 (every interface), so no exclusion is allowed. $fix"
     }
 
+    # A portproxy entry relays traffic it accepts to its connect address as a
+    # new local connection, which the inbound rules below do not filter.
+    try {
+        $proxies = @(Get-RpcFwPortProxyEntries)
+    }
+    catch {
+        throw "${prefix}: cannot verify that no port proxy forwards to rpc-server: $($_.Exception.Message)"
+    }
+    $proxyHits = @($proxies | Where-Object {
+        $_.ListenPort -in @($TargetPort, $commPort) -or $_.ConnectPort -in @($TargetPort, $commPort)
+    })
+    if ($proxyHits.Count -gt 0) {
+        $listed = ($proxyHits | ForEach-Object {
+            $type = if ($_.Section) { $_.Section } else { '<v4tov4|v4tov6|v6tov4|v6tov6>' }
+            "[$type] listen $($_.ListenAddress):$($_.ListenPort) -> connect $($_.ConnectAddress):$($_.ConnectPort) (remove, elevated: netsh interface portproxy delete $type listenport=$($_.ListenPort) listenaddress=$($_.ListenAddress))"
+        }) -join '; '
+        throw "${prefix}: netsh interface portproxy has entries that listen on or connect to TCP $TargetPort or the rpc-server comm port TCP ${commPort}: $listed. A port proxy relays connections as local traffic that the firewall rules do not filter, so none is allowed for these ports."
+    }
+
     $rules = @()
     try {
         $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Inbound -Enabled True -Action Allow -ErrorAction Stop)
@@ -305,7 +405,9 @@ function Assert-RpcFirewallLockdown {
 
         $portFilter = Get-RpcFwRuleFilter $rule $portMap 'Port'
         $addrFilter = Get-RpcFwRuleFilter $rule $addrMap 'Address'
-        $remotePeerOnly = Test-RpcFwSingleHost $addrFilter.RemoteAddress $peer
+        $keywords = @(Get-RpcFwRuleKeywords $rule)
+        # Any dynamic keyword also admits the addresses it resolves to: never peer-only.
+        $remotePeerOnly = ($keywords.Count -eq 0) -and (Test-RpcFwSingleHost $addrFilter.RemoteAddress $peer)
         $coversTcpPort = (Test-RpcFwProtocolCoversTcp $portFilter.Protocol) -and
             ((Test-RpcFwPortCovers $portFilter.LocalPort $TargetPort) -or (Test-RpcFwPortCovers $portFilter.LocalPort $commPort))
 
@@ -316,6 +418,7 @@ function Assert-RpcFirewallLockdown {
                 Protocol      = (ConvertTo-RpcFwTokens $portFilter.Protocol) -join ','
                 LocalPort     = (ConvertTo-RpcFwTokens $portFilter.LocalPort) -join ','
                 RemoteAddress = (ConvertTo-RpcFwTokens $addrFilter.RemoteAddress) -join ','
+                Keywords      = $keywords -join ','
                 Program       = $program
                 Source        = ([string]$rule.PolicyStoreSource).Trim()
                 SourceType    = ([string]$rule.PolicyStoreSourceType).Trim()
@@ -336,10 +439,15 @@ function Assert-RpcFirewallLockdown {
     $problems = @()
     if ($wideRules.Count -gt 0) {
         $listed = ($wideRules | ForEach-Object {
-            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress); Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
+            $kw = if ($_.Keywords) { "; RemoteDynamicKeywordAddresses=$($_.Keywords)" } else { '' }
+            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress)$kw; Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
         }) -join '; '
+        $kwNote = ''
+        if (@($wideRules | Where-Object { $_.Keywords }).Count -gt 0) {
+            $kwNote = " A rule with RemoteDynamicKeywordAddresses also admits every address its dynamic keywords resolve to, so it is never peer-only, even when its RemoteAddress is exactly ${peer}."
+        }
         $disable = ($wideRules | ForEach-Object { $_.Fix }) -join '; '
-        $problems += "enabled inbound Allow rule(s) admit TCP $TargetPort, the rpc-server comm port TCP $commPort (opened on 0.0.0.0 on COMM_INIT) or the rpc-server program from beyond ${peer}: $listed. Fix (elevated): $disable"
+        $problems += "enabled inbound Allow rule(s) admit TCP $TargetPort, the rpc-server comm port TCP $commPort (opened on 0.0.0.0 on COMM_INIT) or the rpc-server program from beyond ${peer}: $listed.$kwNote Fix (elevated): $disable"
     }
     if ($peerRules.Count -eq 0) {
         $problems += "no enabled inbound Allow rule admits exactly TCP $TargetPort from $peer to $BindHost. Fix (elevated): $FixCommand"
