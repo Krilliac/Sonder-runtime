@@ -33,7 +33,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sonder_runtime.domain import speculation_policy
+from sonder_runtime.domain import network_path_spelling, speculation_policy
 from sonder_runtime.domain.tools.builtin_traits import builtin_traits
 from sonder_runtime.domain.tools.traits import ToolTraits
 from sonder_runtime.platform import speculation as speculation_config
@@ -696,7 +696,9 @@ class FilePrefetcher:
         for pattern in _LISTING_LINE_PATTERNS:
             for match in pattern.finditer(observation or ""):
                 path = match.group("path").strip()
-                if path and path not in seen:
+                # A UNC/device name is never predicted: a speculative read of
+                # it would reach the filesystem (and SMB) before any refusal.
+                if path and path not in seen and not network_path_spelling.is_network_spelling(path):
                     seen.append(path)
         return seen
 

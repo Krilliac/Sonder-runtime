@@ -198,6 +198,7 @@ from sonder_runtime.application.session.model_steps import (
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
+from sonder_runtime.domain import network_path_spelling as _network_spelling
 from sonder_runtime.adapters import tier_escalation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
@@ -2907,7 +2908,16 @@ def _selfmod_agent_policy(run):
         if time.monotonic() - started > run["budgets"]["max_runtime_seconds"]:
             return "ERROR: SELFMOD POLICY: total runtime budget exhausted."
         if tool_name == "workspace_run":
-            cwd = Path(str(args.get("cwd") or workspace)).expanduser().resolve(strict=False)
+            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+                cwd_text = file_ops._reject_network_path(str(args.get("cwd") or workspace))
+            except PermissionError:
+                refusal = "ERROR: SELFMOD POLICY: the working directory uses a %s." % _network_spelling.REFUSAL
+                return refusal
+            try:
+                cwd = Path(cwd_text).expanduser().resolve(strict=False)
+            except (OSError, ValueError):
+                refusal = "ERROR: SELFMOD POLICY: the working directory could not be checked."
+                return refusal
             if cwd != workspace and workspace not in cwd.parents:
                 return "ERROR: SELFMOD POLICY: commands must run inside the candidate workspace."
             command_text = " ".join(str(item) for item in (args.get("args_json") or args.get("args") or []))
@@ -2919,10 +2929,18 @@ def _selfmod_agent_policy(run):
         if any(args.get(name) for name in ("token", "approval", "extra_roots")):
             return "ERROR: SELFMOD POLICY: filesystem authority cannot be expanded by the candidate."
         raw = args.get("path") or args.get("root") or args.get("cwd") or ""
-        target = Path(str(raw)).expanduser()
+        try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+            target = Path(file_ops._reject_network_path(str(raw))).expanduser()
+        except PermissionError:
+            refusal = "ERROR: SELFMOD POLICY: path uses a %s." % _network_spelling.REFUSAL
+            return refusal
         if not target.is_absolute():
             target = workspace / target
-        target = target.resolve(strict=False)
+        try:
+            target = target.resolve(strict=False)
+        except (OSError, ValueError):
+            refusal = "ERROR: SELFMOD POLICY: path could not be checked."
+            return refusal
         if target != workspace and workspace not in target.parents:
             return "ERROR: SELFMOD POLICY: path is outside the isolated candidate workspace."
         if tool_name in mutation_tools and target not in allowed:
@@ -17325,6 +17343,35 @@ def tool_contract_report():
     )
 
 
+def _is_network_spelling_raw(raw):
+    """Whether the caller's RAW path text is a UNC, device or NT-namespace spelling.
+
+    Decided by ``file_ops._reject_network_path`` on the value as given, before
+    any join: on POSIX ``os.path.isabs(r"\\\\host\\share\\x")`` is False, so
+    joining such a value under a root hides it from every later check.  Pure
+    string work, no filesystem call.
+    """
+    try:
+        file_ops._reject_network_path(str(raw))
+    except PermissionError:
+        return True
+    return False
+
+
+def _scope_target_under(base, raw_value):
+    """``base / raw`` for a relative raw path; the raw value itself otherwise.
+
+    A UNC, device or NT-namespace spelling is returned as the caller's raw
+    text, never joined, so the per-target refusal in
+    ``_repository_scope_path_error`` sees it on every OS before any resolve.
+    """
+    text = str(raw_value)
+    if _is_network_spelling_raw(text):
+        return text
+    candidate = Path(text).expanduser()
+    return candidate if candidate.is_absolute() else Path(base) / candidate
+
+
 def _repository_scope_path_error(tool_name, args, project_root):
     """Reject a project-bound agent path outside its host-selected root.
 
@@ -17371,17 +17418,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
             # subdirectory root.  It is checked, not rebased: for the cargo
             # and go frameworks `path` names a test target or package pattern
             # rather than a filesystem path, and rebasing would corrupt it.
-            tool_root = Path(str(args.get("root") or ".")).expanduser()
-            if not tool_root.is_absolute():
-                tool_root = root / tool_root
+            tool_root = _scope_target_under(root, args.get("root") or ".")
             targets = [("repository root", tool_root)]
             raw_path = str(args.get("path") or "").strip()
             if raw_path:
-                candidate = Path(raw_path).expanduser()
-                targets.append((
-                    "path",
-                    candidate if candidate.is_absolute() else tool_root / candidate,
-                ))
+                targets.append(("path", _scope_target_under(tool_root, raw_path)))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -17399,9 +17440,7 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 )
             ]
         elif tool_name == "archive_create":
-            archive_root = Path(str(args.get("root") or ".")).expanduser()
-            if not archive_root.is_absolute():
-                archive_root = root / archive_root
+            archive_root = _scope_target_under(root, args.get("root") or ".")
             targets = [("archive root", archive_root)]
             try:
                 archive_inputs = archive_create_tool._parse_inputs(
@@ -17410,20 +17449,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
             except ValueError as exc:
                 return "ERROR: agent project archive inputs rejected: %s" % exc
             for raw_input in archive_inputs:
-                candidate = Path(raw_input).expanduser()
-                targets.append((
-                    "archive input",
-                    candidate if candidate.is_absolute() else archive_root / candidate,
-                ))
+                targets.append(("archive input", _scope_target_under(archive_root, raw_input)))
             destination_text = str(args.get("destination") or "").strip()
             if not destination_text:
                 targets.append(("archive destination", ""))
             else:
-                raw_destination = Path(destination_text).expanduser()
                 targets.append((
                     "archive destination",
-                    raw_destination if raw_destination.is_absolute()
-                    else archive_root / raw_destination,
+                    _scope_target_under(archive_root, destination_text),
                 ))
         elif tool_name in {"file_copy", "file_move"}:
             targets = [
@@ -17456,6 +17489,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
             raw = str(raw_value or "").strip()
             if not raw:
                 return "ERROR: agent project path rejected: %s is required" % label
+            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak);
+                if "\\??\\" in raw:  # an NT prefix the branches above joined under root
+                    raise PermissionError(raw)
+                raw = file_ops._reject_network_path(raw)
+            except PermissionError:
+                refusal = "ERROR: agent project path rejected: %s uses a %s" % (
+                    label, _network_spelling.REFUSAL)
+                return refusal
             target = Path(raw).expanduser()
             if not target.is_absolute():
                 target = root / target
@@ -17498,7 +17539,11 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         or not isinstance(args, dict)
     ):
         return ""
-    root = Path(str(project_root)).expanduser().resolve(strict=True)
+    try:
+        root = Path(str(project_root)).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        refusal = "ERROR: agent project scope is invalid: %s" % exc
+        return refusal
     if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
         # harness_tools splits the command on whitespace and execs the result,
         # so read the program and its argv exactly the way the child will.
@@ -17579,7 +17624,19 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         base_value = args.get("cwd") or (
             os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
         )
-    base = Path(str(base_value)).expanduser().resolve(strict=False)
+    network_refusal = (
+        "ERROR: agent project execution rejected: %s uses a "
+        + _network_spelling.REFUSAL
+    )
+    try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+        base_value = file_ops._reject_network_path(str(base_value))
+    except PermissionError:
+        return network_refusal % "the working directory"
+    try:
+        base = Path(base_value).expanduser().resolve(strict=False)
+    except (OSError, ValueError) as exc:
+        refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
+        return refusal
     for raw_item in argv:
         raw = str(raw_item or "").strip().strip('"\'')
         if not raw:
@@ -17587,12 +17644,13 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         if "=" in raw and raw.startswith(("-", "/")):
             raw = raw.split("=", 1)[1].strip().strip('"\'')
         raw = raw.lstrip("@")
+        # A token naming or embedding a UNC/device path is refused whole;
+        # nothing of it is resolved.
+        if _network_spelling.contains_network_spelling(raw):
+            return network_refusal % "an argv path"
         drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
-        unc_match = re.search(r"\\\\[^\\]+\\[^\\]+", raw)
         if drive_match:
             raw = raw[drive_match.start():]
-        elif unc_match:
-            raw = raw[unc_match.start():]
         # On Windows, /Zi and /W4 are compiler switches, not POSIX paths.
         if (
             os.name == "nt"
@@ -17613,10 +17671,9 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         target = Path(raw).expanduser()
         if not target.is_absolute():
             target = base / target
-        target = target.resolve(strict=False)
         try:
-            target.relative_to(root)
-        except ValueError:
+            target.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError):
             return (
                 "ERROR: agent project execution rejected: argv path is outside "
                 "the host-selected project root"
@@ -19474,6 +19531,21 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
 
 
 
+def _scope_arg_is_rooted(raw):
+    """Whether ``_project_scope_args`` must keep ``raw`` as given instead of joining it under the project.
+
+    True for an absolute or drive-qualified path, and for a UNC, device or
+    NT-namespace spelling judged on the raw value: on POSIX such a backslash
+    spelling is not ``os.path.isabs``, and rebasing it under the project would
+    hide it from the dispatch scope check that must refuse it.
+    """
+    return (
+        _is_network_spelling_raw(raw)
+        or os.path.isabs(raw)
+        or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+    )
+
+
 def _project_scope_args(tool_name, args, project):
     """Scope an agent file/inspection tool call to the run's project directory.
 
@@ -19509,9 +19581,7 @@ def _project_scope_args(tool_name, args, project):
     if tool_name == "data_convert":
         for key in ("input_path", "output_path"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
@@ -19527,9 +19597,7 @@ def _project_scope_args(tool_name, args, project):
                 continue
             item = dict(operation)
             raw_path = str(item.get("path") or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 item["path"] = os.path.normpath(os.path.join(project, raw_path))
             rebased.append(item)
@@ -19549,9 +19617,7 @@ def _project_scope_args(tool_name, args, project):
             return scoped
         rebased = []
         for raw_path in paths:
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
         scoped["paths_json"] = rebased
         scoped.pop("paths", None)
@@ -19560,9 +19626,7 @@ def _project_scope_args(tool_name, args, project):
     if tool_name in {"file_copy", "file_move", "archive_extract"}:
         for key in ("source", "destination"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.join(project, raw_path)
         return scoped
@@ -19570,32 +19634,24 @@ def _project_scope_args(tool_name, args, project):
     if tool_name == "workspace_compare":
         for key in ("left", "right"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.join(project, raw_path)
         return scoped
 
     if tool_name == "workspace_run":
         raw_cwd = str(scoped.get("cwd") or ".").strip()
-        is_abs = os.path.isabs(raw_cwd) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
-        )
+        is_abs = _scope_arg_is_rooted(raw_cwd)
         scoped["cwd"] = raw_cwd if is_abs else os.path.join(project, raw_cwd)
         return scoped
 
     if tool_name == "script_run":
         raw_path = str(scoped.get("path") or "").strip()
-        path_is_abs = os.path.isabs(raw_path) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_path)
-        )
+        path_is_abs = _scope_arg_is_rooted(raw_path)
         if raw_path and not path_is_abs:
             scoped["path"] = os.path.join(project, raw_path)
         raw_cwd = str(scoped.get("cwd") or "").strip()
-        cwd_is_abs = os.path.isabs(raw_cwd) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
-        )
+        cwd_is_abs = _scope_arg_is_rooted(raw_cwd)
         if raw_cwd and not cwd_is_abs:
             scoped["cwd"] = os.path.join(project, raw_cwd)
         return scoped
@@ -19604,18 +19660,14 @@ def _project_scope_args(tool_name, args, project):
         # ``path`` is optional (a job digest names ``job_id`` instead), so an
         # omitted path must stay omitted rather than becoming the project dir.
         raw_path = str(scoped.get("path") or "").strip()
-        is_abs = os.path.isabs(raw_path) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_path)
-        )
+        is_abs = _scope_arg_is_rooted(raw_path)
         if raw_path and not is_abs:
             scoped["path"] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
 
     if tool_name == "ensemble_codegen_build_loop":
         raw_project = str(scoped.get("project_dir") or ".").strip()
-        is_abs = os.path.isabs(raw_project) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_project)
-        )
+        is_abs = _scope_arg_is_rooted(raw_project)
         scoped["project_dir"] = (
             raw_project if is_abs else os.path.join(project, raw_project)
         )
@@ -19623,7 +19675,7 @@ def _project_scope_args(tool_name, args, project):
 
     key = _project_scoped_path_key(tool_name)
     raw = str(scoped.get(key) or "").strip()
-    is_abs = os.path.isabs(raw) or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+    is_abs = _scope_arg_is_rooted(raw)
     if not raw or raw == ".":
         scoped[key] = project
     elif not is_abs:
