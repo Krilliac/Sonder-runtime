@@ -326,3 +326,30 @@ def test_template_without_prefix_match_fails_closed():
             ],
             max_len=64,
         )
+
+
+def _train_requirement(name):
+    from packaging.requirements import Requirement
+
+    path = Path(__file__).resolve().parents[1] / "requirements-train.txt"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and Requirement(line).name == name:
+            return Requirement(line)
+    raise AssertionError(f"{name} not pinned in requirements-train.txt")
+
+
+def test_train_pins_peft_supports_pinned_transformers_5():
+    # PEFT < 0.18.0 is incompatible with Transformers v5 (PEFT v0.18.0 notes).
+    peft = _train_requirement("peft").specifier
+    assert not peft.contains("0.13.2")
+    assert not peft.contains("0.17.1")
+    assert peft.contains("0.19.0")
+    assert peft.contains("0.22.0")
+    assert _train_requirement("transformers").specifier.contains("5.3.0")
+
+
+def test_train_requirements_do_not_point_at_cu121_index():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("requirements-train.txt", "cloud_train.sh"):
+        assert "whl/cu121" not in (root / name).read_text(encoding="utf-8")
