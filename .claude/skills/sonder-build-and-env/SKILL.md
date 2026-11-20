@@ -81,8 +81,8 @@ Rules the files themselves state — do not fight them:
   explicitly (MCP 2.x's server Settings is a plain BaseModel; nothing in
   Sonder imports `pydantic_settings`).
 - **Training deps: CUDA torch comes from PyTorch's own index**, not PyPI's CPU
-  wheel. On Windows for CUDA 12.1:
-  `pip install torch --index-url https://download.pytorch.org/whl/cu121`
+  wheel. On Windows for CUDA 13.0:
+  `pip install torch --index-url https://download.pytorch.org/whl/cu130`
   (check `nvidia-smi` for the driver's supported CUDA version first). If a
   bitsandbytes wheel is unavailable for your Python/CUDA pair, the file's own
   guidance is WSL2, where the official Linux wheels apply.
@@ -248,7 +248,7 @@ tooling: match the file you are editing; comments explain *why*
 | `run-tests.cmd` exits 3 or 4 | No venv (3) or broken venv redirector (4) | Recreate: `python -m venv venv` then install `-dev` reqs |
 | Proposal compatibility tests never run | `testpaths` trimmed to `tests` only | Keep `tests proposals` in pytest.ini |
 | A `network`/`model` test "passes" instantly | It self-skipped without the opt-in flag | Re-run with `--run-network` / `--run-model`; a skip is not a pass |
-| torch installed but no CUDA | PyPI CPU wheel | Reinstall from `https://download.pytorch.org/whl/cu121` (match your driver) |
+| torch installed but no CUDA | PyPI CPU wheel | Reinstall from `https://download.pytorch.org/whl/cu130` (match your driver) |
 | `git add -A` stages tens of MB of packages | Venv at a non-ignored path | Only `venv/`, `.runtime/`, `venv-train/` are ignored; keep venvs at those paths |
 | New `.claude/skills/` files never commit | `.claude/` is gitignored (worktrees under it would otherwise self-report as offenders) | `git add -f .claude/skills/...` when a skill is meant to be tracked |
 | Ratchet scan flags files inside a worktree/venv | Scan run against a copy outside the exclusion filter | By design, `tests/production/test_architecture.py` excludes dot-dirs (`.claude/`, `.runtime/`) and `venv/` from ratchet scans and guards the filter both ways; keep nested worktrees under dot-dirs |
