@@ -1,7 +1,8 @@
 {
   "version": 1,
   "retired_cloud_models": [
-    "qwen3-coder:480b-cloud"
+    "qwen3-coder:480b-cloud",
+    "deepseek-v4-flash:cloud"
   ],
   "legacy_cloud_general_model": "gpt-oss:120b-cloud",
   "default_cloud_models": {
