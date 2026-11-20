@@ -367,6 +367,12 @@
       "summary": "change process-local hosted/cloud consent"
     },
     {
+      "category": "runtime",
+      "name": "/cloud_models_status",
+      "risk": "safe",
+      "summary": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models."
+    },
+    {
       "category": "security",
       "name": "/cloud_opt_in",
       "risk": "dangerous",

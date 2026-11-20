@@ -98,6 +98,7 @@ from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
 from sonder_runtime.adapters.inference import startup_prewarm
+import sonder_runtime.adapters.cloud_model_refresh_schedule as cloud_model_refresh_schedule
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
@@ -8273,6 +8274,8 @@ def main(
             prewarm=lambda tier: server.prewarm_model(tier, announce=True),
             enabled=lambda: server.sonder_speculation.prewarm_enabled(),
             thread_factory=owned_runtime_thread)
+        cloud_model_refresh_schedule.start_scheduled_refresh(
+            origin=server.BASE, thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         _warn_if_local_open()

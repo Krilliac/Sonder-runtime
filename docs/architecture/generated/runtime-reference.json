@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+      "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -1585,6 +1585,17 @@
             "type": "object"
           },
           "name": "claim_check"
+        },
+        {
+          "description": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "cloud_models_statusArguments",
+            "type": "object"
+          },
+          "name": "cloud_models_status"
         },
         {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\nEnabling is explicit consent for later ``cloud-*`` prompts to leave this\nmachine and potentially incur provider usage. The setting resets on restart.",
@@ -10118,6 +10129,16 @@
       "risk": "dangerous",
       "summary": "change process-local hosted/cloud consent",
       "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "runtime",
+      "name": "/cloud_models_status",
+      "native": false,
+      "params": [],
+      "risk": "safe",
+      "summary": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models.",
+      "tool": "cloud_models_status"
     },
     {
       "aliases": [],
@@ -20466,15 +20487,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 241,
-    "commands": 359,
+    "capabilities": 242,
+    "commands": 360,
     "configuration": 317,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
-    "tools": 241
+    "tools": 242
   },
-  "digest": "4156638bc9495c1fb01fc06777138b57b28099b9d9dcf102d5e9d828ce18d68c",
+  "digest": "e0a59df3adee61d2772c18d78beff27e695cbc95a71f4ca141f1b68a04b1ec72",
   "events": [
     {
       "name": "session.started",
@@ -23186,9 +23207,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
     "client": {
-      "digest": "055cd06d7946ecb8704c12e53ad5a2dcbd4a7e57b34175cdfda1b9d997dfb931",
+      "digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
       "events": [
         {
           "name": "approval.denied",
@@ -24398,6 +24419,7 @@
           "checklist_show",
           "checklist_update",
           "claim_check",
+          "cloud_models_status",
           "cloud_opt_in",
           "codegen_build_loop",
           "command_registry_list",
@@ -24818,6 +24840,11 @@
             "name": "claim_check",
             "schema_available": true,
             "summary": "Check a model's code claim against the repository, read-only: is the cited file,\nline and are the named symbols real, and is a guard of the claimed category nearby\n(verdict reject = the citation is wrong; flag = a guard-shaped line was found nearby, which\nsays nothing about whether the claim is true; keep = nothing contradicts the citation).\nPass file (+ line, symbols, category, guard, entry_point, claim_text) or claims_json."
+          },
+          {
+            "name": "cloud_models_status",
+            "schema_available": true,
+            "summary": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule."
           },
           {
             "name": "cloud_opt_in",
@@ -27313,6 +27340,17 @@
             "type": "object"
           },
           "name": "claim_check"
+        },
+        {
+          "description": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {},
+            "title": "cloud_models_statusArguments",
+            "type": "object"
+          },
+          "name": "cloud_models_status"
         },
         {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\nEnabling is explicit consent for later ``cloud-*`` prompts to leave this\nmachine and potentially incur provider usage. The setting resets on restart.",
@@ -36683,6 +36721,15 @@
           "name": "claim_check"
         },
         {
+          "description": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule.",
+          "inputSchema": {
+            "properties": {},
+            "title": "cloud_models_statusArguments",
+            "type": "object"
+          },
+          "name": "cloud_models_status"
+        },
+        {
           "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\nEnabling is explicit consent for later ``cloud-*`` prompts to leave this\nmachine and potentially incur provider usage. The setting resets on restart.",
           "inputSchema": {
             "properties": {
@@ -44624,6 +44671,18 @@
         },
         {
           "function": {
+            "description": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule.",
+            "name": "cloud_models_status",
+            "parameters": {
+              "properties": {},
+              "title": "cloud_models_statusArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Show, enable, or revoke process-local hosted/cloud model consent.\n\nEnabling is explicit consent for later ``cloud-*`` prompts to leave this\nmachine and potentially incur provider usage. The setting resets on restart.",
             "name": "cloud_opt_in",
             "parameters": {
@@ -51613,7 +51672,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "495f013cf79608376773ada5e46d1a61e309ca0504710ab1419e5e99d62dfbaf",
+    "server.py": "c3929f8acce16fb604cfb823f697838b90aaead5af469d2cbc64ff116da21055",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -53037,6 +53096,15 @@
           "root"
         ],
         "title": "claim_checkArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Report Sonder's Ollama cloud model refresh: last run, retired models and their source, new catalog models, ladder state per cloud tier, pending operator choices and the effective cloud tier models. Read-only: no network, no writes; apply a refresh with `python -m sonder_runtime models cloud-refresh --apply` or the daily schedule.",
+      "name": "cloud_models_status",
+      "parameters": {
+        "properties": {},
+        "title": "cloud_models_statusArguments",
         "type": "object"
       }
     },

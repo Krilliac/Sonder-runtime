@@ -13,7 +13,7 @@ from .traits import ToolTraits, TriState, traits_from_effects
 # Existing host-owned read contracts in server.REPOSITORY_READ_ONLY_TOOLS,
 # command_catalog._READ_ONLY, typed_tools and permission_modes native grades.
 READ_ONLY_TOOLS = frozenset({
-    "tool_help", "file_check", "claim_check",
+    "tool_help", "file_check", "claim_check", "cloud_models_status",
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree",
     "file_find", "dependency_inventory", "repository_symbol_index", "log_inspect",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
@@ -54,7 +54,7 @@ _PARALLEL_READS = frozenset({
 _LOCAL_READS = _PARALLEL_READS | frozenset({
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",
     "hardware_profile", "file_policy", "repo_status", "repo_diff", "artifact_risk_inspect",
-    "process_list", "process_memory_risk_inspect",
+    "process_list", "process_memory_risk_inspect", "cloud_models_status",
 })
 _NETWORK = frozenset({"web_search", "web_fetch", "weather_lookup", "approximate_location_lookup"})
 _DESTRUCTIVE = frozenset({
