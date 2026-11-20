@@ -3777,7 +3777,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/selfmod", "/selfmodify"):
         return _selfmod_command(arg, operator_approved=operator_approved)
     if cmd == "/approvals":
-        return permission_approvals(limit=_approvals_limit(arg))
+        return permission_approvals(limit=_approvals_limit(arg), token=_OPERATOR_ATTENDED if operator_approved else "")
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
@@ -9175,6 +9175,11 @@ def _approval_authority(token) -> tuple[str, str]:
     )
 
 
+def _approval_view(token):
+    """All owners' calls only after an admin-level check (attended console, admin session token)."""
+    admin = token is _OPERATOR_ATTENDED or (isinstance(token, str) and bool(token) and _admin_require(token)[0])
+    return approval_ledger_module.operator_scope() if admin else contextlib.nullcontext()
+
 
 def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
     """``/approve <call id> [ttl]`` | ``/approve revoke <nonce>`` | ``/approve call <tool> <json>``."""
@@ -9229,68 +9234,73 @@ def permission_approve(
         error = "ERROR: one-shot approvals are not available in this process."
         return error
     surface = "console" if token is _OPERATOR_ATTENDED else "tool"
-    if revoke:
-        approval = ledger.revoke(revoke)
-        if approval is None:
-            error = (
-                "ERROR: no open approval %s (it may be spent, expired, already "
-                "revoked, or mistyped; see /approvals)." % revoke
+    with _approval_view(token):
+        if revoke:
+            approval = ledger.revoke(revoke)
+            if approval is None:
+                error = (
+                    "ERROR: no open approval %s (it may be spent, expired, already "
+                    "revoked, or mistyped; see /approvals)." % revoke
+                )
+                return error
+            ref = approval_ledger_module.call_ref(approval.digest, approval.owner)
+            _record_direct_tool(  # the owner tag (after '@') names whose approval it was
+                "permission_approve", {"revoke": approval.nonce, "owner": ref.split("@", 1)[1]},
+                ok=True, started=started, summary="revoked %s call %s" % (approval.tool, ref),
             )
+            return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, ref)
+        try:
+            if call_id:
+                pending = ledger.resolve_call(call_id)  # exactly one row: its owner, never a guess
+                target, digest, preview, owner = pending.tool, pending.digest, pending.preview, pending.owner
+            elif tool and arguments_json:
+                try:
+                    arguments = json.loads(arguments_json)
+                except ValueError as exc:
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "arguments_json must be a JSON object: %s" % exc
+                    )
+                if not isinstance(arguments, dict):
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "arguments_json must be a JSON object"
+                    )
+                # owner None: the ledger binds the one owner with it pending, or refuses.
+                target, owner = str(tool or "").strip().lstrip("/"), None
+                digest = permission_modes.call_digest(target, arguments)
+                preview = permission_modes.argument_preview(arguments)
+                if not digest:
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "that call has no canonical form and cannot be approved"
+                    )
+            else:
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "give a call id from /approvals, or a tool with its arguments_json"
+                )
+            approval = ledger.issue(  # only the console may knowingly override a denial
+                target, digest, approver=approver, surface=surface,
+                ttl_seconds=ttl_seconds, preview=preview,
+                override_denial=surface == "console", owner=owner,
+            )
+            overrode = approval.overrode_denial  # the row issue() matched, not the bound owner
+        except approval_ledger_module.ApprovalLedgerError as exc:
+            error = "ERROR: %s" % exc
             return error
-        _record_direct_tool(
-            "permission_approve", {"revoke": approval.nonce}, ok=True, started=started,
-            summary="revoked %s call %s" % (approval.tool, approval.call_id),
-        )
-        return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, approval.call_id)
-    try:
-        if call_id:
-            pending = ledger.resolve_call(call_id)
-            target, digest, preview = pending.tool, pending.digest, pending.preview
-        elif tool and arguments_json:
-            try:
-                arguments = json.loads(arguments_json)
-            except ValueError as exc:
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "arguments_json must be a JSON object: %s" % exc
-                )
-            if not isinstance(arguments, dict):
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "arguments_json must be a JSON object"
-                )
-            target = str(tool or "").strip().lstrip("/")
-            digest = permission_modes.call_digest(target, arguments)
-            preview = permission_modes.argument_preview(arguments)
-            if not digest:
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "that call has no canonical form and cannot be approved"
-                )
-        else:
-            raise approval_ledger_module.ApprovalLedgerError(
-                "give a call id from /approvals, or a tool with its arguments_json"
-            )
-        # Only the console may knowingly approve a call an operator denied.
-        overrode = surface == "console" and ledger.denied_for(target, digest)
-        approval = ledger.issue(
-            target, digest, approver=approver, surface=surface,
-            ttl_seconds=ttl_seconds, preview=preview,
-            override_denial=surface == "console",
-        )
-    except approval_ledger_module.ApprovalLedgerError as exc:
-        error = "ERROR: %s" % exc
-        return error
-    _record_direct_tool(
+    _record_direct_tool(  # the owner tag names whose call this approval is bound to
         "permission_approve",
         {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         "owner": approval_ledger_module.owner_tag(approval.owner),
          **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
         ("overrode a denial: " if overrode else "")
-        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        + "approved %s call %s once%s: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (
-            approval.tool, approval.call_id, approval.nonce, approval.approver,
+            approval.tool, approval.call_id,
+            " for owner " + approval_ledger_module.owner_tag(approval.owner) if approval.owner else "",
+            approval.nonce, approval.approver,
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(approval.expires_ts)),
             approval.tool, approval.nonce,
         )
@@ -9298,13 +9308,14 @@ def permission_approve(
 
 
 @mcp.tool()
-def permission_approvals(limit: int = 20) -> str:
-    """List calls refused unattended (approvable by call id) and the one-shot approvals issued."""
+def permission_approvals(limit: int = 20, token: str = "") -> str:
+    """List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token)."""
     _maybe_live_reload()
     ledger = permission_modes.approval_ledger()
     if ledger is None:
         return "one-shot approvals are not available in this process."
-    return ledger.format_status(_safe_limit_policy(limit, 20, 200))
+    with _approval_view(token):
+        return ledger.format_status(_safe_limit_policy(limit, 20, 200))
 
 
 @mcp.tool()
@@ -18219,13 +18230,8 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     return _chat_run_backend.format_agent_gate_refusal(name, decision)
 
 
-def _record_restricted_pending_refusal(decision, name, call_args):
-    """The restricted lane records its classifier asks on the HTTP work-run row through this."""
-    from sonder_runtime.bootstrap import chat_tools_wiring as _chat_tools_wiring
-    _chat_tools_wiring.record_restricted_pending_refusal(decision, name, call_args)
-
-
-_restricted_tool_lane.install_pending_refusal_recorder(_record_restricted_pending_refusal)
+from sonder_runtime.bootstrap import chat_tools_wiring as _restricted_wiring
+_restricted_tool_lane.install_pending_refusal_recorder(_restricted_wiring.record_restricted_pending_refusal)  # classifier asks land on the work-run row
 
 
 def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):

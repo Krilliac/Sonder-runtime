@@ -923,8 +923,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
 
     Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps`` and
     per-``(origin, model, digest)`` cached ``/api/show`` metadata without
-    failing if optional endpoints are unavailable.  Each probe fetches
-    ``/api/show`` metadata.  The probe itself never calls ``/api/show``: it
+    failing if optional endpoints are unavailable.  The probe itself never calls ``/api/show``: it
     reports whatever is cached and starts at most one background filler per
     origin that fetches up to ``_SHOW_FETCHES_PER_PROBE`` uncached models, so a
     slow or hanging ``/api/show`` cannot fail the capability probe, and large

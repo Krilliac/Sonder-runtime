@@ -1,6 +1,7 @@
 """Start-up prewarm of the default chat model, and the visible GPU-admission wait."""
 import io
 import logging
+import os
 import threading
 import time
 
@@ -70,8 +71,76 @@ def test_hook_prewarms_the_default_model_once_when_enabled():
 
 def test_hook_does_nothing_when_prewarm_is_disabled():
     calls = []
-    assert _start(True, lambda tier: calls.append(tier) or True, lambda: False) is True
+    assert _start(True, lambda tier: calls.append(tier) or True, lambda: False) is False
     assert calls == []
+
+
+class _DeferredThread:
+    """Records the starter thread instead of running it, so a test can run it later."""
+
+    made = []
+
+    def __init__(self, *, target, args=(), name="", daemon=False):
+        self._target, self._args = target, args
+        _DeferredThread.made.append(self)
+
+    def start(self):
+        pass
+
+    def run_now(self):
+        return self._target(*self._args)
+
+
+def test_hook_reads_the_switch_once_before_the_thread_starts(monkeypatch):
+    # An in-process serve.main test sets SONDER_PREWARM=0 through monkeypatch,
+    # which can be undone before the starter thread runs. The decision must be
+    # the one the caller saw: disabled at the call means no thread at all, even
+    # if the switch reads on by the time a thread would have run.
+    _DeferredThread.made = []
+    calls, reads = [], []
+
+    def enabled():
+        reads.append(os.environ.get("SONDER_PREWARM"))
+        return server.sonder_speculation.prewarm_enabled()
+
+    with monkeypatch.context() as patch:
+        patch.setenv("SONDER_PREWARM", "0")
+        assert startup_prewarm.start_default_model_prewarm(
+            setting=True, prewarm=lambda tier: calls.append(tier) or True,
+            enabled=enabled, thread_factory=_DeferredThread) is False
+    monkeypatch.delenv("SONDER_PREWARM", raising=False)  # the override is gone
+    assert _DeferredThread.made == []
+    assert reads == ["0"]
+    assert calls == []
+
+
+def test_hook_does_not_reread_the_switch_on_the_starter_thread():
+    _DeferredThread.made = []
+    calls, switch = [], [True]
+
+    def enabled():
+        return switch[0]
+
+    assert startup_prewarm.start_default_model_prewarm(
+        setting=True, prewarm=lambda tier: calls.append(tier) or True,
+        enabled=enabled, thread_factory=_DeferredThread) is True
+    switch[0] = False
+    (thread,) = _DeferredThread.made
+    assert thread.run_now() == "started"
+    assert calls == [""]
+
+
+def test_hook_survives_a_failing_switch(caplog):
+    def broken():
+        raise RuntimeError("config unreadable")
+
+    _DeferredThread.made = []
+    with caplog.at_level(logging.INFO, logger="sonder.prewarm"):
+        assert startup_prewarm.start_default_model_prewarm(
+            setting=True, prewarm=lambda tier: True, enabled=broken,
+            thread_factory=_DeferredThread) is False
+    assert _DeferredThread.made == []
+    assert any("could not read the prewarm switch" in r.getMessage() for r in caplog.records)
 
 
 def test_hook_does_nothing_when_the_setting_is_off():
@@ -163,7 +232,6 @@ def test_per_request_prewarm_outcome_is_logged_at_debug_only(caplog):
     assert caplog.records == []
 
 
-@pytest.mark.skipif(not hasattr(server, "_startup_prewarm"), reason="pending server.py wiring from @tool-access-core")
 def test_prewarm_model_announces_only_when_asked(monkeypatch, caplog):
     seen = []
     monkeypatch.setattr(server.sonder_speculation, "prewarm_enabled", lambda: True)
@@ -367,7 +435,6 @@ class _Handler:
         self.wfile = io.BytesIO()
 
 
-@pytest.mark.skipif(not hasattr(live_stream, "arm_wait_status"), reason="pending live_stream.py wiring from @tool-access-core")
 def test_wait_line_is_written_as_an_sse_comment():
     handler = _Handler(_Early())
     reporter = live_stream.arm_wait_status(handler, interval_seconds=0)
@@ -378,14 +445,12 @@ def test_wait_line_is_written_as_an_sse_comment():
     assert out.endswith("\n\n")
 
 
-@pytest.mark.skipif(not hasattr(live_stream, "arm_wait_status"), reason="pending live_stream.py wiring from @tool-access-core")
 def test_clear_frame_is_an_empty_status_comment():
     assert live_stream.wait_status_frame("") == b": sonder-status\n\n"
     assert live_stream.wait_status_frame("  ") == b": sonder-status\n\n"
     assert live_stream.wait_status_frame("a  b") == b": sonder-status a b\n\n"
 
 
-@pytest.mark.skipif(not hasattr(live_stream, "arm_wait_status"), reason="pending live_stream.py wiring from @tool-access-core")
 def test_admission_writes_a_clear_frame_after_a_status_frame():
     handler = _Handler(_Early())
     reporter = live_stream.arm_wait_status(handler, interval_seconds=0)
@@ -399,6 +464,5 @@ def test_admission_writes_a_clear_frame_after_a_status_frame():
     assert frames[1] == ": sonder-status"
 
 
-@pytest.mark.skipif(not hasattr(live_stream, "arm_wait_status"), reason="pending live_stream.py wiring from @tool-access-core")
 def test_no_reporter_without_an_early_stream():
     assert live_stream.arm_wait_status(_Handler(None)) is None

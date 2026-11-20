@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
+    "catalog_digest": "e42c18770959f644dfced5a03573b501640ba767a0ce1684d3988029bd4d0695",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
+      "catalog_digest": "e42c18770959f644dfced5a03573b501640ba767a0ce1684d3988029bd4d0695",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -5394,7 +5394,7 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -5403,6 +5403,11 @@
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -14985,10 +14990,16 @@
           "name": "limit",
           "required": false,
           "type": "int"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "safe",
-      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
       "tool": "permission_approvals"
     },
     {
@@ -20929,7 +20940,7 @@
     "schemas": 4,
     "tools": 246
   },
-  "digest": "35fbce1a325576bd15bcd160575a36f8f80ee0de5aff2c129afa0b8850dbd577",
+  "digest": "9128ca4c680dc48c3736ab7736b8381353ee76a710e0ccf23f23f2663e504b9f",
   "events": [
     {
       "name": "session.started",
@@ -23641,9 +23652,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
+    "catalog_digest": "e42c18770959f644dfced5a03573b501640ba767a0ce1684d3988029bd4d0695",
     "client": {
-      "digest": "1d1ee97f69be6c48b9ee00bc845b201b7e46d2d053beb38da8c2615a081a85a1",
+      "digest": "e42c18770959f644dfced5a03573b501640ba767a0ce1684d3988029bd4d0695",
       "events": [
         {
           "name": "approval.denied",
@@ -25822,7 +25833,7 @@
           {
             "name": "permission_approvals",
             "schema_available": true,
-            "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued."
+            "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token)."
           },
           {
             "name": "permission_approve",
@@ -31607,7 +31618,7 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -31616,6 +31627,11 @@
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -40987,13 +41003,18 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "inputSchema": {
             "properties": {
               "limit": {
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -49470,7 +49491,7 @@
         },
         {
           "function": {
-            "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+            "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
             "name": "permission_approvals",
             "parameters": {
               "properties": {
@@ -49478,6 +49499,11 @@
                   "default": 20,
                   "title": "Limit",
                   "type": "integer"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
                 }
               },
               "title": "permission_approvalsArguments",
@@ -52777,7 +52803,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "06eba53fa88fa38612f9fcdc283281186a50f3c0ccef9bb22a075a2700303ad5",
+    "server.py": "04efe8d9c2d2718fb4e8c31058f9a033d93c8099cede375c0db0f190e473f5c4",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -57796,7 +57822,7 @@
       }
     },
     {
-      "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
       "name": "permission_approvals",
       "parameters": {
         "properties": {
@@ -57804,6 +57830,11 @@
             "default": 20,
             "title": "Limit",
             "type": "integer"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
           }
         },
         "title": "permission_approvalsArguments",

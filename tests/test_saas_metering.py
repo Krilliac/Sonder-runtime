@@ -66,6 +66,28 @@ def test_metering_on_never_meters_admins_unlimited_or_callers_without_an_account
     assert conn.execute("SELECT COUNT(*) FROM usage_stats").fetchone()[0] == 0
 
 
+def test_only_an_exact_unlimited_flag_exempts_from_metering_and_rate_limits(conn, monkeypatch):
+    monkeypatch.setattr(admin_auth, "_now", lambda: 1_800_000_000)  # one rate window throughout
+    admin_auth.set_saas_feature(conn, "usage_metering_enabled", True)
+    admin_auth.set_saas_tier_limit(conn, "free", TOKENS)
+    for flags in ("notunlimited", "unlimited-trial developer"):
+        conn.execute("UPDATE accounts SET dev_flags=? WHERE username='alice'", (flags,))
+        conn.execute("DELETE FROM usage_stats")
+        conn.execute("DELETE FROM account_rate")
+        conn.commit()
+        alice = admin_auth.public_account(conn, "alice")
+        assert admin_auth.meter_usage(conn, alice, TOKENS)[0] is True, flags
+        assert admin_auth.meter_usage(conn, alice, TOKENS)[0] is False, flags
+        results = [admin_auth.rate_limit(conn, alice)[0] for _ in range(admin_auth.DEFAULT_RATE_LIMIT + 1)]
+        assert results[-1] is False, flags
+    conn.execute("UPDATE accounts SET dev_flags='developer, unlimited' WHERE username='alice'")
+    conn.commit()
+    alice = admin_auth.public_account(conn, "alice")
+    for _ in range(3):
+        assert admin_auth.meter_usage(conn, alice, TOKENS) == (True, "")
+        assert admin_auth.rate_limit(conn, alice) == (True, "")
+
+
 def test_toggling_metering_off_again_stops_metering(conn):
     admin_auth.set_saas_feature(conn, "usage_metering_enabled", True)
     admin_auth.set_saas_tier_limit(conn, "free", TOKENS)

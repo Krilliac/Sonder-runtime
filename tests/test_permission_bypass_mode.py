@@ -44,7 +44,7 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     assert pm._MATRIX[pm.BYPASS][pm.UNCLASSIFIED] == pm.ASK
 
     rules = {
-        # The unmodified shipped default, which bypass alone steps past.
+        # The unmodified shipped default: bypass skips ``ask`` only, so it holds.
         "file_delete": {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
         "admin_private_chain_of_thought": {
             "pattern": "admin_private_chain_of_thought",
@@ -54,7 +54,7 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     }
     lookup = lambda name: rules.get(name)  # noqa: E731
     del_decision = pm.decide("file_delete", interactive=False, mode=pm.BYPASS, rule_lookup=lookup)
-    assert del_decision.allowed and del_decision.source == "mode:bypass"
+    assert del_decision.action == pm.DENY and del_decision.source == "rule"
 
     cot_decision = pm.decide(
         "admin_private_chain_of_thought", interactive=False, mode=pm.BYPASS, rule_lookup=lookup
@@ -64,6 +64,19 @@ def test_bypass_matrix_and_protected_boundaries(monkeypatch, tmp_path):
     for tool in pm.DURABLE_AUTHORITY_TOOLS:
         assert pm.decide(tool, interactive=False, mode=pm.BYPASS, rule_lookup=lambda _n: None).action == pm.DENY
         assert pm.decide(tool, interactive=True, mode=pm.BYPASS, rule_lookup=lambda _n: None).action == pm.ASK
+
+
+def test_bypass_holds_process_wide_cloud_consent():
+    """A scoped bypass never turns on cloud egress for every caller unprompted."""
+    assert pm.DURABLE_AUTHORITY_TOOLS < pm.BYPASS_HELD_TOOLS
+    assert "cloud_opt_in" in pm.BYPASS_HELD_TOOLS
+    none = lambda _n: None  # noqa: E731
+    unattended = pm.decide("cloud_opt_in", interactive=False, mode=pm.BYPASS, rule_lookup=none)
+    assert unattended.action == pm.DENY and unattended.source == "durable-authority"
+    assert pm.decide("cloud_opt_in", interactive=True, mode=pm.BYPASS, rule_lookup=none).action == pm.ASK
+    # An explicit allow rule is the written-down way through, as in every other mode.
+    allow = lambda _n: {"pattern": "cloud_opt_in", "action": pm.ALLOW, "note": "operator"}  # noqa: E731
+    assert pm.decide("cloud_opt_in", interactive=False, mode=pm.BYPASS, rule_lookup=allow).action == pm.ALLOW
 
 
 def test_bypass_file_ops_containment_keeps_user_role_blocked(monkeypatch, tmp_path):

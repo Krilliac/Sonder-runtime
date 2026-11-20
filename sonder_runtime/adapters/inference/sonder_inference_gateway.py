@@ -279,9 +279,9 @@ def _is_cancelled(token: object | None) -> bool:
     is_set = getattr(token, "is_set", None)
     if callable(is_set):
         return bool(is_set())
-    if hasattr(token, "cancelled"):
+    value = getattr(token, "cancelled", _UNSET)
+    if value is not _UNSET:
         # A property (OperationContext tokens) or a method (concurrent.futures.Future).
-        value = token.cancelled
         return bool(value()) if callable(value) else bool(value)
     if callable(token):
         return bool(token())
@@ -314,16 +314,21 @@ class _CompositeCancellation:
 # How often the exchange watcher re-reads its cancellation token.  An Event is
 # a memory read; any other token (a ``cancelled`` property or a callable, e.g.
 # a fleet worker's check, which reads the fleet store) is read at most twice a
-# second per in-flight exchange.  A composite polls at its slowest part's rate.
+# second per in-flight exchange.  A composite is split into its parts and each
+# part is read at its own rate, so an Event inside it is still noticed at once.
 _EVENT_POLL_SECONDS = 0.05
 _CHECK_POLL_SECONDS = 0.5
+# Backoff between reads after a token's read raised (e.g. "database is locked").
+_WATCH_RETRY_SECONDS = (0.5, 1.0, 2.0, 5.0)
 
 
-def _cancel_poll_seconds(token: object | None) -> float:
+def _cancel_leaves(token: object | None) -> list[object]:
     if isinstance(token, _CompositeCancellation):
-        parts = [part for part in (token._primary, token._secondary) if part is not None]
-        return max((_cancel_poll_seconds(part) for part in parts), default=_EVENT_POLL_SECONDS)
-    return _EVENT_POLL_SECONDS if callable(getattr(token, "is_set", None)) else _CHECK_POLL_SECONDS
+        return [
+            leaf for part in (token._primary, token._secondary)
+            for leaf in _cancel_leaves(part)
+        ]
+    return [] if token is None else [token]
 
 
 @contextmanager
@@ -355,7 +360,7 @@ class _ExchangeBudget:
     def __enter__(self) -> "_ExchangeBudget":
         self._timer.start()
         if self._cancellation is not None:
-            if _is_cancelled(self._cancellation):
+            if self._cancelled_at_entry():
                 self.abort()
             else:
                 # The watcher runs in a copy of the caller's context: a cancel
@@ -369,6 +374,13 @@ class _ExchangeBudget:
                 self._cancel_thread.start()
         return self
 
+    def _cancelled_at_entry(self) -> bool:
+        try:
+            return _is_cancelled(self._cancellation)
+        except Exception:
+            # The watcher reads again, backs off and reports the failure.
+            return False
+
     def __exit__(self, *exc_info) -> None:
         self._timer.cancel()
         self._stop.set()
@@ -376,11 +388,42 @@ class _ExchangeBudget:
             self._cancel_thread.join(timeout=0.5)
 
     def _watch_cancel(self) -> None:
-        interval = _cancel_poll_seconds(self._cancellation)
-        while not self._stop.wait(interval):
-            if _is_cancelled(self._cancellation):
-                self.abort()
-                return
+        leaves = [
+            (
+                leaf,
+                _EVENT_POLL_SECONDS if callable(getattr(leaf, "is_set", None)) else _CHECK_POLL_SECONDS,
+            )
+            for leaf in _cancel_leaves(self._cancellation)
+        ]
+        if not leaves:
+            return
+        tick = min(interval for _, interval in leaves)
+        next_read = [0.0] * len(leaves)
+        failures = [0] * len(leaves)
+        logged = False
+        while not self._stop.wait(tick):
+            now = time.monotonic()
+            for index, (leaf, interval) in enumerate(leaves):
+                if now < next_read[index]:
+                    continue
+                try:
+                    cancelled = _is_cancelled(leaf)
+                except Exception as exc:
+                    # A failing read (a locked fleet store) must not end the
+                    # watcher: back off and read again, and say so once.
+                    delay = _WATCH_RETRY_SECONDS[min(failures[index], len(_WATCH_RETRY_SECONDS) - 1)]
+                    failures[index] += 1
+                    next_read[index] = now + delay
+                    if not logged:
+                        logged = True
+                        logger.warning("sonder-inference cancel watcher read failed, retrying: %s",
+                                       _bounded(exc))
+                    continue
+                failures[index] = 0
+                next_read[index] = now + interval
+                if cancelled:
+                    self.abort()
+                    return
 
     def attach(self, sock: socket.socket) -> None:
         with self._lock:
