@@ -12,13 +12,23 @@ Three verdicts:
   fsmonitor, a pager or a diff driver, so even ``git status`` can run code),
   a program named by a path instead of a bare name, a flag outside a safe
   program's read-only list, host programs and code the classifier cannot
-  show to be read-only, command text above ``_MAX_TEXT`` characters, and
-  every tool or argument shape it does not know.  ASK is the default for
-  anything not recognised.
+  show to be read-only, and every tool or argument shape it does not know.
+  ASK is the default for anything not recognised.
 * ``BLOCK``: refused in every permission mode, bypass included: recognised
   destructive commands (disk formatting and partitioning, boot and shadow-copy
-  deletion, shutdown, download-and-execute, fork bombs) and deletes aimed at a
-  drive, filesystem, home or system root.
+  deletion, shutdown, download-and-execute, fork bombs), deletes aimed at a
+  drive, filesystem, home or system root, and command text above
+  ``_MAX_TEXT`` characters (it is not read, and bypass would skip an ASK).
+
+``classify`` answers ``BLOCK`` when the rules in this module (``_classify``)
+or the stricter rules of ``tool_call_classifier_floor`` (``blocks``) block,
+and this module's verdict otherwise.  The floor only adds BLOCKs: parameter
+expansion WORDs (``${X:=/}``), the shell strings other code hands to an exec
+call (``os.system("rm -rf /")``), argv elements read with no shell, the text
+of ``run_program``'s ``command`` read as the one argv the client runs
+(``rg -e x / ; echo --pre=rm``), a delete verb in any word or assembled by
+quotes (``r"m" -rf /``), a flag's value (``-Path:'C:\\Program Files'``) and
+the size cap.  So no verdict is ever lower than this module's own.
 
 BLOCK is a denylist, and a denylist is not complete: it refuses the
 destructive shapes it recognises, and the same effect spelled some other way
@@ -62,7 +72,9 @@ catalog's read-only (``safe``/``ask``) and file-edit (``mutation``) grades are
 ``ALLOW``.  The caller passes the grade (``risk``) it read from the permission
 catalog; an unknown or missing grade is ``ASK``.
 
-It fails closed: any fault while classifying answers ``ASK``, never ``ALLOW``.
+It fails closed: a fault while classifying answers ``ASK`` for arguments of
+a shape it does not read, and ``BLOCK`` for any other fault in a call that
+carries command text (bypass skips an ASK), never ``ALLOW``.
 It is purely static (no model call, no I/O), so there is no timeout path.
 Arguments are inspected in memory and never logged or kept.
 
@@ -78,6 +90,8 @@ import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, NamedTuple
+
+from sonder_runtime.domain.security import tool_call_classifier_floor as _floor
 
 ALLOW, ASK, BLOCK = "allow", "ask", "block"
 VERDICTS = frozenset({ALLOW, ASK, BLOCK})
@@ -98,7 +112,7 @@ _SHELL_LANGUAGES = frozenset({
 })
 # Languages whose backtick is an escape character, not a command substitution.
 _BACKTICK_ESCAPES = frozenset({"pwsh", "powershell", "ps1"})
-# Above this many characters of command text the classifier does not read it: ASK.
+# Above this many characters of command text ``_classify`` does not read it and asks (the floor blocks it).
 _MAX_TEXT = 256 * 1024
 # Substitutions nested deeper than this are read as part of the deepest one.
 _MAX_DEPTH = 64
@@ -1060,15 +1074,26 @@ def _classify(tool_name: str, arguments: Any, risk: str) -> str:
 
 
 def classify(tool_name: str, arguments: Any, *, risk: str) -> str:
-    """``ALLOW``, ``ASK`` or ``BLOCK`` for one tool call; ``ASK`` on any fault.
+    """``ALLOW``, ``ASK`` or ``BLOCK`` for one tool call; never ``ALLOW`` on a fault.
 
-    ``risk`` is the permission catalog's grade for ``tool_name``.
+    ``risk`` is the permission catalog's grade for ``tool_name``.  The
+    verdict is ``BLOCK`` when this module's rules (``_classify``) or the
+    floor's (``tool_call_classifier_floor.blocks``) block, and this module's
+    verdict otherwise.  A fault in ``_classify`` asks for arguments of a shape
+    it does not read and blocks any other call that carries command text: bypass
+    skips an ASK, so a fault while reading a command must not let it run unread.
     """
     try:
         verdict = _classify(tool_name, arguments, risk)
+    except _Unreadable:
+        verdict = ASK
     except Exception:  # noqa: BLE001 - fail closed: a fault is never an allow
-        return ASK
-    return verdict if verdict in VERDICTS else ASK
+        verdict = BLOCK if _floor.carries_commands(arguments) else ASK
+    if verdict not in VERDICTS:
+        verdict = ASK
+    if verdict == BLOCK or _floor.blocks(tool_name, arguments):
+        return BLOCK
+    return verdict
 
 
 __all__ = ["ALLOW", "ASK", "BLOCK", "VERDICTS", "classify"]
