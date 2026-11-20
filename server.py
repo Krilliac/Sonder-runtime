@@ -50,6 +50,7 @@ from pathlib import Path
 from pydantic import StrictBool, StrictInt, StrictStr
 
 import sonder_runtime.adapters.task_store as task_state_adapter
+import sonder_runtime.adapters.agent_outcomes as agent_outcomes
 import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
@@ -20226,7 +20227,7 @@ def _agent_project_scope(project):
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
-    action = "Perform the requested analysis" if read_only else "Implement the requested changes"
+    action = "Perform the requested analysis" if read_only else "Carry out the requested work"
     items = [
         "Inspect relevant folders, files, programs, and context",
         action,
@@ -20369,6 +20370,7 @@ def _agent_turn(
         )
 
     _maybe_live_reload()
+    cancel_check = agent_outcomes.combined_cancel(cancel_check, _foreground_turns.current())  # polled before and between sends
     capture_session = _resolve_session(session) if session is not None else None
     # A model failure that ends this run is noted for the escalating
     # workbench runner under this run's own identity, so a nested agent's
@@ -20667,6 +20669,7 @@ def _agent_turn(
     transcript += "\n\n" + _agent_verification_standing_notice()
     pre_model_context_rendered = False
     pre_model_context_response_observed = False
+    model_failure: dict = {}  # typed kind on a ModelCallError exit, for fleet workers
     if pre_model_context is not None:
         # The pre-model callback runs after route, project scope, system text,
         # and visible tools are resolved, but before the first provider call.
@@ -20680,18 +20683,11 @@ def _agent_turn(
     transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
-        if (
-            (cancel_check is not None and _cancel_requested(cancel_check))
-            or _foreground_turns.cancel_requested()
-        ):
+        if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
             if _standalone_lanes.current() is not None:
                 _standalone_lanes.current().request_cancel()
             raise ModelCallError(
-                "cancelled",
-                "agent call cancelled before another model/tool action",
-                attempts=0,
-                cloud=cloud,
-            )
+                "cancelled", "agent call cancelled before another model/tool action", attempts=0, cloud=cloud)
 
     def _teardown_speculation():
         # Squash anything in flight and persist the learned predictor so it
@@ -20775,6 +20771,7 @@ def _agent_turn(
                 prefix, failures,
             )
             failed = True
+        agent_outcomes.mark_failure_incomplete(activity_tracker, final, failed)
         final = _attach_tool_evidence(final)
         if controller is not None:
             terminal_class = "ERROR" if failed else "NORMAL"
@@ -20846,19 +20843,12 @@ def _agent_turn(
                 )
             final = block + "\n\n" + final
         elif standing and not failed:
-            final = "%s this run claimed completion without %s - %s\n\n%s" % (
-                _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
-            )
-            # The activity/end-report status must agree with the host fence.
-            # Otherwise users see ``result: complete`` directly above this
-            # warning and the model's claim wins the most visible field.
-            activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
+            if mutated or delegated:
+                final = agent_outcomes.unverified_banner(
+                    final, standing, _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, activity_tracker)
             if not mutated and not validation_attempted:
-                # Measured 2026-09-03: a 1.5B "completed" a fix request after
-                # twelve model calls that changed nothing and ran nothing.
-                # That is the model not doing the work, and the escalating
-                # runner treats it as a failure when the request asked for a
-                # change or a check (never for a read or an explanation).
+                # Measured 2026-09-03: a 1.5B "completed" a fix request after twelve
+                # calls that changed nothing; the escalating runner treats that as a failure.
                 _note_agent_model_failure(
                     tier_escalation.REASON_FAILED, key=escalation_key, step=0,
                     detail="claimed completion without a change or a validation",
@@ -20915,7 +20905,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=validated,
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed,
+                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
                 **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
                 **certificate_fields,
             )
@@ -20935,6 +20925,7 @@ def _agent_turn(
             return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")
+        agent_outcomes.mark_failure_incomplete(activity_tracker, text)
         # Early exits are still auditable outcomes.  A worker may have already
         # collected valid, host-observed repository evidence before the model
         # exhausted its step budget, repeated a cached inspection, or failed
@@ -20951,7 +20942,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=_work_validated(),
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed,
+                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
             )
         return text
 
@@ -21100,6 +21091,8 @@ def _agent_turn(
                 )
         _spec_decision_t0 = time.monotonic()
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        if decision is not None:
+            ensure_not_cancelled()
         if pre_model_context_rendered and raw:
             pre_model_context_response_observed = True
         _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
@@ -21114,7 +21107,7 @@ def _agent_turn(
                     tier_escalation.failure_reason(error=decision_error),
                     key=escalation_key, step=step,
                 )
-                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
+                agent_outcomes.model_request_failed(activity_tracker, model_failure, decision_error)
                 return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21785,6 +21778,8 @@ def _agent_turn(
         final_decision, raw, final_error = _agent_generate_decision(
             gen, final_prompt, require_final=True,
         )
+        if final_decision is not None:
+            ensure_not_cancelled()  # a cancel during the call discards its answer
         if pre_model_context_rendered and raw:
             pre_model_context_response_observed = True
         if final_decision is None:
@@ -21796,7 +21791,7 @@ def _agent_turn(
                         "model request failed during final synthesis",
                         active_item,
                     )
-                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
+                agent_outcomes.model_request_failed(activity_tracker, model_failure, final_error)
                 return _early_exit(render_model_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
@@ -23178,6 +23173,8 @@ def _route_work_request(
                             "routing", "ollama", True,
                         )
             except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, ModelCallError) and agent_outcomes.router_capacity_error(exc):
+                    return agent_outcomes.router_capacity_busy(exc, _format_model_call_error)
                 if npu_fallback_attempted:
                     with contextlib.suppress(Exception):
                         npu_service.record_fallback_handler(

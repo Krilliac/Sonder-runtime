@@ -30,10 +30,12 @@ body only up to a fixed byte ceiling.
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
 import ipaddress
 import json
 import logging
+import re
 import socket
 import ssl
 import time
@@ -42,11 +44,25 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from email.utils import format_datetime, parsedate_to_datetime
+from types import SimpleNamespace
 from typing import Sequence
 from urllib.parse import urlsplit
 
+import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
+from .exchange_transport import (
+    DEFAULT_TIMEOUT_SECONDS as _EXCHANGE_DEFAULT_TIMEOUT,
+    ERROR_BODY_LIMIT,
+    RESPONSE_BODY_LIMIT as _EXCHANGE_RESPONSE_LIMIT,
+    _BudgetedHTTPHandler,
+    _BudgetedHTTPSHandler,
+    _ExchangeBudget,
+    _NoRedirect,
+    _error_document_fields,
+    _read_bounded,
+)
 from .log_safe import UNSENDABLE_URL_CHARS as _UNSENDABLE_URL_CHARS
 from .log_safe import redact_url, urlsplit_or_none
+from ...application.chat import stream_sink
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
     Embedding,
@@ -71,6 +87,7 @@ from ...domain.common.errors import (
     InvalidInput,
     SonderError,
 )
+from ...domain.gpu_admission import RefusalReason
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_EMBEDDINGS,
@@ -84,6 +101,7 @@ from ..model_request_admission import (
 from ..model_transport import ModelCallError
 from ..tls_contexts import default_https_context
 from ..provider_bindings import provider_id_for_label
+from .sse_stream import StreamTimeout, post_streaming, stall_limits
 from .telemetry import from_openai_compatible
 
 logger = logging.getLogger(__name__)
@@ -92,23 +110,20 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 _DEFAULT_TIMEOUT = 300
 # Error bodies and GET responses are read with a hard bound: an error page is
 # only ever inspected for a machine-readable code, never stored or relayed.
-ERROR_BODY_LIMIT = 16_384
 GET_BODY_LIMIT = 1_048_576
 # A non-streaming completion or embedding batch is one JSON object; a larger
 # successful body is not a response this runtime will buffer.
 POST_BODY_LIMIT = 16 * 1024 * 1024
-_READ_CHUNK = 65_536
 ENV_ALLOW_HTTP_NETWORKS = "SONDER_OPENAI_ALLOW_HTTP_NETWORKS"
+ENV_STREAM_IDLE = "SONDER_OPENAI_STREAM_IDLE_TIMEOUT_SECONDS"
+ENV_STREAM_FIRST_CONTENT = "SONDER_OPENAI_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS"
+# Streaming stall limits (0 disables, the default): see sse_stream.
+MAX_STREAM_STALL_SECONDS = 86_400.0
 _MALFORMED_BASE_URL = (
     "OpenAI-compatible base URL is not a valid http:// or https:// URL "
     "(check the host, the port, and for spaces or control characters)"
 )
 _PERCENT_IN_HOST = "OpenAI-compatible base URL host must not contain percent-encoding"
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
 
 def shared_https_context() -> ssl.SSLContext:
     """The verifying TLS context for model-endpoint openers, shared in-process.
@@ -136,17 +151,46 @@ def _opener_for(url: str):
     return urllib.request.build_opener(*handlers)
 
 
-def _read_bounded(stream, limit: int) -> bytes:
-    """Read at most ``limit + 1`` bytes so an oversize body is detectable."""
-    chunks: list[bytes] = []
-    total = 0
-    while total <= limit:
-        chunk = stream.read(min(_READ_CHUNK, limit + 1 - total))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-    return b"".join(chunks)
+def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
+    """``"stream": true`` POST: read the event stream into one completion.
+
+    Reuses the Sonder Inference stream reader (:mod:`.sse_stream`) with this
+    module's opener policy (no redirects; loopback bypasses every proxy).  The
+    exchange helpers live in the leaf :mod:`.exchange_transport`, which both
+    gateways import, so there is no import cycle; they are handed to
+    ``post_streaming`` as a namespace.
+    """
+    def error_fields(document: object) -> tuple[str, str]:
+        # A remote endpoint's message text is not relayed (the non-streaming
+        # path emits only the HTTP status); a short token-like code is kept.
+        code = _error_document_fields(document)[0]
+        return (code if re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", code) else "", "")
+
+    exchange = SimpleNamespace(
+        DEFAULT_TIMEOUT_SECONDS=_EXCHANGE_DEFAULT_TIMEOUT,
+        ERROR_BODY_LIMIT=ERROR_BODY_LIMIT,
+        RESPONSE_BODY_LIMIT=_EXCHANGE_RESPONSE_LIMIT,
+        _ExchangeBudget=_ExchangeBudget,
+        _NoRedirect=_NoRedirect,
+        _BudgetedHTTPHandler=_BudgetedHTTPHandler,
+        _BudgetedHTTPSHandler=_BudgetedHTTPSHandler,
+        _read_bounded=_read_bounded,
+        _error_document_fields=error_fields,
+    )
+
+    def opener_factory(budget):
+        handlers: list = [
+            _NoRedirect(),
+            _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
+        ]
+        if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+            handlers.append(urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
+
+    return post_streaming(
+        url, payload, headers, timeout or _DEFAULT_TIMEOUT, stream_sink.call_stream(),
+        exchange=exchange, opener_factory=opener_factory, label="endpoint",
+    )
 
 
 def _split_networks(raw: str) -> tuple[str, ...]:
@@ -171,6 +215,18 @@ CAPABILITIES = frozenset({
 })
 
 
+class BackendAdmissionRefused(CapacityExceeded):
+    """Local GPU/host-memory admission refused the request.
+
+    ``reason`` is the ``RefusalReason`` value; ``retry_after`` is in seconds
+    (or None)."""
+
+    def __init__(self, message: str, *, reason: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.retry_after = retry_after
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     base_url: str
@@ -179,6 +235,32 @@ class OpenAICompatibleConfig:
     embed_model: str = ""
     # CIDRs whose private IP-literal hosts may be reached over plain http.
     plaintext_networks: tuple[str, ...] = ()
+    # Streaming stall limits in seconds (0 disables); inside the call budget.
+    stream_idle_seconds: float = 0.0
+    stream_first_content_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.stream_idle_seconds, ENV_STREAM_IDLE),
+                            (self.stream_first_content_seconds, ENV_STREAM_FIRST_CONTENT)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+                0.0 <= float(value) <= MAX_STREAM_STALL_SECONDS
+            ):
+                raise InvalidInput("%s must be in [0, 86400] (0 disables it)" % name)
+
+
+def _env_seconds(name: str) -> float:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise InvalidInput("%s must be a number, got %r" % (name, raw)) from exc
+    if value != value:  # NaN
+        raise InvalidInput("%s must be a number, got %r" % (name, raw))
+    return value
 
 
 def _config_from_env() -> OpenAICompatibleConfig:
@@ -190,6 +272,8 @@ def _config_from_env() -> OpenAICompatibleConfig:
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
         plaintext_networks=_split_networks(os.environ.get(ENV_ALLOW_HTTP_NETWORKS, "")),
+        stream_idle_seconds=_env_seconds(ENV_STREAM_IDLE),
+        stream_first_content_seconds=_env_seconds(ENV_STREAM_FIRST_CONTENT),
     )
 
 
@@ -378,14 +462,20 @@ class OpenAICompatibleGateway:
         timeout = self._check_liveness(context)
 
         options = dict(request.options or {})
+        live = stream_sink.call_stream()
         model = str(options.get("model") or cfg.model or request.tier or "default")
         logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload = {
             "model": model,
             "messages": self._build_messages(request),
-            "stream": False,
+            # The caller's live stream (claimed only for a streaming provider)
+            # decides: a streaming call reads the event stream and returns the
+            # same aggregated document, so everything below is unchanged.
+            "stream": live is not None,
             "temperature": float(options.get("temperature", 0.2)),
         }
+        if live is not None:
+            payload["stream_options"] = {"include_usage": True}
         try:
             template_kwargs = normalize_chat_template_options(options)
         except ChatTemplateOptionsError as exc:
@@ -396,7 +486,11 @@ class OpenAICompatibleGateway:
             payload["max_tokens"] = int(options["num_predict"])
 
         started = time.monotonic()
-        data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+        with stall_limits(
+            cfg.stream_idle_seconds, cfg.stream_first_content_seconds,
+            idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
+        ):
+            data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
         # urllib cannot observe a token while blocked.  A final liveness gate
         # prevents a response/cancellation race from publishing stale work.
         self._check_liveness(context, phase="during model call")
@@ -558,6 +652,36 @@ class OpenAICompatibleGateway:
             return None
         return self._connect_error_classifier(reason)
 
+    @staticmethod
+    def _backend_admission(
+        path: str, payload: dict, cfg: OpenAICompatibleConfig,
+        context: OperationContext | None,
+    ):
+        """GPU-slot admission for a chat request to a declared streamed model.
+
+        It takes the shared GPU slot (queueing for it), and checks host memory
+        only when a residency callback answers False; production passes none,
+        so the gateway path queues but does not refuse on memory. Only a loopback endpoint whose model has a declaration in
+        ``SONDER_GPU_STREAMED_MODELS`` is gated; everything else passes through.
+        A remote endpoint never touches admission. A refusal raises
+        ``GpuAdmissionRefused``, which ``_post`` maps to a domain error; an
+        invalid declaration on a loopback endpoint raises ``InternalFailure``."""
+        model = payload.get("model")
+        if path != "/v1/chat/completions" or not isinstance(model, str) or not model:
+            return contextlib.nullcontext()
+        try:
+            service = gpu_admission.backend_service_for(cfg.base_url)
+        except ValueError as error:
+            raise InternalFailure("GPU admission is misconfigured: %s" % error) from error
+        if service is None:
+            return contextlib.nullcontext()
+        footprint = service.declared_backend_footprint(model)
+        if footprint is None:
+            return contextlib.nullcontext()
+        deadline = context.deadline_monotonic if context is not None else None
+        return service.admit_backend(
+            model, origin=cfg.base_url, footprint=footprint, deadline=deadline)
+
     def _post(
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
         *, context: OperationContext | None = None,
@@ -578,14 +702,36 @@ class OpenAICompatibleGateway:
         headers = self._headers(cfg, context)
         failure: SonderError | None = None
         http_cause: urllib.error.HTTPError | None = None
+        cause: BaseException | None = None
+        gate = self._backend_admission(path, payload, cfg, context)
         try:
-            if path == "/v1/chat/completions":
-                data = dispatch_provider(
-                    self._provider_label, path, payload,
-                    lambda: transport(url, payload, headers, timeout),
-                )
+            with gate:
+                if context is not None:
+                    # The admission wait can be long; the request may have been
+                    # cancelled or expired meanwhile, and the transport budget
+                    # must be what is left, not what was left before the wait.
+                    left = self._check_liveness(context, phase="after local admission")
+                    if left is not None:
+                        timeout = left if timeout is None else min(timeout, left)
+                if path == "/v1/chat/completions":
+                    data = dispatch_provider(
+                        self._provider_label, path, payload,
+                        lambda: transport(url, payload, headers, timeout),
+                    )
+                else:
+                    data = transport(url, payload, headers, timeout)
+        except gpu_admission.GpuAdmissionRefused as exc:
+            # A typed refusal, not a transport failure; it must stay ahead of
+            # the URLError clause because it is one.
+            cause = exc
+            refusal = exc.refusal
+            if refusal.reason is RefusalReason.STORE_UNAVAILABLE:
+                failure = DependencyUnavailable("GPU admission store is unavailable")
             else:
-                data = transport(url, payload, headers, timeout)
+                failure = BackendAdmissionRefused(
+                    "local model admission refused (%s): %s"
+                    % (refusal.reason.value, refusal.detail),
+                    reason=refusal.reason.value, retry_after=exc.retry_after_seconds)
         except urllib.error.HTTPError as exc:
             code = getattr(exc, "code", 0)
             retry_after = next((value for key, value in (exc.headers or {}).items()
@@ -618,6 +764,13 @@ class OpenAICompatibleGateway:
                         f"http_status={code}, url={safe_url!r}"
                     )
                     failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+        except StreamTimeout as exc:
+            logger.warning(
+                f"OpenAI-compatible endpoint {exc.kind} timeout: url={safe_url!r}, "
+                f"timeout={timeout}"
+            )
+            # The text names the limit and the elapsed numbers; it carries no URL.
+            failure = DeadlineExceeded(str(exc))
         except (socket.timeout, TimeoutError):
             logger.warning(
                 f"OpenAI-compatible endpoint timed out: url={safe_url!r}, "
@@ -662,7 +815,7 @@ class OpenAICompatibleGateway:
                 failure = DependencyUnavailable("cannot reach endpoint")
         # Raise after the handlers so no raw transport error becomes context.
         if failure is not None:
-            raise failure from http_cause
+            raise failure from (cause if cause is not None else http_cause)
         if not isinstance(data, dict):
             raise InternalFailure("endpoint transport returned a non-object response")
         return data
@@ -738,6 +891,8 @@ class OpenAICompatibleGateway:
 
     @staticmethod
     def _default_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
+        if payload.get("stream") is True:
+            return _stream_transport(url, payload, headers, timeout)
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         # Never follow a redirect: urllib would turn the POST into a GET and

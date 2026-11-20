@@ -5,6 +5,14 @@ bounds in TOML, in the environment overrides and in the typed binding. Defaults
 are conservative: ``enforce`` mode, one GPU slot, 4 GiB floors on available RAM
 and on commit headroom, and a request for a different ``num_ctx`` is served at
 the window the model is already loaded with.
+
+``SONDER_GPU_STREAMED_MODELS`` declares expert-streaming models served by a
+loopback OpenAI-compatible backend. It is a JSON object keyed by model name,
+each value an object with ``expert_cache_bytes`` (required) and optionally
+``dense_bytes``, ``kv_bytes_per_token``, ``state_bytes`` and ``num_ctx``; any
+other field is rejected. It is validated at startup by
+``configure_typed_gpu_admission`` and is not one of ``ENVIRONMENT_NAMES``,
+which map to config fields.
 """
 from __future__ import annotations
 
