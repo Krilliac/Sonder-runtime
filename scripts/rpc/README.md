@@ -18,17 +18,32 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
 - Node1 `rpc-server` binds **strictly** to `10.77.0.2:50052` (never `0.0.0.0` or public LAN).
 - Node1 Windows Firewall rule `Node1 llama-rpc 50052 from Main peer` allows inbound TCP `50052` **only** from `10.77.0.1` to `10.77.0.2` (`-Profile Any` because private-link Ethernet can classify as `Public`).
 - Main `llama-server` binds **strictly** to `127.0.0.1:11438` (loopback only, no cloud egress).
+- `start-node1-rpc.ps1 -Action Start` **always** checks the effective Windows Firewall policy before it launches
+  `rpc-server`, with or without `-EnsureFirewall`, and refuses to start (throws, non-zero exit) when:
+  - no enabled inbound Allow rule has exactly TCP `<Port>`, LocalAddress `<HostAddress>` and RemoteAddress `10.77.0.1`;
+  - any other enabled inbound Allow rule admits TCP `<Port>` (directly, through `Any`, a range that contains it, or a
+    port keyword) or the `rpc-server.exe` / `ggml-rpc-server.exe` program under `-InstallDir`, from any remote
+    address other than exactly `10.77.0.1` (`Any`, `LocalSubnet`, a LAN range, ...). Rules bound to another program
+    or to a packaged (Store) app are ignored, because they cannot admit `rpc-server` traffic;
+  - a firewall profile is off or allows inbound by default, or a rule's filters cannot be read.
+
+  The refusal message names the fix: run `ensure-node1-rpc-fw.ps1 -Port <Port>` (or Start with `-EnsureFirewall`)
+  from an elevated shell, and `Disable-NetFirewallRule -Name '<rule>'` for each wider rule it lists.
+- `-EnsureFirewall` runs `ensure-node1-rpc-fw.ps1 -Port <Port>` first (needs admin) and refuses to start if that
+  helper is missing from the folder holding `start-node1-rpc.ps1`, or fails. The helper always uses LocalAddress
+  `10.77.0.2`, so `-EnsureFirewall` only satisfies the check for the default `-HostAddress 10.77.0.2`.
 
 ## Current Hardware Usage (780M iGPU on Node1)
 
-1. Ensure Node1 firewall rule (once as admin on Node1):
+1. Ensure Node1 firewall rule (once as admin on Node1; add `-Port <Port>` if rpc-server uses a non-default port):
    ```powershell
    powershell -NoProfile -File C:\NewBuild\scripts\ensure-node1-rpc-fw.ps1
    ```
-2. Start Node1 Vulkan RPC worker:
+2. Start Node1 Vulkan RPC worker. From an elevated shell, `-EnsureFirewall` refreshes the peer-only rule first:
    ```powershell
-   powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Start
+   powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Start -EnsureFirewall
    ```
+   From a non-admin shell, omit `-EnsureFirewall`: Start still verifies the firewall and refuses if step 1 was not done.
 3. Start Main sharded `llama-server` (using an Ollama tag or explicit `.gguf` path):
    ```powershell
    powershell -NoProfile -File %LOCALAPPDATA%\sonder\deployment\start-rpc-sharded.ps1 `
@@ -42,10 +57,11 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
    ```powershell
    powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Devices
    ```
-3. Start Node1 `rpc-server` pinned to the RX 9060 XT Vulkan device (with `-UseCache` optional):
+3. Start Node1 `rpc-server` pinned to the RX 9060 XT Vulkan device (with `-UseCache` optional; from an elevated
+   shell, or drop `-EnsureFirewall` when not admin):
    ```powershell
    powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Stop
-   powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Start -Device Vulkan0 -UseCache
+   powershell -NoProfile -File C:\NewBuild\scripts\start-node1-rpc.ps1 -Action Start -Device Vulkan0 -UseCache -EnsureFirewall
    ```
 4. Flip Main launch flags to balanced 16 GB + 16 GB VRAM sharding (`-TensorSplit 16,16 -CtxSize 16384`):
    ```powershell
