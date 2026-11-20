@@ -1,4 +1,8 @@
-"""Startup readiness logging for the RPC sharded backend probe."""
+"""Startup readiness logging for the RPC sharded backend probe.
+
+Ported from #785: the helper now lives in ``rpc_cluster.log_sharded_readiness``
+(called by ``serve.main`` through ``log_sharded_readiness_from_env``).
+"""
 from __future__ import annotations
 
 import http.client
@@ -16,6 +20,19 @@ from sonder_runtime.adapters.inference.rpc_cluster import (
 from sonder_runtime.interfaces.http import serve
 
 
+def _ready(base, probe):
+    """Run the rpc_cluster helper against serve's logger; return the probed health or None."""
+    seen: list[ShardedServerHealth] = []
+
+    def capture(url: str) -> ShardedServerHealth:
+        health = probe(url)
+        seen.append(health)
+        return health
+
+    rpc_cluster.log_sharded_readiness(serve._serve_logger, base, probe=capture)
+    return seen[0] if seen else None
+
+
 def test_readiness_result_is_logged_with_model_ids(caplog: pytest.LogCaptureFixture) -> None:
     health = ShardedServerHealth(
         base_url="http://127.0.0.1:11438",
@@ -24,9 +41,7 @@ def test_readiness_result_is_logged_with_model_ids(caplog: pytest.LogCaptureFixt
         model_ids=("sonder-rpc",),
     )
     with caplog.at_level(logging.INFO, logger=serve._serve_logger.name):
-        result = serve._log_sharded_backend_readiness(
-            "http://127.0.0.1:11438", probe=lambda _url: health
-        )
+        result = _ready("http://127.0.0.1:11438", probe=lambda _url: health)
     assert result is health
     messages = [r.getMessage() for r in caplog.records]
     assert any("healthy=True" in m and "['sonder-rpc']" in m for m in messages)
@@ -41,8 +56,8 @@ def test_transport_and_config_failures_become_warning(caplog: pytest.LogCaptureF
         raise RpcClusterConfigError("not loopback")
 
     with caplog.at_level(logging.WARNING, logger=serve._serve_logger.name):
-        assert serve._log_sharded_backend_readiness("http://127.0.0.1:1", probe=refuse) is None
-        assert serve._log_sharded_backend_readiness("http://10.0.0.1:1", probe=bad_config) is None
+        assert _ready("http://127.0.0.1:1", probe=refuse) is None
+        assert _ready("http://10.0.0.1:1", probe=bad_config) is None
     messages = [r.getMessage() for r in caplog.records]
     assert any("ConnectionRefusedError" in m for m in messages)
     assert any("RpcClusterConfigError" in m for m in messages)
@@ -53,7 +68,7 @@ def test_programming_errors_propagate() -> None:
         raise AttributeError("boom")
 
     with pytest.raises(AttributeError, match="boom"):
-        serve._log_sharded_backend_readiness("http://127.0.0.1:1", probe=broken)
+        _ready("http://127.0.0.1:1", probe=broken)
 
 
 def _deep_get(_url: str, _timeout: float) -> tuple[int, bytes]:
@@ -65,19 +80,17 @@ def test_deeply_nested_reply_becomes_warning(caplog: pytest.LogCaptureFixture) -
         return rpc_cluster.probe_sharded_server(url, get_fn=_deep_get)
 
     with caplog.at_level(logging.INFO, logger=serve._serve_logger.name):
-        assert serve._log_sharded_backend_readiness("http://127.0.0.1:11438", probe=probe) is None
+        assert _ready("http://127.0.0.1:11438", probe=probe) is None
     assert any("probe failed (RecursionError)" in r.getMessage() for r in caplog.records)
 
 
 def test_unhealthy_status_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     health = ShardedServerHealth(base_url="http://127.0.0.1:11438", healthy=False, error="x")
     with caplog.at_level(logging.INFO, logger=serve._serve_logger.name):
-        result = serve._log_sharded_backend_readiness(
-            "http://127.0.0.1:11438", probe=lambda _url: health
-        )
+        result = _ready("http://127.0.0.1:11438", probe=lambda _url: health)
     assert result is health
     records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == serve._serve_logger.name]
-    assert (logging.WARNING, "RPC sharded backend status: healthy=False models=[]") in records
+    assert (logging.WARNING, "RPC sharded backend status: healthy=False models=[] error=x") in records
     assert not any("probe failed" in m for _lvl, m in records)
 
 

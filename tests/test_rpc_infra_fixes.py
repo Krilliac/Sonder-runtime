@@ -53,6 +53,13 @@ def test_readiness_warns_when_backend_unhealthy(caplog: pytest.LogCaptureFixture
 
 
 def test_readiness_never_raises(caplog: pytest.LogCaptureFixture) -> None:
+    """Transport/config failures never raise; programming errors now do (#785).
+
+    The helper used to catch every Exception, which turned an AttributeError in
+    the probe into a "probe failed" warning and hid the bug.  The contract is
+    now: expected probe failures are logged and swallowed, anything else
+    propagates (tests/test_serve_sharded_probe_readiness.py covers the rest).
+    """
     logger = logging.getLogger("test.rpc.readiness.raise")
 
     def boom(_url: str) -> ShardedServerHealth:
@@ -61,6 +68,12 @@ def test_readiness_never_raises(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger=logger.name):
         log_sharded_readiness(logger, "http://10.77.0.2:1", probe=boom)
     assert "probe failed (RpcClusterConfigError)" in caplog.text
+
+    def buggy(_url: str) -> ShardedServerHealth:
+        raise AttributeError("probe bug")
+
+    with pytest.raises(AttributeError, match="probe bug"):
+        log_sharded_readiness(logger, "http://127.0.0.1:11438", probe=buggy)
 
 
 def _healthy(url: str) -> ShardedServerHealth:
