@@ -311,6 +311,36 @@ def test_http_non_admin_context_never_inherits_remote_consent(monkeypatch, tmp_p
     assert tuple(context.workspace_roots) == ()
 
 
+@pytest.mark.parametrize("auth", [
+    {"authorized": True, "mode": "local-open"},
+    {"authorized": True, "mode": "account", "account": {"role": "admin", "username": "root"}},
+])
+def test_http_principal_roots_are_only_the_configured_roots(monkeypatch, tmp_path, auth):
+    # The lane-grant widening (SONDER_FILE_ROOTS, file_roots.local, the
+    # default workspace root) is for the local-owner lane context only; an
+    # HTTP principal, admin included, carries exactly [state].workspace_roots.
+    configured = tmp_path / "configured"
+    env_root = tmp_path / "env-root"
+    listed = tmp_path / "listed"
+    workspaces = tmp_path / "workspaces"
+    for folder in (configured, env_root, listed, workspaces):
+        folder.mkdir()
+    roots_file = tmp_path / "file_roots.local"
+    roots_file.write_text("%s\n" % listed, encoding="utf-8")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(env_root))
+    monkeypatch.setenv("SONDER_FILE_ROOTS_FILE", str(roots_file))
+    monkeypatch.setenv("SONDER_DEFAULT_WORKSPACE_ROOT", str(workspaces))
+    _granting_app(monkeypatch, [configured])
+    expected = (str(configured.resolve()),)
+    assert serve._http_workspace_roots(auth) == expected
+    context = serve._http_debug_context(auth, "t")
+    assert tuple(str(root) for root in context.workspace_roots) == expected
+    # Nothing configured means no grant at all, not the ambient roots.
+    _granting_app(monkeypatch, [])
+    assert serve._http_workspace_roots(auth) == ()
+    assert tuple(serve._http_debug_context(auth, "t").workspace_roots) == ()
+
+
 def test_agent_lane_context_carries_remote_consent_and_unified_roots(monkeypatch, tmp_path):
     import server
     listed = tmp_path / "listed"

@@ -3237,13 +3237,15 @@ def _http_principal(auth):
 
 
 def _http_workspace_roots(auth):
-    """Configured workspace roots for an admin caller; () for anyone else."""
+    """Configured [state].workspace_roots (resolved) for an admin; () otherwise.
+
+    Never ``file_ops.lane_grant_roots``: its ambient roots are for local-owner lanes only."""
     if not _admin_authorized(auth):
         return ()
     from sonder_runtime.bootstrap.app import default_app
 
     state = getattr(getattr(default_app(), "config", None), "state", None)
-    return tuple(server.file_ops.lane_grant_roots(getattr(state, "workspace_roots", ())))
+    return tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ()))
 
 
 def _http_debug_context(auth, correlation_id):
@@ -3844,7 +3846,7 @@ def _work_project_for_request(project, storage_project, content="", auth=None):
 
     Durable state keeps its principal namespace; file work needs the original
     project selection so an unset/default project can use a creations lane.
-    With no project, a directory the text names inside *auth*'s grant (owner/admin lane roots, () otherwise) is used.
+    With no project, a directory the text names inside *auth*'s grant (an owner/admin's configured workspace roots, () otherwise) is used.
     """
     named = server.file_ops.named_directory(content, roots) if auth is not None and str(project or "").strip().lower() in {"", "default", "none"} and (roots := _http_workspace_roots(auth)) else ""
     return named or server.served_work_project(project) or (

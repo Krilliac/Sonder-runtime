@@ -389,7 +389,7 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
 
 
 def lane_grant_roots(configured=()) -> tuple[str, ...]:
-    """The one root set agent lanes, fleets and HTTP tool contexts are scoped to.
+    """The root set the local-owner agent lane context is scoped to.
 
     It is ``allowed_roots()`` minus the two roots no caller may be handed as a
     work area: the state home and Sonder's own checkout. What remains is the
@@ -403,7 +403,9 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
     The local-owner lane context (``server._agent_lane_context``) is scoped to
     this set and also inherits the configured remote-Ollama consent
     (decision 14); a non-owner caller never reaches that context, so neither
-    widens anyone else's reach.
+    widens anyone else's reach. HTTP principals are NOT scoped to this set:
+    ``serve._http_workspace_roots`` hands an admin caller only the configured
+    ``[state].workspace_roots`` (resolved) and anyone else ``()``.
     """
     excluded = []
     for root in (workspace_root(), Path(runtime_paths.default_home())):
@@ -452,8 +454,8 @@ def named_directory(text: str, roots: "tuple[object, ...] | list[object]" = ()) 
     """The first directory *text* names inside *roots*, or ``""``.
 
     *roots* is the caller's own grant (for the HTTP surfaces
-    ``serve._http_workspace_roots``: ``lane_grant_roots`` for an owner/admin
-    and ``()`` for anyone else), never ``allowed_roots()``, so prompt text can
+    ``serve._http_workspace_roots``: the configured ``[state].workspace_roots``
+    for an owner/admin and ``()`` for anyone else), never ``allowed_roots()``, so prompt text can
     never select the state home or Sonder's checkout. Empty *roots* returns
     ``""`` without touching the filesystem.
 
