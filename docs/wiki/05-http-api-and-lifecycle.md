@@ -25,7 +25,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/work-runs`, `GET /v1/work-runs/<id>` | developer/admin (own runs only) | Routed-work runs started by this principal: status (`running`, `returned`, `unknown`, `refused`, `cancelled`, `budget_exceeded`, `interrupted`, `failed`) and, for one run, its persisted answer. |
 | `POST /v1/work-runs/<id>/cancel` | developer/admin (own runs only) | Cancel a routed-work run: its effect fence stops holding, so every further file change, host program, or destructive tool is refused. |
 | `GET /v1/approvals` | developer/admin | Calls refused unattended that can be approved once (`pending`: call id, tool, redacted preview, count) and open approvals (`approvals`); `?limit=1..200`, `?include_spent=1` adds spent, revoked and expired ones. |
-| `POST /v1/approvals/<call_id>` | developer/admin | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
+| `POST /v1/approvals/<call_id>` | authenticated developer/admin (refused under local-open) | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
 | `POST /v1/approvals/revoke/<nonce>` | developer/admin | Withdraw one open approval (body `{}`). |
 | `GET /v1/sessions` | admin | Durable sessions, newest activity first: `id`, redacted `title` (first user message, one line, at most 80 characters), `turns`, `events`, `created`, `updated`; `?limit=1..100` (default 20) and `?after=<next_cursor>`. Ids are storage ids, the same ones `/v1/sessions/<id>/{events,export,replay}` take. |
 | `GET /v1/sessions/<id>/export?format=atif` | admin | The same bounded, redacted export as an [ATIF-v1.7](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md) trajectory for Harbor / Terminal-Bench tooling (save it as `trajectory.json`): model calls are agent steps with per-step `metrics` (token usage, provider time) and `llm_call_count`, tool calls link to their observations by `tool_call_id`/`source_call_id`, and a delegated child session linked by a `subagent.*` event is embedded in `subagent_trajectories` (at most 16 children per export, 4 levels deep; beyond that the delegation step stays, unresolved). Every string passes the export redaction again. Without `format` (or with `format=sonder`) the body is the unchanged `sonder.session-export.v1` envelope; any other value is a `400`. An export with no representable step is `409 session_atif_unavailable`. |
@@ -319,7 +319,13 @@ them.
 `POST /v1/approvals/<call_id>` is the attended answer to that ask. The
 security decision: an authenticated developer or administrator POST is an
 attended approval surface, the same precedent as `POST /v1/permission-mode`.
-The person holding the credential approves one exact call:
+Under `local-open` (no `SONDER_API_KEY` and no `SONDER_REQUIRE_ACCOUNT=1`,
+including `api-key` with no key on a loopback bind) no credential stands
+behind the POST, so it refuses to approve with
+`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN`, whatever account token is sent;
+approve at the console with `/approve <call_id>` instead. Listing and
+revoking stay allowed there. The person holding the credential approves one
+exact call:
 
 - only a call that was refused and is still pending can be approved; there is
   no approve-in-advance over HTTP (the console's `/approve call` keeps that);
@@ -332,11 +338,12 @@ The person holding the credential approves one exact call:
   retry replays the first response, with the refusal codes listed below;
 - the ledger spends the approval atomically on the next unchanged call from
   any surface and it expires after `ttl_seconds`; the mode is not changed;
-- the approver is recorded as `developer:<username>`, `admin-key` (the
-  deployment API key) or `local-open`, with surface `http`, and the action is
-  audited on the direct-tool path as `permission_approve`.
+- the approver is recorded as `developer:<username>` or `admin-key` (the
+  deployment API key), with surface `http`, and the action is audited on the
+  direct-tool path as `permission_approve`.
 
 Errors: `401` without credentials, `403 FORBIDDEN` for an ordinary account,
+`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN` for an approval under `local-open`,
 `400 INVALID_CALL_ID` / `INVALID_TTL` / `INVALID_REQUEST`,
 `404 CALL_NOT_PENDING` (already approved and run, aged out, or never refused),
 `404 APPROVAL_NOT_OPEN` on revoke, and `503 APPROVALS_UNAVAILABLE`.
