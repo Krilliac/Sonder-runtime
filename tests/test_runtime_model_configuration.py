@@ -17,7 +17,9 @@ def test_default_projection_preserves_server_model_and_tier_defaults():
     assert config.default_cloud_code_model == "kimi-k2.7-code:cloud"
     assert config.default_cloud_general_model == "glm-5.2:cloud"
     assert config.cloud_extra_usage_fallback_model == "kimi-k2.7-code:cloud"
-    assert config.retired_cloud_models == frozenset({"qwen3-coder:480b-cloud"})
+    assert config.retired_cloud_models == frozenset(
+        {"qwen3-coder:480b-cloud", "deepseek-v4-flash:cloud"}
+    )
     assert config.tier_bindings == (
         ("fast", "sonder:latest"),
         ("code", "sonder:latest"),
@@ -69,3 +71,18 @@ def test_projection_is_immutable_but_exposes_an_independent_compatibility_seed()
     seed = config.tier_map()
     seed["code"] = "temporary-test-binding"
     assert dict(config.tier_bindings)["code"] == "sonder:latest"
+
+
+def test_retired_deepseek_v4_flash_cloud_falls_back_to_defaults():
+    config = RuntimeModelConfiguration.from_environment(
+        {
+            "SONDER_CLOUD_CODE": "deepseek-v4-flash:cloud",
+            "SONDER_CLOUD_GENERAL": "DeepSeek-V4-Flash:Cloud",
+        },
+        floor=FLOOR,
+        lists=_test_model_lists.load().values,
+    )
+
+    bindings = dict(config.tier_bindings)
+    assert bindings["cloud-code"] == "kimi-k2.7-code:cloud"
+    assert bindings["cloud-general"] == "glm-5.2:cloud"
