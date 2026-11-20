@@ -8,6 +8,7 @@ Sonder's ``openai-compatible`` gateway treats it as local without cloud egress.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
@@ -481,11 +482,20 @@ def log_sharded_readiness(
     *,
     probe: Callable[[str], ShardedServerHealth] | None = None,
 ) -> None:
-    """Probe the sharded backend once and log the outcome (never raises)."""
+    """Probe the sharded backend once and log the outcome.
+
+    Only failures ``probe_sharded_server`` can really signal are downgraded to
+    a warning: config errors (``RpcClusterConfigError``/``ValueError``),
+    socket/HTTP transport errors (``OSError``, ``http.client.HTTPException``)
+    and ``RecursionError`` (a deeply nested JSON reply is backend data, not a
+    bug).  Anything else, e.g. AttributeError/TypeError, is a programming error
+    and propagates so a probe bug fails fast instead of reading as "probe
+    failed".
+    """
     run = probe_sharded_server if probe is None else probe
     try:
         health = run(base_url)
-    except Exception as exc:
+    except (OSError, ValueError, http.client.HTTPException, RecursionError) as exc:
         logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
         return
     if health.healthy:
