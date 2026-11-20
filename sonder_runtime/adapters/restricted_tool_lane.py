@@ -31,7 +31,11 @@ A restricted turn (:class:`RestrictedRun`) is then fenced:
   entries of a ``directory_tree`` that name a path matching a secret glob
   (spelled or real; a tree entry under a matching directory too) are withheld
   from the observation (``filter_observation``); a line that does not parse is
-  withheld too.
+  withheld too;
+* every dispatch the other checks allow is classified (``domain.security.tool_call_classifier``),
+  in admin-open runs too: ``block`` refuses in every mode, bypass included; ``ask`` is skipped
+  only in bypass, and otherwise needs a person's approval of exactly that call
+  (:func:`classifier_refusal`).
 
 Its own model calls.  The restricted model stays on the deny list, so the
 generation guard (``tool_lane_guard.require_generation``) would refuse its
@@ -95,6 +99,75 @@ _TREE_TRUNCATED = re.compile(r"^  \.\.\. truncated at \d+ entries$")
 def _refusal(text: str) -> str:
     message = "%s%s" % (_POLICY, text)
     return message
+
+
+def classifier_verdict(tool_name: str, args: Any) -> str:
+    """``allow``, ``ask`` or ``block`` for one call, with the catalog's risk grade filled in.
+
+    The rules are ``domain.security.tool_call_classifier``; a grade that cannot
+    be read is no grade, which they answer with ``ask``, as they answer any
+    fault.  No model name is an input, so no model is exempt.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    try:
+        risk = str(gate.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - no grade: the rules ask
+        risk = ""
+    return classifier.classify(tool_name, args, risk=risk)
+
+
+def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
+    """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
+
+    ``block`` refuses in every permission mode, bypass included.  ``allow``
+    goes on to the operator's own gate at dispatch, which still decides.
+    ``ask`` is skipped only in bypass (``bypass_root_containment_active``, so a
+    restricted caller role in bypass is still asked).  Otherwise the call must
+    be confirmed by a person: when the operator's mode would already ask for
+    it, the dispatch gate asks, so this returns ``""``; when the mode would
+    let it run outright (``auto``, say), it is decided here as ``manual``
+    would, so it stays refused, naming its call id, until an operator approves
+    exactly that call once (an explicit ``allow`` rule the operator wrote for
+    the tool also answers it, as it answers ``manual``).  Any fault on this
+    path refuses.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    verdict = classifier_verdict(tool_name, args)
+    if verdict == classifier.ALLOW:
+        return ""
+    if verdict != classifier.ASK:
+        return _refusal("the safety classifier blocks tool '%s' for model '%s'." % (tool_name, model))
+    try:
+        from sonder_runtime.adapters.execution import effect_fence
+
+        if gate.bypass_root_containment_active():
+            return ""
+        arguments = args if isinstance(args, dict) else None
+        preflight = gate.decide(tool_name, interactive=False, surface="agent", record=False,
+                                arguments=arguments)
+        if not preflight.allowed:
+            return ""  # the dispatch gate asks (or refuses) for this call itself
+        decision = gate.decide(tool_name, interactive=False, mode=gate.MANUAL, surface="agent",
+                               record=True, arguments=arguments, fence=effect_fence.current())
+        if decision.allowed:
+            return ""
+        call = str(getattr(decision, "call_id", "") or "")
+        # Not decision.reason: its remedies name modes, and no mode lifts this ask.
+        reason = (
+            "approve exactly this call once at the console with /approve %s, or write an "
+            "explicit allow rule for the tool with /permissions" % call
+            if call else str(decision.reason)
+        )
+    except Exception:  # noqa: BLE001 - an unconfirmable ask is a refusal, never an allow
+        reason = "the confirmation could not be checked"
+    return _refusal(
+        "the safety classifier requires confirmation for tool '%s' from model '%s': %s"
+        % (tool_name, model, reason)
+    )
 
 
 # ---- entry marking ------------------------------------------------------------
@@ -203,11 +276,50 @@ def admin_opt_in(enabled: bool = True) -> Iterator[None]:
         _ADMIN_OPT_IN.reset(token)
 
 
-_LOCAL_PRIVATE_PROVIDERS = frozenset({"", "ollama", "sonder_inference"})
+_LOCAL_PROVIDERS = frozenset({"", "ollama"})
+
+
+def _sonder_inference_on_loopback() -> bool:
+    """Whether the configured Sonder Inference endpoint is this machine's loopback.
+
+    Read the way the gateway reads it (``config_from_env``, on every call).  The
+    loopback primary is the only Sonder Inference endpoint that counts as local:
+    the approved private workers it places work on (Node1) are reached through
+    it.  A remote endpoint (``SONDER_ALLOW_REMOTE_INFERENCE=1``) does not count,
+    and neither does a configuration that cannot be read.  A loopback endpoint
+    with a remote route behind it does not count either: private inference
+    workers (``SONDER_INFERENCE_PRIVATE_WORKERS``), or the Ollama fallback
+    (``SONDER_INFERENCE_FALLBACK=ollama``) when its primary origin (typed
+    endpoint or ``OLLAMA_HOST``) is not loopback, or when remote Ollama
+    workers are configured (typed, or ``SONDER_OLLAMA_WORKERS``; loopback-only
+    workers do not count), can place the prompt on another machine.
+    """
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
+        from sonder_runtime.adapters.provider_bindings import inference_fallback_from_env
+
+        config = config_from_env()
+        if not config.loopback or config.workers:
+            return False
+        if inference_fallback_from_env(os.environ) == "ollama":
+            from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+
+            if ollama_pool.has_configured_remote_workers():
+                return False
+            if not ollama_endpoint.is_loopback(ollama_endpoint.normalize()):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _is_non_local_provider(provider: Any) -> bool:
-    return str(provider or "").strip().lower() not in _LOCAL_PRIVATE_PROVIDERS
+    name = str(provider or "").strip().lower()
+    if name in _LOCAL_PROVIDERS:
+        return False
+    if name == "sonder_inference":
+        return not _sonder_inference_on_loopback()
+    return True
 
 
 def admit(
@@ -251,7 +363,8 @@ def admit(
         )
     if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
-            "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
+            "model '%s' has a restricted tool grant, which applies only to a local model "
+            "(Ollama, or Sonder Inference on loopback)." % (selector,)
         )
     confirmed = decide(model, policy)
     tools = decision.tools & confirmed.tools
@@ -489,7 +602,8 @@ class RestrictedRun:
             def admin_check(tool_name: str, args: Any) -> str:
                 if not self.still_granted():
                     return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
-                return str(inner(tool_name, args) or "") if inner is not None else ""
+                refused = str(inner(tool_name, args) or "") if inner is not None else ""
+                return refused or classifier_refusal(self.model, tool_name, args)
 
             return admin_check
 
@@ -524,7 +638,8 @@ class RestrictedRun:
             refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root), globs)
             if refused:
                 return refused
-            return str(inner(tool_name, args) or "") if inner is not None else ""
+            refused = str(inner(tool_name, args) or "") if inner is not None else ""
+            return refused or classifier_refusal(self.model, tool_name, args)
 
         return check
 

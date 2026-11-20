@@ -13,7 +13,9 @@ import '../settings_screen.dart';
 import '../system_screen.dart';
 import '../theme.dart';
 import '../ui/kit.dart';
+import '../ui/tone_provider.dart';
 import '../workspace_ui.dart';
+
 import 'chat_link.dart';
 import 'page_navigator.dart';
 import 'preferences.dart';
@@ -128,6 +130,8 @@ class _AppShellState extends State<AppShell>
   bool _wide = true;
   String? _projectFilter;
   int _identityGeneration = 0;
+  double _themeTone = 0.0;
+
 
   DateTime _now() => widget.clock?.call() ?? DateTime.now();
 
@@ -236,7 +240,19 @@ class _AppShellState extends State<AppShell>
   void _updateBadges() {
     final chat = _session.chat;
     final badges = <WorkspaceDestination, SidebarBadge>{};
+    
+    // Calculate theme tone based on active work
+    final info = chat.status.value;
+    final activeAgents = info?.agents?.activeAgents ?? 0;
+    final activeRuns = info?.autopilot?.activeRuns ?? 0;
+    final totalActive = activeAgents + activeRuns;
+    final newTone = (totalActive > 0) ? (totalActive * 0.1).clamp(0.0, 0.5) : 0.0;
+    if (_themeTone != newTone) {
+      setState(() => _themeTone = newTone);
+    }
+
     if (chat.sending && _current != WorkspaceDestination.chat) {
+
       badges[WorkspaceDestination.chat] = SidebarBadge(
         kind: StatusKind.running,
         text: StatusKind.running.word,
@@ -244,7 +260,6 @@ class _AppShellState extends State<AppShell>
         mini: StatusKind.running.glyph,
       );
     }
-    final info = chat.status.value;
     final running =
         (info?.agents?.activeAgents ?? 0) + (info?.autopilot?.activeRuns ?? 0);
     if (running > 0) {
@@ -664,47 +679,53 @@ class _AppShellState extends State<AppShell>
   @override
   Widget build(BuildContext context) {
     final platform = Theme.of(context).platform;
-    return LayoutBuilder(builder: (context, constraints) {
-      // Read by callbacks; the drawer leaves with the narrow layout.
-      final wide = _wide = constraints.maxWidth >= kShellWideBreakpoint;
-      final content = KeyedSubtree(key: _contentKey, child: _content());
-      return PopScope<Object?>(
-        canPop: _current == WorkspaceDestination.chat && !_chatHasRoutes,
-        onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) unawaited(_handleBack());
-        },
-        child: Shortcuts(
-          shortcuts: shellShortcuts(platform),
-          child: Actions(
-            actions: _actions,
-            child: Focus(
-              focusNode: _shellFocus,
-              autofocus: true,
-              child: Scaffold(
-                key: _scaffoldKey,
-                drawer: wide
-                    ? null
-                    : Drawer(
-                        width: 304,
-                        child: _sidebar(inDrawer: true),
-                      ),
-                drawerEnableOpenDragGesture: !wide,
-                body: wide
-                    ? Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _sidebar(inDrawer: false),
-                          Expanded(child: content),
-                        ],
-                      )
-                    : content,
+    return ToneProvider(
+      tone: _themeTone,
+      child: LayoutBuilder(builder: (context, constraints) {
+        // Read by callbacks; the drawer leaves with the narrow layout.
+        final wide = _wide = constraints.maxWidth >= kShellWideBreakpoint;
+        final content = KeyedSubtree(key: _contentKey, child: _content());
+        return PopScope<Object?>(
+          canPop: _current == WorkspaceDestination.chat && !_chatHasRoutes,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) unawaited(_handleBack());
+          },
+          child: Shortcuts(
+            shortcuts: shellShortcuts(platform),
+            child: Actions(
+              actions: _actions,
+              child: Focus(
+                focusNode: _shellFocus,
+                autofocus: true,
+                child: TonalTheme(
+                  child: Scaffold(
+                    key: _scaffoldKey,
+                    drawer: wide
+                        ? null
+                        : Drawer(
+                            width: 304,
+                            child: _sidebar(inDrawer: true),
+                          ),
+                    drawerEnableOpenDragGesture: !wide,
+                    body: wide
+                        ? Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _sidebar(inDrawer: false),
+                              Expanded(child: content),
+                            ],
+                          )
+                        : content,
+                  ),
+                ),
               ),
             ),
           ),
-        ),
-      );
-    });
+        );
+      }),
+    );
   }
+
 }
 
 /// The always-mounted Chat page. While another destination is shown it
@@ -765,7 +786,14 @@ class _FadeThrough extends StatelessWidget {
         children: [...previous, if (current != null) current],
       ),
       transitionBuilder: (child, animation) {
-        final scale = Tween<double>(begin: 0.985, end: 1).animate(animation);
+        final slide = Tween<Offset>(
+          begin: const Offset(0.05, 0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(
+          parent: animation,
+          curve: SonderMotion.enter,
+          reverseCurve: SonderMotion.exit,
+        ));
         return AnimatedBuilder(
           animation: animation,
           child: child,
@@ -773,7 +801,7 @@ class _FadeThrough extends StatelessWidget {
             ignoring: animation.status == AnimationStatus.reverse,
             child: FadeTransition(
               opacity: animation,
-              child: ScaleTransition(scale: scale, child: child),
+              child: SlideTransition(position: slide, child: child),
             ),
           ),
         );

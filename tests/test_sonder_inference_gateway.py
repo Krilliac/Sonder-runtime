@@ -1943,3 +1943,79 @@ def test_cancel_token_aborts_active_http_exchange_promptly():
         release.set()
         server.shutdown()
         server.server_close()
+
+
+def test_exchange_watcher_sees_a_fleet_worker_cancel_bound_on_the_caller_thread(monkeypatch):
+    """A fleet worker's cancel_check reads its agent binding; the watcher thread must see it.
+
+    Fleet workers pass ``master_orchestrator.current_worker_cancel_requested``
+    wrapped in ``BridgeCancellation``.  The exchange watcher runs on its own
+    thread, so a binding visible only to the caller thread never aborted the
+    in-flight HTTP call: the call ran on until its timeout.
+    """
+    import time as _time
+
+    import master_orchestrator as mo
+    from sonder_runtime.adapters.legacy_chat_bridge import BridgeCancellation
+
+    cancelled = threading.Event()
+    monkeypatch.setattr(mo, "cancel_requested",
+                        lambda agent_id: agent_id == "agent-under-test" and cancelled.is_set())
+    left, right = socket.socketpair()
+    try:
+        with mo._bind_worker_agent("agent-under-test"):
+            token = BridgeCancellation(mo.current_worker_cancel_requested)
+            with gateway_module._cancellation_scope(token), \
+                    gateway_module._ExchangeBudget(30.0) as budget:
+                budget.attach(left)
+                assert token.cancelled is False and budget.aborted is False
+                cancelled.set()
+                deadline = _time.monotonic() + 3.0
+                while not budget.aborted and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                assert budget.aborted, "the watcher never saw the caller thread's cancellation"
+    finally:
+        right.close()
+        left.close()
+
+
+def test_exchange_watcher_polls_a_store_backed_cancel_check_sparingly(monkeypatch):
+    """A cancel_check that is not an Event (a fleet-store read) is not polled every 50 ms."""
+    import time as _time
+
+    calls = []
+
+    def check():
+        calls.append(_time.monotonic())
+        return False
+
+    with gateway_module._ExchangeBudget(30.0, cancellation=check):
+        _time.sleep(1.2)
+    assert 1 <= len(calls) <= 5, "polled %d times in 1.2 s" % len(calls)
+
+
+def test_exchange_watcher_polls_an_event_token_promptly():
+    import time as _time
+
+    event = threading.Event()
+    left, right = socket.socketpair()
+    try:
+        with gateway_module._ExchangeBudget(30.0, cancellation=event) as budget:
+            budget.attach(left)
+            started = _time.monotonic()
+            event.set()
+            while not budget.aborted and _time.monotonic() - started < 2.0:
+                _time.sleep(0.005)
+            assert budget.aborted and _time.monotonic() - started < 0.5
+    finally:
+        right.close()
+        left.close()
+
+
+def test_a_token_whose_cancelled_is_a_method_is_called_not_truth_tested():
+    from concurrent.futures import Future
+
+    pending = Future()
+    assert gateway_module._is_cancelled(pending) is False
+    pending.cancel()
+    assert gateway_module._is_cancelled(pending) is True

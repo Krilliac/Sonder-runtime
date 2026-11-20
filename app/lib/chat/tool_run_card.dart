@@ -136,12 +136,15 @@ class _ToolRunCardState extends State<ToolRunCard> {
       ...e.bidiChars,
       ...detectHiddenBidiChars(e.code),
       ...detectHiddenBidiChars(e.preview),
+      ...detectHiddenBidiChars(e.detail),
       for (final val in e.args.values) ...detectHiddenBidiChars(val),
     }.toList(growable: false);
     final showBidi = e.bidiWarning || detectedChars.isNotEmpty;
     final awaitingDecision =
         e.isAwaitingApproval || e.isAwaitingClientApproval;
+    // Approve is offered only next to the payload it approves.
     final canAct = awaitingDecision &&
+        e.hasPayload &&
         e.callId.isNotEmpty &&
         _submittedNotice.isEmpty &&
         (widget.onApprove != null || widget.onDeny != null);
@@ -197,7 +200,7 @@ class _ToolRunCardState extends State<ToolRunCard> {
                   : 'Found ${detectedChars.join(', ')}. Inspect carefully before approving.',
             ),
           ],
-          if (e.code.isNotEmpty) ...[
+          if (e.code.isNotEmpty || e.detail.isNotEmpty) ...[
             const SizedBox(height: SonderSpace.sm),
             Container(
               key: const Key('tool-run-code'),
@@ -210,7 +213,7 @@ class _ToolRunCardState extends State<ToolRunCard> {
               ),
               child: SingleChildScrollView(
                 child: SelectableText(
-                  e.code,
+                  e.code.isNotEmpty ? e.code : e.detail,
                   style: tokens.mono(12, color: tokens.text),
                 ),
               ),
@@ -253,6 +256,31 @@ class _ToolRunCardState extends State<ToolRunCard> {
                 e.preview,
                 style: tokens.mono(12, color: tokens.text),
               ),
+            ),
+          ] else if (e.argumentsReported) ...[
+            const SizedBox(height: SonderSpace.sm),
+            Text(
+              'No arguments.',
+              key: const Key('tool-run-no-arguments'),
+              style: tokens.mono(12, color: tokens.text2),
+            ),
+          ],
+          if (e.detailTruncated) ...[
+            const SizedBox(height: SonderSpace.xs),
+            Text(
+              'Only the first part is shown (${e.detailChars} characters in '
+              'all). Deny it if you cannot judge the rest.',
+              key: const Key('tool-run-truncated'),
+              style: tokens.mono(12, color: tokens.warn),
+            ),
+          ],
+          if (awaitingDecision && !e.hasPayload) ...[
+            const SizedBox(height: SonderSpace.sm),
+            Text(
+              'This request did not say what it would run, so it cannot be '
+              'approved here. Review it in the approvals list.',
+              key: const Key('tool-run-no-payload'),
+              style: tokens.mono(12, color: tokens.warn),
             ),
           ],
           if (_submittedNotice.isNotEmpty) ...[

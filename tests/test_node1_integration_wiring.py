@@ -115,11 +115,7 @@ def test_auto_model_context_and_remote_num_thread_omission(monkeypatch):
     assert stripped is True and "num_thread" not in cleaned["options"]
 
 
-def test_ollama_only_reroute_permits_private_pool_workers(monkeypatch):
-    monkeypatch.setattr(server, "BASE", LOCAL)
-    pool = SimpleNamespace(enabled=True, has_remote_workers=True)
-    monkeypatch.setattr(server, "OLLAMA_POOL", pool)
-
+def _reroute(monkeypatch, *, loopback_endpoint):
     from sonder_runtime.adapters import legacy_chat_bridge
     from sonder_runtime.application.chat import provider_bridge
 
@@ -130,17 +126,42 @@ def test_ollama_only_reroute_permits_private_pool_workers(monkeypatch):
         lambda _g: SimpleNamespace(fallbacks={"sonder_inference": "ollama"}),
     )
     monkeypatch.setattr(provider_bridge, "record_degradation", lambda _s: None)
-    rerouted = legacy_chat_bridge.ollama_only_reroute(
+    return legacy_chat_bridge.ollama_only_reroute(
         SimpleNamespace(),
         {"model": "qwen3.6:35b", "format": {"type": "object"}, "options": {}},
         rung,
         model="qwen3.6:35b",
         graph=SimpleNamespace(),
-        loopback_endpoint=False,
+        loopback_endpoint=loopback_endpoint,
         context_probe=lambda: 32768,
-        allow_pool_workers=True,
     )
+
+
+def test_ollama_only_reroute_on_loopback_may_be_placed_on_configured_pool_workers(monkeypatch):
+    from sonder_runtime.adapters import legacy_chat_bridge
+
+    rerouted = _reroute(monkeypatch, loopback_endpoint=True)
     assert rerouted is not None and rerouted["options"]["num_ctx"] == 32768
+    pool = OllamaWorkerPool(LOCAL, (NODE1,), allow_remote=True, capability_prober=lambda o: {})
+    assert pool.enabled and pool.has_remote_workers
+    assert legacy_chat_bridge.reroute_may_use_pool(pool, base_loopback=True, local_only=False) is True
+    assert legacy_chat_bridge.reroute_may_use_pool(pool, base_loopback=True, local_only=True) is False
+    solo = OllamaWorkerPool(LOCAL, (), allow_remote=True, capability_prober=lambda o: {})
+    assert legacy_chat_bridge.reroute_may_use_pool(solo, base_loopback=True, local_only=False) is False
+
+
+def test_ollama_only_reroute_refuses_a_remote_primary_even_with_a_pool(monkeypatch):
+    """A remote primary plus one loopback worker made the primary eligible; it must not."""
+    from sonder_runtime.adapters import legacy_chat_bridge
+
+    remote_primary = "https://ollama.example.net:11434"
+    pool = OllamaWorkerPool(remote_primary, ("http://127.0.0.1:11435",), allow_remote=True,
+                            capability_prober=lambda o: {})
+    assert pool.enabled and pool.has_remote_workers  # the primary itself is the remote member
+    assert legacy_chat_bridge.reroute_may_use_pool(pool, base_loopback=False, local_only=False) is False
+    with pytest.raises(server.ModelCallError) as caught:
+        _reroute(monkeypatch, loopback_endpoint=False)
+    assert "remote" in caught.value.detail
 
 
 def test_ensemble_answer_runs_distinct_nodes_concurrently_and_skips_unneeded_unload(monkeypatch):
@@ -192,7 +213,8 @@ def test_bypass_mode_allows_restricted_tool_lane_and_dangerous_tools_while_keepi
     monkeypatch.setenv("SONDER_PERMISSION_STATE", str(tmp_path / "permission_mode.json"))
     pm._reset_for_tests()
     denied_rules = {
-        "file_delete": {"pattern": "file_delete", "action": "deny", "note": "shipped deny"},
+        # The unmodified shipped default: a deny, so it holds in bypass too.
+        "file_delete": {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
         "sqlite_mutate": {"pattern": "sqlite_mutate", "action": "ask", "note": "db mutate"},
         "admin_private_chain_of_thought": {
             "pattern": "admin_private_chain_of_thought",
@@ -222,8 +244,10 @@ def test_bypass_mode_allows_restricted_tool_lane_and_dangerous_tools_while_keepi
     assert policy("file_delete", {"path": str(tmp_path / "x.txt")}) == ""
     assert run.filter_observation("text_search", {}, "raw lines") == "raw lines"
 
-    # Permissions.json deny on file_delete and sqlite_mutate ask are bypassed for local-open/admin.
-    assert server._agent_permission_gate_error("file_delete", {"path": "x.txt"}, rule_lookup=denied_rules.get) == ""
+    # A sqlite_mutate ask is bypassed for local-open/admin; bypass skips ``ask`` only, so
+    # every deny rule, the shipped file_delete one included, still holds
+    # (tests/test_perm_owner_binding.py).
+    assert "rule denies" in server._agent_permission_gate_error("file_delete", {"path": "x.txt"}, rule_lookup=denied_rules.get)
     assert server._agent_permission_gate_error("sqlite_mutate", {"path": "a.db"}, rule_lookup=denied_rules.get) == ""
     # Protected boundaries remain enforced even in BYPASS.
     assert "system operation" in server._agent_dispatch("permission_mode", {"mode": "auto"})
@@ -231,3 +255,46 @@ def test_bypass_mode_allows_restricted_tool_lane_and_dangerous_tools_while_keepi
     with role_tool_policy.caller_role_scope("user"):
         assert rtl.admin_opt_in_active() is False
         assert server._agent_permission_gate_error("file_delete", {"path": "x.txt"}, rule_lookup=denied_rules.get) != ""
+
+
+_INFERENCE_ENV = ("SONDER_INFERENCE_BASE_URL", "SONDER_INFERENCE_READY_FILE",
+                  "SONDER_INFERENCE_PRIVATE_WORKERS", "SONDER_ALLOW_REMOTE_INFERENCE",
+                  "SONDER_INFERENCE_API_KEY")
+
+
+def _admit_inference_model(monkeypatch, **env):
+    from sonder_runtime.adapters import tool_lane_guard
+
+    for name in _INFERENCE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    model = "astra-cyber-35b-a3b:latest"
+    with rtl.admin_opt_in(True):
+        return rtl.admit(
+            rtl.entry("agent", ""), model, tool_lane_guard.DENIED_LABEL, server._RUNTIME_POLICY,
+            unsafe=False, prepared=False,
+            resolve=lambda: (model, False, False, "model:%s" % model),
+            provider_for=lambda _label: "sonder_inference",
+        )
+
+
+def test_restricted_lane_counts_sonder_inference_as_local_only_on_loopback(monkeypatch):
+    run, refusal = _admit_inference_model(monkeypatch)  # default endpoint: 127.0.0.1
+    assert refusal == "" and run is not None and run.admin_open is True
+    run, refusal = _admit_inference_model(
+        monkeypatch, SONDER_INFERENCE_BASE_URL="http://localhost:11437")
+    assert run is not None
+
+
+def test_restricted_lane_refuses_sonder_inference_on_a_remote_endpoint(monkeypatch):
+    """A deny-listed model's unfiltered BYPASS observations must not go to a remote endpoint."""
+    run, refusal = _admit_inference_model(
+        monkeypatch, SONDER_INFERENCE_BASE_URL="https://inference.example.net:8443",
+        SONDER_ALLOW_REMOTE_INFERENCE="1", SONDER_INFERENCE_API_KEY="k")
+    assert run is None and refusal == ""
+
+
+def test_restricted_lane_refuses_sonder_inference_when_its_endpoint_cannot_be_read(monkeypatch):
+    run, refusal = _admit_inference_model(monkeypatch, SONDER_INFERENCE_BASE_URL="ftp://nowhere")
+    assert run is None and refusal == ""

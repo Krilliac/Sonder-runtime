@@ -7,7 +7,7 @@ import 'status_vocab.dart';
 ///
 /// The glyph is decorative for assistive technology; the word is what a
 /// screen reader hears, so colour and glyph never carry status alone.
-class StatusMark extends StatelessWidget {
+class StatusMark extends StatefulWidget {
   final StatusKind kind;
 
   /// A synonym from the same row of the vocabulary ("done", "off").
@@ -23,24 +23,87 @@ class StatusMark extends StatelessWidget {
       {super.key, this.word, this.size = 13, this.width});
 
   @override
+  State<StatusMark> createState() => _StatusMarkState();
+}
+
+class _StatusMarkState extends State<StatusMark>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1000));
+    _animation = Tween<double>(begin: 0.5, end: 1.0).animate(CurvedAnimation(
+        parent: _controller, curve: Curves.easeInOut));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncPulse();
+  }
+
+  @override
+  void didUpdateWidget(StatusMark oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncPulse();
+  }
+
+  /// Only a running mark pulses, and not under reduced motion.
+  bool get _pulses =>
+      widget.kind == StatusKind.running &&
+      !MediaQuery.disableAnimationsOf(context);
+
+  void _syncPulse() {
+    if (_pulses) {
+      // A few breaths, then rest at full opacity: the word and glyph carry
+      // the status, and an endless animation keeps the frame scheduler busy.
+      if (!_controller.isAnimating && _controller.value == 0) {
+        _controller.repeat(reverse: true, count: 3);
+      }
+    } else {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final shown = word ?? kind.word;
-    final style = tokens.mono(size,
-        color: kind.color(tokens),
-        weight:
-            kind.role == StatusRole.danger ? FontWeight.w600 : FontWeight.w500);
-    final mark = Row(mainAxisSize: MainAxisSize.min, children: [
-      ExcludeSemantics(child: Text(kind.glyph, style: style)),
-      SizedBox(width: size * 0.5),
+    final shown = widget.word ?? widget.kind.word;
+    final style = tokens.mono(widget.size,
+        color: widget.kind.color(tokens),
+        weight: widget.kind.role == StatusRole.danger
+            ? FontWeight.w600
+            : FontWeight.w500);
+
+    Widget markContent = Row(mainAxisSize: MainAxisSize.min, children: [
+      ExcludeSemantics(child: Text(widget.kind.glyph, style: style)),
+      SizedBox(width: widget.size * 0.5),
       Flexible(
         child: Text(shown,
             style: style, maxLines: 1, overflow: TextOverflow.ellipsis),
       ),
     ]);
-    return width == null ? mark : SizedBox(width: width, child: mark);
+
+    if (_pulses) {
+      markContent = FadeTransition(opacity: _animation, child: markContent);
+    }
+
+    return widget.width == null
+        ? markContent
+        : SizedBox(width: widget.width, child: markContent);
   }
 }
+
 
 /// One status row: `✓ ok   Server   mypc · 127.0.0.1:11435 · up 3h`.
 ///

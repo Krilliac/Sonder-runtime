@@ -14,6 +14,7 @@ import hashlib
 import heapq
 import json
 import os
+import posixpath
 import re
 import shlex
 import signal
@@ -1025,7 +1026,11 @@ def _is_stdin_operand(arg):
             rest = rest[2:]
         candidate = rest
     if candidate.startswith("/"):
-        return re.sub(r"/+", "/", candidate) in _STDIN_OPERANDS
+        # Collapse repeated slashes (normpath keeps a leading "//"), then the
+        # "." and ".." segments, so /dev/./stdin and /proc/self/fd/../fd/0
+        # match. Lexical only: it can over-match a symlinked path, which
+        # refuses rather than allows.
+        return posixpath.normpath(re.sub(r"/+", "/", candidate)) in _STDIN_OPERANDS
     return False
 
 
@@ -1607,6 +1612,14 @@ def run_program(
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
     _allow_cmd_script=False, _pass_fds=(),
 ):
+    """Run one program (no shell) and return its exit status and output.
+
+    Behaviour change (E4): the program's whole process tree is torn down when
+    the run ends, on a normal exit as well as on timeout. Background helpers a
+    tool starts on purpose (a Gradle daemon, MSBuild/VBCSCompiler node reuse,
+    ``git fsmonitor--daemon``, a dev server behind a launcher) no longer
+    outlive the call; start long-lived processes outside run_program.
+    """
     if str(program).strip().casefold() in {"bash", "sh"}:
         executable = runtime_paths.bash_executable()
         if not executable:

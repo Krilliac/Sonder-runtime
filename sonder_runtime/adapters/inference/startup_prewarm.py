@@ -2,10 +2,10 @@
 
 Without this the first chat after ``serve`` starts pays the whole cold load. The
 serving entry point calls :func:`start_default_model_prewarm` once, right after
-the listener is bound. It starts one daemon thread that calls the runtime's
-existing single-flight ``prewarm_model("")`` (the same call an empty-model chat
-request makes), so tier resolution, the cloud / other-provider skip, the prewarm
-gate and GPU admission are exactly the normal ones: nothing here lifts an
+the listener is bound. When prewarm is enabled it starts one daemon thread that
+calls the runtime's existing single-flight ``prewarm_model("")`` (the same call
+an empty-model chat request makes), so tier resolution, the cloud /
+other-provider skip, the prewarm gate and GPU admission are exactly the normal ones: nothing here lifts an
 admission floor or loads a model by another route.
 
 ``prewarm_model`` only *starts* the weight load on its own worker and returns,
@@ -45,17 +45,15 @@ def load_failed(model: str, error: BaseException, *, announce: bool = True) -> N
         logger.log(level, "prewarm: %s not loaded (%s)", model, type(error).__name__)
 
 
-def run_default_model_prewarm(prewarm: Callable[[str], bool],
-                              enabled: Callable[[], bool]) -> str:
+def run_default_model_prewarm(prewarm: Callable[[str], bool]) -> str:
     """Start the default model's prewarm; return the outcome word that was logged.
 
-    Never raises. ``started`` means the load was handed to its worker (its own
-    result is logged later); ``skipped`` means there was nothing to load.
+    Runs on the starter thread, after :func:`start_default_model_prewarm` has
+    already found prewarm enabled. Never raises. ``started`` means the load was
+    handed to its worker (its own result is logged later); ``skipped`` means
+    there was nothing to load.
     """
     try:
-        if not enabled():
-            logger.info("prewarm: skipped at start (prewarm is disabled)")
-            return "disabled"
         if prewarm(""):
             logger.info("prewarm: default chat model load started")
             return "started"
@@ -72,18 +70,31 @@ def start_default_model_prewarm(
     *, setting: bool, prewarm: Callable[[str], bool], enabled: Callable[[], bool],
     thread_factory: Callable[..., Any],
 ) -> bool:
-    """Spawn the starter thread when ``setting`` is on; ``True`` if it was started.
+    """Spawn the starter thread when prewarm is on; ``True`` if it was started.
 
     ``setting`` is ``[server].prewarm_on_start``; ``enabled`` is the global
     prewarm switch (``sonder_speculation.prewarm_enabled``), which also governs
-    per-request prewarm and is off under the test suite.
+    per-request prewarm and is off under the test suite. ``enabled`` is read
+    here, once, on the caller's thread: read later on the starter thread, an
+    in-process ``serve.main`` test could already have restored its
+    ``SONDER_PREWARM=0`` override, and the thread would then load a real model
+    from the machine's Ollama. Disabled means no thread at all. Never raises.
     """
     if not setting:
         logger.info("prewarm: start-up prewarm is off ([server].prewarm_on_start)")
         return False
     try:
+        on = enabled()
+    except Exception:
+        logger.warning("prewarm: could not read the prewarm switch; start-up prewarm "
+                       "skipped", exc_info=True)
+        return False
+    if not on:
+        logger.info("prewarm: skipped at start (prewarm is disabled)")
+        return False
+    try:
         thread = thread_factory(
-            target=run_default_model_prewarm, args=(prewarm, enabled),
+            target=run_default_model_prewarm, args=(prewarm,),
             name="sonder-startup-prewarm", daemon=True,
         )
         thread.start()

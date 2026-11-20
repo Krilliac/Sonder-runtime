@@ -88,6 +88,12 @@ if "_PRINCIPAL_ID" not in globals():
 
 
 
+def get_swarm_status() -> list[dict]:
+    """Every local agent row, for the admin-only app-control swarm view."""
+    with _LOCK:
+        return [{"id": agent_id, **data} for agent_id, data in _AGENTS.items()]
+
+
 def _lane_deadline(row, progress_deadline: float) -> float:
     """Progress deadline for one lane's current fleet row (see fleet_store)."""
     resolve = getattr(fleet_store, "lane_progress_deadline", None)
@@ -1244,8 +1250,8 @@ def request_cancel(selector: str) -> dict:
 
 
 def current_worker_cancel_requested() -> bool:
-    """Whether the delegated worker bound to this thread was cancelled."""
-    agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
+    """Whether the worker bound to this thread (or, via its fence, this context) was cancelled."""
+    agent_id = getattr(_WORKER_LOCAL, "agent_id", None) or effect_fence.current_fleet_agent_id()
     return bool(agent_id and cancel_requested(agent_id))
 
 
