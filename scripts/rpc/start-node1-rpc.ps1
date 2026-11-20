@@ -123,6 +123,37 @@ function ConvertTo-RpcFwPath([string]$Path) {
     }
 }
 
+$script:RpcServerExeNames = @('rpc-server.exe', 'ggml-rpc-server.exe')
+
+function Test-RpcFwProgramIsRpc([string]$Program, [hashtable]$ExeSet) {
+    # Matched by file name too, so a rule written through another directory form
+    # (8.3 directory, junction, \Device\HarddiskVolumeN, another install dir)
+    # still counts as an rpc-server rule.
+    if ($ExeSet.ContainsKey((ConvertTo-RpcFwPath $Program).ToLowerInvariant())) { return $true }
+    $leaf = ([string](@($Program.Trim().Trim('"') -split '[\\/]') | Select-Object -Last 1)).Trim()
+    if ($leaf -in $script:RpcServerExeNames) { return $true }
+    # An 8.3 short file name (e.g. RPC-SE~1.EXE) cannot be compared by name: fail closed.
+    if ($leaf -match '~\d+(\.[^.\\/]*)?$') { return $true }
+    return $false
+}
+
+function Get-RpcFwRuleFix($Rule) {
+    # Where the rule comes from decides how it can be turned off.
+    $name = [string]$Rule.Name
+    $source = ([string]$Rule.PolicyStoreSource).Trim()
+    $type = ([string]$Rule.PolicyStoreSourceType).Trim()
+    if ($type -in @('', 'Local', 'HostFirewallLocal')) {
+        return "Disable-NetFirewallRule -Name '$name'"
+    }
+    if ($type -in @('GroupPolicy', 'HostFirewallGroupPolicy')) {
+        return "rule '$name' comes from Group Policy '$source', so Disable-NetFirewallRule on this machine will not stick: disable or narrow it in that GPO (GPMC / gpedit.msc), then gpupdate /force"
+    }
+    if ($type -in @('MDM', 'HostFirewallMDM')) {
+        return "rule '$name' is pushed by MDM ('$source'): disable or narrow it in the MDM firewall policy, then sync the device"
+    }
+    return "rule '$name' is not a local rule (PolicyStoreSourceType=$type, PolicyStoreSource='$source'): disable or narrow it where it is defined"
+}
+
 function Get-RpcFwFilterMap([string]$Kind) {
     # Bulk read; non-admin shells may get a partial list (some entries are access
     # denied), so callers fall back to a per-rule read for anything missing.
@@ -185,6 +216,43 @@ function Assert-RpcFirewallLockdown {
         throw "${prefix}: Windows Firewall is off or allows inbound by default for: $names. Fix (elevated): Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block"
     }
 
+    # A profile's DisabledInterfaceAliases switches the firewall off for those
+    # interfaces, which would make every rule check below meaningless.
+    $noAliasList = @($profiles | Where-Object { $null -eq $_.PSObject.Properties['DisabledInterfaceAliases'] })
+    if ($noAliasList.Count -gt 0) {
+        $names = ($noAliasList | ForEach-Object { [string]$_.Name }) -join ', '
+        throw "${prefix}: cannot read DisabledInterfaceAliases of Windows Firewall profile(s): $names, so it cannot be verified that the firewall filters the interface carrying ${BindHost}."
+    }
+    $bindAliases = @()
+    $aliasError = ''
+    try {
+        $bindAliases = @(Get-NetIPAddress -IPAddress $BindHost -ErrorAction Stop |
+            ForEach-Object { ([string]$_.InterfaceAlias).Trim() } | Where-Object { $_ -ne '' } | Select-Object -Unique)
+    }
+    catch {
+        $aliasError = $_.Exception.Message
+        $bindAliases = @()
+    }
+    if ($bindAliases.Count -eq 0 -and $aliasError -eq '') { $aliasError = "no interface has address $BindHost" }
+    $excluded = @()
+    foreach ($fwProfile in $profiles) {
+        foreach ($alias in @(ConvertTo-RpcFwTokens $fwProfile.DisabledInterfaceAliases)) {
+            if ($alias -eq 'NotConfigured') { continue }
+            # Unresolved bind interface: any exclusion might be it (fail closed).
+            $hit = ($bindAliases.Count -eq 0) -or ($alias -in @('Any', '*')) -or ($alias -in $bindAliases)
+            if ($hit) { $excluded += [pscustomobject]@{ Profile = [string]$fwProfile.Name; Alias = $alias } }
+        }
+    }
+    if ($excluded.Count -gt 0) {
+        $listed = ($excluded | ForEach-Object { "$($_.Profile): '$($_.Alias)'" }) -join ', '
+        $profileNames = ($excluded | ForEach-Object { $_.Profile } | Select-Object -Unique) -join ','
+        $fix = "Fix (elevated): Set-NetFirewallProfile -Name $profileNames -DisabledInterfaceAliases NotConfigured (clears each listed profile's whole exclusion list; re-add any other interface that must stay excluded)"
+        if ($bindAliases.Count -gt 0) {
+            throw "${prefix}: Windows Firewall does not filter the interface carrying ${BindHost} ('$($bindAliases -join "', '")'): it is listed in DisabledInterfaceAliases on $listed. $fix"
+        }
+        throw "${prefix}: cannot resolve the interface carrying ${BindHost} ($aliasError) and Windows Firewall profiles exclude interfaces from filtering ($listed), so one of them may be the private link. Assign ${BindHost} to the private-link adapter, or $fix"
+    }
+
     $rules = @()
     try {
         $rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Inbound -Enabled True -Action Allow -ErrorAction Stop)
@@ -212,7 +280,7 @@ function Assert-RpcFirewallLockdown {
         $app = Get-RpcFwRuleFilter $rule $appMap 'Application'
         $program = ([string]$app.Program).Trim()
         $programAny = ($program -eq '' -or $program -eq 'Any')
-        $programIsRpc = (-not $programAny) -and $exeSet.ContainsKey((ConvertTo-RpcFwPath $program).ToLowerInvariant())
+        $programIsRpc = (-not $programAny) -and (Test-RpcFwProgramIsRpc $program $exeSet)
         $package = ([string]$app.Package).Trim()
         $packaged = ($package -ne '' -and $package -ne 'Any') -or ([string]$rule.PackageFamilyName).Trim() -ne ''
         # Rules bound to another program, or to a packaged (AppContainer) app, cannot admit rpc-server traffic.
@@ -231,6 +299,9 @@ function Assert-RpcFirewallLockdown {
                 LocalPort     = (ConvertTo-RpcFwTokens $portFilter.LocalPort) -join ','
                 RemoteAddress = (ConvertTo-RpcFwTokens $addrFilter.RemoteAddress) -join ','
                 Program       = $program
+                Source        = ([string]$rule.PolicyStoreSource).Trim()
+                SourceType    = ([string]$rule.PolicyStoreSourceType).Trim()
+                Fix           = Get-RpcFwRuleFix $rule
             }
             continue
         }
@@ -247,9 +318,9 @@ function Assert-RpcFirewallLockdown {
     $problems = @()
     if ($wideRules.Count -gt 0) {
         $listed = ($wideRules | ForEach-Object {
-            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress); Program=$($_.Program)]"
+            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress); Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
         }) -join '; '
-        $disable = ($wideRules | ForEach-Object { "Disable-NetFirewallRule -Name '$($_.Name)'" }) -join '; '
+        $disable = ($wideRules | ForEach-Object { $_.Fix }) -join '; '
         $problems += "enabled inbound Allow rule(s) admit TCP $TargetPort or the rpc-server program from beyond ${peer}: $listed. Fix (elevated): $disable"
     }
     if ($peerRules.Count -eq 0) {
@@ -285,6 +356,27 @@ function Get-CurrentState {
     }
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
     return $null
+}
+
+function Get-RpcServerListener {
+    return @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -eq $bindHost })
+}
+
+function Stop-RpcServerInstance {
+    # Used by -Action Stop and by a refused Start that finds an instance running.
+    $state = Get-CurrentState
+    if ($state) {
+        Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
+        if ($state.wrapperPid) {
+            Stop-Process -Id ([int]$state.wrapperPid) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Get-RpcServerListener | ForEach-Object {
+        Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
 }
 
 switch ($Action) {
@@ -326,45 +418,52 @@ switch ($Action) {
     }
 
     'Stop' {
-        $state = Get-CurrentState
-        if ($state) {
-            Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
-            if ($state.wrapperPid) {
-                Stop-Process -Id ([int]$state.wrapperPid) -Force -ErrorAction SilentlyContinue
-            }
-        }
-        Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalAddress -eq $bindHost } |
-            ForEach-Object {
-                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-            }
-        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+        Stop-RpcServerInstance
         Write-Output "Stopped Node1 rpc-server on ${bindHost}:${Port}"
     }
 
     'Start' {
         $fwScript = Join-Path $PSScriptRoot 'ensure-node1-rpc-fw.ps1'
-        if ($EnsureFirewall) {
-            if (-not (Test-Path -LiteralPath $fwScript -PathType Leaf)) {
-                throw "Refusing to start rpc-server: -EnsureFirewall was passed but '$fwScript' is missing. Restore ensure-node1-rpc-fw.ps1 next to start-node1-rpc.ps1."
+        try {
+            if ($EnsureFirewall) {
+                if (-not (Test-Path -LiteralPath $fwScript -PathType Leaf)) {
+                    throw "Refusing to start rpc-server: -EnsureFirewall was passed but '$fwScript' is missing. Restore ensure-node1-rpc-fw.ps1 next to start-node1-rpc.ps1."
+                }
+                $global:LASTEXITCODE = 0
+                try {
+                    & $fwScript -Port $Port | Out-Null
+                }
+                catch {
+                    throw "Refusing to start rpc-server: '$fwScript -Port $Port' failed: $($_.Exception.Message)"
+                }
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Refusing to start rpc-server: '$fwScript -Port $Port' exited with code $LASTEXITCODE."
+                }
             }
-            $global:LASTEXITCODE = 0
-            try {
-                & $fwScript -Port $Port | Out-Null
-            }
-            catch {
-                throw "Refusing to start rpc-server: '$fwScript -Port $Port' failed: $($_.Exception.Message)"
-            }
-            if ($LASTEXITCODE -ne 0) {
-                throw "Refusing to start rpc-server: '$fwScript -Port $Port' exited with code $LASTEXITCODE."
-            }
-        }
 
-        # Always verified, with or without -EnsureFirewall.
-        Assert-RpcFirewallLockdown -BindHost $bindHost -TargetPort $Port `
-            -ProgramPaths @((Join-Path $InstallDir 'rpc-server.exe'), (Join-Path $InstallDir 'ggml-rpc-server.exe')) `
-            -FixCommand ("powershell -NoProfile -File `"$fwScript`" -Port $Port (or re-run Start with -EnsureFirewall from an elevated shell)")
+            # Always verified, with or without -EnsureFirewall, and before the
+            # "already running" exit below.
+            Assert-RpcFirewallLockdown -BindHost $bindHost -TargetPort $Port `
+                -ProgramPaths @($script:RpcServerExeNames | ForEach-Object { Join-Path $InstallDir $_ }) `
+                -FixCommand ("powershell -NoProfile -File `"$fwScript`" -Port $Port (or re-run Start with -EnsureFirewall from an elevated shell)")
+        }
+        catch {
+            # An instance that is already up is exposed by the same firewall
+            # state, so a refusal stops it as well (same logic as -Action Stop).
+            $refusal = $_.Exception.Message
+            $running = Get-CurrentState
+            $listening = @(Get-RpcServerListener)
+            if ($null -eq $running -and $listening.Count -eq 0) { throw }
+            $pids = @(@($running | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.pid }) +
+                @($listening | ForEach-Object { [string]$_.OwningProcess }) | Select-Object -Unique) -join ', '
+            Stop-RpcServerInstance
+            $left = @(Get-RpcServerListener)
+            if ($left.Count -gt 0) {
+                $leftPids = (@($left | ForEach-Object { [string]$_.OwningProcess }) | Select-Object -Unique) -join ', '
+                throw "$refusal ALSO: an rpc-server instance was already running (PID $pids) on ${bindHost}:${Port} and is exposed by this firewall state; stopping it FAILED (still listening: PID $leftPids). Stop it now: Stop-Process -Id $leftPids -Force"
+            }
+            throw "$refusal ALSO: an rpc-server instance was already running (PID $pids) on ${bindHost}:${Port} and was exposed by this firewall state, so it has been stopped."
+        }
 
         $existing = Get-CurrentState
         if ($existing -and (Test-TcpPort -TargetHost $bindHost -TargetPort $Port)) {

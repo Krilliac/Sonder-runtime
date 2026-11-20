@@ -22,13 +22,26 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
   `rpc-server`, with or without `-EnsureFirewall`, and refuses to start (throws, non-zero exit) when:
   - no enabled inbound Allow rule has exactly TCP `<Port>`, LocalAddress `<HostAddress>` and RemoteAddress `10.77.0.1`;
   - any other enabled inbound Allow rule admits TCP `<Port>` (directly, through `Any`, a range that contains it, or a
-    port keyword) or the `rpc-server.exe` / `ggml-rpc-server.exe` program under `-InstallDir`, from any remote
-    address other than exactly `10.77.0.1` (`Any`, `LocalSubnet`, a LAN range, ...). Rules bound to another program
-    or to a packaged (Store) app are ignored, because they cannot admit `rpc-server` traffic;
-  - a firewall profile is off or allows inbound by default, or a rule's filters cannot be read.
+    port keyword) or an `rpc-server.exe` / `ggml-rpc-server.exe` program, from any remote address other than exactly
+    `10.77.0.1` (`Any`, `LocalSubnet`, a LAN range, ...). A program rule counts as an rpc-server rule by its file
+    name (case-insensitive) in any directory or path form (8.3, junction, `\Device\HarddiskVolumeN`), and an 8.3
+    short file name (`RPC-SE~1.EXE`) counts too because it cannot be compared. Rules bound to another program or to a
+    packaged (Store) app are ignored, because they cannot admit `rpc-server` traffic;
+  - a firewall profile is off or allows inbound by default, or a rule's filters cannot be read;
+  - any profile lists the interface that owns `<HostAddress>` (resolved with `Get-NetIPAddress`) in
+    `DisabledInterfaceAliases`, which turns the firewall off for that interface; or, when that interface cannot be
+    resolved, any profile lists any interface there; or the profiles' `DisabledInterfaceAliases` cannot be read.
 
   The refusal message names the fix: run `ensure-node1-rpc-fw.ps1 -Port <Port>` (or Start with `-EnsureFirewall`)
-  from an elevated shell, and `Disable-NetFirewallRule -Name '<rule>'` for each wider rule it lists.
+  from an elevated shell, `Set-NetFirewallProfile -Name <profile> -DisabledInterfaceAliases NotConfigured` for an
+  interface exclusion, and, for each wider rule it lists (with its `PolicyStoreSource`), `Disable-NetFirewallRule
+  -Name '<rule>'` for a local rule, or the GPO (then `gpupdate /force`) or MDM policy the rule comes from.
+- If Start refuses while an instance is already running, that instance is exposed by the same firewall state, so
+  Start stops it (the same steps as `-Action Stop`) and says so in the refusal; if it cannot be stopped, the message
+  says so and gives the PID.
+- Accepted deviation from the design doc's "Profile Any" for the peer rule: Start does not check the peer rule's
+  profile. A peer rule scoped to a narrower profile can only admit fewer connections than `Any`, so this is
+  fail-safe (at worst Main cannot connect); `ensure-node1-rpc-fw.ps1` still creates it with `-Profile Any`.
 - `-EnsureFirewall` runs `ensure-node1-rpc-fw.ps1 -Port <Port>` first (needs admin) and refuses to start if that
   helper is missing from the folder holding `start-node1-rpc.ps1`, or fails. The helper always uses LocalAddress
   `10.77.0.2`, so `-EnsureFirewall` only satisfies the check for the default `-HostAddress 10.77.0.2`.
