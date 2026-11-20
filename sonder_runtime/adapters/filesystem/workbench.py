@@ -162,6 +162,11 @@ def _sensitive_directory(path: Path) -> str:
     return "sensitive_directory"
 
 
+def _credential_directory(path: Path) -> str:
+    """Skip reason for a credential-store directory a listing walk must not enter."""
+    return "credential_store" if file_ops.is_credential_store(path) else ""
+
+
 def _secret_file(path: Path) -> bool:
     """Whether a content search must withhold *path*.
 
@@ -480,6 +485,11 @@ def directory_tree(
             if is_dir and _skip_dir(child.name, include_ignored):
                 skipped += 1
                 continue
+            if file_ops.is_credential_store(candidate):
+                # A credential store is neither listed nor entered, whatever
+                # include_hidden says; its names and sizes are its metadata.
+                skipped += 1
+                continue
             try:
                 size = child.stat(follow_symlinks=False).st_size if not is_dir else 0
             except OSError:
@@ -670,6 +680,7 @@ def script_search(
         include_ignored=include_ignored,
         max_entries=max_entries,
         timeout_seconds=timeout_seconds,
+        prune_dir=_credential_directory,
     )
     needle = str(query or "*").lower()
     results = []
@@ -679,6 +690,9 @@ def script_search(
         if item["type"] != "file" or suffix not in SCRIPT_EXTENSIONS:
             continue
         if needle not in ("", "*") and needle not in item["relative"].lower():
+            continue
+        if file_ops.is_credential_store(Path(item["path"])):
+            _note_skip(state, item["path"], "credential_store", expose_path=False)
             continue
         results.append({**item, "runner": SCRIPT_EXTENSIONS[suffix]})
         if len(results) >= limit:

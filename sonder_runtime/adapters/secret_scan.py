@@ -26,6 +26,7 @@ def scan(root=".", *, timeout=30, extra_roots=""):
     scanner = CredentialScanner(max_bytes=MAX_FILE_BYTES)
     findings = []
     files_scanned = 0
+    credential_files_skipped = 0
     truncated = False
     for path in resolved.rglob("*"):
         if time.monotonic() >= deadline:
@@ -38,6 +39,12 @@ def scan(root=".", *, timeout=30, extra_roots=""):
             if not str(relative).startswith(".env"):
                 continue
         if path.suffix.lower() in SKIP_SUFFIXES:
+            continue
+        if file_ops.is_credential_store(path):
+            # A credential store (a key pair, ``.env``, cloud credentials) is
+            # one file_read refuses whatever the token: a finding's file, line
+            # and kind would fingerprint it, so it is counted, never opened.
+            credential_files_skipped += 1
             continue
         files_scanned += 1
         try:
@@ -58,6 +65,7 @@ def scan(root=".", *, timeout=30, extra_roots=""):
     return {
         "ok": True, "root": str(resolved), "findings": findings,
         "files_scanned": files_scanned, "truncated": truncated,
+        "credential_files_skipped": credential_files_skipped,
     }
 
 
@@ -70,6 +78,11 @@ def format_result(result):
         lines.append(
             "  %s:%d  [%s]  %s"
             % (finding["file"], finding["line"], finding["type"], finding["match"])
+        )
+    if result.get("credential_files_skipped"):
+        lines.append(
+            "  skipped %d credential-store file(s) (not opened)"
+            % result["credential_files_skipped"]
         )
     if result.get("truncated"):
         lines.append("  ... (truncated at 100 findings or timeout)")
