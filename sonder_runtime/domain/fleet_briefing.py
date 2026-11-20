@@ -4,6 +4,13 @@ from __future__ import annotations
 import re
 
 
+# Spelled worker counts a request may use ("spawn three agents"); the master
+# orchestrator's count cues are built from these two names.
+NUMBER_WORDS: dict[str, int] = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+COUNT_TOKEN = r"(?:[1-9]\d*|" + "|".join(NUMBER_WORDS) + r")"
 _ROUTING_PREFIX = re.compile(
     r"\A\s*(?:(?:/master|master)\s+)?(?:fleet|swarm|fanout)(?=\s|$)"
     r"(?:\s+(?P<count>[+-]?[0-9]+)(?=\s|$))?\s*",
@@ -32,6 +39,21 @@ _LENSES = (
     "Prioritize collaboration and shared discovery.",
     "Prioritize constrained time and resource use.",
     "Prioritize an unexpected technique or unusual medium.",
+)
+
+# Repository-review workers (read-only file tools, an existing project) need
+# review lenses, not the greenfield "Deliverable: ... proposal" angles above:
+# those told an equipped worker to invent a game or utility instead of
+# reading the repository it was handed.
+_REVIEW_ANGLES = (
+    "Review angle: correctness defects and unhandled edge cases.",
+    "Review angle: security boundaries, input validation and trust assumptions.",
+    "Review angle: error handling, failure modes and resource cleanup.",
+    "Review angle: concurrency, ordering and shared-state hazards.",
+    "Review angle: tests, coverage gaps and observable checks.",
+    "Review angle: structure, coupling and maintainability.",
+    "Review angle: performance and unnecessary work on hot paths.",
+    "Review angle: contrarian read, challenge what the code assumes.",
 )
 
 # Build workers must implement inside their assigned workspace.  Keep these
@@ -96,7 +118,7 @@ def format_plan(
         seconds = agents / slots * DEFAULT_AGENT_SECONDS
         summary += (
             f"; estimated worker time ~{seconds:g}s"
-            f" ({agents}/{slots} x {DEFAULT_AGENT_SECONDS}s per agent, default; audit extra)"
+            f" ({agents}/{slots} x {DEFAULT_AGENT_SECONDS}s per agent, default guess; audit extra)"
         )
     summary += ". Task: " + " ".join(task.split())
     if output_workspace:
@@ -181,6 +203,8 @@ def subtask_prompts(
                     f"{_BUILD_ANGLES[i % len(_BUILD_ANGLES)]} "
                     f"{_BUILD_LENSES[(i // len(_BUILD_ANGLES)) % len(_BUILD_LENSES)]}"
                 )
+            elif tool_access:
+                angle = _REVIEW_ANGLES[i % len(_REVIEW_ANGLES)]
             else:
                 angle = f"{_ANGLES[i % len(_ANGLES)]} {_LENSES[(i // len(_ANGLES)) % len(_LENSES)]}"
             prompt = (

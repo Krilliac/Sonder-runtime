@@ -3238,7 +3238,9 @@ def _http_principal(auth):
 
 
 def _http_workspace_roots(auth):
-    """Configured workspace roots for an admin caller; () for anyone else."""
+    """Configured [state].workspace_roots (resolved) for an admin; () otherwise.
+
+    Never ``file_ops.lane_grant_roots``: its ambient roots are for local-owner lanes only."""
     if not _admin_authorized(auth):
         return ()
     from sonder_runtime.bootstrap.app import default_app
@@ -3254,7 +3256,9 @@ def _http_debug_context(auth, correlation_id):
         raise PermissionError("authenticated account identity is unavailable")
     context = sonder_lifecycle.get().operation_context(correlation_id, auth)
     roots = tuple(Path(root) for root in _http_workspace_roots(auth))
-    return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.interfaces.orchestration_commands import inherited_remote_consent
+    return replace(context, principal_id=principal, source="http", workspace_roots=roots, remote_ollama_allowed=inherited_remote_consent(context.remote_ollama_allowed, _admin_authorized(auth), default_app))
 
 
 def _debug_tools_http_facade(application):
@@ -3465,10 +3469,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         )
         if task_boundary_error:
             return task_boundary_error
+        work_project = project if workspace_project is None else workspace_project
+        from sonder_runtime.application.agents.delegation import rejected_project_refusal
+        if rejected := rejected_project_refusal(work_project, server.served_work_project):
+            return rejected
         return _idempotent_http_action(
-            context, idempotency_key, "workbench\0%s\0%s" % (project, arg.strip()),
-            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": project}, lambda: server.workbench_agent(
-                prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+            context, idempotency_key, "workbench\0%s\0%s" % (work_project, arg.strip()),
+            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": work_project}, lambda: server.workbench_agent(
+                prompt=arg.strip(), tier="auto", max_steps=12, project=work_project,
             ), context),
         )
     if cmd in (
@@ -3599,7 +3607,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         if task_boundary_error:
             return task_boundary_error
         from sonder_runtime.interfaces.orchestration_commands import (
-            execute_master_command, parse_master_arguments, uses_tool_arguments,
+            execute_master_command, parse_master_arguments, resolved_agent_count, uses_tool_arguments,
         )
         if not uses_tool_arguments(arg):
             # One parser for every surface ([inline|delegate|fleet] [N] <task>,
@@ -3612,10 +3620,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             return _idempotent_http_action(
                 context, idempotency_key, "master\0" + stripped,
                 lambda: _narrate_http_command(
-                    "master_orchestrate", {"task": parsed.task, "mode": parsed.mode},
+                    "master_orchestrate", {"task": parsed.task, "mode": parsed.mode, "agents": (count := resolved_agent_count(parsed, server.master_orchestrator.capacity))},
                     lambda: execute_master_command(
                         arg, orchestrate=server.master_orchestrate,
-                        capacity=server.master_orchestrator.capacity, project=master_project,
+                        capacity=server.master_orchestrator.capacity, project=master_project, agents=count,
                     ),
                     context,
                 ),
@@ -3834,13 +3842,15 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
-def _work_project_for_request(project, storage_project, content=""):
+def _work_project_for_request(project, storage_project, content="", auth=None):
     """The project routed natural work runs under for one served request.
 
     Durable state keeps its principal namespace; file work needs the original
     project selection so an unset/default project can use a creations lane.
+    With no project, a directory the text names inside *auth*'s grant (an owner/admin's configured workspace roots, () otherwise) is used.
     """
-    return server.served_work_project(project) or (
+    named = server.file_ops.named_directory(content, roots) if auth is not None and str(project or "").strip().lower() in {"", "default", "none"} and (roots := _http_workspace_roots(auth)) else ""
+    return named or server.served_work_project(project) or (
         project or "default" if intents.classify_file_intent(content) else storage_project
     )
 
@@ -7533,7 +7543,7 @@ class Handler(BaseHTTPRequestHandler):
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
-                            project=_work_project_for_request(project, storage_project, prompt),
+                            project=_work_project_for_request(project, storage_project, prompt, context),
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
