@@ -71,8 +71,16 @@ function Test-TcpPort([string]$TargetHost, [int]$TargetPort, [int]$TimeoutMs = 1
 # rpc-server is unauthenticated, so Start refuses to launch unless Windows
 # Firewall admits TCP $Port only from Main (10.77.0.1). Rules are read from the
 # ActiveStore (effective policy, including GPO rules).
+#
+# The comm port is protected the same way. In the pinned llama.cpp b12494,
+# when Main's client has 2+ distinct RPC endpoints (and GGML_RPC_NO_COMM is
+# unset) it sends RPC_CMD_COMM_INIT with port = rank-0 port + 1000
+# (ggml-rpc.cpp:3258), and the rank-0 rpc-server then opens a second,
+# unauthenticated listener on 0.0.0.0:<that port> (ggml-rpc.cpp:2352). The main
+# listener keeps --host.
 
 $script:MainPeerAddress = '10.77.0.1'
+$script:RpcCommPortOffset = 1000
 
 function ConvertTo-RpcFwTokens($Value) {
     return @(@($Value) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
@@ -143,7 +151,8 @@ function Get-RpcFwRuleFix($Rule) {
     $source = ([string]$Rule.PolicyStoreSource).Trim()
     $type = ([string]$Rule.PolicyStoreSourceType).Trim()
     if ($type -in @('', 'Local', 'HostFirewallLocal')) {
-        return "Disable-NetFirewallRule -Name '$name'"
+        # PowerShell single-quoted string: a ' inside the name is written as ''.
+        return "Disable-NetFirewallRule -Name '$($name -replace "'", "''")'"
     }
     if ($type -in @('GroupPolicy', 'HostFirewallGroupPolicy')) {
         return "rule '$name' comes from Group Policy '$source', so Disable-NetFirewallRule on this machine will not stick: disable or narrow it in that GPO (GPMC / gpedit.msc), then gpupdate /force"
@@ -198,6 +207,10 @@ function Assert-RpcFirewallLockdown {
     )
     $peer = $script:MainPeerAddress
     $prefix = "Refusing to start rpc-server on ${BindHost}:${TargetPort}"
+    $commPort = $TargetPort + $script:RpcCommPortOffset
+    if ($commPort -gt 65535) {
+        throw "${prefix}: the rpc-server comm port (${TargetPort} + $($script:RpcCommPortOffset) = $commPort) is above 65535, so the port the COMM_INIT listener would bind cannot be checked. Use a port of 64535 or lower."
+    }
 
     try {
         $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
@@ -217,40 +230,44 @@ function Assert-RpcFirewallLockdown {
     }
 
     # A profile's DisabledInterfaceAliases switches the firewall off for those
-    # interfaces, which would make every rule check below meaningless.
-    $noAliasList = @($profiles | Where-Object { $null -eq $_.PSObject.Properties['DisabledInterfaceAliases'] })
-    if ($noAliasList.Count -gt 0) {
-        $names = ($noAliasList | ForEach-Object { [string]$_.Name }) -join ', '
-        throw "${prefix}: cannot read DisabledInterfaceAliases of Windows Firewall profile(s): $names, so it cannot be verified that the firewall filters the interface carrying ${BindHost}."
-    }
-    $bindAliases = @()
-    $aliasError = ''
-    try {
-        $bindAliases = @(Get-NetIPAddress -IPAddress $BindHost -ErrorAction Stop |
-            ForEach-Object { ([string]$_.InterfaceAlias).Trim() } | Where-Object { $_ -ne '' } | Select-Object -Unique)
-    }
-    catch {
-        $aliasError = $_.Exception.Message
-        $bindAliases = @()
-    }
-    if ($bindAliases.Count -eq 0 -and $aliasError -eq '') { $aliasError = "no interface has address $BindHost" }
+    # interfaces. rpc-server's comm listener binds 0.0.0.0 (all interfaces), so
+    # any excluded interface, whatever it names, would leave it unfiltered: no
+    # entry other than NotConfigured is allowed. Both stores are read and their
+    # lists united: ActiveStore is the effective policy (GPO included) and
+    # PersistentStore is the local setting that will apply after a refresh.
     $excluded = @()
-    foreach ($fwProfile in $profiles) {
-        foreach ($alias in @(ConvertTo-RpcFwTokens $fwProfile.DisabledInterfaceAliases)) {
-            if ($alias -eq 'NotConfigured') { continue }
-            # Unresolved bind interface: any exclusion might be it (fail closed).
-            $hit = ($bindAliases.Count -eq 0) -or ($alias -in @('Any', '*')) -or ($alias -in $bindAliases)
-            if ($hit) { $excluded += [pscustomobject]@{ Profile = [string]$fwProfile.Name; Alias = $alias } }
+    foreach ($store in @('ActiveStore', 'PersistentStore')) {
+        if ($store -eq 'ActiveStore') {
+            $storeProfiles = $profiles
+        }
+        else {
+            try {
+                $storeProfiles = @(Get-NetFirewallProfile -PolicyStore $store -ErrorAction Stop)
+            }
+            catch {
+                throw "${prefix}: cannot read Windows Firewall profiles from the $store (needed for DisabledInterfaceAliases): $($_.Exception.Message)"
+            }
+            if ($storeProfiles.Count -eq 0) {
+                throw "${prefix}: Windows Firewall returned no profiles from the $store, so DisabledInterfaceAliases cannot be verified."
+            }
+        }
+        $noAliasList = @($storeProfiles | Where-Object { $null -eq $_.PSObject.Properties['DisabledInterfaceAliases'] })
+        if ($noAliasList.Count -gt 0) {
+            $names = ($noAliasList | ForEach-Object { [string]$_.Name }) -join ', '
+            throw "${prefix}: cannot read DisabledInterfaceAliases of Windows Firewall profile(s) in the ${store}: $names, so it cannot be verified that the firewall filters every interface."
+        }
+        foreach ($fwProfile in $storeProfiles) {
+            foreach ($alias in @(ConvertTo-RpcFwTokens $fwProfile.DisabledInterfaceAliases)) {
+                if ($alias -eq 'NotConfigured') { continue }
+                $excluded += [pscustomobject]@{ Store = $store; Profile = [string]$fwProfile.Name; Alias = $alias }
+            }
         }
     }
     if ($excluded.Count -gt 0) {
-        $listed = ($excluded | ForEach-Object { "$($_.Profile): '$($_.Alias)'" }) -join ', '
+        $listed = ($excluded | ForEach-Object { "$($_.Store) $($_.Profile): '$($_.Alias)'" }) -join ', '
         $profileNames = ($excluded | ForEach-Object { $_.Profile } | Select-Object -Unique) -join ','
-        $fix = "Fix (elevated): Set-NetFirewallProfile -Name $profileNames -DisabledInterfaceAliases NotConfigured (clears each listed profile's whole exclusion list; re-add any other interface that must stay excluded)"
-        if ($bindAliases.Count -gt 0) {
-            throw "${prefix}: Windows Firewall does not filter the interface carrying ${BindHost} ('$($bindAliases -join "', '")'): it is listed in DisabledInterfaceAliases on $listed. $fix"
-        }
-        throw "${prefix}: cannot resolve the interface carrying ${BindHost} ($aliasError) and Windows Firewall profiles exclude interfaces from filtering ($listed), so one of them may be the private link. Assign ${BindHost} to the private-link adapter, or $fix"
+        $fix = "Fix (elevated): Set-NetFirewallProfile -Name $profileNames -DisabledInterfaceAliases NotConfigured (clears each listed profile's whole exclusion list); an entry listed only for the ActiveStore comes from Group Policy or MDM, so remove it there (then gpupdate /force)"
+        throw "${prefix}: Windows Firewall profile(s) exclude interfaces from filtering (DisabledInterfaceAliases): $listed. Traffic on an excluded interface is not filtered at all, and rpc-server's comm listener binds 0.0.0.0 (every interface), so no exclusion is allowed. $fix"
     }
 
     $rules = @()
@@ -289,7 +306,8 @@ function Assert-RpcFirewallLockdown {
         $portFilter = Get-RpcFwRuleFilter $rule $portMap 'Port'
         $addrFilter = Get-RpcFwRuleFilter $rule $addrMap 'Address'
         $remotePeerOnly = Test-RpcFwSingleHost $addrFilter.RemoteAddress $peer
-        $coversTcpPort = (Test-RpcFwProtocolCoversTcp $portFilter.Protocol) -and (Test-RpcFwPortCovers $portFilter.LocalPort $TargetPort)
+        $coversTcpPort = (Test-RpcFwProtocolCoversTcp $portFilter.Protocol) -and
+            ((Test-RpcFwPortCovers $portFilter.LocalPort $TargetPort) -or (Test-RpcFwPortCovers $portFilter.LocalPort $commPort))
 
         if (-not $remotePeerOnly -and ($programIsRpc -or $coversTcpPort)) {
             $wideRules += [pscustomobject]@{
@@ -321,7 +339,7 @@ function Assert-RpcFirewallLockdown {
             "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress); Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
         }) -join '; '
         $disable = ($wideRules | ForEach-Object { $_.Fix }) -join '; '
-        $problems += "enabled inbound Allow rule(s) admit TCP $TargetPort or the rpc-server program from beyond ${peer}: $listed. Fix (elevated): $disable"
+        $problems += "enabled inbound Allow rule(s) admit TCP $TargetPort, the rpc-server comm port TCP $commPort (opened on 0.0.0.0 on COMM_INIT) or the rpc-server program from beyond ${peer}: $listed. Fix (elevated): $disable"
     }
     if ($peerRules.Count -eq 0) {
         $problems += "no enabled inbound Allow rule admits exactly TCP $TargetPort from $peer to $BindHost. Fix (elevated): $FixCommand"
@@ -377,6 +395,45 @@ function Stop-RpcServerInstance {
         Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-RpcProcessTree([int]$RootPid) {
+    # Stops $RootPid and every process descended from it (the powershell
+    # wrapper and the rpc-server it runs). A process counts as a child only if
+    # it was created after its parent, so a recycled parent PID cannot pull in
+    # an unrelated process. Returns '' or a note when the tree could not be read.
+    $note = ''
+    $tree = @($RootPid)
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $byPid = @{}
+        foreach ($proc in $all) { $byPid[[int]$proc.ProcessId] = $proc }
+        $queue = [System.Collections.Queue]::new()
+        $queue.Enqueue($RootPid)
+        $seen = @{ $RootPid = $true }
+        while ($queue.Count -gt 0) {
+            $parentPid = [int]$queue.Dequeue()
+            $parent = $byPid[$parentPid]
+            foreach ($proc in $all) {
+                $childPid = [int]$proc.ProcessId
+                if ([int]$proc.ParentProcessId -ne $parentPid -or $seen.ContainsKey($childPid)) { continue }
+                if ($null -ne $parent -and $null -ne $parent.CreationDate -and $null -ne $proc.CreationDate -and
+                    ([datetime]$proc.CreationDate) -lt ([datetime]$parent.CreationDate)) { continue }
+                $seen[$childPid] = $true
+                $tree += $childPid
+                $queue.Enqueue($childPid)
+            }
+        }
+    }
+    catch {
+        $note = " Could not list its child processes ($($_.Exception.Message)), so only PID $RootPid was stopped: check for a stray rpc-server process."
+    }
+    # Deepest first, so a parent cannot start anything new after its child is gone.
+    [array]::Reverse($tree)
+    foreach ($id in $tree) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    return $note
 }
 
 switch ($Action) {
@@ -526,8 +583,9 @@ switch ($Action) {
             Start-Sleep -Milliseconds 250
         }
         if (-not $ready -or $null -eq $rpcPid) {
-            Stop-Process -Id $wrapperPid -Force -ErrorAction SilentlyContinue
-            throw "Node1 rpc-server did not start listening on ${bindHost}:${Port} within 20s."
+            # The wrapper and any rpc-server child it started (which may have bound elsewhere).
+            $treeNote = Stop-RpcProcessTree $wrapperPid
+            throw "Node1 rpc-server did not start listening on ${bindHost}:${Port} within 20s; stopped the wrapper (PID $wrapperPid) and its child processes.$treeNote"
         }
 
         $stateObj = [ordered]@{
