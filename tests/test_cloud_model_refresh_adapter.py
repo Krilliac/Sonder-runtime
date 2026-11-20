@@ -88,7 +88,7 @@ def test_show_live_returns_metadata(world):
     assert body == {"model": "kimi-k3:cloud", "name": "kimi-k3:cloud"}
 
 
-@pytest.mark.parametrize("status", [400, 404, 500, 200])
+@pytest.mark.parametrize("status", [400, 404, 410, 500, 200])
 def test_show_retirement_error_is_retired_at_any_http_status(world, status):
     w = world(shows={"x:cloud": (status, {"error": MEASURED_RETIREMENT})})
     probe = OllamaCloudMetadata(w.fake.url).show("x:cloud")
@@ -762,6 +762,18 @@ def test_shipped_retirements_survive_every_write(std):
     assert {n.casefold() for n in SHIPPED["retired_cloud_models"]} <= retired
     assert "only-mine:cloud" in retired
     assert set(model_lists.load().values["retired_cloud_models"]) >= set(SHIPPED["retired_cloud_models"])
+
+
+def test_no_retirement_evidence_never_heals_a_deliberately_shorter_retired_list(world):
+    w = world(shows={})  # every probe is live: no provider evidence this run
+    w.write_preferences(LADDER)
+    w.write_overlay({"version": 1, "retired_cloud_models": ["only-mine:cloud"]})
+    before = w.overlay.read_bytes()
+    for apply in (False, True):
+        report = w.run(apply=apply)
+        assert report["outcome"] == "ok" and report["write_retired"] is False
+        assert report["retirements"] == [] and report["overlay_changes"] == []
+    assert w.overlay.read_bytes() == before  # the operator's un-retire stands
 
 
 # --- 20. concurrency -----------------------------------------------------------------------

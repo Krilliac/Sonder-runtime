@@ -12,12 +12,15 @@ reads the public ollama.com catalog; and plans:
   never an environment binding);
 * opt-in pulls of missing ladder stubs (``auto_pull_stubs``, default off).
 
-A dry run (the default) writes nothing.  An apply run writes the overlay
+A dry run (the default) writes no overlay, state, backup or change-log file;
+it still takes the run lock file.  An apply run writes the overlay
 under the same lock as ``/runtime models set``, each file through
 ``write_json_validated`` (validated by loading it back through the real
 model-list loader before the replace, previous copy kept as ``.bak``), then
 the state file, then appends the JSONL change log.  Every network read happens
-before the first write, so a network failure leaves every file unchanged.
+before the first write, so an Ollama failure leaves every file unchanged; a
+catalog failure discards only the catalog part unless
+``CATALOG_FAILURE_ABORTS_RUN`` is set.
 
 Nothing here enables cloud opt-in, writes runtime policy or permission state,
 or reaches a chat/generate/embed endpoint.  Reports carry reason codes and

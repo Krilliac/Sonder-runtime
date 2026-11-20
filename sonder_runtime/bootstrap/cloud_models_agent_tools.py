@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any, Protocol, TypeVar
 
 from ..adapters.cloud_model_refresh import status_payload
+from ..adapters.debug_tools_executor import default_path_redactor, redact_paths
 
 _F = TypeVar("_F", bound=Callable[..., object])
 
@@ -25,12 +26,37 @@ class _McpServer(Protocol):
     def tool(self) -> Callable[[_F], _F]: ...
 
 
+def _redacted(payload: dict[str, Any], redact: Callable[[str], str]) -> dict[str, Any]:
+    """Model-visible copy of ``payload``: host paths in ``paths``, issues and errors redacted."""
+    result = dict(payload)
+    paths = result.get("paths")
+    if isinstance(paths, dict):
+        result["paths"] = {
+            key: redact(value) if isinstance(value, str) else value for key, value in paths.items()
+        }
+    issues = result.get("model_lists_issues")
+    if isinstance(issues, list):
+        result["model_lists_issues"] = [
+            redact_paths(item, redact) if isinstance(item, str) else item for item in issues
+        ]
+    for key in ("preferences_error", "state_error", "error"):
+        value = result.get(key)
+        if isinstance(value, str):
+            result[key] = redact_paths(value, redact)
+    return result
+
+
 def run_status() -> dict[str, Any]:
-    """The status payload, or ``{"ok": false, "error": ...}``; never raises."""
+    """The status payload with host paths redacted, or ``{"ok": false, "error": ...}``; never raises.
+
+    Absolute paths (the state home sits under the user profile) go through the
+    same display redactor as the other model-visible inventory tools.
+    """
     try:
-        return status_payload()
+        payload = status_payload()
     except Exception as exc:  # noqa: BLE001 - a tool reports, it never crashes the server
-        return {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+        payload = {"ok": False, "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    return _redacted(payload, default_path_redactor())
 
 
 def register(mcp: _McpServer, record: Callable[..., Any] | None) -> None:

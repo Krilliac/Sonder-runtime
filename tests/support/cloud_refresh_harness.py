@@ -17,15 +17,23 @@ from typing import Any
 
 from sonder_runtime.adapters import model_lists
 
-# The provider's retirement answer as measured for deepseek-v4-flash (spec section 9, test 1).
+# The provider's retirement answer, byte for byte, as captured from a real
+# ``POST /api/show {"model": "deepseek-v4-flash:cloud"}`` on 2026-11-19
+# (HTTP 410).  The live API appends a ``(ref: <uuid>)`` request reference.
+MEASURED_RETIREMENT_STATUS = 410
 MEASURED_RETIREMENT = (
-    "deepseek-v4-flash:0731 was retired on September 25, 2026. Try glm-5.3-flash:cloud."
+    "deepseek-v4-flash:0731 was retired on September 25, 2026. Try glm-5.3-flash:cloud. "
+    "(ref: 59bcf5d7-6731-4254-858b-f8c8705b9dbe)"
 )
+MEASURED_RETIREMENT_REF = "59bcf5d7-6731-4254-858b-f8c8705b9dbe"
 
 
-def retired_message(provider: str, suggestion: str | None, date: str = "September 25, 2026") -> str:
-    text = "%s was retired on %s." % (provider, date)
-    return text + (" Try %s." % suggestion if suggestion else "")
+def retired_message(provider: str, suggestion: str | None, date: str = "September 25, 2026",
+                    ref: str | None = MEASURED_RETIREMENT_REF) -> str:
+    """A retirement notice in the live shape (with the ``(ref: ...)`` tail unless ``ref=None``)."""
+    text = f"{provider} was retired on {date}."
+    text += f" Try {suggestion}." if suggestion else ""
+    return text + (f" (ref: {ref})" if ref else "")
 
 
 LIVE_SHOW = {
@@ -165,7 +173,7 @@ def snapshot(root: Path) -> dict[str, str]:
 def standard_shows() -> dict[str, tuple[int, Any]]:
     """Retired default code (no successor), retired default general (provider suggests glm-5.3)."""
     return {
-        "kimi-k2.7-code:cloud": (200, {"error": retired_message("kimi-k2.7-code:0801", None)}),
+        "kimi-k2.7-code:cloud": (410, {"error": retired_message("kimi-k2.7-code:0801", None)}),
         "glm-5.2:cloud": (404, {"error": retired_message("glm-5.2:0801", "glm-5.3:cloud")}),
     }
 

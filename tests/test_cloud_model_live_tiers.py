@@ -91,7 +91,8 @@ def test_live_cloud_default_never_returns_a_retired_model_or_raises(live):
     assert consumers.live_cloud_default("nope", "fallback:cloud") == "fallback:cloud"
     live.overlay.write_text("{", encoding="utf-8")
     model_lists.clear_cache()
-    assert consumers.live_cloud_default("code", "fallback:cloud") == DEFAULT_CODE  # invalid overlay is ignored whole
+    # An overlay with load issues is not trusted: its shipped stand-in values never win.
+    assert consumers.live_cloud_default("code", "fallback:cloud") == "fallback:cloud"
 
 
 def test_an_editor_default_change_also_reaches_the_running_tier(live):
@@ -111,3 +112,17 @@ def test_unusable_model_lists_leave_the_tiers_as_they_are(live):
     model_lists.clear_cache()
     server.TIERS["cloud-code"] = "pinned:cloud"
     assert server.available_tiers(include_disabled=True)["cloud-code"] == "pinned:cloud"
+
+
+@pytest.mark.parametrize("bad_overlay", ['{"version": 1, "typo": 1}', "{"])
+def test_invalid_overlay_after_an_applied_refresh_keeps_the_applied_tier(live, bad_overlay):
+    assert live.run(apply=True)["outcome"] == "ok"
+    assert server.available_tiers(include_disabled=True)["cloud-code"] == "kimi-k3-code:cloud"
+    assert consumers.live_cloud_default("code", "fallback:cloud") == "kimi-k3-code:cloud"
+    live.overlay.write_text(bad_overlay, encoding="utf-8")
+    model_lists.clear_cache()
+    assert model_lists.load().issues  # the loader now serves shipped values
+    tiers = server.available_tiers(include_disabled=True)
+    assert tiers["cloud-code"] == "kimi-k3-code:cloud"  # not moved back to the retired shipped default
+    assert tiers["cloud-general"] == DEFAULT_GENERAL
+    assert consumers.live_cloud_default("code", "fallback:cloud") == "fallback:cloud"

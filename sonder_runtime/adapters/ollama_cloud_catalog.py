@@ -1,8 +1,10 @@
 """Best-effort read of the public ollama.com cloud catalog (no official API).
 
 Only two fixed URL shapes are ever requested: the cloud search page and one
-family's tags page.  Requests go through the root ``web_tools`` bounded
-public-address transport (generic ``sonder-local-agent/1.0`` User-Agent,
+family's tags page.  Only the first URL is checked against those shapes: the
+root ``web_tools`` transport follows up to five redirects to any public host
+(each hop is re-validated as a public address, nothing user-chosen is sent).
+Requests go through that bounded public-address transport (generic ``sonder-local-agent/1.0`` User-Agent,
 ``Accept-Encoding: identity``, no cookies, no body, response size capped), so
 no user data, prompt or configuration leaves the machine.  The fetch is gated
 by ``SONDER_WEB_TOOLS`` and ``SONDER_CLOUD_CATALOG``; it does not need cloud

@@ -80,7 +80,10 @@ _NAME_BODY = r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}"
 _RETIREMENT_RE = re.compile(
     r"(?P<name>" + _NAME_BODY + r") was retired on "
     r"(?P<date>[A-Z][a-z]+ \d{1,2}, \d{4})\.?"
-    r"(?:\s+Try (?P<suggestion>\S+?)\.?)?\s*"
+    r"(?:\s+Try (?P<suggestion>\S+?)\.?)?"
+    # The live API appends a request reference, e.g. ``(ref: 59bcf5d7-...)``;
+    # accept exactly that bounded token and nothing else after the notice.
+    r"(?:\s*\(ref:\s*[A-Za-z0-9._-]{1,64}\))?\s*"
 )
 _ERROR_PREFIX_RE = re.compile(r"^\s*Error:\s*")
 _FAMILY_HREF_RE = re.compile(r'href="/library/([a-z0-9][a-z0-9._-]{0,63})"')
@@ -119,7 +122,7 @@ def is_cloud_stub_name(name: str) -> bool:
 
 
 def parse_retirement(message: str) -> Retirement | None:
-    """Parse ``[Error: ]<name> was retired on <Month D, YYYY>.[ Try <name>.]``."""
+    """Parse ``[Error: ]<name> was retired on <Month D, YYYY>.[ Try <name>.][ (ref: <id>)]``."""
     if not isinstance(message, str):
         return None
     text = _ERROR_PREFIX_RE.sub("", message[:MAX_MESSAGE_CHARS]).strip()
@@ -628,7 +631,11 @@ def plan_refresh(inputs: RefreshInputs) -> RefreshPlan:
             continue
         retire_add.append((name, probe.retirement))
     retired_after = retired_union(shipped_retired, overlay_retired, [n for n, _ in retire_add])
-    write_retired = bool(retire_add) or retired_heal_needed(shipped_retired, overlay_retired)
+    # Heal (restore hidden shipped entries) only alongside a retirement this run
+    # writes anyway: an overlay list that omits shipped entries may be a
+    # deliberate operator un-retire, and the daily run must not undo it
+    # without provider evidence.
+    write_retired = bool(retire_add)
     retired_cf = frozenset(name.casefold() for name in retired_after)
     pulls, refused = plan_pulls(inputs.prefs, inputs.probes, inputs.pulled_before, retired_cf)
     pulled_cf = inputs.pulled_before | inputs.pulled_now

@@ -196,3 +196,17 @@ def test_tool_source_has_no_write_or_network_calls():
     text = Path(tool.__file__).read_text(encoding="utf-8")
     for forbidden in ("run_refresh", "write_", "urlopen", "open_url", "subprocess", "requests"):
         assert forbidden not in text
+
+
+def test_model_visible_paths_and_issues_are_redacted(home, no_io, monkeypatch):
+    root = str(home)
+    monkeypatch.setattr(tool, "default_path_redactor",
+                        lambda: (lambda text: text.replace(root, "<HOME>")))
+    (home / "model_lists.json").write_text('{"version": 1, "typo": 1}', encoding="utf-8")
+    model_lists.clear_cache()
+    payload, _calls = _call()
+    assert payload["paths"] and all(v.startswith("<HOME>") for v in payload["paths"].values())
+    assert payload["model_lists_issues"]  # the bad overlay is reported, by redacted path
+    assert root not in json.dumps(payload)
+    raw = refresh.status_payload()  # the operator-facing CLI payload keeps real paths
+    assert raw["paths"]["state"].startswith(root)

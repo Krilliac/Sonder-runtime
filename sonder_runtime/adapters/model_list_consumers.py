@@ -77,18 +77,22 @@ def refresh_live_cloud_tiers(
 
     Runs before every tier read, so a changed overlay ``default_cloud_models``
     or ``retired_cloud_models`` (from ``/runtime models set`` or the cloud
-    model refresh) reaches the running process without a restart.  An
-    unusable model-list file leaves the tiers as they are.
+    model refresh) reaches the running process without a restart.  The
+    model lists are read once per call.  An overlay with load issues (the
+    loader then falls back to the shipped values) leaves the cloud tiers as
+    they are: shipped values standing in for a broken overlay are not an
+    operator decision and must not undo an applied refresh.  An unusable
+    shipped file raises ``ModelListsConfigurationError`` as before.
     """
+    config = model_lists.load()
+    lists = config.values
     cloud_tier_policy.refresh_live_cloud_tiers(
         tiers,
         environment,
         default_cloud_general_model=default_cloud_general_model,
-        legacy_cloud_general_model=values()["legacy_cloud_general_model"],
+        legacy_cloud_general_model=lists["legacy_cloud_general_model"],
     )
-    try:
-        lists = values()
-    except model_lists.ModelListsConfigurationError:
+    if config.issues:
         return
     with _APPLIED_LOCK:
         if not _APPLIED_CLOUD_DEFAULTS:
@@ -109,9 +113,17 @@ def refresh_live_cloud_tiers(
 
 
 def live_cloud_default(tier: str, fallback: str) -> str:
-    """The current ``default_cloud_models[tier]`` unless it is retired; never raises."""
+    """The current ``default_cloud_models[tier]`` unless it is retired; never raises.
+
+    ``fallback`` is returned when the model lists are unusable, when the
+    overlay has load issues (its shipped stand-in values are not trusted to
+    override an applied refresh), or when the default is missing or retired.
+    """
     try:
-        lists = values()
+        config = model_lists.load()
+        if config.issues:
+            return fallback
+        lists = config.values
         model = lists["default_cloud_models"][tier]
         retired = {str(name).casefold() for name in lists["retired_cloud_models"]}
     except (model_lists.ModelListsConfigurationError, KeyError, TypeError):

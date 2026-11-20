@@ -40,7 +40,8 @@ def add_parser(
     common(refresh)
     refresh.add_argument(
         "--apply", action="store_true",
-        help="write the overlay, state file and change log (default: dry run, nothing written)",
+        help="write the overlay, state file and change log (default: dry run, which writes"
+        " none of them; it still takes the run lock file)",
     )
     refresh.add_argument(
         "--no-catalog", action="store_true", help="do not read the public ollama.com catalog",

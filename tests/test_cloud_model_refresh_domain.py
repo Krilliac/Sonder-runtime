@@ -13,7 +13,11 @@ from sonder_runtime.adapters import model_lists
 from sonder_runtime.domain import cloud_model_refresh as crm
 from sonder_runtime.domain.cloud_model_refresh import ProbeResult, ProbeStatus, Retirement
 from sonder_runtime.domain.cloud_tier_policy import resync_cloud_tiers
-from tests.support.cloud_refresh_harness import MEASURED_RETIREMENT, retired_message
+from tests.support.cloud_refresh_harness import (
+    MEASURED_RETIREMENT,
+    MEASURED_RETIREMENT_STATUS,
+    retired_message,
+)
 
 SHIPPED = model_lists.load_shipped_document()
 
@@ -25,6 +29,25 @@ SHIPPED = model_lists.load_shipped_document()
 def test_parse_retirement_measured_message_with_and_without_error_prefix(prefix):
     parsed = crm.parse_retirement(prefix + MEASURED_RETIREMENT)
     assert parsed == Retirement("deepseek-v4-flash:0731", "September 25, 2026", "glm-5.3-flash:cloud")
+
+
+def test_parse_retirement_accepts_the_live_ref_tail_and_the_bare_form():
+    bare = "deepseek-v4-flash:0731 was retired on September 25, 2026. Try glm-5.3-flash:cloud."
+    expected = Retirement("deepseek-v4-flash:0731", "September 25, 2026", "glm-5.3-flash:cloud")
+    assert crm.parse_retirement(bare) == expected
+    assert crm.parse_retirement(bare + " (ref: abc-123)") == expected
+    no_try = crm.parse_retirement("q:480b-cloud was retired on May 1, 2026. (ref: 0f-1e)")
+    assert no_try == Retirement("q:480b-cloud", "May 1, 2026", None)
+
+
+def test_classify_show_measured_410_body_is_retired():
+    probe = crm.classify_show(
+        "deepseek-v4-flash:cloud", MEASURED_RETIREMENT_STATUS, {"error": MEASURED_RETIREMENT}
+    )
+    assert probe.status is ProbeStatus.RETIRED
+    assert probe.retirement == Retirement(
+        "deepseek-v4-flash:0731", "September 25, 2026", "glm-5.3-flash:cloud"
+    )
 
 
 def test_parse_retirement_without_suggestion_and_without_trailing_period():
@@ -40,6 +63,12 @@ def test_parse_retirement_without_suggestion_and_without_trailing_period():
         "the model x:cloud was retired on September 25, 2026 and more words",  # lookalike
         "x:cloud was retired on 2026-09-25.",
         "x:cloud was not retired on September 25, 2026.",
+        "x:cloud was retired on September 25, 2026. (ref: abc) and more words",
+        "x:cloud was retired on September 25, 2026. (ref: <script>)",
+        "x:cloud was retired on September 25, 2026. (reference: abc)",
+        "x:cloud was retired on September 25, 2026. (ref: abc",
+        "x:cloud was retired on September 25, 2026. (ref: " + "a" * 65 + ")",
+        "x:cloud was retired on September 25, 2026. (ref: a) (ref: b)",
         "",
         "Error:",
     ],

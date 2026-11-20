@@ -10,9 +10,12 @@ things:
    `/api/show`. The known models are the shipped and overlay defaults,
    `SONDER_CLOUD_CODE` / `SONDER_CLOUD_GENERAL` (and `SONDER_CODE` when it
    names a cloud model), the legacy general model, the ladder entries, pulled
-   cloud stubs and catalog entries. An answer of the form
-   `<name> was retired on <Month D, YYYY>. Try <suggestion>.` adds the name to
-   the overlay `retired_cloud_models`. The provider's suggestion is recorded.
+   cloud stubs and catalog entries. An error answer (at any HTTP status; the
+   live API uses 410) of the form
+   `<name> was retired on <Month D, YYYY>. Try <suggestion>. (ref: <id>)`,
+   where the suggestion and the `(ref: ...)` request reference are optional,
+   adds the name to the overlay `retired_cloud_models`. The provider's
+   suggestion is recorded; the reference is not.
 2. **Catalog (automatic, inert).** It reads the cloud models listed on
    `https://ollama.com/search?c=cloud` and their tags pages, and records them
    in a separate state file with first-seen, last-seen and the `/api/show`
@@ -38,7 +41,10 @@ policy.
 ## Files
 
 All files are in the Sonder state home (`%LOCALAPPDATA%\sonder` on Windows)
-unless an override is set.
+unless an override is set. `SONDER_CLOUD_MODEL_PREFERENCES` and
+`SONDER_CLOUD_MODEL_STATE` apply only when no state home is configured: a
+configured home (`state.home` in the CLI config, or a typed home) wins, and
+both files are then read from and written to that home.
 
 | File | Written by | Purpose |
 |---|---|---|
@@ -52,8 +58,10 @@ unless an override is set.
 
 The written retired list is always the union of the shipped list, the
 existing overlay list and the new entries. A list in the overlay replaces the
-whole shipped key, so a shorter list would hide shipped retirements. A refresh
-also restores shipped entries that an older overlay list hides.
+whole shipped key, so a shorter list would hide shipped retirements. When a
+refresh writes a new retirement, it also restores shipped entries that the
+overlay list hides. A run with no new retirement leaves the overlay list
+alone, so a shipped entry the operator deliberately left out stays out.
 
 Every write goes to a temporary file in the same directory, is checked by
 loading it back through the model-list loader (the same code path that would
@@ -92,7 +100,9 @@ overlay.
 python -m sonder_runtime models cloud-refresh [--apply] [--json] [--no-catalog] [--config PATH] [--set SECTION.KEY=VALUE]
 ```
 
-The default is a dry run, which writes nothing. The report lists:
+The default is a dry run. It writes no overlay, state, backup or change-log
+file; it still takes the run lock (`cloud_model_refresh.lock` and the lock's
+owner sidecar) and may create the state home directory. The report lists:
 
 - retirements, with the provider's date and suggestion;
 - rebinds, as `default_cloud_models.<tier>: A -> B (ladder #n)`;
@@ -109,7 +119,9 @@ ok, 1 aborted / refused / busy, 2 usage.
 ## MCP
 
 `cloud_models_status` is read-only. It reads the state files, the model lists
-and the environment, makes no network calls and writes nothing. It reports:
+and the environment, makes no network calls and writes nothing. Host paths in
+its answer (file paths, model-list issues, errors) go through the same display
+redactor as the other model-visible tools. It reports:
 
 - the last refresh, `last_success_at` and `next_due_after`;
 - the effective retired list, with each entry's source (shipped, overlay or
@@ -155,6 +167,11 @@ from the refresh (or from `/runtime models set`) reaches a running `serve` or
 - a tier bound by a live `SONDER_CLOUD_<TIER>` is left alone;
 - the 402 extra-usage fallback uses the current code default.
 
+An overlay that fails to load (the loader then serves the shipped values)
+leaves the live cloud tiers as they are, and the 402 fallback uses the
+process's startup code default: shipped values standing in for a broken
+overlay never undo an applied refresh.
+
 Local tiers and other startup bindings still need a restart. The
 `DEFAULT_CLOUD_*` and `RETIRED_CLOUD_MODELS` constants in `server.py` remain
 import-time compatibility values.
@@ -173,7 +190,11 @@ User-Agent, no cookies, no body and no user data, and caps the response size.
 - A page that parses to nothing is `unparsed`: the layout changed, and the
   catalog section is left untouched.
 - An HTTP or transport failure makes the status `unavailable` and discards the
-  catalog for that run only. Retirement and rebinds still apply.
+  catalog for that run only. Retirement and rebinds from the Ollama probes
+  still apply, so on a catalog failure the overlay and state can still be
+  written; only an Ollama failure leaves every file unchanged.
+- Only the first URL is checked against the two shapes. The transport follows
+  up to five redirects, each re-validated as a public address, to any host.
 
 The catalog is off when `SONDER_WEB_TOOLS=0`, when `SONDER_CLOUD_CATALOG=0`,
 when the preferences say `"catalog": false`, or with `--no-catalog`.
