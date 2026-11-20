@@ -24,6 +24,14 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
   protects the comm port like `<Port>` (see below), and refuses a `<Port>` above 64535 because its comm port would
   not fit. Defence in depth: setting `GGML_RPC_NO_COMM=1` in the environment of Main's `llama-server` turns
   COMM_INIT off (`ggml-rpc.cpp:3229`), so no comm listener is opened; the Main launchers do not set it.
+- **The comm port is closed to Main too.** No rule admits `<Port>` + 1000 from `10.77.0.1` (the peer rule is for
+  `<Port>` only), so when Node1's `rpc-server` is rank 0 a rank on Main cannot reach its comm listener: that rank's
+  connect retries fail (`ggml-rpc.cpp:2376-2385`), it answers COMM_INIT with failure, and the client logs
+  "rank ... failed to initialize" and gives up on the communicator (`ggml-rpc.cpp:3283-3295`). Nothing is admitted,
+  so this is safe, but note (static reading of the source, not a live test) that rank 0 waits in `accept()` with no
+  timeout (`ggml-rpc.cpp:2361`, `transport.cpp:726-727`), so Main's `llama-server` can stall at COMM_INIT instead of
+  failing fast. For splits over two or more RPC endpoints, set `GGML_RPC_NO_COMM=1` in the environment of Main's
+  `llama-server` so COMM_INIT is never sent.
 - Main `llama-server` binds **strictly** to `127.0.0.1:11438` (loopback only, no cloud egress).
 - `start-node1-rpc.ps1 -Action Start` **always** checks the effective Windows Firewall policy before it launches
   `rpc-server`, with or without `-EnsureFirewall`, and refuses to start (throws, non-zero exit) when:
@@ -34,6 +42,15 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
     program rule counts as an rpc-server rule by its file name (case-insensitive) in any directory or path form (8.3, junction, `\Device\HarddiskVolumeN`), and an 8.3
     short file name (`RPC-SE~1.EXE`) counts too because it cannot be compared. Rules bound to another program or to a
     packaged (Store) app are ignored, because they cannot admit `rpc-server` traffic;
+  - such a rule (including one shaped exactly like the peer rule) has a non-empty `RemoteDynamicKeywordAddresses`.
+    A rule admits its `RemoteAddress` plus every address its dynamic keywords resolve to, so a rule with any keyword
+    is never peer-only: it is never accepted as the peer rule, and it refuses as wide when it covers TCP `<Port>` or
+    the comm port. The refusal lists the keyword ids. The property is read from the rule object; if it cannot be
+    read, Start refuses;
+  - the Windows Defender Firewall service (`mpssvc`) is not `Running`, or its state cannot be read;
+  - `netsh interface portproxy show all` lists an entry that listens on or connects to TCP `<Port>` or the comm port
+    (a port proxy relays connections as local traffic, which the inbound rules do not filter), or `netsh` fails or
+    prints anything that cannot be parsed. The refusal gives the `netsh interface portproxy delete` command;
   - a firewall profile is off or allows inbound by default, or a rule's filters cannot be read;
   - any profile (Domain, Private or Public) lists any entry other than `NotConfigured` in `DisabledInterfaceAliases`,
     whatever interface it names (a friendly name, a GUID, a renamed adapter). An excluded interface is not filtered

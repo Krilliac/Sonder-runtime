@@ -54,18 +54,30 @@ $global:MockLivePids = New-Object System.Collections.ArrayList
 foreach ($p in @($scenario.livePids)) { if ($null -ne $p) { [void]$global:MockLivePids.Add([int]$p) } }
 $global:MockListeners = New-Object System.Collections.ArrayList
 foreach ($l in @($scenario.listeners)) { if ($null -ne $l) { [void]$global:MockListeners.Add($l) } }
+# netsh interface portproxy show all: no entries prints one blank line (seen on a real PC).
+$global:MockPortproxyLines = if ($null -ne $scenario.portproxyLines) { @($scenario.portproxyLines) } else { @('') }
+$global:MockPortproxyExit = [int]$scenario.portproxyExit
+$global:MockPortproxyThrows = [bool]$scenario.portproxyThrows
+$global:MockServiceStatus = if ($null -ne $scenario.serviceStatus) { [string]$scenario.serviceStatus } else { 'Running' }
+$global:MockServiceFails = [bool]$scenario.serviceFails
 
 function Write-MockLog([string]$Name, $Value) {
     Add-Content -LiteralPath (Join-Path $global:MockOut $Name) -Value ($Value | ConvertTo-Json -Compress -Depth 6)
 }
 
 function ConvertTo-MockRule($r) {
-    [pscustomobject]@{
+    $rule = [pscustomobject]@{
         Name = [string]$r.name; InstanceID = [string]$r.name; DisplayName = [string]$r.displayName
         Enabled = [string]$r.enabled; Direction = [string]$r.direction; Action = [string]$r.action
         PackageFamilyName = [string]$r.packageFamilyName
         PolicyStoreSource = [string]$r.policyStoreSource; PolicyStoreSourceType = [string]$r.policyStoreSourceType
     }
+    # The real rule object carries RemoteDynamicKeywordAddresses as string[] (empty when unset).
+    if (-not $r.omitKeywordProperty) {
+        $kw = if ($null -ne $r.remoteDynamicKeywordAddresses) { [string[]]@($r.remoteDynamicKeywordAddresses) } else { [string[]]@() }
+        $rule | Add-Member -MemberType NoteProperty -Name RemoteDynamicKeywordAddresses -Value $kw
+    }
+    $rule
 }
 
 function New-MockFilter($r, [string]$Kind) {
@@ -205,6 +217,19 @@ function Get-CimInstance {
         }
     }
 }
+function netsh {
+    Write-MockLog 'netsh.jsonl' @{ Args = @($args) }
+    if ($global:MockPortproxyThrows) { throw 'mock: netsh is not recognized' }
+    $global:LASTEXITCODE = $global:MockPortproxyExit
+    foreach ($line in $global:MockPortproxyLines) { [string]$line }
+}
+function Get-Service {
+    [CmdletBinding()]
+    param([string]$Name)
+    Write-MockLog 'get-service.jsonl' @{ Name = $Name }
+    if ($global:MockServiceFails) { Write-Error -Message "mock: Cannot find any service with service name '$Name'." -Category ObjectNotFound; return }
+    [pscustomobject]@{ Name = $Name; Status = $global:MockServiceStatus }
+}
 function New-Object {
     # Only the TcpClient used by Test-TcpPort is mocked: it never connects.
     param([Parameter(Position = 0)][string]$TypeName)
@@ -226,7 +251,8 @@ function New-Object {
 foreach ($cmd in 'Get-NetFirewallRule', 'Get-NetFirewallPortFilter', 'Get-NetFirewallAddressFilter',
                  'Get-NetFirewallApplicationFilter', 'Get-NetFirewallProfile', 'Remove-NetFirewallRule',
                  'New-NetFirewallRule', 'Get-NetTCPConnection', 'Invoke-CimMethod', 'New-Object',
-                 'Get-NetIPAddress', 'Get-Process', 'Stop-Process', 'Wait-Process', 'Get-CimInstance') {
+                 'Get-NetIPAddress', 'Get-Process', 'Stop-Process', 'Wait-Process', 'Get-CimInstance',
+                 'netsh', 'Get-Service') {
     if ((Get-Command $cmd).CommandType -ne 'Function') { throw "mock for $cmd is not active" }
 }
 
@@ -820,3 +846,125 @@ def test_existing_unpinned_peer_rule_still_allows_start(tmp_path: Path) -> None:
     # PEER carries no interface condition: Start does not add a refusal for that.
     outcome = _run(tmp_path, [PEER], extra={"ipFails": True})
     assert outcome.launched, outcome.error or outcome.text
+
+
+# --- Dynamic keyword addresses widen a rule's remote address ---
+# A rule admits its RemoteAddress plus every address its RemoteDynamicKeywordAddresses
+# resolve to, so any keyword makes it not peer-only.
+
+KEYWORD_ID = "{3c4f2a11-7e0b-4d2a-9a51-0b7f6c1e2d90}"
+
+
+def test_peer_shaped_rule_with_a_dynamic_keyword_refuses(tmp_path: Path) -> None:
+    kw_peer = _rule(name="peer-kw", displayName="Peer plus keyword", remoteDynamicKeywordAddresses=[KEYWORD_ID])
+    outcome = _run(tmp_path, [kw_peer])
+    _assert_refused(outcome, "'Peer plus keyword'", f"RemoteDynamicKeywordAddresses={KEYWORD_ID}",
+                    "never peer-only", "Disable-NetFirewallRule -Name 'peer-kw'",
+                    "no enabled inbound Allow rule admits exactly TCP 50052")
+
+
+def test_peer_rule_plus_a_peer_shaped_keyword_rule_refuses(tmp_path: Path) -> None:
+    kw_peer = _rule(name="peer-kw", displayName="Peer plus keyword", remoteDynamicKeywordAddresses=[KEYWORD_ID])
+    outcome = _run(tmp_path, [PEER, kw_peer])
+    _assert_refused(outcome, "'Peer plus keyword'", f"RemoteDynamicKeywordAddresses={KEYWORD_ID}")
+    assert "no enabled inbound Allow rule admits exactly" not in outcome.error, outcome.error
+
+
+def test_comm_port_rule_from_the_peer_with_a_dynamic_keyword_refuses(tmp_path: Path) -> None:
+    comm = _rule(name="comm-kw", displayName="Comm from Main plus keyword", localPort=["51052"],
+                 localAddress=["Any"], remoteAddress=["10.77.0.1"], remoteDynamicKeywordAddresses=[KEYWORD_ID])
+    outcome = _run(tmp_path, [PEER, comm])
+    _assert_refused(outcome, "'Comm from Main plus keyword'", "comm port TCP 51052",
+                    f"RemoteDynamicKeywordAddresses={KEYWORD_ID}", "Disable-NetFirewallRule -Name 'comm-kw'")
+
+
+def test_peer_rule_with_an_empty_keyword_list_allows_start(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [_rule(remoteDynamicKeywordAddresses=[])])
+    assert outcome.launched, outcome.error or outcome.text
+
+
+def test_unreadable_keyword_property_refuses(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [_rule(omitKeywordProperty=True)])
+    _assert_refused(outcome, "cannot read RemoteDynamicKeywordAddresses", "'Node1 llama-rpc 50052 from Main peer'")
+
+
+# --- netsh interface portproxy must not forward the rpc ports ---
+
+PORTPROXY_HEADER = ["", "Listen on ipv4:             Connect to ipv4:", "",
+                    "Address         Port        Address         Port",
+                    "--------------- ----------  --------------- ----------"]
+
+
+def _portproxy(*rows: str) -> dict:
+    return {"portproxyLines": [*PORTPROXY_HEADER, *rows, ""]}
+
+
+@pytest.mark.parametrize(
+    ("row", "needle"),
+    [
+        pytest.param("0.0.0.0         50052       10.77.0.2       50052", "listen 0.0.0.0:50052", id="listen-port"),
+        pytest.param("192.168.1.20    8080        10.77.0.2       51052", "connect 10.77.0.2:51052",
+                     id="connect-comm-port"),
+        pytest.param("*               51052       127.0.0.1       9000", "listen *:51052", id="listen-comm-port"),
+    ],
+)
+def test_portproxy_entry_for_an_rpc_port_refuses(tmp_path: Path, row: str, needle: str) -> None:
+    outcome = _run(tmp_path, [PEER], extra=_portproxy(row))
+    _assert_refused(outcome, "netsh interface portproxy", needle, "[v4tov4]",
+                    "netsh interface portproxy delete v4tov4")
+    assert outcome.log("netsh.jsonl") == [{"Args": ["interface", "portproxy", "show", "all"]}]
+
+
+def test_portproxy_entry_in_a_v6_section_refuses(tmp_path: Path) -> None:
+    lines = ["", "Listen on ipv6:             Connect to ipv4:", "",
+             "Address         Port        Address         Port",
+             "--------------- ----------  --------------- ----------",
+             "::              50052       10.77.0.2       50052", ""]
+    outcome = _run(tmp_path, [PEER], extra={"portproxyLines": lines})
+    _assert_refused(outcome, "[v6tov4] listen :::50052", "portproxy delete v6tov4")
+
+
+def test_unrelated_portproxy_entry_allows_start(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER], extra=_portproxy("0.0.0.0         8080        127.0.0.1       80"))
+    assert outcome.launched, outcome.error or outcome.text
+
+
+def test_no_portproxy_entries_allows_start(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER])
+    assert outcome.launched, outcome.error or outcome.text
+    assert outcome.log("netsh.jsonl"), "portproxy was never listed"
+
+
+@pytest.mark.parametrize(
+    ("extra", "needle"),
+    [
+        pytest.param({"portproxyExit": 1, "portproxyLines": ["The following command was not found."]},
+                     "exited with code 1", id="exit-code"),
+        pytest.param({"portproxyThrows": True}, "cannot run 'netsh interface portproxy show all'", id="not-runnable"),
+        pytest.param(_portproxy("0.0.0.0 http 127.0.0.1 80"), "cannot parse", id="named-port"),
+        pytest.param({"portproxyLines": ["Something unexpected"]}, "cannot parse", id="unknown-text"),
+    ],
+)
+def test_portproxy_unreadable_refuses(tmp_path: Path, extra: dict, needle: str) -> None:
+    outcome = _run(tmp_path, [PEER], extra=extra)
+    _assert_refused(outcome, "cannot verify that no port proxy forwards to rpc-server", needle)
+
+
+# --- The firewall service must be running ---
+
+
+@pytest.mark.parametrize("status", ["Stopped", "StartPending", "Paused"])
+def test_firewall_service_not_running_refuses(tmp_path: Path, status: str) -> None:
+    outcome = _run(tmp_path, [PEER], extra={"serviceStatus": status})
+    _assert_refused(outcome, "(mpssvc) is not running", f"Status={status}", "Start-Service mpssvc")
+
+
+def test_firewall_service_unreadable_refuses(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER], extra={"serviceFails": True})
+    _assert_refused(outcome, "cannot read the state of the Windows Defender Firewall service (mpssvc)")
+
+
+def test_firewall_service_is_checked_on_a_healthy_start(tmp_path: Path) -> None:
+    outcome = _run(tmp_path, [PEER])
+    assert outcome.launched, outcome.error or outcome.text
+    assert outcome.log("get-service.jsonl") == [{"Name": "mpssvc"}]
