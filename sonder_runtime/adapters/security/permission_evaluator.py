@@ -19,6 +19,11 @@ Two things distinguish the request-aware form from the narrow one:
   unattended refusal names the call (``call_id``) and a one-shot approval of
   exactly that call can answer the next attempt; the current effect fence,
   if a worker installed one, is consulted too.
+
+The safety classifier (``domain.security.tool_call_classifier``) is not
+consulted here: a typed request's ``ToolScope`` names no model, so this
+evaluator cannot tell a model-originated call from a person's.  It runs where
+the calling model is known: the restricted tool lane's per-dispatch policy.
 """
 from __future__ import annotations
 

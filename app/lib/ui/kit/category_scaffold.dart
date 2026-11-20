@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme.dart';
 import 'motion.dart';
+import 'text_field.dart';
 
 /// One page of a categorized surface (Runtime, Settings): its rail entry and
 /// the builder for its content.
@@ -426,33 +427,25 @@ class _SearchField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    return TextField(
-      key: const Key('category-search'),
+    return SonderTextField(
+      fieldKey: const Key('category-search'),
       controller: controller,
       onChanged: onChanged,
-      style: Theme.of(context).textTheme.bodyMedium,
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: hint,
-        prefixIcon: Icon(Icons.search, size: 18, color: tokens.muted),
-        prefixIconConstraints:
-            const BoxConstraints(minWidth: 36, minHeight: 36),
-        contentPadding: const EdgeInsets.symmetric(
-            horizontal: SonderSpace.sm, vertical: SonderSpace.sm),
-        suffixIcon: ValueListenableBuilder<TextEditingValue>(
-          valueListenable: controller,
-          builder: (context, value, _) => value.text.isEmpty
-              ? const SizedBox.shrink()
-              : IconButton(
-                  tooltip: 'Clear search',
-                  iconSize: 16,
-                  icon: const Icon(Icons.close),
-                  onPressed: () {
-                    controller.clear();
-                    onChanged('');
-                  },
-                ),
-        ),
+      hint: hint,
+      prefix: Icon(Icons.search, size: 18, color: tokens.muted),
+      suffix: ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (context, value, _) => value.text.isEmpty
+            ? const SizedBox.shrink()
+            : IconButton(
+                tooltip: 'Clear search',
+                iconSize: 16,
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  controller.clear();
+                  onChanged('');
+                },
+              ),
       ),
     );
   }

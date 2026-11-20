@@ -753,7 +753,42 @@ class SonderTokens extends ThemeExtension<SonderTokens> {
       scrim: mix(scrim, other.scrim),
     );
   }
+
+  /// Adjusts the theme tone by [tone] (-1.0 to 1.0).
+  SonderTokens withTone(double tone) {
+    if (tone == 0) return this;
+    final adjustment = tone > 0 ? Colors.black : Colors.white;
+    final factor = tone.abs();
+    Color adjust(Color c) => Color.lerp(c, adjustment, factor) ?? c;
+    return SonderTokens(
+      canvas: adjust(canvas),
+      sunken: adjust(sunken),
+      panel: adjust(panel),
+      raised: adjust(raised),
+      bubble: adjust(bubble),
+      hairline: adjust(hairline),
+      hairlineStrong: adjust(hairlineStrong),
+      text: adjust(text),
+      text2: adjust(text2),
+      muted: adjust(muted),
+      accent: adjust(accent),
+      accentText: adjust(accentText),
+      onAccent: adjust(onAccent),
+      accentDim: adjust(accentDim),
+      ok: adjust(ok),
+      info: adjust(info),
+      warn: adjust(warn),
+      danger: adjust(danger),
+      dangerDim: adjust(dangerDim),
+      auto: adjust(auto),
+      mutation: adjust(mutation),
+      execution: adjust(execution),
+      shadow: adjust(shadow),
+      scrim: adjust(scrim),
+    );
+  }
 }
+
 
 /// WCAG 2.x contrast arithmetic, shared by the contrast tests and any
 /// widget that must pick a legible foreground at run time.

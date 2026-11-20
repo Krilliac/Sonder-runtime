@@ -1097,7 +1097,7 @@ class ChatController extends ChangeNotifier {
             (t) => (t.id.isNotEmpty ? t.id : t.callId) == key,
           );
     if (idx >= 0) {
-      updated[idx] = tool;
+      updated[idx] = tool.mergedOnto(updated[idx]);
     } else {
       updated.add(tool);
     }
@@ -1118,8 +1118,7 @@ class ChatController extends ChangeNotifier {
     if (tool.isAwaitingClientResult && tool.callId.isNotEmpty) {
       final firstSeen = _handledClientCalls.add(tool.callId);
       if (!firstSeen) return;
-      final risk =
-          tool.risk.isNotEmpty ? tool.risk : clientToolRisk(tool.tool);
+      final risk = effectiveClientToolRisk(tool.risk, tool.tool);
       if (clientModeAllowsWithoutPrompt(clientPermissionMode, risk)) {
         _upsertLiveTool(tool, awaiting: false);
         unawaited(_executeAndSubmitClientTool(
@@ -1452,8 +1451,9 @@ class ChatController extends ChangeNotifier {
     for (final h in reply.metadata?.clientToolHandoffs ?? const <ClientToolHandoff>[]) {
       if (h.callId.isNotEmpty && !seenIds.contains(h.callId)) {
         seenIds.add(h.callId);
+        final effectiveRisk = effectiveClientToolRisk(h.risk, h.tool);
         final allowed =
-            clientModeAllowsWithoutPrompt(clientPermissionMode, h.risk);
+            clientModeAllowsWithoutPrompt(clientPermissionMode, effectiveRisk);
         final ev = ChatStreamToolEvent.fromJson({
           'id': h.callId,
           'call_id': h.callId,
@@ -1463,7 +1463,7 @@ class ChatController extends ChangeNotifier {
           'state': allowed ? 'running' : 'awaiting_client_approval',
           'tool': h.tool,
           'args': h.args,
-          'risk': h.risk,
+          'risk': effectiveRisk,
           'session': h.session,
         });
         handoffTools.add(ev);

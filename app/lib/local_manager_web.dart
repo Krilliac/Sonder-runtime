@@ -222,7 +222,8 @@ class LocalManager {
     String companionUrl = defaultClientAgentUrl,
     String companionToken = '',
   }) async {
-    final effectiveRisk = risk.isEmpty ? clientToolRisk(tool) : risk;
+    // A declared risk can raise the local classification, never lower it.
+    final effectiveRisk = effectiveClientToolRisk(risk, tool);
     if (!approved && !clientModeAllowsWithoutPrompt(mode, effectiveRisk)) {
       return ClientToolExecResult(
         ok: false,

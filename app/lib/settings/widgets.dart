@@ -183,30 +183,22 @@ class LabeledTextField extends StatelessWidget {
     return Semantics(
       container: true,
       label: label,
-      child: TextField(
-        key: fieldKey,
+      child: SonderTextField(
+        fieldKey: fieldKey,
         controller: controller,
         focusNode: focusNode,
         obscureText: obscureText,
         readOnly: readOnly,
-        autocorrect: false,
-        enableSuggestions: !obscureText,
         keyboardType: keyboardType,
         inputFormatters: inputFormatters,
         onChanged: onChanged,
         onSubmitted: onSubmitted,
         textAlign: textAlign,
-        style: style,
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: (mono ? tokens.mono(13.5, height: 22) : text.bodyMedium)
-              ?.copyWith(color: tokens.muted),
-          suffixIcon: suffix,
-          suffixText: suffixText,
-          suffixStyle: text.bodySmall?.copyWith(color: tokens.muted),
-          errorText: errorText,
-          errorMaxLines: 3,
-        ),
+        hint: hint,
+        mono: mono,
+        suffix: suffix,
+        suffixText: suffixText,
+        errorText: errorText,
       ),
     );
   }

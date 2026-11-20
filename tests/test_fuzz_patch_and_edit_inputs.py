@@ -1438,6 +1438,7 @@ def test_scan_and_normalize_stay_in_budget_on_ten_thousand_line_inputs():
         "quotes": '"\n', "adjacent_literals": '"a" ', "string_run_newlines": '"a"\n', "block_comments": "/*\n",
         "raw_open": 'R"x(\n', "splices": "\\\n", "digraphs": "%:%:%:\n", "directives": "# define A 1\n",
         "pp_numbers": "1'0'0'0 ", "open_declspec": "__declspec(\n", "attr_spaces": "__attribute__ ( (" + " " * 40 + "\n",
+        "escaped_quotes": '\\"',
     }
     slow = []
     for name, unit in units.items():
@@ -1468,6 +1469,183 @@ def test_regression_unterminated_opener_scan_is_not_quadratic(opener):
     _scan(text)
     elapsed = time.perf_counter() - started
     assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars of unterminated attribute openers ({TAG})"
+
+
+def test_regression_escaped_quote_line_scan_is_not_quadratic():
+    """One unterminated line of escaped quotes: a backtracking string pattern restarts at every ``\\"``.
+
+    64000 characters is the most a candidate can add on one line (8 chained hunks x 8000 chars).
+    """
+    text = 'x = "' + '\\"' * 31_995
+    for scan in (_scan, _scan_every_lexing):
+        started = time.perf_counter()
+        scan(text)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"{scan.__name__}: {elapsed:.2f}s for {len(text)} chars of escaped quotes ({TAG})"
+
+
+_REFERENCE_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+_REFERENCE_STRING_RUN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"(?:\s*"(?:[^"\\\n]|\\.)*")+')
+
+
+def test_linear_string_matchers_agree_with_the_regex_reference():
+    """The linear literal and adjacent-literal matchers return what the backtracking patterns did."""
+    from sonder_runtime.domain.build import repair as repair_module
+
+    rng = _rng("string-matchers")
+    alphabet = '"""\\\\\n \tax \x1c\x85\''
+    for _ in range(30_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 28)))
+        spans = repair_module._string_spans(text)
+        assert [text[start:end] for start, end in spans] == _REFERENCE_STRING_RE.findall(text), (text, TAG)
+        runs = repair_module._string_runs(text)
+        assert [text[run[0][0]:run[-1][1]] for run in runs] == _REFERENCE_STRING_RUN_RE.findall(text), (text, TAG)
+        for run in runs:
+            joined = "".join(text[start:end] for start, end in run)
+            assert [text[start:end] for start, end in run] == _REFERENCE_STRING_RE.findall(
+                text[run[0][0]:run[-1][1]]), (text, joined, TAG)
+
+
+# A header-name (after #include and its kin, inside __has_include( or anything that expands to
+# it on an #if/#elif line, or after a C++20 import) is one token to the compilers: a comment
+# opener or quote inside it starts neither a comment nor a literal. Each head below hid the tail
+# lines from a scanner that read one; the comment names the compilers (gcc -E, clang -E,
+# clang-cl /E) that still reach the hidden #include. On an #if/#elif line every such ``<`` or
+# ``"`` is refused, whatever precedes it, so the scanner never has to resolve a macro.
+_HIDDEN_TAIL = '#include "../../../outside/secret.h"\n#pragma comment(lib, "evil")\n'
+_HEADER_NAME_BYPASSES = {
+    "has-include-angle-comment": ("#if __has_include(<a/*b.h>)\n#endif\n", "#if 0 //*/ c.h>)\n#endif\n"),  # all three
+    "has-include-angle-apostrophe": ("#if __has_include(<a'b.h>) || '/*'\n#endif\n", "#if 0 //*/\n#endif\n"),  # all three
+    "skipped-include-angle-quote": ('#if 0\n#include <a"b.h> "/*"\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
+    "skipped-include-angle-comment": ("#if 0\n#include <a/*b.h>\n#endif\n", "#if 0 //*/\n#endif\n"),  # gcc
+    "alias-has-include": ("#define H __has_include\n#if H(<a/*b.h>)\n#endif\n", "#if 0 //*/ c.h>)\n#endif\n"),  # all
+    "comment-in-directive-head": ("#if 0\n#/**/include /**/ <a/*b.h>\n#endif\n", "#if 0 //*/\n#endif\n"),  # gcc
+    "has-include-quoted-escape": ('#if __has_include("x\\") || 1 //"/*\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
+    "skipped-include-quoted-escape": ('#if 0\n#include "x\\" "/*"\n#endif\n', "#if 0 //*/\n#endif\n"),  # gcc
+    "cxx20-import": ("import <a/*b.h>;\n", "#if 0 //*/\n#endif\n"),  # clang, clang-cl (-std=c++20)
+    # A __has_include pasted from pieces, with a macro-made ``(``: the pieces still name it.
+    "pasted-has-include": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has_, include) LP <a/*b.h>)\n#endif\n",
+                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # The same, split where no piece looks like __has_include.
+    "pasted-split-ha": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__ha, s_include) LP <a/*b.h>)\n#endif\n",
+                        "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    "pasted-split-has": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(__has, _include) LP <a/*b.h>)\n#endif\n",
+                         "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    "pasted-split-underscore": ("#define CAT(a, b) a##b\n#define LP (\n#if CAT(_, _has_include) LP <a/*b.h>)\n#endif\n",
+                                "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # An object-like macro pastes it and the next one supplies the ``(``: two adjacent names.
+    "pasted-object-like": ("#define HI __has_##include\n#define LP (\n#if HI LP <a/*b.h>)\n#endif\n",
+                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl
+    # One object-like macro pastes it and supplies the ``(``: ``#if HIP <`` is spelled like
+    # ``#if A < B``.
+    "pasted-lone-object-like": ("#define HIP __has_##include (\n#if HIP <a/*b.h>)\n#endif\n",
+                                "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    # The same with a quoted name: the escaped quote hides ``//`` and opens ``/*``.
+    "pasted-lone-object-like-quoted": ("#define HIP __has_##include (\n#if HIP \"x\\\" ) || 1 //\"/*\n#endif\n",
+                                       "#if 0 //*/\n#endif\n"),  # gcc
+    # Other spellings of the directive head reach the same rule.
+    "pasted-lone-object-like-digraph-head": ("#define HIP __has_##include (\n%:if HIP <a/*b.h>)\n#endif\n",
+                                             "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    "pasted-lone-object-like-spliced-elif": ("#define HIP __has_##include (\n#if 0\n#el\\\nif HIP <a/*b.h>)\n#endif\n",
+                                             "#if 0 //*/ c.h>)\n#endif\n"),  # gcc
+    # A builtin the same text redefines to paste it.
+    "pasted-redefined-builtin": (("#define __has_feature(a, b) a##b\n#define LP (\n"
+                                  "#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n"),
+                                 "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl (with a warning)
+    # The same with both defines in another file of the patch (``_CROSS_FILE_DEFINES``): this
+    # text holds only a builtin call and a name.
+    "pasted-builtin-redefined-elsewhere": ("#if __has_feature(__ha, s_include) LP <a/*b.h>)\n#endif\n",
+                                           "#if 0 //*/ c.h>)\n#endif\n"),  # clang, clang-cl (with a warning)
+}
+# What "pasted-builtin-redefined-elsewhere" needs from a header the same patch edits.
+_CROSS_FILE_DEFINES = "#define __has_feature(a, b) a##b\n#define LP (\n"
+
+
+@pytest.mark.parametrize("name", sorted(_HEADER_NAME_BYPASSES))
+def test_comment_or_quote_inside_a_header_name_is_refused(name):
+    head, close = _HEADER_NAME_BYPASSES[name]
+    for before in ("int x;\n", "int x;\n" + head + _HIDDEN_TAIL + close):
+        # In the old text as well: it decides which of the added lines a comment hides.
+        found = scan_added_lexings(before, "int x;\n" + head + _HIDDEN_TAIL + close + "int y;\n", include_ok=OK)
+        assert any("header-name" in reason for reason in found), (name, found, TAG)
+
+
+def test_header_name_comment_bypass_is_refused_end_to_end():
+    head, close = _HEADER_NAME_BYPASSES["has-include-angle-comment"]
+    patch = CandidatePatch(hunks=(PatchHunk("src/core/math.cpp", "    return l;\n}\n",
+                                            "    return l;\n}\n" + head + _HIDDEN_TAIL + close),))
+    texts, reasons = validate_patch(patch, scope=SCOPE, current={"src/core/math.cpp": _MATH_SOURCE})
+    assert texts == {} and any("header-name" in reason for reason in reasons), (reasons, TAG)
+
+
+def test_builtin_redefined_in_another_file_of_the_patch_is_refused_end_to_end():
+    # Each file is scanned on its own, so math.cpp shows only a builtin call; the #if line's
+    # suspect ``<`` is refused without knowing what the header defines.
+    head, close = _HEADER_NAME_BYPASSES["pasted-builtin-redefined-elsewhere"]
+    patch = CandidatePatch(hunks=(
+        PatchHunk("src/core/feat.h", "#pragma once\n", "#pragma once\n" + _CROSS_FILE_DEFINES),
+        PatchHunk("src/core/math.cpp", "    return l;\n}\n",
+                  '    return l;\n}\n#include "feat.h"\n' + head + _HIDDEN_TAIL + close),
+    ))
+    current = {"src/core/feat.h": "#pragma once\n", "src/core/math.cpp": _MATH_SOURCE}
+    texts, reasons = validate_patch(patch, scope=SCOPE, current=current)
+    assert texts == {} and any("header-name" in reason and "math.cpp" in reason for reason in reasons), (
+        reasons, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    '#include <vector> // a "quoted" note\n',
+    "#include <sys/types.h> /* <inner> */\n",
+    '#include "win\\path.h"\n',
+    '#if __has_include(<vector>) // "x"\n#endif\n',
+    "#if A < B\n#endif\n",
+    "#if A < B /* x */\n#endif\n",
+    "#if A < B && C > D\n#endif\n",
+    "#elif A < B && C > D // a->b\n",
+    '#define LOG(x) printf("\\"%s\\"\\n", x)\n',
+    "#define LT(a, b) ((a) < (b)) /* a > b */\n",
+    'if (a < b) { // x -> "y"\n}\n',
+    'static_assert(N < 4, "N > 3 is unsupported");\n',
+    # Only __has_include and __has_embed take a header-name; other __has_ names take tokens.
+    'static_assert(__has_trivial_copy(T), "T must be \\"trivial\\"");\n',
+    'static_assert(__has_trivial_destructor(T) && sizeof(T) < 16, "size > 16");\n',
+    "#if __has_feature(x) && N < 3\n#endif\n",
+    "#if __has_builtin(__builtin_expect) && N < 3 /* see a, b */\n#endif\n",
+    '#if __has_warning("-Wfoo") && A < B\n#endif\n',
+    "#if MYVER(1, 2) < 3 // a user macro call\n#endif\n",
+    "#if defined FOO && defined(BAR) && N < 3 /* see a */\n#endif\n",
+])
+def test_header_name_rule_keeps_ordinary_code(text):
+    found = scan_added_lexings("", text, include_ok=OK)
+    assert not any("header-name" in reason for reason in found), (text, found, TAG)
+
+
+@pytest.mark.parametrize("text", [
+    "#if A < B /* > */\n#endif\n",
+    "#if A < B // c > d\n#endif\n",
+    '#if A < B // a "note" > b\n#endif\n',
+    "#elif A < B /* > */\n",
+    "#if MYVER(1, 2) < 3 /* a->b */\n#endif\n",
+    "#if A B < 3 /* a->b */\n#endif\n",
+    "#if __has_builtin(__builtin_expect) && N < 3 /* see a->b */\n#endif\n",
+    '#if __has_feature(cxx_rtti) && X < 2 // "y" > z\n#endif\n',
+    "#if defined FOO && defined(BAR) && N < 3 /* see a->b */\n#endif\n",
+    "#if 201703L <= 1'000'000 && __has_include(<version>)\n#endif\n",
+])
+def test_header_name_rule_refuses_every_split_name_on_if_lines(text):
+    """Pinned refusal, by design: on an #if/#elif line any ``<`` whose text up to the first ``>``
+    holds a comment opener or a quote (a digit separator included) is refused, whatever precedes
+    it.
+
+    Each line here is an ordinary comparison, but the scanner cannot see macro bodies: ``A``,
+    ``MYVER`` or a ``__has_feature`` another file redefines may expand to ``__has_include (``
+    (``#define HIP __has_##include (`` makes ``#if HIP <a/*b.h>)`` a header-name to gcc), and
+    then ``< B /* >`` is one header-name token whose ``/*`` opens no comment. Telling the two
+    apart needs the macro definitions, so the line fails closed. No ``#if``/``#elif`` line of
+    the MSVC STL, Windows SDK, clang or gcc headers measured has this shape.
+    """
+    found = scan_added_lexings("", text, include_ok=OK)
+    assert any("header-name" in reason for reason in found), (text, found, TAG)
 
 
 def test_patch_json_does_not_resolve_unc_paths_before_the_root_check(tmp_path, monkeypatch, request):
@@ -1910,7 +2088,9 @@ def test_regression_has_include_shim_exemption_is_anchored_to_the_line_start(tex
     "#if defined __has_include && __has_include(<version>)\n#endif\n",
     '#if !defined( __has_include ) || !__has_include("detail/impl.inl")\n#endif\n',
     "#if (defined(__has_include) && (__has_include(<a.h>) || __has_include_next(<b.h>)))\n#endif\n",
-    "#if defined(_WIN32) && !defined SPARK_NO_X && 201703L <= 1'000'000 && 0x1F && __has_include(<version>)\n#endif\n",
+    # Digit separators after a ``<`` and before a later ``>`` are refused on an #if line
+    # (test_header_name_rule_refuses_every_split_name_on_if_lines), so this compares with ``>=``.
+    "#if defined(_WIN32) && !defined SPARK_NO_X && 1'000'000 >= 201703L && 0x1F && __has_include(<version>)\n#endif\n",
     '#if __cplusplus >= 201703L && __has_include("detail/impl.inl")\n#endif\n',
     '#if 0\n#elif __has_include(<sys/types.h>) && __has_include("math.h")\n#endif\n',
     "#if __has_include__(<version>)\n#endif\n",
@@ -2272,8 +2452,10 @@ def _union_of_every_lexing(before: str, after: str) -> set[str]:
                 found.update(scan_hostile_directives(
                     added_logical_lines(before, after, raw_strings=raw, separators=separators, **mode),
                     include_ok=OK))
-            # The ambiguous quote counts in the C++14 quote reading; a bad raw prefix in C++14 and C++11.
-            for separators, kinds in (("cxx14", ("ambiguous", "bad_raw")), ("none", ("bad_raw",))):
+            # The ambiguous quote counts in the C++14 quote reading; a bad raw prefix in C++14 and C++11;
+            # a split header-name in every quote reading.
+            for separators, kinds in (("cxx14", ("ambiguous", "bad_raw", "header_name")),
+                                      ("none", ("bad_raw", "header_name")), ("legacy", ("header_name",))):
                 events: set[str] = set()
                 for text in (before, after):
                     repair_module._mask_literals(
@@ -2281,8 +2463,10 @@ def _union_of_every_lexing(before: str, after: str) -> set[str]:
                         digraphs=mode.get("digraphs", False), separators=separators, events=events)
                 if "ambiguous" in kinds and "ambiguous" in events:
                     found.add(repair_module._AMBIGUOUS_SEPARATOR)
-                if "bad_raw" in events:
+                if "bad_raw" in kinds and "bad_raw" in events:
                     found.add(repair_module._BAD_RAW_DELIMITER)
+                if "header_name" in kinds and "header_name" in events:
+                    found.add(repair_module._HEADER_NAME_SPLIT)
     return found
 
 

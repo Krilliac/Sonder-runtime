@@ -331,7 +331,17 @@ def test_trivial_equation_agreement_passes_both_judge_and_heuristic():
 
     judged = consult_module.consult("What is 7 * 8?", _LOCAL_PAIR, ask_fn=ask_with_prose_no)
     assert judged["agree"] is True
-    assert judged["confidence"] == "high"
+    # Two lines and a second YES/NO word ('no disagreement'): the strict rule returns None, so consult falls back to the token-overlap heuristic.
+    assert judged["confidence"] == "unknown"
+
+    def ask_with_one_line_yes(prompt, tier):
+        if prompt.startswith("Do these answers agree"):
+            return "YES, both give 56."
+        return {"code": "7 * 8 = 56", "reasoning": "56"}[tier]
+
+    one_line = consult_module.consult("What is 7 * 8?", _LOCAL_PAIR, ask_fn=ask_with_one_line_yes)
+    assert one_line["agree"] is True
+    assert one_line["confidence"] == "high"
 
     disagree = consult_module.consult(
         "What is 7 * 8?",

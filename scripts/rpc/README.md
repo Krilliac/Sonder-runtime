@@ -10,7 +10,7 @@ and **Node1** (`10.77.0.2`, Vulkan `rpc-server`) over the dedicated
 
 Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` protocol on both hosts):
 
-- **Main**: `C:\Users\Nathan\AppData\Local\sonder\llama-rpc\` (`llama-b12494-bin-win-cuda-12.4-x64.zip` + `cudart-llama-bin-win-cuda-12.4-x64.zip`)
+- **Main**: `%LOCALAPPDATA%\sonder\llama-rpc\` (`llama-b12494-bin-win-cuda-12.4-x64.zip` + `cudart-llama-bin-win-cuda-12.4-x64.zip`)
 - **Node1**: `C:\NewBuild\llama-rpc\` (`llama-b12494-bin-win-vulkan-x64.zip`)
 
 ## Security & Network Policy
@@ -31,7 +31,7 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
    ```
 3. Start Main sharded `llama-server` (using an Ollama tag or explicit `.gguf` path):
    ```powershell
-   powershell -NoProfile -File C:\Users\Nathan\AppData\Local\sonder\deployment\start-rpc-sharded.ps1 `
+   powershell -NoProfile -File %LOCALAPPDATA%\sonder\deployment\start-rpc-sharded.ps1 `
      -Action Start -OllamaModel "R4C3R/qwen3-0.6b-heretic:q4_k_m" -CtxSize 4096
    ```
 
@@ -49,7 +49,7 @@ Pinned official `ggml-org/llama.cpp` release (`b12494`, matching `ggml-rpc` prot
    ```
 4. Flip Main launch flags to balanced 16 GB + 16 GB VRAM sharding (`-TensorSplit 16,16 -CtxSize 16384`):
    ```powershell
-   powershell -NoProfile -File C:\Users\Nathan\AppData\Local\sonder\deployment\start-rpc-sharded.ps1 `
+   powershell -NoProfile -File %LOCALAPPDATA%\sonder\deployment\start-rpc-sharded.ps1 `
      -Action Start `
      -ModelPath "D:\ollama\gguf\unsloth\Qwen3.8-27B-GGUF\Qwen3.8-27B-UD-Q6_K_M.gguf" `
      -TensorSplit "16,16" -CtxSize 16384 -GpuLayers 999 -FlashAttn on -CacheTypeK q8_0 -CacheTypeV q8_0

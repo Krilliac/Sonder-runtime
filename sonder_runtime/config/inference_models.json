@@ -1,0 +1,42 @@
+{
+  "defaults": {
+    "rpc_port": 50052,
+    "server_host": "127.0.0.1",
+    "server_port": 11438,
+    "model_alias": "sonder-rpc",
+    "ctx_size": 16384,
+    "n_gpu_layers": 999,
+    "kv_cache_type": "q8_0",
+    "flash_attn": "on"
+  },
+  "profiles": {
+    "main-5070ti-plus-node1-780m": {
+        "node1_device": "Vulkan0",
+        "tensor_split": "14,2",
+        "ctx_size": 4096,
+        "n_gpu_layers": 999,
+        "notes": "Current Node1 has 780M iGPU (~2 GiB UMA); sharding is discouraged until GPU arrival."
+    },
+    "main-5070ti-plus-node1-9060xt-16gb": {
+        "node1_device": "Vulkan0",
+        "tensor_split": "16,16",
+        "ctx_size": 16384,
+        "n_gpu_layers": 999,
+        "notes": "After installing RX 9060 XT 16 GB on Node1 and lowering 780M BIOS UMA to minimum (512M/Auto)."
+    }
+  },
+  "models": [
+    {
+      "model_id": "Gemma 4 26B-A4B-Instruct-abliterated",
+      "quantization": "Q4_K_M",
+      "tier": "Main",
+      "usage": "CodingAssistant"
+    },
+    {
+      "model_id": "Qwen2.5-Coder-32B-Instruct-abliterated",
+      "quantization": "Q4_K_M",
+      "tier": "Main",
+      "usage": "GeneralCoder"
+    }
+  ]
+}

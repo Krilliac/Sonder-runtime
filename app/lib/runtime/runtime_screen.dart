@@ -30,6 +30,7 @@ import 'jobs_panel.dart';
 import 'model_routing.dart';
 import 'overview.dart';
 import 'runtime_data.dart';
+import 'panels/saas_config_panel.dart';
 import 'runtime_rows.dart';
 import 'status_word.dart';
 import 'work_runs_panel.dart';
@@ -1552,6 +1553,15 @@ class _RuntimeScreenState extends State<RuntimeScreen>
             'diagnostics',
           ],
           builder: (context) => _DeveloperPage(this),
+        ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: 'saas-config',
+          label: 'SaaS Config',
+          group: 'Advanced',
+          icon: Icons.settings_applications_outlined,
+          description: 'Where SaaS mode and metering are configured.',
+          builder: (context) => const SaasConfigPanel(),
         ),
       SonderCategory(
         id: RuntimeCategories.about,

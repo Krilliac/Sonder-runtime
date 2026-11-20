@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/foundation.dart';
@@ -176,17 +177,33 @@ class ShellSidebar extends StatelessWidget {
       builder: (context, _) {
         final t = SonderMotion.standard.transform(expansion.value);
         final width = lerpDouble(kSidebarRailWidth, kSidebarWidth, t)!;
-        return Container(
-          key: const Key('shell-sidebar'),
-          width: width,
-          // The frame is told from the page by tone alone.
-          color: tokens.sunken,
-          child: ClipRect(
-            child: OverflowBox(
-              alignment: Alignment.topLeft,
-              minWidth: kSidebarWidth,
-              maxWidth: kSidebarWidth,
-              child: _content(context, t, kSidebarWidth),
+        return Transform(
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.002) // Perspective
+            // Hinge effect while the rail opens or closes; flat at rest, so a
+            // collapsed rail is not left tilted.
+            ..rotateY(-0.25 * math.sin(math.pi * t)),
+          alignment: Alignment.centerLeft,
+          child: Container(
+            key: const Key('shell-sidebar'),
+            width: width,
+            decoration: BoxDecoration(
+              color: tokens.sunken,
+              boxShadow: [
+                BoxShadow(
+                  color: tokens.shadow.withValues(alpha: tokens.shadow.a * t),
+                  blurRadius: 10 * t,
+                  offset: Offset(5 * t, 0),
+                ),
+              ],
+            ),
+            child: ClipRect(
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minWidth: kSidebarWidth,
+                maxWidth: kSidebarWidth,
+                child: _content(context, t, kSidebarWidth),
+              ),
             ),
           ),
         );

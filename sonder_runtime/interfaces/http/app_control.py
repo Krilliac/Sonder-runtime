@@ -1,6 +1,7 @@
 """Early bounded wire boundary for private app-control metadata."""
 
 from contextlib import ExitStack, contextmanager
+import json
 import re
 import threading
 import time
@@ -81,6 +82,10 @@ def _route(method, target):
         "/clear": "clear_selection",
         "/revoke": "revoke_binding",
         "/work": "prepare_work",
+        "/api-keys/list": "list_api_keys",
+        "/api-keys/generate": "generate_api_key",
+        "/api-keys/revoke": "revoke_api_key",
+        "/swarm/status": "get_swarm_status",
     }
     suffix = path.removeprefix("/v1/app-control")
     if method == "POST" and suffix in post and not separator:
@@ -127,8 +132,73 @@ def _route(method, target):
     raise ControlError(404, "APP_CONTROL_ROUTE_NOT_FOUND")
 
 
+# Answered here rather than by ``binding.perform``: they need an account
+# session but no enrolled control credential or project grant.
+_ACCOUNT_ACTIONS = frozenset(
+    {"list_api_keys", "generate_api_key", "revoke_api_key", "get_swarm_status"}
+)
+_KEY_ID_CHARS = frozenset("0123456789abcdef")
+
+
+def _account_action(binding, action, token, body, accounts, swarm_status):
+    """``(status, body)`` for the caller's own API keys or the admin swarm view.
+
+    The identity is the account session ``token`` names, read from the
+    binding's configured accounts database, never the header text itself.
+    ``get_swarm_status`` is an operator view and takes the same admin-session
+    check as every other app-control action (``binding._account``); the key
+    actions take any live session and act only on that session's account.
+    ``accounts`` (the account engine) and ``swarm_status`` (a callable listing
+    agent rows) are supplied by the composing server; without them these
+    routes are unavailable.
+    """
+    body = {} if body is None else body
+    if type(body) is not dict or set(body) - (
+        {"key_id"} if action == "revoke_api_key" else set()
+    ):
+        raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
+    key_id = body.get("key_id")
+    if key_id is not None and (
+        type(key_id) is not str
+        or len(key_id) != 16
+        or not set(key_id) <= _KEY_ID_CHARS
+    ):
+        raise ControlError(400, "INVALID_APP_CONTROL_REQUEST")
+    if accounts is None or swarm_status is None:
+        raise ControlError(503, "APP_CONTROL_UNAVAILABLE")
+    account_auth = accounts
+    conn = binding._open()
+    try:
+        if action == "get_swarm_status":
+            binding._account(conn, token)
+            rows = swarm_status()
+            return 200, {"ok": True, "status": json.loads(json.dumps(rows, default=str))}
+        binding._config()
+        binding._source(conn)
+        identity = account_auth.authenticate_session(conn, token)
+        binding._source(conn)
+        if identity is None:
+            raise ControlError(401, "APP_CONTROL_AUTH_REQUIRED")
+        username = identity.username
+        if action == "list_api_keys":
+            return 200, {"ok": True, "keys": account_auth.list_api_keys(conn, username)}
+        if action == "generate_api_key":
+            try:
+                minted = account_auth.generate_api_key(conn, username)
+            except ValueError:
+                raise ControlError(409, "API_KEY_LIMIT_REACHED") from None
+            return 200, {"ok": True, **minted}
+        revoked = account_auth.revoke_api_key(conn, username, key_id)
+        if key_id is not None and not revoked:
+            raise ControlError(404, "API_KEY_NOT_FOUND")
+        return 200, {"ok": True, "revoked": revoked}
+    finally:
+        conn.close()
+
+
 def handle_app_control(
-    handler, method, binding, *, deployment_authorized, work_binding=None
+    handler, method, binding, *, deployment_authorized, work_binding=None,
+    accounts=None, swarm_status=None
 ):
     if not is_app_control_route(handler.path):
         return False
@@ -191,6 +261,12 @@ def handle_app_control(
             if not deployment_authorized(authorization or "", config):
                 raise ControlError(401, "APP_CONTROL_AUTH_REQUIRED")
             account = _token(account)
+            if action in _ACCOUNT_ACTIONS:
+                body = handler._read_json(max_bytes=16384)
+                reply(*_account_action(
+                    binding, action, account, body, accounts, swarm_status
+                ))
+                return True
             if method == "POST":
                 body = handler._read_json(max_bytes=16384)
                 if action in {
