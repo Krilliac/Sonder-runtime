@@ -20,10 +20,12 @@ def _argv(program, *args):
 
 
 @pytest.mark.parametrize("tool,args,verdict", [
-    ("git_commit", {"message": "fix"}, rules.ALLOW),
+    # git tools ask: a repository's hooks and .git/config can run code.
+    ("git_commit", {"message": "fix"}, rules.ASK),
     ("text_search", {"pattern": "TODO"}, rules.ALLOW),
     ("file_read", {"path": "a.txt"}, rules.ALLOW),
-    ("workspace_run", _argv("git", "status"), rules.ALLOW),
+    # Every git call asks: .git/config can make even ``git status`` run code.
+    ("workspace_run", _argv("git", "status"), rules.ASK),
     ("workspace_run", _argv("ls", "-la"), rules.ALLOW),
     ("file_delete", {"path": "build/out.txt"}, rules.ASK),
     ("workspace_run", _argv("sudo", "apt", "install", "x"), rules.ASK),
@@ -109,7 +111,7 @@ def test_outside_bypass_a_classifier_ask_needs_an_approval_even_when_the_mode_al
         refusal = policy("run_code", {"code": "print(1)", "language": "python"})
         assert "safety classifier" in refusal and "confirmation" in refusal
         assert "/approve" in refusal  # the pending call is named so an operator can approve it
-        assert policy("git_commit", {"message": "m"}) == ""
+        assert policy("file_write", {"path": "a.txt", "content": "x"}) == ""
         assert "blocks" in policy("workspace_run", _argv("diskpart"))
 
 
@@ -144,8 +146,8 @@ def test_a_classifier_fault_in_the_lane_asks_so_outside_bypass_it_refuses(
     monkeypatch.setattr(pm, "current_mode", lambda: pm.AUTO)
     with rtl.admin_opt_in():
         policy = _admin_open_policy(tmp_path)
-        # git_commit is allowed by a working classifier; a broken one asks, never allows.
-        assert "confirmation" in policy("git_commit", {"message": "m"})
+        # file_write is allowed by a working classifier; a broken one asks, never allows.
+        assert "confirmation" in policy("file_write", {"path": "a.txt", "content": "x"})
 
 
 class _Policy:

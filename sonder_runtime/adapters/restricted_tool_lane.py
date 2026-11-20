@@ -35,7 +35,11 @@ A restricted turn (:class:`RestrictedRun`) is then fenced:
 * every dispatch the other checks allow is classified (``domain.security.tool_call_classifier``),
   in admin-open runs too: ``block`` refuses in every mode, bypass included; ``ask`` is skipped
   only in bypass, and otherwise needs a person's approval of exactly that call
-  (:func:`classifier_refusal`).
+  (:func:`classifier_refusal`), which in ``auto`` is also recorded on the
+  caller's HTTP work-run row through the recorder ``server.py`` installs.
+  The ``block`` half applies outside this lane too: the general dispatch gate
+  (``server._agent_permission_gate_error``) asks :func:`classifier_block_refusal`
+  for every model.
 
 Its own model calls.  The restricted model stays on the deny list, so the
 generation guard (``tool_lane_guard.require_generation``) would refuse its
@@ -52,6 +56,7 @@ shared and holds no lock.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import json
 import os
@@ -118,6 +123,54 @@ def classifier_verdict(tool_name: str, args: Any) -> str:
     return classifier.classify(tool_name, args, risk=risk)
 
 
+def classifier_block_refusal(tool_name: str, args: Any) -> str:
+    """A refusal when the safety classifier blocks this call, else ``""``.
+
+    The dispatch gate asks it for every model-originated call in every
+    permission mode, bypass included, whatever the model.  ``ask`` is not
+    decided here: it stays this lane's rule (:func:`classifier_refusal`).
+    """
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    if classifier_verdict(tool_name, args) != classifier.BLOCK:
+        return ""
+    return _refusal("the safety classifier blocks tool '%s'." % tool_name)
+
+
+# Records a classifier ask this lane refused, as ``(decision, tool_name,
+# arguments)``, on the caller's HTTP work-run row.  The composition root
+# (``server.py``) installs it, because recording needs the interfaces layer,
+# which an adapter must not import.  None records nothing.  It is installed
+# once at import and only read afterwards.
+PendingRefusalRecorder = Callable[[Any, str, Mapping[str, Any] | None], None]
+_pending_refusal_recorder: PendingRefusalRecorder | None = None
+
+
+def install_pending_refusal_recorder(recorder: PendingRefusalRecorder | None) -> None:
+    """Install (or, with None, remove) the recorder :func:`classifier_refusal` calls."""
+    global _pending_refusal_recorder
+    _pending_refusal_recorder = recorder
+
+
+def _record_pending_refusal(decision: Any, tool_name: str, arguments: Mapping[str, Any] | None,
+                            reason: str) -> None:
+    """Hand one unattended refusal to the installed recorder; recording never changes the refusal.
+
+    The receipt carries the operator's mode, not the ``manual`` this lane
+    decided under, and this lane's reason, because no mode lifts a classifier ask.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+
+    recorder = _pending_refusal_recorder
+    if recorder is None or getattr(decision, "source", "") != "unattended":
+        return
+    try:
+        recorder(dataclasses.replace(decision, mode=gate.current_mode(), reason=reason),
+                 tool_name, arguments)
+    except Exception:  # noqa: BLE001 - the record is a route out, not the gate
+        pass
+
+
 def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
     """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
 
@@ -162,6 +215,8 @@ def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
             "explicit allow rule for the tool with /permissions" % call
             if call else str(decision.reason)
         )
+        if call:
+            _record_pending_refusal(decision, tool_name, arguments, reason)
     except Exception:  # noqa: BLE001 - an unconfirmable ask is a refusal, never an allow
         reason = "the confirmation could not be checked"
     return _refusal(

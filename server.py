@@ -18206,6 +18206,9 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
     if role_refusal := _role_tool_policy.agent_refusal(name):
         return role_refusal
+    # The classifier's BLOCK holds for every model in every mode, bypass and pre-approval included.
+    if blocked := _restricted_tool_lane.classifier_block_refusal(name, args):
+        return blocked
     if mode is None and rule_lookup is None and permission_modes.consume_preapproved_decision(name) is not None:
         return ""
     call_args = args if isinstance(args, dict) else None
@@ -18215,15 +18218,7 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     if decision.allowed:
         return ""
     if record and decision.source == "unattended" and decision.call_id:
-        from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt as _refusal_receipt
-        from sonder_runtime.interfaces.http.work_runs import current_run_id as _current_work_run_id
-        run_id = _current_work_run_id()
-        _chat_tools_wiring.record_work_run_pending_refusal(
-            run_id, decision, name, call_args,
-            refusal_receipt_fn=_refusal_receipt,
-            mode_label=permission_modes.mode_label(decision.mode),
-            modes_allowing=permission_modes._modes_allowing(decision.risk),
-        )
+        run_id = _chat_tools_wiring.record_agent_pending_refusal(decision, name, call_args)
         hook = permission_modes.current_agent_approval_hook()
         if hook is not None and hook(decision, name, call_args) == "approved":
             decision = permission_modes.decide(
@@ -18233,6 +18228,10 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
                 _chat_tools_wiring.clear_work_run_pending_refusal(run_id)
                 return ""
     return _chat_run_backend.format_agent_gate_refusal(name, decision)
+
+
+from sonder_runtime.bootstrap import chat_tools_wiring as _restricted_wiring
+_restricted_tool_lane.install_pending_refusal_recorder(_restricted_wiring.record_restricted_pending_refusal)  # classifier asks land on the work-run row
 
 
 def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):
