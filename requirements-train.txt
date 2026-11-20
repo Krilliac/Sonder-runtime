@@ -7,8 +7,10 @@
 
 # --- PyTorch -----------------------------------------------------------------
 # Install a CUDA build matching your driver, NOT the plain PyPI CPU wheel.
-# On Windows, the CUDA wheels are hosted on a separate index, e.g. for CUDA 12.1:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# On Windows, the CUDA wheels are hosted on a separate index, e.g. for CUDA 13.0
+# (the validated host, and the only line with Blackwell sm_120 kernels in the
+# torch>=2.13 range; cu121 wheels stop at torch 2.5.1 and cannot satisfy this pin):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu130
 # Check `nvidia-smi` for your driver's supported CUDA version first.
 # Security floor: Dependabot advisories affect older PyTorch ranges through
 # 2.12.x, so keep this on a current training-only line.
@@ -20,7 +22,11 @@ torch>=2.13,<2.14
 transformers>=5.3,<6
 # Transformers 5.x enforces this at TrainingArguments construction time.
 accelerate>=1.1,<2
-peft>=0.11,<0.14
+# PEFT 0.18.0 release notes: Transformers v5 is incompatible with PEFT < 0.18.0.
+# 0.19.0 adds the transformers>=5 weight-tying and v5 follow-up fixes, so it is
+# the floor. 0.22.x is the newest line (needs Python >= 3.11). qlora_train.py uses
+# only LoraConfig, get_peft_model and prepare_model_for_kbit_training.
+peft>=0.19,<0.23
 datasets>=2.19,<2.21
 
 # --- 4-bit quantization ---------------------------------------------------------
