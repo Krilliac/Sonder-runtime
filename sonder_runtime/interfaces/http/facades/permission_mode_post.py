@@ -7,7 +7,8 @@ to ``auto``, where execution tools are ALLOW unattended, and then run host
 programs through chat -- nor leave a raised mode saved for the next start.
 It may still lower the mode, or return from ``plan`` to ``manual``. Every
 other auth mode reached this point through ``_admin_authorized`` and keeps
-the attended ``set_mode``.
+the attended ``set_mode``. Who counts as credential-less, failing closed for
+a missing or unknown context, is ``local_open_authority.credential_less``.
 
 ``policy`` is the permission-policy port (``set_mode``,
 ``set_mode_without_escalation``, ``mode_escalation_refused``) and
@@ -18,6 +19,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Callable
+
+from .local_open_authority import AUTHENTICATED_ADMIN_REMEDY, credential_less
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +34,11 @@ def mode_applier(policy: Any, context: Any, wanted: str) -> Callable[[], Any]:
     exception inside the idempotent action marks its receipt "uncertain",
     although nothing changed.
     """
-    credential_less = (context or {}).get("mode") == "local-open"
+    held_to_lowering = credential_less(context)
     refused_type = policy.mode_escalation_refused()
 
     def apply() -> Any:
-        if not credential_less:
+        if not held_to_lowering:
             return policy.set_mode(wanted)
         try:
             return policy.set_mode_without_escalation(wanted)
@@ -63,9 +66,8 @@ def send_escalation_refusal(handler: Any, policy: Any, result: Any,
         "raising the permission mode from %s to %s is refused: this server "
         "runs in local-open mode, so the request carries no credential and "
         "could come from any local process. Run /mode %s at the Sonder "
-        "console, or configure an API key or administrator account and send "
-        "this request with it. Lowering the mode, or returning from plan to "
-        "manual, is allowed here." % (current, target, target),
+        "console, or %s. Lowering the mode, or returning from plan to "
+        "manual, is allowed here." % (current, target, target, AUTHENTICATED_ADMIN_REMEDY),
         handler._correlation(),
         retryable=False,
     )

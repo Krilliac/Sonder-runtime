@@ -581,6 +581,7 @@ sonder_runtime/interfaces/http/facades/client_protocol.py
 sonder_runtime/interfaces/http/facades/compute_fabric.py
 sonder_runtime/interfaces/http/facades/control_plane.py
 sonder_runtime/interfaces/http/facades/health_status.py
+sonder_runtime/interfaces/http/facades/local_open_authority.py
 sonder_runtime/interfaces/http/facades/model_request.py
 sonder_runtime/interfaces/http/facades/observability_stream.py
 sonder_runtime/interfaces/http/facades/permission_mode_post.py

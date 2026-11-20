@@ -214,7 +214,10 @@ local process passes its authority check, with no secret at all. There it
 calls ``set_mode_without_escalation`` and answers 403
 ``PERMISSION_MODE_ESCALATION_REFUSED`` for a raise, so a raise is never made
 or saved by a credential-less caller; lowering stays allowed. An API key or an
-admin account restores the attended raise.
+admin account restores the attended raise. ``POST /v1/approvals/<call_id>``
+follows the same line: under ``local-open`` it refuses to approve a call
+(403 ``APPROVAL_REQUIRES_AUTHENTICATED_ADMIN``) and still revokes one; the
+console's ``/approve`` is unchanged.
 
 Rules and modes compose; they do not race
 -------------------------------------------
@@ -1004,9 +1007,11 @@ def unattended_escalation_refusal(target_name: str) -> str:
         "refused: raising the permission mode from %s to %s needs a person to "
         "confirm it, and this caller is unattended (an MCP client, the HTTP "
         "chat, or a control command). Run /mode %s at the Sonder console, or "
-        "have an administrator use the app's permission-mode control "
-        "(POST /v1/permission-mode). Lowering the mode, or returning from plan "
-        "to manual, is allowed here." % (current, target, target)
+        "have an administrator send POST /v1/permission-mode with the "
+        "server's API key (SONDER_API_KEY) or an admin account token "
+        "(SONDER_REQUIRE_ACCOUNT=1); a server in local-open mode, with "
+        "neither configured, refuses that raise. Lowering the mode, or "
+        "returning from plan to manual, is allowed here." % (current, target, target)
     )
 
 

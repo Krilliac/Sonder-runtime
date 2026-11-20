@@ -5,10 +5,13 @@
 * ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval.
 
 Approving a refused call is the attended answer to the gate's ask, the same
-authority ``/approve`` needs at the console: a developer or administrator
-(the single-user local-open listener counts here; at
-``/v1/permission-mode`` it may only lower the mode). The ledger semantics
-live in ``approvals.py``.
+authority ``/approve`` needs at the console: an authenticated developer or
+administrator. Under ``local-open`` (including ``api-key`` with no key on a
+loopback bind) the developer check passes for every local process with no
+secret, so an approval there is refused with 403
+``APPROVAL_REQUIRES_AUTHENTICATED_ADMIN``, as a raise is at
+``/v1/permission-mode``; listing and revoking stay allowed, and the console's
+``/approve`` is unchanged. The ledger semantics live in ``approvals.py``.
 
 ``handler`` is serve.py's request handler: these functions use its auth
 check, its correlation id, its headers and its JSON sender, so the wire
@@ -23,9 +26,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .approvals import approvals_payload, approve_call, revoke_approval
+from .approvals import CALL_ID_CHARS, DIGEST_CHARS, approvals_payload, approve_call, revoke_approval
+from .local_open_authority import AUTHENTICATED_ADMIN_REMEDY, credential_less
 
 ROUTE = "/v1/approvals"
+GRANT_REFUSED_CODE = "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"
 
 
 def _unavailable() -> dict:
@@ -44,6 +49,38 @@ class HttpApprovalPorts:
     audit: Callable[[str, Any, float], None]
     clock: Callable[[], float]
     log: Any
+
+
+def _refuse_credential_less_grant(handler: Any, context: Any, target: str,
+                                  ports: HttpApprovalPorts) -> bool:
+    """Send the 403 for an approval no credential stands behind; True when sent.
+
+    Runs before the ledger is touched and before an idempotency receipt is
+    claimed, so a refused grant changes nothing. ``None`` or an unknown
+    context fails closed (``credential_less``).
+    """
+    if not credential_less(context):
+        return False
+    ref = target.strip().lower()
+    # Echo the path back only when it is a well-formed call reference.
+    if len(ref) not in (CALL_ID_CHARS, DIGEST_CHARS) or any(
+            c not in "0123456789abcdef" for c in ref):
+        ref = "<call_id>"
+    ports.log.warning("local-open HTTP approval refused for call %s", ref)
+    handler._send_json_payload(
+        ports.error_envelope(
+            GRANT_REFUSED_CODE,
+            "approving a refused call over HTTP is refused: this server runs "
+            "in local-open mode, so the request carries no credential and "
+            "could come from any local process. Approve it at the Sonder "
+            "console with /approve %s, or %s. Listing pending calls and "
+            "revoking an approval are allowed here." % (ref, AUTHENTICATED_ADMIN_REMEDY),
+            handler._correlation(),
+            retryable=False,
+        ),
+        status=403,
+    )
+    return True
 
 
 def _access(handler: Any, context: Any, ports: HttpApprovalPorts) -> tuple[Any, bool]:
@@ -113,7 +150,8 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
 
     The approval is bound to that call's digest, single-use and expiring,
     recorded as the caller's approver label with surface ``http``, and
-    audited on the direct-tool path as ``permission_approve``.
+    audited on the direct-tool path as ``permission_approve``. A
+    credential-less (local-open) caller may revoke but not approve.
     """
     parts = path[len(ROUTE):].strip("/").split("/")
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
@@ -122,6 +160,8 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
         action, target = "approve", parts[0]
     else:
         handler._send_not_found()
+        return
+    if action == "approve" and _refuse_credential_less_grant(handler, context, target, ports):
         return
     ledger, done = _access(handler, context, ports)
     if done:
@@ -153,4 +193,4 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     handler._send_json_payload(dict(result.body), status=result.status)
 
 
-__all__ = ["HttpApprovalPorts", "ROUTE", "serve_get", "serve_post"]
+__all__ = ["GRANT_REFUSED_CODE", "HttpApprovalPorts", "ROUTE", "serve_get", "serve_post"]

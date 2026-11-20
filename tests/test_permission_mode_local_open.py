@@ -306,3 +306,62 @@ def test_admin_raise_still_lets_chat_run_code(monkeypatch, mode_sandbox):
     assert len(ran) == 1, reply
     assert "refused" not in reply
     assert server.permission_mode_data()["mode"] == pm.AUTO
+
+
+# --- what the refusal tells the operator, and failing closed -----------------
+
+
+@pytest.mark.parametrize("headers", [
+    {},
+    {"Authorization": "Bearer admin-token"},
+    {"X-Sonder-Account-Token": "admin-token"},
+], ids=["no-credential", "admin-token-as-bearer", "admin-token-as-account-header"])
+def test_local_open_refusal_names_the_settings_that_restore_the_raise(
+        monkeypatch, mode_sandbox, headers):
+    """An admin account token does not lift local-open: the effective auth
+    mode stays local-open, so the message must name the server settings."""
+    _local_open(monkeypatch)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda header: {"username": "ada", "role": "admin"}
+        if "admin-token" in str(header or "") else None)
+    with _http_server(monkeypatch) as port:
+        status, payload = _post_mode(port, "auto", headers)
+    assert status == 403, payload
+    message = payload["error"]["message"]
+    assert payload["error"]["code"] == ESCALATION_CODE
+    assert "SONDER_API_KEY" in message and "SONDER_REQUIRE_ACCOUNT=1" in message
+    assert "/mode auto" in message
+    assert pm.current_mode() == pm.MANUAL
+    assert not mode_sandbox.exists()
+
+
+@pytest.mark.parametrize("context", [
+    None, {}, {"mode": ""}, {"mode": "open"}, {"mode": "local-open"}, "local-open",
+])
+def test_mode_applier_fails_closed_without_an_authenticated_context(mode_sandbox, context):
+    from sonder_runtime.interfaces.http.facades import permission_mode_post
+
+    result = permission_mode_post.mode_applier(ts.permission_policy, context, "auto")()
+    assert isinstance(result, pm.ModeEscalationRefused), result
+    assert pm.current_mode() == pm.MANUAL
+    assert not mode_sandbox.exists()
+
+
+@pytest.mark.parametrize("mode", ["api-key", "account", "both", "either"])
+def test_mode_applier_keeps_the_attended_raise_for_authenticated_modes(mode_sandbox, mode):
+    from sonder_runtime.interfaces.http.facades import permission_mode_post
+
+    assert permission_mode_post.mode_applier(
+        ts.permission_policy, {"mode": mode}, "auto")() == pm.AUTO
+    assert pm.current_mode() == pm.AUTO
+
+
+def test_unattended_refusal_does_not_send_callers_to_a_local_open_post(mode_sandbox):
+    """The MCP/chat refusal names POST /v1/permission-mode; under local-open
+    that POST refuses a raise, so the text must say what it needs."""
+    text = pm.unattended_escalation_refusal("auto")
+    assert text.startswith("refused")
+    assert "POST /v1/permission-mode" in text
+    assert "SONDER_API_KEY" in text and "SONDER_REQUIRE_ACCOUNT=1" in text
+    assert "local-open" in text

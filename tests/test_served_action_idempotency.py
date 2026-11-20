@@ -335,6 +335,8 @@ def test_capacity_refusal_is_not_cached_and_can_retry_after_admission(monkeypatc
 
 
 def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
+    # A real auth context (mode "account"): one with no auth mode is held to
+    # lowering only (local_open_authority.credential_less fails closed).
     sonder_lifecycle.reset_for_tests()
     calls = []
     sent = []
@@ -351,10 +353,10 @@ def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
 
     for _ in range(2):
         serve.Handler._handle_permission_mode_post(
-            handler, {"mode": "auto"}, context=_account("alice"),
+            handler, {"mode": "auto"}, context=_authorized_account("alice"),
         )
     serve.Handler._handle_permission_mode_post(
-        handler, {"mode": "manual"}, context=_account("alice"),
+        handler, {"mode": "manual"}, context=_authorized_account("alice"),
     )
     assert calls == ["auto"]
     assert sent[:2] == [({"mode": "auto"}, 200)] * 2
@@ -375,9 +377,9 @@ def test_permission_mode_refusal_is_not_reported_as_success(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(serve.permission_modes, "set_mode", lambda wanted: calls.append(wanted))
     monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "auto"})
-    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_account("alice"))
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_authorized_account("alice"))
     sonder_lifecycle.reset_for_tests()  # a new server process
-    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_account("alice"))
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=_authorized_account("alice"))
     assert calls == ["auto"]
     assert sent[0] == ({"mode": "auto"}, 200)
     payload, status = sent[1]
