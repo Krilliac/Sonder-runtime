@@ -40,6 +40,29 @@ UNTRUSTED_OBSERVATION_HEADER = (
 )
 UNTRUSTED_OBSERVATION_FOOTER = "\n=== END HOST TOOL OBSERVATIONS ==="
 
+# The envelope's marker phrase as untrusted text could spell it: any case, any
+# run of non-word separators (or none) between the words, never across a line
+# break. A body that carries it -- a fake footer followed by "ignore previous
+# instructions", or a fake header opening a second "trusted" block -- would
+# otherwise end the untrusted envelope early. Bodies are neutralized instead
+# of the envelope carrying a per-call nonce: the window is a pure function of
+# the host ledger, and its byte-stable append-only prefix is what the model
+# server's prompt cache reuses between steps.
+_ENVELOPE_MARKER_RE = re.compile(
+    r"host(?:[^\w\n]|_)*tool(?:[^\w\n]|_)*observations", re.IGNORECASE,
+)
+_NEUTRALIZED_MARKER = "[quoted envelope marker]"
+
+
+def neutralize_envelope_markers(text):
+    """Defuse every spelling of the envelope marker inside untrusted text.
+
+    Idempotent, and a pure rewrite within one line, so neutralizing a ledger
+    entry by entry or the joined window gives the same bytes and an
+    append-only window stays append-only.
+    """
+    return _ENVELOPE_MARKER_RE.sub(_NEUTRALIZED_MARKER, str(text or ""))
+
 
 def clip_prompt_text(text, limit):
     """Keep useful context from both ends of a long tool observation."""
@@ -62,7 +85,8 @@ def frame_observations(text, limit):
     header = UNTRUSTED_OBSERVATION_HEADER
     footer = UNTRUSTED_OBSERVATION_FOOTER
     body_limit = max(0, limit - len(header) - len(footer))
-    return header + clip_prompt_text(text, body_limit) + footer
+    body = clip_prompt_text(neutralize_envelope_markers(text), body_limit)
+    return header + body + footer
 
 
 _STEP_TOOL_RE = re.compile(r"\bstep\s+(\d+)\b.*?\btool=([^\s:]+)", re.I)
@@ -125,7 +149,10 @@ def observation_prompt(
     observations, max_chars=OBSERVATION_PROMPT_CHARS,
 ):
     """Build a bounded model-facing window while the host retains full evidence."""
-    values = [str(item or "") for item in observations if str(item or "").strip()]
+    values = [
+        neutralize_envelope_markers(item)
+        for item in observations if str(item or "").strip()
+    ]
     if not values:
         return ""
     max_chars = max(512, int(max_chars))

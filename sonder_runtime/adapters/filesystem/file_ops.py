@@ -929,6 +929,20 @@ def credential_read_component(path: Path) -> str:
     return found
 
 
+def is_credential_store(path) -> bool:
+    """Whether a walk must skip *path* as a credential store.
+
+    The entries ``credential_read_component`` names are the ones ``file_read``
+    refuses whatever the token or bypass, so a walk (a tree listing, a file
+    find, a script search, a secret scan) never lists or opens them either.
+    The name-only ``_credential_part`` runs first and the root-aware check
+    only on a hit, because ``credential_read_component`` resolves every
+    allowed root per call. A store an operator root names stays visible.
+    """
+    candidate = Path(path)
+    return bool(_credential_part(candidate.parts) and credential_read_component(candidate))
+
+
 def credential_path_component(root: Path, relative_parts) -> str:
     """Credential-store component for *relative_parts* below *root* ("" if none).
 
@@ -1504,6 +1518,7 @@ def find_files(
             name for name in dirs
             if name not in {".git", ".pytest_cache", "venv", "__pycache__"}
             and not _is_reparse_point(base_path / name)
+            and not is_credential_store(base_path / name)
             and (
                 visible is None
                 or os.path.normcase(
@@ -1520,6 +1535,10 @@ def find_files(
             if _is_reparse_point(path):
                 continue
             if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern) or pattern.lower() in rel.lower():
+                if is_credential_store(path):
+                    # Judged only on a match: a credential store is never
+                    # listed, and the walk does not pay for it per entry.
+                    continue
                 results.append({
                     "path": str(path),
                     "relative": rel,
