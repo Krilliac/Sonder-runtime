@@ -450,3 +450,78 @@ def test_the_service_caps_concurrent_runs_per_caller(env, tmp_path):
     for outcome in (first, second, other):
         env.launcher.cancel(outcome.run_id, "test over")
     assert ident.kind == "elf_core"
+
+
+windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows mandatory integrity labels")
+
+
+def _live_run(env, tmp_path):
+    ident = env.capture()
+    pid_file = tmp_path / "live.txt"
+    rid = run_id()
+    env.launcher.start(env.plan(ident, [env.step("sleep", str(pid_file))]), context(), rid)
+    _pids(pid_file)
+    return rid, env.state / "debug-runs" / rid
+
+
+@windows_only
+def test_live_run_tree_carries_the_no_read_up_label(env, tmp_path):
+    from sonder_runtime.platform import private_files
+
+    rid, rundir = _live_run(env, tmp_path)
+    try:
+        staged = [p for p in (rundir / "in").iterdir()]
+        assert len(staged) == 1
+        # a control outside the labelled tree proves low_integrity_readable can say True
+        control = tmp_path / "control.bin"
+        control.write_bytes(b"x")
+        assert private_files.low_integrity_readable(control)
+        for path in (rundir.parent, rundir, rundir / "in", staged[0], rundir / "plan.json"):
+            assert not private_files.low_integrity_readable(path), path
+    finally:
+        env.launcher.cancel(rid, "test over")
+
+
+@windows_only
+def test_run_is_refused_and_removed_when_the_label_cannot_be_applied(env, monkeypatch):
+    from sonder_runtime.adapters.debugging import launcher as launcher_module
+
+    real = launcher_module.label_new_tree_no_read_up
+    rid = run_id()
+    # fail only for the run dir, so the root is labelled and the run dir's own
+    # refusal path (remove it, then raise) is the one exercised
+    monkeypatch.setattr(launcher_module, "label_new_tree_no_read_up",
+                        lambda path: False if os.path.basename(os.fspath(path)) == rid else real(path))
+    ident = env.capture()
+    with pytest.raises(PermissionError, match="debug run directory"):
+        env.launcher.start(env.plan(ident, [env.step("echo")]), context(), rid)
+    assert not (env.state / "debug-runs" / rid).exists()
+    assert (env.state / "debug-runs").is_dir()
+
+
+@windows_only
+def test_run_is_refused_when_the_run_root_cannot_be_labelled(env, monkeypatch):
+    from sonder_runtime.adapters.debugging import launcher as launcher_module
+
+    monkeypatch.setattr(launcher_module, "label_new_tree_no_read_up", lambda _path: False)
+    ident = env.capture()
+    rid = run_id()
+    with pytest.raises(PermissionError, match="debug run root"):
+        env.launcher.start(env.plan(ident, [env.step("echo")]), context(), rid)
+    assert not (env.state / "debug-runs" / rid).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="proves the Windows-only call is skipped on POSIX")
+def test_label_helper_is_never_called_off_windows(env, monkeypatch):
+    from sonder_runtime.adapters.debugging import launcher as launcher_module
+
+    def boom(_path):
+        raise AssertionError("labelling must be Windows-only")
+
+    monkeypatch.setattr(launcher_module, "label_new_tree_no_read_up", boom)
+    monkeypatch.setattr(launcher_module, "low_integrity_readable", boom)
+    ident = env.capture()
+    rid = run_id()
+    env.launcher.start(env.plan(ident, [env.step("echo")]), context(), rid)
+    state, running = env.launcher.wait(rid, 60)
+    assert not running and state.status == "complete", state

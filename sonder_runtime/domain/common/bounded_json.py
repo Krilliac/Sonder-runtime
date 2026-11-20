@@ -23,6 +23,8 @@ from __future__ import annotations
 import codecs
 import json
 import re
+from array import array
+from bisect import bisect_left
 from typing import Iterable, Iterator
 
 from .errors import InvalidInput
@@ -35,9 +37,16 @@ DEFAULT_MAX_ITEM_BYTES = 65_536
 # pattern succeeds at *every* opening quote (unrolled loop, no nested
 # quantifier backtracking), so ``sub`` never fails after scanning ahead and
 # never restarts inside an unterminated string: ``"\"\"\"...`` stays linear.
-_STRING_TO_END = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.S)
+# The quantifiers are possessive (Python 3.11+): nothing they take could be
+# given back to a match, and ``re`` then keeps no state per escape (a string
+# with 36 000 escapes cost 5 MB and 4 ms, now nothing and 0.6 ms).
+_STRING_TO_END = re.compile(r'"[^"\\]*+(?:\\.[^"\\]*+)*+(?:"|\\?\Z)', re.S)
 _NOT_BRACKET = re.compile(r'[^\[\]{}]+')
 _STRUCTURAL = re.compile(r'[\[\]{}",:]')
+# What the container walk acts on: brackets and string openers only, so the
+# ',' and ':' between them are skipped inside ``re`` rather than visited one
+# at a time in Python.
+_CONTAINER_TOKEN = re.compile(r'[\[\]{}"]')
 _IN_STRING = re.compile(r'["\\]')
 
 
@@ -78,6 +87,245 @@ def check_depth(text: str, max_depth: int = DEFAULT_MAX_DEPTH) -> int:
         elif depth:
             depth -= 1
     return deepest
+
+
+def check_container_depth(text: str, start: int,
+                          max_depth: int = DEFAULT_MAX_DEPTH) -> int:
+    """Bound the first container at ``start``, without scanning later values.
+
+    Strings, including unterminated ones, are skipped with the same linear
+    matcher as ``check_depth``. Only brackets and string openers are walked in
+    Python; no suffix is copied. Malformed syntax remains the decoder's
+    responsibility.
+    """
+    return container_extent(text, start, max_depth)[0]
+
+
+def container_extent(text: str, start: int,
+                     max_depth: int = DEFAULT_MAX_DEPTH) -> tuple[int, int]:
+    """``(deepest, end)`` for the container at ``start``; raises like ``check_container_depth``.
+
+    ``end`` is where the walk stopped: just past the bracket that closes the
+    container, or ``len(text)`` when it never closes. ``end - start`` is what
+    the walk cost in characters, so a caller can charge repeated walks to a
+    budget. Linear in ``end - start``.
+    """
+    deepest, end, _closed = container_walk(text, start, max_depth)
+    return deepest, end
+
+
+def container_walk(text: str, start: int,
+                   max_depth: int = DEFAULT_MAX_DEPTH) -> tuple[int, int, bool]:
+    """``container_extent`` plus whether the container closes (``end`` alone cannot tell a
+    container that never closes from one closed by the last character).
+
+    A container that never closes can never be decoded: a successful decode of
+    it reads the same strings and brackets as this walk, up to its closing
+    bracket. Raises like ``check_container_depth``; linear in ``end - start``.
+    """
+    value = _as_text(text)
+    if start < 0 or start >= len(value) or value[start] not in "[{":
+        raise JsonBoundsExceeded("JSON container does not start at the supplied offset")
+    limit = max(1, int(max_depth))
+    position, depth, deepest = start, 0, 0
+    while (match := _CONTAINER_TOKEN.search(value, position)) is not None:
+        position = match.end()
+        token = match.group()
+        if token == '"':
+            string = _STRING_TO_END.match(value, match.start())
+            if string is None:
+                return deepest, len(value), False
+            position = string.end()
+        elif token in "[{":
+            depth += 1
+            if depth > limit:
+                raise JsonBoundsExceeded(f"JSON nesting exceeds depth {limit}")
+            deepest = max(deepest, depth)
+        else:
+            depth -= 1
+            if depth == 0:
+                return deepest, position, True
+    return deepest, len(value), False
+
+
+class ContainerExtents:
+    """What ``container_extents`` computed: ``lookup(offset)`` for any ``[`` or ``{`` offset.
+
+    Holds one machine integer per bracket or quote of the text in each of three
+    arrays (offsets, depths, ends), so memory is 24 bytes per such character
+    and no Python object is kept per opener. Immutable once built; safe to
+    share between threads.
+    """
+
+    __slots__ = ("_deepest", "_ends", "_offsets")
+
+    def __init__(self, offsets: array, deepest: array, ends: array) -> None:
+        self._offsets = offsets
+        self._deepest = deepest
+        self._ends = ends
+
+    def lookup(self, offset: int) -> tuple[int, int]:
+        """``(deepest, end)`` for the opener at ``offset``; ``end`` is -1 when it never closes.
+
+        ``deepest`` and a non-negative ``end`` are what ``container_extent(text, offset)``
+        returns whenever it does not raise; for an opener that never closes, ``deepest`` is
+        what that walk reaches before the text ends. Raises ``KeyError`` for an offset that
+        holds no opener. O(log n).
+        """
+        slot = bisect_left(self._offsets, offset)
+        if slot == len(self._offsets) or self._offsets[slot] != offset or self._ends[slot] == _NO_OPENER:
+            raise KeyError(offset)
+        return self._deepest[slot], self._ends[slot]
+
+    def items(self) -> Iterator[tuple[int, tuple[int, int]]]:
+        """``(offset, lookup(offset))`` for every opener, in text order."""
+        for slot, offset in enumerate(self._offsets):
+            if self._ends[slot] != _NO_OPENER:
+                yield offset, (self._deepest[slot], self._ends[slot])
+
+
+_NO_OPENER = -2
+
+
+def container_extents(text: object) -> ContainerExtents:
+    """``container_walk`` for every container opener in ``text`` at once, without a depth limit.
+
+    For every ``[`` and ``{``, inside strings or not (a caller may try any
+    offset), the returned table gives the ``(deepest, end)`` of
+    ``container_walk(text, offset)`` whenever that does not raise, with ``end``
+    -1 for an opener that never closes; the caller compares ``deepest`` with
+    its own limit. Linear in ``len(text)`` in time and memory (about 24 bytes
+    per bracket plus 32 per quote), meant for texts the caller has already
+    bounded (``verdict`` cuts replies to 200 000 characters).
+
+    A walk from an opener reads brackets up to the next quote, skips the string
+    that quote opens, and goes on right after that string closes. So every walk
+    that reaches a given quote continues identically from there, and the
+    quote-free stretches between quotes form a forest: each stretch continues
+    into the one after its next quote's string, or ends the text. One
+    right-to-left bracket match over each stretch, run on top of the state of
+    the stretch it continues into and undone before that stretch's other
+    continuations are visited, answers every opener in it. Each stretch is
+    matched and undone once.
+
+    Where a walk's string ends, for every quote: a quote strictly inside a
+    string matched from an earlier quote was escaped there, so a match started
+    at it rejoins that match and ends at the same place; every other quote is
+    matched with ``_STRING_TO_END``, and those matches overlap by at most one
+    character.
+    """
+    value = _as_text(text)
+    size = len(value)
+    tokens = array("q", (match.start() for match in _CONTAINER_TOKEN.finditer(value)))
+    count = len(tokens)
+    quote_slots = array("q", (slot for slot in range(count) if value[tokens[slot]] == '"'))
+    quotes = len(quote_slots)
+    # Stretch k holds the tokens before quote k (the last stretch: after the last quote) and
+    # continues into the stretch after the quote that closes quote k's string. ``final`` stands
+    # for the end of the text: a string that runs to it leaves nothing to walk. The forest is
+    # kept as first-child and next-sibling links.
+    final = quotes + 1
+    first_child = array("q", [-1]) * (final + 1)
+    next_sibling = array("q", [-1]) * (final + 1)
+    matched_to = -1
+    closing = 0  # the quote number at ``matched_to - 1``; string ends never decrease
+    for number in range(quotes):
+        offset = tokens[quote_slots[number]]
+        if offset >= matched_to - 1:
+            matched_to = _STRING_TO_END.match(value, offset).end()
+        if matched_to >= size:
+            parent = final
+        else:
+            while tokens[quote_slots[closing]] < matched_to - 1:
+                closing += 1
+            parent = closing + 1
+        next_sibling[number] = first_child[parent]
+        first_child[parent] = number
+    next_sibling[quotes] = first_child[final]
+    first_child[final] = quotes
+    deepest = array("q", [0]) * count
+    ends = array("q", [_NO_OPENER]) * count
+    # Right-to-left match state: closers not yet matched (nearest last), and for each the
+    # deepest container closed before it while it was the nearest. Slot 0 is the end of the
+    # text; its depth is the deepest the unclosed rest reaches. ``undo`` holds what each step
+    # changed, newest last, each entry ending with its kind.
+    closers = array("q", [size])
+    inner = array("q", [0])
+    undo = array("q")
+    # Stretches to visit (>= 0) and undo marks (-1 - mark), newest last.
+    pending = array("q")
+    # Bound methods and counters instead of attribute and ``len`` lookups in the loops below.
+    push_closer, pop_closer = closers.append, closers.pop
+    push_inner, pop_inner = inner.append, inner.pop
+    log, log_many, unlog = undo.append, undo.extend, undo.pop
+    visit, next_visit = pending.append, pending.pop
+    waiting = 0  # closers not yet matched (``len(closers) - 1``)
+    logged = 0  # ``len(undo)``
+    child = first_child[final]
+    while child >= 0:
+        visit(child)
+        child = next_sibling[child]
+    while pending:
+        stretch = next_visit()
+        if stretch < 0:
+            mark = -1 - stretch
+            while logged > mark:
+                kind = unlog()
+                if kind == _PUSHED:
+                    pop_closer()
+                    pop_inner()
+                    waiting -= 1
+                    logged -= 1
+                elif kind == _MATCHED:
+                    outer = unlog()
+                    nested = unlog()
+                    inner[-1] = outer
+                    push_closer(unlog())
+                    push_inner(nested)
+                    waiting += 1
+                    logged -= 4
+                else:
+                    inner[0] = unlog()
+                    logged -= 2
+            continue
+        visit(-1 - logged)
+        low = quote_slots[stretch - 1] + 1 if stretch else 0
+        high = quote_slots[stretch] if stretch < quotes else count
+        for slot in range(high - 1, low - 1, -1):
+            offset = tokens[slot]
+            if value[offset] in "]}":
+                push_closer(offset)
+                push_inner(0)
+                log(_PUSHED)
+                waiting += 1
+                logged += 1
+            elif waiting:
+                close = pop_closer()
+                nested = pop_inner() + 1
+                outer = inner[-1]
+                if nested > outer:
+                    inner[-1] = nested
+                log_many((close, nested - 1, outer, _MATCHED))
+                waiting -= 1
+                logged += 4
+                deepest[slot] = nested
+                ends[slot] = close + 1
+            else:
+                outer = inner[0]
+                inner[0] = outer + 1
+                log_many((outer, _UNCLOSED))
+                logged += 2
+                deepest[slot] = outer + 1
+                ends[slot] = -1
+        child = first_child[stretch]
+        while child >= 0:
+            visit(child)
+            child = next_sibling[child]
+    return ContainerExtents(tokens, deepest, ends)
+
+
+# ``container_extents`` undo kinds: a closer pushed, an opener matched, an unclosed opener.
+_PUSHED, _MATCHED, _UNCLOSED = -1, -2, -3
 
 
 def loads_bounded(text: object, *, max_bytes: int, max_depth: int = DEFAULT_MAX_DEPTH):
@@ -319,6 +567,8 @@ def iter_array_objects(chunks: Iterable[object], *, key: str | None = "traceEven
 
 
 __all__ = [
-    "ArrayObjectScan", "DEFAULT_MAX_DEPTH", "DEFAULT_MAX_ITEM_BYTES",
-    "JsonBoundsExceeded", "check_depth", "iter_array_objects", "loads_bounded",
+    "ArrayObjectScan", "ContainerExtents", "DEFAULT_MAX_DEPTH", "DEFAULT_MAX_ITEM_BYTES",
+    "JsonBoundsExceeded", "check_container_depth", "check_depth", "container_extent", "container_extents",
+    "container_walk", "iter_array_objects",
+    "loads_bounded",
 ]

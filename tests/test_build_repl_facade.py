@@ -110,7 +110,10 @@ def test_the_facade_routes_only_through_execute_tool():
     tree = ast.parse(inspect.getsource(facade))
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} | {
         alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    assert imported <= {"__future__", "re", "shlex", "dataclasses", "typing"}
+    assert imported <= {
+        "__future__", "re", "shlex", "dataclasses", "typing",
+        "application.command_surface.command_text",
+    }
 
 
 def test_refusals_and_reports_render():

@@ -210,20 +210,30 @@ def bounded_notes(notes: Iterable[object]) -> tuple[str, ...]:
 
 # --- bounded JSON ---------------------------------------------------------------
 
-_JSON_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
-_JSON_BRACKET_RE = re.compile(r"[\[\]{}]")
-
 
 def json_depth(text: str) -> int:
     """Maximum bracket nesting of a JSON text, strings ignored (linear)."""
-    stripped = _JSON_STRING_RE.sub('""', text)
     depth = deepest = 0
-    for match in _JSON_BRACKET_RE.finditer(stripped):
-        if match.group() in "[{":
-            depth += 1
-            deepest = max(deepest, depth)
+    in_string = False
+    escaped = False
+
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                in_string = False
         else:
-            depth -= 1
+            if char == '"':
+                in_string = True
+            elif char == '[' or char == '{':
+                depth += 1
+                if depth > deepest:
+                    deepest = depth
+            elif char == ']' or char == '}':
+                depth -= 1
     return deepest
 
 
@@ -304,6 +314,8 @@ def safe_rel(rel: object) -> str | None:
     if is_absolute(text) or text.startswith("//"):
         return None
     normalized = posixpath.normpath(text)
+    if re.match(r"^[A-Za-z]:", normalized):
+        return None
     if normalized in (".", "") or normalized == ".." or normalized.startswith("../"):
         return None
     return normalized

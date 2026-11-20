@@ -9,6 +9,62 @@ Two layers, deliberately separate:
    selects model aliases, routing lanes, and NPU modes. It can **never**
    widen network, filesystem, credential, or cloud permissions.
 
+## Model lists and defaults
+
+The version 1 catalog in `sonder_runtime/adapters/data/model_lists.json` ships
+the model names and routing lists. An optional `<state home>/model_lists.json`
+overrides it; `SONDER_MODEL_LISTS` selects another overlay path. The overlay is
+a JSON object with `"version": 1`. Lists and scalar values replace the whole
+key; dictionary entries merge by subkey, including nested router and training
+entries. Unknown keys, invalid names, unknown tiers, and unpinned training
+revisions invalidate the entire overlay. The runtime reports the issue, uses
+the shipped catalog, and leaves the invalid file untouched. Missing or invalid
+shipped data raises a configuration error naming the file; there is no Python
+copy of the model defaults. MCP import remains available to report the error.
+
+The catalog keys are `retired_cloud_models`, `legacy_cloud_general_model`,
+`default_cloud_models`, `stable_alias`, `default_local_models`,
+`default_embedding_model`, `reserved_personal_model`, `default_routing`,
+`vision_only_model_families`, `tier_strength`, `working_strength`,
+`capability_router` (`preferred`, `ladder`, `fallback`, `keywords`),
+`ensemble_skip_tiers`, `bootstrap_models`, and `training_model_specs`.
+Training sizes and memory-budget algorithms remain code contracts; each HF
+revision in the catalog must be an exact 40-character commit, never a branch.
+
+Existing environment overrides still win: `SONDER_FAST`, `SONDER_CODE`,
+`SONDER_GENERAL`, `SONDER_REASONING`, `SONDER_VISION`, `SONDER_CODE_LOCAL`,
+`SONDER_CLOUD_CODE`, `SONDER_CLOUD_GENERAL`, and `SONDER_EMBED_MODEL`.
+`SONDER_LEARN_TIERS` continues to override the derived learning-tier set.
+Runtime policy still owns persisted tier bindings; changing a catalog default
+does not replace an operator's existing runtime-policy assignments.
+
+At the console:
+
+```text
+/runtime models
+/runtime models set default_local_models {"code":"custom-coder:7b"}
+/runtime models set bootstrap_models {"small":"custom-coder:1.5b"}
+/runtime models reset default_local_models
+```
+
+Status shows effective defaults, their `shipped`, `overlay`, or `env` sources,
+file paths, and errors. Set/reset accept top-level catalog keys and write only
+the overlay, using a file lock and atomic replacement. They require exactly
+the same attended console authority as `/runtime tools`; MCP/HTTP/model calls
+cannot write the overlay. The overlay, its lock, and atomic temporary siblings
+are protected control-plane paths, including an environment-selected path.
+Invalid existing overlays must be fixed by hand before console edits.
+Loaders notice file identity changes; restart the runtime to apply startup
+bindings such as aliases and ensemble exclusions consistently.
+
+Training, deployment, and rollback pin one immutable catalog for the whole
+lifecycle operation. Editing the overlay takes effect on the next operation;
+it cannot change the alias being validated or published by an operation already
+running. Transition journals record the exact personal/rollback aliases and
+training model revisions, so recovery uses those recorded identities after a
+restart. A pending journal from before identity pinning is left untouched and
+requires operator recovery; it never inherits newly configured aliases.
+
 ## Precedence (production config)
 
 Lowest to highest:
@@ -52,6 +108,7 @@ work_wait_seconds = 240             # routed chat work: wait before answering wi
 work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
 work_max_running = 2                # concurrent routed work runs
 stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed turn generates
+prewarm_on_start = true             # load the default chat model once the listener is bound (SONDER_PREWARM_ON_START); needs prewarm enabled, goes through GPU admission
 
 [state]
 home = "/var/lib/sonder"
@@ -253,7 +310,8 @@ Serving/auth: `SONDER_API_KEY`, `SONDER_HOST`, `SONDER_PORT`,
 `SONDER_WEB_APP` (`[server].web_app_enabled`), `SONDER_WEB_APP_DIR`
 (`[server].web_app_dir`, absolute),
 `SONDER_HTTP_WORK_WAIT_SECONDS`, `SONDER_HTTP_WORK_BUDGET_SECONDS`,
-`SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`.
+`SONDER_HTTP_WORK_MAX_RUNNING`, `SONDER_STREAM_HEARTBEAT_SECONDS`,
+`SONDER_PREWARM_ON_START` (`[server].prewarm_on_start`, default on).
 
 Orchestration: `SONDER_MAX_WORKER_CAP` lowers the absolute ceiling for explicit
 per-run `worker_cap` requests. It accepts a positive decimal integer only and
@@ -1175,6 +1233,8 @@ procedure: [runbook](../runbooks/sonder-inference.md)):
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback URL, which also needs `https://`, a key, and a cloud-allowed context |
 | `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON list of approved private workers (https private IP, own CA bundle, own token variable); needs `SONDER_ALLOW_REMOTE_INFERENCE=1`, not cloud consent; requests are placed on the least-loaded endpoint ([provider reference](../architecture/sonder-inference-provider.md#private-workers)) |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | per-call ceiling, never beyond the operation deadline |
+| `SONDER_INFERENCE_STREAM_IDLE_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no bytes (keep-alive comments count) arrive for this long once the response has started; `0`-`86400`. Inside the total timeout above. Off by default because a long prefill can legitimately be silent. The error names the idle timeout and the elapsed seconds. |
+| `SONDER_INFERENCE_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no content, reasoning or tool-call delta has arrived this long after the request started (empty keep-alive deltas do not count); `0`-`86400`. Pair a long `SONDER_INFERENCE_TIMEOUT_SECONDS` with these for a slow large model that must still fail fast when it stalls. The `openai_compatible` provider reads `SONDER_OPENAI_STREAM_IDLE_TIMEOUT_SECONDS` and `SONDER_OPENAI_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` (same meaning); it streams only when the caller streams. The idle clock resets per complete line received, so one line trickling in for longer than the limit counts as idle. If the endpoint answers a stream request with a single JSON body, the idle limit bounds the whole body read after the headers, and the first-content limit then acts as a cap on time-to-headers. Streamed turns on `openai_compatible` tiers now send `"stream": true` and `stream_options: {"include_usage": true}`; an endpoint that rejects either field fails with "endpoint rejected request (HTTP 400)". |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once, and serves schema/tool/image chat steps (which Inference v1 cannot carry) on local Ollama |
 

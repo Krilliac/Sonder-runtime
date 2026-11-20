@@ -47,6 +47,7 @@ from typing import Any
 import sonder_runtime.adapters.generation_permit as _generation_permit
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 import sonder_runtime.adapters.runtime_policy as _policy
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.domain import tool_lane_models as _models
 
 # The tier label ``_serve_target`` returns (with no model) for a caller-named
@@ -542,7 +543,7 @@ def default_route_reach(
     ``_local_tier_rung``).  A policy that cannot be read starts on the
     fallback chat tier over every local tier in ``bindings`` (fails closed).
     """
-    from sonder_runtime.application.routing import tier_escalation
+    import sonder_runtime.adapters.tier_escalation as tier_escalation
 
     try:
         loaded = policy or _policy.load(create=False)
@@ -669,8 +670,7 @@ def prompt_refusal(
         if request.get("kind") == "ensemble":
             return selector_refusal(request.get("tiers"), bindings, policy)
         return ""
-    command = str(prompt or "").strip().split(None, 1)
-    command = command[0].lower() if command else ""
+    command = _slash_head(prompt)
     if command == "/ensemble":
         try:
             tiers = _policy.configured_tiers(policy or _policy.load(create=False), bindings)

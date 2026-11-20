@@ -10,10 +10,13 @@ confirmation but can never remove one.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections import deque
 from dataclasses import dataclass
+
+from ..common.bounded_json import JsonBoundsExceeded, check_depth
 
 ACTIONS = frozenset({"click", "double_click", "right_click", "move", "type", "key", "scroll"})
 POINTER_ACTIONS = frozenset({"click", "double_click", "right_click", "move", "scroll"})
@@ -36,6 +39,7 @@ _KEY_ALIASES = {"return": "enter", "esc": "escape", "del": "delete", "control": 
 _ESCAPE_CHORDS = frozenset({
     ("alt", "tab"), ("alt", "shift", "tab"), ("ctrl", "escape"), ("alt", "escape"),
     ("alt", "ctrl", "delete"), ("ctrl", "shift", "escape"), ("alt", "space"),
+    ("alt", "ctrl", "tab"), ("alt", "ctrl", "shift", "tab"),
 })
 
 # Words that, on the control being clicked, mean the click may not be undoable.
@@ -137,8 +141,10 @@ def to_pixels(x, y, coords: str, width: int, height: int) -> tuple[int, int]:
         raise ActionRefused("coords must be 'pixels' or 'normalized'")
     try:
         fx, fy = float(x), float(y)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ActionRefused("x and y must be numbers") from None
+    if not (math.isfinite(fx) and math.isfinite(fy)):
+        raise ActionRefused("x and y must be finite numbers")
     if coords == "normalized":
         if not (0 <= fx <= NORMALIZED_SCALE and 0 <= fy <= NORMALIZED_SCALE):
             raise ActionRefused("normalized coordinates must lie in 0..1000")
@@ -189,8 +195,10 @@ def build_action(action, *, x=None, y=None, coords="pixels", width=0, height=0,
         chord = parse_chord(keys)
     elif name == "scroll":
         try:
+            if isinstance(scroll, float) and not math.isfinite(scroll):
+                raise ActionRefused("scroll must be a finite integer")
             notches = int(scroll)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ActionRefused("scroll must be an integer") from None
         if notches == 0 or abs(notches) > MAX_SCROLL_NOTCHES:
             raise ActionRefused(f"scroll must be 1..{MAX_SCROLL_NOTCHES} notches, up (+) or down (-)")
@@ -221,7 +229,11 @@ class ActionBudget:
         return ""
 
 
-_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+def json_object_text(text) -> str:
+    """The span from the first ``{`` to the last ``}`` in ``text``, or ``""`` when there is none."""
+    raw = str(text or "")
+    first, last = raw.find("{"), raw.rfind("}")
+    return raw[first:last + 1] if 0 <= first <= last else ""
 
 
 def parse_model_step(text) -> dict:
@@ -231,12 +243,13 @@ def parse_model_step(text) -> dict:
     "keys": str, "scroll": int, "label": str, "reason": str}`` with x/y on the
     0..1000 grid. Unknown fields are dropped; the model's prose is clipped.
     """
-    match = _JSON_OBJECT.search(str(text or ""))
-    if not match:
+    body = json_object_text(text)
+    if not body:
         raise ActionRefused("the model did not return a JSON step")
     try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
+        check_depth(body)
+        data = json.loads(body)
+    except (JsonBoundsExceeded, json.JSONDecodeError, RecursionError):
         raise ActionRefused("the model returned malformed JSON") from None
     if not isinstance(data, dict):
         raise ActionRefused("the model's step must be a JSON object")
@@ -257,6 +270,6 @@ def parse_model_step(text) -> dict:
 __all__ = [
     "ACTIONS", "Action", "ActionBudget", "ActionRefused", "IRREVERSIBLE_WORDS",
     "NORMALIZED_SCALE", "app_allowed", "build_action", "clean_text",
-    "irreversible_reason", "normalize_app", "parse_chord", "parse_model_step",
+    "irreversible_reason", "json_object_text", "normalize_app", "parse_chord", "parse_model_step",
     "to_pixels",
 ]

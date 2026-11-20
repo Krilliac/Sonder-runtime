@@ -38,6 +38,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from ....application.command_surface.command_text import slash_head
 from ...repl.facades import build_tools as repl_build
 from ...repl.facades import debug_tools as repl_debug
 from . import build_tools as http_build
@@ -105,7 +106,7 @@ class DebugCall:
 
 def parse_chat_command(cmd: str, arg: str) -> TypedCall | DebugCall:
     """The call a chat line makes; ``ChatUsage`` (the reply) when it makes none."""
-    name = str(cmd or "").lower()
+    name = slash_head(cmd)
     text = str(arg or "").strip()
     if name == "/test":
         return _parse_test(text)

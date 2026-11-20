@@ -240,14 +240,16 @@ class ConfinedRepo:
                    and entry.strip() and os.path.isabs(entry)]
         if not entries:
             raise RepoRootRefused("no repo root is allowed: SONDER_SECURITY_EVAL_REPO_ROOTS is empty")
+        # Lexical containment first: nothing below may stat a caller path the
+        # operator never allowed (a UNC root would open an SMB connection).
+        if not any(_inside(absolute, entry) for entry in entries):
+            raise RepoRootRefused("repo_root is outside SONDER_SECURITY_EVAL_REPO_ROOTS")
         if not os.path.isdir(absolute):
             raise RepoRootRefused("repo_root is not an existing directory")
         if _is_reparse(absolute):
             raise RepoRootRefused("repo_root may not be a symlink or junction")
         if _norm(os.path.realpath(absolute)) != _norm(absolute):
             raise RepoRootRefused("repo_root traverses a symlink, junction or short-name alias")
-        if not any(_inside(absolute, entry) for entry in entries):
-            raise RepoRootRefused("repo_root is outside SONDER_SECURITY_EVAL_REPO_ROOTS")
         return absolute
 
     @property

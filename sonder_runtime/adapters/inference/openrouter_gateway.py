@@ -205,6 +205,10 @@ def normalize_base_url(value: str) -> str:
             "%s must be https://host[:port]/path/v1 without credentials, "
             "query or fragment" % ENV_BASE_URL
         )
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in parts.netloc):
+        raise InvalidInput(
+            ENV_BASE_URL + " host must not contain whitespace or control characters"
+        )
     if parts.scheme != "https" and not is_loopback_url(raw):
         raise InvalidInput(
             "%s must use https:// (plain http is accepted only for a loopback "

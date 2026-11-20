@@ -1,5 +1,6 @@
 """SPEC-5 WP3: RoutePlanner contract tests."""
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -15,12 +16,12 @@ from tests.support.tool_lane import FLOOR
 
 @pytest.fixture
 def planner():
-    return RoutePlanner()
+    return RoutePlanner(config=_test_model_lists.load().values["capability_router"])
 
 
 @pytest.fixture
 def policy():
-    return default_policy(env={}, floor=FLOOR)
+    return default_policy(env={}, floor=FLOOR, lists=_test_model_lists.load().values)
 
 
 @pytest.fixture

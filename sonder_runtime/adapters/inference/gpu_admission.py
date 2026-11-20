@@ -48,15 +48,18 @@ from typing import Any, Callable, Iterator, Mapping, NoReturn, Protocol, cast
 from sonder_runtime.adapters.inference.gpu_admission_store import (
     FULL, HELD, GpuAdmissionStore, StoreUnavailable,
 )
+from sonder_runtime.adapters.inference.log_safe import redact_url, safe_origin
 from sonder_runtime.adapters.inference.runner_footprint import (
     MeasurementScheduler, measure_runner_for_blob, weights_blob_from_modelfile,
 )
 from sonder_runtime.adapters.model_transport import ModelCallError
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 from sonder_runtime.domain import gpu_admission as policy
 from sonder_runtime.domain import ollama_policy
 from sonder_runtime.domain.gpu_admission import (
     AdmissionLane, CtxAction, CtxCheck, CtxPolicy, Footprint, FootprintSource,
     GpuAdmissionPolicy, HostFloorMode, HostMemoryReading, Queued, RefusalReason, Refused,
+    StreamedPlacement,
 )
 from sonder_runtime.domain.model_routing import is_cloud_model_name
 from sonder_runtime.platform import host_memory
@@ -71,6 +74,7 @@ _TAGS_CACHE_SECONDS = 30.0
 _REMEASURE_SECONDS = 600.0
 _READ_LIMIT = 4 * 1024 * 1024
 _BOUND_LOG_TUPLES = 4096
+_BOUND_BACKEND_ENTRIES = 256
 _HELD_TICKET: contextvars.ContextVar[_Entry | None] = contextvars.ContextVar(
     "sonder_gpu_admission_held", default=None)
 
@@ -157,6 +161,7 @@ class _Entry:
     file_size: int = 0
     digest: str = ""
     store_ok: bool = True
+    backend: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -223,6 +228,22 @@ def policy_from_config(config: GpuAdmissionConfig) -> GpuAdmissionPolicy:
     )
 
 
+_UNPARSABLE_ORIGIN = "http://<redacted>"
+
+
+def _origin_without_userinfo(origin: str) -> str:
+    """``origin`` rebuilt as ``scheme://host[:port]`` from allowlisted text only.
+
+    Admission keys, caches and logs every origin it sees, so userinfo, path and
+    query are dropped here for every caller and both key shapes are identical.
+    ``log_safe.safe_origin`` does the rebuilding. When it declines (no http(s)
+    scheme, a malformed host or port, an ``@`` after the authority) the origin
+    becomes ``_UNPARSABLE_ORIGIN``: never "", which ``ollama_policy`` reads as
+    the default loopback host, and never loopback itself.
+    """
+    return safe_origin(origin) or _UNPARSABLE_ORIGIN
+
+
 def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any] | None:
     """GET one control-plane document through the policy-enforcing transport."""
     ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
@@ -233,8 +254,10 @@ def _read_json(origin: str, path: str, timeout: float = 2.0) -> Mapping[str, Any
         if len(raw) > _READ_LIMIT:
             return None
         value = json.loads(raw.decode("utf-8"))
-    except Exception:  # a failed read means "unknown", never a failed request
-        logger.debug("gpu admission could not read %s%s", origin, path, exc_info=True)
+    except Exception as exc:  # a failed read means "unknown", never a failed request
+        # No traceback: transport exception text can repeat the request URL.
+        logger.debug("gpu admission could not read %s%s: %s", redact_url(origin), path,
+                     type(exc).__name__)
         return None
     return value if isinstance(value, Mapping) else None
 
@@ -269,6 +292,7 @@ class GpuAdmission:
         tags_reader: PsReader | None = None,
         show_reader: Callable[[str, str], Mapping[str, Any] | None] | None = None,
         memory_reader: Callable[[str], tuple[int, int] | None] | None = None,
+        streamed: Mapping[str, StreamedPlacement] | None = None,
         metrics: _CtxMismatchMetrics | None = None,
         background: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -308,6 +332,37 @@ class GpuAdmission:
         self._last_refusals: collections.deque[tuple[str, str]] = collections.deque(maxlen=8)
         self._last_reading: HostMemoryReading | None = None
         self._pins_seen: dict[str, int] = {}
+        self._streamed: dict[str, StreamedPlacement] = {
+            model_key(name): placement for name, placement in (streamed or {}).items()}
+        self._shape_cache: dict[tuple[str, str, str], policy.ExpertModelShape] = {}
+        self._shape_failed: dict[tuple[str, str, str], float] = {}
+
+    def declare_streamed(self, model: str, placement: StreamedPlacement | None) -> None:
+        """Declare (or with None, withdraw) that ``model`` streams its experts.
+
+        Cold loads of a declared model are sized by
+        ``policy.estimate_streamed_footprint`` from ``/api/show`` metadata and
+        this placement instead of ``file_size * factor``."""
+        with self._lock:
+            if placement is None:
+                self._streamed.pop(model_key(model), None)
+            else:
+                self._streamed[model_key(model)] = placement
+
+    def declared_backend_footprint(self, model: str, num_ctx: int = 0) -> Footprint | None:
+        """The STREAMED footprint a binding declared for ``model``, else None.
+
+        For a backend with no ``/api/show``: the placement itself must give
+        ``dense_bytes`` and ``kv_bytes_per_token`` (``num_ctx`` of 0 uses the
+        placement's own window). None means the model is not declared, or the
+        declaration is too thin to size it, and the request is not gated."""
+        with self._lock:
+            placement = self._streamed.get(model_key(model))
+        if placement is None or placement.dense_bytes is None or placement.kv_bytes_per_token is None:
+            return None
+        return policy.estimate_streamed_footprint(
+            file_size_bytes=0, num_ctx=num_ctx, placement=placement, shape=None,
+            policy=self._policy)
 
     # -- plumbing -------------------------------------------------------------
     @staticmethod
@@ -404,8 +459,10 @@ class GpuAdmission:
                 headers={"Content-Type": "application/json"}, method="POST")
             with ollama_endpoint.open_url(request, timeout=5.0) as response:
                 value = json.loads(response.read(_READ_LIMIT).decode("utf-8"))
-        except Exception:
-            logger.debug("gpu admission could not read /api/show for %s", model, exc_info=True)
+        except Exception as exc:
+            # No traceback: transport exception text can repeat the request URL.
+            logger.debug("gpu admission could not read /api/show for %s: %s", model,
+                         type(exc).__name__)
             return None
         return value if isinstance(value, Mapping) else None
 
@@ -417,6 +474,7 @@ class GpuAdmission:
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
     ) -> Iterator[AdmissionTicket]:
         """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
+        origin = _origin_without_userinfo(origin)
         mode = self.config.mode
         if mode == "off":
             yield passthrough_ticket(payload)
@@ -458,6 +516,131 @@ class GpuAdmission:
             _HELD_TICKET.reset(token)
             self._leave(entry, succeeded)
 
+    # -- non-Ollama local backends ---------------------------------------------------
+    @contextlib.contextmanager
+    def admit_backend(
+        self, model: str, *, origin: str, footprint: Footprint,
+        lane: AdmissionLane = AdmissionLane.INFERENCE, deadline: float | None = None,
+        caller: str = "interactive", resident: Callable[[], bool | None] | None = None,
+    ) -> Iterator[AdmissionTicket]:
+        """Gate one request to a bound local backend that is not Ollama.
+
+        The binding declares ``footprint`` (for an expert-streaming model,
+        ``policy.estimate_streamed_footprint``); there is no ``/api/ps`` to ask.
+        A request is charged against host memory only when ``resident()``
+        returns False. With no answer (no callback, a callback that returns
+        None or raises) the model is assumed possibly loaded: the request takes
+        its GPU slot and is not memory-checked, because available memory
+        already excludes a loaded model and charging it again would refuse a
+        model that is running.
+        The request passes the same GPU queue, floors and ``on_host_floor``
+        modes as an Ollama cold load, but nothing is rewritten and no ``num_ctx``
+        pin applies. Only loopback origins and the LOAD, INFERENCE and EMBED
+        lanes are gated; anything else passes through, as does mode ``off``.
+        """
+        origin = _origin_without_userinfo(origin)
+        key = model_key(model)
+        if (self.config.mode == "off" or not key or _HELD_TICKET.get() is not None
+                or lane not in (AdmissionLane.LOAD, AdmissionLane.INFERENCE, AdmissionLane.EMBED)
+                or not is_gated_backend_origin(origin)):
+            yield passthrough_ticket(None)
+            return
+        ticket = AdmissionTicket(lane, None)
+        entry = _Entry(ticket, lane=lane, origin=origin, model_key=key, ticket_id=uuid.uuid4().hex,
+                       pool="embed" if lane is AdmissionLane.EMBED else "gpu", backend=True)
+        if self.config.mode == "observe":
+            self._observe_backend(entry, footprint, resident)
+        else:
+            try:
+                self._enforce_backend(entry, footprint, deadline, caller, resident)
+            except StoreUnavailable as error:
+                self._release_quietly(entry)
+                self._store_unavailable(error)
+            except BaseException:
+                self._release_quietly(entry)
+                raise
+        token = _HELD_TICKET.set(entry)
+        succeeded = False
+        try:
+            yield ticket
+            succeeded = True
+        finally:
+            _HELD_TICKET.reset(token)
+            self._leave(entry, succeeded)
+
+    def _backend_verdict(
+        self, entry: _Entry, footprint: Footprint, resident: Callable[[], bool | None] | None,
+    ) -> policy.AdmissionDecision | None:
+        """The verdict for a load known to be cold, else None.
+
+        Only an explicit ``False`` from ``resident()`` is a cold load. No
+        answer is not evidence either way, so it is not charged."""
+        answer: bool | None = None
+        if resident is not None:
+            try:
+                answer = resident()
+            except Exception:
+                logger.debug("gpu admission: residency probe for %s raised",
+                             entry.model_key, exc_info=True)
+        if answer is not False:
+            if answer is None:
+                logger.debug("gpu admission: residency of %s unknown; not charged",
+                             entry.model_key)
+            return None
+        reading = self._host_reader()
+        if reading is None:
+            logger.debug("gpu admission: host memory unreadable; cold load of %s not checked",
+                         entry.model_key)
+            return None
+        self._last_reading = reading
+        return policy.host_memory_verdict(
+            reading, footprint, policy=self._policy, lane=entry.lane or AdmissionLane.INFERENCE,
+            retry_after_seconds=self.config.host_recheck_interval_ms / 1000.0)
+
+    def _enforce_backend(
+        self, entry: _Entry, footprint: Footprint, deadline: float | None, caller: str,
+        resident: Callable[[], bool | None] | None,
+    ) -> None:
+        started = self._clock()
+        limit = started + self.config.max_queue_wait_seconds
+        if deadline is not None:
+            limit = min(limit, deadline)
+        while True:
+            self._take_slot(entry, limit, deadline, caller)
+            verdict = self._backend_verdict(entry, footprint, resident)
+            if verdict is None or isinstance(verdict, policy.Admitted):
+                break
+            wait_interval = None
+            refusal = verdict if isinstance(verdict, Refused) else None
+            if isinstance(verdict, Queued):
+                wait_interval = self.config.host_recheck_interval_ms / 1000.0
+                refusal = Refused(verdict.reason, verdict.detail, verdict.retry_after_seconds,
+                                  self._last_reading, footprint)
+            if refusal is None:  # host_memory_verdict returns only these three kinds
+                break
+            if wait_interval is None or self._clock() + wait_interval >= limit:
+                self._release_quietly(entry)
+                self._refuse(refusal)
+            self._release_quietly(entry)
+            with self._lock:
+                self._counters["queued"] += 1
+            self._report_memory_wait(entry.model_key, refusal)
+            self._pause(wait_interval)
+        wait_status.report_admitted()
+        entry.ticket.waited_seconds = self._clock() - started
+        with self._lock:
+            self._counters["admitted"] += 1
+
+    def _observe_backend(
+        self, entry: _Entry, footprint: Footprint, resident: Callable[[], bool | None] | None,
+    ) -> None:
+        verdict = self._backend_verdict(entry, footprint, resident)
+        if isinstance(verdict, (Queued, Refused)):
+            logger.warning("gpu admission (observe): would not admit cold load of %s: %s",
+                           entry.model_key, verdict.detail)
+        with self._lock:
+            self._counters["observed"] += 1
+
     # -- PROBE lane ---------------------------------------------------------------
     def acquire_probe(self, path: str, *, origin: str,
                       deadline: float | None = None) -> Callable[[], None]:
@@ -471,6 +654,7 @@ class GpuAdmission:
         is thread-agnostic and idempotent: only its first call frees the slot,
         so a caller may hand it to whichever thread finishes the read.
         """
+        origin = _origin_without_userinfo(origin)
         if self.config.mode == "off" or not ollama_policy.is_loopback(origin):
             return _no_release
         wait = self.config.probe_wait_ms / 1000.0
@@ -563,7 +747,24 @@ class GpuAdmission:
                     "waited %.0f s for a free %s GPU slot" % (
                         self.config.max_queue_wait_seconds, entry.pool),
                     retry_after_seconds=5.0))
+            wait_status.report_wait(
+                entry.model_key, detail="every %s GPU slot is busy" % entry.pool)
             self._pause(min(interval, max(0.0, limit - self._clock())))
+
+    def _report_memory_wait(self, model_key: str, refusal: Refused) -> None:
+        """Say what the wait is on: the binding floor, with its numbers."""
+        reading, footprint = refusal.reading, refusal.footprint
+        free = need = floor = None
+        if reading is not None and footprint is not None:
+            if refusal.reason is RefusalReason.HOST_RAM_FLOOR:
+                free, need = reading.available_physical_bytes, footprint.working_set_bytes
+                floor = self._policy.min_available_ram_bytes
+            elif refusal.reason is RefusalReason.COMMIT_FLOOR:
+                free, need = reading.commit_available_bytes, footprint.private_bytes
+                floor = self._policy.min_commit_headroom_bytes
+        wait_status.report_wait(
+            model_key, free, need, refusal.detail,
+            reason=refusal.reason.value, floor_bytes=floor)
 
     def _release_quietly(self, entry: _Entry) -> None:
         if entry.enqueued and self._store is not None:
@@ -616,7 +817,9 @@ class GpuAdmission:
             self._release_quietly(entry)
             with self._lock:
                 self._counters["queued"] += 1
+            self._report_memory_wait(entry.model_key, refusal)
             self._pause(wait_interval)
+        wait_status.report_admitted()
         self._apply(entry, plan, body, store)
         entry.ticket.waited_seconds = self._clock() - started
         with self._lock:
@@ -701,7 +904,8 @@ class GpuAdmission:
                     measured_exact=next((r for r in records if r.num_ctx == served), None),
                     measured_other=[r for r in records if r.num_ctx != served],
                     file_size_bytes=file_size, requested_ctx=served, policy=self._policy,
-                    digest=digest)
+                    digest=digest,
+                    streamed=self._streamed_footprint(origin, key, digest, file_size, served))
                 evictable = self._evictable(rows, key)
                 memory = policy.host_memory_verdict(
                     reading, footprint, policy=self._policy, lane=lane, evictable=evictable,
@@ -710,6 +914,45 @@ class GpuAdmission:
                 logger.debug("gpu admission: host memory unreadable; cold load of %s not checked", key)
         return _Plan(decision, requested, cold, digest, file_size, follow, memory,
                      footprint, reading, evictable)
+
+    def _streamed_footprint(
+        self, origin: str, key: str, digest: str, file_size: int, num_ctx: int,
+    ) -> Footprint | None:
+        """The STREAMED footprint of a declared model, else None (use the ordinary path).
+
+        The architecture comes from one ``/api/show`` per (origin, model, digest),
+        cached once it parses; a failed or unparseable answer is not asked again
+        for ``_TAGS_CACHE_SECONDS``. None also when the placement and metadata do not
+        give the dense size or KV rate: the ordinary estimate then applies."""
+        cache_key = (origin, key, digest)
+        with self._lock:
+            placement = self._streamed.get(key)
+            shape = self._shape_cache.get(cache_key)
+            failed_at = self._shape_failed.get(cache_key)
+        if placement is None:
+            return None
+        if shape is None and (
+                failed_at is None or self._clock() - failed_at >= _TAGS_CACHE_SECONDS):
+            shown = self._show_reader(origin, key)
+            info = shown.get("model_info") if isinstance(shown, Mapping) else None
+            shape = policy.expert_model_shape(info if isinstance(info, Mapping) else None)
+            with self._lock:
+                if shape is not None:
+                    if len(self._shape_cache) >= _BOUND_BACKEND_ENTRIES:
+                        self._shape_cache.clear()
+                    self._shape_cache[cache_key] = shape
+                    self._shape_failed.pop(cache_key, None)
+                else:
+                    if len(self._shape_failed) >= _BOUND_BACKEND_ENTRIES:
+                        self._shape_failed.clear()
+                    self._shape_failed[cache_key] = self._clock()
+        footprint = policy.estimate_streamed_footprint(
+            file_size_bytes=file_size, num_ctx=num_ctx, placement=placement, shape=shape,
+            policy=self._policy, digest=digest)
+        if footprint is None:
+            logger.warning("gpu admission: %s is declared streamed but its metadata gives no "
+                           "dense size or KV rate; using the ordinary estimate", key)
+        return footprint
 
     @staticmethod
     def _evictable(rows: Mapping[str, _PsRow] | None, key: str) -> tuple[str, ...]:
@@ -738,7 +981,7 @@ class GpuAdmission:
                           window_seconds=self._policy.repin_window_seconds)
             logger.warning(
                 "num_ctx repin: model=%s origin=%s requested=%d replaces the pinned window; "
-                "the model reloads once (%s)", key, origin, requested, plan.ctx.detail)
+                "the model reloads once (%s)", key, redact_url(origin), requested, plan.ctx.detail)
         elif action in (CtxAction.SERVE_PINNED, CtxAction.INHERIT_PINNED):
             if served is None:  # resolve_num_ctx serves a pin only with its window
                 _inconsistent_ctx_decision(plan.ctx)
@@ -756,7 +999,8 @@ class GpuAdmission:
                 if first:
                     logger.warning(
                         "num_ctx pinned: model=%s requested=%d is served at the loaded window "
-                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served, origin)
+                        "pinned=%d to avoid a reload (origin=%s)", key, requested, served,
+                        redact_url(origin))
             else:
                 logger.debug("num_ctx inherited: model=%s request named no window; using pinned=%d",
                              key, served)
@@ -776,6 +1020,8 @@ class GpuAdmission:
     # -- leaving -------------------------------------------------------------------
     def _leave(self, entry: _Entry, succeeded: bool) -> None:
         self._release_quietly(entry)
+        if entry.backend:
+            return
         self._ps_cache.pop(entry.origin, None)
         if succeeded and entry.ticket.lane in (
                 AdmissionLane.LOAD, AdmissionLane.INFERENCE, AdmissionLane.EMBED):
@@ -831,7 +1077,7 @@ class GpuAdmission:
                 logger.error(
                     "num_ctx mismatch: model=%s origin=%s sent=%d effective=%d; the server runs "
                     "the model at a different window than was requested",
-                    entry.model_key, entry.origin, sent, row.context_length)
+                    entry.model_key, redact_url(entry.origin), sent, row.context_length)
                 if self._metrics is not None:
                     self._metrics.observe_num_ctx_mismatch()
         elif verdict is CtxCheck.UNVERIFIABLE:
@@ -843,7 +1089,8 @@ class GpuAdmission:
             if first:
                 logger.info(
                     "num_ctx unverifiable: model=%s origin=%s; /api/ps reports no context_length, "
-                    "so the sent window %s cannot be compared", entry.model_key, entry.origin, sent)
+                    "so the sent window %s cannot be compared",
+                    entry.model_key, redact_url(entry.origin), sent)
 
     def _maybe_measure(self, entry: _Entry) -> None:
         if not ollama_policy.is_loopback(entry.origin) or self._store is None:
@@ -851,6 +1098,8 @@ class GpuAdmission:
         served = entry.ticket.served_num_ctx
         if served is None:
             return
+        if entry.model_key in self._streamed:
+            return  # a runner's working set counts file-backed expert pages: not a footprint
         slot = (entry.digest, served)
         now = self._clock()
         with self._lock:
@@ -919,6 +1168,7 @@ class GpuAdmission:
 _configuration_lock = threading.RLock()
 _typed_config: GpuAdmissionConfig | None = None
 _process_service: GpuAdmission | None = None
+_typed_streamed: dict[str, StreamedPlacement] | None = None
 
 
 def config_from_environment(environment: Mapping[str, str] | None = None) -> GpuAdmissionConfig:
@@ -932,6 +1182,46 @@ def config_from_environment(environment: Mapping[str, str] | None = None) -> Gpu
     return config
 
 
+STREAMED_MODELS_ENV = "SONDER_GPU_STREAMED_MODELS"
+_PLACEMENT_FIELDS = ("expert_cache_bytes", "dense_bytes", "kv_bytes_per_token",
+                     "state_bytes", "num_ctx")
+
+
+def streamed_placements_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, StreamedPlacement]:
+    """Placements declared in ``SONDER_GPU_STREAMED_MODELS``; ValueError if invalid.
+
+    The value is a JSON object ``{"<model>": {"expert_cache_bytes": N,
+    "dense_bytes": N, "kv_bytes_per_token": N, "state_bytes": N, "num_ctx": N}}``;
+    ``expert_cache_bytes`` is required, the rest optional."""
+    env = os.environ if environment is None else environment
+    text = env.get(STREAMED_MODELS_ENV, "").strip()
+    if not text:
+        return {}
+    try:
+        loaded = json.loads(text)
+    except ValueError as error:
+        raise ValueError("%s is not valid JSON" % STREAMED_MODELS_ENV) from error
+    if not isinstance(loaded, dict):
+        raise ValueError("%s must be a JSON object keyed by model" % STREAMED_MODELS_ENV)
+    placements: dict[str, StreamedPlacement] = {}
+    for name, fields in loaded.items():
+        if not isinstance(fields, dict) or "expert_cache_bytes" not in fields:
+            raise ValueError("%s: %r needs an object with expert_cache_bytes"
+                             % (STREAMED_MODELS_ENV, str(name)))
+        unknown = sorted(set(fields) - set(_PLACEMENT_FIELDS))
+        if unknown:
+            raise ValueError("%s: %r has unknown fields %s"
+                             % (STREAMED_MODELS_ENV, str(name), ", ".join(unknown)))
+        try:
+            placements[str(name)] = StreamedPlacement(**fields)
+        except (ValueError, TypeError) as error:
+            raise ValueError("%s: %r is invalid: %s"
+                             % (STREAMED_MODELS_ENV, str(name), error)) from error
+    return placements
+
+
 def service_for_environment(environment: Mapping[str, str]) -> GpuAdmission:
     """A service for an explicit environment mapping (tests, process-local callers).
 
@@ -940,7 +1230,8 @@ def service_for_environment(environment: Mapping[str, str]) -> GpuAdmission:
     config = config_from_environment(environment)
     if "SONDER_GPU_ADMISSION" not in environment:
         config = dataclasses.replace(config, mode="off")
-    return GpuAdmission(config)
+    return GpuAdmission(
+        config, streamed=streamed_placements_from_environment(environment))
 
 
 def configure_typed_gpu_admission(config: GpuAdmissionConfig) -> None:
@@ -949,21 +1240,28 @@ def configure_typed_gpu_admission(config: GpuAdmissionConfig) -> None:
     Called next to ``configure_typed_workers``, before the pool is built. The
     documented ``SONDER_GPU_*`` environment overrides apply to the section here
     too, so a section built in code obeys them like one loaded from TOML."""
-    global _typed_config, _process_service
+    global _typed_config, _process_service, _typed_streamed
     errors: list[str] = []
     config = apply_gpu_admission_environment(config, os.environ, errors)
     problems = errors + gpu_admission_errors(config)
+    placements: dict[str, StreamedPlacement] = {}
+    try:
+        placements = streamed_placements_from_environment(os.environ)
+    except ValueError as error:
+        problems.append(str(error))
     if problems:
         raise ValueError("; ".join(problems))
     with _configuration_lock:
         _typed_config = config
+        _typed_streamed = placements
         _process_service = None
 
 
 def reset_typed_gpu_admission() -> None:
-    global _typed_config, _process_service
+    global _typed_config, _process_service, _typed_streamed
     with _configuration_lock:
         _typed_config = None
+        _typed_streamed = None
         _process_service = None
 
 
@@ -979,8 +1277,37 @@ def process_service() -> GpuAdmission:
         if _process_service is None:
             config = _typed_config if _typed_config is not None else config_from_environment()
             from sonder_runtime.platform.metrics import default_registry
-            _process_service = GpuAdmission(config, metrics=default_registry())
+            _process_service = GpuAdmission(
+                config, metrics=default_registry(),
+                streamed=(_typed_streamed if _typed_config is not None
+                          else streamed_placements_from_environment()))
         return _process_service
+
+
+def is_gated_backend_origin(origin: str) -> bool:
+    """Whether admission gates a non-Ollama backend at ``origin`` (loopback only)."""
+    return ollama_policy.is_loopback(_origin_without_userinfo(origin))
+
+
+def backend_service_for(origin: str) -> GpuAdmission | None:
+    """The process service for a backend at ``origin``, or None when nothing gates it.
+
+    None for a remote origin (no configuration is read) and for a loopback
+    origin when no streamed model is declared and no service exists yet. Raises
+    ``ValueError`` only for a loopback origin whose declaration or configuration
+    is invalid in a process that never ran ``configure_typed_gpu_admission``."""
+    if not is_gated_backend_origin(origin):
+        return None
+    with _configuration_lock:
+        if _process_service is not None:
+            return _process_service
+        if _typed_config is not None:
+            declared = bool(_typed_streamed)
+        else:
+            declared = bool(os.environ.get(STREAMED_MODELS_ENV, "").strip())
+        if not declared:
+            return None
+        return process_service()
 
 
 def set_process_service(service: GpuAdmission | None) -> None:
@@ -991,8 +1318,10 @@ def set_process_service(service: GpuAdmission | None) -> None:
 
 
 __all__ = [
-    "AdmissionTicket", "GpuAdmission", "GpuAdmissionRefused", "StoreUnavailable",
-    "config_from_environment", "configure_typed_gpu_admission", "default_store_path",
+    "AdmissionTicket", "GpuAdmission", "GpuAdmissionRefused", "STREAMED_MODELS_ENV",
+    "StoreUnavailable", "backend_service_for", "config_from_environment",
+    "configure_typed_gpu_admission", "default_store_path", "is_gated_backend_origin",
     "model_key", "passthrough_ticket", "policy_from_config", "process_service",
-    "reset_typed_gpu_admission", "service_for_environment", "set_process_service", "typed_config",
+    "reset_typed_gpu_admission", "service_for_environment", "set_process_service",
+    "streamed_placements_from_environment", "typed_config",
 ]

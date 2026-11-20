@@ -38,6 +38,7 @@ from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
 from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY, HOST_TRUSTED, forwarded_client_ip, host_decision,
@@ -67,6 +68,7 @@ _MEMORY_REPLICATION_RECEIVER = None
 _MEMORY_REPLICATION_SERVICE = None
 _ACCOUNT_LOGOUT_ADMISSION = threading.BoundedSemaphore(2)
 from sonder_runtime.platform import context_policy
+from sonder_runtime.platform.config_environment import env_bool
 
 import logging as _logging_module
 _serve_logger = _logging_module.getLogger(__name__)
@@ -95,6 +97,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
+from sonder_runtime.adapters.inference import startup_prewarm
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
@@ -891,6 +894,8 @@ STREAM_IDLE_TIMEOUT_SECONDS = max(1, _env_int(
 # per-connection wait above.
 # Interval of SSE keep-alive comment frames while a streamed turn generates.
 STREAM_HEARTBEAT_SECONDS = max(1, min(300, _env_int("SONDER_STREAM_HEARTBEAT_SECONDS", 15)))
+# [server].prewarm_on_start: load the default chat model once the listener is bound.
+PREWARM_ON_START = env_bool(os.environ.get("SONDER_PREWARM_ON_START", "1"))
 MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
 DISCARD_BODY_TIMEOUT_SECONDS = 5
 # Closing a socket whose receive buffer still holds body bytes makes the OS
@@ -1237,8 +1242,9 @@ def configure_typed_config(config) -> None:
     MAX_DISCARDED_BODY_BYTES = min(MAX_REQUEST_BYTES, 64 * 1024)
     REQUEST_TIMEOUT_SECONDS = max(5, server_config.request_timeout_seconds)
     STREAM_IDLE_TIMEOUT_SECONDS = max(1, server_config.stream_idle_timeout_seconds)
-    global STREAM_HEARTBEAT_SECONDS
+    global STREAM_HEARTBEAT_SECONDS, PREWARM_ON_START
     STREAM_HEARTBEAT_SECONDS = max(1, min(300, server_config.stream_heartbeat_seconds))
+    PREWARM_ON_START = server_config.prewarm_on_start
     HTTP_SESSION_STATE_LIMIT = max(2, min(1024, server_config.session_state_limit))
     HTTP_SESSION_STATE_OWNER_LIMIT = max(
         1, min(HTTP_SESSION_STATE_LIMIT - 1, server_config.session_state_owner_limit)
@@ -2076,7 +2082,7 @@ def _restricted_tool_role(context):
         return None
     try:
         unrestricted = _developer_authorized(context)
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         unrestricted = False
     return None if unrestricted else public_policy.ROLE_USER
 
@@ -2113,6 +2119,7 @@ SYSTEM_OPERATION_TOOLS = {
     "permission_approve": "permission_rule_change",
     "elevate": "permission_mode_change",
     "runtime_policy_update": "runtime_policy_change",
+    "cloud_opt_in": "runtime_policy_change",
     "runtime_source_update": "selfmod_deploy",
     "runtime_source_stash": "selfmod_deploy",
     # These mutate process-wide runtime behaviour or durable prompt inputs.
@@ -2150,6 +2157,8 @@ SYSTEM_OPERATION_TOOLS = {
     "memory_export": "workspace_execution",
     "memory_privacy_repair": "workspace_execution",
     "memory_quality_repair": "workspace_execution",
+    # A caller's judgement of a delegated run is the operator's review.
+    "record_outcome": "workspace_execution",
 }
 
 
@@ -2420,7 +2429,7 @@ def _dangerous_http_slash(content):
     if not stripped.startswith("/"):
         return False
     pieces = stripped.split(None, 2)
-    command = pieces[0].lower()
+    command = _slash_head(pieces[0])
     if command in ("/autopilot", "/auto"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
         return action not in ("status", "show", "list", "help", "?")
@@ -3093,7 +3102,8 @@ def _loop_global_operation_refusal(actions_json, context=None):
     for action in actions:
         if not isinstance(action, dict):
             continue
-        action_type = str(action.get("type") or action.get("action") or "").strip().lower()
+        # Same default as server._loop_dispatch: an action with no type runs as "code".
+        action_type = str(action.get("type") or action.get("action") or "code").strip().lower()
         action_tool = server._loop_action_tool(action_type)
         operation = _http_system_operation_for(action_tool)
         if not operation:
@@ -3190,7 +3200,7 @@ def _slash_system_operation(command, argument):
     choke point prevents a role declaration from becoming decorative merely
     because a command has two spellings.
     """
-    command = str(command or "").strip().lower()
+    command = _slash_head(command)
     parts = str(argument or "").strip().split(None, 1)
     action = parts[0].lower() if parts else ""
     if command in ("/runtime", "/models") and action in ("set", "reset"):
@@ -3227,7 +3237,9 @@ def _http_principal(auth):
 
 
 def _http_workspace_roots(auth):
-    """Configured workspace roots for an admin caller; () for anyone else."""
+    """Configured [state].workspace_roots (resolved) for an admin; () otherwise.
+
+    Never ``file_ops.lane_grant_roots``: its ambient roots are for local-owner lanes only."""
     if not _admin_authorized(auth):
         return ()
     from sonder_runtime.bootstrap.app import default_app
@@ -3243,7 +3255,9 @@ def _http_debug_context(auth, correlation_id):
         raise PermissionError("authenticated account identity is unavailable")
     context = sonder_lifecycle.get().operation_context(correlation_id, auth)
     roots = tuple(Path(root) for root in _http_workspace_roots(auth))
-    return replace(context, principal_id=principal, source="http", workspace_roots=roots)
+    from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.interfaces.orchestration_commands import inherited_remote_consent
+    return replace(context, principal_id=principal, source="http", workspace_roots=roots, remote_ollama_allowed=inherited_remote_consent(context.remote_ollama_allowed, _admin_authorized(auth), default_app))
 
 
 def _debug_tools_http_facade(application):
@@ -3296,15 +3310,15 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return None
 
     parts = stripped.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
-    _serve_logger.debug(f"_handle_slash: cmd={cmd!r}")
+    _serve_logger.debug("_handle_slash: slash command received")
     # One choke point in front of every branch of this ~130-branch chain (as in the REPL).
     from sonder_runtime.adapters.security.powershell_gate import slash_run_arguments
     run_args = slash_run_arguments(cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block)
     refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
-        _serve_logger.debug(f"_handle_slash: refused cmd={cmd!r}: {refusal!r}")
+        _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
     operation = _slash_system_operation(cmd, arg)
     if operation and context is not None:
@@ -3454,10 +3468,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         )
         if task_boundary_error:
             return task_boundary_error
+        work_project = project if workspace_project is None else workspace_project
+        from sonder_runtime.application.agents.delegation import rejected_project_refusal
+        if rejected := rejected_project_refusal(work_project, server.served_work_project):
+            return rejected
         return _idempotent_http_action(
-            context, idempotency_key, "workbench\0%s\0%s" % (project, arg.strip()),
-            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": project}, lambda: server.workbench_agent(
-                prompt=arg.strip(), tier="auto", max_steps=12, project=project,
+            context, idempotency_key, "workbench\0%s\0%s" % (work_project, arg.strip()),
+            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": work_project}, lambda: server.workbench_agent(
+                prompt=arg.strip(), tier="auto", max_steps=12, project=work_project,
             ), context),
         )
     if cmd in (
@@ -3588,7 +3606,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         if task_boundary_error:
             return task_boundary_error
         from sonder_runtime.interfaces.orchestration_commands import (
-            execute_master_command, parse_master_arguments, uses_tool_arguments,
+            execute_master_command, parse_master_arguments, resolved_agent_count, uses_tool_arguments,
         )
         if not uses_tool_arguments(arg):
             # One parser for every surface ([inline|delegate|fleet] [N] <task>,
@@ -3601,10 +3619,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             return _idempotent_http_action(
                 context, idempotency_key, "master\0" + stripped,
                 lambda: _narrate_http_command(
-                    "master_orchestrate", {"task": parsed.task, "mode": parsed.mode},
+                    "master_orchestrate", {"task": parsed.task, "mode": parsed.mode, "agents": (count := resolved_agent_count(parsed, server.master_orchestrator.capacity))},
                     lambda: execute_master_command(
                         arg, orchestrate=server.master_orchestrate,
-                        capacity=server.master_orchestrator.capacity, project=master_project,
+                        capacity=server.master_orchestrator.capacity, project=master_project, agents=count,
                     ),
                     context,
                 ),
@@ -3823,13 +3841,15 @@ def _handle_intent(content, messages=None, state=None):
     return "\n".join(replies)
 
 
-def _work_project_for_request(project, storage_project, content=""):
+def _work_project_for_request(project, storage_project, content="", auth=None):
     """The project routed natural work runs under for one served request.
 
     Durable state keeps its principal namespace; file work needs the original
     project selection so an unset/default project can use a creations lane.
+    With no project, a directory the text names inside *auth*'s grant (an owner/admin's configured workspace roots, () otherwise) is used.
     """
-    return server.served_work_project(project) or (
+    named = server.file_ops.named_directory(content, roots) if auth is not None and str(project or "").strip().lower() in {"", "default", "none"} and (roots := _http_workspace_roots(auth)) else ""
+    return named or server.served_work_project(project) or (
         project or "default" if intents.classify_file_intent(content) else storage_project
     )
 
@@ -7522,7 +7542,7 @@ class Handler(BaseHTTPRequestHandler):
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
-                            project=_work_project_for_request(project, storage_project, prompt),
+                            project=_work_project_for_request(project, storage_project, prompt, context),
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
@@ -8258,6 +8278,11 @@ def main(
             target=_warm_command_catalog, daemon=True, name="sonder-catalog-warmup"
         ).start()
         BOUND_PORT = port
+        startup_prewarm.start_default_model_prewarm(
+            setting=PREWARM_ON_START,
+            prewarm=lambda tier: server.prewarm_model(tier, announce=True),
+            enabled=lambda: server.sonder_speculation.prewarm_enabled(),
+            thread_factory=owned_runtime_thread)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         _warn_if_local_open()

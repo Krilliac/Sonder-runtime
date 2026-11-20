@@ -350,6 +350,10 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     # Live emotion-vector tuning is saved beside it (the bundled default in
     # the checkout is covered by the workspace entry above).
     atomic.append(home / "emotion_vectors.json")
+    # The operator's live system profile (system_profile.live_path), injected
+    # into every system prompt; the bundled default is covered by the workspace
+    # entry above.
+    atomic.append(home / "system_profile.md")
     # The operator's model tool policy overlay (model_tool_policy.overlay_path:
     # the env override wins over the state home). Only the attended console
     # editor writes it, under file_lock and through a ``.tmp-`` sibling; a model
@@ -362,6 +366,10 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
         if tool_policy_override
         else state(OVERLAY_FILE_NAME)
     )
+    from ..model_lists import OVERLAY_ENV as lists_env, OVERLAY_FILE_NAME as lists_file
+
+    lists_override = os.environ.get(lists_env, "").strip()
+    atomic.append(_canonical(Path(lists_override).expanduser()) if lists_override else state(lists_file))
     from .unsafe_lab import _audit_path
 
     catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()

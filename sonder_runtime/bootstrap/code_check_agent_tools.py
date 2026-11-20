@@ -136,16 +136,27 @@ def native_agent_assist(name, arguments, registry, roots):
                    for item in registry.list_all()}
         output = tool_help_text(**arguments, catalog=catalog)
     else:
-        candidate = Path(arguments["path"]).expanduser()
+        from ..adapters.filesystem.file_ops import _reject_network_path
+        try:
+            # Lexical refusal first: resolve() on a UNC/device spelling opens an SMB connection.
+            requested = _reject_network_path(arguments["path"])
+        except PermissionError:
+            requested = None
         project = None
-        for root in roots:
-            resolved = Path(root).resolve()
-            target = (candidate if candidate.is_absolute() else resolved / candidate).resolve()
-            if target.is_relative_to(resolved):
-                project = resolved
-                break
-        output = (dispatch_file_check(arguments["path"], arguments.get("max_items", 30), project_root=project)
-                  if project is not None else f"{LEGACY_ERROR_PREFIX} file_check path is outside the native workspace roots")
+        if requested is not None:
+            candidate = Path(requested).expanduser()
+            for root in roots:
+                resolved = Path(root).resolve()
+                target = (candidate if candidate.is_absolute() else resolved / candidate).resolve()
+                if target.is_relative_to(resolved):
+                    project = resolved
+                    break
+        if requested is None:
+            output = f"{LEGACY_ERROR_PREFIX} file_check refuses a UNC or network path spelling"
+        elif project is None:
+            output = f"{LEGACY_ERROR_PREFIX} file_check path is outside the native workspace roots"
+        else:
+            output = dispatch_file_check(requested, arguments.get("max_items", 30), project_root=project)
     failed = output.startswith(LEGACY_ERROR_PREFIX)
     return {"output": output, "isError": failed, "error": "tool_refused" if failed else None,
             "evidence": {"tool": name}}

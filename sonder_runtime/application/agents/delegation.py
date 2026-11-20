@@ -9,7 +9,9 @@ of truth.
 from __future__ import annotations
 
 import os
+import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 _MAX_TASK_CHARS = 12_000
@@ -20,6 +22,45 @@ def _text(value: object, name: str, maximum: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(f"{name} must be non-empty bounded text")
     return value.strip()
+
+
+def project_refusal() -> str:
+    """The one refusal for a project the caller named outside its workspace.
+
+    It names the setting that grants roots. The text is identical for every
+    path, present or absent (an existing test pins that: a refusal that
+    differed by path would be an existence oracle), so a caller that wants the
+    path in the answer adds it itself from its own input.
+    """
+    return (
+        "the project is outside the allowed workspace roots; add it to "
+        "file_roots.local or [state].workspace_roots, or select a project "
+        "inside them"
+    )
+
+
+def rejected_project_refusal(project: object, served_work_project: Callable[[str], str]) -> str:
+    """A refusal when *project* names a path the file roots do not admit, else ``""``.
+
+    A path-like selection that *served_work_project* rejects used to fall back
+    to the default project without a word. Bare names (memory namespaces) are
+    not paths and never refuse. A UNC or device spelling (two leading
+    separators) is refused on its text alone, before *served_work_project*
+    can touch the filesystem, so a selection never makes the host open a
+    remote share. The reply quotes only the caller's own input.
+    """
+    text = str(project or "").strip()
+    if not text or text.lower() in {"default", "none"}:
+        return ""
+    unc_or_device = len(text) >= 2 and text[0] in "/\\" and text[1] in "/\\"
+    if not unc_or_device:
+        expanded = os.path.expanduser(text)
+        if not (os.path.isabs(expanded) or re.match(r"^[A-Za-z]:[\\/]", expanded)
+                or text.startswith("~")):
+            return ""
+        if served_work_project(text):
+            return ""
+    return "Refused: project '%s': %s." % (" ".join(text[:300].split()), project_refusal())
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -130,13 +171,13 @@ class DelegationService:
             os.path.normcase(os.path.abspath(os.path.expanduser(requested))), "",
         )
         if not lexical.startswith(_granted_prefixes(context.workspace_roots)):
-            raise PermissionError("delegation workspace is outside caller workspace")
+            raise PermissionError(project_refusal())
         root = Path(lexical).resolve()
         if not any(
             _inside(root, Path(candidate).resolve())
             for candidate in context.workspace_roots
         ):
-            raise PermissionError("delegation workspace is outside caller workspace")
+            raise PermissionError(project_refusal())
         if not root.is_dir():
             raise ValueError("delegation workspace must be an existing directory")
         effective_context = context

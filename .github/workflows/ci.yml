@@ -396,6 +396,7 @@ jobs:
           tests/test_build_tree_reader.py
           tests/test_build_preimages.py
           tests/test_debug_launcher.py
+          tests/test_debug_capture_source.py
           tests/test_debug_templates_symbol_path.py
           tests/test_build_clang_cl_real.py
       - name: Observe native Codegen isolation feasibility (diagnostic only)

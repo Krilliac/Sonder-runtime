@@ -32,6 +32,9 @@ class FakeTurn implements ChatTurn {
   void phase(String p) => controller.add(TurnPhase(p));
   void delta(String text) => controller.add(TurnDelta(text));
 
+  /// The server's wait status; an empty [text] is its clearing frame.
+  void status(String text) => controller.add(TurnStatus(text));
+
   void done(String text, {ChatResponseMetadata? metadata}) {
     controller.add(TurnDone(ChatReply(text: text, metadata: metadata)));
     controller.close();

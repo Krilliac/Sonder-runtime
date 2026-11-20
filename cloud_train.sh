@@ -57,9 +57,9 @@ if [ ! -d .venv ]; then python3 -m venv .venv; fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m pip install --upgrade pip wheel
-# CUDA build of torch first (cu121 works on most current GPU images; change the
-# index if your box has a different CUDA runtime).
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu121 \
+# CUDA build of torch first (cu130 matches requirements-train.txt's torch>=2.13
+# range and Blackwell GPUs; change the index if the box has an older driver).
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu130 \
   || python -m pip install torch   # fall back to default wheel if the index fails
 python -m pip install -r requirements-train.txt
 

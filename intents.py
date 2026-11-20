@@ -7,6 +7,7 @@ on, /run), without hijacking real coding questions or requests. Stdlib only.
 import re
 
 from sonder_runtime.application.chat.tool_intent import classify_file_intent, suppresses_file_tools
+from sonder_runtime.application.command_surface.command_text import ascii_lower
 
 # Messages that open with one of these are almost always a real question or
 # task ("how do I...", "explain strict mode in javascript"), not a control
@@ -203,9 +204,11 @@ _EXECUTION_NO_BACKGROUND_RE = re.compile(
 )
 _EXECUTION_FLEET_RE = re.compile(
     r"\b(?:fleet|swarm|fan[- ]?out|paral+el (?:sub)?agents?|paral+el workflow|"
-    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max)?\s*"
+    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max|"
+    r"[2-9]|1[0-2]|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)?\s*"
     r"(?:sub)?agents?|"
-    r"as many (?:sub)?agents? as (?:possible|the hardware allows))\b"
+    r"as many (?:sub)?agents?(?: and tools)? as (?:possible|you can|the hardware allows)|"
+    r"(?<!\bnot )(?<!n't )(?<!never )(?:hand|delegate) (?:this|it|that)?\s*(?:off )?to (?:sub)?agents?)\b"
 )
 _EXECUTION_AUTOPILOT_RE = re.compile(
     r"\b(?:autonomously|autonomous(?:ly)?|autopilot|in the background|"
@@ -256,7 +259,7 @@ def classify(text):
     Conservative: only fires on SHORT control-like messages (<= 10 words), and
     never fires on messages that read as a real question or task.
     """
-    t = (text or "").strip().lower()
+    t = ascii_lower((text or "").strip())
     if not t or len(t.split()) > 10:
         return {}
 

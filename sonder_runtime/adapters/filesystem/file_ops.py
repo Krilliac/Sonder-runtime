@@ -388,6 +388,121 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
     return _attenuate_managed_roots(out)
 
 
+def lane_grant_roots(configured=()) -> tuple[str, ...]:
+    """The root set the local-owner agent lane context is scoped to.
+
+    It is ``allowed_roots()`` minus the two roots no caller may be handed as a
+    work area: the state home and Sonder's own checkout. What remains is the
+    configured ``[state].workspace_roots`` (*configured*), ``SONDER_FILE_ROOTS``,
+    the ``file_roots.local`` file and the default workspace root, so a folder
+    that the read tools already reach is also a folder a lane may be scoped to.
+    Whether a lane may *write* there is still decided per call by the
+    permission mode and the caller's role, not by this list. A managed root
+    scope in force narrows the set exactly as it narrows ``allowed_roots``.
+
+    The local-owner lane context (``server._agent_lane_context``) is scoped to
+    this set and also inherits the configured remote-Ollama consent
+    (decision 14); a non-owner caller never reaches that context, so neither
+    widens anyone else's reach. HTTP principals are NOT scoped to this set:
+    ``serve._http_workspace_roots`` hands an admin caller only the configured
+    ``[state].workspace_roots`` (resolved) and anyone else ``()``.
+    """
+    excluded = []
+    for root in (workspace_root(), Path(runtime_paths.default_home())):
+        try:
+            excluded.append(root.resolve())
+        except OSError:
+            excluded.append(_normalized_absolute(root))
+    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
+    roots = []
+    roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
+    roots.extend(_roots_from_file())
+    default_root = None
+    with contextlib.suppress(RuntimeError, OSError, ValueError):
+        default_root = runtime_paths.default_workspace_root()
+    if default_root is not None and os.path.isdir(default_root):
+        roots.append(Path(default_root))
+    out: list[str] = []
+    for root in explicit + roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = _normalized_absolute(root)
+        text = str(resolved)
+        # An operator's own [state].workspace_roots entry is kept as written;
+        # only the ambient sources may not hand out the state home or checkout.
+        if text in out or (root not in explicit and resolved in excluded):
+            continue
+        out.append(text)
+    return tuple(str(root) for root in _attenuate_managed_roots([Path(text) for text in out]))
+
+
+# An absolute path a prompt may name as its project directory: a drive path or
+# a rooted POSIX path. The look-behinds keep URL schemes ("https://") and words
+# joined by slashes ("and/or") from matching.
+_NAMED_DIRECTORY = re.compile(
+    r"(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![\w:./\\-])/)[^\s'\"<>|?*`]*"
+)
+
+
+def _unc_or_device(token: str) -> bool:
+    """Whether *token* starts with two separators (UNC or device namespace)."""
+    return len(token) >= 2 and token[0] in "/\\" and token[1] in "/\\"
+
+
+def named_directory(text: str, roots: "tuple[object, ...] | list[object]" = ()) -> str:
+    """The first directory *text* names inside *roots*, or ``""``.
+
+    *roots* is the caller's own grant (for the HTTP surfaces
+    ``serve._http_workspace_roots``: the configured ``[state].workspace_roots``
+    for an owner/admin and ``()`` for anyone else), never ``allowed_roots()``, so prompt text can
+    never select the state home or Sonder's checkout. Empty *roots* returns
+    ``""`` without touching the filesystem.
+
+    Prompt text is untrusted, so containment is decided on the lexical
+    spelling BEFORE the filesystem is touched (as ``DelegationService`` does
+    for a requested workspace). A token that is shorter than three
+    characters, holds a NUL, starts with two separators (UNC or device path)
+    or lies lexically outside every root is skipped without any I/O: the
+    answer never depends on whether such a path exists, and prompt text can
+    never make the host open a remote share. Only an in-root candidate is
+    resolved, and the resolved directory must still lie inside the same
+    roots (resolved) so a link beneath a root cannot lead out. Bypass mode
+    widens nothing here.
+    """
+    granted = [str(root) for root in (roots or ()) if str(root).strip()]
+    if not granted:
+        return ""
+    prefixes: tuple[str, ...] | None = None
+    resolved_prefixes: tuple[str, ...] | None = None
+    for match in _NAMED_DIRECTORY.finditer(str(text or "")):
+        token = match.group(0).rstrip(".,;:)]}")
+        if len(token) < 3 or "\0" in token or _unc_or_device(token):
+            continue
+        try:
+            if prefixes is None:
+                prefixes = tuple(
+                    os.path.join(os.path.normcase(os.path.abspath(root)), "") for root in granted
+                )
+            lexical = os.path.join(os.path.normcase(os.path.abspath(token)), "")
+        except (OSError, ValueError):
+            continue
+        if not lexical.startswith(prefixes):
+            continue
+        try:
+            if resolved_prefixes is None:
+                resolved_prefixes = tuple(
+                    os.path.join(os.path.normcase(os.path.realpath(root)), "") for root in granted
+                )
+            resolved = os.path.realpath(os.path.abspath(token))
+            inside = os.path.join(os.path.normcase(resolved), "").startswith(resolved_prefixes)
+            if inside and os.path.isdir(resolved):
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
 def bypass_enabled() -> bool:
     return os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
         "1", "true", "yes", "on"
@@ -951,7 +1066,15 @@ def resolve_repository_read_path(
     """
     if not isinstance(path, str) or not path.strip():
         raise ValueError("repository path must be a non-empty path")
-    raw = path.strip()
+    try:
+        # Before any stat/resolve: a UNC or device spelling must never reach
+        # the filesystem (an SMB connection can leak NTLM credentials). An
+        # extended-length local path comes back with its prefix stripped.
+        raw = _reject_network_path(path.strip())
+    except PermissionError:
+        raise PermissionError(
+            "repository path uses a UNC, device or network spelling"
+        ) from None
     _require_plain_name_spelling(raw)
     if _foreign_absolute(raw):
         # e.g. a Windows drive/UNC path reaching a POSIX host: Path() would
@@ -1001,7 +1124,7 @@ def resolve_repository_read_path(
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(path).expanduser()
+    candidate = Path(_reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -1245,9 +1368,37 @@ def _require_plain_name_spelling(path: str) -> None:
         )
 
 
+_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+
+
+def _reject_network_path(path: str) -> str:
+    """Refuse a UNC / extended / device-namespace spelling before any filesystem call.
+
+    ``Path.resolve`` (and even ``lstat``) on ``//host/share`` opens an SMB
+    connection and can leak NTLM credentials before a containment check runs.
+    Covers both slash flavours of the UNC, extended (``//?/``), device (``//./``) and NT (``/??/``) forms.
+    Every entry point must call this first, so no ``lstat``/``is_symlink``/``stat``/``resolve``
+    ever sees a caller-supplied network path.
+
+    A legitimate extended-length local path (``\\\\?\\D:\\x`` or ``//?/D:/x``) is
+    returned with the prefix stripped (``D:\\x``); callers must use the return
+    value for the rest of their checks. Any other ``\\\\?\\`` form (``UNC``,
+    ``GLOBALROOT``, ``Volume{``...) is refused.
+    """
+    text = str(path).strip()
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        return text[extended.start(1):]
+    flat = text.replace("/", "\\")
+    if flat.startswith(("\\\\", "\\??\\")):
+        raise PermissionError("refusing a UNC or network path spelling")
+    return path
+
+
 def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
     if not (path or "").strip():
         raise ValueError("empty path")
+    path = _reject_network_path(path)
     _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
@@ -1285,6 +1436,7 @@ def resolve_mutation_path(
     """
     if not isinstance(path, str) or not path.strip():
         raise ValueError("empty path")
+    path = _reject_network_path(path)
     if _foreign_absolute(path.strip()):
         raise PermissionError("path uses a foreign absolute path form")
     requested = _requested_path(path)
@@ -1438,7 +1590,7 @@ def _resolve_transfer_path(
 ) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
         raise ValueError("%s must be an explicit non-empty file path" % label)
-    raw_path = raw_path.strip()
+    raw_path = _reject_network_path(raw_path.strip())
     if _foreign_absolute(raw_path):
         raise PermissionError("%s uses a foreign absolute path form" % label)
     requested = _requested_path(raw_path)
@@ -2159,7 +2311,7 @@ def _batch_payload(operations):
 
 def _batch_requested_path(path: str) -> Path:
     """Return the lexical requested path used for reparse-point checks."""
-    candidate = Path(path).expanduser()
+    candidate = Path(_reject_network_path(path)).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -2192,6 +2344,7 @@ def _batch_preflight(
             mode = operation.get("mode")
             if not isinstance(path, str) or not path.strip():
                 raise ValueError("path must be a non-empty string")
+            path = _reject_network_path(path)
             if _foreign_absolute(path.strip()):
                 raise PermissionError("path uses a non-native absolute form")
             if not isinstance(content, str):

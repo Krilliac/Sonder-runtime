@@ -23,6 +23,7 @@ import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.execution.fleet_reservations as fleet_reservations
 import sonder_runtime.adapters.fleet_creations as fleet_creations
 import sonder_runtime.adapters.fleet_aggregation as fleet_aggregation
+import sonder_runtime.adapters.agent_outcomes as agent_outcomes
 import sonder_runtime.adapters.persistence.fleet_store as fleet_store
 import sonder_runtime.domain.adaptive_concurrency as adaptive_concurrency
 import sonder_runtime.domain.events as events
@@ -179,8 +180,8 @@ EVIDENCE_REQUIRED = (
 
 _REPOSITORY_REQUEST = re.compile(
     r"(?:\brepository\s*:|\brepo\s*:|\bcurrent\s+(?:file|code|diff|uncommitted)|"
-    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}\b(?:repo|repository|codebase|"
-    r"workspace|files?)\b|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
+    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}(?:\b(?:repo|repository|codebase|"
+    r"workspace|files?|modules?|packages?|source|src|code)\b|(?<![A-Za-z0-9])[A-Za-z]:[\\/](?=[\w.~-])|(?<![\w:./\\-])/(?=[\w.~-]))|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
     re.IGNORECASE | re.DOTALL,
 )
 _EMBEDDED_EVIDENCE = re.compile(
@@ -203,7 +204,7 @@ _REPO_FILE_PATH = re.compile(
 _FLEET_REQUEST = re.compile(
     r"(?:\bfleet\b|\bswarm\b|\bfan[- ]?out\b|\bparallel\s+agents?\b|"
     r"\bspawn\s+(?:as\s+much|as\s+many|the\s+maximum|maximum|parallel|subagents?)\b|"
-    r"\bas\s+many\s+(?:subagents?|agents?)\b|\bparallel\s+workflow\b|"
+    r"\bas\s+many\s+(?:subagents?|agents?)\b|\bparallel\s+workflow\b|(?<!\bnot\s)(?<!n't\s)(?<!never\s)\b(?:hand|delegate)\s+(?:this|it|that)?\s*(?:off\s+)?to\s+(?:sub)?agents?\b|"
     r"\bspawn\s+workflow\b|\bworkflow\b|\bmax(?:imum)?\s+agents?\b)",
     re.IGNORECASE,
 )
@@ -566,10 +567,10 @@ def explicit_agent_ceiling() -> int:
 
 _AFFIRMATIVE_WORKER_REQUEST = re.compile(
     r"(?i)^\s*(?:please\s+)?(?:use|run|spawn|launch)\s+"
-    r"(?P<count>[1-9]\d*)\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
+    r"(?P<count>" + fleet_briefing.COUNT_TOKEN + r")\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
 _WORKER_COUNT_MENTION = re.compile(
-    r"(?i)(?<!\d)(?P<count>[1-9]\d*)(?!\d)\s+"
+    r"(?i)(?<!\w)(?P<count>" + fleet_briefing.COUNT_TOKEN + r")(?!\w)\s+"
     r"(?:concurrent\s+)?(?:workers?|agents?)\b"
 )
 _WORKER_REQUEST_NEGATION = re.compile(
@@ -601,7 +602,7 @@ def requested_worker_cap(task: str) -> int | None:
     mentions = list(_WORKER_COUNT_MENTION.finditer(text))
     if len(mentions) != 1 or mentions[0].start("count") != match.start("count"):
         return None
-    value, error = _positive_int(match.group("count"))
+    value, error = _positive_int(str(fleet_briefing.NUMBER_WORDS.get(match.group("count").lower(), match.group("count"))))
     return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
 
 
@@ -884,7 +885,7 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
     if inferred:
         return inferred
     raise ValueError(
-        "repository work requires an explicit existing project root; no cwd fallback is allowed"
+        "repository work requires an explicit existing project root; no cwd fallback is allowed. Name it with a 'Repository: <absolute path>' line or select a project inside the configured file roots"
     )
 
 
@@ -908,7 +909,7 @@ def repository_worker_result(receipt, expected_project: str) -> RepositoryWorker
         )
     tools = tuple(sorted(set(str(name) for name in (getattr(receipt, "tools", ()) or ()))))
     if not REPOSITORY_EVIDENCE_TOOLS.intersection(tools):
-        raise RuntimeError("repository worker produced no host-observed file evidence")
+        raise agent_outcomes.no_evidence_error(receipt)
     output = str(getattr(receipt, "output", "") or "")
     if output.count("=== TOOL EVIDENCE ===") != 1:
         raise RuntimeError("repository worker omitted its guarded tool-evidence ledger")
@@ -1292,6 +1293,8 @@ def classify_worker_error(exc) -> str:
     transport/availability fault is ``unknown`` (treated as permanent), so a
     deterministic model or validation failure is never silently re-run.
     """
+    if isinstance(exc, agent_outcomes.WorkerModelFailure):
+        return exc.failure_class
     if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
         return "timeout"
     if isinstance(exc, ConnectionError):
@@ -1499,34 +1502,29 @@ def _run_worker(
                 break
             except Exception as exc:  # defensive boundary for worker threads
                 failure_class = classify_worker_error(exc)
-                legacy_retry = (
-                    attempt < attempts_allowed
-                    and failure_class in TRANSIENT_FAILURE_CLASSES
-                    and not cancel_requested(agent_id)
+                wait = agent_outcomes.retry_plan(
+                    exc, attempt, attempts_allowed, failure_class,
+                    TRANSIENT_FAILURE_CLASSES, fleet_store,
+                    lambda: cancel_requested(agent_id),
                 )
+                legacy_retry = wait is not None
                 if observe_strategy(
                     attempt, accepted=False, failure_code=failure_class,
                     legacy_retry=legacy_retry,
                 ):
-                    # A transient transport/availability fault earns one more
-                    # bounded attempt.  Cancellation is re-checked first so a
-                    # cancel arriving during the failed call is honored instead
-                    # of starting another model request.
                     _event(
                         agent_id,
                         "transient %s failure; retrying model call (attempt %d/%d)"
                         % (failure_class, attempt + 1, attempts_allowed),
                     )
                     report(adaptive_concurrency.Outcome.TRANSIENT_RETRY)
+                    if agent_outcomes.retry_pause(wait or 0.0, lambda: cancel_requested(agent_id)):
+                        return _finish(agent_id) or "CANCELLED"
                     continue
-                final = _finish(
-                    agent_id, error="[%s] %s" % (failure_class, exc),
-                )
-                report(
-                    adaptive_concurrency.Outcome.TRANSIENT_RETRY
-                    if failure_class in TRANSIENT_FAILURE_CLASSES
-                    else adaptive_concurrency.Outcome.FAILED
-                )
+                agent_outcomes.remember_transient_failure(agent_id, failure_class, TRANSIENT_FAILURE_CLASSES)
+                final = _finish(agent_id, error="[%s] %s" % (failure_class, exc))
+                report(adaptive_concurrency.Outcome.TRANSIENT_RETRY if failure_class in TRANSIENT_FAILURE_CLASSES
+                       else adaptive_concurrency.Outcome.FAILED)
                 return final if final in ABORT_MARKERS else _WORKER_FAILED
     stored_output = (
         _render_repository_result(output)
@@ -2378,7 +2376,8 @@ def run_delegated(
                     "task_drift": True,
                     "drift_metrics": aggregation,
                 }
-            if repository_task:
+            capacity_error = agent_outcomes.capacity_unavailable_error(repository_task, child_ids)
+            if repository_task and not capacity_error:
                 report = fleet_aggregation.build_report(creation.root, lane_projects, ()) if creation else ""
                 final = _finish(master_id, output=report + EVIDENCE_REQUIRED)
                 return {
@@ -2391,7 +2390,7 @@ def run_delegated(
                     "outputs": [],
                     "output": final,
                 }
-            error = "all delegated workers failed before producing an auditable result"
+            error = capacity_error or "all delegated workers failed before producing an auditable result"
             final = _finish(master_id, error=error)
             return {
                 "mode": "delegated",

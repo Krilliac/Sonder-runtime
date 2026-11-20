@@ -5,6 +5,7 @@ arguments, so these pass identically with the machine's live variables and
 with them cleared.
 """
 from __future__ import annotations
+from sonder_runtime.adapters import model_lists as _test_model_lists
 
 import pytest
 
@@ -181,7 +182,9 @@ def test_existing_defaults_helpers_and_other_gguf_repositories_remain_allowed(na
 
 
 def test_repository_tier_defaults_are_all_allowed():
-    defaults = RuntimeModelConfiguration.from_environment({}, floor=FLOOR).tier_map()
+    defaults = RuntimeModelConfiguration.from_environment(
+        {}, floor=FLOOR, lists=_test_model_lists.load().values
+    ).tier_map()
     assert defaults
     assert all(not denied(model) for model in defaults.values()), defaults
 

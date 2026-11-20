@@ -8,11 +8,20 @@ without making the domain/application layers import SQLite or ``OSError``.
 from __future__ import annotations
 
 import sqlite3
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 from ..domain.common.errors import DependencyUnavailable, InvalidInput, NotFound
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def call_repository_operation(operation, *args, **kwargs):
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def call_repository_operation(
+    operation: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs
+) -> _T:
     """Run a repository operation and translate its storage failures."""
     try:
         return operation(*args, **kwargs)

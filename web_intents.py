@@ -775,13 +775,41 @@ def _current_followup_topic(text: str, history) -> dict | None:
     return _topic(family, query, subject, fresh=True, inherited=True)
 
 
+_LOCATION_EDGES = " \t\r\n?!.,;:"
+_LONGEST_LOCATION_PLACEHOLDER = max(len(item) for item in _LOCATION_PLACEHOLDERS)
+
+
+def _without_leading_articles(location: str) -> str:
+    """Drop every leading "the " and the punctuation after it, in one pass.
+
+    A placeholder that itself starts with the article ("the area") is kept
+    whole, so the caller still recognises it. The scan only moves forward and
+    looks at a bounded tail for the placeholder test, so a long run of
+    articles costs time in proportion to its length.
+    """
+    start = 0
+    end = len(location)
+    while location[start:start + 4].lower() == "the ":
+        if (end - start <= _LONGEST_LOCATION_PLACEHOLDER
+                and location[start:].lower() in _LOCATION_PLACEHOLDERS):
+            break
+        start += 4
+        while start < end and location[start] in _LOCATION_EDGES:
+            start += 1
+    return location[start:]
+
+
 def _clean_location(value: str) -> str:
-    location = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n?!.,;:")
-    location = _TRAILING_TIME.sub("", location).strip(" \t\r\n?!.,;:")
+    """The place named by ``value``, or "" when it names none.
+
+    Cleaning a cleaned place changes nothing: the trailing time phrase is cut
+    once (the cut runs to the end of the text, so nothing is left to cut), and
+    the leading articles are all dropped together.
+    """
+    location = re.sub(r"\s+", " ", str(value or "")).strip(_LOCATION_EDGES)
+    location = _TRAILING_TIME.sub("", location).strip(_LOCATION_EDGES)
+    location = _without_leading_articles(location)
     lowered = location.lower()
-    if lowered.startswith("the ") and lowered not in _LOCATION_PLACEHOLDERS:
-        location = location[4:].strip()
-        lowered = location.lower()
     if (
         not 2 <= len(location) <= 120
         or lowered in _LOCATION_PLACEHOLDERS

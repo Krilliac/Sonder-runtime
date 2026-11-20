@@ -1,26 +1,43 @@
 """Pure presentation helpers for runtime model readiness."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+    from typing import TypedDict
+
+    class _RuntimeReadinessData(TypedDict, total=False):
+        inventory_error: str | None
+        local_models: Mapping[str, str | None] | None
+        missing_models: Iterable[str | None] | None
+        capability_errors: Mapping[str, str] | None
+        embedding_model: str | None
+
 BASE_LOCAL_TIERS = ("fast", "code", "general")
 OPTIONAL_LOCAL_TIERS = ("reasoning", "vision")
 
 
-def format_model_readiness(data: dict, *, base_local_tiers=BASE_LOCAL_TIERS,
-                           optional_local_tiers=OPTIONAL_LOCAL_TIERS) -> list[str]:
+def format_model_readiness(
+    data: _RuntimeReadinessData,
+    *,
+    base_local_tiers: Iterable[str] = BASE_LOCAL_TIERS,
+    optional_local_tiers: Iterable[str] = OPTIONAL_LOCAL_TIERS,
+) -> list[str]:
     """Render the bounded operator-facing readiness summary for ``/runtime``."""
     if data.get("inventory_error"):
         return ["  readiness: unknown (local model inventory unavailable)"]
-    local_models = data.get("local_models") or {}
+    local_models: Mapping[str, str | None] = data.get("local_models") or {}
     missing = {
         str(model or "").strip().casefold()
         for model in data.get("missing_models") or ()
         if str(model or "").strip()
     }
 
-    def unavailable(model) -> bool:
+    def unavailable(model: str | None) -> bool:
         return str(model or "").strip().casefold() in missing
 
-    capability_errors = data.get("capability_errors") or {}
+    capability_errors: Mapping[str, str] = data.get("capability_errors") or {}
     base_missing = [
         "%s=%s%s" % (
             tier,

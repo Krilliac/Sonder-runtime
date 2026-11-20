@@ -12,11 +12,15 @@ import json
 import os
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
-def write_json_atomic(path, payload) -> Path:
+
+def write_json_atomic(path: str | os.PathLike[str], payload: object) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
@@ -33,7 +37,12 @@ def write_json_atomic(path, payload) -> Path:
 
 
 @contextlib.contextmanager
-def file_lock(target: Path, *, timeout: float = 10.0, suffix: str = ".lock"):
+def file_lock(
+    target: str | os.PathLike[str],
+    *,
+    timeout: float = 10.0,
+    suffix: str = ".lock",
+) -> Iterator[None]:
     """Serialize access to ``target`` across independent processes."""
     target = Path(target).resolve()
     lock_path = target.with_name(target.name + suffix)

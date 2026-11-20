@@ -384,3 +384,41 @@ def test_overlong_child_working_directory_is_refused_up_front(tmp_path):
     too_long = tmp_path / ("d" * 120) / ("e" * 120)
     with pytest.raises(ValueError, match="ERROR_DIRECTORY 267"):
         sli.run_isolated([sys.executable, "-c", "pass"], cwd=too_long, timeout=5)
+
+
+def test_low_process_cannot_read_a_live_debug_run_capture(tmp_path, monkeypatch):
+    from scripts.selfmod_low_integrity import run_isolated
+    from tests.test_debug_launcher import Env, _pids, context, run_id
+
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path / "allowed"))
+    env = Env(tmp_path)
+    ident = env.capture()
+    pid_file = tmp_path / "live.txt"
+    rid = run_id()
+    env.launcher.start(env.plan(ident, [env.step("sleep", str(pid_file))]), context(), rid)
+    try:
+        _pids(pid_file)
+        rundir = env.state / "debug-runs" / rid
+        captures = list((rundir / "in").iterdir())
+        assert len(captures) == 1
+        capture, plan_json = captures[0], rundir / "plan.json"
+        assert plan_json.is_file()
+        # medium-integrity control: the same user can read both
+        assert capture.read_bytes() and plan_json.read_bytes()
+        control = tmp_path / "control.bin"
+        control.write_bytes(b"unlabelled control")
+        script = (
+            "from pathlib import Path\n"
+            "try: Path(%r).read_bytes()\n"
+            "except PermissionError: raise SystemExit(4)\n"
+            "for name in (%r, %r):\n"
+            "  try: Path(name).read_bytes(); raise SystemExit(3)\n"
+            "  except PermissionError: pass\n" % (str(control), str(capture), str(plan_json))
+        )
+        result = run_isolated([sys.executable, "-c", script], cwd=tmp_path, timeout=10)
+        assert result["passed"] is True, result
+        assert result["job"]["integrity"] == "low"
+        assert capture.read_bytes() and plan_json.read_bytes()  # medium still reads
+    finally:
+        env.launcher.cancel(rid, "test over")
+        env.launcher.wait(rid, 30)

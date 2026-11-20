@@ -8,6 +8,7 @@ must never break a conversation.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from ...application.prefix_cache_report import (
     DEFAULT_MONITOR,
@@ -18,6 +19,11 @@ from ...application.prefix_cache_report import (
 from ...platform.metrics import default_registry
 from .telemetry import from_ollama
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from ...application.prefix_cache_report import PrefixCacheJoin
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,8 +33,15 @@ def provider_label(*, cloud: bool, bridged: bool) -> str:
     return "ollama_cloud" if cloud else "ollama"
 
 
-def observe_chat_turn(system_text, *, model, cloud=False, bridged=False,
-                      response_meta=None, monitor: ChatPrefixCacheMonitor | None = None):
+def observe_chat_turn(
+    system_text: str | None,
+    *,
+    model: str | None,
+    cloud: bool = False,
+    bridged: bool | Callable[[], object] = False,
+    response_meta: Mapping[str, object] | None = None,
+    monitor: ChatPrefixCacheMonitor | None = None,
+) -> PrefixCacheJoin | None:
     """Join and record one turn; returns the join, or ``None`` on any failure.
 
     ``bridged`` may be a zero-argument callable returning the active provider

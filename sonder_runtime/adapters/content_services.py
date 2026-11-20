@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 
 class _RootProvider:
     module_name = ""
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(importlib.import_module(self.module_name), name)
 
 

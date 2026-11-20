@@ -50,6 +50,7 @@ from pathlib import Path
 from pydantic import StrictBool, StrictInt, StrictStr
 
 import sonder_runtime.adapters.task_store as task_state_adapter
+import sonder_runtime.adapters.agent_outcomes as agent_outcomes
 import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
@@ -57,6 +58,7 @@ import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.bootstrap import playbook_context
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
+from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
@@ -164,7 +166,9 @@ from sonder_runtime.application.ports.work_narration import route_reason as _nar
 import creative_router
 import intents
 import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
+from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
+from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
 from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
@@ -194,7 +198,8 @@ from sonder_runtime.application.session.model_steps import (
 from sonder_runtime.adapters.model_inventory import inventory_rows as _inventory_rows_policy
 from sonder_runtime.domain.context import compaction as context_compaction
 from sonder_runtime.domain.context import overflow as context_overflow
-from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.domain import network_path_spelling as _network_spelling
+from sonder_runtime.adapters import tier_escalation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 # The per-rung provider ContextVar lives in this package module, not here, so
 # a live reload of server.py cannot orphan an in-flight rung binding.
@@ -224,7 +229,6 @@ from sonder_runtime.domain.distillation_policy import (
 )
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
-    nonchat_reason as _fanout_nonchat_reason,
 )
 from sonder_runtime.domain.campaign_formatting import (
     campaign_headline as _campaign_headline,
@@ -325,8 +329,8 @@ from sonder_runtime.domain.context.pack_arguments import (
     pack_paths as _context_pack_paths,
     pack_utf8_prefix as _context_pack_utf8_prefix,
 )
+from sonder_runtime.adapters.model_list_consumers import model_capability_error as _runtime_model_capability_error
 from sonder_runtime.domain.runtime_model_binding import (
-    model_capability_error as _runtime_model_capability_error,
     model_is_installed as _runtime_model_is_installed,
 )
 from sonder_runtime.domain.updates.stash_formatting import format_stash as _runtime_stash_format
@@ -368,6 +372,7 @@ from sonder_runtime.adapters.model_response_metadata import (
 )
 from sonder_runtime.adapters.offload_schema_argument import parse_schema_arg as _parse_schema_arg
 from sonder_runtime.adapters.agent_call_signature import call_signature as _agent_call_signature_policy
+from sonder_runtime.domain import campaign_corpus as _campaign_corpus
 from sonder_runtime.domain.campaign_prompt import campaign_prompt as _campaign_prompt_policy
 from sonder_runtime.domain.automation.command_programs import command_programs as _autopilot_command_programs
 from sonder_runtime.adapters.agent_decision_generation import (
@@ -509,11 +514,8 @@ from sonder_runtime.adapters.inference.pool_model_catalog import (
     resolve_model_pin,
 )
 from sonder_runtime.domain import ollama_policy
-from sonder_runtime.domain.runtime_model_configuration import (
-    RuntimeModelConfiguration,
-)
-from sonder_runtime.domain.cloud_model_policy import live_cloud_model as _live_cloud_model
-from sonder_runtime.domain.cloud_tier_policy import (
+from sonder_runtime.adapters.model_list_consumers import live_cloud_model as _live_cloud_model, nonchat_reason as _fanout_nonchat_reason  # noqa: F401 - public compatibility names
+from sonder_runtime.adapters.model_list_consumers import (
     refresh_live_cloud_tiers as _refresh_live_cloud_tiers_policy,
 )
 from sonder_runtime.domain.tier_names import valid_tier_names as _valid_tier_names_policy
@@ -627,7 +629,7 @@ def _keep_alive_for(model):
 
 
 TIMEOUT = int(os.environ.get("SONDER_TIMEOUT", "300"))
-_RUNTIME_MODEL_CONFIGURATION = RuntimeModelConfiguration.from_environment(os.environ, floor=_model_tool_policy.shipped_floor())
+_RUNTIME_MODEL_CONFIGURATION = _model_list_consumers.startup_configuration(os.environ, floor=_model_tool_policy.shipped_floor())
 SONDER_STABLE_ALIAS = _RUNTIME_MODEL_CONFIGURATION.stable_alias
 LOCAL_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.local_code_model
 DEFAULT_CLOUD_CODE_MODEL = _RUNTIME_MODEL_CONFIGURATION.default_cloud_code_model
@@ -674,7 +676,7 @@ def _context_native(value=None):
     return _platform_native_context(value, default_value=SESSION_NUM_CTX)
 
 
-TIERS = _tool_lane_guard.seed_bindings(_RUNTIME_MODEL_CONFIGURATION.tier_map())
+TIERS = _model_list_consumers.startup_seed(_RUNTIME_MODEL_CONFIGURATION.tier_map(), _tool_lane_guard.seed_bindings)
 # Tiers whose ":...-cloud" model runs on Ollama's servers (data leaves the machine).
 CLOUD_TIERS = set(_RUNTIME_MODEL_CONFIGURATION.cloud_tiers)
 LOCAL_TIERS = tuple(k for k in TIERS if k not in CLOUD_TIERS)
@@ -948,7 +950,7 @@ def _chat_request_with_cloud_fallback(
     )
 
 
-if _is_cloud_model_name(TIERS["code"]):
+if _is_cloud_model_name(TIERS.get("code", "")):
     TIERS["code"] = LOCAL_CODE_MODEL
 
 
@@ -978,7 +980,7 @@ def _configured_local_tiers():
     return runtime_policy.configured_tiers(_RUNTIME_POLICY or _refresh_runtime_policy(create=True), TIERS)
 
 
-_refresh_runtime_policy(create=True)
+_model_list_consumers.startup_refresh(_refresh_runtime_policy)
 
 
 def _runtime_lane_tier(lane: str, requested: str = "") -> str:
@@ -1242,6 +1244,7 @@ LIVE_RELOAD_MODULES = [
     "orchestrator",
     "retriever",
     "sonder_runtime.domain.memory.rules",
+    "sonder_runtime.domain.campaign_corpus",
     "reflection",
     "embeddings",
     "ollama_endpoint",
@@ -1376,6 +1379,11 @@ def _maybe_live_reload(*, create_policy=True):
             continue
         if name == "sonder_runtime.adapters.memory_store":
             globals()["memory_store"] = module
+            continue
+        if name == "sonder_runtime.domain.campaign_corpus":
+            globals()["_campaign_corpus"] = module
+            globals()["_CAMPAIGN_TASKS"] = module.CAMPAIGN_TASKS
+            globals()["_REPO_REPAIR_TASKS"] = module.REPO_REPAIR_TASKS
             continue
         if name == "sonder_runtime.domain.memory.rules":
             globals()["reward_rules"] = module
@@ -2765,6 +2773,8 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
     rest = rest.strip()
     if action == "reset":
         return runtime_policy_update(reset=True)
+    if action == "models":
+        return _model_lists_editor.command(rest, operator_attended=bool(operator_approved))
     if action == "tools":  # writes only with the console operator attending
         return _model_tool_policy_editor.command(rest, operator_attended=bool(operator_approved), policy=_RUNTIME_POLICY)
     if action == "overflow":
@@ -2818,7 +2828,7 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
             "autopilot=<tier> fleet=<tier> review=<tier>\n"
             "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
             "  /runtime tools [allow|revoke|deny|undeny ...]   (per-model tool lists; /runtime tools help)\n"
-            "  /runtime reset\n"
+            "  /runtime models [set <key> <json>|reset <key>]\n  /runtime reset\n"
             "Only installed local models are accepted. Embedding changes affect "
             "future vectors only; use /embeddings apply to refresh stored memory. "
             "Execution lanes route to fast/code/general only."
@@ -2901,7 +2911,16 @@ def _selfmod_agent_policy(run):
         if time.monotonic() - started > run["budgets"]["max_runtime_seconds"]:
             return "ERROR: SELFMOD POLICY: total runtime budget exhausted."
         if tool_name == "workspace_run":
-            cwd = Path(str(args.get("cwd") or workspace)).expanduser().resolve(strict=False)
+            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+                cwd_text = file_ops._reject_network_path(str(args.get("cwd") or workspace))
+            except PermissionError:
+                refusal = "ERROR: SELFMOD POLICY: the working directory uses a %s." % _network_spelling.REFUSAL
+                return refusal
+            try:
+                cwd = Path(cwd_text).expanduser().resolve(strict=False)
+            except (OSError, ValueError):
+                refusal = "ERROR: SELFMOD POLICY: the working directory could not be checked."
+                return refusal
             if cwd != workspace and workspace not in cwd.parents:
                 return "ERROR: SELFMOD POLICY: commands must run inside the candidate workspace."
             command_text = " ".join(str(item) for item in (args.get("args_json") or args.get("args") or []))
@@ -2913,10 +2932,18 @@ def _selfmod_agent_policy(run):
         if any(args.get(name) for name in ("token", "approval", "extra_roots")):
             return "ERROR: SELFMOD POLICY: filesystem authority cannot be expanded by the candidate."
         raw = args.get("path") or args.get("root") or args.get("cwd") or ""
-        target = Path(str(raw)).expanduser()
+        try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+            target = Path(file_ops._reject_network_path(str(raw))).expanduser()
+        except PermissionError:
+            refusal = "ERROR: SELFMOD POLICY: path uses a %s." % _network_spelling.REFUSAL
+            return refusal
         if not target.is_absolute():
             target = workspace / target
-        target = target.resolve(strict=False)
+        try:
+            target = target.resolve(strict=False)
+        except (OSError, ValueError):
+            refusal = "ERROR: SELFMOD POLICY: path could not be checked."
+            return refusal
         if target != workspace and workspace not in target.parents:
             return "ERROR: SELFMOD POLICY: path is outside the isolated candidate workspace."
         if tool_name in mutation_tools and target not in allowed:
@@ -3666,7 +3693,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if not text.startswith("/"):
         return None
     parts = text.split(None, 1)
-    cmd = parts[0].lower()
+    cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
 
     try:
@@ -4370,6 +4397,7 @@ def _record_outcome_and_maybe_distill(interaction_id, signal, *, source):
             "found": True,
             "reward": score,
             "outcome_inserted": recorded["outcome_inserted"],
+            "usage_rows_kept": recorded.get("usage_rows_kept", 0),
             "distillation_state": recorded["distillation_state"],
             "lesson_id": None,
             "distillation_reason": None,
@@ -5533,7 +5561,7 @@ def _post(
 _PREWARM_LOAD_TIMEOUT = 60
 
 
-def prewarm_model(tier: str = "") -> bool:
+def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     """Speculatively load the tier's local model while context is assembled.
 
     Model cold-load dominates first-token latency (tens of seconds for a 7B
@@ -5568,8 +5596,9 @@ def prewarm_model(tier: str = "") -> bool:
                 _platform_local_model_options(0.2, 1, _auto_model_context(model),
                     native_context=context_policy.native, environ=os.environ)))
             prewarm_gate.run_as_prewarm(lambda: _post(path, body, timeout=_PREWARM_LOAD_TIMEOUT))
-        except Exception:
-            pass
+            _startup_prewarm.load_finished(model, announce=announce)
+        except Exception as exc:
+            _startup_prewarm.load_failed(model, exc, announce=announce)
         finally:
             prewarm_gate.finish(model)
 
@@ -6195,8 +6224,8 @@ def _agent_lane_context():
         )
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
-        workspace_roots=tuple(Path(root) for root in application.config.state.workspace_roots),
-        timeout_seconds=60.0,
+        workspace_roots=tuple(Path(r) for r in file_ops.lane_grant_roots(application.config.state.workspace_roots)),
+        remote_ollama_allowed=bool(getattr(getattr(application.config, "ollama", None), "allow_remote", False)), timeout_seconds=60.0,
     )
     return application, context
 
@@ -7496,6 +7525,8 @@ def record_outcome(interaction_id: str, signal: str) -> str:
         msg += " Distilled lesson %s." % result["lesson_id"]
     elif result["distillation_deferred"]:
         msg += " Lesson distillation was deferred for retry."
+    if result.get("usage_rows_kept"):
+        msg += " Lesson credit unchanged: stronger runtime evidence exists."
     return msg
 
 
@@ -7823,49 +7854,7 @@ def parallel_generate_run_languages(
     return "\n".join(lines)
 
 
-_CAMPAIGN_TASKS = [
-    ("hello", "print exactly: sonder-ok"),
-    ("sum", "compute 12 + 30 and print exactly: 42"),
-    ("loop", "print the numbers 1, 2, and 3 each on its own line"),
-    ("string", "reverse the string 'sonder' and print exactly: rednos"),
-    ("branch", "if 17 is prime print exactly: prime"),
-    ("list", "compute the sum of [2, 4, 6, 8] and print exactly: 20"),
-    # Harder algorithmic tier: these force the failure classes small local
-    # models actually exhibit (incomplete map initialization, eviction-order
-    # bookkeeping, interval bookkeeping, stack discipline) so campaign
-    # records and distilled lessons carry real signal, not just boilerplate.
-    ("toposort",
-     "topologically sort the directed edges d->a, a->b, b->c, a->c (an edge "
-     "u->v means u comes before v; include every node) and print the only "
-     "valid order as space-separated letters on one line, like: w x y z"),
-    ("lru",
-     "simulate an LRU cache with capacity 2 and operations put(1,10), "
-     "put(2,20), get(1), put(3,30) (this evicts the least recently used "
-     "key), get(2), get(3); print the three get results on one line "
-     "separated by single spaces, using -1 for a miss"),
-    ("intervals",
-     "merge the overlapping intervals [1,3] [2,6] [8,10] [9,12] and print "
-     "the merged intervals on one line as start-end pairs separated by a "
-     "single space, like 5-7 9-11"),
-    ("balanced",
-     # Two harness lessons are baked into this wording. (1) The pass check is
-     # a containment check, so wrong verdicts must not contain the expected
-     # text as a substring: 'ok'/'bad' cannot embed each other the way
-     # 'valid'/'invalid' can. (2) Bracket literals must be quoted and
-     # numbered, never wrapped in bare parentheses — models read those outer
-     # parens as punctuation and silently drop them, then get marked wrong
-     # for answering a different question than the one intended.
-     "decide whether the brackets are balanced in each of these three "
-     "strings, given exactly between the quotes: "
-     "1) \"([]{})\"  2) \"([)]\"  3) \"(((\" . "
-     "Print ok if that string's brackets are balanced or bad if they are "
-     "not, one verdict per line, in that order"),
-    ("wordfreq",
-     "count word frequencies in the sentence 'the quick the lazy the end' "
-     "and print the most frequent word and its count as word:count"),
-    ("fib",
-     "print the 20th Fibonacci number where fib(1)=1 and fib(2)=1"),
-]
+_CAMPAIGN_TASKS: list[tuple[str, str]] = _campaign_corpus.CAMPAIGN_TASKS
 
 
 def _campaign_prompt(language, task_name, task_text, repair_note=""):
@@ -8075,124 +8064,7 @@ def campaign_generate_compile_execute_record(
 # Each bug is a class small local models actually exhibit; the fix is judged
 # by the project's own tests, not output matching, so lessons distilled from
 # these interactions reflect real repair work.
-_REPO_REPAIR_TASKS = [
-    ("offbyone",
-     "def total(values):\n"
-     "    result = 0\n"
-     "    for index in range(len(values) - 1):\n"
-     "        result += values[index]\n"
-     "    return result\n",
-     "from module import total\n\n\n"
-     "def test_total_includes_every_value():\n"
-     "    assert total([1, 2, 3, 4]) == 10\n\n\n"
-     "def test_total_single_value():\n"
-     "    assert total([7]) == 7\n\n\n"
-     "def test_total_empty():\n"
-     "    assert total([]) == 0\n"),
-    ("boundary",
-     "def bulk_discount(quantity):\n"
-     "    # spec: orders of 10 or more get the discount\n"
-     "    return 0.1 if quantity > 10 else 0.0\n",
-     "from module import bulk_discount\n\n\n"
-     "def test_discount_at_threshold():\n"
-     "    assert bulk_discount(10) == 0.1\n\n\n"
-     "def test_discount_above_threshold():\n"
-     "    assert bulk_discount(11) == 0.1\n\n\n"
-     "def test_no_discount_below():\n"
-     "    assert bulk_discount(9) == 0.0\n"),
-    ("mutabledefault",
-     "def add_tag(tag, tags=[]):\n"
-     "    tags.append(tag)\n"
-     "    return tags\n",
-     "from module import add_tag\n\n\n"
-     "def test_fresh_list_per_call():\n"
-     "    assert add_tag('a') == ['a']\n"
-     "    assert add_tag('b') == ['b']\n\n\n"
-     "def test_explicit_list_still_appends():\n"
-     "    existing = ['x']\n"
-     "    assert add_tag('y', existing) == ['x', 'y']\n"),
-    ("missingkey",
-     "def word_counts(words):\n"
-     "    counts = {}\n"
-     "    for word in words:\n"
-     "        counts[word] += 1\n"
-     "    return counts\n",
-     "from module import word_counts\n\n\n"
-     "def test_counts_new_words():\n"
-     "    assert word_counts(['a', 'b', 'a']) == {'a': 2, 'b': 1}\n\n\n"
-     "def test_counts_empty():\n"
-     "    assert word_counts([]) == {}\n"),
-    ("numericsort",
-     "def sort_ids(ids):\n"
-     "    # ids arrive as decimal strings; callers need numeric order\n"
-     "    return sorted(ids)\n",
-     "from module import sort_ids\n\n\n"
-     "def test_numeric_not_lexicographic():\n"
-     "    assert sort_ids(['10', '2', '1']) == ['1', '2', '10']\n\n\n"
-     "def test_already_sorted():\n"
-     "    assert sort_ids(['1', '2']) == ['1', '2']\n"),
-    # A second tier of bug classes. The first five became memorised - 10/10 on
-    # every nightly run, which measures recall rather than repair - so these
-    # cover failure modes the originals miss: aliasing a caller's object,
-    # integer division, short-circuit ordering against None, accumulating in
-    # the wrong scope, and an exclusive range boundary.
-    ("aliasing",
-     "def with_defaults(config):\n"
-     "    # must not disturb the caller's dict\n"
-     "    merged = config\n"
-     "    merged.setdefault('retries', 3)\n"
-     "    return merged\n",
-     "from module import with_defaults\n\n\n"
-     "def test_caller_dict_is_untouched():\n"
-     "    original = {'host': 'localhost'}\n"
-     "    result = with_defaults(original)\n"
-     "    assert result == {'host': 'localhost', 'retries': 3}\n"
-     "    assert original == {'host': 'localhost'}\n\n\n"
-     "def test_explicit_value_wins():\n"
-     "    assert with_defaults({'retries': 9})['retries'] == 9\n"),
-    ("intdivision",
-     "def average(values):\n"
-     "    return sum(values) // len(values)\n",
-     "from module import average\n\n\n"
-     "def test_average_is_not_truncated():\n"
-     "    assert average([1, 2]) == 1.5\n\n\n"
-     "def test_exact_average_stays_exact():\n"
-     "    assert average([2, 4]) == 3\n"),
-    ("noneguard",
-     "def name_length(user):\n"
-     "    # user may be None, or may have no name set\n"
-     "    return len(user['name']) if user['name'] else 0\n",
-     "from module import name_length\n\n\n"
-     "def test_missing_user_is_zero():\n"
-     "    assert name_length(None) == 0\n\n\n"
-     "def test_empty_name_is_zero():\n"
-     "    assert name_length({'name': ''}) == 0\n\n\n"
-     "def test_real_name_is_counted():\n"
-     "    assert name_length({'name': 'ada'}) == 3\n"),
-    ("wrongscope",
-     "def group_lengths(words):\n"
-     "    # one bucket per length\n"
-     "    buckets = {}\n"
-     "    found = []\n"
-     "    for word in words:\n"
-     "        found.append(word)\n"
-     "        buckets[len(word)] = found\n"
-     "    return buckets\n",
-     "from module import group_lengths\n\n\n"
-     "def test_each_bucket_holds_only_its_own_words():\n"
-     "    assert group_lengths(['a', 'bb', 'cc']) == {1: ['a'], 2: ['bb', 'cc']}\n\n\n"
-     "def test_empty_input():\n"
-     "    assert group_lengths([]) == {}\n"),
-    ("rangeend",
-     "def inclusive_range(start, end):\n"
-     "    # callers expect both endpoints included\n"
-     "    return list(range(start, end))\n",
-     "from module import inclusive_range\n\n\n"
-     "def test_end_is_included():\n"
-     "    assert inclusive_range(1, 4) == [1, 2, 3, 4]\n\n\n"
-     "def test_single_value_range():\n"
-     "    assert inclusive_range(2, 2) == [2]\n"),
-]
+_REPO_REPAIR_TASKS: list[tuple[str, str, str]] = _campaign_corpus.REPO_REPAIR_TASKS
 
 
 
@@ -16477,7 +16349,7 @@ def system_profile_text() -> str:
     # This status tool is catalogued as safe and can be reached by natural
     # language. Do not bootstrap a missing profile here: creating the default
     # file is an explicit setup/edit operation, not an observation.
-    path = system_profile._resolve_path()
+    path = system_profile._read_path(None)
     text = system_profile.read_profile(path)
     return "profile: %s\n\n%s" % (path, text or "(empty; profile has not been created)")
 
@@ -17484,6 +17356,35 @@ def tool_contract_report():
     )
 
 
+def _is_network_spelling_raw(raw):
+    """Whether the caller's RAW path text is a UNC, device or NT-namespace spelling.
+
+    Decided by ``file_ops._reject_network_path`` on the value as given, before
+    any join: on POSIX ``os.path.isabs(r"\\\\host\\share\\x")`` is False, so
+    joining such a value under a root hides it from every later check.  Pure
+    string work, no filesystem call.
+    """
+    try:
+        file_ops._reject_network_path(str(raw))
+    except PermissionError:
+        return True
+    return False
+
+
+def _scope_target_under(base, raw_value):
+    """``base / raw`` for a relative raw path; the raw value itself otherwise.
+
+    A UNC, device or NT-namespace spelling is returned as the caller's raw
+    text, never joined, so the per-target refusal in
+    ``_repository_scope_path_error`` sees it on every OS before any resolve.
+    """
+    text = str(raw_value)
+    if _is_network_spelling_raw(text):
+        return text
+    candidate = Path(text).expanduser()
+    return candidate if candidate.is_absolute() else Path(base) / candidate
+
+
 def _repository_scope_path_error(tool_name, args, project_root):
     """Reject a project-bound agent path outside its host-selected root.
 
@@ -17530,17 +17431,11 @@ def _repository_scope_path_error(tool_name, args, project_root):
             # subdirectory root.  It is checked, not rebased: for the cargo
             # and go frameworks `path` names a test target or package pattern
             # rather than a filesystem path, and rebasing would corrupt it.
-            tool_root = Path(str(args.get("root") or ".")).expanduser()
-            if not tool_root.is_absolute():
-                tool_root = root / tool_root
+            tool_root = _scope_target_under(root, args.get("root") or ".")
             targets = [("repository root", tool_root)]
             raw_path = str(args.get("path") or "").strip()
             if raw_path:
-                candidate = Path(raw_path).expanduser()
-                targets.append((
-                    "path",
-                    candidate if candidate.is_absolute() else tool_root / candidate,
-                ))
+                targets.append(("path", _scope_target_under(tool_root, raw_path)))
         elif tool_name == "file_batch_write":
             operations = _batch_agent_operations(args)
             if operations is None or not operations:
@@ -17558,9 +17453,7 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 )
             ]
         elif tool_name == "archive_create":
-            archive_root = Path(str(args.get("root") or ".")).expanduser()
-            if not archive_root.is_absolute():
-                archive_root = root / archive_root
+            archive_root = _scope_target_under(root, args.get("root") or ".")
             targets = [("archive root", archive_root)]
             try:
                 archive_inputs = archive_create_tool._parse_inputs(
@@ -17569,20 +17462,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
             except ValueError as exc:
                 return "ERROR: agent project archive inputs rejected: %s" % exc
             for raw_input in archive_inputs:
-                candidate = Path(raw_input).expanduser()
-                targets.append((
-                    "archive input",
-                    candidate if candidate.is_absolute() else archive_root / candidate,
-                ))
+                targets.append(("archive input", _scope_target_under(archive_root, raw_input)))
             destination_text = str(args.get("destination") or "").strip()
             if not destination_text:
                 targets.append(("archive destination", ""))
             else:
-                raw_destination = Path(destination_text).expanduser()
                 targets.append((
                     "archive destination",
-                    raw_destination if raw_destination.is_absolute()
-                    else archive_root / raw_destination,
+                    _scope_target_under(archive_root, destination_text),
                 ))
         elif tool_name in {"file_copy", "file_move"}:
             targets = [
@@ -17615,6 +17502,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
             raw = str(raw_value or "").strip()
             if not raw:
                 return "ERROR: agent project path rejected: %s is required" % label
+            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak);
+                if "\\??\\" in raw:  # an NT prefix the branches above joined under root
+                    raise PermissionError(raw)
+                raw = file_ops._reject_network_path(raw)
+            except PermissionError:
+                refusal = "ERROR: agent project path rejected: %s uses a %s" % (
+                    label, _network_spelling.REFUSAL)
+                return refusal
             target = Path(raw).expanduser()
             if not target.is_absolute():
                 target = root / target
@@ -17657,7 +17552,11 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         or not isinstance(args, dict)
     ):
         return ""
-    root = Path(str(project_root)).expanduser().resolve(strict=True)
+    try:
+        root = Path(str(project_root)).expanduser().resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        refusal = "ERROR: agent project scope is invalid: %s" % exc
+        return refusal
     if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
         # harness_tools splits the command on whitespace and execs the result,
         # so read the program and its argv exactly the way the child will.
@@ -17738,7 +17637,19 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         base_value = args.get("cwd") or (
             os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
         )
-    base = Path(str(base_value)).expanduser().resolve(strict=False)
+    network_refusal = (
+        "ERROR: agent project execution rejected: %s uses a "
+        + _network_spelling.REFUSAL
+    )
+    try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+        base_value = file_ops._reject_network_path(str(base_value))
+    except PermissionError:
+        return network_refusal % "the working directory"
+    try:
+        base = Path(base_value).expanduser().resolve(strict=False)
+    except (OSError, ValueError) as exc:
+        refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
+        return refusal
     for raw_item in argv:
         raw = str(raw_item or "").strip().strip('"\'')
         if not raw:
@@ -17746,12 +17657,13 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         if "=" in raw and raw.startswith(("-", "/")):
             raw = raw.split("=", 1)[1].strip().strip('"\'')
         raw = raw.lstrip("@")
+        # A token naming or embedding a UNC/device path is refused whole;
+        # nothing of it is resolved.
+        if _network_spelling.contains_network_spelling(raw):
+            return network_refusal % "an argv path"
         drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
-        unc_match = re.search(r"\\\\[^\\]+\\[^\\]+", raw)
         if drive_match:
             raw = raw[drive_match.start():]
-        elif unc_match:
-            raw = raw[unc_match.start():]
         # On Windows, /Zi and /W4 are compiler switches, not POSIX paths.
         if (
             os.name == "nt"
@@ -17772,10 +17684,9 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         target = Path(raw).expanduser()
         if not target.is_absolute():
             target = base / target
-        target = target.resolve(strict=False)
         try:
-            target.relative_to(root)
-        except ValueError:
+            target.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError):
             return (
                 "ERROR: agent project execution rejected: argv path is outside "
                 "the host-selected project root"
@@ -18274,6 +18185,8 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
+    # The caller's judgement is the operator's review; a model must not review its own work.
+    "record_outcome",
     "admin_login", "admin_register", "admin_set_account", "admin_accounts",
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "update_system_profile",
@@ -18287,7 +18200,7 @@ _AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
     # behaviour or unload their models.
     "set_context_size", "unload", "update_emotion_vectors",
     "tune_emotion_vectors", "learn_preference",
-    "ollama_pool_admin_status",
+    "ollama_pool_admin_status", "cloud_opt_in",
 })
 
 
@@ -18305,7 +18218,14 @@ def _agent_dispatch(
         read_only = False
         allow_location = True
         repository_extra_roots = ""
-    tool_name = _canonical_agent_tool_name((tool_name or "").strip())
+    raw_tool_name = (tool_name or "").strip()
+    if raw_tool_name.startswith("/"):
+        if role_refusal := _role_tool_policy.agent_refusal(raw_tool_name):
+            return role_refusal
+        # The permission gate reads "/x" as "x" but dispatch does not, so a
+        # slash spelling would spend a one-shot approval and run nothing.
+        return f"{_generic_agent_dispatch.LEGACY_ERROR_PREFIX} unknown tool '{raw_tool_name}'."
+    tool_name = _canonical_agent_tool_name(raw_tool_name)
     from sonder_runtime.bootstrap.prepared_workbench import require_prepared_tool
     require_prepared_tool(tool_name)
     args = args or {}
@@ -19624,6 +19544,21 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
 
 
 
+def _scope_arg_is_rooted(raw):
+    """Whether ``_project_scope_args`` must keep ``raw`` as given instead of joining it under the project.
+
+    True for an absolute or drive-qualified path, and for a UNC, device or
+    NT-namespace spelling judged on the raw value: on POSIX such a backslash
+    spelling is not ``os.path.isabs``, and rebasing it under the project would
+    hide it from the dispatch scope check that must refuse it.
+    """
+    return (
+        _is_network_spelling_raw(raw)
+        or os.path.isabs(raw)
+        or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+    )
+
+
 def _project_scope_args(tool_name, args, project):
     """Scope an agent file/inspection tool call to the run's project directory.
 
@@ -19659,9 +19594,7 @@ def _project_scope_args(tool_name, args, project):
     if tool_name == "data_convert":
         for key in ("input_path", "output_path"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
@@ -19677,9 +19610,7 @@ def _project_scope_args(tool_name, args, project):
                 continue
             item = dict(operation)
             raw_path = str(item.get("path") or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 item["path"] = os.path.normpath(os.path.join(project, raw_path))
             rebased.append(item)
@@ -19699,9 +19630,7 @@ def _project_scope_args(tool_name, args, project):
             return scoped
         rebased = []
         for raw_path in paths:
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
         scoped["paths_json"] = rebased
         scoped.pop("paths", None)
@@ -19710,9 +19639,7 @@ def _project_scope_args(tool_name, args, project):
     if tool_name in {"file_copy", "file_move", "archive_extract"}:
         for key in ("source", "destination"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.join(project, raw_path)
         return scoped
@@ -19720,32 +19647,24 @@ def _project_scope_args(tool_name, args, project):
     if tool_name == "workspace_compare":
         for key in ("left", "right"):
             raw_path = str(scoped.get(key) or "").strip()
-            is_abs = os.path.isabs(raw_path) or bool(
-                re.match(r"^[A-Za-z]:[\\/]", raw_path)
-            )
+            is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
                 scoped[key] = os.path.join(project, raw_path)
         return scoped
 
     if tool_name == "workspace_run":
         raw_cwd = str(scoped.get("cwd") or ".").strip()
-        is_abs = os.path.isabs(raw_cwd) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
-        )
+        is_abs = _scope_arg_is_rooted(raw_cwd)
         scoped["cwd"] = raw_cwd if is_abs else os.path.join(project, raw_cwd)
         return scoped
 
     if tool_name == "script_run":
         raw_path = str(scoped.get("path") or "").strip()
-        path_is_abs = os.path.isabs(raw_path) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_path)
-        )
+        path_is_abs = _scope_arg_is_rooted(raw_path)
         if raw_path and not path_is_abs:
             scoped["path"] = os.path.join(project, raw_path)
         raw_cwd = str(scoped.get("cwd") or "").strip()
-        cwd_is_abs = os.path.isabs(raw_cwd) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_cwd)
-        )
+        cwd_is_abs = _scope_arg_is_rooted(raw_cwd)
         if raw_cwd and not cwd_is_abs:
             scoped["cwd"] = os.path.join(project, raw_cwd)
         return scoped
@@ -19754,18 +19673,14 @@ def _project_scope_args(tool_name, args, project):
         # ``path`` is optional (a job digest names ``job_id`` instead), so an
         # omitted path must stay omitted rather than becoming the project dir.
         raw_path = str(scoped.get("path") or "").strip()
-        is_abs = os.path.isabs(raw_path) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_path)
-        )
+        is_abs = _scope_arg_is_rooted(raw_path)
         if raw_path and not is_abs:
             scoped["path"] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
 
     if tool_name == "ensemble_codegen_build_loop":
         raw_project = str(scoped.get("project_dir") or ".").strip()
-        is_abs = os.path.isabs(raw_project) or bool(
-            re.match(r"^[A-Za-z]:[\\/]", raw_project)
-        )
+        is_abs = _scope_arg_is_rooted(raw_project)
         scoped["project_dir"] = (
             raw_project if is_abs else os.path.join(project, raw_project)
         )
@@ -19773,7 +19688,7 @@ def _project_scope_args(tool_name, args, project):
 
     key = _project_scoped_path_key(tool_name)
     raw = str(scoped.get(key) or "").strip()
-    is_abs = os.path.isabs(raw) or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+    is_abs = _scope_arg_is_rooted(raw)
     if not raw or raw == ".":
         scoped[key] = project
     elif not is_abs:
@@ -20377,7 +20292,7 @@ def _agent_project_scope(project):
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
-    action = "Perform the requested analysis" if read_only else "Implement the requested changes"
+    action = "Perform the requested analysis" if read_only else "Carry out the requested work"
     items = [
         "Inspect relevant folders, files, programs, and context",
         action,
@@ -20520,6 +20435,7 @@ def _agent_turn(
         )
 
     _maybe_live_reload()
+    cancel_check = agent_outcomes.combined_cancel(cancel_check, _foreground_turns.current())  # polled before and between sends
     capture_session = _resolve_session(session) if session is not None else None
     # A model failure that ends this run is noted for the escalating
     # workbench runner under this run's own identity, so a nested agent's
@@ -20818,6 +20734,7 @@ def _agent_turn(
     transcript += "\n\n" + _agent_verification_standing_notice()
     pre_model_context_rendered = False
     pre_model_context_response_observed = False
+    model_failure: dict = {}  # typed kind on a ModelCallError exit, for fleet workers
     if pre_model_context is not None:
         # The pre-model callback runs after route, project scope, system text,
         # and visible tools are resolved, but before the first provider call.
@@ -20831,18 +20748,11 @@ def _agent_turn(
     transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
-        if (
-            (cancel_check is not None and _cancel_requested(cancel_check))
-            or _foreground_turns.cancel_requested()
-        ):
+        if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
             if _standalone_lanes.current() is not None:
                 _standalone_lanes.current().request_cancel()
             raise ModelCallError(
-                "cancelled",
-                "agent call cancelled before another model/tool action",
-                attempts=0,
-                cloud=cloud,
-            )
+                "cancelled", "agent call cancelled before another model/tool action", attempts=0, cloud=cloud)
 
     def _teardown_speculation():
         # Squash anything in flight and persist the learned predictor so it
@@ -20926,6 +20836,7 @@ def _agent_turn(
                 prefix, failures,
             )
             failed = True
+        agent_outcomes.mark_failure_incomplete(activity_tracker, final, failed)
         final = _attach_tool_evidence(final)
         if controller is not None:
             terminal_class = "ERROR" if failed else "NORMAL"
@@ -20997,19 +20908,12 @@ def _agent_turn(
                 )
             final = block + "\n\n" + final
         elif standing and not failed:
-            final = "%s this run claimed completion without %s - %s\n\n%s" % (
-                _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, standing, final,
-            )
-            # The activity/end-report status must agree with the host fence.
-            # Otherwise users see ``result: complete`` directly above this
-            # warning and the model's claim wins the most visible field.
-            activity_tracker.set_response_status("unverified", "agent completion lacks required verification")
+            if mutated or delegated:
+                final = agent_outcomes.unverified_banner(
+                    final, standing, _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, activity_tracker)
             if not mutated and not validation_attempted:
-                # Measured 2026-09-03: a 1.5B "completed" a fix request after
-                # twelve model calls that changed nothing and ran nothing.
-                # That is the model not doing the work, and the escalating
-                # runner treats it as a failure when the request asked for a
-                # change or a check (never for a read or an explanation).
+                # Measured 2026-09-03: a 1.5B "completed" a fix request after twelve
+                # calls that changed nothing; the escalating runner treats that as a failure.
                 _note_agent_model_failure(
                     tier_escalation.REASON_FAILED, key=escalation_key, step=0,
                     detail="claimed completion without a change or a validation",
@@ -21066,7 +20970,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=validated,
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed,
+                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
                 **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
                 **certificate_fields,
             )
@@ -21086,6 +20990,7 @@ def _agent_turn(
             return finish_final(text, failed=True)
         _teardown_speculation()
         text = str(text or "")
+        agent_outcomes.mark_failure_incomplete(activity_tracker, text)
         # Early exits are still auditable outcomes.  A worker may have already
         # collected valid, host-observed repository evidence before the model
         # exhausted its step budget, repeated a cached inspection, or failed
@@ -21102,7 +21007,7 @@ def _agent_turn(
                 validation_attempted=validation_attempted,
                 validation_passed=_work_validated(),
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed,
+                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
             )
         return text
 
@@ -21251,6 +21156,8 @@ def _agent_turn(
                 )
         _spec_decision_t0 = time.monotonic()
         decision, raw, decision_error = _agent_generate_decision(gen, step_prompt)
+        if decision is not None:
+            ensure_not_cancelled()
         if pre_model_context_rendered and raw:
             pre_model_context_response_observed = True
         _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
@@ -21265,7 +21172,7 @@ def _agent_turn(
                     tier_escalation.failure_reason(error=decision_error),
                     key=escalation_key, step=step,
                 )
-                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
+                agent_outcomes.model_request_failed(activity_tracker, model_failure, decision_error)
                 return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
@@ -21936,6 +21843,8 @@ def _agent_turn(
         final_decision, raw, final_error = _agent_generate_decision(
             gen, final_prompt, require_final=True,
         )
+        if final_decision is not None:
+            ensure_not_cancelled()  # a cancel during the call discards its answer
         if pre_model_context_rendered and raw:
             pre_model_context_response_observed = True
         if final_decision is None:
@@ -21947,7 +21856,7 @@ def _agent_turn(
                         "model request failed during final synthesis",
                         active_item,
                     )
-                activity_tracker.set_response_status("incomplete", "model request failed")  # not `complete`
+                agent_outcomes.model_request_failed(activity_tracker, model_failure, final_error)
                 return _early_exit(render_model_error(final_error))
             if auto_checklist:
                 active_item = 3 if validation_attempted else 2 if mutated else 1
@@ -23180,7 +23089,7 @@ def _capability_refined_tier(
         available = _configured_local_tiers() or runtime_policy.BASE_LOCAL_TIERS
         specialists = set(runtime_policy.OPTIONAL_LOCAL_TIERS) & set(available)
         if specialists:
-            route = _caprouter.route(prompt, available, has_image=has_image)
+            route = _caprouter.route(prompt, available, has_image=has_image, config=_model_list_consumers.values()["capability_router"])
             if route.tier == "vision" and not has_image:
                 return selected_tier, reason
             if route.tier in specialists and route.tier != selected_tier:
@@ -23329,6 +23238,8 @@ def _route_work_request(
                             "routing", "ollama", True,
                         )
             except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, ModelCallError) and agent_outcomes.router_capacity_error(exc):
+                    return agent_outcomes.router_capacity_busy(exc, _format_model_call_error)
                 if npu_fallback_attempted:
                     with contextlib.suppress(Exception):
                         npu_service.record_fallback_handler(
@@ -23527,6 +23438,7 @@ def runtime_policy_data() -> dict:
                 data["capability_errors"]["embedding"] = "does not declare embedding capability"
     except Exception as exc:
         data["inventory_error"] = "%s: %s" % (type(exc).__name__, exc)
+    data["model_lists"] = _model_lists_editor.command("", operator_attended=False)
     data["model_tool_policy"] = _model_tool_grants.status_payload(legacy_section=policy.get("tool_lane_denied_models"))
     _remember_runtime_readiness(data)
     return data
@@ -23645,8 +23557,7 @@ def runtime_policy_status() -> str:
     """
     # Not the default ``create_policy=True``: that would write a missing
     # policy file (and its lock) from a read graded ``safe``.
-    _maybe_live_reload(create_policy=False)
-    return _format_runtime_policy_status(_runtime_policy_cached_data())
+    return _model_list_consumers.policy_status(_runtime_policy_cached_data, _maybe_live_reload, _format_runtime_policy_status)
 
 
 def _runtime_policy_refresh_status() -> str:
@@ -24177,7 +24088,7 @@ def runtime_source_stash(action: str) -> str:
 ENSEMBLE_MAX_MODELS = 4
 # Vision needs an image channel this path does not have, and a VLM handed a
 # text-only prompt answers with an immediate end-of-sequence.
-ENSEMBLE_SKIP_TIERS = ("vision",)
+ENSEMBLE_SKIP_TIERS = _model_list_consumers.startup_ensemble_skip_tiers()
 
 
 def _fanout_profile_scope(profile):

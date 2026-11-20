@@ -38,7 +38,6 @@ to bind ``SONDER_EMBEDDING_PROVIDER=ollama``.
 """
 from __future__ import annotations
 
-import functools
 import http.client
 import io
 import ipaddress
@@ -48,14 +47,13 @@ import math
 import os
 import re
 import socket
-import ssl
+import ssl  # noqa: F401  (tests patch ssl through this module)
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -74,6 +72,7 @@ from ...application.ports.model_gateway import (
     require_model_text,
 )
 from ...application.ports.model_gateway_contract import Capability, CapabilityHealth
+from .log_safe import redact_url, urlsplit_or_none
 from ...domain.common.errors import (
     CapacityExceeded,
     DeadlineExceeded,
@@ -91,15 +90,30 @@ from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
 from ..observability import activity_tracker
 from ..provider_bindings import PROVIDER_TIERS
-from .openai_compat_gateway import (
+from .exchange_transport import (
+    DEFAULT_TIMEOUT_SECONDS,
+    DETAIL_LIMIT,  # noqa: F401  (re-exported)
     ERROR_BODY_LIMIT,
+    RESPONSE_BODY_LIMIT,
+    _TRUST,  # noqa: F401  (re-exported)
+    _BudgetedHTTPHandler,
+    _BudgetedHTTPSHandler,
+    _ExchangeBudget,
+    _NoRedirect,
+    _bounded,
+    _error_document_fields,
+    _read_bounded,
+    _tls_context,  # noqa: F401  (re-exported)
+    trust_scope,
+)
+from .openai_compat_gateway import (
     GET_BODY_LIMIT,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
-    shared_https_context,
+    shared_https_context,  # noqa: F401  (re-exported)
 )
 from .request_tuning import thinking_supported, tune_request
-from .sse_stream import post_streaming
+from .sse_stream import post_streaming, stall_limits
 from .telemetry import from_openai_compatible
 
 logger = logging.getLogger(__name__)
@@ -110,17 +124,18 @@ API_VERSION = 1
 IDENTITY_SCHEMA = "sonder.inference.identity/1"
 DEFAULT_BASE_URL = "http://127.0.0.1:11437"
 DEFAULT_MODEL = "default"
-DEFAULT_TIMEOUT_SECONDS = 300.0
+# Streaming stall limits sit inside the total budget above.  0 disables a
+# limit, and both default to disabled: Sonder Inference may legitimately send
+# no bytes while it prefills a very long prompt on a slow model (nothing
+# documents a keep-alive cadence), so no idle value is safe to impose.
+DEFAULT_STREAM_IDLE_SECONDS = 0.0
+DEFAULT_STREAM_FIRST_CONTENT_SECONDS = 0.0
+MAX_STREAM_STALL_SECONDS = 86_400.0
 DEFAULT_HEALTH_TTL_SECONDS = 5.0
 HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
 DEFAULT_HEALTH_STALE_SECONDS = 120.0
 BUSY_RETRY_SECONDS = 5.0
 READY_FILE_LIMIT = 65_536
-DETAIL_LIMIT = 240
-# A non-streaming chat completion is one JSON object; anything larger than
-# this is not a response this runtime will buffer.
-RESPONSE_BODY_LIMIT = 16 * 1024 * 1024
-_READ_CHUNK = 65_536
 # The only host names Inference's Host check accepts on a loopback bind
 # (contract 2.3); any other loopback alias would be refused with 403.
 ACCEPTED_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -132,6 +147,8 @@ ENV_API_KEY = "SONDER_INFERENCE_API_KEY"
 ENV_ALLOW_REMOTE = "SONDER_ALLOW_REMOTE_INFERENCE"
 ENV_READY_FILE = "SONDER_INFERENCE_READY_FILE"
 ENV_TIMEOUT = "SONDER_INFERENCE_TIMEOUT_SECONDS"
+ENV_STREAM_IDLE = "SONDER_INFERENCE_STREAM_IDLE_TIMEOUT_SECONDS"
+ENV_STREAM_FIRST_CONTENT = "SONDER_INFERENCE_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS"
 ENV_HEALTH_TTL = "SONDER_INFERENCE_HEALTH_TTL_SECONDS"
 ENV_HEALTH_TIMEOUT = "SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"
 ENV_HEALTH_STALE = "SONDER_INFERENCE_HEALTH_STALE_SECONDS"
@@ -241,134 +258,6 @@ class SonderInferenceResponse(ModelResponse):
 # exchange's wall-clock budget is spent.
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-class _ExchangeBudget:
-    """Shut down an exchange's sockets once its total budget is spent."""
-
-    def __init__(self, seconds: float) -> None:
-        self._lock = threading.Lock()
-        self._sockets: list[socket.socket] = []
-        self.expired = False
-        self._timer = threading.Timer(max(0.0, float(seconds)), self._expire)
-        self._timer.daemon = True
-
-    def __enter__(self) -> "_ExchangeBudget":
-        self._timer.start()
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        self._timer.cancel()
-
-    def attach(self, sock: socket.socket) -> None:
-        with self._lock:
-            self._sockets.append(sock)
-            expired = self.expired
-        if expired:
-            _shutdown(sock)
-
-    def _expire(self) -> None:
-        with self._lock:
-            self.expired = True
-            sockets = list(self._sockets)
-        for sock in sockets:
-            _shutdown(sock)
-
-
-def _shutdown(sock: socket.socket) -> None:
-    try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-
-
-class _BudgetedHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, *args, budget: _ExchangeBudget, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._budget = budget
-
-    def connect(self) -> None:
-        super().connect()
-        self._budget.attach(self.sock)
-
-
-class _BudgetedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, *args, budget: _ExchangeBudget, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._budget = budget
-
-    def connect(self) -> None:
-        super().connect()
-        self._budget.attach(self.sock)
-
-
-class _BudgetedHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, budget: _ExchangeBudget) -> None:
-        super().__init__()
-        self._budget = budget
-
-    def http_open(self, req):
-        return self.do_open(
-            functools.partial(_BudgetedHTTPConnection, budget=self._budget), req,
-        )
-
-
-_TRUST = threading.local()
-
-
-@contextmanager
-def trust_scope(ca_bundle: str):
-    """Verify HTTPS exchanges on this thread against exactly ``ca_bundle``.
-
-    A private worker names its own CA bundle; inside this scope the bundle is
-    the only trust anchor (the system store is not consulted), so a private
-    worker's URL cannot be satisfied by a publicly issued certificate.  An
-    empty value keeps the system trust store.  Scopes nest and always restore.
-    """
-    previous = getattr(_TRUST, "ca_bundle", "")
-    _TRUST.ca_bundle = ca_bundle or ""
-    try:
-        yield
-    finally:
-        _TRUST.ca_bundle = previous
-
-
-def _tls_context() -> ssl.SSLContext:
-    ca_bundle = getattr(_TRUST, "ca_bundle", "")
-    if ca_bundle:
-        return ssl.create_default_context(cafile=ca_bundle)
-    return shared_https_context()
-
-
-class _BudgetedHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, budget: _ExchangeBudget) -> None:
-        super().__init__(context=_tls_context())
-
-        self._budget = budget
-
-    def https_open(self, req):
-        return self.do_open(
-            functools.partial(_BudgetedHTTPSConnection, budget=self._budget), req,
-            context=self._context,
-        )
-
-
-def _read_bounded(stream, limit: int) -> bytes:
-    """Read at most ``limit + 1`` bytes so an oversize body is detectable."""
-    chunks: list[bytes] = []
-    total = 0
-    while total <= limit:
-        chunk = stream.read(min(_READ_CHUNK, limit + 1 - total))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-    return b"".join(chunks)
-
-
 def _exchange(
     method: str, url: str, headers: Mapping[str, str], data: bytes | None,
     timeout: float, limit: int,
@@ -388,6 +277,11 @@ def _exchange(
             urllib.request.ProxyHandler({}), _NoRedirect(),
             _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
         )
+        # http.client's InvalidURL quotes the URL text it rejected, so an
+        # HTTPException is never chained: the class name is kept in this
+        # variable and the error is raised after the except block.
+        malformed: str | None = None
+        expired_cause: Exception | None = None
         try:
             try:
                 with opener.open(request, timeout=budget_seconds) as response:
@@ -402,16 +296,24 @@ def _exchange(
                     exc.close()
                 error_headers = dict(exc.headers or {})
         except Exception as exc:
+            if isinstance(exc, http.client.HTTPException):
+                malformed = type(exc).__name__
+            elif budget.expired:
+                expired_cause = exc
+            else:
+                raise
+        if malformed is not None:
             if budget.expired:
                 raise TimeoutError(
                     "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
-                ) from exc
-            if isinstance(exc, http.client.HTTPException):
-                raise DependencyUnavailable(
-                    "sonder-inference sent a malformed HTTP response (%s)"
-                    % type(exc).__name__
-                ) from exc
-            raise
+                )
+            raise DependencyUnavailable(
+                "sonder-inference sent a malformed HTTP response (%s)" % malformed
+            )
+        if expired_cause is not None:
+            raise TimeoutError(
+                "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
+            ) from expired_cause
         if budget.expired:
             raise TimeoutError(
                 "sonder-inference exchange exceeded its %.1fs budget" % budget_seconds
@@ -459,6 +361,8 @@ class SonderInferenceConfig:
     api_key: str = ""
     allow_remote: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    stream_idle_seconds: float = DEFAULT_STREAM_IDLE_SECONDS
+    stream_first_content_seconds: float = DEFAULT_STREAM_FIRST_CONTENT_SECONDS
     health_ttl_seconds: float = DEFAULT_HEALTH_TTL_SECONDS
     base_url_source: str = "default"
     health_timeout_seconds: float = HEALTH_PROBE_TIMEOUT_SECONDS
@@ -490,6 +394,12 @@ class SonderInferenceConfig:
         object.__setattr__(self, "tier_models", MappingProxyType(tiers))
         if not 0.0 < float(self.timeout_seconds) <= 86_400.0:
             raise InvalidInput("%s must be in (0, 86400]" % ENV_TIMEOUT)
+        for value, name in ((self.stream_idle_seconds, ENV_STREAM_IDLE),
+                            (self.stream_first_content_seconds, ENV_STREAM_FIRST_CONTENT)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+                0.0 <= float(value) <= MAX_STREAM_STALL_SECONDS
+            ):
+                raise InvalidInput("%s must be in [0, 86400] (0 disables it)" % name)
         if not 0.0 <= float(self.health_ttl_seconds) <= 3_600.0:
             raise InvalidInput("%s must be in [0, 3600]" % ENV_HEALTH_TTL)
         if not 0.0 < float(self.health_timeout_seconds) <= 6.0:
@@ -513,17 +423,27 @@ class SonderInferenceConfig:
 def normalize_base_url(value: str) -> str:
     """Validate an Inference base URL; map bind-all addresses to loopback."""
     raw = str(value or "").strip()
-    try:
-        parts = urlsplit(raw)
-        host = parts.hostname
-        port = parts.port
-    except ValueError as exc:
-        raise InvalidInput("sonder-inference base URL %r is not a valid URL" % raw) from exc
+    parts = urlsplit_or_none(raw)
+    if parts is None:
+        raise InvalidInput(
+            "sonder-inference base URL %r is not a valid URL" % redact_url(raw)
+        )
+    if "%" in parts.netloc:
+        # urllib unquotes the host, so an encoded ":" or "@" becomes a port or
+        # userinfo that http.client later quotes in its own error; an IPv6 zone
+        # id is refused with them. A "%" in the path is fine.
+        raise InvalidInput("sonder-inference base URL host must not contain percent-encoding")
+    host = parts.hostname
+    port = parts.port
     if (parts.scheme not in ("http", "https") or not host
             or parts.username or parts.password or parts.query or parts.fragment):
         raise InvalidInput(
             "sonder-inference base URL must be http(s)://host[:port][/path] "
             "without credentials, query or fragment"
+        )
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in parts.netloc):
+        raise InvalidInput(
+            "sonder-inference base URL host must not contain whitespace or control characters"
         )
     host = _BIND_ADDRESS_REWRITES.get(host.lower(), host.lower())
     try:
@@ -771,6 +691,9 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         api_key=str(source.get(ENV_API_KEY, "") or "").strip(),
         allow_remote=allow_remote_raw == "1",
         timeout_seconds=_parse_float(source, ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS),
+        stream_idle_seconds=_parse_float(source, ENV_STREAM_IDLE, DEFAULT_STREAM_IDLE_SECONDS),
+        stream_first_content_seconds=_parse_float(
+            source, ENV_STREAM_FIRST_CONTENT, DEFAULT_STREAM_FIRST_CONTENT_SECONDS),
         health_ttl_seconds=_parse_float(source, ENV_HEALTH_TTL, DEFAULT_HEALTH_TTL_SECONDS),
         health_timeout_seconds=_parse_float(source, ENV_HEALTH_TIMEOUT, HEALTH_PROBE_TIMEOUT_SECONDS),
         health_stale_seconds=_parse_float(source, ENV_HEALTH_STALE, DEFAULT_HEALTH_STALE_SECONDS),
@@ -857,11 +780,6 @@ def _rfc3339(moment: datetime) -> str:
     )
 
 
-def _bounded(text: object) -> str:
-    value = " ".join(str(text or "").split())
-    return value if len(value) <= DETAIL_LIMIT else value[: DETAIL_LIMIT - 3] + "..."
-
-
 def _error_fields(body: bytes) -> tuple[str, str]:
     """Return ``(code, message)`` from an Inference error document."""
     try:
@@ -869,19 +787,6 @@ def _error_fields(body: bytes) -> tuple[str, str]:
     except (UnicodeDecodeError, ValueError, RecursionError):
         return "", ""
     return _error_document_fields(document, bound_message=False)
-
-
-def _error_document_fields(document: object, *, bound_message: bool = True) -> tuple[str, str]:
-    error = document.get("error") if isinstance(document, dict) else None
-    if not isinstance(error, dict):
-        return "", ""
-    code = error.get("code")
-    message = error.get("message") or error.get("detail")
-    message = message if isinstance(message, str) else ""
-    return (
-        code if isinstance(code, str) else "",
-        _bounded(message) if bound_message else message,
-    )
 
 
 def _response_timings(timings: dict, usage: dict) -> dict[str, int | float] | None:
@@ -1564,7 +1469,10 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             if timeout <= 0:
                 raise DeadlineExceeded("sonder-inference retry budget exhausted")
             try:
-                with trust_scope(settings.ca_bundle):
+                with trust_scope(settings.ca_bundle), stall_limits(
+                    settings.stream_idle_seconds, settings.stream_first_content_seconds,
+                    idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
+                ):
                     return self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
             except SonderInferenceBusyTimeout as exc:
                 if attempt or (live is not None and (live.generated or live.cancelled)):
@@ -1605,6 +1513,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return SonderInferenceConfig(
             base_url=spec.url, model=settings.model, tier_models=dict(settings.tier_models),
             api_key=token, allow_remote=True, timeout_seconds=settings.timeout_seconds,
+            stream_idle_seconds=settings.stream_idle_seconds,
+            stream_first_content_seconds=settings.stream_first_content_seconds,
             health_ttl_seconds=settings.health_ttl_seconds, base_url_source="private_worker",
             health_timeout_seconds=settings.health_timeout_seconds,
             health_stale_seconds=settings.health_stale_seconds,
@@ -1616,6 +1526,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         worker = self._worker_settings(settings, spec)
         key = (worker.base_url, worker.api_key, worker.ca_bundle, worker.max_inflight, worker.model,
                tuple(sorted(worker.tier_models.items())), worker.timeout_seconds,
+               worker.stream_idle_seconds, worker.stream_first_content_seconds,
                worker.health_ttl_seconds, worker.health_timeout_seconds, worker.health_stale_seconds)
         with self._lock:
             cached = self._workers.get(spec.url)
