@@ -84,23 +84,52 @@ def master_choice(task: str, delegate_agents: int, fleet_agents: int,
     )
 
 
-def execute_master_command(argument: str, *, orchestrate, capacity,
-                           project: str = "") -> str:
-    try:
-        parsed = parse_master_arguments(argument)
-    except ValueError as error:
-        return str(error)
+def resolved_agent_count(parsed: MasterArguments, capacity) -> int:
+    """The agent count a parsed command will run with.
+
+    An explicit count wins. A zero/missing count in delegate or fleet mode is
+    an automatic *capacity-sized* wave; it is never passed on as zero to an
+    older host whose zero means maximum breadth. Other modes use no count.
+    The acknowledgement and the run share this one answer.
+    """
     count = parsed.agents
     if not count and parsed.mode in {"delegate", "fleet"}:
-        # A zero/missing CLI count is an automatic *capacity-sized* wave.
-        # Never pass zero to an older host whose zero means maximum breadth.
         available = capacity()
         slots = max(1, int(available.get("worker_slots") or 1))
         count = slots
         if parsed.mode == "fleet":
             count = automatic_fleet_agents(available)
+    return count
+
+
+def execute_master_command(argument: str, *, orchestrate, capacity,
+                           project: str = "", agents: int | None = None) -> str:
+    """Parse and run one /master command.
+
+    *agents*, when given, is the count the caller already resolved with
+    ``resolved_agent_count`` for its acknowledgement; the run reuses it so
+    capacity is sampled once and the ack and the run cannot disagree.
+    """
+    try:
+        parsed = parse_master_arguments(argument)
+    except ValueError as error:
+        return str(error)
+    count = resolved_agent_count(parsed, capacity) if agents is None else agents
     return orchestrate(task=parsed.task, mode=parsed.mode, agents=count,
                        project=project)
+
+
+def inherited_remote_consent(own: bool, admin: bool, application_provider) -> bool:
+    """Remote-Ollama consent for one HTTP tool context (decision 14).
+
+    An owner/admin context inherits the configured ``[ollama].allow_remote``
+    consent from *application_provider*'s config; any other caller keeps only
+    its own context's consent (*own*), and the provider is never consulted.
+    """
+    if own or not admin:
+        return bool(own)
+    config = getattr(application_provider(), "config", None)
+    return bool(getattr(getattr(config, "ollama", None), "allow_remote", False))
 
 
 def reply_receipt_fields(reply) -> dict:
