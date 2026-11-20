@@ -231,7 +231,8 @@ def test_serve_starts_the_schedule_after_binding_and_prewarm_with_owned_threads(
     assert start > prewarm
     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.lineno == start)
     assert {k.arg: ast.unparse(k.value) for k in call.keywords} == {
-        "origin": "server.BASE", "thread_factory": "owned_runtime_thread"}
+        "origin": "server.BASE", "thread_factory": "owned_runtime_thread",
+        "stop": "cloud_refresh_stop"}
 
 
 def test_cmd_mcp_starts_the_schedule_after_membership_in_both_branches():

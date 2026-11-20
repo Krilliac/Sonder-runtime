@@ -8151,6 +8151,7 @@ def main(
     httpd = None
     port = None
     startup_completed = False
+    cloud_refresh_stop = threading.Event()  # managed children join owned threads at stop
     cleanup_errors = []
 
     def cleanup(name, callback):
@@ -8280,12 +8281,10 @@ def main(
         ).start()
         BOUND_PORT = port
         startup_prewarm.start_default_model_prewarm(
-            setting=PREWARM_ON_START,
-            prewarm=lambda tier: server.prewarm_model(tier, announce=True),
-            enabled=lambda: server.sonder_speculation.prewarm_enabled(),
-            thread_factory=owned_runtime_thread)
+            setting=PREWARM_ON_START, prewarm=lambda tier: server.prewarm_model(tier, announce=True),
+            enabled=lambda: server.sonder_speculation.prewarm_enabled(), thread_factory=owned_runtime_thread)
         cloud_model_refresh_schedule.start_scheduled_refresh(
-            origin=server.BASE, thread_factory=owned_runtime_thread)
+            origin=server.BASE, thread_factory=owned_runtime_thread, stop=cloud_refresh_stop)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         _warn_if_local_open()
@@ -8311,6 +8310,7 @@ def main(
             pass
     finally:
         _serve_logger.info("HTTP server shutting down")
+        cloud_refresh_stop.set()
         if startup_completed and lifecycle is not None:
             coordinator = getattr(lifecycle, "coordinator", None)
             if not getattr(coordinator, "draining", False):
