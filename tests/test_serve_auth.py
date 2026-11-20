@@ -3536,6 +3536,9 @@ def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, 
     monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # local-open is held to non-escalating changes (see test_permission_mode_local_open).
+    monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
+                        lambda mode: applied.append(mode))
     body = b'{"mode":"plan"}'
     with _http_server(monkeypatch) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -3578,6 +3581,9 @@ def test_bounded_idempotency_key_still_replays(
     monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # local-open is held to non-escalating changes (see test_permission_mode_local_open).
+    monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
+                        lambda mode: applied.append(mode))
     headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
     try:
         with _http_server(monkeypatch) as port:

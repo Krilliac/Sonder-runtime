@@ -209,6 +209,13 @@ everywhere. The attended surfaces are the console's ``/mode`` and Shift+Tab
 surface is unattended until it says otherwise: that is the fail-closed
 default.
 
+Under ``local-open`` that endpoint has no administrator to authorize: every
+local process passes its authority check, with no secret at all. There it
+calls ``set_mode_without_escalation`` and answers 403
+``PERMISSION_MODE_ESCALATION_REFUSED`` for a raise, so a raise is never made
+or saved by a credential-less caller; lowering stays allowed. An API key or an
+admin account restores the attended raise.
+
 Rules and modes compose; they do not race
 -------------------------------------------
 ``permission_rules`` shipped its own per-tool ``allow``/``ask``/``deny`` rules
@@ -1038,6 +1045,44 @@ def set_mode(name: str) -> str:
         _STATE["mode"] = match
         _save(previous)
     return match
+
+
+class ModeEscalationRefused(ValueError):
+    """A caller without mode-raising authority asked for more autonomy.
+
+    Raised by ``set_mode_without_escalation`` before any state changes or is
+    saved. ``current`` and ``target`` are the exact mode names compared.
+    """
+
+    def __init__(self, current: str, target: str):
+        super().__init__(
+            "permission mode not changed: raising it from %s to %s is refused "
+            "for this caller; it may only lower the mode or return from plan "
+            "to manual" % (current, target)
+        )
+        self.current = current
+        self.target = target
+
+
+def set_mode_without_escalation(name: str) -> str:
+    """``set_mode`` for a caller that may never raise autonomy.
+
+    The escalation check and the change happen under one hold of ``_LOCK``
+    (re-entrant, so ``set_mode`` takes it again), so a concurrent lowering at
+    the console cannot slip between the check and the write and be undone.
+    Raises ``ModeEscalationRefused`` (nothing changed, nothing saved) when
+    *name* is more autonomous than both the current mode and ``manual``;
+    ``ValueError`` for an unknown mode, like ``set_mode``. Ignores
+    ``attended_mode_change()``: the caller has already decided it holds no
+    attended authority.
+    """
+    _load()
+    target = resolve_mode(name)
+    with _LOCK:
+        current = _STATE["mode"]
+        if is_unattended_escalation(current, target):
+            raise ModeEscalationRefused(current, target)
+        return set_mode(target)
 
 
 def cycle_mode(step: int = 1) -> str:
