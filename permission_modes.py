@@ -62,11 +62,12 @@ decision because it is narrow and it is written down.
 Bypass
 ------
 ``bypass`` is the one mode that skips the prompts: every graded class runs
-without asking. It skips prompts only. An explicit deny rule the operator
-wrote, the degraded-policy deny, the chain-of-thought guard, privilege
-(elevation), durable-authority tools, the effect fence and a name nothing can
-classify still stop it; the one shipped default it steps past is the
-unmodified ``file_delete: deny``. Entering it needs an attended confirmation
+without asking. It skips prompts (``ask``) only. Every deny rule -- one the
+operator wrote, a shipped default such as ``file_delete: deny``, the
+degraded-policy deny, the chain-of-thought guard -- and privilege
+(elevation), durable-authority tools, process-wide cloud consent
+(``BYPASS_HELD_TOOLS``), the effect fence and a name nothing can
+classify still stop it. Entering it needs an attended confirmation
 (``/mode bypass`` answered at the console, or an administrator's
 ``confirm_bypass``). Over HTTP it applies to that caller's principal and
 session only, and a process-global bypass is not applied to scoped turns.
@@ -851,6 +852,15 @@ DURABLE_AUTHORITY_TOOLS = frozenset({
     "elevate", "permission_rule_set", "permission_approve",
 })
 
+# What ``bypass`` still holds besides the durable-authority tools. Over HTTP a
+# bypass is one principal's and one session's, but ``cloud_opt_in`` is
+# process-wide: turning it on sends every later ``cloud-*`` prompt of every
+# caller off the machine, and enabling it is explicit consent, which a skipped
+# prompt is not. Bypass holds these as it holds the durable-authority tools: an
+# unattended caller is refused, the console is asked, and an explicit allow
+# rule still lets them run, as in every other mode.
+BYPASS_HELD_TOOLS = DURABLE_AUTHORITY_TOOLS | frozenset({"cloud_opt_in"})
+
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
 _LOADED = False
@@ -1315,9 +1325,11 @@ def set_global_mode(name: str) -> str:
 
     The administrator's mode control (``POST /v1/permission-mode`` for any mode
     but bypass) uses this. It ignores any bound ``mode_scope`` and clears every
-    (principal, session) scope, so the mode it sets is the one MCP clients,
-    loops, autopilot and every account turn now run under -- including a
-    session that was in bypass. That makes lowering it a real safety stop.
+    (principal, session) scope that is not stricter than the new mode, so the
+    mode it sets is the one MCP clients, loops, autopilot and every account
+    turn now run under -- including a session that was in bypass. That makes
+    lowering it a real safety stop. It never loosens a scope: a session a user
+    put in a stricter mode (``plan`` under a new global ``auto``) keeps it.
     Bypass is refused here: it is only ever entered for one caller's scope (or
     at the attended console) and never applies process-wide over HTTP.
     """
@@ -1325,17 +1337,20 @@ def set_global_mode(name: str) -> str:
     match = resolve_mode(name)
     if match == BYPASS:
         raise ValueError("bypass is entered per session, never as the global mode over HTTP")
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
     with _LOCK:
         previous = _STATE["mode"]
         prior_scopes = dict(_SCOPED_MODES)
         _STATE["mode"] = match
-        _SCOPED_MODES.clear()
+        for scope, scoped in prior_scopes.items():
+            if order.get(scoped, len(MODES)) >= order[match]:
+                del _SCOPED_MODES[scope]
         try:
             _save(previous)
         except ModePersistenceError:
             # A refused raise restored the global mode; the scopes it would
             # have cleared come back too. A lowering that could not be saved
-            # still holds for this process, scopes cleared.
+            # still holds for this process, looser scopes cleared.
             if _STATE["mode"] != match:
                 _SCOPED_MODES.update(prior_scopes)
             raise
@@ -1726,42 +1741,6 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
     return action, pattern
 
 
-# The shipped default denies that bypass steps past when they are still exactly
-# as shipped. ``file_delete: deny`` ("destructive by default") is a careful
-# default, not an operator's decision: without this, bypass could never delete,
-# though the product asks before deletes rather than forbidding them. The
-# chain-of-thought guard is a shipped deny too, but it is one of the two acts an
-# operator must reverse deliberately, so bypass never skips it.
-_BYPASS_SKIPPABLE_DEFAULT_DENIES = frozenset({"file_delete"})
-
-
-def _bypass_skips_deny(rule: dict | None) -> bool:
-    """True only for an unmodified shipped default deny bypass may step past.
-
-    A deny the operator wrote (``/permissions``, ``permission_rule_set``, or by
-    hand with its own note), the degraded-policy deny, and every other rule
-    still refuse in bypass: bypass skips confirmation prompts, not written
-    refusals. "Unmodified" means the row equals the shipped one in pattern,
-    action and note; ``upsert_rule`` replaces the note, so a re-written rule
-    never matches.
-    """
-    if not isinstance(rule, dict):
-        return False
-    try:
-        from sonder_runtime.domain.execution import policy as _policy
-    except ImportError:
-        return False
-    pattern = str(rule.get("pattern", "")).strip()
-    if pattern not in _BYPASS_SKIPPABLE_DEFAULT_DENIES:
-        return False
-    for shipped in _policy.DEFAULT_RULES:
-        if (shipped["pattern"] == pattern
-                and str(rule.get("action", "")).strip().lower() == shipped["action"]
-                and str(rule.get("note", "") or "") == shipped.get("note", "")):
-            return True
-    return False
-
-
 def decide_for_caller(tool_name: str, *, interactive: bool,
                       gate_control_exempt: bool, surface: str = "",
                       record: bool = True, mode: str | None = None,
@@ -1982,14 +1961,14 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 name, source="fence", call_id=call,
             )
 
-    rule_action, rule_pattern, rule_row = _rule_for(name, rule_lookup)
+    rule_action, rule_pattern, _rule_row = _rule_for(name, rule_lookup)
 
     # 1. An explicit deny is a narrower, written-down decision than any mode
     #    dial, so it wins outright -- including over auto and bypass, and
-    #    immune to the unattended rule below. Bypass skips prompts, not written
-    #    refusals; the one exception is the unmodified shipped
-    #    ``file_delete`` default (see ``_bypass_skips_deny``).
-    if rule_action == DENY and not (active == BYPASS and _bypass_skips_deny(rule_row)):
+    #    immune to the unattended rule below. Bypass skips ``ask`` only: every
+    #    deny rule holds in it, the shipped defaults (``file_delete``) and the
+    #    degraded-policy deny included, with no exception.
+    if rule_action == DENY:
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
@@ -2006,7 +1985,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
                         source="privilege", call_id=call)
 
-    if active == BYPASS and name in DURABLE_AUTHORITY_TOOLS and rule_action != ALLOW:
+    if active == BYPASS and name in BYPASS_HELD_TOOLS and rule_action != ALLOW:
         if not interactive:
             return Decision(
                 DENY, active, risk,
@@ -2133,7 +2112,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             source="non-interactive", call_id=call,
         )
     decision_source = (
-        "mode:bypass" if active == BYPASS and (risk == "dangerous" or rule_action == DENY)
+        "mode:bypass" if active == BYPASS and risk == "dangerous"
         else "mode"
     )
     return Decision(action, active, risk, mode_reason(action, active, risk), name,

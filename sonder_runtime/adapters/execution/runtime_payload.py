@@ -233,6 +233,36 @@ def _require_compiled_from(digests, rows, site_root, dependencies):
             raise OwnerRefused("runtime artifact changed during inspection")
 
 
+PROFILE_NAME = "system_profile.md"
+
+
+def _place_standing_instructions(source, payload):
+    """Put the standing-instructions file in the payload; return its size.
+
+    The child's ``system_profile`` resolves the file to
+    ``<payload>/system_profile.md`` and, on the first prompt build (the
+    start-up prewarm's system prefix, or the first chat), creates it from the
+    default text when it is missing. That write landed inside the hashed
+    payload, so the next launch refused the payload as changed. The payload
+    therefore carries the file from the start, which keeps the child's prompt
+    build a pure read: the source's own copy when it has one (the instructions
+    an unmanaged runtime from the same source reads), else the default text
+    that first use would have written.
+    """
+    original = source / PROFILE_NAME
+    destination = payload / PROFILE_NAME
+    if os.path.lexists(original):
+        if not stat.S_ISREG(plain(original).st_mode):
+            raise OwnerRefused("runtime artifact is not an ordinary file")
+        shutil.copyfile(original, destination)
+    else:
+        from ...platform.system_profile import DEFAULT_TEXT
+
+        with destination.open("x", encoding="utf-8") as stream:
+            stream.write(DEFAULT_TEXT)
+    return destination.stat().st_size
+
+
 def _runtime_layout(runtime_venv=None):
     """Base interpreter and selected dependency closure (private test seam)."""
     source = Path(__file__).resolve().parents[3]
@@ -343,6 +373,10 @@ class RuntimePayload:
                     destination = self.path / original.relative_to(source)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(original, destination)
+            total += _place_standing_instructions(source, self.path)
+            copied += 1
+            if copied > 10000 or total > 256 * 1024**2:
+                raise OwnerRefused("Sonder payload exceeds bounds")
             (self.root / "python-cache").mkdir()
             roots = [(str(self.path), False), *external,
                      *((path, False) for path in profile_roots)]

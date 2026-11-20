@@ -589,23 +589,28 @@ class AgentImplBridge:
         project_scope: str,
     ) -> None:
         self._stack = stack
-        self._model = model
-        self._max_steps = max(1, int(max_steps or 1))
-        self._cloud = cloud
-        self._read_only = read_only
-        self._project_scope = project_scope
-        self._started = time.monotonic()
-        self._board_cursor = 0
         self._closed = False
-        self._depth = _rt.current_depth()
-        self._prompt_preview = compact_text(prompt, limit=180)
-        _rt.emit_agent_event(
-            phase="starting",
-            step=0,
-            max_steps=self._max_steps,
-            model=model,
-            summary=self._prompt_preview,
-        )
+        try:
+            self._model = model
+            self._max_steps = max(1, int(max_steps or 1))
+            self._cloud = cloud
+            self._read_only = read_only
+            self._project_scope = project_scope
+            self._started = time.monotonic()
+            self._board_cursor = 0
+            self._depth = _rt.current_depth()
+            self._prompt_preview = compact_text(prompt, limit=180)
+            _rt.emit_agent_event(
+                phase="starting",
+                step=0,
+                max_steps=self._max_steps,
+                model=model,
+                summary=self._prompt_preview,
+            )
+        except BaseException:
+            self._closed = True
+            stack.close()
+            raise
 
     def maybe_preamble(self, *, transcript_chars: int = 0, num_ctx: int = 0) -> str:
         """Return compact coordinator/drive guidance when context budget comfortably permits."""
@@ -669,16 +674,18 @@ class AgentImplBridge:
         if self._closed:
             return
         self._closed = True
-        _rt.emit_agent_event(
-            phase="completed" if ok else "failed",
-            step=0,
-            max_steps=self._max_steps,
-            ok=ok,
-            elapsed_ms=int((time.monotonic() - self._started) * 1000),
-            model=self._model,
-            summary=compact_text(summary, limit=180),
-        )
-        self._stack.close()
+        try:
+            _rt.emit_agent_event(
+                phase="completed" if ok else "failed",
+                step=0,
+                max_steps=self._max_steps,
+                ok=ok,
+                elapsed_ms=int((time.monotonic() - self._started) * 1000),
+                model=self._model,
+                summary=compact_text(summary, limit=180),
+            )
+        finally:
+            self._stack.close()
 
 
 def _find_sonder_inference_gateway(server: Any) -> Any:
@@ -822,27 +829,31 @@ def open_agent_run(
 ) -> AgentImplBridge:
     """Bind board, executor, identity, and observers around one ``_agent_impl`` run."""
     stack = contextlib.ExitStack()
-    board = _rt.current_board()
-    if board is None:
-        board = _rt.AgentProgressBoard()
-        stack.enter_context(_rt.bind_board(board))
-        detach = attach_board_observers(board)
-        stack.callback(detach)
-    if _rt.current_delegation_executor() is None and _rt.can_delegate():
-        stack.enter_context(_rt.bind_delegation_executor(make_delegation_executor(server)))
-    origin_hint = ""
-    if not cloud and model:
-        origin_hint = _selected_origin_for_model(
-            getattr(server, "OLLAMA_POOL", None),
-            model,
-            default_origin=str(getattr(server, "BASE", "") or ""),
-        )
-    if _rt.current_depth() == 0:
-        stack.enter_context(
-            _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
-        )
-    else:
-        _rt.note_agent_execution(model=model, origin=origin_hint)
+    try:
+        board = _rt.current_board()
+        if board is None:
+            board = _rt.AgentProgressBoard()
+            stack.enter_context(_rt.bind_board(board))
+            detach = attach_board_observers(board)
+            stack.callback(detach)
+        if _rt.current_delegation_executor() is None and _rt.can_delegate():
+            stack.enter_context(_rt.bind_delegation_executor(make_delegation_executor(server)))
+        origin_hint = ""
+        if not cloud and model:
+            origin_hint = _selected_origin_for_model(
+                getattr(server, "OLLAMA_POOL", None),
+                model,
+                default_origin=str(getattr(server, "BASE", "") or ""),
+            )
+        if _rt.current_depth() == 0:
+            stack.enter_context(
+                _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
+            )
+        else:
+            _rt.note_agent_execution(model=model, origin=origin_hint)
+    except BaseException:
+        stack.close()
+        raise
     bridge = AgentImplBridge(
         stack=stack,
         prompt=prompt,

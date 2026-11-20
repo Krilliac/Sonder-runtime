@@ -5,6 +5,7 @@ import asyncio
 import fnmatch
 import itertools
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -214,19 +215,29 @@ def _is_credential_name(name: str) -> bool:
     return suffix in _NAMED_CREDENTIAL_CONFIG_SUFFIXES and ("credential" in name or "secret" in name)
 
 
-def _is_credential_path(names: list[str]) -> bool:
-    """``names`` (canonical components, leaf last) name a credential store."""
+def _is_credential_path(names: list[str], context: list[str]) -> bool:
+    """``names`` (canonical components below the root, leaf last) name a credential store.
+
+    ``context`` holds every canonical component of the resolved workspace
+    root (empty for a path outside the root, whose ``names`` are then the
+    whole path). Every rule that names a directory runs on ``context`` plus
+    ``names``, so a root that is, or sits anywhere inside, a credential store
+    (``~/.aws``, ``~/.aws/sso``, ``~/.config/gcloud/configurations``) makes
+    every write under it a credential write. The leaf-name rule still judges
+    only the target's own name.
+    """
     if not names:
         return False
-    if any(name in _CREDENTIAL_DIRECTORIES for name in names):
+    window = [*context, *names]
+    if any(name in _CREDENTIAL_DIRECTORIES for name in window):
         return True
-    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in zip(names, names[1:], strict=False)):
+    if any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in itertools.pairwise(window)):
         return True
     if _is_credential_name(names[-1]):
         return True
-    if len(names) >= 2 and (names[-2], names[-1]) in _CREDENTIAL_PAIRS:
+    if len(window) >= 2 and (window[-2], window[-1]) in _CREDENTIAL_PAIRS:
         return True
-    return len(names) >= 3 and (names[-3], names[-2], names[-1]) in _CREDENTIAL_TRIPLES
+    return len(window) >= 3 and (window[-3], window[-2], window[-1]) in _CREDENTIAL_TRIPLES
 
 
 def _canonical_component(part: str) -> str:
@@ -240,11 +251,15 @@ def _canonical_component(part: str) -> str:
     return part.split(":", 1)[0].rstrip(" .").casefold()
 
 
-def _components_under(path: Path, root: Path) -> tuple[str, ...]:
+def _components_under(path: Path, root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(the root's components, ``path``'s components below the root).
+
+    A path outside the root yields no root context and all its components.
+    """
     try:
-        return path.relative_to(root).parts
+        return root.parts, path.relative_to(root).parts
     except ValueError:
-        return path.parts
+        return (), path.parts
 
 
 def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | None:
@@ -253,14 +268,19 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
     The lexical spelling and the resolved path are both checked, so neither a
     ``..`` detour nor a symlink or 8.3 short name (which ``resolve`` expands
     for existing directories) reaches ``.git`` or a credential store.
-    Components above the workspace root are not inspected, so a workspace that
-    itself sits under a directory named ``.git`` or ``.ssh`` is not refused
-    wholesale; a path outside the root (bypass) is inspected in full.
+    The git rules do not inspect components above the workspace root, so a
+    workspace that itself sits under a directory named ``.git`` is not refused
+    wholesale; a path outside the root (bypass) is inspected in full. The
+    credential rules also see every component of the root (see
+    ``_is_credential_path``).
     """
     lexical = Path(text)
-    lexical_parts = _components_under(lexical, root) if lexical.is_absolute() else lexical.parts
-    for parts in (lexical_parts, _components_under(resolved, root)):
+    lexical_split = (
+        _components_under(lexical, root) if lexical.is_absolute() else (root.parts, lexical.parts)
+    )
+    for context_parts, parts in (lexical_split, _components_under(resolved, root)):
         names = [_canonical_component(part) for part in parts]
+        context = [_canonical_component(part) for part in context_parts]
         if _GIT_METADATA_DIRECTORY in names:
             return GitControlPathRefused(
                 f"refusing to modify git repository metadata '{text}': hooks and config there "
@@ -271,7 +291,7 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
                 f"refusing to modify git control file '{text}': it selects programs git runs; "
                 "use run_program (execute approval) if this is intended"
             )
-        if _is_credential_path(names):
+        if _is_credential_path(names, context):
             return CredentialPathRefused(
                 f"refusing to modify credential store '{text}' from a client tool; "
                 "use run_program (execute approval) if this is intended"
@@ -626,6 +646,10 @@ _GIT_DRIVER_LEAVES: Mapping[str, frozenset[str]] = {
     "diff": frozenset({"textconv"}),
 }
 _BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
+# Driver names a ``-c`` override can name exactly; ASCII only, matched without
+# IGNORECASE so no Unicode case-fold (U+212A, U+017F) slips in. Restated from
+# git_program_guard._SAFE_DRIVER_NAME_RE (interfaces may not import adapters).
+_SAFE_GIT_DRIVER_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # Environment variables that name a program git would run.
 _GIT_PROGRAM_ENV_VARS: tuple[str, ...] = (
     "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
@@ -676,12 +700,14 @@ def _git_driver_overrides(probe_stdout: str) -> list[str]:
         section = section.lower()
         if not name or leaf.lower() not in _GIT_DRIVER_LEAVES.get(section, frozenset()):
             raise ValueError("unexpected git driver configuration key; refusing to run git")
-        if "=" in name or "\ufffd" in name or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+        if _SAFE_GIT_DRIVER_NAME_RE.fullmatch(name) is None:
             # git splits ``-c`` at the first '=': ``-c filter.a=b.process=``
             # would set ``filter.a`` and leave the driver named ``a=b`` live.
-            # A name that did not decode cleanly would not match either.
+            # Any other character outside the allowlist (a quote, space,
+            # control or non-ASCII character, U+FFFD from bad UTF-8) may not
+            # round-trip either. Same charset as git_program_guard.
             raise ValueError(
-                "git driver name contains '=', a control character or invalid UTF-8; refusing to run git"
+                f"git driver name {name!r} is outside [A-Za-z0-9_.-]; refusing to run git"
             )
         if (section, name) in seen:
             continue
@@ -712,8 +738,8 @@ def _hardened_git_prefix(git: str, cwd: Path, env: Mapping[str, str]) -> list[st
     diff drivers, and each is neutralised: filters run no program, merge
     drivers become git's built-in ``merge-file`` and textconv becomes ``cat``
     (the diff and log tools also pass ``--no-textconv``). A driver whose name
-    ``-c`` cannot express exactly (an '=', a control character, invalid
-    UTF-8) refuses. A probe that fails (including ``safe.bareRepository``
+    ``-c`` cannot express exactly (anything outside ``[A-Za-z0-9_.-]``)
+    refuses. A probe that fails (including ``safe.bareRepository``
     refusing an embedded bare repository) or times out raises, and no further
     git command runs: fail closed.
     """

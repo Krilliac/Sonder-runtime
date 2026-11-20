@@ -1502,15 +1502,23 @@ class LocalManager {
     return p == d || p.startsWith(d.endsWith(sep) ? d : '$d$sep');
   }
 
-  /// Components of [path] below [root]; the whole path when it is outside.
-  static List<String> _clientComponentsUnder(String path, String root) {
-    var rest = path;
-    if (_isInsideClientDir(path, root)) {
-      final sep = Platform.pathSeparator;
-      final prefixLength = root.endsWith(sep) ? root.length : root.length + 1;
-      rest = path.length <= prefixLength ? '' : path.substring(prefixLength);
+  static List<String> _clientSplitPath(String path) =>
+      path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+
+  /// Every component of [root], the credential rules' context.
+  static List<String> _clientRootContext(String root) => _clientSplitPath(root);
+
+  /// (the root's components, [path]'s components below [root]);
+  /// no context and the whole path when it is outside.
+  static (List<String>, List<String>) _clientComponentsUnder(
+      String path, String root) {
+    if (!_isInsideClientDir(path, root)) {
+      return (const <String>[], _clientSplitPath(path));
     }
-    return rest.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+    final sep = Platform.pathSeparator;
+    final prefixLength = root.endsWith(sep) ? root.length : root.length + 1;
+    final rest = path.length <= prefixLength ? '' : path.substring(prefixLength);
+    return (_clientRootContext(root), _clientSplitPath(rest));
   }
 
   static bool _isCredentialName(String name) {
@@ -1529,29 +1537,42 @@ class LocalManager {
         (name.contains('credential') || name.contains('secret'));
   }
 
-  static bool _isCredentialPath(List<String> names) {
+  /// [names] (canonical components below the root, leaf last) name a
+  /// credential store. [context] holds every canonical component of the
+  /// canonical workspace root (empty for a path outside the root, whose
+  /// [names] are then the whole path). Every rule that names a directory
+  /// runs on [context] plus [names], so a root that is, or sits anywhere
+  /// inside, a credential store (`~/.aws`, `~/.aws/sso`,
+  /// `~/.config/gcloud/configurations`) makes every write under it a
+  /// credential write. The leaf-name rule still judges only the target's own
+  /// name.
+  static bool _isCredentialPath(List<String> names, List<String> context) {
     if (names.isEmpty) return false;
-    if (names.any(_credentialDirectories.contains)) return true;
-    for (var i = 0; i + 1 < names.length; i++) {
-      if (_credentialDirectoryPairs.contains('${names[i]}/${names[i + 1]}')) {
+    final window = [...context, ...names];
+    if (window.any(_credentialDirectories.contains)) return true;
+    for (var i = 0; i + 1 < window.length; i++) {
+      if (_credentialDirectoryPairs.contains('${window[i]}/${window[i + 1]}')) {
         return true;
       }
     }
-    final n = names.length;
-    if (_isCredentialName(names[n - 1])) return true;
-    if (n >= 2 && _credentialPairs.contains('${names[n - 2]}/${names[n - 1]}')) {
+    if (_isCredentialName(names.last)) return true;
+    final n = window.length;
+    if (n >= 2 &&
+        _credentialPairs.contains('${window[n - 2]}/${window[n - 1]}')) {
       return true;
     }
     return n >= 3 &&
         _credentialTriples
-            .contains('${names[n - 3]}/${names[n - 2]}/${names[n - 1]}');
+            .contains('${window[n - 3]}/${window[n - 2]}/${window[n - 1]}');
   }
 
   /// [_resolveClientPath] for the write-class tools: refuses git metadata,
   /// git control files and credential stores, judged on both the lexical
   /// spelling (so `sub/../.git` is caught) and the resolved path (so a
-  /// symlink or short name is caught). Components above the workspace root
-  /// are not inspected; a path outside it (bypass) is inspected in full.
+  /// symlink or short name is caught). The git rules do not inspect
+  /// components above the workspace root; a path outside it (bypass) is
+  /// inspected in full. The credential rules also see every component of the
+  /// root (see [_isCredentialPath]).
   static String _resolveClientWritePath(
     Object? rawArg,
     String workspaceRoot, {
@@ -1562,9 +1583,13 @@ class LocalManager {
     final raw = (rawArg?.toString() ?? '').trim();
     final lexical = _isAbsolutePath(raw)
         ? _clientComponentsUnder(raw, root)
-        : raw.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
-    for (final parts in [lexical, _clientComponentsUnder(resolved, root)]) {
+        : (_clientRootContext(root), _clientSplitPath(raw));
+    for (final (contextParts, parts) in [
+      lexical,
+      _clientComponentsUnder(resolved, root),
+    ]) {
       final names = parts.map(_canonicalClientComponent).toList();
+      final context = contextParts.map(_canonicalClientComponent).toList();
       if (names.contains(_gitMetadataDirectory)) {
         throw _ClientPathRefused(
             "Refusing to modify git repository metadata '$raw': hooks and "
@@ -1576,7 +1601,7 @@ class LocalManager {
             "Refusing to modify git control file '$raw': it selects programs "
             'git runs; use run_program (execute approval) if this is intended.');
       }
-      if (_isCredentialPath(names)) {
+      if (_isCredentialPath(names, context)) {
         throw _ClientPathRefused(
             "Refusing to modify credential store '$raw' from a client tool; "
             'use run_program (execute approval) if this is intended.');
@@ -1623,6 +1648,8 @@ class LocalManager {
     'diff': {'textconv'},
   };
   static const _builtinMergeDriver = 'git merge-file --marker-size=%L %A %O %B';
+  // ASCII only and case-sensitive, so no Unicode case-fold slips in.
+  static final _safeGitDriverName = RegExp(r'^[A-Za-z0-9_.-]+$');
   static const _gitProgramEnvVars = {
     'GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'GIT_SSH', 'GIT_SSH_COMMAND',
     'GIT_ASKPASS',
@@ -1677,8 +1704,10 @@ class LocalManager {
   /// merge drivers become git's built-in merge-file, textconv becomes `cat`
   /// (the diff and log tools also pass --no-textconv). A key of an
   /// unexpected shape, or a driver name `-c` cannot express exactly (git
-  /// splits `-c` at the first '='; a control or non-ASCII character could be
-  /// re-encoded on the way back), refuses: fail closed.
+  /// splits `-c` at the first '='; a quote, space, control or non-ASCII
+  /// character may not round-trip), refuses: fail closed. Only names in
+  /// [_safeGitDriverName] are overridden, the same charset as
+  /// sonder_runtime/adapters/git_program_guard.py.
   static List<String> _clientGitDriverOverrides(String probeStdout) {
     final overrides = <String>[];
     final seen = <String>{};
@@ -1698,10 +1727,9 @@ class LocalManager {
         throw const _ClientGitRefused(
             'Unexpected git driver configuration key; refusing to run git.');
       }
-      if (name.codeUnits.any((c) => c < 0x20 || c > 0x7E || c == 0x3D)) {
+      if (!_safeGitDriverName.hasMatch(name)) {
         throw const _ClientGitRefused(
-            "git driver name contains '=' or a non-printable character; "
-            'refusing to run git.');
+            'git driver name is outside [A-Za-z0-9_.-]; refusing to run git.');
       }
       if (!seen.add('$section.$name')) continue;
       final prefix = '$section.$name.';
@@ -1752,17 +1780,6 @@ class LocalManager {
           '${_boundClientText(detail, _maxClientErrorChars)}');
     }
     return [...base, ..._clientGitDriverOverrides(probe.stdout)];
-  }
-
-  static int _clientRiskRank(String risk) {
-    switch (risk.trim()) {
-      case 'read_only':
-        return 0;
-      case 'write':
-        return 1;
-      default:
-        return 2;
-    }
   }
 
   /// Reports native desktop execution readiness (or unavailability on mobile).
@@ -1820,11 +1837,7 @@ class LocalManager {
     }
     final cleanTool = tool.trim().replaceFirst(RegExp(r'^/+'), '');
     // A declared risk can raise the local classification, never lower it.
-    final localRisk = clientToolRisk(cleanTool);
-    final effectiveRisk = risk.trim().isEmpty ||
-            _clientRiskRank(localRisk) >= _clientRiskRank(risk)
-        ? localRisk
-        : risk.trim();
+    final effectiveRisk = effectiveClientToolRisk(risk, cleanTool);
     if (!approved && !clientModeAllowsWithoutPrompt(mode, effectiveRisk)) {
       return ClientToolExecResult(
         ok: false,

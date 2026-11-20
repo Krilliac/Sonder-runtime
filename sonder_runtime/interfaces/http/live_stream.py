@@ -25,11 +25,7 @@ import time
 import uuid
 
 from sonder_runtime.application.chat import stream_sink
-
-try:
-    from sonder_runtime.application.chat import admission_wait_status as _wait_status
-except ImportError:  # sibling w2/inference-pool owns admission_wait_status.py
-    _wait_status = None  # type: ignore[assignment]
+from sonder_runtime.application.chat import admission_wait_status as wait_status
 
 _logger = logging.getLogger("sonder.serve")
 # The chat code gate verifies fenced code after generation; code is held
@@ -88,18 +84,12 @@ def wait_status_frame(line: str) -> bytes:
     return (": sonder-status" + (" " + text if text else "") + "\n\n").encode("utf-8")
 
 
-def arm_wait_status(handler, *, interval_seconds: float | None = None,
-                    clock=time.monotonic):
+def arm_wait_status(handler, *, interval_seconds: float = wait_status.DEFAULT_INTERVAL_SECONDS,
+                    clock=time.monotonic) -> wait_status.AdmissionWaitReporter | None:
     """A reporter that writes GPU-admission wait lines to ``handler``'s early SSE."""
-    if _wait_status is None:
-        return None
     early = getattr(handler, "_early_stream", None)
     if early is None or early.client_gone:
         return None
-    interval = (
-        _wait_status.DEFAULT_INTERVAL_SECONDS
-        if interval_seconds is None else interval_seconds
-    )
 
     def emit(line: str) -> None:
         frame = wait_status_frame(line)
@@ -114,18 +104,15 @@ def arm_wait_status(handler, *, interval_seconds: float | None = None,
             except (OSError, ValueError):
                 early.client_gone = True
 
-    return _wait_status.AdmissionWaitReporter(
-        emit, interval_seconds=interval, clock=clock)
+    return wait_status.AdmissionWaitReporter(
+        emit, interval_seconds=interval_seconds, clock=clock)
 
 
 @contextlib.contextmanager
 def armed_for(handler, chunk, *, hold_code: bool):
     """Arm a live stream for the enclosed turn when the response is early SSE."""
-    wait_ctx = (
-        _wait_status.armed(arm_wait_status(handler))
-        if _wait_status is not None else contextlib.nullcontext()
-    )
-    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live, wait_ctx:
+    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live, \
+            wait_status.armed(arm_wait_status(handler)):
         yield live
 
 
