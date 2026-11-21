@@ -221,8 +221,8 @@ marks or backticks, or a second worker count. This keeps a quoted or
 discussed count from starting a fleet. When a cue is ignored, the route
 header (and the console) prints a `note:` naming the word that disabled
 it; use `/master fleet <task>` to fan out explicitly.
-Statuses `queued → running → done | failed | cancelled | interrupted`, with
-`interrupted`/`failed`/`cancelled` re-dispatchable to `queued`. Claims use
+Statuses `queued → running → done | failed | task_drift | cancelled | interrupted`, with
+`interrupted`/`failed`/`task_drift`/`cancelled` re-dispatchable to `queued` (or marked `retried` after a successful replay). Claims use
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
 two `facts.` sticks) roughly double fleet throughput.
 

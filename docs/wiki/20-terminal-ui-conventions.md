@@ -239,7 +239,10 @@ versioned and additive-only. Interactive terminals ignore the flag.
 - A cancelled turn clears the per-turn handles: feedback, `/run`, and the
   latest-answer views no longer point at the previous answer. The
   activity feed records the turn as `cancelled`.
-- Ctrl-C (or Ctrl-D, or `/exit`) at the idle prompt ends the session.
+- Ctrl-D or `/exit` at the idle prompt ends the session immediately; on an
+  interactive terminal, the first Ctrl-C at the idle prompt prints
+  `(Ctrl-C again or /exit to quit)` and a second Ctrl-C within 2 s ends the
+  session (unattended/piped sessions exit on the first Ctrl-C).
 
 ## Observability surfaces (read-only)
 
