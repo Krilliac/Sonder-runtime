@@ -406,6 +406,9 @@ NATIVE_MCP_WORK = {
     # claim_check (bootstrap/claim_check_agent_tools.py) only reads files the
     # repository read guard allows and writes nothing.
     "claim_check": "safe",
+    # cloud_models_status (bootstrap/cloud_models_agent_tools.py) reads the
+    # cloud model refresh state files only; no network calls, no writes.
+    "cloud_models_status": "safe",
     "test_run_result": "safe",
     # C++ build tools (bootstrap/build_tools.py). The two readers of the
     # caller's own jobs and the model reader never write or launch;

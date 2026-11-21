@@ -26,11 +26,11 @@ class PreflightService:
             check_ollama=check_ollama,
             ollama_timeout=ollama_timeout,
         )
-        if not getattr(report, 'passed', True):
-            logger.error("preflight service startup checks did not pass, system may be degraded")
-            logger.warning("preflight service reports startup checks did not pass")
-        logger.info(f"preflight service completed, passed={getattr(report, 'passed', '?')}")
-        logger.debug(f"PreflightService.run: complete, passed={getattr(report, 'passed', '?')}")
+        ok = getattr(report, "ok", True)
+        if not ok:
+            logger.warning("preflight service reports required startup checks did not pass, system may be degraded")
+        logger.info(f"preflight service completed, ok={ok}")
+        logger.debug(f"PreflightService.run: complete, ok={ok}")
         return report
 
 
