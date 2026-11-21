@@ -111,14 +111,22 @@ class WorkerEffectHostLease:
                 except OSError:
                     live += 1
                     continue
-                # The owner is gone: the kernel released its lock.  Remove
-                # the stale lease while still holding it.
-                try:
-                    entry.unlink()
-                except OSError:
-                    pass
+                # The owner is gone: the kernel released its lock.  POSIX
+                # removes the stale lease while still holding it; Windows
+                # refuses to delete an open file, so the handle is closed
+                # first there.
+                if os.name != "nt":
+                    try:
+                        entry.unlink()
+                    except OSError:
+                        pass
+                    continue
             finally:
                 handle.close()
+            try:
+                entry.unlink()
+            except OSError:
+                pass
         return live
 
 
