@@ -190,10 +190,29 @@ def test_message_code_is_bound_at_every_surface(monkeypatch, surface, inspectabl
     assert ("refused" in output) is not inspectable
 
 
-def test_legacy_non_powershell_intent_is_unchanged():
-    from sonder_runtime.adapters.security.powershell_gate import run_intent
-    assert run_intent(lambda: "existing", lambda *a: pytest.fail("unexpected gate"),
-                      ["source"], lambda source: {"code": "print(1)", "language": "python"}) == "existing"
+def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkeypatch):
+    """A python "run it" is graded like ``/run``: same gate, argument-free digest."""
+    import sonder_runtime.interfaces.http.serve as serve
+
+    monkeypatch.setattr(serve, "_LEGACY_RUNTIME", server)
+    messages = [{"role": "assistant", "content": "```python\nprint(1)\n```"}]
+    seen = []
+
+    def decide(tool, **kwargs):
+        seen.append((tool, kwargs.get("arguments")))
+        return permission_modes.decide(
+            tool, mode=permission_modes.PLAN, interactive=False, record=False,
+            arguments=kwargs.get("arguments"), rule_lookup=lambda name: None,
+        )
+
+    monkeypatch.setattr(serve.permission_policy, "decide_for_caller", decide)
+    monkeypatch.setattr(serve.code_runner, "run_code", lambda *a, **k: pytest.fail("refused run executed"))
+    monkeypatch.setattr(serve.intents, "classify", lambda value: {"run": True})
+
+    output = serve._handle_intent("run it", messages=messages)
+
+    assert output.startswith("refused /run:")
+    assert seen and all(arguments is None for _tool, arguments in seen)
 
 
 # --- non-PowerShell calls keep origin/main's argument-free decisions --------
