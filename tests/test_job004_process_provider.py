@@ -347,6 +347,7 @@ def test_start_registers_process_identity_and_posix_group_for_cleanup():
     assert started.process_group_id == 77
     assert launch["kwargs"]["start_new_session"] is True
     assert launch["kwargs"]["encoding"] == "utf-8"
+    assert launch["kwargs"]["errors"] == "replace"
     assert launch["kwargs"]["env"]["SONDER_TEST"] == "1"
     assert launch["kwargs"]["cwd"] == str(Path("C:/workspace"))
 
@@ -1851,3 +1852,31 @@ def test_deadline_expiry_after_root_exit_forces_without_grace():
 
     assert token.graces, "deadline expiry never quiesced the owned containment"
     assert token.graces[0] == (True, 0.0), token.graces
+
+
+def test_non_utf8_child_output_is_replaced_and_the_reader_keeps_draining():
+    registry = DurableJobRegistry()
+    provider = SubprocessJobProvider(
+        registry,
+        process_cleanup=_Cleanup(complete=True),
+        platform_name=os.name,
+        memory_limiter=_MemoryLimiter(),
+    )
+    child = (
+        "import sys;"
+        "sys.stdout.buffer.write(b'bad \\xff\\xfe\\n' + b'after\\n');"
+        "sys.stdout.flush()"
+    )
+    request = ProcessJobRequest(
+        JobIdentity("job-bad-utf8", "process", "execute", "idem-bad-utf8"),
+        (sys.executable, "-c", child),
+        deadline_seconds=30,
+    )
+
+    provider.start(request)
+    finished = provider.wait(request.identity.job_id, timeout=10)
+
+    assert finished.exit_code == 0
+    assert finished.record.status is JobStatus.SUCCEEDED
+    page = registry.stream(request.identity.job_id)
+    assert [event.data for event in page.events] == ["bad \ufffd\ufffd\n", "after\n"]
