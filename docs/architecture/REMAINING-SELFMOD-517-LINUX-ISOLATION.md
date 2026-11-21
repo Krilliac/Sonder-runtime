@@ -636,7 +636,13 @@ passes there.
    still require qualification on Windows. The QLoRA partition now has a
    6 GiB process/8 GiB job budget; that implemented budget does not establish
    a passing current baseline within the 900-second per-gate cap. MSYS2 tests
-   remain unevaluated, and no confidential Windows oracle exists.
+   remain unevaluated, and no confidential Windows oracle exists. An opt-in
+   evaluator broker gate (`scripts/selfmod_evaluator_client.py`,
+   `scripts/selfmod_evaluator_broker.py`, see SELFMOD.md "Optional evaluator
+   broker") verifies an Ed25519 receipt from a separate scheduled-task
+   identity. It adds a gate only, and its reference broker fails closed until
+   a third candidate task under a distinct lower-privilege identity is
+   provisioned. Broker containment is therefore still unqualified.
 6. **Full-baseline run on Linux.** The nightly parent-scored gate now accepts
    the `linux-uid` attestation (see "Nightly production path"). A dry nightly
    cycle runs end to end under the supervisor against a small real checkout.

@@ -53,6 +53,14 @@ every credential available to the account. Give the account only the data and
 credentials needed for this job. A confidential independent oracle is not
 implemented on Windows.
 
+An optional evaluator broker can add a held-out gate run by a second,
+separately provisioned account through its own Scheduled Task. Its variables,
+ACLs and key placement are in [SELFMOD.md](../../SELFMOD.md) under "Optional
+evaluator broker (Windows)". Leave every `SONDER_SELFMOD_EVALUATOR_*` variable
+unset unless that deployment is complete: a partial configuration refuses
+every pass. The checked-in reference broker rejects every candidate until a
+third candidate task is provisioned.
+
 ## Fixed installation paths
 
 Use a short local checkout, for example `C:\Sonder`, with
