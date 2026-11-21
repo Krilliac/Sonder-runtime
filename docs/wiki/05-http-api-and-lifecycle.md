@@ -310,6 +310,17 @@ carries it as data, in `sonder_receipt.refusal`:
     {"kind": "console", "detail": "run it from the console and answer the prompt"} ] }
 ```
 
+Under `local-open` (below) neither HTTP grant works for the caller, so the
+receipt does not offer them: `approve_once` carries no `method`/`path`, only
+`console`, plus `"http_available": false` and `"http_refusal":
+"APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"`; a `switch_mode` to a mode that
+would raise the current one carries `console` (`/mode <mode>`),
+`"http_available": false` and `"http_refusal":
+"PERMISSION_MODE_ESCALATION_REFUSED"` (a mode change that is not a raise
+keeps the plain form); and a last `{"kind": "authenticate", "detail": ...}`
+names the restart (`SONDER_API_KEY`, or `SONDER_REQUIRE_ACCOUNT=1` with an
+administrator account token) that restores both.
+
 The text is unchanged. `/write`, `/append` and `/edit` typed in chat name
 their call the same way the catalogued `/file_write path=… content=… mode=…`
 spelling does, so either spelling is approved by the same id. When a turn
@@ -324,7 +335,12 @@ including `api-key` with no key on a loopback bind) no credential stands
 behind the POST, so it refuses to approve with
 `403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN`, whatever account token is sent;
 approve at the console with `/approve <call_id>` instead. Listing and
-revoking stay allowed there. The person holding the credential approves one
+revoking stay allowed there. `POST /v1/permission-mode` holds such a caller
+to lowering the mode the same way: a raise above both the current mode and
+`manual` answers `403 PERMISSION_MODE_ESCALATION_REFUSED`, with `mode` (the
+mode still in force) beside the error; run `/mode <mode>` at the console
+instead. Lowering the mode, or returning from `plan` to `manual`, stays
+allowed. The person holding the credential approves one
 exact call:
 
 - only a call that was refused and is still pending can be approved; there is
@@ -343,7 +359,9 @@ exact call:
   direct-tool path as `permission_approve`.
 
 Errors: `401` without credentials, `403 FORBIDDEN` for an ordinary account,
-`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN` for an approval under `local-open`,
+`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN` for an approval under `local-open`
+(and `403 PERMISSION_MODE_ESCALATION_REFUSED` from `POST /v1/permission-mode`
+for a mode raise under `local-open`),
 `400 INVALID_CALL_ID` / `INVALID_TTL` / `INVALID_REQUEST`,
 `404 CALL_NOT_PENDING` (already approved and run, aged out, or never refused),
 `404 APPROVAL_NOT_OPEN` on revoke, and `503 APPROVALS_UNAVAILABLE`.

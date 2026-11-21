@@ -814,6 +814,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } on SonderException catch (error) {
       if (error.code == ApprovalsApi.unavailableCode) {
         outcome = _consoleApproval(id);
+      } else if (localOpenRefusalCodes.contains(error.code)) {
+        // A local-open server refuses the approval whoever is signed in, so
+        // the account advice below would be wrong: show the server's words.
+        outcome = ActionOutcome.failed('The approval was not recorded',
+            detail: error.message);
       } else if (const {401, 403}.contains(error.httpStatus)) {
         outcome = const ActionOutcome(
             StatusKind.warn, SonderStrings.approvalsNeedRole);

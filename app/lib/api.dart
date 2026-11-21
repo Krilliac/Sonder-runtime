@@ -33,6 +33,7 @@ export 'api/transport.dart'
         SonderEndpoint,
         CleartextKeyPolicy,
         describeServerError,
+        localOpenRefusalCodes,
         responseException,
         isPreRequestConnectFailure,
         newIdempotencyKey;
@@ -1372,11 +1373,16 @@ class SonderApi implements SonderApiPort {
   /// the server reports afterwards, so the UI shows what actually took effect
   /// rather than what was requested.
   ///
-  /// The server treats this authenticated POST as the attended confirmation
-  /// for raising the mode, so callers must confirm a raise with the person
-  /// first (plan P0-4). Each call carries a fresh `Idempotency-Key`: a
-  /// retried network send cannot switch twice. A 403 becomes "Only an
-  /// administrator can change the permission mode." (code `FORBIDDEN`).
+  /// The server treats this POST, sent with an API key or administrator
+  /// account, as the attended confirmation for raising the mode, so callers
+  /// must confirm a raise with the person first (plan P0-4). A local-open
+  /// server (no API key, no account requirement) refuses any raise with a
+  /// 403 `PERMISSION_MODE_ESCALATION_REFUSED`, whoever is signed in; that
+  /// exception keeps the server's message, which names the console command
+  /// and the restart that lifts it, and an empty remedy. Lowering the mode
+  /// still works there. Any other 403 becomes "Only an administrator can
+  /// change the permission mode." Each call carries a fresh
+  /// `Idempotency-Key`: a retried network send cannot switch twice.
   @override
   Future<PermissionMode> setPermissionMode(String mode,
       {String? idempotencyKey}) async {

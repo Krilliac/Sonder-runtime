@@ -263,6 +263,17 @@ SonderException responseException(http.BaseResponse response, String fallback,
   );
 }
 
+/// The 403 codes a local-open server answers when it refuses to approve a
+/// call or to raise the permission mode. No account or role lifts either one
+/// (the server itself must be restarted with an API key or an account
+/// requirement, or the person acts at its console), and the server's message
+/// says exactly that, so these are shown verbatim and never reworded as a
+/// missing role.
+const localOpenRefusalCodes = {
+  'APPROVAL_REQUIRES_AUTHENTICATED_ADMIN',
+  'PERMISSION_MODE_ESCALATION_REFUSED',
+};
+
 /// The person-facing explanation for [error] from the server at [server].
 ///
 /// Returns a copy whose [SonderException.message] and
@@ -312,6 +323,7 @@ SonderException describeServerError(SonderException error, Uri server,
       remedy: 'Enter the bootstrap secret shown by the server on first run.',
     );
   }
+  if (localOpenRefusalCodes.contains(code)) return error;
   if (code == 'FORBIDDEN' || status == 403) {
     final lower = error.message.toLowerCase();
     if (lower.contains('work run')) {

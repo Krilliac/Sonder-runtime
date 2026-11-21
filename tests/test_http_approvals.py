@@ -96,6 +96,106 @@ def test_refusal_receipt_names_the_call_and_every_route_out(ledger):
     assert "hello" not in json.dumps(receipt)
 
 
+def test_local_open_refusal_receipt_offers_no_http_grant(ledger):
+    """Neither the approve POST nor a mode raise works without a credential."""
+    from sonder_runtime.interfaces.http.facades import approval_routes, permission_mode_post
+    from sonder_runtime.interfaces.http.facades.local_open_authority import (
+        AUTHENTICATED_ADMIN_REMEDY)
+
+    decision = _refuse_write(ledger)
+    receipt = facade.refusal_receipt(
+        decision, mode_label="manual", modes_allowing=["acceptEdits", "auto"],
+        credential_less=True, raises=["acceptEdits", "auto"])
+    call = decision.call_id
+    assert receipt["call_id"] == call
+    assert receipt["remedies"] == [
+        {"kind": "approve_once", "call_id": call, "console": "/approve %s" % call,
+         "http_available": False, "http_refusal": approval_routes.GRANT_REFUSED_CODE},
+        {"kind": "switch_mode", "modes": ["acceptEdits", "auto"],
+         "console": "/mode acceptEdits", "http_available": False,
+         "http_refusal": permission_mode_post.ESCALATION_CODE},
+        {"kind": "allow_rule", "console": "/permissions"},
+        {"kind": "console", "detail": "run it from the console and answer the prompt"},
+        {"kind": "authenticate", "detail": AUTHENTICATED_ADMIN_REMEDY},
+    ]
+    # No remedy points at a route that would answer 403.
+    assert "/v1/approvals" not in json.dumps(receipt["remedies"])
+    assert not any("method" in item or "path" in item for item in receipt["remedies"])
+
+
+def test_local_open_refusal_receipt_keeps_a_mode_change_that_is_not_a_raise(ledger):
+    decision = _refuse_write(ledger)
+    receipt = facade.refusal_receipt(
+        decision, modes_allowing=["acceptEdits", "auto"],
+        credential_less=True, raises=["auto"])
+    switches = [item for item in receipt["remedies"] if item["kind"] == "switch_mode"]
+    assert switches == [
+        {"kind": "switch_mode", "modes": ["acceptEdits"]},
+        {"kind": "switch_mode", "modes": ["auto"], "console": "/mode auto",
+         "http_available": False, "http_refusal": "PERMISSION_MODE_ESCALATION_REFUSED"},
+    ]
+
+
+def test_turn_receipt_counts_only_a_real_raise_as_refused(monkeypatch):
+    """The ``raises`` the turn receipt computes match the POST's own rule."""
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    def raising(current, modes):
+        return facade.modes_raising_from(permission_policy, current, modes)
+
+    assert raising(pm.MANUAL, [pm.ACCEPT_EDITS, pm.AUTO]) == [pm.ACCEPT_EDITS, pm.AUTO]
+    assert raising(pm.AUTO, [pm.ACCEPT_EDITS]) == []
+    assert raising(pm.PLAN, [pm.MANUAL, pm.AUTO]) == [pm.AUTO]
+
+    def broken(current, target):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(pm, "is_unattended_escalation", broken)
+    # Fails closed: when the policy cannot say, every mode is a raise.
+    assert raising(pm.AUTO, [pm.ACCEPT_EDITS]) == [pm.ACCEPT_EDITS]
+
+
+def test_chat_refusal_receipt_follows_the_auth_mode(ledger, monkeypatch):
+    """Over the wire: local-open marks the grants unavailable; an API key keeps them."""
+    monkeypatch.setattr(server, "file_write", lambda **kwargs: "wrote it")
+    _local_open(monkeypatch)
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/write notes.txt hello")
+        assert status == 200, reply
+        refusal = reply["sonder_receipt"]["refusal"]
+    by_kind = {}
+    for item in refusal["remedies"]:
+        by_kind.setdefault(item["kind"], []).append(item)
+    (approve,) = by_kind["approve_once"]
+    assert approve == {
+        "kind": "approve_once", "call_id": refusal["call_id"],
+        "console": "/approve %s" % refusal["call_id"],
+        "http_available": False, "http_refusal": GRANT_REFUSED}
+    # From manual every mode that allows a file change is a raise.
+    assert by_kind["switch_mode"] == [
+        {"kind": "switch_mode", "modes": [pm.ACCEPT_EDITS, pm.AUTO],
+         "console": "/mode %s" % pm.ACCEPT_EDITS, "http_available": False,
+         "http_refusal": "PERMISSION_MODE_ESCALATION_REFUSED"}]
+    (authenticate,) = by_kind["authenticate"]
+    assert "SONDER_API_KEY" in authenticate["detail"]
+    assert "SONDER_REQUIRE_ACCOUNT=1" in authenticate["detail"]
+
+    _serve_with_accounts(monkeypatch, mode="api-key")
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/write notes.txt hello",
+                              {"Authorization": "Bearer " + API_KEY})
+        assert status == 200, reply
+        refusal = reply["sonder_receipt"]["refusal"]
+    assert refusal["remedies"][:2] == [
+        {"kind": "approve_once", "call_id": refusal["call_id"], "method": "POST",
+         "path": "/v1/approvals/%s" % refusal["call_id"],
+         "console": "/approve %s" % refusal["call_id"]},
+        {"kind": "switch_mode", "modes": [pm.ACCEPT_EDITS, pm.AUTO]},
+    ]
+    assert [item["kind"] for item in refusal["remedies"]] == [
+        "approve_once", "switch_mode", "allow_rule", "console"]
+
+
 def test_refusal_receipt_ignores_decisions_that_name_no_call(ledger):
     allowed = pm.decide("file_read", interactive=False, surface="http")
     unnamed = pm.decide("file_write", interactive=False, surface="http")
