@@ -20,6 +20,27 @@ _NETWORK_REFUSAL_TOOLS = frozenset({
 })
 
 
+def _require_read(path, args, context: OperationContext) -> None:
+    """Apply the secret/control-plane read guard ``file_read`` enforces.
+
+    For the point-read tools whose primitives only resolve the path
+    (``image_inspect``, ``artifact_risk_inspect``, ``verify_artifact``,
+    ``archive_extract``): their hash, size, header or verdict is a read of
+    the file, so a credential store is refused whatever the token and a
+    protected path without developer authorization, exactly as the
+    ``image_inspect`` server handler does before it calls the primitive.
+    Only the knobs the call carries are honored; developer authorization is
+    the scope's auth level.
+    """
+    import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
+    file_ops.require_read_access(
+        str(path), extra_roots=args.get("extra_roots", ""),
+        bypass=bool(args.get("bypass", False)),
+        developer_authorized=context.auth_level in ("developer", "admin"),
+    )
+
+
 class ToolExecutorAdapter:
     """Execute the supported application tools through packaged guards."""
 
@@ -55,6 +76,7 @@ class ToolExecutorAdapter:
             if call.tool == "image_inspect":
                 import sonder_runtime.adapters.filesystem.workbench as workbench
 
+                _require_read(args["path"], args, context)
                 res = workbench.image_inspect(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
@@ -73,6 +95,7 @@ class ToolExecutorAdapter:
             if call.tool == "artifact_risk_inspect":
                 import sonder_runtime.adapters.artifact_risk as artifact_risk
 
+                _require_read(args["path"], args, context)
                 res = artifact_risk.inspect_artifact(**args)
                 return ToolResult(
                     ok=True,
@@ -107,6 +130,7 @@ class ToolExecutorAdapter:
                 archive_args = dict(args)
                 archive_args["source_path"] = archive_args.pop("source")
                 archive_args["destination_path"] = archive_args.pop("destination")
+                _require_read(archive_args["source_path"], archive_args, context)
                 res = archive_tools.extract_archive(
                     **archive_args,
                     developer_authorized=context.auth_level in ("developer", "admin"),
@@ -168,6 +192,7 @@ class ToolExecutorAdapter:
                     res = artifact_fetch.fetch_artifact(**args)
                     output = artifact_fetch.format_fetch_result(res)
                 else:
+                    _require_read(args["path"], args, context)
                     res = artifact_fetch.verify_artifact(**args)
                     output = artifact_fetch.format_verify_result(res)
                 return ToolResult(
