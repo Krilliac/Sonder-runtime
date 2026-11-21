@@ -12,6 +12,7 @@ from ..application.ports.delegated_verification import (
     VerificationVerdict,
 )
 from ..application.ports.lane_continuation import (
+    ApprovalOutcomeUnknown,
     PendingVerificationIdentity,
     PreparedReattachment,
     ProjectionBinding,
@@ -123,7 +124,11 @@ class ManagedStandaloneRecovery:
     def _approve(self, prepared, context):
         self._check()
         result = self._attachment_gate(prepared, context)
-        self._check()
+        try:
+            self._check()
+        except PermissionError as error:
+            # A grant was already returned, so the approval may be spent.
+            raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN") from error
         return result
 
     def execute(self, prepared):

@@ -1553,6 +1553,53 @@ def test_active_lane_count_covers_history_beyond_first_page(env):
         )) == 0
 
 
+def _seed_history_then(env, later_rows):
+    """Insert 1000 archived rows, then later_rows [(status, root_id)]."""
+    _, store, _, _, context, root = env
+    with store.transaction() as tx:
+        root_id = tx.root("parent", context.principal_id)
+        for index in range(1000):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) VALUES(?,?,?,?)",
+                (f"old-{index}", context.principal_id, "parent",
+                 json.dumps({"status": "archived", "root_id": root_id, "owner": ""})),
+            )
+        for index, (status, row_root) in enumerate(later_rows):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) VALUES(?,?,?,?)",
+                (f"new-{index}", context.principal_id, "parent",
+                 json.dumps({"id": f"new-{index}", "status": status, "owner": "",
+                             "root_id": root_id if row_root is None else row_root,
+                             "workspace_root": str(root / f"elsewhere-{index}")})),
+            )
+        page = tx.lanes(context.principal_id, limit=1000)
+        assert len(page) == 1000
+        assert all(row["status"] == "archived" for _, row in page)
+
+
+def test_spawn_root_retained_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("completed", None)] * 8)
+    with pytest.raises(ValueError, match="lane fanout or retained lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_principal_queued_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("queued", f"root-{i}") for i in range(8)])
+    with pytest.raises(ValueError, match="principal queued lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_principal_retained_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("completed", f"root-{i}") for i in range(256)])
+    with pytest.raises(ValueError, match="lane fanout or retained lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_admission_ignores_archived_history_below_caps(env):
+    _seed_history_then(env, [("completed", None)] * 2)
+    assert spawn(env)["lane"]["id"]
+
+
 def test_capacity_admission_refusal_does_not_fail_another_committed_event(env):
     service, _, sessions, _, context, _ = env
     lane = spawn(env)["lane"]["id"]
@@ -1783,3 +1830,304 @@ def test_live_request_with_production_default_compaction_bound_recovers_long_his
     history = service._history(lane)
     assert any("Accepted decision: keep the earliest rule." in str(item.get("content"))
                for item in history)
+
+
+# --- SWX-047 / TL08: oversized tool results and long reports stay lossless ---
+
+
+def _scoped_read_tool(service, output, *, success=True, error_code=""):
+    from sonder_runtime.application.ports.tool_execution import ToolExecutionResult
+    from sonder_runtime.application.ports.tool_registry import (
+        InMemoryToolRegistry,
+        ToolDescriptor,
+    )
+    from sonder_runtime.application.tools.facade import ToolApplicationFacade
+    from sonder_runtime.application.tools.resource_policy import (
+        Decision,
+        PolicyRule,
+        ResourcePolicy,
+    )
+
+    calls = []
+
+    class Executor:
+        def execute(self, descriptor, call, ctx, execution_class):
+            calls.append(call)
+            return ToolExecutionResult(
+                tool_name=descriptor.name, success=success, output=output,
+                error_code=error_code,
+            )
+
+    descriptor = ToolDescriptor(
+        "read_file",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    )
+    service.tools = ToolApplicationFacade.compose(
+        InMemoryToolRegistry([descriptor]),
+        Executor(),
+        policy=ResourcePolicy([PolicyRule("allow", Decision.ALLOW, tool="read_file")]),
+    )
+    return calls
+
+
+def _spawn_sibling(env):
+    service, _, _, _, context, root = env
+    (root / "sibling").mkdir()
+    return service.spawn(
+        command_id="spawn-sibling",
+        parent_session_id="parent",
+        task="inspect parser",
+        workspace_root=str(root / "sibling"),
+        context=context,
+    )["lane"]["id"]
+
+
+def _drive_replies(model, replies):
+    replies = iter(replies)
+
+    def generate(request, ctx):
+        model.requests.append((request, ctx))
+        return ModelResponse(next(replies), "fake", "code", tokens_out=10)
+
+    model.generate = generate
+
+
+def _tool_results(service, lane_id):
+    events, _ = service.store.events(lane_id, 0, 500)
+    return [event for event in events if event["event_type"] == "tool.result"]
+
+
+def _canonical_bytes(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _canonical_sha(value):
+    import hashlib
+
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "x" * 3_000_000,
+        "é" * 40_000,
+        "\U0001F600" * 20_000,
+    ],
+    ids=["multi-megabyte", "two-byte-boundary", "four-byte-boundary"],
+)
+def test_oversized_tool_result_commits_receipt_and_archives_full_output(env, output):
+    service, store, sessions, model, context, _ = env
+    calls = _scoped_read_tool(service, output)
+    lane_id = spawn(env)["lane"]["id"]
+    _drive_replies(model, ['{"tool":"read_file","arguments":{"path":"big.txt"}}', "Done"])
+
+    service.run_pending(lane_id, context)
+
+    assert len(calls) == 1
+    lane = service.store.read_lane(lane_id)
+    assert lane["pending_effect"] is False
+    assert lane["status"] == "completed"
+    assert lane.get("error") != "LANE_ATTEMPT_FAILED"
+    results = _tool_results(service, lane_id)
+    assert len(results) == 1
+    payload = results[0]["payload"]
+    assert payload["success"] is True
+    assert payload["output_truncated"] is True
+    envelope = payload["output"]
+    full = _canonical_bytes(output)
+    assert envelope["truncated"] is True
+    assert envelope["original_bytes"] == len(full)
+    assert envelope["digest"] == _canonical_sha(output)
+    assert envelope["media_type"] == "application/json"
+    assert envelope["archive_status"] == "stored"
+    assert envelope["scope"] == {"lane_id": lane_id, "project_id": lane["workspace_root"]}
+    preview = envelope["preview"].encode("utf-8")
+    assert 0 < len(preview) <= 16 * 1024
+    assert full.startswith(preview)
+    # The cut never splits a code point: the next byte starts a new one.
+    assert full[len(preview)] & 0xC0 != 0x80
+    # The next model turn saw the bounded envelope, not a failed attempt.
+    assert envelope["archive_id"] in str(model.requests[1][0].history)
+
+    recovered = service.retrieve_archived_tool(lane_id, envelope["archive_id"], context)
+    assert recovered["payload"] == output
+    assert _canonical_sha(recovered["payload"]) == envelope["digest"]
+    assert recovered["digest"] == envelope["digest"]
+
+    # Restart recovery: a fresh store and service over the same database.
+    reopened = AgentLaneService(
+        SQLiteAgentLaneStore(store.path, sessions), sessions, model, auto_start=False,
+    )
+    again = reopened.retrieve_archived_tool(lane_id, envelope["archive_id"], context)
+    assert again["payload"] == output
+
+    # The stored envelope is pointed at, never archived a second time.
+    history = service._history(service.store.read_lane(lane_id))
+    assert any(envelope["archive_id"] in str(item.get("content")) for item in history)
+    assert not any(
+        event.payload.get("source_kind") == "agent_lane"
+        for event in sessions.search(
+            session_id=lane["session_id"], event_type="context.archive.created", limit=20,
+        )
+    )
+
+
+def test_empty_tool_output_stays_inline_without_envelope(env):
+    service, _, _, model, context, _ = env
+    calls = _scoped_read_tool(service, "")
+    lane_id = spawn(env)["lane"]["id"]
+    _drive_replies(model, ['{"tool":"read_file","arguments":{"path":"empty.txt"}}', "Done"])
+
+    service.run_pending(lane_id, context)
+
+    assert len(calls) == 1
+    payload = _tool_results(service, lane_id)[0]["payload"]
+    assert payload["output"] == ""
+    assert "output_truncated" not in payload
+    assert service.store.read_lane(lane_id)["status"] == "completed"
+
+
+def test_failed_tool_with_large_diagnostic_keeps_failure_and_full_output(env):
+    service, _, _, model, context, _ = env
+    diagnostic = "stack frame detail " * 11_000
+    calls = _scoped_read_tool(
+        service, diagnostic, success=False, error_code="TOOL_EXECUTION_FAILED",
+    )
+    lane_id = spawn(env)["lane"]["id"]
+    _drive_replies(model, ['{"tool":"read_file","arguments":{"path":"big.txt"}}', "Done"])
+
+    service.run_pending(lane_id, context)
+
+    assert len(calls) == 1
+    payload = _tool_results(service, lane_id)[0]["payload"]
+    assert payload["success"] is False
+    assert payload["error_code"]
+    assert payload["output_truncated"] is True
+    envelope = payload["output"]
+    assert envelope["archive_status"] == "stored"
+    recovered = service.retrieve_archived_tool(lane_id, envelope["archive_id"], context)
+    assert _canonical_sha(recovered["payload"]) == envelope["digest"]
+    assert diagnostic in json.dumps(recovered["payload"])
+    lane = service.store.read_lane(lane_id)
+    assert lane["pending_effect"] is False
+    assert lane["status"] == "completed"
+
+
+def test_oversized_result_delivery_retry_does_not_reexecute_tool(env, monkeypatch):
+    from sonder_runtime.adapters.persistence.agent_lanes import LaneTransaction
+
+    service, _, _, model, context, _ = env
+    output = "y" * 200_000
+    calls = _scoped_read_tool(service, output)
+    lane_id = spawn(env)["lane"]["id"]
+    _drive_replies(model, ['{"tool":"read_file","arguments":{"path":"big.txt"}}', "Done"])
+    failures = []
+    original = LaneTransaction.store_artifact
+
+    def fail_once(self, *args, **kwargs):
+        if not failures:
+            failures.append(args)
+            raise OSError("artifact store unavailable")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LaneTransaction, "store_artifact", fail_once)
+
+    service.run_pending(lane_id, context)
+
+    assert failures, "the artifact write was not attempted"
+    assert len(calls) == 1
+    results = _tool_results(service, lane_id)
+    assert len(results) == 1
+    envelope = results[0]["payload"]["output"]
+    assert envelope["archive_status"] == "unavailable"
+    assert "archive_id" not in envelope
+    assert envelope["digest"] == _canonical_sha(output)
+    lane = service.store.read_lane(lane_id)
+    assert lane["pending_effect"] is False
+    assert lane["status"] == "completed"
+
+
+def test_lane_artifact_rejects_foreign_lane_and_changed_scope(env):
+    from sonder_runtime.domain.common.errors import IntegrityFailure
+
+    service, store, _, model, context, _ = env
+    _scoped_read_tool(service, "z" * 100_000)
+    lane_id = spawn(env)["lane"]["id"]
+    other_id = _spawn_sibling(env)
+    _drive_replies(model, ['{"tool":"read_file","arguments":{"path":"big.txt"}}', "Done"])
+    service.run_pending(lane_id, context)
+    archive_id = _tool_results(service, lane_id)[0]["payload"]["output"]["archive_id"]
+
+    with pytest.raises(ValueError, match="unavailable"):
+        service.retrieve_archived_tool(other_id, archive_id, context)
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE agent_lane_artifacts SET project_scope=? WHERE artifact_id=?",
+            ("/other/project", archive_id),
+        )
+    with pytest.raises(ValueError, match="unavailable"):
+        service.retrieve_archived_tool(lane_id, archive_id, context)
+
+    lane = service.store.read_lane(lane_id)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE agent_lane_artifacts SET project_scope=?, payload=? WHERE artifact_id=?",
+            (lane["workspace_root"], b'"tampered"', archive_id),
+        )
+    with pytest.raises(IntegrityFailure):
+        service.retrieve_archived_tool(lane_id, archive_id, context)
+
+
+def test_final_report_over_8000_chars_is_labelled_and_full_report_retrievable(env):
+    import hashlib
+
+    service, _, _, model, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    other_id = _spawn_sibling(env)
+    full_text = ("report line é " * 1_500)[:20_000]
+    _drive_replies(model, [full_text])
+
+    service.run_pending(lane_id, context)
+
+    report = next(
+        item for item in service.reports("parent", context)["reports"]
+        if item["lane_id"] == lane_id
+    )
+    summary = report["summary"]
+    assert len(summary) <= 8000
+    assert summary.startswith("[report truncated: ")
+    ref = report["report_ref"]
+    assert ref["truncated"] is True
+    assert ref["original_chars"] == 20_000
+    assert ref["lane_id"] == lane_id
+    assert ref["archive_id"] in summary
+    assert f"of {len(full_text)} chars" in summary
+    _, preview = summary.split("\n", 1)
+    assert full_text.startswith(preview)
+    assert len(preview) == ref["preview_chars"]
+    recovered = service.retrieve_archived_tool(lane_id, ref["archive_id"], context)
+    assert recovered["payload"] == full_text
+    assert hashlib.sha256(full_text.encode("utf-8")).hexdigest() == ref["digest"]
+    assert recovered["digest"] == ref["digest"]
+    with pytest.raises(ValueError, match="unavailable"):
+        service.retrieve_archived_tool(other_id, ref["archive_id"], context)
+
+
+def test_short_final_report_is_unchanged_without_reference(env):
+    service, _, _, model, context, _ = env
+    lane_id = spawn(env)["lane"]["id"]
+    _drive_replies(model, ["Short report"])
+
+    service.run_pending(lane_id, context)
+
+    report = service.reports("parent", context)["reports"][0]
+    assert report["summary"] == "Short report"
+    assert "report_ref" not in report
