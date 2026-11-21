@@ -1,7 +1,9 @@
 """The only writer of the eval: ``items.jsonl``, ``report.json`` and ``summary.md`` under one directory.
 
-The directory is named by the caller. It must be absolute, must not be (or sit below) a symlink or
-junction, must not lie inside a repo root, and none of the three files may be the dataset. Nothing
+The directory is named by the caller. It must be absolute, must not be a UNC, network or device
+spelling (refused lexically, before any filesystem call could open an SMB connection), must not be
+(or sit below) a symlink or junction, must not lie inside a repo root (compared both as written and
+with links and 8.3 short names resolved), and none of the three files may be the dataset. Nothing
 else is ever created: the atomic writes use a temp file that is removed in all cases.
 """
 from __future__ import annotations
@@ -11,6 +13,8 @@ import os
 import stat
 import uuid
 from typing import Any, Sequence
+
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 from ...domain.security_eval.errors import OutputDirRefused
 from ..filesystem.atomic_json import write_json_atomic
@@ -33,6 +37,27 @@ def _inside(child: str, parent: str) -> bool:
         return False
 
 
+def _real(path: str) -> str | None:
+    """``path`` with links and 8.3 short names resolved, or ``None`` for a network spelling.
+
+    Never resolves a UNC/device spelling: that would open an SMB connection."""
+    try:
+        local = file_ops._reject_network_path(path)
+        return os.path.normcase(os.path.realpath(os.path.abspath(local)))
+    except (OSError, ValueError):  # PermissionError is an OSError
+        return None
+
+
+def _inside_resolved(real_child: str | None, parent: str) -> bool:
+    real_parent = _real(parent)
+    if real_child is None or real_parent is None:
+        return False
+    try:
+        return os.path.commonpath([real_child, real_parent]) == real_parent
+    except ValueError:
+        return False
+
+
 def _is_link(path: str) -> bool:
     try:
         info = os.lstat(path)
@@ -48,11 +73,16 @@ class OutputStore:
                  dataset_path: str | None = None) -> None:
         if not isinstance(out_dir, str) or not out_dir.strip() or "\x00" in out_dir:
             raise OutputDirRefused("out_dir is required")
+        try:
+            out_dir = file_ops._reject_network_path(out_dir)
+        except PermissionError:
+            raise OutputDirRefused("out_dir may not be a UNC, network or device path") from None
         if not os.path.isabs(out_dir):
             raise OutputDirRefused("out_dir must be an absolute path")
         target = os.path.abspath(out_dir)
+        real_target = _real(target)
         for root in protected_roots:
-            if root and _inside(target, root):
+            if root and (_inside(target, root) or _inside_resolved(real_target, root)):
                 raise OutputDirRefused("out_dir may not lie inside a repo root")
         if os.path.lexists(target) and not os.path.isdir(target):
             raise OutputDirRefused("out_dir exists and is not a directory")
