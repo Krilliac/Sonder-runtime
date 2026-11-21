@@ -139,10 +139,17 @@ if [ ! -f /etc/sonder/sonder.env ]; then
 SONDER_API_KEY=$KEY
 SONDER_AUTH_SECRET=$AUTH
 EOF
-  chmod 0600 /etc/sonder/sonder.env
   unset KEY AUTH
-  echo "generated secrets in /etc/sonder/sonder.env (mode 0600; keys are not printed)"
+  echo "generated secrets in /etc/sonder/sonder.env (keys are not printed)"
 fi
+# Owner sonder, mode 0600: the configuration loader refuses a secrets file
+# with any group/world access, so the mode must stay 0600.  systemd reads
+# EnvironmentFile as root regardless of owner, while the documented
+# `sudo -u sonder ... --secrets` commands (and the preflight below) need to
+# own it.  Applied on every run so an existing root:root file from an older
+# install is repaired too.
+chown sonder:sonder /etc/sonder/sonder.env
+chmod 0600 /etc/sonder/sonder.env
 
 # 4. Hardened service units and timers.
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder.service" /etc/systemd/system/
