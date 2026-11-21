@@ -238,3 +238,40 @@ def test_subclass_gateways_do_not_inherit_the_openai_env_probe(monkeypatch):
     monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://remote-inference.example.com")
     assert OpenRouterGateway().endpoint_is_loopback() is False
     assert SonderInferenceGateway().endpoint_is_loopback() is False
+
+
+_HOSTILE_URLS = [
+    "http://0.0.0.0:8080",
+    "ftp://127.0.0.1:8080",
+    "file://localhost/x",
+    "http://user:pass@127.0.0.1:8080",
+    "http://@127.0.0.1",
+    "//127.0.0.1:8080",
+]
+
+
+@pytest.mark.parametrize("url", _HOSTILE_URLS)
+def test_graph_none_probe_rejects_unusable_loopback_urls(monkeypatch, url):
+    monkeypatch.setenv("SONDER_OPENAI_BASE_URL", url)
+    assert legacy_chat_bridge.endpoint_is_loopback("openai_compatible", None) is False
+    assert provider_bridge.is_hosted("openai_compatible") is True
+
+
+@pytest.mark.parametrize("url", _HOSTILE_URLS)
+def test_consent_gate_agrees_with_the_hostedness_probe(url):
+    from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
+
+    assert OpenAICompatibleGateway._is_loopback(url) is False
+
+
+def test_probe_is_false_when_graph_does_not_bind_the_provider():
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
+    from sonder_runtime.adapters.provider_bindings import ProviderBindings
+
+    inf = SonderInferenceGateway(
+        env={"SONDER_INFERENCE_BASE_URL": "http://127.0.0.1:9"},
+        request_admission=HostModelRequestAdmission(None),
+    )
+    graph = SimpleNamespace(
+        model_gateway=inf, provider_bindings=ProviderBindings.uniform("sonder_inference"))
+    assert legacy_chat_bridge.endpoint_is_loopback("openai_compatible", graph) is False
