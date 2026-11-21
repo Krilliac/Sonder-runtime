@@ -1013,7 +1013,7 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
     (workspace / "reflection.py").write_text(
         "def selected(value):\n    return value\n", encoding="utf-8",
     )
-    cancelled, discarded = [], []
+    cancelled, discarded, plans = [], [], []
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     monkeypatch.setattr(
         nightly_selfmod.selfmod, "settings",
@@ -1029,7 +1029,7 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         nightly_selfmod.selfmod, "create_plan",
-        lambda *_args, **_kwargs: {"id": "run-rewrite-error"},
+        lambda *_args, **kwargs: plans.append(kwargs) or {"id": "run-rewrite-error"},
     )
     monkeypatch.setattr(nightly_selfmod.selfmod, "create_backup", lambda _run_id: None)
     monkeypatch.setattr(nightly_selfmod.selfmod, "verify_backup", lambda _run_id: None)
@@ -1055,6 +1055,8 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
 
     assert result == "candidate rejected: rewrite request failed (RuntimeError)"
     assert cancelled == discarded == ["run-rewrite-error"]
+    # The loop tags its own runs so reclaim_orphans() never claims others.
+    assert [plan.get("created_by") for plan in plans] == [nightly_selfmod.LOOP_CREATOR]
     assert not workspace.exists()
 
 

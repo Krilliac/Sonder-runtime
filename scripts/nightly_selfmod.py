@@ -111,6 +111,10 @@ from scripts import selfmod_oracle
 from sonder_runtime.application.selfmod import independent_oracle
 from sonder_runtime.application.selfmod.candidate_isolation import accepted_probe_attestation
 
+# Recorded as selfmod_runs.created_by on every run this loop creates;
+# reclaim_orphans() touches only runs carrying it.
+LOOP_CREATOR = "nightly-selfmod-loop"
+
 _HELD_OUT_MAX_FILES = 2048
 _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
 # This suite is the medium-integrity supervisor's own boundary test. Running
@@ -1194,9 +1198,12 @@ def reclaim_orphans(log) -> int:
     editing/testing, its ~100 MB worktree, and its branch behind forever,
     invisible to both cleanup paths and inflating the 'active' count.
 
-    Called once at loop start: any active-phase run with no owner predates this
-    process and cannot belong to a live loop (only one runs at a time), so it
-    is safe to cancel and discard.
+    Called once at loop start: an active-phase run with no owner that this
+    loop created (created_by == LOOP_CREATOR) predates this process and cannot
+    belong to a live loop (only one runs at a time), so it is safe to cancel
+    and discard. A NULL owner alone proves nothing: an operator-driven run
+    holds owner_id only while a stage executes, so a run without the loop's
+    tag is never reclaimed here.
     """
     reclaimed = 0
     try:
@@ -1207,6 +1214,8 @@ def reclaim_orphans(log) -> int:
         if run.get("phase") not in ("editing", "testing", "backed_up", "proposed"):
             continue
         if run.get("owner_id"):
+            continue
+        if run.get("created_by") != LOOP_CREATOR:
             continue
         rid = run.get("id")
         try:
@@ -1583,6 +1592,7 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
         risk="low",
         expected_benefit="nightly autonomous improvement",
         rollback_plan="selfmod rollback restores the best-effort backup",
+        created_by=LOOP_CREATOR,
     )
     run_id = run_id["id"] if isinstance(run_id, dict) else run_id
     log("  run: %s  target: %s" % (run_id, target))

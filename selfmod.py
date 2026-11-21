@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS selfmod_runs (
   maintenance_authorized INTEGER NOT NULL DEFAULT 0, owner_id TEXT, owner_pid INTEGER,
   owner_host TEXT, lease_until REAL, deployed_commit TEXT, last_error TEXT NOT NULL DEFAULT '',
   created_ts REAL NOT NULL, updated_ts REAL NOT NULL, deployed_ts REAL, restored_ts REAL,
-  budgets_json TEXT NOT NULL
+  budgets_json TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_selfmod_runs_phase ON selfmod_runs(phase, updated_ts DESC);
 CREATE TABLE IF NOT EXISTS selfmod_backups (
@@ -221,6 +221,7 @@ def _connect() -> sqlite3.Connection:
     for table, column, declaration in (
         ("selfmod_runs", "auto_evaluation_eligible", "INTEGER NOT NULL DEFAULT 0"),
         ("selfmod_tests", "isolation", "TEXT NOT NULL DEFAULT 'unverified'"),
+        ("selfmod_runs", "created_by", "TEXT NOT NULL DEFAULT ''"),  # old rows: unattributed
     ):
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
@@ -463,7 +464,7 @@ def _risk(files, requested="", objective=""):
 def create_plan(
     objective: str, repository_root, *, problem="", evidence=None, files=None,
     criteria=None, risk="", expected_benefit="", rollback_plan="",
-    maintenance_authorized=False, budgets=None,
+    maintenance_authorized=False, budgets=None, created_by="",
 ):
     config = settings()
     if not config["enabled"]:
@@ -510,13 +511,13 @@ def create_plan(
               id,objective,problem,evidence_json,files_json,criteria_json,risk,
               expected_benefit,rollback_plan,repository_root,phase,mode,starting_commit,
               git_status_start,source_fingerprint,approval_required,maintenance_authorized,
-              created_ts,updated_ts,budgets_json,test_inventory_before)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              created_ts,updated_ts,budgets_json,test_inventory_before,created_by)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, objective, problem or objective, _json(ev), _json(normalized),
              _json(acceptance), classification, expected_benefit or "bounded reliability improvement",
              rollback_plan or "restore tamper-evident backup bundle", str(root), phase, config["mode"],
              commit, git_status, fingerprint, int(config["mode"] != "auto-low-risk" or classification != "low"),
-             int(bool(maintenance_authorized)), now, now, _json(limits), _json(_test_inventory(root))),
+             int(bool(maintenance_authorized)), now, now, _json(limits), _json(_test_inventory(root)), str(created_by or "")[:200]),
         )
         _event(conn, run_id, "proposal", "created %s-risk proposal for %d file(s); git=%s" % (classification, len(normalized), git_mode))
     return get_run(run_id)
@@ -568,6 +569,8 @@ def _phase(run_id, allowed, target, kind, details="", **updates):
             raise KeyError("unknown selfmod run")
         if row["phase"] not in set(allowed):
             raise RuntimeError("cannot move %s from %s to %s" % (run_id, row["phase"], target))
+        if target == "cancelled" and conn.execute("SELECT 1 FROM selfmod_deployment_lock WHERE id=1 AND owner_id IS NOT NULL AND run_id=?", (run_id,)).fetchone():
+            raise RuntimeError("run cannot be cancelled while it holds the deployment lock (live or stale); restore it instead")
         fields = ["phase=?", "updated_ts=?"]
         values = [target, time.time()]
         for key, value in updates.items():
@@ -2084,6 +2087,8 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
         # failures inside the mutation block below can leave live source
         # changed.
         try:
+            if get_run(run_id)["phase"] != "approved":  # re-read under the lock: a cancel() that won the race
+                raise SelfmodStageNotApplied("run left the approved phase before deployment")
             verify_backup(run_id)
             ok, conflict = _current_source_matches(run)
             if not ok:
@@ -2137,11 +2142,11 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
                     )
                     _event(conn, run_id, "deploy_commit_start", "recording isolated selfmod commit")
                 code, output = _git(root, "add", "--", *diff["changed_files"])
-                if code:
-                    raise RuntimeError("could not stage isolated self-improvement: %s" % output)
-                code, output = _git(root, "commit", "-m", "selfmod: %s" % run["objective"][:100], "--only", "--", *diff["changed_files"])
-                if code:
-                    raise RuntimeError("could not commit self-improvement: %s" % output)
+                if not code:
+                    code, output = _git(root, "commit", "-m", "selfmod: %s" % run["objective"][:100], "--only", "--", *diff["changed_files"])
+                if code:  # restore() touches Git only once a commit exists: unstage the candidate here
+                    _git(root, "reset", "-q", "--", *diff["changed_files"])
+                    raise RuntimeError("could not stage or commit self-improvement: %s" % output)
                 _, deployed_commit = _git(root, "rev-parse", "HEAD")
                 deployed_commit = deployed_commit.strip()
                 with _tx() as conn:
@@ -2189,8 +2194,8 @@ def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
             return get_run(run_id)
         except Exception:
             current = get_run(run_id)
-            if current["phase"] == "approved":
-                _phase(run_id, {"approved"}, "rollback_requested", "deploy_failure", "deployment failed; rollback requested")
+            if current["phase"] in {"approved", "deployed"}:  # 'deployed': lease/probe/health errors
+                _phase(run_id, {current["phase"]}, "rollback_requested", "deploy_failure", "deployment failed; rollback requested")
                 restore(run_id)
             raise
 
@@ -2266,9 +2271,9 @@ def rollback(run_id, reason="user requested rollback"):
 
 
 def cancel(run_id):
-    run = get_run(run_id)
-    if run["phase"] in TERMINAL_PHASES or run["phase"] == "deployed":
-        raise RuntimeError("run cannot be cancelled")
+    run = get_run(run_id)  # rollback_requested owes a restore; _phase refuses a lock-holding run
+    if run["phase"] in TERMINAL_PHASES | {"deployed", "rollback_requested"}:
+        raise RuntimeError("run cannot be cancelled from %s" % run["phase"])
     return _phase(run_id, {run["phase"]}, "cancelled", "cancel", "cancelled by user")
 
 
@@ -2441,9 +2446,10 @@ def prune_backups(retention_days=None, retention_bytes=None):
     newest_valid = bundles[0][0] if bundles else None
     total = sum(item[2] for item in bundles)
     cutoff = time.time() - max(1, days) * 86400
+    keep = {r["id"] for r in _connect().execute("SELECT id,phase FROM selfmod_runs") if r["phase"] in ACTIVE_PHASES | {"deployed", "interrupted"}}  # sole rollback point
     removed = []
     for path, _, size, mtime in reversed(bundles):
-        if path == newest_valid:
+        if path == newest_valid or path.name in keep:
             continue
         if mtime < cutoff or total > byte_limit:
             with contextlib.suppress(OSError):
