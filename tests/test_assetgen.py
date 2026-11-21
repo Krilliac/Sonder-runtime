@@ -277,6 +277,49 @@ def test_output_rejects_path_escape(monkeypatch, tmp_path):
         assetgen.generate_artifacts("../escape", "icon")
 
 
+def test_output_outside_asset_root_is_refused_and_untouched(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    project = tmp_path / "app" / "web"
+    project.mkdir(parents=True)
+    (project / "manifest.json").write_text('{"name": "my-web-app"}', encoding="utf-8")
+    (project / "data.json").write_text('{"keep": true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="asset root"):
+        assetgen.generate_artifacts("web", "icon", kinds="icon", output_dir="app")
+
+    assert (project / "manifest.json").read_text(encoding="utf-8") == '{"name": "my-web-app"}'
+    assert (project / "data.json").read_text(encoding="utf-8") == '{"keep": true}'
+    assert not (project / "icon.png").exists()
+
+
+def test_output_dir_inside_asset_root_is_accepted(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+
+    result = assetgen.generate_artifacts(
+        "team-kit", "icon", kinds="icon", output_dir=os.path.join("artifacts", "generated", "team"),
+    )
+
+    expected = tmp_path / "artifacts" / "generated" / "team" / "team-kit"
+    assert os.path.realpath(result["root"]) == os.path.realpath(str(expected))
+    assert assetgen.verify_pack(result["root"])["ok"]
+
+
+def test_regeneration_refuses_directory_without_generator_manifest(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    foreign = tmp_path / "artifacts" / "generated" / "notes"
+    foreign.mkdir(parents=True)
+    (foreign / "data.json").write_text('{"user": 1}', encoding="utf-8")
+    (foreign / "manifest.json").write_text(
+        '{"generator": "someone-else"}', encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not a generated artifact pack"):
+        assetgen.generate_artifacts("notes", "icon", kinds="icon")
+
+    assert (foreign / "data.json").read_text(encoding="utf-8") == '{"user": 1}'
+    assert (foreign / "manifest.json").read_text(encoding="utf-8") == '{"generator": "someone-else"}'
+
+
 def test_manifest_is_machine_readable(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
     pack = assetgen.generate_artifacts("diagram", "architecture diagram preview")

@@ -209,13 +209,27 @@ def _copy_assets(pack: dict, destination: str) -> None:
     shutil.copy2(pack["manifest"], os.path.join(destination, "manifest.json"))
 
 
+def _pack_name(name: str, language: str, dimension: str) -> str:
+    """Asset pack name unique per (name, language, dimension).
+
+    run_reference_suite prepares several matrix entries in parallel, each with
+    its own dimension and seed; a pack keyed by ``name`` alone would be deleted
+    and rewritten by one worker while another copies from it. The suffix is
+    kept whole and the name part is truncated, so long names stay distinct.
+    """
+    dim_slug = "iso" if dimension == "2.5d" else dimension
+    suffix = "-%s-%s-assets" % (language, dim_slug)
+    stem = assetgen._safe_slug(name)[:assetgen.MAX_NAME - len(suffix)].rstrip("-_")
+    return stem + suffix
+
+
 def prepare_project(name: str, language: str, dimension: str, theme: str = "arcane",
                     seed: int = 1337) -> dict:
     language = normalize_language(language)
     dimension = normalize_dimension(dimension)
     root = project_dir(name, language, dimension)
     os.makedirs(root, exist_ok=True)
-    pack_name = (assetgen._safe_slug(name) + "-assets")[:assetgen.MAX_NAME].rstrip("-_")
+    pack_name = _pack_name(name, language, dimension)
     pack = assetgen.generate_pack(pack_name, dimension, theme, seed)
     _copy_assets(pack, os.path.join(root, "assets"))
     return {

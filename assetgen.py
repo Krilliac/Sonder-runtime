@@ -110,6 +110,7 @@ KIND_ARTIFACTS = {
 }
 MAX_NAME = 48
 MAX_IMAGE_SIDE = 512
+GENERATOR_ID = "sonder-artifact-forge-stdlib"
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
 
@@ -155,7 +156,22 @@ def _inside_workspace(path: str) -> bool:
         return False
 
 
+def _inside_asset_root(path: str) -> bool:
+    root = os.path.realpath(default_asset_root())
+    try:
+        return os.path.commonpath([root, os.path.realpath(path)]) == root
+    except ValueError:
+        return False
+
+
 def resolve_pack_dir(name: str, output_dir: str = "") -> str:
+    """Pack directory for ``name``; always inside default_asset_root().
+
+    A relative ``output_dir`` is resolved against workspace_root(), as before,
+    but it must land inside the asset root (``artifacts/generated``): the
+    generator removes and rewrites fixed file names such as ``manifest.json``,
+    so it may not be pointed at arbitrary project directories.
+    """
     slug = _safe_slug(name)
     base = output_dir.strip() if output_dir else default_asset_root()
     if not os.path.isabs(base):
@@ -163,10 +179,28 @@ def resolve_pack_dir(name: str, output_dir: str = "") -> str:
     base = os.path.abspath(base)
     if not _inside_workspace(base):
         raise ValueError("asset output must stay inside workspace: %r" % output_dir)
+    if not _inside_asset_root(base):
+        raise ValueError(
+            "asset output must stay inside the asset root (artifacts/generated): %r"
+            % output_dir
+        )
     target = os.path.abspath(os.path.join(base, slug))
-    if not _inside_workspace(target):
+    if not _inside_workspace(target) or not _inside_asset_root(target):
         raise ValueError("unsafe asset pack path")
     return target
+
+
+def _is_generated_pack(root: str) -> bool:
+    """True when ``root`` holds a manifest.json written by this generator."""
+    manifest = os.path.join(root, "manifest.json")
+    if os.path.islink(manifest) or not os.path.isfile(manifest):
+        return False
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("generator") == GENERATOR_ID
 
 
 def _chunk(kind: bytes, payload: bytes) -> bytes:
@@ -733,6 +767,16 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
     request["seed"] = seed
     root = resolve_pack_dir(name, output_dir)
     os.makedirs(root, exist_ok=True)
+    existing = sorted(
+        filename for filename in OWNED_FILENAMES
+        if os.path.lexists(os.path.join(root, filename))
+    )
+    if existing and not _is_generated_pack(root):
+        raise ValueError(
+            "refusing to replace %s: %s is not a generated artifact pack "
+            "(no manifest.json from %s); choose another name or remove those files"
+            % (", ".join(existing[:5]), _safe_slug(name), GENERATOR_ID)
+        )
     for filename in OWNED_FILENAMES:
         stale = os.path.join(root, filename)
         if os.path.lexists(stale):
@@ -843,7 +887,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
         files.append({"path": filename, "bytes": os.path.getsize(path), "sha256": _hash_file(path)})
     manifest = {
         "schema": 2,
-        "generator": "sonder-artifact-forge-stdlib",
+        "generator": GENERATOR_ID,
         "name": _safe_slug(name),
         "brief": request["brief"],
         "kinds": request["kinds"],
