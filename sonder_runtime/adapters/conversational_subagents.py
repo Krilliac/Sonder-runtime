@@ -5,8 +5,17 @@ from dataclasses import replace
 from pathlib import Path
 import time
 import uuid
+from ..domain.common.errors import DeadlineExceeded, InternalFailure, SonderError
 from ..application.ports.model_gateway import ModelRequest, require_model_text
 from ..application.execution.resume_reality import consume_resume_context
+
+
+def _failure_code(error: Exception) -> str:
+    if isinstance(error, SonderError):
+        return error.code
+    if isinstance(error, TimeoutError):
+        return DeadlineExceeded.code
+    return InternalFailure.code
 
 
 def conversational_runner_factory(gateway, sessions, capture):
@@ -86,9 +95,18 @@ def conversational_runner_factory(gateway, sessions, capture):
                 scope = provider_attempt_scope(capture, pending)
             except ImportError:
                 scope = nullcontext()
-            with scope:
-                response = gateway.generate(model_request, child_context)
-            text = require_model_text(response.text)
+            try:
+                with scope:
+                    response = gateway.generate(model_request, child_context)
+                text = require_model_text(response.text)
+            except Exception as error:
+                # Close the admitted attempt so a later resume is not refused
+                # as an unresolved model call.
+                try:
+                    capture.fail_request(pending, error_code=_failure_code(error))
+                except Exception:  # noqa: BLE001 - keep the original failure
+                    pass
+                raise
             capture.complete_request(pending, model_response=text)
             save(
                 {
