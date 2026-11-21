@@ -137,6 +137,28 @@ def test_trajectory_survives_withheld_tool_events(tmp_path, withheld):
         assert (first["call_id"], first["tool"]) == ("c1", "search")
 
 
+def test_text_filter_does_not_match_retention_withheld_content(tmp_path):
+    engine = SessionQueryEngine(_redacted_session(tmp_path))
+
+    for probe in (SECRET, SECRET[:8]):
+        page = engine.query_events("s1", text=probe)
+        assert page.records == ()
+    # The visible event is still searchable.
+    assert [r.sequence for r in engine.query_events("s1", text="visible").records] == [2]
+
+
+def test_text_filter_does_not_match_credential_redacted_values(tmp_path):
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=100)
+    repo.append("s1", "user.message", {"content": "token=super-secret", "turn_id": "t1"})
+    engine = SessionQueryEngine(repo)
+
+    assert engine.query_events("s1", text="super-secret").records == ()
+    assert engine.query_events("s1", text="token=s").records == ()
+    # Matching follows what the caller is shown.
+    [record] = engine.query_events("s1", text="token=[REDACTED]").records
+    assert record.sequence == 1 and record.redacted
+
+
 def test_generic_redaction_is_not_mistaken_for_retention(tmp_path):
     repo = SQLiteSessionRepository(tmp_path / "sessions.db", max_read_limit=100)
     repo.append("s1", "user.message",
