@@ -9,6 +9,7 @@ fetch, non-chat check) so this module performs no network I/O itself.
 from __future__ import annotations
 
 import http.client
+import logging
 import threading
 import time
 from collections.abc import Callable, Hashable, Mapping
@@ -21,6 +22,8 @@ from ...domain.model_catalog import catalog_records, resolve_record
 # Transport-shaped failures of a per-member tag read (URLError is an OSError;
 # a bad JSON body is a ValueError).  Programming errors are deliberately absent.
 _TRANSPORT_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+logger = logging.getLogger(__name__)
 
 
 class PinStatus(str, Enum):
@@ -93,6 +96,41 @@ class PoolCatalogCache:
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+
+
+def discovery_tags(
+    pool: Any,
+    get_tags: Callable[[], object],
+    fetch_member_tags: Callable[[str], object],
+    *,
+    host_origin: str | None = None,
+) -> object:
+    """The ``/api/tags`` payload that decides which models are *known*.
+
+    A pooled ``get_tags`` read describes whichever single member the scheduler
+    picked, so a busy member's models would flicker out of the catalog.  With
+    the pool enabled, read the union over every member the scheduler could
+    route to now (an open-circuit member is skipped rather than waited on);
+    the primary wins a name several members hold.  Without a pool, ``get_tags``.
+
+    ``host_origin`` narrows a pooled read to that one member (this host), which
+    keeps lanes that must not gain a worker-only name deterministic.  When that
+    member is not an admissible pool member (e.g. an external roster without
+    ``local_fallback``), or its read fails with a transport or admission error,
+    the pooled ``get_tags`` read is used instead: the failover that existed
+    before the host-only read, never a wider catalog than it.
+    """
+    if pool is not None and pool.enabled:
+        if host_origin is None:
+            return pool.catalog_union(fetch_member_tags, routable_only=True)
+        if pool.catalog_member(host_origin):
+            try:
+                return fetch_member_tags(host_origin)
+            except _TRANSPORT_ERRORS as error:
+                logger.warning(
+                    "host catalog read failed (%s); using the pooled read",
+                    type(error).__name__)
+    return get_tags()
 
 
 def resolve_model_pin(

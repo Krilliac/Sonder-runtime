@@ -1537,7 +1537,7 @@ def test_exact_model_pin_keeps_the_selected_code_route_augmentation(monkeypatch)
         lambda _tier, _strict: ("code-default:7b", False, True, "code"),
     )
     monkeypatch.setattr(
-        server, "resolve_discovered_model_record",
+        server, "_pin_endpoint_record",
         lambda selector: ("gemma3:12b", {"capabilities": ["chat"]}),
     )
     monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda _record: "")
@@ -1578,7 +1578,7 @@ def test_explicit_target_skips_posthoc_web_reroute(monkeypatch):
         lambda _tier, _strict: ("code-default:7b", False, False, "general"),
     )
     monkeypatch.setattr(
-        server, "resolve_discovered_model_record",
+        server, "_pin_endpoint_record",
         lambda _selector: ("gemma3:12b", {"capabilities": ["chat"]}),
     )
     monkeypatch.setattr(server, "_fanout_nonchat_reason", lambda _record: "")

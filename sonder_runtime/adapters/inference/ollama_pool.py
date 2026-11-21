@@ -1862,6 +1862,22 @@ class OllamaWorkerPool:
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
 
+    def catalog_member(self, origin: str) -> bool:
+        """Whether ``origin`` is a member ``catalog_union`` would read right now.
+
+        That is the admissibility ``_choose`` applies (membership, no
+        compatibility error), ignoring load and cooldown.  An external roster
+        without ``local_fallback`` never admits the loopback primary.
+        """
+        wanted = str(origin or "").rstrip("/")
+        with self._condition:
+            now = self._clock()
+            return any(
+                state.endpoint.origin == wanted and self._membership_admissible(state, now)
+                and not state.compatibility_error
+                for state in self._states
+            )
+
     def catalog_union(
         self, fetch_tags: Callable[[str], object], *, routable_only: bool = False,
     ) -> dict:
