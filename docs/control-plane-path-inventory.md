@@ -5,9 +5,9 @@ current host paths without creating directories, opening databases or invoking
 memory migration. It follows the existing state-path precedence: configured
 process home overrides state_path environment values; canonical memory uses
 SONDER_DB; canonical sessions explicitly prefers SONDER_SESSIONS_DB as app.py
-does. The app task fallback STATE_HOME/memory.db is also protected. The existing
-execution spill resolver uses SONDER_JOBS_DB, so that exact override is shared
-with jobs; this module does not invent a spill environment setting.
+does. The app task fallback STATE_HOME/memory.db is also protected. The execution
+spill store has its own SONDER_SPILL_DB override and never shares the
+SONDER_JOBS_DB file.
 
 The default inventory covers fleet/approvals/memory/sessions/jobs/spill/child
 sessions/fanout/extensions databases and all SQLite WAL, SHM and rollback-journal

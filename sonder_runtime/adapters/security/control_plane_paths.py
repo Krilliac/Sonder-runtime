@@ -15,7 +15,7 @@ from ...platform import paths as runtime_paths
 STATE_DATABASES = (
     ("approvals.db", "SONDER_APPROVALS_DB"),
     ("jobs.db", "SONDER_JOBS_DB"),
-    ("execution-spill.db", "SONDER_JOBS_DB"),
+    ("execution-spill.db", "SONDER_SPILL_DB"),
     ("child-sessions.db", "SONDER_CHILD_SESSIONS_DB"),
     ("fanout.db", "SONDER_FANOUT_DB"),
     ("extensions.db", "SONDER_EXTENSIONS_DB"),

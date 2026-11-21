@@ -126,7 +126,7 @@ class ChildMigrationActivation:
             if isinstance(source, SQLiteChildMigrationStore) and (
                 already_retired
                 or (
-                    source.path.is_dir()
+                    (source.path.is_dir() or not source.path.exists())
                     and retired.is_file()
                     and bundle.has_phase("SOURCE_RETIRE_INTENT", manifest)
                 )
@@ -160,7 +160,10 @@ class ChildMigrationActivation:
             guard = issue_host_guard(self, manifest)
             bundle.record_phase("SOURCE_RETIRE_INTENT", manifest)
             if already_retired and isinstance(source, SQLiteChildMigrationStore):
-                pass
+                if not source.path.exists():
+                    # A crash between rename and mkdir left no blocking
+                    # directory; recreate it to finish the retirement.
+                    source.path.mkdir()
             elif isinstance(source, SQLiteChildMigrationStore):
                 if source.path.parent != self.path:
                     raise MigrationUnsupported(
