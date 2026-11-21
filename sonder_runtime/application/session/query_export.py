@@ -12,7 +12,7 @@ import binascii
 import hashlib
 import json
 from dataclasses import replace
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from ..ports.session_repository import (
@@ -270,6 +270,54 @@ class SessionQueryEngine:
             raise QueryExportError("invalid pagination cursor")
         return next_sequence
 
+    def _scan_limit(self) -> int:
+        """Rows per read: the service bound, lowered to the adapter's ceiling."""
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = self._max_scan
+        return min(self._max_scan, adapter_limit)
+
+    def last_sequence(self, session_id: str) -> int:
+        """Sequence of the newest event, or 0 when the session has none."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise QueryExportError("session_id must be non-empty")
+        tail = self._repository.read_tail(session_id, limit=1)
+        return tail[-1].sequence if tail else 0
+
+    def iter_records(self, session_id: str, *, end_sequence: int, max_events: int,
+                     project: Callable[[SessionEvent], SessionEvent | None] | None = None
+                     ) -> Iterator[tuple[int, SessionEventRecord | None]]:
+        """Yield each row of ``1..end_sequence`` once, in order, as (sequence, record).
+
+        ``record`` is None when ``project`` drops the row (it is then never
+        redacted or exposed).  ``project`` runs before redaction.  Privacy
+        markers are read once, eagerly: call this after fixing ``end_sequence``.
+        """
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise QueryExportError("session_id must be non-empty")
+        for name, value in (("end_sequence", end_sequence), ("max_events", max_events)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise QueryExportError("%s must be positive" % name)
+        targets = self._privacy_targets(session_id)
+        limit = self._scan_limit()
+
+        def generate() -> Iterator[tuple[int, SessionEventRecord | None]]:
+            next_sequence, scanned = 1, 0
+            while scanned < max_events and next_sequence <= end_sequence:
+                batch = self._repository.read_range(
+                    session_id, start_sequence=next_sequence, end_sequence=end_sequence,
+                    limit=min(limit, max_events - scanned))
+                if not batch:
+                    return
+                for event in batch:
+                    kept = event if project is None else project(event)
+                    yield event.sequence, (None if kept is None
+                                           else self._record_for_event(kept, targets))
+                scanned += len(batch)
+                next_sequence = batch[-1].sequence + 1
+
+        return generate()
+
     def query_events(self, session_id: str, *, event_type: str | None = None,
                      text: str | None = None, page_size: int = 100,
                      cursor: str | None = None, start_sequence: int = 1,
@@ -289,10 +337,7 @@ class SessionQueryEngine:
         # page is terminal without issuing an unbounded follow-up query.
         # A port implementation may enforce a lower adapter-side ceiling.  A
         # service-level bound must never turn into an adapter validation error.
-        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
-        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
-            adapter_limit = self._max_scan
-        scan_limit = min(self._max_scan, adapter_limit)
+        scan_limit = self._scan_limit()
         raw = self._repository.read_range(session_id, start_sequence=next_sequence,
                                           end_sequence=end_sequence, limit=scan_limit)
         privacy_targets = self._privacy_targets(session_id)
