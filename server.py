@@ -6829,8 +6829,8 @@ def _sonder_impl_serialized(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
@@ -7279,8 +7279,8 @@ def _answer_with_history_impl(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
