@@ -1,7 +1,10 @@
 """compile_db.sanitize_for_trace: an allowlist rebuild of the compile argv (F6)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from sonder_runtime.domain.build.compile_db import (
     SanitizedArgv,
@@ -127,3 +130,42 @@ def test_forced_includes_outside_the_roots_or_non_headers_are_dropped():
     assert isinstance(result, SanitizedArgv)
     assert "/etc/passwd" not in result.argv and "/work/sparklite/src/core/keys.pem" not in result.argv
     assert "/work/sparklite/src/core/config.h" in result.argv
+
+
+def test_option_shaped_source_token_is_refused():
+    # A repository file literally named like a flag would otherwise be emitted as
+    # the last argv token and parsed by the compiler as that flag (G1252).
+    gnu = sanitize_for_trace(("gcc", "-fplugin=evil.so"), "gnu", source_file="-fplugin=evil.so",
+                             roots=("/src",), directory="/src")
+    assert isinstance(gnu, TraceRefused) and gnu.code == "RUNNER_UNAVAILABLE"
+    msvc = sanitize_for_trace(("cl.exe", "/c", "-BxC:/src/x.exe"), "msvc",
+                              source_file="-BxC:/src/x.exe", roots=("C:/src",), directory="C:/src")
+    assert isinstance(msvc, TraceRefused) and msvc.code == "RUNNER_UNAVAILABLE"
+    slash = sanitize_for_trace(("cl.exe", "/c", "/Tp/analyze:plugin"), "msvc",
+                               source_file="/analyze:plugin", roots=("C:/src",), directory="C:/src")
+    assert isinstance(slash, TraceRefused)
+
+
+@pytest.mark.parametrize("compiler,family,tp", [
+    ("cl.exe", "msvc", "/Tp@evil.rsp"),
+    ("cl.exe", "msvc", "-Tp@evil.rsp"),
+    ("clang-cl.exe", "clang_cl", "/Tp@evil.rsp"),
+])
+def test_response_file_shaped_source_is_refused(compiler, family, tp):
+    # "/Tp@evil.rsp" names the source "@evil.rsp"; emitted last and verbatim the
+    # compiler would expand it as a repository-chosen response file (G1252).
+    result = sanitize_for_trace((compiler, "/nologo", "/c", tp), family,
+                                source_file="@evil.rsp", roots=("C:/src",), directory="C:/src")
+    assert isinstance(result, TraceRefused) and result.code == "RUNNER_UNAVAILABLE"
+
+
+def test_response_file_shaped_source_is_refused_from_compile_commands():
+    db = parse_compile_commands(json.dumps([{
+        "directory": "C:/src", "file": "@evil.rsp",
+        "arguments": ["cl.exe", "/nologo", "/c", "/Tp@evil.rsp"],
+    }]).encode(), source_root="C:/src", build_dir="C:/src/build")
+    entry = db.entries[0]
+    result = sanitize_for_trace(entry.argv, "msvc", source_file=entry.file,
+                                roots=("C:/src",), directory=entry.directory,
+                                windows=entry.windows)
+    assert isinstance(result, TraceRefused) and result.code == "RUNNER_UNAVAILABLE"

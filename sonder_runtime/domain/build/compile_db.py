@@ -571,6 +571,12 @@ def sanitize_for_trace(
         index += consumed
     if not source:
         return TraceRefused("UNKNOWN_FILE", "the compile command does not name the requested file")
+    # The source is emitted last and verbatim, so an option-shaped token (a file
+    # literally named "-fplugin=x.so") would be parsed by the compiler as a flag,
+    # and one starting with "@" (e.g. from "/Tp@x.rsp") would be expanded as a
+    # response file chosen by the repository.
+    if source.startswith(("-", "@")) or (style == "msvc" and source.startswith("/")):
+        return TraceRefused("RUNNER_UNAVAILABLE", "source path is shaped like a compiler option")
     notes: list[str] = []
     if wants_pch or pch_header:
         header = _inside(pch_header, roots, directory) if pch_header else ""
