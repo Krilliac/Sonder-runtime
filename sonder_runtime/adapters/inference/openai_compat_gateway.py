@@ -175,18 +175,28 @@ def shared_https_context() -> ssl.SSLContext:
     return default_https_context()
 
 
-def _opener_for(url: str):
-    """A non-redirecting opener; loopback URLs also bypass every proxy.
+def _bypasses_proxy(url: str) -> bool:
+    """True when ``url`` must never be sent through an ambient proxy.
 
-    urllib has no implicit loopback bypass: with ``http_proxy`` (or a system
-    proxy) set and no matching ``no_proxy`` entry, a request to
-    ``http://localhost`` -- prompt, bearer key and all -- goes to the proxy
-    host.  Remote endpoints keep proxy support (they are https, so the proxy
-    only sees a CONNECT tunnel).  Built per call so the proxy decision reflects
+    That is every plaintext ``http://`` URL (loopback or an operator-trusted
+    private IP) and every loopback URL.  An http request through a proxy is
+    sent to the proxy in clear -- prompt, bearer key and all -- and urllib has
+    no implicit loopback bypass.  Only remote https keeps proxy support: the
+    proxy then sees just a CONNECT tunnel.  Redirects are never followed, so
+    the URL's own scheme decides.
+    """
+    parts = urlsplit(url)
+    return (parts.scheme or "").lower() == "http" or (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+
+
+def _opener_for(url: str):
+    """A non-redirecting opener; plaintext and loopback URLs bypass every proxy.
+
+    See :func:`_bypasses_proxy`.  Built per call so the proxy decision reflects
     the current environment rather than the one at import time.
     """
     handlers: list = [_NoRedirect(), urllib.request.HTTPSHandler(context=shared_https_context())]
-    if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+    if _bypasses_proxy(url):
         handlers.append(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener(*handlers)
 
@@ -195,7 +205,7 @@ def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
     """``"stream": true`` POST: read the event stream into one completion.
 
     Reuses the Sonder Inference stream reader (:mod:`.sse_stream`) with this
-    module's opener policy (no redirects; loopback bypasses every proxy).  The
+    module's opener policy (no redirects; plaintext and loopback bypass every proxy).  The
     exchange helpers live in the leaf :mod:`.exchange_transport`, which both
     gateways import, so there is no import cycle; they are handed to
     ``post_streaming`` as a namespace.
@@ -223,7 +233,7 @@ def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
             _NoRedirect(),
             _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
         ]
-        if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+        if _bypasses_proxy(url):
             handlers.append(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener(*handlers)
 

@@ -1806,8 +1806,14 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 template = dict(retry.get("chat_template_kwargs") or {})
                 template["enable_thinking"] = False
                 retry["chat_template_kwargs"] = template
-                data = self._post("/v1/chat/completions", retry, cfg, remaining,
-                                  context=context)
+                # Same trust anchor and stall limits as the first attempt: a
+                # private worker's pinned CA must govern every request to it.
+                with trust_scope(settings.ca_bundle), stall_limits(
+                    settings.stream_idle_seconds, settings.stream_first_content_seconds,
+                    idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
+                ):
+                    data = self._post("/v1/chat/completions", retry, cfg, remaining,
+                                      context=context)
                 self._check_liveness(context, phase="during model call")
                 served = served_model(data)
                 repaired = True
