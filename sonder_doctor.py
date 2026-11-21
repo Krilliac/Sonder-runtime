@@ -740,11 +740,44 @@ def _inference_binding(env=None):
         }
 
 
+def _inference_tier_context_summary(gateway) -> str:
+    """``; tier context: code=100096 (profile) ...`` from ``/v1/models`` launch profiles.
+
+    Empty when the gateway has no profile support or the server publishes no
+    context lengths (an older Inference), so doctor output is then unchanged.
+    """
+    reader = getattr(gateway, "tier_context", None)
+    if not callable(reader):
+        return ""
+    try:
+        document = reader()
+    except Exception:
+        return ""
+    if not isinstance(document, dict) or document.get("state") != "ok":
+        return ""
+    tiers = document.get("tiers")
+    if not isinstance(tiers, dict):
+        return ""
+    known = []
+    for tier, entry in tiers.items():
+        if isinstance(entry, dict) and entry.get("context_length"):
+            caps = entry.get("capabilities")
+            known.append("%s=%d (%s%s)" % (
+                tier, entry["context_length"], entry.get("profile") or entry.get("model"),
+                "; " + ",".join(caps) if caps else "",
+            ))
+    if not known:
+        return ""
+    return "; tier context: " + ", ".join(known)
+
+
 def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     """Probe the Sonder Inference provider when any binding uses it.
 
     Read-only: one cached GET of ``/v1/sonder/health`` bounded to 2 seconds
-    of wall-clock time.  It never generates.  The verdict follows what a
+    of wall-clock time, and, once the server is ready, one TTL-cached GET of
+    ``/v1/models`` (2 seconds) for the launch-profile context lengths it
+    appends.  It never generates.  The verdict follows what a
     request would meet right now (``SonderInferenceGateway.readiness``):
 
     * skipped -- no tier, default or embedding binding names sonder_inference;
@@ -774,6 +807,7 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     fallback = bindings.fallbacks.get("sonder_inference")
     detail = readiness.detail
     if readiness.kind == "ready":
+        detail += _inference_tier_context_summary(gateway)
         if readiness.synthetic:
             return {
                 "status": STATUS_WARN,

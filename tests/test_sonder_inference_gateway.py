@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from sonder_runtime.adapters.inference import launch_profile_cache
 from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
@@ -45,6 +46,16 @@ from sonder_runtime.domain.common.errors import (
 from sonder_runtime.domain.routing.backend_conformance import BackendIdentity
 
 HEX = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def _fresh_profile_cache():
+    """``/v1/models`` metadata is cached per endpoint process-wide; isolate tests."""
+    launch_profile_cache.shared_cache().clear()
+    yield
+    launch_profile_cache.shared_cache().clear()
+
+
 IDENTITY = {
     "backend": "mock", "model": "mock", "model_digest": HEX, "quantization": "none",
     "backend_version": "0.1.0", "tokenizer_digest": "b" * 64,
@@ -112,6 +123,9 @@ class FakeInference:
                 "synthetic": True, "backend_identity": IDENTITY, "reason": None,
             }
             return self.identity_status, json.dumps(document).encode()
+        if url.endswith("/v1/models"):
+            # Like an Inference without launch-profile support: no /v1/models.
+            return 404, json.dumps({"error": {"code": "not_found", "message": "no"}}).encode()
         raise AssertionError(url)
 
     def post(self, url, payload, headers, timeout):
@@ -645,6 +659,13 @@ def test_provider_status_keys_and_types_when_ready():
                         ("fast", "general", "code", "reasoning", "vision")},
         "busy": False,
         "workers": None,
+        # Additive: an Inference without /v1/models reports every tier unknown.
+        "tier_context": {
+            "state": "absent", "detail": "no /v1/models (HTTP 404)",
+            "tiers": {tier: {"model": DEFAULT_MODEL, "profile": None, "context_length": None,
+                             "capabilities": None, "source": "unknown"}
+                      for tier in ("fast", "general", "code", "reasoning", "vision")},
+        },
     }
 
 

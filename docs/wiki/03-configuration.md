@@ -485,6 +485,31 @@ unavailable, stayed on <model>: <reason> — …` when no pool worker advertises
 the model or the overflow attempt fails (the turn then falls back to its
 original route).
 
+#### Context-fit routing
+
+Always on, and a no-op until a turn is known not to fit. An HTTP chat turn
+estimated above 4096 tokens is checked against the context length of the
+model it is about to be sent to: a Sonder Inference tier's launch-profile
+`context_length` (from `/v1/models`), an Ollama tier's configured `num_ctx`,
+else the Ollama model's own context length. A turn that fits, or whose
+context length is unknown, routes exactly as before. A turn that does not
+fit moves to the long-context tier when one is set (stated in the receipt
+with `route: "context_fit"`, a `route.changed` event with `reason_code:
+context_exceeds_model`, and an activity entry), and otherwise fails before
+any model call with an error that says how to fix it; nothing is truncated.
+The opt-in overflow above is decided first.
+
+| Control | Effect |
+|---|---|
+| `routing.long_context_tier` in `runtime_policy.json` (`runtime_policy_update routing_json='{"long_context_tier": "reasoning"}'`, `""` clears) | the local tier a too-long turn moves to; unset by default |
+| `SONDER_LONG_CONTEXT_TIER=<tier>` | override it for this process; an invalid value is ignored and reported |
+| `SONDER_OLLAMA_TIER_OPTIONS='{"code": {"num_ctx": 32768}}'` | an Ollama tier's request window (512..1048576), also the length the check measures it against; an explicit request context size still wins |
+| `SONDER_INFERENCE_PROFILE_TTL_SECONDS` | how long `/v1/models` profile metadata is cached per endpoint (default 60, 0..3600) |
+
+`runtime_policy_status` lists the long-context tier and each tier's
+effective context. Details and an example:
+[context-fit routing](../integration/context-fit-routing.md).
+
 #### Tool-lane model deny list
 
 Some installed models are text-only advisers: they may be chatted with by

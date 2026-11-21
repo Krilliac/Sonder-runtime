@@ -363,7 +363,13 @@ These never generate.
   URLs, or null when unreachable), `fallback`, `fallback_count`,
   `tier_models` (`{tier: model}` for all five tiers: the
   `SONDER_INFERENCE_TIER_MODELS` entry or the default model; from
-  configuration, so present even when unreachable). `served_tier_models()`
+  configuration, so present even when unreachable), `busy`, `workers`,
+  `tier_context` (additive; null unless the server is ready and not busy:
+  `{"state": "ok" | "absent" | "error", "detail", "tiers": {tier: {"model",
+  "profile", "context_length", "capabilities", "source"}}}` from the
+  launch-profile metadata on `/v1/models`, read by `model_profiles()` with a
+  2-second bound and a per-endpoint TTL cache; see
+  [context-fit-routing.md](../integration/context-fit-routing.md)). `served_tier_models()`
   returns the same map as `{"sonder_inference": {...}}` without any I/O;
   `PreSendFallbackGateway` forwards it and `ProviderDispatchGateway`
   aggregates it, for the `/v1/models` row `sonder.served_model`.
@@ -382,6 +388,9 @@ These never generate.
   fallback and for anything no fallback can help (invalid `SONDER_INFERENCE_*`
   values, a remote URL without consent, rejected credentials or Host, an API
   version mismatch from health or from the ready file, invalid bindings).
+  When ready, its detail appends `tier context: <tier>=<tokens> (<profile>)`
+  for every tier whose launch profile publishes a context length (unchanged
+  for an Inference without `/v1/models` profile metadata).
   `sonder_inference_scope` reports the tier-bound agent, autopilot, fleet and
   helper surfaces; explicit Ollama pins, strict `sonder` aliases and durable
   fanout remain outside that binding. `--skip-inference` removes both.

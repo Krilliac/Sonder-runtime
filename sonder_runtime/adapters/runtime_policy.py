@@ -46,6 +46,7 @@ NPU_CAPABILITIES = _rules.NPU_CAPABILITIES
 DEFAULT_NPU = _rules.DEFAULT_NPU
 DEFAULT_LONG_CONTEXT_OVERFLOW = _rules.DEFAULT_LONG_CONTEXT_OVERFLOW
 PROVIDER_MODEL_PROVIDERS = _rules.PROVIDER_MODEL_PROVIDERS
+LONG_CONTEXT_TIER_KEY = _rules.LONG_CONTEXT_TIER_KEY
 _MODEL_RE = _rules._MODEL_RE
 _LOCK = threading.RLock()
 
@@ -153,6 +154,12 @@ def long_context_overflow(policy=None, env=None) -> dict:
     return _rules.effective_long_context_overflow(
         policy, os.environ if env is None else env,
     )
+
+
+def long_context_tier(policy=None, env=None) -> dict:
+    """The context-fit target tier in force: ``{tier, source, error}``."""
+    policy = load(create=False) if policy is None else policy
+    return _rules.effective_long_context_tier(policy, os.environ if env is None else env)
 
 
 def npu_mode(capability, policy=None) -> str:
@@ -390,7 +397,7 @@ def update(
         if routing:
             if not isinstance(routing, dict):
                 raise ValueError("routing update must be a JSON object")
-            unknown = set(routing) - set(ROUTING_LANES)
+            unknown = set(routing) - set(ROUTING_LANES) - {LONG_CONTEXT_TIER_KEY}
             if unknown:
                 raise ValueError("unknown routing lane(s): %s" % ", ".join(sorted(unknown)))
             candidate["routing"].update(routing)
@@ -470,6 +477,7 @@ def format_policy(policy=None) -> str:
         lines.append("  %s tier models (used only where that provider is bound): %s" % (
             provider, ", ".join("%s=%s" % item for item in tiers.items()) or "-",
         ))
+    lines.extend("  " + line for line in _context_fit_lines(policy))
     lines.append("  " + format_tool_lane_denied_models(policy))
     lines.extend("  " + line for line in _model_lists.describe())
     lines.extend("  " + line for line in _model_tool_policy.describe())
@@ -479,6 +487,16 @@ def format_policy(policy=None) -> str:
     lines.append("  " + format_reference_lookup(policy))
     lines.append("  cloud tiers remain separate explicit opt-in configuration")
     return "\n".join(lines)
+
+
+def _context_fit_lines(policy) -> list:
+    """Long-context tier plus each tier's effective context (caches only, no I/O)."""
+    try:
+        from sonder_runtime.adapters.inference.context_fit_route import tier_context_lines
+
+        return tier_context_lines(policy)
+    except Exception as exc:  # noqa: BLE001 - status must render
+        return ["context fit: status unavailable (%s)" % type(exc).__name__]
 
 
 def format_tool_lane_denied_models(policy=None) -> str:
