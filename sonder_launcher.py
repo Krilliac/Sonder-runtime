@@ -51,7 +51,7 @@ from sonder_runtime.application.lifecycle import (
 )
 from sonder_runtime.platform.paths import state_path
 from sonder_runtime.platform.runtime_threads import run_bounded
-from sonder_runtime.interfaces.http import deferred_tls
+from sonder_runtime.adapters.web import deferred_tls
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY,
     host_decision,
