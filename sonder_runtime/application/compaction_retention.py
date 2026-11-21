@@ -136,7 +136,8 @@ def _nonzero_exit(code: object) -> bool:
     if isinstance(code, str):
         text = code.strip()
         digits = text[1:] if text[:1] in ("+", "-") else text
-        if digits.isdigit() and len(text) <= _MAX_EXIT_CODE_TEXT:
+        # isascii(): "²".isdigit() is True but int("²") raises ValueError.
+        if digits.isascii() and digits.isdigit() and len(text) <= _MAX_EXIT_CODE_TEXT:
             return int(text) != 0
     return False
 

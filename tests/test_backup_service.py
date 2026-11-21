@@ -401,11 +401,12 @@ def test_list_ignores_non_object_manifests(tmp_path, manifest):
 
 
 def test_list_normalizes_malformed_sort_and_display_metadata(tmp_path):
-    candidate = tmp_path / "candidate"
+    candidate = tmp_path / "20260101T000000Z-1.2.3-bkp_abc"
     candidate.mkdir()
     (candidate / "manifest.json").write_text(
         json.dumps({
-            "backup_id": [],
+            "format_version": backup_adapter.MANIFEST_FORMAT_VERSION,
+            "backup_id": "bkp_abc",
             "created_at_utc": {"invalid": True},
             "application_version": 7,
             "files": "not-a-list",
@@ -415,12 +416,48 @@ def test_list_normalizes_malformed_sort_and_display_metadata(tmp_path):
 
     assert backup_adapter.list_backups(tmp_path) == [{
         "path": str(candidate),
-        "backup_id": "unknown",
+        "backup_id": "bkp_abc",
         "created_at_utc": "unknown",
         "created_at_valid": False,
         "application_version": "unknown",
         "files": 0,
     }]
+
+
+@pytest.mark.parametrize(
+    ("name", "manifest"),
+    [
+        # A foreign folder that happens to hold a manifest.json.
+        ("webapp", {"name": "x"}),
+        # Published-looking name, but no supported format_version.
+        ("20260101T000000Z-1.2.3-bkp_abc", {"backup_id": "bkp_abc"}),
+        # Right format_version, but the name is not the published layout.
+        ("webapp", {"format_version": 1, "backup_id": "webapp"}),
+        # backup_id in the manifest does not match the directory name.
+        (
+            "20260101T000000Z-1.2.3-bkp_abc",
+            {"format_version": 1, "backup_id": "bkp_other"},
+        ),
+        # Non-ASCII digits are not a stamp _utc_stamp() can produce.
+        (
+            "٢٠٢٦٠١٠١T000000Z-1.2.3-bkp_abc",
+            {"format_version": 1, "backup_id": "bkp_abc"},
+        ),
+    ],
+)
+def test_retention_never_lists_or_deletes_non_backup_directories(
+    tmp_path, name, manifest,
+):
+    foreign = tmp_path / name
+    foreign.mkdir()
+    (foreign / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    assert backup_adapter.list_backups(tmp_path) == []
+    assert backup_adapter.prune_backups_tiered(tmp_path) == []
+    assert backup_adapter.prune_backups(tmp_path, keep=1) == []
+    assert (foreign / "manifest.json").is_file()
 
 
 @pytest.mark.parametrize("value", [True, 1.5, "2", -1, 0])
