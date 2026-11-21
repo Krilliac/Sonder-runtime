@@ -21,7 +21,8 @@ from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
 
 BLENDER = os.environ.get("SONDER_BLENDER", "")
 _ON_WINDOWS = os.name == "nt"
-REAL_KIT = Path(r"D:\LanternfallGame\Lanternfall\tools\blender\lf_kit.py")
+_REAL_KIT_ENV = os.environ.get("SONDER_TEST_MESHGEN_KIT", "")
+REAL_KIT = Path(_REAL_KIT_ENV) if _REAL_KIT_ENV else None
 
 pytestmark = pytest.mark.skipif(not BLENDER or not os.path.isfile(BLENDER),
                                 reason="SONDER_BLENDER is not set to a Blender executable")
@@ -217,7 +218,8 @@ def test_an_exception_in_a_kit_function_comes_back_with_the_script_line(tmp_path
     assert "line 4" in result["error"] and "testkit.box" in result["error"], result
 
 
-@pytest.mark.skipif(not REAL_KIT.is_file(), reason="the Lanternfall lf_kit.py is not on this machine")
+@pytest.mark.skipif(REAL_KIT is None or not REAL_KIT.is_file(),
+                    reason="SONDER_TEST_MESHGEN_KIT is not set to a kit file")
 def test_the_real_lf_kit_box_builds_exports_and_renders_through_the_default_runner(tmp_path):
     source = ("import lf_kit\n\ndef build():\n"
               "    lf_kit.box('Crate', (1.0, 0.6, 0.5), 0.05, 2, '#8a5a2b', 'LF_Toon', True, (0, 0, 0.25))\n")
@@ -230,7 +232,8 @@ def test_the_real_lf_kit_box_builds_exports_and_renders_through_the_default_runn
     assert not list((tmp_path / "out").glob(".run-*"))
 
 
-@pytest.mark.skipif(not REAL_KIT.is_file(), reason="the Lanternfall lf_kit.py is not on this machine")
+@pytest.mark.skipif(REAL_KIT is None or not REAL_KIT.is_file(),
+                    reason="SONDER_TEST_MESHGEN_KIT is not set to a kit file")
 def test_an_lferror_from_the_real_kit_comes_back_as_line_n_lferror(tmp_path):
     source = "import lf_kit\n\ndef build():\n    lf_kit.box('Crate', (1.0, 0.6, 0.5), 0.05, 2, '#8a5a2b', 'no_such_slot')\n"
     result = _build(tmp_path, source, kit=REAL_KIT, render=False)

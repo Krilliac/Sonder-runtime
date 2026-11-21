@@ -32,7 +32,7 @@ WORKER_A = "https://worker-a.example:11434"
 WORKER_B = "https://worker-b.example:11434"
 
 
-def _pinned_failure(tmp_path, monkeypatch, *, connect_error=None, answer="10.77.0.2"):
+def _pinned_failure(tmp_path, monkeypatch, *, connect_error=None, answer="192.0.2.2"):
     """Drive the real pinned transport to one failure and return that error."""
     from sonder_runtime.adapters.inference import external_membership as module
 
@@ -124,7 +124,7 @@ def test_concurrent_callers_share_resolution_instead_of_failing_fast(tmp_path, m
     def slow(host, port, **_kwargs):
         lookups.append(host)
         time.sleep(0.05)
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.77.0.2", port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("192.0.2.2", port))]
 
     monkeypatch.setattr(module.socket, "getaddrinfo", slow)
     source = ExternalMembershipSource(configuration(tmp_path), credentials(tmp_path),

@@ -81,7 +81,7 @@ def test_leading_or_backward_reference_is_unresolved(text):
 
 @pytest.mark.parametrize("text", [
     "Use pathlib.Path for path joins.",                     # not time-sensitive
-    "Node1 is currently at 10.77.0.2 (verified 2026-08-17).",  # dated
+    "The build host is currently at 192.0.2.2 (verified 2026-08-17).",  # dated
     "As of September 2026 the latest CMake is 4.1.",        # dated
     "Python 3.12 is the venv interpreter since 2025.",      # dated version
     "As of v2.4 the runtime currently defaults to WAL.",    # version-anchored
