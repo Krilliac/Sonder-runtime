@@ -21,6 +21,7 @@ from ..session.capture import CapturedTurn, SessionCaptureService
 from ..session.provider_attempts import ProviderCaptureFailure, provider_attempt_scope
 from ...domain.common.errors import IntegrityFailure, InternalFailure, InvalidInput, SonderError
 from ...domain.common.ids import SessionId, TurnId, new_id
+from ...domain.request_temperature import validate_request_temperature
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,9 @@ class ChatService:
     ) -> ChatResult:
         logger.debug(f"ChatService.complete: tier={command.tier!r}, system_len={len(command.system)}, history_len={len(command.history)}, session_id={command.session_id!r}")
         options = {}
+        # Refused before any capture or gateway call so a bad value is never
+        # mistaken for a model failure.
+        validate_request_temperature(command.temperature)
         if command.temperature is not None:
             options["temperature"] = command.temperature
         if command.num_predict is not None:

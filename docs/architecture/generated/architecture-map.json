@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 479,
+      "file_count": 480,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -438,6 +438,7 @@
         "sonder_runtime/adapters/repo_repair_runner.py",
         "sonder_runtime/adapters/repository_errors.py",
         "sonder_runtime/adapters/reproducible_evaluation.py",
+        "sonder_runtime/adapters/request_temperature_guard.py",
         "sonder_runtime/adapters/resource_leases.py",
         "sonder_runtime/adapters/restricted_tool_lane.py",
         "sonder_runtime/adapters/runtime_capabilities.py",
@@ -1046,7 +1047,7 @@
       ]
     },
     {
-      "file_count": 323,
+      "file_count": 324,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1299,6 +1300,7 @@
         "sonder_runtime/domain/reference_lookup/terms.py",
         "sonder_runtime/domain/replication_ack.py",
         "sonder_runtime/domain/repository_languages.py",
+        "sonder_runtime/domain/request_temperature.py",
         "sonder_runtime/domain/request_timeout.py",
         "sonder_runtime/domain/resource_leases.py",
         "sonder_runtime/domain/retrieval_policy.py",
