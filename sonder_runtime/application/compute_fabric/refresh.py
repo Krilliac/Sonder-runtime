@@ -5,15 +5,20 @@ from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor 
 
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta
-from typing import Callable
+from typing import TYPE_CHECKING, cast
 
 from .registry import ComputeNodeRegistry
 from ...domain.compute_fabric import ComputeNode, NodeSnapshot, NodeHealth
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ..ports.compute_fabric import ComputeSnapshotSource
+
 
 def refresh_remote_snapshots(
     registry: ComputeNodeRegistry,
-    source,
+    source: ComputeSnapshotSource,
     *,
     now: Callable[[], datetime],
     max_workers: int = 8,
@@ -37,7 +42,7 @@ def refresh_remote_snapshots(
     nodes = tuple(node for node in registry.configured_nodes() if not node.local)
     if refresh_after is not None:
         current = now()
-        def due(node):
+        def due(node: ComputeNode) -> bool:
             snapshot = registry.last_observation(node.node_id)
             return (snapshot is None or snapshot.health is not NodeHealth.HEALTHY
                     or not timedelta(0) <= current - snapshot.freshness_at < refresh_after)
@@ -55,7 +60,7 @@ def refresh_remote_snapshots(
         received_at = now()
         return node, received_at, snapshot, None
 
-    with owned_runtime_pool(
+    with cast(type[ThreadPoolExecutor], owned_runtime_pool)(
         max_workers=min(max_workers, len(nodes)),
         thread_name_prefix="sonder-compute-probe",
     ) as executor:

@@ -286,7 +286,6 @@ sonder_runtime/adapters/workspace_reality.py
 sonder_runtime/application/agents/delegated_verification.py
 sonder_runtime/application/agents/delegation.py
 sonder_runtime/application/agents/delegation_service.py
-sonder_runtime/application/agents/fleet_breadth.py
 sonder_runtime/application/agents/host_turns.py
 sonder_runtime/application/agents/interactive_lanes.py
 sonder_runtime/application/agents/lane_continuation.py
@@ -313,21 +312,16 @@ sonder_runtime/application/compute_fabric/artifact_spool.py
 sonder_runtime/application/compute_fabric/coordinator.py
 sonder_runtime/application/compute_fabric/index.py
 sonder_runtime/application/compute_fabric/jobs.py
-sonder_runtime/application/compute_fabric/placement_queue.py
-sonder_runtime/application/compute_fabric/refresh.py
 sonder_runtime/application/compute_fabric/registry.py
 sonder_runtime/application/compute_fabric/service.py
 sonder_runtime/application/compute_fabric/spool_budget.py
 sonder_runtime/application/compute_fabric/wire.py
-sonder_runtime/application/context_integration.py
 sonder_runtime/application/context_manifests.py
-sonder_runtime/application/context_priority.py
 sonder_runtime/application/debugging/ports.py
 sonder_runtime/application/debugging/presenters.py
 sonder_runtime/application/debugging/service.py
 sonder_runtime/application/diagnostics/service.py
 sonder_runtime/application/evaluation/cheat_trials.py
-sonder_runtime/application/evaluation/divergence.py
 sonder_runtime/application/evaluation/durable_lifecycle.py
 sonder_runtime/application/evaluation/harness_outcomes.py
 sonder_runtime/application/evaluation/reproducible.py
@@ -340,7 +334,6 @@ sonder_runtime/application/extensions/registry.py
 sonder_runtime/application/inference_membership/controller.py
 sonder_runtime/application/instruction_discovery/registry.py
 sonder_runtime/application/jobs/durable_registry.py
-sonder_runtime/application/jobs/generic_jobs.py
 sonder_runtime/application/lifecycle.py
 sonder_runtime/application/live_context.py
 sonder_runtime/application/loop/facade.py

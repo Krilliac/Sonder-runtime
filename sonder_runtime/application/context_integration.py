@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from sonder_runtime.domain.context.hardware_sizing import (
     ContextSizing,
@@ -36,6 +36,14 @@ from .context_overflow_recovery import ContextOverflowRecovery, RecoveryResult
 CONTEXT_DEDUP_METADATA_KEY = "context_dedup"
 """Replay-metadata key the facade reserves for the dedup provenance mapping."""
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from typing import Any, TypeVar
+
+    from .context_manifests import PrefixCacheTelemetry
+
+    _CandidateT = TypeVar("_CandidateT")
+
 
 @dataclass(frozen=True)
 class ContextAssembly:
@@ -55,7 +63,7 @@ class ContextAssembly:
             raise ValueError("selections must contain every context section in order")
         object.__setattr__(self, "selections", MappingProxyType(selections))
 
-    def __deepcopy__(self, memo: dict[int, object]) -> "ContextAssembly":
+    def __deepcopy__(self, memo: dict[int, object]) -> ContextAssembly:
         """Keep immutable mapping proxies compatible with snapshot isolation."""
         copied = ContextAssembly(
             self.plan, dict(self.selections), self.sizing, self.prefix, self.replay,
@@ -148,13 +156,13 @@ class ContextPlanningFacade:
         tokenizer: str = "",
         template: str = "",
         system_prefix: str = "",
-        visible_tool_schemas: Any = (),
-        tool_schemas: Any = None,
-        project_policy: Any = None,
-        dynamic_memory: Any = None,
-        retrieval: Any = None,
+        visible_tool_schemas: object = (),
+        tool_schemas: object = None,
+        project_policy: object = None,
+        dynamic_memory: object = None,
+        retrieval: object = None,
         request_id: str | None = None,
-        replay_metadata: Mapping[str, Any] | None = None,
+        replay_metadata: Mapping[str, object] | None = None,
     ) -> ContextAssembly:
         """Assemble a bounded, explainable view and publish only complete views.
 
@@ -236,19 +244,19 @@ class ContextPlanningFacade:
         return None if snapshot is None else snapshot.value
 
     @property
-    def prefix_cache_telemetry(self):
+    def prefix_cache_telemetry(self) -> PrefixCacheTelemetry:
         """Return bounded hit/miss reasons for the stable prefix cache."""
         return self._prefix_cache.telemetry
 
     def prepare_overflow(
         self,
-        candidate: Any,
+        candidate: _CandidateT,
         *,
         estimated_tokens: int,
         context_limit: int,
         reserved_output_tokens: int = 0,
-        compact: Callable[[Any], Any | None],
-    ) -> RecoveryResult[Any]:
+        compact: Callable[[_CandidateT], _CandidateT | None],
+    ) -> RecoveryResult[_CandidateT]:
         """Expose the bounded preflight recovery seam without provider logic."""
         policy = self._recovery or ContextOverflowRecovery(
             compact=compact, shrink=lambda value, _factor: None
@@ -262,13 +270,13 @@ class ContextPlanningFacade:
 
     def recover_overflow(
         self,
-        candidate: Any,
+        candidate: _CandidateT,
         *,
-        fits: Callable[[Any], bool],
-        compact: Callable[[Any], Any | None],
-        shrink: Callable[[Any, float], Any | None],
+        fits: Callable[[_CandidateT], bool],
+        compact: Callable[[_CandidateT], _CandidateT | None],
+        shrink: Callable[[_CandidateT, float], _CandidateT | None],
         max_attempts: int = 3,
-    ) -> RecoveryResult[Any]:
+    ) -> RecoveryResult[_CandidateT]:
         """Run bounded overflow recovery and preserve its last-good fallback."""
         policy = self._recovery or ContextOverflowRecovery(
             compact=compact, shrink=shrink, max_attempts=max_attempts
