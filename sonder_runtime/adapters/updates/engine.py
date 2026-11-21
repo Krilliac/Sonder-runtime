@@ -503,10 +503,21 @@ class UpdateManager:
 
             # Run migrations using the target release's code (R-M9).
             step += 1
-            migrate_result = self._run_in_release(
-                final_dir, ["-m", "sonder_runtime", "migrate", "--json"],
-                timeout=self._health_timeout,
-            )
+            try:
+                migrate_result = self._run_in_release(
+                    final_dir, ["-m", "sonder_runtime", "migrate", "--json"],
+                    timeout=self._health_timeout,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.repository.record_step(
+                    update_id, step, "migrate", "failed",
+                    error_code="MIGRATION_FAILED",
+                    evidence={"error": type(exc).__name__},
+                )
+                return self._roll_back_activation(
+                    plan, final_dir, step,
+                    error_code="MIGRATION_FAILED",
+                )
             if migrate_result.returncode != 0:
                 self.repository.record_step(
                     update_id, step, "migrate", "failed",

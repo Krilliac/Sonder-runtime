@@ -49,10 +49,12 @@ CANARY = ShadowCanaryObservation(EvaluationMode.CANARY, "c1", True, 20, {"error"
 
 
 def _result(result_id: str, passed: int, total: int, *, replay: bool | None = True,
-            mode: EvaluationMode = EvaluationMode.OFFLINE) -> EvaluationResult:
+            mode: EvaluationMode = EvaluationMode.OFFLINE,
+            result_passed: bool | None = None) -> EvaluationResult:
+    ok = (passed / total >= 0.9) if result_passed is None else result_passed
     return EvaluationResult(
         result_id, SUITE, "candidate", "baseline", mode, SUITE.dimensions,
-        {"pass_rate": passed / total}, passed == total, total,
+        {"pass_rate": passed / total}, ok, total,
         replay_equivalent=replay, provenance=("test",),
     )
 
