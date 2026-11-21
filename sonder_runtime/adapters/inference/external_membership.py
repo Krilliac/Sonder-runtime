@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from ...application.ports.inference_membership import MembershipSourceLimits
 from ...domain.inference_membership import MembershipSnapshot, _aware, _origin, _timestamp
@@ -80,6 +80,39 @@ def _capture_authority(path, maximum):
                     (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
                 raise ValueError
             return raw
+
+
+def ed25519_payload_bytes(payload: object) -> bytes:
+    """Canonical bytes for a signed JSON payload (sorted keys, ASCII, no spaces)."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def sign_ed25519_payload(payload: object, private_key_file: str | os.PathLike[str]) -> str:
+    """Sign a canonical JSON payload with a provisioned Ed25519 private key.
+
+    The key is read once through ``_capture_authority``: a regular file beneath
+    a private, link-free directory, at most 16 KiB.  Returns base64 text.
+    """
+    key = serialization.load_pem_private_key(
+        _capture_authority(private_key_file, 16384), password=None,
+    )
+    if not isinstance(key, Ed25519PrivateKey):
+        raise ValueError("selfmod receipt key is not Ed25519")
+    return base64.b64encode(key.sign(ed25519_payload_bytes(payload))).decode("ascii")
+
+
+def verify_ed25519_payload(payload: object, signature: str,
+                           public_key_file: str | os.PathLike[str]) -> bool:
+    """Verify a canonical JSON payload against a provisioned Ed25519 public key.
+
+    Raises (``InvalidSignature``, ``ValueError`` or ``OSError``) on any
+    failure; returns ``True`` only for a valid signature.
+    """
+    key = serialization.load_pem_public_key(_capture_authority(public_key_file, 16384))
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("selfmod receipt key is not Ed25519")
+    key.verify(base64.b64decode(signature, validate=True), ed25519_payload_bytes(payload))
+    return True
 
 
 def _remaining(deadline):

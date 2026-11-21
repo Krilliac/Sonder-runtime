@@ -85,6 +85,10 @@ SENSITIVE_PREFIXES = (
     "tests/test_517_linux_uid_separated_candidate_evaluator",
     # The independent oracle and the evaluation-integrity checks (cheat trials, protected writes).
     "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py", "scripts/selfmod_cheat_trials.py",
+    # The opt-in evaluator broker endpoint, its worker client, and the
+    # receipt signature verifier the nightly accepts its verdict through.
+    "scripts/selfmod_evaluator_broker.py", "scripts/selfmod_evaluator_client.py",
+    "sonder_runtime/adapters/inference/external_membership.py",
     "sonder_runtime/application/selfmod/", "tests/test_selfmod_independent_oracle",
     "sonder_runtime/application/evaluation/integrity.py", "sonder_runtime/application/evaluation/cheat_trials.py", "sonder_runtime/adapters/cheat_trial_runner.py",
 )

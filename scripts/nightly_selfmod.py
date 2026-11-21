@@ -82,6 +82,17 @@ WHAT THE GATES DO AND DO NOT PROVE
     receipt bound to the tested bytes and the baseline. A failing oracle
     rejects the candidate; a missing or non-independent one (every non-Linux
     host) is recorded as not evaluated and blocks unattended promotion.
+  - An operator may also configure an evaluator broker
+    (SONDER_SELFMOD_EVALUATOR_BROKER and the related variables in
+    SELFMOD.md): after every candidate gate passes, the held-out request is
+    submitted to a separately deployed evaluator under a distinct OS identity
+    and accepted only with an Ed25519-signed receipt bound to this run's
+    nonce, the request and manifest digests, and that identity. The broker
+    is an additional gate: it replaces none of the gates above, its receipt
+    is not an independent-oracle verdict, and it never unlocks unattended
+    promotion. A partial broker configuration, or
+    SONDER_SELFMOD_EVALUATOR_STRICT=1 without a broker, refuses before any
+    run starts.
 """
 from __future__ import annotations
 
@@ -97,6 +108,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -121,6 +133,16 @@ _HELD_OUT_MAX_BYTES = 32 * 1024 * 1024
 # it inside the low-integrity candidate would recursively ask a low process to
 # create a medium-integrity evaluator manifest, which Windows correctly denies.
 _LOW_SUPERVISOR_TESTS = ("tests/test_selfmod_low_integrity.py",)
+# Opt-in evaluator broker (see _evaluator_broker_gate and SELFMOD.md).
+_EVALUATOR_BROKER_ENV = "SONDER_SELFMOD_EVALUATOR_BROKER"
+_EVALUATOR_IDENTITY_ENV = "SONDER_SELFMOD_EVALUATOR_IDENTITY"
+_EVALUATOR_ISOLATION_ENV = "SONDER_SELFMOD_EVALUATOR_ISOLATION"
+_EVALUATOR_PUBLIC_KEY_ENV = "SONDER_SELFMOD_EVALUATOR_PUBLIC_KEY"
+_EVALUATOR_PRIVATE_KEY_ENV = "SONDER_SELFMOD_EVALUATOR_PRIVATE_KEY"
+_EVALUATOR_STRICT_ENV = "SONDER_SELFMOD_EVALUATOR_STRICT"
+_EVALUATOR_ISOLATION = "windows-scheduled-task"
+_EVALUATOR_REQUEST_SCHEMA = "sonder.selfmod.evaluator-request/v1"
+_EVALUATOR_RECEIPT_SCHEMA = "sonder.selfmod.evaluator-receipt/v1"
 
 # Files the nightly stage may propose changes to. Every entry is a module
 # with its own test file, small enough that one function is a meaningful
@@ -685,7 +707,230 @@ def _prepare_held_out(target: str, workspace: Path, timeout: int,
             _module_name_for_target(target) or "", function_name or "",
         ),
         "cleanup": snapshot,
+        # The same snapshot, for an optional evaluator broker request.
+        "suite_root": str(suite_root),
+        "suites": tuple(suites),
+        "files": copied,
     }
+
+
+def _broker_command() -> tuple[str, ...] | None:
+    """Return the configured evaluator broker command, or ``None``.
+
+    A broker is deliberately an operator-supplied executable whose argv is a
+    JSON list.  The nightly worker never turns a same-user subprocess into a
+    security boundary by itself: the command must submit to an evaluator
+    that runs under a dedicated, pre-existing identity (on Windows, a
+    Scheduled Task; ``scripts/selfmod_evaluator_client.py``).  ``None``
+    unless the command, identity, public key and the scheduled-task
+    isolation label are all set.
+    """
+    raw = str(os.environ.get(_EVALUATOR_BROKER_ENV, "")).strip()
+    expected = str(os.environ.get(_EVALUATOR_IDENTITY_ENV, "")).strip()
+    public_key = str(os.environ.get(_EVALUATOR_PUBLIC_KEY_ENV, "")).strip()
+    isolation = str(os.environ.get(_EVALUATOR_ISOLATION_ENV, "")).strip()
+    if not raw or not expected or not public_key or isolation != _EVALUATOR_ISOLATION:
+        return None
+    try:
+        command = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(command, list) or not command or any(
+        not isinstance(item, str) or not item.strip() for item in command
+    ):
+        return None
+    return tuple(item.strip() for item in command)
+
+
+def _evaluator_strict() -> bool:
+    return os.environ.get(_EVALUATOR_STRICT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _worker_identity() -> str:
+    """The account this worker runs as, compared with the evaluator's."""
+    import getpass
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["whoami", "/user", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, check=False, timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
+            line = (result.stdout or "").strip().splitlines()[0]
+            fields = [item.strip().strip('"') for item in line.split(",")]
+            if fields and fields[0]:
+                return fields[0]
+        except (OSError, IndexError, AttributeError, subprocess.SubprocessError):
+            pass
+    return "%s:%s" % (getpass.getuser(), getattr(os, "getuid", lambda: "none")())
+
+
+def _evaluator_broker_refusal() -> str | None:
+    """Why the evaluator broker configuration forbids a run, else ``None``.
+
+    With no broker variable set and strict mode off, the broker gate is
+    simply absent and the lane behaves exactly as without this feature.  A
+    partial or malformed configuration refuses rather than silently dropping
+    a gate the operator meant to add; strict mode refuses without a broker.
+    """
+    names = (_EVALUATOR_BROKER_ENV, _EVALUATOR_IDENTITY_ENV,
+             _EVALUATOR_ISOLATION_ENV, _EVALUATOR_PUBLIC_KEY_ENV)
+    if _broker_command() is None:
+        partial = any(str(os.environ.get(name, "")).strip() for name in names)
+        if not partial and not _evaluator_strict():
+            return None
+        return ("%s needs %s (a JSON argv list), %s, %s=%s and %s" % (
+            "strict evaluator mode" if _evaluator_strict() else "the evaluator broker",
+            _EVALUATOR_BROKER_ENV, _EVALUATOR_IDENTITY_ENV,
+            _EVALUATOR_ISOLATION_ENV, _EVALUATOR_ISOLATION, _EVALUATOR_PUBLIC_KEY_ENV))
+    if str(os.environ.get(_EVALUATOR_PRIVATE_KEY_ENV, "")).strip():
+        return ("%s is set for the nightly worker; only the evaluator account may "
+                "hold the receipt signing key" % _EVALUATOR_PRIVATE_KEY_ENV)
+    if not Path(str(os.environ.get(_EVALUATOR_PUBLIC_KEY_ENV, "")).strip()).is_file():
+        return "%s does not name a provisioned public key file" % _EVALUATOR_PUBLIC_KEY_ENV
+    if str(os.environ.get(_EVALUATOR_IDENTITY_ENV, "")).strip() == _worker_identity():
+        return "%s names this worker's own identity" % _EVALUATOR_IDENTITY_ENV
+    return None
+
+
+def _canonical_json(payload: dict) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _file_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prepare_broker_request(target: str, workspace: Path, held_out: dict, timeout: int) -> dict:
+    """Write one nonce-bound evaluator request for the prepared held-out snapshot.
+
+    The request lives in its own temporary directory (never inside the
+    evaluator truth snapshot).  Returns the request path, its cleanup, the
+    nonce and the request and manifest digests a receipt must echo, or
+    ``{"error": reason}``.  ``scripts/selfmod_evaluator_broker.py``
+    recomputes both digests from the same fields.
+    """
+    suite_root = held_out.get("suite_root")
+    suites = held_out.get("suites")
+    files = held_out.get("files")
+    if not suite_root or not suites or not files:
+        return {"error": "held-out snapshot unavailable for the broker"}
+    target_path = workspace / target
+    if target_path.is_symlink() or not target_path.is_file():
+        return {"error": "candidate target is not a regular file"}
+    suite_paths = [str(Path(suite_root) / item) for item in suites]
+    target_sha = _file_sha(target_path)
+    manifest = {
+        "target_path": target, "target_sha256": target_sha,
+        "suites": suite_paths, "files": list(files),
+    }
+    bounded = max(1, min(int(timeout), 900))
+    payload = {
+        "schema": _EVALUATOR_REQUEST_SCHEMA,
+        "nonce": uuid.uuid4().hex,
+        "root": str(workspace),
+        "suite_root": str(suite_root),
+        "target_path": target,
+        "target_sha256": target_sha,
+        "suites": [{"path": path} for path in suite_paths],
+        "files": list(files),
+        "timeout": bounded,
+        "worker_identity": _worker_identity(),
+        "expected_evaluator_identity": str(os.environ.get(_EVALUATOR_IDENTITY_ENV, "")).strip(),
+        "isolation": _EVALUATOR_ISOLATION,
+        "manifest_digest": hashlib.sha256(_canonical_json(manifest)).hexdigest(),
+    }
+    payload["request_digest"] = hashlib.sha256(_canonical_json(payload)).hexdigest()
+    directory = tempfile.TemporaryDirectory(prefix="sonder-evaluator-request-")
+    path = Path(directory.name) / "request.json"
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    path.chmod(0o400)
+    return {
+        "path": path, "cleanup": directory, "timeout": bounded,
+        "receipt_nonce": payload["nonce"],
+        "request_digest": payload["request_digest"],
+        "manifest_digest": payload["manifest_digest"],
+    }
+
+
+def _validate_evaluator_receipt(outcome, request: dict) -> tuple[bool, str]:
+    """Accept only a signed receipt bound to this request and the configured identity."""
+    if not isinstance(outcome, dict) or not outcome.get("passed"):
+        return False, "broker command failed"
+    output = str(outcome.get("output") or "")[-100_000:]
+    receipt = None
+    for line in reversed(output.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("schema") == _EVALUATOR_RECEIPT_SCHEMA:
+            receipt = candidate
+            break
+    expected_identity = str(os.environ.get(_EVALUATOR_IDENTITY_ENV, "")).strip()
+    if not receipt or not isinstance(receipt.get("payload"), dict):
+        return False, "broker returned no signed evaluator receipt"
+    signed = receipt["payload"]
+    if signed.get("schema") != _EVALUATOR_RECEIPT_SCHEMA:
+        return False, "broker receipt schema mismatch"
+    if not request.get("receipt_nonce") or signed.get("nonce") != request.get("receipt_nonce"):
+        return False, "broker receipt nonce mismatch"
+    if signed.get("request_digest") != request.get("request_digest"):
+        return False, "broker request digest mismatch"
+    if signed.get("manifest_digest") != request.get("manifest_digest"):
+        return False, "broker manifest digest mismatch"
+    if not expected_identity or signed.get("identity") != expected_identity:
+        return False, "broker evaluator identity mismatch"
+    if signed.get("identity") == _worker_identity():
+        return False, "broker evaluator identity is the worker identity"
+    if signed.get("isolation") != _EVALUATOR_ISOLATION:
+        return False, "broker isolation attestation mismatch"
+    if signed.get("passed") is not True:
+        return False, "broker evaluator did not pass"
+    try:
+        from sonder_runtime.adapters.inference.external_membership import verify_ed25519_payload
+        verify_ed25519_payload(
+            signed, str(receipt.get("signature") or ""),
+            os.environ[_EVALUATOR_PUBLIC_KEY_ENV],
+        )
+    except Exception:
+        return False, "broker evaluator receipt signature invalid"
+    return True, "broker evaluator receipt accepted"
+
+
+def _evaluator_broker_gate(target: str, workspace: Path, held_out: dict, timeout: int,
+                           broker: tuple[str, ...]) -> tuple[bool, str]:
+    """Submit the held-out request to the configured broker and check its receipt.
+
+    The broker command is operator-deployed and runs no candidate code, so it
+    runs from this process rather than under the candidate supervisor (a
+    low-integrity or candidate-uid process could not write the evaluator
+    inbox).  Every failure -- no request, no start, timeout, non-zero exit,
+    missing or forged receipt -- is a refusal.
+    """
+    request = _prepare_broker_request(target, workspace, held_out, timeout)
+    if "error" in request:
+        return False, str(request["error"])
+    try:
+        try:
+            completed = subprocess.run(
+                [*broker, str(request["path"])],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=False,
+                timeout=int(request["timeout"]) + 60,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "broker timed out"
+        except OSError as exc:
+            return False, "broker could not start (%s)" % type(exc).__name__
+        outcome = {"passed": completed.returncode == 0, "output": completed.stdout or ""}
+        return _validate_evaluator_receipt(outcome, request)
+    finally:
+        request["cleanup"].cleanup()
 
 
 def _module_name_for_target(target: str) -> str | None:
@@ -1546,6 +1791,12 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     refusal = _isolation_refusal()
     if refusal:
         return "candidate isolation unavailable, no run started: %s" % refusal
+    # The optional evaluator broker is all-or-nothing: absent, or fully and
+    # coherently configured (and required under strict mode).
+    refusal = _evaluator_broker_refusal()
+    if refusal:
+        return "isolated evaluator broker unavailable, no run started: %s" % refusal
+    broker = _broker_command()
 
     # A dirty tree cannot produce a committed improvement -- selfmod's deploy
     # refuses to commit when the run started with uncommitted changes -- so
@@ -1746,6 +1997,17 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
                 return "candidate rejected: independent oracle failed"
             if not oracle_independent:
                 oracle_note = "verdict is not independent: %s" % str(outcome.get("detail", ""))[:300]
+        if broker is not None:
+            # Runs last, while the held-out snapshot still exists; in addition to,
+            # never instead of, the supervised held_out, host_grade and oracle gates.
+            passed, broker_detail = _evaluator_broker_gate(
+                target, workspace, held_out, test_timeout, broker)
+            results.append(("evaluator_broker", passed))
+            log("  evaluator_broker: %s -- %s" % ("pass" if passed else "FAIL", broker_detail))
+            if not passed:
+                selfmod.reject(run_id, reason="isolated evaluator broker refused: %s" % broker_detail)
+                _discard_workspace(run_id)
+                return "candidate rejected: isolated evaluator broker refused (%s)" % broker_detail
     finally:
         cleanup = held_out.get("cleanup")
         if cleanup is not None:
