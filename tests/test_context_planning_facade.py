@@ -132,3 +132,110 @@ def test_prefix_identity_separates_provider_bindings():
         tokenizer="tokenizer-v1", template="chat-v1",
     )
     assert first.cache_key != second.cache_key
+
+
+ALWAYS_RULE = "Always run the full test suite before you push changes to the main branch."
+NEVER_RULE = "Never run the full test suite before you push changes to the main branch."
+
+
+def _rules(first: str = ALWAYS_RULE, second: str = NEVER_RULE) -> tuple[ContextRecord, ContextRecord]:
+    return (
+        ContextRecord("rule:first", "project_rules", first, "project-rule:global", ordinal=1, stable=True),
+        ContextRecord("rule:second", "project_rules", second, "project-rule:project", ordinal=2, stable=True),
+    )
+
+
+def _assemble_records(records, **kwargs):
+    return ContextPlanningFacade().assemble(
+        ModelContext("model-a", 20_000, 2_000), {}, _budgets(20),
+        records=records, tokenizer="tok", template="chat", request_id="r", **kwargs,
+    )
+
+
+def test_facade_keeps_contradictory_rules_from_different_sources_in_both_manifests():
+    result = _assemble_records(_rules())
+
+    assert result.replay is not None and result.prefix is not None
+    assert [section.item_id for section in result.replay.sections] == ["rule:first", "rule:second"]
+    assert [section.source for section in result.replay.sections] == [
+        "project-rule:global", "project-rule:project",
+    ]
+    assert {record.item_id for record in result.prefix.sections} == {"rule:first", "rule:second"}
+    assert result.dedup is not None and result.dedup.provenance == ()
+    assert "context_dedup" not in result.replay.metadata
+
+
+def test_facade_evidence_changes_when_a_near_duplicate_rule_changes():
+    baseline = _assemble_records(_rules())
+    # Still one word away from the first rule, so similarity alone would
+    # treat both versions of the second rule as the same duplicate.
+    changed = _assemble_records(_rules(second=ALWAYS_RULE.replace("Always", "Sometimes")))
+
+    assert baseline.prefix.cache_key != changed.prefix.cache_key  # type: ignore[union-attr]
+    assert baseline.replay.manifest_digest != changed.replay.manifest_digest  # type: ignore[union-attr]
+
+
+def test_facade_exact_duplicates_keep_every_source_and_count_once():
+    result = _assemble_records(_rules(second=ALWAYS_RULE))
+
+    assert result.replay is not None and result.prefix is not None and result.dedup is not None
+    # Both rendered copies stay in the evidence with their own source.
+    assert [(section.item_id, section.source) for section in result.replay.sections] == [
+        ("rule:first", "project-rule:global"), ("rule:second", "project-rule:project"),
+    ]
+    assert len(result.prefix.sections) == 2
+    # They are one piece of evidence, and the mapping is part of the digest.
+    assert [record.item_id for record in result.dedup.retained] == ["rule:first"]
+    assert result.replay.metadata["context_dedup"] == [{
+        "removed_item_id": "rule:second", "retained_item_id": "rule:first",
+        "reason": "exact", "similarity": 1.0,
+        "removed_source": "project-rule:project", "retained_source": "project-rule:global",
+        "removed_section": "project_rules", "retained_section": "project_rules",
+    }]
+    independent = {section.item_id for section in result.replay.sections} - {
+        entry["removed_item_id"] for entry in result.replay.metadata["context_dedup"]
+    }
+    assert independent == {"rule:first"}
+    distinct = _assemble_records(_rules())
+    assert distinct.replay.manifest_digest != result.replay.manifest_digest  # type: ignore[union-attr]
+
+
+def test_facade_prefix_changes_when_an_exact_duplicate_rule_is_removed():
+    both = _assemble_records(_rules(second=ALWAYS_RULE))
+    one = _assemble_records(_rules(second=ALWAYS_RULE)[:1])
+
+    assert both.prefix.cache_key != one.prefix.cache_key  # type: ignore[union-attr]
+
+
+def test_facade_manifests_do_not_depend_on_record_input_order():
+    forward = _assemble_records(_rules())
+    backward = _assemble_records(tuple(reversed(_rules())))
+
+    assert forward.replay == backward.replay
+    assert forward.prefix == backward.prefix
+    assert forward.dedup == backward.dedup
+    assert len(forward.replay.sections) == 2  # type: ignore[union-attr]
+
+
+def test_facade_records_semantic_grouping_of_prose_without_dropping_it():
+    records = (
+        ContextRecord("mem:a", "memories", ALWAYS_RULE, "recall-a", ordinal=1),
+        ContextRecord("mem:b", "memories", NEVER_RULE, "recall-b", ordinal=2),
+    )
+    result = _assemble_records(records)
+
+    assert result.replay is not None
+    assert [section.item_id for section in result.replay.sections] == ["mem:a", "mem:b"]
+    (entry,) = result.replay.metadata["context_dedup"]
+    assert (entry["removed_item_id"], entry["retained_item_id"], entry["reason"]) == (
+        "mem:b", "mem:a", "semantic",
+    )
+
+
+def test_facade_rejects_caller_metadata_under_the_reserved_dedup_key():
+    try:
+        _assemble_records(_rules(), replay_metadata={"context_dedup": []})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the dedup mapping key is reserved for the facade")
