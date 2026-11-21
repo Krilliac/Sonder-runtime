@@ -112,3 +112,66 @@ def test_application_exposes_lazy_unified_registry_factory():
     app = build_application()
     assert app.agent_registry is not None
     assert app.agent_registry() is app.agent_registry()
+
+
+def _fleet(service, agent_id, root, **kw):
+    service.fleet.launch_fleet(
+        agent_id=agent_id, operation_id="o-" + agent_id, prompt="p",
+        idempotency_key="i-" + agent_id, lineage=AgentLineage(root), **kw,
+    )
+
+
+def test_cancel_releases_only_the_cancelled_agents_root_and_only_once():
+    service = UnifiedAgentRegistryService(Backend())
+    _fleet(service, "x", "rx", budget=budget(max_concurrency=1))
+    _fleet(service, "y", "ry", budget=budget(max_concurrency=1))
+    service.fleet.cancel("y", reason="r")
+    service.fleet.cancel("y", reason="r")  # repeat is a no-op
+    with pytest.raises(AgentRegistryError, match="concurrency"):
+        _fleet(service, "x2", "rx", budget=budget(max_concurrency=1))
+    _fleet(service, "y2", "ry", budget=budget(max_concurrency=1))
+
+
+def test_unknown_agent_cancel_does_not_release_any_reservation():
+    backend = Backend()
+    backend.records["ghost"] = {"id": "ghost", "status": "running"}
+    service = UnifiedAgentRegistryService(backend)
+    _fleet(service, "x", "rx", budget=budget(max_concurrency=1))
+    service.cancel("ghost")
+    with pytest.raises(AgentRegistryError, match="concurrency"):
+        _fleet(service, "x2", "rx", budget=budget(max_concurrency=1))
+
+
+def test_child_budget_released_on_cancel_and_on_backend_failure():
+    backend = Backend()
+    service = UnifiedAgentRegistryService(backend)
+    kw = dict(budget=budget(max_children=1, max_concurrency=5), parent_id="p")
+    _fleet(service, "c1", "p", **kw)
+    with pytest.raises(AgentRegistryError, match="child budget"):
+        _fleet(service, "c2", "p", **kw)
+    service.fleet.cancel("c1", reason="r")
+    _fleet(service, "c3", "p", **kw)
+    backend.create = lambda launch: None
+    service.fleet.cancel("c3", reason="r")
+    with pytest.raises(AgentRegistryError, match="refused"):
+        _fleet(service, "c4", "p", **kw)
+    backend.create = Backend.create.__get__(backend)
+    _fleet(service, "c5", "p", **kw)
+
+
+def test_duplicate_agent_id_does_not_overwrite_live_receipt():
+    backend = Backend()
+    service = UnifiedAgentRegistryService(backend)
+    kw = dict(budget=budget(max_children=1, max_concurrency=1), parent_id="p")
+    _fleet(service, "x", "r", **kw)
+    real_create = backend.create
+
+    def duplicate(launch):
+        raise RuntimeError("UNIQUE constraint failed: fleet_agents.id")
+
+    backend.create = duplicate
+    with pytest.raises(AgentRegistryError, match="already admitted"):
+        _fleet(service, "x", "r", **kw)
+    backend.create = real_create
+    service.fleet.cancel("x", reason="r")
+    _fleet(service, "y", "r", **kw)

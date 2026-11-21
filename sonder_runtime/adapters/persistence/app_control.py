@@ -653,6 +653,7 @@ class AppControlTransaction:
         expected_revision,
         dispatch_id,
         process_incarnation,
+        live_authority=True,
     ):
         positive(expected_revision)
         identifier(dispatch_id)
@@ -664,7 +665,8 @@ class AppControlTransaction:
         )
         if record is None:
             raise NotFound("work unavailable")
-        self._require_work(record.prepared)
+        if live_authority or record.state == "prepared":
+            self._require_work(record.prepared)
         work = record.prepared
         preparation = self.command(
             work.command, action="prepare_work", argument_digest=work.digest
@@ -751,6 +753,11 @@ class AppControlTransaction:
             expected_revision=1,
             dispatch_id=dispatch_id,
             process_incarnation=process_incarnation,
+            # Terminal and unknown transitions close work that is already
+            # admitted; they validate against the stored admission and must
+            # not be blocked by preparation expiry. (Selection-epoch checks in
+            # the authority layer are separate and not handled here.)
+            live_authority=terminal is None and interruption is None,
         ).record
         if record.state == "prepared":
             raise CommandConflict("work is not admitted")
