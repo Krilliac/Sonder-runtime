@@ -1553,6 +1553,53 @@ def test_active_lane_count_covers_history_beyond_first_page(env):
         )) == 0
 
 
+def _seed_history_then(env, later_rows):
+    """Insert 1000 archived rows, then later_rows [(status, root_id)]."""
+    _, store, _, _, context, root = env
+    with store.transaction() as tx:
+        root_id = tx.root("parent", context.principal_id)
+        for index in range(1000):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) VALUES(?,?,?,?)",
+                (f"old-{index}", context.principal_id, "parent",
+                 json.dumps({"status": "archived", "root_id": root_id, "owner": ""})),
+            )
+        for index, (status, row_root) in enumerate(later_rows):
+            tx.conn.execute(
+                "INSERT INTO agent_lanes(id,principal,parent_session,data) VALUES(?,?,?,?)",
+                (f"new-{index}", context.principal_id, "parent",
+                 json.dumps({"id": f"new-{index}", "status": status, "owner": "",
+                             "root_id": root_id if row_root is None else row_root,
+                             "workspace_root": str(root / f"elsewhere-{index}")})),
+            )
+        page = tx.lanes(context.principal_id, limit=1000)
+        assert len(page) == 1000
+        assert all(row["status"] == "archived" for _, row in page)
+
+
+def test_spawn_root_retained_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("completed", None)] * 8)
+    with pytest.raises(ValueError, match="lane fanout or retained lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_principal_queued_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("queued", f"root-{i}") for i in range(8)])
+    with pytest.raises(ValueError, match="principal queued lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_principal_retained_cap_counts_history_beyond_first_page(env):
+    _seed_history_then(env, [("completed", f"root-{i}") for i in range(256)])
+    with pytest.raises(ValueError, match="lane fanout or retained lane capacity reached"):
+        spawn(env)
+
+
+def test_spawn_admission_ignores_archived_history_below_caps(env):
+    _seed_history_then(env, [("completed", None)] * 2)
+    assert spawn(env)["lane"]["id"]
+
+
 def test_capacity_admission_refusal_does_not_fail_another_committed_event(env):
     service, _, sessions, _, context, _ = env
     lane = spawn(env)["lane"]["id"]

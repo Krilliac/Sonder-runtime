@@ -302,6 +302,27 @@ class LaneTransaction:
         ).fetchall()
         return [(r[0], json.loads(r[1])) for r in rows]
 
+    def admission_counts(self, principal, root_id, active_statuses):
+        """Count retained lanes for spawn admission without paging history.
+
+        Returns (retained_total, retained_for_root, active_status_total) over
+        every non-archived row of the principal, in the caller's writer
+        transaction. A row without a status counts as retained, matching the
+        previous in-memory policy.
+        """
+        statuses = tuple(sorted(active_statuses))
+        marks = ",".join("?" for _ in statuses) or "NULL"
+        row = self.conn.execute(
+            f"""SELECT COUNT(*),
+                   COALESCE(SUM(json_extract(data, '$.root_id') IS ?), 0),
+                   COALESCE(SUM(json_extract(data, '$.status') IN ({marks})), 0)
+               FROM agent_lanes
+               WHERE principal=?
+                 AND COALESCE(json_extract(data, '$.status'), '') != 'archived'""",
+            (root_id, *statuses, principal),
+        ).fetchone()
+        return int(row[0]), int(row[1]), int(row[2])
+
     def expensive_spawn_count(self, principal, parent_session):
         """Count all admitted expensive lanes, including archived tombstones.
 

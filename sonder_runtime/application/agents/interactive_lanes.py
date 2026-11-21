@@ -1159,11 +1159,12 @@ class AgentLaneService:
                 )
             if depth > 2:
                 raise ValueError("lane depth limit reached")
-            lanes = [lane_row for _, lane_row in tx.lanes(context.principal_id, limit=1000)]
-            retained = [lane_row for lane_row in lanes if lane_row.get("status") != "archived"]
-            if len(retained) >= 256 or sum(lane_row["root_id"] == root_id for lane_row in retained) >= 8:
+            retained_total, retained_for_root, active_total = tx.admission_counts(
+                context.principal_id, root_id, _ACTIVE
+            )
+            if retained_total >= 256 or retained_for_root >= 8:
                 raise ValueError("lane fanout or retained lane capacity reached")
-            if sum(lane_row["status"] in _ACTIVE for lane_row in retained) >= 8:
+            if active_total >= 8:
                 raise ValueError("principal queued lane capacity reached")
             # Explicit exclusive root grant; no implicit merge or shared checkout.
             for other in tx.all_lanes():
