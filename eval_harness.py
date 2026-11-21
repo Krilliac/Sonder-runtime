@@ -54,6 +54,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import grounding
@@ -483,6 +484,10 @@ def resolve_suite(name_or_path, scenario_dir=DEFAULT_SCENARIO_DIR):
 
 # --- providers ---------------------------------------------------------------
 
+class _CaseAbandoned(Exception):
+    """Raised inside a timed-out case's worker so it stops touching state."""
+
+
 class ReplayProvider:
     """Deterministic offline provider serving recorded responses in order.
 
@@ -524,19 +529,46 @@ class ReplayProvider:
         self._scenario_id = scenario_id
         self._cursor = 0
 
-    def generate(self, prompt, history=None):
-        recorded = self._entries.get(self._scenario_id, [])
-        index = self._cursor
+    def for_case(self, scenario_id):
+        """Per-case handle with its own cursor, immune to later begin_case."""
+        return _ReplayCase(self, scenario_id)
+
+    def _serve(self, scenario_id, index, prompt):
+        recorded = self._entries.get(scenario_id, [])
         if index >= len(recorded):
             raise CassetteMiss(
                 "no recording for scenario %r call %d (cassette has %d)"
-                % (self._scenario_id, index + 1, len(recorded)))
+                % (scenario_id, index + 1, len(recorded)))
         entry = recorded[index]
-        self._cursor += 1
         expected_sha = entry.get("prompt_sha256")
         if expected_sha and expected_sha != _sha256(prompt):
-            self.drift.append((self._scenario_id, index))
+            self.drift.append((scenario_id, index))
         return entry["response"]
+
+    def generate(self, prompt, history=None):
+        index = self._cursor
+        response = self._serve(self._scenario_id, index, prompt)
+        self._cursor = index + 1
+        return response
+
+
+class _ReplayCase:
+    """One scenario's view of a ReplayProvider: fixed id, private cursor."""
+
+    kind = "replay"
+    deterministic = True
+
+    def __init__(self, parent, scenario_id):
+        self._parent = parent
+        self._scenario_id = scenario_id
+        self._cursor = 0
+        self.name = parent.name
+
+    def generate(self, prompt, history=None):
+        index = self._cursor
+        response = self._parent._serve(self._scenario_id, index, prompt)
+        self._cursor = index + 1
+        return response
 
 
 class RecordingProvider:
@@ -564,9 +596,32 @@ class RecordingProvider:
         if hasattr(self.inner, "begin_case"):
             self.inner.begin_case(scenario_id)
 
+    def for_case(self, scenario_id):
+        """Per-case handle that records under a fixed scenario id."""
+        return _RecordingCase(self, scenario_id)
+
     def generate(self, prompt, history=None):
         response = self.inner.generate(prompt)
         self.cassette["entries"].setdefault(self._scenario_id, []).append(
+            {"prompt_sha256": _sha256(prompt), "response": response})
+        return response
+
+
+class _RecordingCase:
+    """One scenario's view of a RecordingProvider; never retargets entries."""
+
+    kind = "recording"
+    deterministic = False
+
+    def __init__(self, parent, scenario_id):
+        self._parent = parent
+        self._scenario_id = scenario_id
+        self.name = parent.name
+
+    def generate(self, prompt, history=None):
+        parent = self._parent
+        response = parent.inner.generate(prompt)
+        parent.cassette["entries"].setdefault(self._scenario_id, []).append(
             {"prompt_sha256": _sha256(prompt), "response": response})
         return response
 
@@ -936,8 +991,20 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
     generate_errors = []
     attempt_counter = {"n": 0}
     run_code_fn = run_code_fn or grounding.run_code
+    cancelled = threading.Event()
+
+    # Bind a per-case handle so an abandoned worker cannot disturb the next
+    # case's provider state; providers without one keep begin_case semantics.
+    bind = getattr(provider, "for_case", None)
+    if callable(bind):
+        case_provider = bind(scenario["id"])
+    else:
+        provider.begin_case(scenario["id"])
+        case_provider = provider
 
     def generate_fn(prompt, history=None):
+        if cancelled.is_set():
+            raise _CaseAbandoned("case abandoned after timeout")
         attempt_counter["n"] += 1
         event = {
             "event": "generate",
@@ -950,7 +1017,7 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
         }
         events.append(event)
         try:
-            response = provider.generate(prompt)
+            response = case_provider.generate(prompt)
         except CassetteMiss as exc:
             event["error"] = str(exc)
             misses.append(str(exc))
@@ -964,6 +1031,8 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
         return response
 
     def grading_run(code, check):
+        if cancelled.is_set():
+            raise _CaseAbandoned("case abandoned after timeout")
         ok, output = run_code_fn(code, check, timeout=scenario["timeout_s"])
         events.append({
             "event": "exec",
@@ -1012,7 +1081,6 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
         # plus headroom for generation. A hung provider is a "timeout" case,
         # never a silently absent one.
         case_timeout = scenario["max_attempts"] * (scenario["timeout_s"] + 30)
-    provider.begin_case(scenario["id"])
     timed_out = False
     result = None
     crash = None
@@ -1023,6 +1091,7 @@ def run_case(scenario, provider, run_code_fn=None, case_timeout=None,
             result = future.result(timeout=case_timeout)
         except concurrent.futures.TimeoutError:
             timed_out = True
+            cancelled.set()
             future.cancel()
         except Exception as exc:
             crash = exc

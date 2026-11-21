@@ -487,7 +487,7 @@ def install_model_store(
             if sha256_file(target) == record.sha256:
                 reused += 1
                 continue
-        elif target.exists():
+        elif target.exists() and not target.is_file():
             raise ValueError(f"model-store destination is not a regular file: {suffix.as_posix()}")
         fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
         os.close(fd)
