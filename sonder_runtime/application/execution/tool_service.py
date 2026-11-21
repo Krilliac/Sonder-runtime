@@ -4,6 +4,13 @@ Every model-authored tool call flows through ToolService:
 descriptor lookup → schema validation → policy authorization →
 execution-class selection → execute → normalize result → record.
 
+Deprecated: no production composition constructs ``ToolService``; the live
+routes are the typed tool gateway and the native MCP server.  It stays
+callable for its existing callers and validates arguments with the same
+validator and schema dialect as those routes
+(:func:`~sonder_runtime.application.ports.tool_registry.validate_tool_arguments`),
+before policy authorization and independent of it.
+
 No model-facing subsystem may invoke subprocess directly.
 """
 from __future__ import annotations
@@ -16,6 +23,7 @@ from ..context import OperationContext
 
 logger = logging.getLogger(__name__)
 from ..ports.tool_executor import ToolResult as ExecutorResult
+from ..ports.tool_registry import validate_tool_arguments
 from ...domain.tools.descriptors import (
     ExecutionClass,
     ToolCall,
@@ -72,6 +80,9 @@ class ToolService:
         descriptor = self._registry.get(call.tool_name)
         if descriptor is None:
             raise InvalidInput(f"unknown tool {call.tool_name!r}")
+
+        # Raises InvalidInput before policy or executor see the call.
+        validate_tool_arguments(descriptor.input_schema, call.arguments)
 
         self._policy.authorize(descriptor, call)
 
