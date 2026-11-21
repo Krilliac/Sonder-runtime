@@ -9,6 +9,7 @@ is only for values a caller passes on a request.
 from __future__ import annotations
 
 import math
+from typing import TypeVar
 
 from .common.errors import InvalidInput
 
@@ -16,8 +17,10 @@ TEMPERATURE_MIN = 0.0
 TEMPERATURE_MAX = 2.0
 _SHOWN_MAX = 80  # an oversized value is not echoed back in full
 
+_T = TypeVar("_T")
 
-def validate_request_temperature(value):
+
+def validate_request_temperature(value: _T) -> _T:
     """Return ``value`` unchanged if it is ``None`` (unset) or a finite real
     number in [0.0, 2.0]; otherwise raise ``InvalidInput``.
 
