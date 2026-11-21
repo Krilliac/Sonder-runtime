@@ -297,6 +297,7 @@ def test_stop_does_not_kill_recorded_server_on_another_port(monkeypatch, tmp_pat
     monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 4567)
     monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
     monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: False)
+    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: True)
     monkeypatch.setattr(
         H.subprocess,
         "run",
@@ -311,6 +312,20 @@ def test_stop_does_not_kill_recorded_server_on_another_port(monkeypatch, tmp_pat
     # The pidfile belongs to the live instance on the other port; deleting it
     # would orphan that server for a later POSIX ``stop``.
     assert H.pid_file("sonder_serve").read_text(encoding="ascii") == "4567"
+
+
+def test_stop_removes_stale_serve_pidfile_for_reused_pid(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    H.pid_file("sonder_serve").write_text("4567", encoding="ascii")
+    monkeypatch.setattr(H, "pid_alive", lambda pid: pid == 4567)
+    monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
+    monkeypatch.setattr(H, "_pid_command_line", lambda pid: '"C:\editor.exe" file.txt')
+    _fail_on_kill(monkeypatch)
+
+    result = H.stop_pid("sonder_serve", port=11435)
+
+    assert "not a Sonder server" in result
+    assert not H.pid_file("sonder_serve").exists()
 
 
 def _fail_on_kill(monkeypatch):
@@ -379,6 +394,8 @@ def test_stop_ollama_kills_a_verified_ollama_serve(monkeypatch, tmp_path):
         (r'"C:\engine\bin\engine-server.exe" serve', r"C:\engine\bin\engine-server.exe", True),
         ("/usr/local/bin/ollama run sonder", "", False),
         ("/usr/bin/notollama serve", "", False),
+        ("cmd.exe /c echo ollama serve", "", False),
+        ('git commit -m "fix ollama serve"', "", False),
         ("python -m sonder_runtime serve 11435", "", False),
         ("", "", False),
     ],
@@ -703,6 +720,7 @@ def _posix_stop_fixture(monkeypatch, tmp_path, alive_polls):
     monkeypatch.setattr(H.os, "name", "posix", raising=False)
     monkeypatch.setattr(H, "_listener_pids", lambda host, port: [])
     monkeypatch.setattr(H, "_is_sonder_server_for_port", lambda pid, port: True)
+    monkeypatch.setattr(H, "_is_sonder_server_pid", lambda pid: True)
 
     def alive(pid):
         if not state["signalled"]:
