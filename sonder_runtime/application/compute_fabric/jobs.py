@@ -992,7 +992,7 @@ class ComputeJobWorker:
     def _artifact_spool_usage_locked(self, *, exclude_job: str) -> tuple[int, int]:
         """Count published and interrupted bytes; expire receipts with bytes.
 
-        Retention is seven days by default. Once expired, both the receipt and
+        Retention is fourteen days by default. Once expired, both the receipt and
         snapshot are removed; callers must treat the old artifact as unavailable.
         """
         root = self._artifact_root.path
