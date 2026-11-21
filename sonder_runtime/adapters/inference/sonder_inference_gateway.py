@@ -884,6 +884,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             http_error_classifier=self._classify_http_error,
             connect_error_classifier=self._classify_connect_error,
             get_transport=get_transport or direct_get_transport,
+            spend_ledger=None,  # the owner's own LAN host: not metered
         )
         self._settings_override = config
         self._env = env

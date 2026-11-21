@@ -564,6 +564,7 @@ class OpenRouterGateway(OpenAICompatibleGateway):
             provider_label=PROVIDER_LABEL,
             extra_headers=self._attribution_headers,
             http_error_classifier=self._classify_http_error,
+            spend_ledger=None,  # OpenRouter has its own policy
         )
         self._settings_override = config
         self._env = env
@@ -1199,7 +1200,7 @@ def protocol_probe_gateway(
 
     return OpenAICompatibleGateway(OpenAICompatibleConfig(
         base_url=settings.api_root, api_key=settings.api_key, model=model,
-    ), transport=with_preferences)
+    ), transport=with_preferences, spend_ledger=None)
 
 
 __all__ = [

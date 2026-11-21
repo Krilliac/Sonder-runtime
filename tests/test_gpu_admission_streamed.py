@@ -556,7 +556,8 @@ def _gateway(calls, base_url=BACKEND):
         return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
 
     return OpenAICompatibleGateway(
-        OpenAICompatibleConfig(base_url, model="giant-moe"), transport=transport)
+        OpenAICompatibleConfig(base_url, model="giant-moe"), transport=transport,
+        spend_ledger=None)
 
 
 def _generate(gateway, *, cloud=False):
