@@ -87,11 +87,13 @@ composed by `AppManagedWorkHttp` with the owned `Application` and the private
 and from `AppWorkRecoveryAttempt.resume` (composed by
 `app_work_recovery_http`). It acts only on the exact authority type in a
 certified/failed phase and on the exact managed owner types; callers pass no
-receipt, worker, trust, or fact text, and no `HostFinalFacts` semantic claim
-is accepted. When the composed unit of work has an authoritative fact source
+receipt, worker, trust, or fact text. The only semantic claim is one sealed
+into the host final facts by a host verifier (see "Explicit host fact claims"
+below). When the composed unit of work has an authoritative fact source
 whose project scope equals the receipt scope it runs
-`MemoryLearningFacade.promote_verified_subject`; otherwise promotion reports
-`unconfigured` or `out_of_scope`.
+`MemoryLearningFacade.promote_verified_subject`, or
+`MemoryLearningFacade.promote_verified_claim` for a receipt that carries a
+claim digest; otherwise promotion reports `unconfigured` or `out_of_scope`.
 
 ## Evidence (local, Windows, `-p no:cacheprovider`)
 
@@ -129,5 +131,55 @@ unit coverage but no live failing-check run; worker/model-class identity is
 not part of independence (per account only); hosted CI has not run this
 revision.
 
-No semantic fact claim is accepted from `HostFinalFacts`; promotion is
-limited to the canonical verifier-subject token.
+Ordinary receipts carry no fact text and still promote only the canonical
+verifier-subject token. Semantic fact text is accepted only through the
+explicit host claim bridge below.
+
+## Explicit host fact claims (ISSUE-513 claim slice)
+
+`HostFinalFacts` has two optional fields, `verified_fact_claim` and
+`verified_fact_claim_digest`, that only a host verifier may populate. They
+must be supplied together, the claim is bounded to 512 characters (the
+`LearningObservation.content` bound), the digest must be the SHA-256 of the
+exact UTF-8 claim, and a `verified-subject:` token is refused as a claim.
+When both are absent they are left out of the sealed final receipt, so the
+final binding digest of every claim-free turn is unchanged.
+
+`ReceiptObservationProducer` reads the claim only from the sealed decision
+inside the verifier authority. With a claim it re-checks the digest (fails
+closed with `PermissionError` on a mismatch), uses the claim as the
+observation content, stores `claim_digest` on the `VerifierReceipt`, and adds
+`claim_digest:<digest>` to the observation provenance. Both are covered by the
+producer's insert capability. A receipt without a claim serializes exactly as
+before (`claim_digest` is omitted, not null), so existing rows replay byte for
+byte.
+
+`ReceiptBoundFactPromotion`
+(`sonder_runtime/application/memory/receipt_bound_fact_promotion.py`, exposed
+as `MemoryLearningFacade.promote_verified_claim`) writes the claim text as a
+fact with the same rules as subject promotion: the fact identity is reserved
+(`verified-claim-fact-<sha256(project, claim digest)>`) and an occupied
+identity is refused; the caller must hold `BEGIN IMMEDIATE`; every selected
+observation must be scoped to the project, authenticated, trusted, and bound
+to the requested claim by both content and receipt digest; a persisted
+authenticated verified negative for the claim demotes (tombstones) before any
+completeness check; and positive promotion reads the complete project- and
+claim-scoped snapshot (at most 10,000 rows) and needs two distinct
+authenticated principals. Caller-supplied fact metadata is not accepted.
+`ManagedLearningRecorder` routes a persisted receipt that carries a claim
+digest to this path and every other receipt to subject promotion.
+
+Evidence: `tests/test_receipt_bound_fact_promotion.py` (producer binding,
+digest refusal, claim-free serialization, `HostFinalFacts` bounds, composed
+promotion by two principals, same-principal non-promotion, verified-negative
+demotion with tombstone, subject receipts cannot promote text, reserved and
+occupied identities, snapshot transaction required, forged claim digest,
+scope and relabeled-row refusal, and recorder routing end to end) and
+`tests/test_host_final_receipt.py` (claim round trip through the sealed final
+receipt; claim-free receipts keep their shape).
+
+Remaining gap: no live host verifier populates `verified_fact_claim` yet
+(`server.py` builds `HostFinalFacts` without it), so the live path is
+reachable only once a host-owned claim source exists. Snapshot reads match the
+exact claim text; a contradiction phrased with different case or whitespace is
+a separate claim.

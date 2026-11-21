@@ -1,6 +1,11 @@
 """Memory and learning application services (SPEC-5 WP4)."""
 
 from .facade import MemoryLearningFacade
+from .receipt_bound_fact_promotion import (
+    FactPromotionRequest,
+    FactPromotionResult,
+    ReceiptBoundFactPromotion,
+)
 from .receipt_observation import (
     ReceiptObservationProducer,
     VerifierReceipt,
@@ -22,4 +27,7 @@ __all__ = [
     "ReceiptObservationProducer",
     "VerifierReceipt",
     "VerifiedSubjectFactPromotion",
+    "FactPromotionRequest",
+    "FactPromotionResult",
+    "ReceiptBoundFactPromotion",
 ]

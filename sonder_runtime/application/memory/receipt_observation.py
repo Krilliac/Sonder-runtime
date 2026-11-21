@@ -28,11 +28,16 @@ _OBSERVATION_AUTH_SEAL = object()
 
 
 def _receipt_payload(receipt) -> dict:
-    """Return the immutable receipt fields, excluding its live capability."""
+    """Return the immutable receipt fields, excluding its live capability.
+
+    An absent host fact claim is omitted rather than serialized as null, so a
+    receipt persisted before claim binding existed replays byte for byte.
+    """
     return {
         name: getattr(receipt, name)
         for name in receipt.__dataclass_fields__
         if name != "authorization"
+        and not (name == "claim_digest" and getattr(receipt, name) is None)
     }
 
 
@@ -92,6 +97,9 @@ class VerifierReceipt:
     receipt_digest: str
     authority_scope: str
     authorization: object | None = field(default=None, repr=False, compare=False)
+    # Digest of an explicit host fact claim (``HostFinalFacts``), or None for
+    # an ordinary content-free verifier receipt.
+    claim_digest: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -109,6 +117,11 @@ class VerifierReceipt:
                 char not in "0123456789abcdef" for char in value
             ):
                 raise ValueError(f"{name} must be a SHA-256 digest")
+        if self.claim_digest is not None and (
+            not isinstance(self.claim_digest, str) or len(self.claim_digest) != 64
+            or any(char not in "0123456789abcdef" for char in self.claim_digest)
+        ):
+            raise ValueError("claim_digest must be a SHA-256 digest when present")
         if self.receipt_id != self.receipt_digest:
             raise ValueError("receipt identity must equal its receipt digest")
 
@@ -119,14 +132,26 @@ class ReceiptObservationProducer:
     SOURCE = "authenticated_verifier"
 
     @staticmethod
-    def _subject(eligibility: ManagedTerminalEligibility, facts) -> tuple[str, str]:
+    def _subject(eligibility: ManagedTerminalEligibility, facts) -> tuple[str, str, str | None]:
         subject_digest = eligibility.verified_subject_digest
         if (
             not isinstance(subject_digest, str) or len(subject_digest) != 64
             or any(char not in "0123456789abcdef" for char in subject_digest)
         ):
             raise PermissionError("verified subject identity is unavailable")
-        return "verified-subject:" + subject_digest, subject_digest
+        # Only the sealed host facts can carry an explicit fact claim; the
+        # ordinary receipt carries no fact text and yields the subject token.
+        claim = getattr(facts, "verified_fact_claim", None)
+        claim_digest = getattr(facts, "verified_fact_claim_digest", None)
+        if claim is None and claim_digest is None:
+            return "verified-subject:" + subject_digest, subject_digest, None
+        if (
+            not isinstance(claim, str) or not claim.strip()
+            or claim.startswith("verified-subject:")
+            or claim_digest != hashlib.sha256(claim.encode("utf-8")).hexdigest()
+        ):
+            raise PermissionError("host fact claim digest is invalid")
+        return claim, subject_digest, claim_digest
 
     @classmethod
     def from_terminal_eligibility(cls, eligibility: ManagedTerminalEligibility) -> tuple[VerifierReceipt, LearningObservation]:
@@ -212,7 +237,7 @@ class ReceiptObservationProducer:
             raise PermissionError(
                 "specific failed check proof is required"
             )
-        claim, subject_digest = cls._subject(eligibility, facts)
+        claim, subject_digest, claim_digest = cls._subject(eligibility, facts)
         authority_scope = _digest({
             "worker_id": eligibility.authenticated_worker_id,
             "workspace_scope": facts.project_scope,
@@ -229,9 +254,11 @@ class ReceiptObservationProducer:
             subject_digest=subject_digest,
             receipt_digest=(failure["receipt_digest"] if outcome == "failed" else link.receipt_digest),
             authority_scope=authority_scope,
+            claim_digest=claim_digest,
         )
         # The subject digest is bound to the verified check bundle and scope.
-        # Verdict tokens and model output are never accepted as claim text.
+        # Verdict tokens and model output are never accepted as claim text;
+        # the only semantic claim is the host verifier's sealed fact claim.
         observation = LearningObservation(
             observation_id="observation-" + receipt.receipt_id,
             content=claim,
@@ -248,6 +275,7 @@ class ReceiptObservationProducer:
                 "receipt_digest:" + receipt.receipt_digest,
                 "content_digest:" + receipt.content_digest,
                 "subject:" + subject_digest,
+                *(() if claim_digest is None else ("claim_digest:" + claim_digest,)),
                 "run:" + receipt.run_id,
                 *(() if outcome == "passed" else (
                     "failed_check:" + _digest(failure["failed_check"]),
