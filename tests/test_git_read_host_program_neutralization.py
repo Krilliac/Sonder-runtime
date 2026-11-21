@@ -180,3 +180,140 @@ def test_guard_rejects_unexpected_driver_keys():
     assert overrides.count("filter.a.clean=cat") == 1
     assert "merge.m.driver=" + git_program_guard.BUILTIN_MERGE_DRIVER in overrides
     assert "diff.d.textconv=cat" in overrides
+
+
+@pytest.fixture
+def equals_named_filter_repo(tmp_path, monkeypatch):
+    """A filter driver whose name contains ``=`` (``-c`` splits at the first)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Sonder Tests")
+    _git(repo, "config", "user.email", "sonder-tests@example.invalid")
+    (repo / ".gitattributes").write_text("*.txt filter=a=b\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("first\n", encoding="utf-8")
+    _git(repo, "add", ".gitattributes", "tracked.txt")
+    _git(repo, "commit", "-q", "-m", "initial")
+    _git(repo, "config", "filter.a=b.clean",
+         _marker_program(tmp_path, tmp_path / "clean.txt", echo_stdin=True))
+    tracked = repo / "tracked.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    later = time.time() + 5
+    os.utime(tracked, (later, later))
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: repo)
+    return repo, tmp_path
+
+
+def test_equals_named_filter_survives_a_command_line_override(equals_named_filter_repo):
+    """Guard against a vacuous GREEN: ``-c`` really cannot reach this driver."""
+    repo, tmp_path = equals_named_filter_repo
+    _git(repo, "-c", "filter.a=b.clean=cat", "status", "--porcelain")
+    assert "clean" in _ran(tmp_path)
+
+
+def test_read_tools_refuse_a_driver_name_containing_equals(equals_named_filter_repo):
+    repo, tmp_path = equals_named_filter_repo
+    with pytest.raises(PermissionError, match="refusing to run git"):
+        git_tools.repo_status(str(repo), bypass=True)
+    with pytest.raises(PermissionError, match="refusing to run git"):
+        git_tools.repo_diff(str(repo), bypass=True)
+    with pytest.raises(Exception, match="(?i)refus"):
+        git_history.repo_log(repo, file_path="tracked.txt")
+    assert _ran(tmp_path) == {}
+
+
+@pytest.mark.parametrize("key", [
+    "filter.a=b.clean",
+    "filter.a=b.process",
+    "merge.a=b.driver",
+    "diff.a=b.textconv",
+    "filter.=.smudge",
+    "filter.a\nb.clean",
+    "filter.a\x1fb.clean",
+])
+def test_guard_refuses_driver_names_a_dash_c_argument_cannot_express(key):
+    from sonder_runtime.adapters import git_program_guard
+
+    with pytest.raises(git_program_guard.GitProgramConfigError):
+        git_program_guard.driver_overrides(["filter.ok.clean", key])
+
+
+def test_guard_still_overrides_ordinary_driver_names():
+    from sonder_runtime.adapters import git_program_guard
+
+    overrides = git_program_guard.driver_overrides(
+        ["filter.lfs.clean", "filter.my filter.v2.smudge", "diff.Word-Doc.textconv"],
+    )
+    assert "filter.lfs.clean=cat" in overrides
+    assert "filter.my filter.v2.smudge=cat" in overrides
+    assert "diff.Word-Doc.textconv=cat" in overrides
+
+
+@pytest.fixture
+def non_utf8_named_filter_repo(tmp_path, monkeypatch):
+    """A filter driver whose name is the single byte 0xFF (not valid UTF-8).
+
+    The guard's probe decodes it to U+FFFD (or a lone surrogate), and a ``-c``
+    argument built from that text names a different subsection.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.name", "Sonder Tests")
+    _git(repo, "config", "user.email", "sonder-tests@example.invalid")
+    (repo / ".gitattributes").write_bytes(b"*.txt filter=\xff\n")
+    (repo / "tracked.txt").write_text("first\n", encoding="utf-8")
+    _git(repo, "add", ".gitattributes", "tracked.txt")
+    _git(repo, "commit", "-q", "-m", "initial")
+    # Let git quote the program value, then rename the subsection to 0xFF in
+    # the raw config bytes (a command-line argument cannot carry that byte).
+    _git(repo, "config", "filter.placeholder.clean",
+         _marker_program(tmp_path, tmp_path / "clean.txt", echo_stdin=True))
+    config = repo / ".git" / "config"
+    raw = config.read_bytes()
+    assert b'[filter "placeholder"]' in raw
+    config.write_bytes(raw.replace(b'[filter "placeholder"]', b'[filter "\xff"]'))
+    tracked = repo / "tracked.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    later = time.time() + 5
+    os.utime(tracked, (later, later))
+    monkeypatch.setattr(file_ops, "workspace_root", lambda: repo)
+    return repo, tmp_path
+
+
+def test_non_utf8_named_filter_runs_under_plain_git(non_utf8_named_filter_repo):
+    """Guard against a vacuous GREEN: the 0xFF-named plant really fires."""
+    repo, tmp_path = non_utf8_named_filter_repo
+    _git(repo, "-c", "filter.\ufffd.clean=cat", "status", "--porcelain")
+    assert "clean" in _ran(tmp_path)
+
+
+def test_read_tools_refuse_a_non_utf8_driver_name(non_utf8_named_filter_repo):
+    repo, tmp_path = non_utf8_named_filter_repo
+    with pytest.raises(PermissionError, match="refusing to run git"):
+        git_tools.repo_status(str(repo), bypass=True)
+    with pytest.raises(PermissionError, match="refusing to run git"):
+        git_tools.repo_diff(str(repo), bypass=True)
+    with pytest.raises(Exception, match="(?i)refus"):
+        git_history.repo_log(repo, file_path="tracked.txt")
+    assert _ran(tmp_path) == {}
+
+
+@pytest.mark.parametrize("key", [
+    "filter.\ufffd.clean",
+    "filter.a\ufffdb.process",
+    "merge.\udcff.driver",
+    "diff.x\ud800.textconv",
+])
+def test_guard_refuses_driver_names_that_were_not_valid_utf8(key):
+    from sonder_runtime.adapters import git_program_guard
+
+    with pytest.raises(git_program_guard.GitProgramConfigError):
+        git_program_guard.driver_overrides(["filter.ok.clean", key])
+
+
+def test_guard_still_overrides_non_ascii_utf8_driver_names():
+    from sonder_runtime.adapters import git_program_guard
+
+    overrides = git_program_guard.driver_overrides(["filter.caf\u00e9.clean"])
+    assert "filter.caf\u00e9.clean=cat" in overrides
