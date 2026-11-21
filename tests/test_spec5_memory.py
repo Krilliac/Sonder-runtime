@@ -175,6 +175,37 @@ class TestRecallService:
         assert result == ["fallback"]
 
 
+class TestRecallEmbeddingCompatibility:
+    def _run(self, semantic, **kw):
+        store = _FakeRecallStore(lexical=[{"text": "lexical"}], semantic=semantic)
+        return RecallService(store, embed=_FakeEmbed()).recall("q", k=1, min_sim=0.0, **kw)
+
+    def test_dimension_mismatch_candidate_skipped(self):
+        assert self._run([{"id": "a", "text": "sem", "embedding": [1.0]}]) == ["lexical"]
+
+    def test_nonfinite_candidate_skipped(self):
+        nan = float("nan")
+        assert self._run([{"id": "a", "text": "sem", "embedding": [nan, 0.0, 0.0]}]) == ["lexical"]
+
+    def test_zero_vector_candidate_never_ranks(self):
+        assert self._run([{"id": "a", "text": "sem", "embedding": [0.0, 0.0, 0.0]}]) == ["lexical"]
+
+    def test_wrong_model_or_revision_skipped(self):
+        row = {"id": "a", "text": "sem", "embedding": [1.0, 0.0, 0.0],
+               "embedding_model": "m1", "embedding_revision": "r1"}
+        assert self._run([row], embedding_model="m2") == ["lexical"]
+        assert self._run([row], embedding_model="m1", embedding_revision="r2") == ["lexical"]
+        assert self._run([row], embedding_model="m1", embedding_revision="r1") == ["sem"]
+
+    def test_invalid_query_vector_falls_back(self):
+        class Bad:
+            def embed(self, text):
+                return [float("inf"), 0.0, 0.0]
+        store = _FakeRecallStore(lexical=[{"text": "lexical"}],
+                                 semantic=[{"id": "a", "text": "sem", "embedding": [1.0, 0.0, 0.0]}])
+        assert RecallService(store, embed=Bad()).recall("q", k=1, min_sim=0.0) == ["lexical"]
+
+
 # ---------------------------------------------------------------------------
 # Application: OutcomeService
 # ---------------------------------------------------------------------------
@@ -261,3 +292,12 @@ class TestCosineSimilarity:
 
     def test_zero_vector(self):
         assert _cosine_similarity([0, 0], [1, 1]) == pytest.approx(0.0)
+
+    def test_dimension_mismatch_is_zero(self):
+        assert _cosine_similarity([1, 0], [1]) == 0.0
+        assert _cosine_similarity([3, 4, 99], [3, 4]) == 0.0
+
+    def test_nonfinite_or_empty_is_zero(self):
+        assert _cosine_similarity([float("nan"), 1], [1, 1]) == 0.0
+        assert _cosine_similarity([float("inf"), 1], [1, 1]) == 0.0
+        assert _cosine_similarity([], []) == 0.0
