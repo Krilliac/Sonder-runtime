@@ -107,3 +107,53 @@ def test_merge_lessons_applies_embedding_similarity_dedup(monkeypatch):
     )
     assert added == 0
     assert len(ms.all_lessons(c)) == 1
+
+
+def test_merge_lessons_skips_non_object_lines_and_keeps_later_lessons():
+    c = _conn()
+    added = pc.merge_lessons(
+        c,
+        ["some text", [1], 7, None,
+         {"id": "c1", "text": "Prefer early returns over deep nesting."}],
+    )
+    assert added == 1
+    assert [row["text"] for row in ms.all_lessons(c)] == [
+        "Prefer early returns over deep nesting."
+    ]
+
+
+def test_merge_lessons_does_not_reintroduce_tombstoned_text():
+    c = _conn()
+    ms.add_lesson(c, "pruned", "Cache expensive pure function calls.", None, "int1")
+    assert ms.tombstone_lesson(c, "pruned")
+    assert ms.all_lessons(c) == []
+
+    added = pc.merge_lessons(
+        c, [{"id": "c1", "text": "  cache expensive PURE function calls. "}],
+    )
+
+    assert added == 0
+    assert ms.all_lessons(c) == []
+
+
+def test_merge_lessons_does_not_reintroduce_semantic_tombstone(monkeypatch):
+    c = _conn()
+    provenance = {"model": "test-embed", "revision": "r1", "dimension": 2}
+    ms.add_lesson(
+        c, "pruned", "Use bisect for ordered insertion.",
+        embeddings.to_blob([1.0, 0.0]), "int1",
+        embedding_model="test-embed", embedding_revision="r1", embedding_dim=2,
+    )
+    assert ms.tombstone_lesson(c, "pruned")
+    monkeypatch.setattr(
+        pc.embeddings, "trusted_provenance", lambda *_a, **_k: dict(provenance),
+    )
+
+    added = pc.merge_lessons(
+        c,
+        [{"id": "similar", "text": "Use bisect_left to retain sorted order."}],
+        embed_fn=lambda _text: [1.0, 0.0],
+    )
+
+    assert added == 0
+    assert ms.all_lessons(c) == []
