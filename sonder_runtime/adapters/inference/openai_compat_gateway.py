@@ -263,11 +263,23 @@ def _env_seconds(name: str) -> float:
     return value
 
 
+def _env_base_url() -> str:
+    import os
+
+    return os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
+
+
+def configured_endpoint_is_loopback() -> bool:
+    """``endpoint_is_loopback`` for a gateway built without a config (env-resolved)."""
+    base_url = _env_base_url()
+    return bool(base_url) and OpenAICompatibleGateway._is_loopback(base_url)
+
+
 def _config_from_env() -> OpenAICompatibleConfig:
     import os
 
     return OpenAICompatibleConfig(
-        base_url=os.environ.get("SONDER_OPENAI_BASE_URL", "").strip(),
+        base_url=_env_base_url(),
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
@@ -361,6 +373,16 @@ class OpenAICompatibleGateway:
         parts = urlsplit_or_none(base_url)
         host = (parts.hostname or "").lower() if parts is not None else ""
         return host in _LOOPBACK_HOSTS
+
+    def endpoint_is_loopback(self) -> bool:
+        """Whether a call made now would send its prompt to a loopback endpoint.
+
+        The same test the consent gate applies, on the base URL a call would
+        resolve (the injected config, else ``SONDER_OPENAI_BASE_URL``).  No I/O;
+        an unset or unparsable endpoint is not loopback.
+        """
+        base_url = self._config.base_url if self._config is not None else _env_base_url()
+        return bool(base_url) and self._is_loopback(base_url)
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
