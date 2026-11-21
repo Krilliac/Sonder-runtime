@@ -488,6 +488,109 @@ def test_deploy_health_failure_automatically_restores(monkeypatch, isolated, use
     assert selfmod.get_run(run["id"])["phase"] == "restored"
 
 
+@pytest.mark.parametrize("use_git", [False, True])
+def test_deploy_health_command_that_cannot_start_rolls_back(isolated, use_git):
+    root = repository(isolated, use_git=use_git)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    original = hashes(root)
+    missing = str(isolated / "no-such-health-binary")
+    with pytest.raises(OSError):
+        selfmod.deploy(run["id"], health_command=[missing], commit=use_git)
+    assert hashes(root) == original
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+
+
+def test_failure_after_deployed_transition_rolls_back(monkeypatch, isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    original = hashes(root)
+
+    def probe_crash(*args, **kwargs):
+        raise OSError("rollback probe could not start")
+
+    monkeypatch.setattr(selfmod, "_verify_deployed_rollback", probe_crash)
+    with pytest.raises(OSError, match="rollback probe could not start"):
+        selfmod.deploy(run["id"], commit=False)
+    assert hashes(root) == original
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+
+
+def test_failed_deploy_commit_leaves_nothing_staged(monkeypatch, isolated):
+    root = repository(isolated, use_git=True)
+    starting_commit = git(root, "rev-parse", "HEAD").stdout.strip()
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    real_git = selfmod._git
+
+    def rejecting_commit(repo_root, *args, **kwargs):
+        if args and args[0] == "commit" and Path(repo_root) == root:
+            return 1, "pre-commit hook rejected the change"
+        return real_git(repo_root, *args, **kwargs)
+
+    monkeypatch.setattr(selfmod, "_git", rejecting_commit)
+    with pytest.raises(RuntimeError, match="could not stage or commit"):
+        selfmod.deploy(run["id"], commit=True)
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+    assert git(root, "rev-parse", "HEAD").stdout.strip() == starting_commit
+    assert git(root, "diff", "--cached", "--name-only").stdout == ""
+    assert git(root, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+def test_cancel_refuses_rollback_requested_run(isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    with selfmod._tx() as conn:
+        conn.execute("UPDATE selfmod_runs SET phase='rollback_requested' WHERE id=?", (run["id"],))
+    with pytest.raises(RuntimeError, match="cannot be cancelled"):
+        selfmod.cancel(run["id"])
+    assert selfmod.get_run(run["id"])["phase"] == "rollback_requested"
+    assert selfmod.restore(run["id"])["phase"] == "restored"
+
+
+def test_cancel_refuses_approved_run_named_by_deployment_lock(isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    with selfmod._tx() as conn:
+        conn.execute(
+            "UPDATE selfmod_deployment_lock SET owner_id='crashed',owner_pid=99999999,owner_host=?,lease_until=?,run_id=? WHERE id=1",
+            (selfmod.socket.gethostname(), time.time() - 1, run["id"]),
+        )
+    with pytest.raises(RuntimeError, match="deployment lock"):
+        selfmod.cancel(run["id"])
+    assert selfmod.get_run(run["id"])["phase"] == "approved"
+    assert selfmod.reconcile_stale_deployment() == 1
+    assert selfmod.get_run(run["id"])["phase"] == "restored"
+
+
+def test_cancel_still_closes_an_approved_run_that_never_deployed(isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    assert selfmod.cancel(run["id"])["phase"] == "cancelled"
+
+
+def test_deploy_rechecks_phase_after_taking_the_lock(monkeypatch, isolated):
+    root = repository(isolated, use_git=False)
+    run = reviewed(root)
+    selfmod.approve(run["id"], "user:test")
+    original = hashes(root)
+    real_lock = selfmod.deployment_lock
+
+    def cancel_then_lock(run_id, owner_id=None):
+        selfmod.cancel(run_id)
+        return real_lock(run_id, owner_id)
+
+    monkeypatch.setattr(selfmod, "deployment_lock", cancel_then_lock)
+    with pytest.raises(selfmod.SelfmodStageNotApplied, match="approved phase"):
+        selfmod.deploy(run["id"], commit=False)
+    assert hashes(root) == original
+    assert selfmod.get_run(run["id"])["phase"] == "cancelled"
+
+
 def test_interrupted_singlefile_deployment_restores_original_bytes(monkeypatch, isolated):
     root = repository(isolated, use_git=False)
     run = reviewed(root)
@@ -623,11 +726,30 @@ def test_retention_never_deletes_newest_valid_rollback(isolated):
     time.sleep(0.02)
     second = plan(root)
     selfmod.create_backup(second["id"])
+    # An in-progress run's bundle is protected (see the test below); finish
+    # the first run so only the newest-valid guard keeps the second.
+    selfmod.cancel(first["id"])
     old = selfmod._backup_dir(first["id"])
     os.utime(old, (1, 1))
     removed = selfmod.prune_backups(retention_days=1, retention_bytes=1)
     assert first["id"] in removed
     assert selfmod._backup_dir(second["id"]).exists()
+
+
+@pytest.mark.parametrize("phase", ["deployed", "backed_up", "interrupted", "rollback_requested"])
+def test_retention_keeps_bundles_of_unfinished_or_deployed_runs(isolated, phase):
+    root = repository(isolated, use_git=False)
+    first = plan(root)
+    selfmod.create_backup(first["id"])
+    time.sleep(0.02)
+    second = plan(root)
+    selfmod.create_backup(second["id"])
+    with selfmod._tx() as conn:
+        conn.execute("UPDATE selfmod_runs SET phase=? WHERE id=?", (phase, first["id"]))
+    os.utime(selfmod._backup_dir(first["id"]), (1, 1))
+    removed = selfmod.prune_backups(retention_days=1, retention_bytes=1)
+    assert first["id"] not in removed
+    assert selfmod.verify_backup(first["id"])
 
 
 def test_recursive_self_improvement_rejected(monkeypatch, isolated):
