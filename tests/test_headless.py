@@ -328,6 +328,31 @@ def test_stop_removes_stale_serve_pidfile_for_reused_pid(monkeypatch, tmp_path):
     assert not H.pid_file("sonder_serve").exists()
 
 
+def test_stop_serve_kills_listener_when_recorded_pid_was_reused(monkeypatch, tmp_path):
+    monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
+    H.pid_file("sonder_serve").write_text("4567", encoding="ascii")
+    monkeypatch.setattr(H, "pid_alive", lambda pid: pid in (4567, 9001))
+    monkeypatch.setattr(H, "_listener_pids", lambda host, port: [9001])
+    commands = {
+        4567: '"C:\editor.exe" file.txt',
+        9001: "python -m sonder_runtime serve 11435",
+    }
+    monkeypatch.setattr(H, "_pid_command_line", lambda pid: commands[pid])
+    killed = []
+    monkeypatch.setattr(H.os, "name", "nt")
+    monkeypatch.setattr(
+        H.subprocess,
+        "run",
+        lambda cmd, **kwargs: killed.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+
+    result = H.stop_pid("sonder_serve", port=11435)
+
+    assert result == "sonder_serve: stopped pid=9001"
+    assert killed == [["taskkill", "/PID", "9001", "/T", "/F"]]
+    assert not H.pid_file("sonder_serve").exists()
+
+
 def _fail_on_kill(monkeypatch):
     monkeypatch.setattr(
         H.subprocess,
@@ -392,6 +417,11 @@ def test_stop_ollama_kills_a_verified_ollama_serve(monkeypatch, tmp_path):
         ("ollama serve", "", True),
         (r'"C:\engine\bin\ollama.exe" serve', "", True),
         (r'"C:\engine\bin\engine-server.exe" serve', r"C:\engine\bin\engine-server.exe", True),
+        (r"C:\Users\me\AppData\Local\Programs\Ollama\ollama.exe serve", "", True),
+        (r'"C:\x\notollama.exe" serve', "", False),
+        (r'"C:\evil\pwnollama.exe" serve', "", False),
+        (r'"notepad.exe C:\ollama" serve', "", False),
+        (r"C:\foo\notollama.exe serve", "", False),
         ("/usr/local/bin/ollama run sonder", "", False),
         ("/usr/bin/notollama serve", "", False),
         ("cmd.exe /c echo ollama serve", "", False),

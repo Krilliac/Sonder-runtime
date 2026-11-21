@@ -259,7 +259,8 @@ def _is_ollama_server_pid(pid: int) -> bool:
     # Anchor to the executable token so an unrelated process that merely
     # mentions "ollama serve" in its arguments is not mistaken for the daemon.
     return bool(re.match(
-        r'\s*(?:"[^"]*?[\/]?(?:%(n)s)(?:\.exe)?"|(?:[^\s"]*[\/])?(?:%(n)s)(?:\.exe)?)'
+        r'\s*(?:"(?:(?:[a-z]:|\\|/)[^"]*[\\/])?(?:%(n)s)(?:\.exe)?"'
+        r'|(?:[^\s"]*[\\/])?(?:%(n)s)(?:\.exe)?)'
         r'\s+serve(?:\s|$)' % {"n": alternatives},
         command,
     ))
@@ -518,20 +519,16 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded_for_other_port = False
     if name == "sonder_serve":
         recorded_alive = bool(recorded and pid_alive(recorded))
-        if recorded_alive and not _is_sonder_server_pid(recorded):
-            # A reused PID: the pidfile is stale, but never kill the stranger.
-            try:
-                pid_file(name).unlink()
-            except OSError:
-                pass
-            return (
-                "%s: recorded pid %s is not a Sonder server; not stopped"
-                % (name, recorded)
-            )
+        # A live recorded PID that is not a Sonder server is a reused PID: the
+        # pidfile is stale and the stranger is never killed, but the real
+        # listener on this port must still be found and stopped.
+        recorded_is_stranger = recorded_alive and not _is_sonder_server_pid(recorded)
         recorded_for_other_port = bool(
-            recorded_alive and not _is_sonder_server_for_port(recorded, port)
+            recorded_alive
+            and not recorded_is_stranger
+            and not _is_sonder_server_for_port(recorded, port)
         )
-        candidates = ([] if recorded_for_other_port else [recorded]) + _listener_pids(host, port)
+        candidates = ([] if recorded_for_other_port or recorded_is_stranger else [recorded]) + _listener_pids(host, port)
         pids = [
             pid for index, pid in enumerate(candidates)
             if pid and pid not in candidates[:index] and pid_alive(pid)
@@ -564,6 +561,11 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
             pid_file(name).unlink()
         except OSError:
             pass
+        if name == "sonder_serve" and recorded_is_stranger:
+            return (
+                "%s: recorded pid %s is not a Sonder server; not stopped"
+                % (name, recorded)
+            )
         if recorded:
             return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
