@@ -301,3 +301,17 @@ def test_direct_include_ignored_requires_developer_and_then_is_explicit(
     monkeypatch.setattr(server, "_file_developer_allowed", lambda _token="": True)
     allowed = server.workspace_inventory(include_ignored=True, token="developer-token")
     assert "weights.gguf" in allowed
+
+
+def test_visible_paths_independent_of_process_cwd(monkeypatch, tmp_path):
+    root = _repository(monkeypatch, tmp_path)
+    (root / "pkg").mkdir()
+    (root / "docs").mkdir()
+    (root / "pkg" / "a.txt").write_text("a", encoding="utf-8")
+    (root / "docs" / "b.txt").write_text("b", encoding="utf-8")
+    monkeypatch.chdir(root / "pkg")
+    assert git_discovery.visible_paths(root / "docs") == frozenset({"b.txt"})
+    assert git_discovery.visible_paths(root) == frozenset(
+        {os.path.normcase(os.path.join("pkg", "a.txt")), os.path.normcase(os.path.join("docs", "b.txt")),
+         "pkg", "docs"}
+    )
