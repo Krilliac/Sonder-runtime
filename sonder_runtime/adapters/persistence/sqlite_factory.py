@@ -13,13 +13,34 @@ that was duplicated across 16+ stores with inconsistent settings.
 """
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect  # isort: skip
 
 import logging
-import os
+import os  # noqa: F401
 import sqlite3
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from typing import Protocol, TypedDict, Unpack
+
+    class _OwnedSQLiteConnect(Protocol):
+        def __call__(
+            self,
+            database: str,
+            *,
+            timeout: float = ...,
+            check_same_thread: bool = ...,
+        ) -> sqlite3.Connection: ...
+
+    class _ConnectKwargs(TypedDict, total=False):
+        timeout: float
+        busy_timeout_ms: int
+        wal: bool
+        foreign_keys: bool
+        row_factory: bool
+        check_same_thread: bool
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +71,15 @@ def connect(
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = owned_sqlite_connect(path, timeout=timeout, check_same_thread=check_same_thread)
+    conn = cast("_OwnedSQLiteConnect", owned_sqlite_connect)(
+        path, timeout=timeout, check_same_thread=check_same_thread,
+    )
 
     try:
         if row_factory:
             conn.row_factory = sqlite3.Row
 
-        conn.execute("PRAGMA busy_timeout=%d" % busy_timeout_ms)
+        conn.execute("PRAGMA busy_timeout=%d" % busy_timeout_ms)  # noqa: UP031
 
         if wal:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -81,14 +104,14 @@ def cached_connection(
     db_path: str | Path,
     *,
     schema_sql: str = "",
-    **kwargs,
+    **kwargs: Unpack[_ConnectKwargs],
 ) -> sqlite3.Connection:
-    conn_attr = "_sqlite_factory_%s_conn" % cache_key
-    path_attr = "_sqlite_factory_%s_path" % cache_key
+    conn_attr = "_sqlite_factory_%s_conn" % cache_key  # noqa: UP031
+    path_attr = "_sqlite_factory_%s_path" % cache_key  # noqa: UP031
 
     path = str(db_path)
-    existing_conn = getattr(_thread_local, conn_attr, None)
-    existing_path = getattr(_thread_local, path_attr, None)
+    existing_conn: sqlite3.Connection | None = getattr(_thread_local, conn_attr, None)
+    existing_path: str | None = getattr(_thread_local, path_attr, None)
 
     if existing_conn is not None and existing_path == path:
         return existing_conn
@@ -110,10 +133,10 @@ def cached_connection(
 
 
 def close_cached(cache_key: str) -> None:
-    conn_attr = "_sqlite_factory_%s_conn" % cache_key
-    path_attr = "_sqlite_factory_%s_path" % cache_key
+    conn_attr = "_sqlite_factory_%s_conn" % cache_key  # noqa: UP031
+    path_attr = "_sqlite_factory_%s_path" % cache_key  # noqa: UP031
 
-    conn = getattr(_thread_local, conn_attr, None)
+    conn: sqlite3.Connection | None = getattr(_thread_local, conn_attr, None)
     if conn is not None:
         try:
             conn.close()

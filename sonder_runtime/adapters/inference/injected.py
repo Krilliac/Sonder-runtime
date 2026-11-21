@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 import importlib
+from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,20 @@ from ...domain.common.errors import (
     InvalidInput,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from typing import Protocol
+
+    class _GenerateProvider(Protocol):
+        def __call__(
+            self,
+            prompt: str,
+            /,
+            *,
+            history: list[object] | None,
+            tier: str | None,
+        ) -> object: ...
+
 
 def _check_context_liveness(
     context: OperationContext, *, phase: str = "before adapter call"
@@ -41,7 +56,12 @@ def _check_context_liveness(
 class InjectedModelGateway:
     """ModelGateway over explicitly injected provider callables."""
 
-    def __init__(self, *, generate=None, embed=None):
+    def __init__(
+        self,
+        *,
+        generate: _GenerateProvider | None = None,
+        embed: Callable[[str], object] | None = None,
+    ) -> None:
         self._generate_provider = generate
         self._embedding_provider = embed
         logger.info(
@@ -85,7 +105,9 @@ class InjectedModelGateway:
             duration_ms=duration_ms,
         )
 
-    def embed(self, texts, context: OperationContext):
+    def embed(
+        self, texts: Iterable[str], context: OperationContext
+    ) -> list[Embedding]:
         logger.debug(f"InjectedModelGateway.embed: text_count={len(list(texts)) if hasattr(texts, '__len__') else 'unknown'}")
         provider = self._embedding_provider
         if provider is None:
@@ -97,7 +119,7 @@ class InjectedModelGateway:
                 "sonder_runtime.adapters.embeddings"
             ).embed
 
-        results = []
+        results: list[Embedding] = []
         for text in texts:
             _check_context_liveness(context)
             vector = provider(text)

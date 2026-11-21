@@ -6,6 +6,7 @@ import math
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters.inference.gpu_admission import GpuAdmissionRefused
@@ -14,10 +15,31 @@ from sonder_runtime.platform import context_policy, paths
 from .capability_evidence import load_production_evidence
 from .ollama_conformance import OllamaConformanceProbe
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from typing import NotRequired, TypedDict
+
+    class CapabilityRefreshOutcome(TypedDict):
+        model: str
+        status: str
+        checked_at: float | None
+        model_digest: str | None
+        ollama_version: str | None
+        capabilities: dict[str, bool | None]
+        reason: NotRequired[str]
+        retry_after_seconds: NotRequired[float | None]
+
+    class CapabilityRefreshResult(TypedDict):
+        evidence_path: str
+        max_age_seconds: float
+        models: list[CapabilityRefreshOutcome]
+
 MAX_MODELS = 16
 
 
-def configured_local_models(home=None) -> tuple[str, ...]:
+def configured_local_models(
+    home: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...]:
     """Read the canonical policy without creating files or importing server."""
     root = Path(home).expanduser() if home else paths.default_home()
     configured = os.environ.get("SONDER_RUNTIME_POLICY", "").strip()
@@ -32,8 +54,14 @@ def configured_local_models(home=None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(model for model in policy["local_models"].values() if model))
 
 
-def refresh_capabilities(*, origin: str, home=None, models=(), timeout_seconds=120.0,
-                         context_tokens=None) -> dict:
+def refresh_capabilities(
+    *,
+    origin: str,
+    home: str | os.PathLike[str] | None = None,
+    models: Sequence[str] = (),
+    timeout_seconds: float = 120.0,
+    context_tokens: int | None = None,
+) -> CapabilityRefreshResult:
     """Run at most sixteen serial, fixed-prompt batteries; never use cloud models.
 
     The timeout is per model, including identity reads. A failed refresh replaces
@@ -50,12 +78,15 @@ def refresh_capabilities(*, origin: str, home=None, models=(), timeout_seconds=1
         raise ValueError("refresh requires between 1 and 16 configured local models")
     if any(model not in configured for model in selected):
         raise ValueError("refresh only accepts models bound to configured local tiers")
-    context_tokens = context_policy.default_requested() if context_tokens is None else context_tokens
+    context_tokens = (
+        cast("Callable[[], int]", context_policy.default_requested)()
+        if context_tokens is None else context_tokens
+    )
     # Validate every target before any model call or evidence mutation.
     probes = [OllamaConformanceProbe(origin, model, context_tokens=context_tokens)
               for model in selected]
     evidence = load_production_evidence(home)
-    outcomes = []
+    outcomes: list[CapabilityRefreshOutcome] = []
     for model, probe in zip(selected, probes, strict=True):
         try:
             record = probe.run(timeout_seconds=timeout_seconds)
