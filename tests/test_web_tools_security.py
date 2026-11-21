@@ -129,3 +129,60 @@ def test_urlopen_connects_to_pinned_address_and_preserves_host(monkeypatch):
 def test_noncanonical_numeric_host_is_rejected(url):
     with pytest.raises(ValueError, match="non-canonical numeric"):
         web_tools.web_fetch(url)
+
+
+@pytest.mark.parametrize("slow_phase", ["headers", "body"])
+def test_fetch_has_one_overall_deadline_against_slow_drip_peers(monkeypatch, slow_phase):
+    import socket
+    import threading
+    import time
+
+    headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100000\r\n\r\n"
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+        try:
+            conn.recv(4096)
+            if slow_phase == "body":
+                conn.sendall(headers)
+                drip = b"x" * 100000
+            else:
+                drip = headers
+            # Each byte arrives well inside the per-operation socket timeout,
+            # so only an overall deadline can end the fetch early.  The peer
+            # gives up after a few seconds so the old code fails, not hangs.
+            give_up = time.monotonic() + 4.0
+            for byte in drip:
+                if stop.is_set() or time.monotonic() > give_up:
+                    break
+                conn.sendall(bytes([byte]))
+                time.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    url = "http://slow.example:%d/page" % port
+    monkeypatch.setattr(
+        web_tools,
+        "_validated_public_target",
+        lambda current: (web_tools.urllib.parse.urlparse(current), ("127.0.0.1",)),
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            web_tools._request(url, timeout=0.6)
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        listener.close()
+
+    assert elapsed < 2.0
