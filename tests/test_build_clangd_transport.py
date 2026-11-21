@@ -374,3 +374,68 @@ def test_lsp_transport_conformance_with_the_multiroot_contracts(project):
     finally:
         provider.close()
     assert not (project / ".cache").exists()
+
+
+# --- session restart after a client failure (no clangd) -----------------------------------
+
+
+def test_a_restart_after_a_dead_client_releases_the_old_session_state(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.build import clangd as clangd_module
+
+    clients = []
+
+    class FakeClient:
+        def __init__(self, argv, *, cwd, **kwargs):
+            self.cwd = cwd
+            self.alive = False
+            self.notified = []
+            self.pid = 4242 + len(clients)
+            clients.append(self)
+
+        def start(self):
+            self.alive = True
+
+        def request(self, method, params, timeout=None):
+            return {}
+
+        def notify(self, method, params=None):
+            self.notified.append(method)
+
+        def close(self):
+            self.alive = False
+
+    class Registry:
+        def __init__(self):
+            self.created, self.finished = [], []
+
+        def create(self, identity, *, metadata=None):
+            self.created.append(identity.job_id)
+
+        def claim(self, job_id, worker_id, *, lease_seconds=300):
+            return SimpleNamespace(claim_token="t")
+
+        def finish(self, job_id, worker_id, status, *, claim_token=None, **kwargs):
+            self.finished.append(job_id)
+
+    monkeypatch.setattr(clangd_module, "JsonRpcStdioClient", FakeClient)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "main.cpp").write_text("int main() { return 0; }\n")
+    registry = Registry()
+    session = ClangdSession(os.path.abspath(str(tmp_path / "clangd")), project_root=str(project),
+                            job_registry=lambda: registry)
+    try:
+        session.open_file("main.cpp")
+        first_dir = session.private_dir
+        assert clients[0].notified[-1] == "textDocument/didOpen"
+        clients[0].alive = False  # what _fail() leaves behind after a timeout
+        session.open_file("main.cpp")
+        assert len(clients) == 2
+        # the new server never saw the document: it must get didOpen, not didChange
+        assert clients[1].notified[-1] == "textDocument/didOpen"
+        assert not os.path.exists(first_dir), "the old private dir is removed"
+        assert session.private_dir != first_dir
+        assert registry.finished == [registry.created[0]], "the old job record is finished"
+        assert len(registry.created) == 2
+    finally:
+        session.close()
