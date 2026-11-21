@@ -50,7 +50,7 @@ def test_owned_script_tree_is_cleaned_on_every_exit(tmp_path, monkeypatch, outco
                 raise subprocess.TimeoutExpired(command, kwargs["timeout"], output=b"partial\n")
             raise OSError("controlled process creation failure")
 
-        monkeypatch.setattr(grounding.subprocess, "run", failed_run)
+        monkeypatch.setattr(grounding, "_run_tree", failed_run)
 
     if outcome == "spawn-error":
         with pytest.raises(OSError, match="controlled process creation failure"):
