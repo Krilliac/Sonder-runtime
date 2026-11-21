@@ -579,16 +579,16 @@ def test_admin_page_cursor_rejects_other_principal_tampering_and_generation():
 def test_trusted_cidr_never_relaxes_remote_https(route):
     with pytest.raises(ValueError, match="https"):
         if route == "direct":
-            OllamaWorkerPool("http://127.0.0.1:11434", ("http://10.77.0.2:11434",),
-                             allow_remote=True, trusted_origins=("10.77.0.0/24",))
+            OllamaWorkerPool("http://127.0.0.1:11434", ("http://192.0.2.2:11434",),
+                             allow_remote=True, trusted_origins=("192.0.2.0/24",))
         elif route == "environment":
             from_environment("http://127.0.0.1:11434", {
-                "SONDER_ALLOW_REMOTE_OLLAMA": "1", "SONDER_TRUSTED_ORIGINS": "10.77.0.0/24",
-                "SONDER_OLLAMA_WORKERS": "http://10.77.0.2:11434",
+                "SONDER_ALLOW_REMOTE_OLLAMA": "1", "SONDER_TRUSTED_ORIGINS": "192.0.2.0/24",
+                "SONDER_OLLAMA_WORKERS": "http://192.0.2.2:11434",
             })
         else:
-            configure_typed_workers(("http://10.77.0.2:11434",), allow_remote=True,
-                                    trusted_origins=("10.77.0.0/24",))
+            configure_typed_workers(("http://192.0.2.2:11434",), allow_remote=True,
+                                    trusted_origins=("192.0.2.0/24",))
 
 
 def test_admin_page_omits_unsafe_provider_model_and_version_text():

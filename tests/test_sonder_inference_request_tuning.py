@@ -273,10 +273,10 @@ def test_doctor_warns_about_every_local_gpu_contender():
 
 
 def test_doctor_does_not_blame_a_remote_embedder():
-    # Live-stack false positive (2026-09-30): embeddings went to Node1 via
+    # Live-stack false positive (2026-09-30): embeddings went to a compute node via
     # SONDER_EMBED_BASE_URL, yet the doctor still advised SONDER_EMBED_ON_CPU=1
     # for an embedder that never loads on this machine.
-    env = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="https://10.77.0.2:8443",
+    env = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="https://192.0.2.2:8443",
                SONDER_ALLOW_REMOTE_OLLAMA="1")
     result = _gpu_check(env)
     assert result["status"] == "warn"  # the fast tier still shares the GPU

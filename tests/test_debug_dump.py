@@ -48,7 +48,7 @@ def test_dump_filename_is_opaque_and_distinct_for_identical_labels(tmp_path):
     # Labels can contain private project/path information even when they are
     # not credentials. They belong in the developer-selected dump body, never
     # its directory entry or a predictable overwrite target.
-    label = r"C:\\Users\\natew\\private-project"
+    label = r"C:\\Users\\alice\\private-project"
     first = debug_dump.write_dump(tmp_path, label=label)
     second = debug_dump.write_dump(tmp_path, label=label)
 

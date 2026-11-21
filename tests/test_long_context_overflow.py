@@ -21,7 +21,7 @@ START = tier_escalation.Rung(tier="general", model=DENSE)
 
 
 def _available(model):
-    return overflow.Availability(overflow.AVAILABLE, worker="10.77.0.2:8443",
+    return overflow.Availability(overflow.AVAILABLE, worker="192.0.2.2:8443",
                                  worker_id="static-" + "ab" * 32)
 
 
@@ -48,9 +48,9 @@ def test_over_threshold_switches_a_local_tier_to_the_pool_model():
     assert decision.switched
     assert (decision.from_model, decision.from_provider) == (DENSE, "sonder_inference")
     assert (decision.to_model, decision.to_provider) == (MOE, "ollama")
-    assert decision.worker == "10.77.0.2:8443"
+    assert decision.worker == "192.0.2.2:8443"
     assert decision.notice() == (
-        "long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 "
+        "long-context overflow: switched to qwen3.6:35b on 192.0.2.2:8443 "
         "— context 41.2k tokens > 32.8k threshold"
     )
 
@@ -256,30 +256,30 @@ class _Pool:
 
 def test_pool_worker_advertising_the_model_is_named():
     pool = _Pool(_snapshot("127.0.0.1:11434", models=(DENSE,)),
-                 _snapshot("10.77.0.2:8443", models=(MOE,)))
+                 _snapshot("192.0.2.2:8443", models=(MOE,)))
     found = pool_model_availability(pool, MOE)
-    assert (found.state, found.worker) == (overflow.AVAILABLE, "10.77.0.2:8443")
-    assert found.worker_id == _snapshot("10.77.0.2:8443").worker_id
+    assert (found.state, found.worker) == (overflow.AVAILABLE, "192.0.2.2:8443")
+    assert found.worker_id == _snapshot("192.0.2.2:8443").worker_id
 
 
 def test_switched_notice_names_the_worker_origin_never_its_opaque_id():
-    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)))
+    pool = _Pool(_snapshot("192.0.2.2:8443", models=(MOE,)))
     decision = _decide(availability=lambda name: pool_model_availability(pool, name))
     notice = decision.notice()
-    assert notice.startswith("long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 — ")
+    assert notice.startswith("long-context overflow: switched to qwen3.6:35b on 192.0.2.2:8443 — ")
     assert "static-" not in notice and "static-" not in decision.receipt()["worker"]
-    assert decision.telemetry()["to_worker_id"] == _snapshot("10.77.0.2:8443").worker_id
+    assert decision.telemetry()["to_worker_id"] == _snapshot("192.0.2.2:8443").worker_id
 
 
 def test_several_serving_workers_do_not_name_an_unselected_origin():
-    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)),
-                 _snapshot("10.77.0.3:8443", models=(MOE,)))
+    pool = _Pool(_snapshot("192.0.2.2:8443", models=(MOE,)),
+                 _snapshot("192.0.2.3:8443", models=(MOE,)))
     assert pool_model_availability(pool, MOE).worker == ""
 
 
 def test_multiple_eligible_workers_do_not_claim_a_selected_worker():
-    pool = _Pool(_snapshot("10.77.0.2:8443", models=(MOE,)),
-                 _snapshot("10.77.0.3:8443", models=(MOE,)))
+    pool = _Pool(_snapshot("192.0.2.2:8443", models=(MOE,)),
+                 _snapshot("192.0.2.3:8443", models=(MOE,)))
     decision = _decide(availability=lambda name: pool_model_availability(pool, name))
     assert decision.switched
     assert decision.worker == ""
@@ -291,7 +291,7 @@ def test_multiple_eligible_workers_do_not_claim_a_selected_worker():
 
 def test_no_worker_advertising_the_model_is_unavailable_with_a_reason():
     pool = _Pool(_snapshot("127.0.0.1:11434", models=(DENSE,)),
-                 _snapshot("10.77.0.2:8443", state="circuit_open", models=(MOE,), healthy=False))
+                 _snapshot("192.0.2.2:8443", state="circuit_open", models=(MOE,), healthy=False))
     found = pool_model_availability(pool, MOE)
     assert found.state == overflow.UNAVAILABLE
     assert found.reason == "no eligible Ollama pool worker advertises qwen3.6:35b"
@@ -299,7 +299,7 @@ def test_no_worker_advertising_the_model_is_unavailable_with_a_reason():
 
 def test_unreported_worker_makes_availability_unknown():
     pool = _Pool(_snapshot("127.0.0.1:11434", models=(DENSE,)),
-                 _snapshot("10.77.0.2:8443", state="unknown"))
+                 _snapshot("192.0.2.2:8443", state="unknown"))
     assert pool_model_availability(pool, MOE).state == overflow.UNKNOWN
 
 

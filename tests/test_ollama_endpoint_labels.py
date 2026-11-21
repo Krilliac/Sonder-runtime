@@ -1,6 +1,6 @@
 """Ollama endpoints are labelled with what they are and what they hold.
 
-Two regressions with a loopback primary plus a remote pool worker (Node1):
+Two regressions with a loopback primary plus a remote pool worker (a compute node):
 
 * ``diagnostics`` printed the remote worker's model list on the line that named
   the loopback endpoint, because ``_get`` may be answered by any pool member.

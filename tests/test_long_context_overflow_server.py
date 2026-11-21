@@ -39,7 +39,7 @@ class _Pool:
             SimpleNamespace(worker_id="127.0.0.1:11434", origin="http://127.0.0.1:11434",
                             state="ready", healthy=True, models=(DENSE,)),
             # A static roster worker's pool id is opaque; the notice names its origin.
-            SimpleNamespace(worker_id="static-" + "f1" * 32, origin="https://10.77.0.2:8443",
+            SimpleNamespace(worker_id="static-" + "f1" * 32, origin="https://192.0.2.2:8443",
                             state="ready", healthy=True, models=self._models),
         )
 
@@ -121,9 +121,9 @@ def test_switched_turn_states_it_in_the_receipt(long_context):
     assert reply.startswith("answer from qwen3.6:35b")
     assert "long-context overflow" not in reply
     assert seen[0][0] == MOE and seen[0][1] >= 40_960
-    assert receipt["status"] == "switched" and receipt["worker"] == "10.77.0.2:8443"
+    assert receipt["status"] == "switched" and receipt["worker"] == "192.0.2.2:8443"
     assert receipt["notice"].startswith(
-        "long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 — context 40k"
+        "long-context overflow: switched to qwen3.6:35b on 192.0.2.2:8443 — context 40k"
     )
 
 

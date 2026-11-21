@@ -1,9 +1,9 @@
 """Tier validation must see every pool member's catalog, not whichever one answered.
 
-Measured 2026-09-28: with the workstation and Node1 pooled, ``runtime_policy_update``
+Measured 2026-09-28: with the workstation and a compute node pooled, ``runtime_policy_update``
 refused a model installed on the workstation ("local model(s) are not installed")
-because ``_get("/api/tags")`` is one pool request, and Node1 answered it.
-The reasoning tier legitimately lives only on Node1, so the check must use the
+because ``_get("/api/tags")`` is one pool request, and a compute node answered it.
+The reasoning tier legitimately lives only on a compute node, so the check must use the
 union of every member's catalog.
 """
 from __future__ import annotations

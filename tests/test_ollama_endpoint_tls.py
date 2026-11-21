@@ -42,8 +42,13 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
     configured_ca = os.environ.get("SONDER_OLLAMA_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE", "")
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    worker = os.environ.get("SONDER_TEST_PRIVATE_OLLAMA_WORKER", "")
+    if not worker:
+        pytest.skip("SONDER_TEST_PRIVATE_OLLAMA_WORKER (host:port) is not set")
+    host, _, port_text = worker.rpartition(":")
+    port = int(port_text)
     try:
-        raw = socket.create_connection(("10.77.0.2", 8443), timeout=3)
+        raw = socket.create_connection((host, port), timeout=3)
     except OSError:
         pytest.skip("private Ollama worker is unavailable")
     with raw:
@@ -52,7 +57,7 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
-            with context.wrap_socket(raw, server_hostname="10.77.0.2"):
+            with context.wrap_socket(raw, server_hostname=host):
                 pytest.fail("private worker certificate was trusted without a supplied CA bundle")
         except ssl.SSLCertVerificationError:
             pass
@@ -65,8 +70,8 @@ def test_private_ollama_certificate_requires_supplied_ca_bundle(monkeypatch):
     context = ssl.create_default_context(cafile=ca)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
-        with socket.create_connection(("10.77.0.2", 8443), timeout=3) as raw:
-            with context.wrap_socket(raw, server_hostname="10.77.0.2") as client:
+        with socket.create_connection((host, port), timeout=3) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as client:
                 assert client.version().startswith("TLS")
     except ssl.SSLCertVerificationError:
         raise
@@ -116,9 +121,9 @@ def private_worker_tls(tmp_path, monkeypatch):
         return cert_path, key_path
 
     certificates = {
-        "matching": certificate("matching", "10.77.0.2"),
-        "other": certificate("other", "10.77.0.2"),
-        "wrong_hostname": certificate("wrong-hostname", "10.77.0.3"),
+        "matching": certificate("matching", "192.0.2.2"),
+        "other": certificate("other", "192.0.2.2"),
+        "wrong_hostname": certificate("wrong-hostname", "192.0.2.3"),
     }
     original_context = ssl.create_default_context
     original_socketpair = socket.socketpair
@@ -132,6 +137,7 @@ def private_worker_tls(tmp_path, monkeypatch):
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_context.load_cert_chain(str(cert_path), str(key_path))
         monkeypatch.setenv("SONDER_OLLAMA_CA_BUNDLE", str(certificates[bundle][0]))
+        monkeypatch.setenv("SONDER_TEST_PRIVATE_OLLAMA_WORKER", "192.0.2.2:8443")
 
         def ambient_context(*args, **kwargs):
             # Model a host that already trusts this private worker. Explicit
@@ -141,7 +147,7 @@ def private_worker_tls(tmp_path, monkeypatch):
             return original_context(*args, **kwargs)
 
         def connect(address, timeout):
-            assert address == ("10.77.0.2", 8443)
+            assert address == ("192.0.2.2", 8443)
             client, raw = original_socketpair()
             client.settimeout(timeout)
             raw.settimeout(timeout)
