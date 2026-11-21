@@ -138,7 +138,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
-from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
+from sonder_runtime.interfaces.http.facades.approvals import turn_refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -3048,28 +3048,6 @@ def _ensure_refusal_observer():
         permission_policy.add_decision_observer(_capture_unattended_refusal)
     except Exception:
         _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
-
-
-def _modes_allowing_risk(risk):
-    try:
-        return list(permission_policy._modes_allowing(risk))
-    except Exception:
-        return []
-
-
-def _turn_refusal_receipt(refusals):
-    """The structured refusal for the last nameable refusal of a turn, or None."""
-    if not refusals:
-        return None
-    decision = refusals[-1]
-    try:
-        label = permission_policy.mode_label(decision.mode)
-    except Exception:
-        label = str(decision.mode or "")
-    return refusal_receipt(
-        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
-        count=len(refusals),
-    )
 
 
 def _loop_global_operation_refusal(actions_json, context=None):
@@ -7881,7 +7859,7 @@ class Handler(BaseHTTPRequestHandler):
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
         if overflow_receipt is not None:
             receipt["overflow"] = overflow_receipt
-        refusal = _turn_refusal_receipt(turn_refusals)
+        refusal = turn_refusal_receipt(turn_refusals, context, permission_policy)
         if refusal is not None:
             receipt["refusal"] = refusal
         # A lookup turn's Sources block and receipt entry, added after the turn

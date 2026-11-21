@@ -749,6 +749,33 @@ void main() {
           findsOneWidget);
     });
 
+    // A local-open server lists pending calls but refuses the POST whoever
+    // is signed in, so the account advice would be wrong here.
+    testWidgets('a local-open refusal shows the server text, not the role hint',
+        (tester) async {
+      const serverText =
+          'approving a refused call over HTTP is refused: this server runs '
+          'in local-open mode. Approve it at the Sonder console with '
+          '/approve 3f9a12c0d1e2f3a4, or restart the server with '
+          'SONDER_API_KEY set and send that key.';
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]))
+        ..approveError = SonderException(serverText,
+            code: 'APPROVAL_REQUIRES_AUTHENTICATED_ADMIN', httpStatus: 403);
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approval-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('The approval was not recorded'),
+          findsOneWidget);
+      expect(find.textContaining('this server runs in local-open mode'),
+          findsOneWidget);
+      expect(find.textContaining('Approvals need a developer or admin account'),
+          findsNothing);
+    });
+
     testWidgets('Revoke cancels an open approval', (tester) async {
       final data = FakeRuntimeData(
         approvalsPage: ApprovalsPage(supported: true, open: [

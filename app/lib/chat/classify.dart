@@ -22,11 +22,16 @@ class RefusalInfo {
   /// The approval ledger id, when known. "Approve once" is offered only then.
   final String callId;
 
+  /// False when the server's receipt says this call cannot be approved over
+  /// HTTP (local-open mode): the app shows the console command instead.
+  final bool approveOverHttp;
+
   const RefusalInfo({
     this.subject = '',
     this.reason = '',
     this.mode = '',
     this.callId = '',
+    this.approveOverHttp = true,
   });
 }
 
@@ -86,6 +91,7 @@ RefusalInfo? refusalOf(ChatMessage message) {
       reason: structured.reason,
       mode: structured.mode,
       callId: structured.callId,
+      approveOverHttp: structured.approveOverHttp,
     );
   }
   var body = head == null ? text : text.substring(head.end);

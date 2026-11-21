@@ -463,6 +463,11 @@ class ChatController extends ChangeNotifier {
         return (ModeChangeOutcome.changed, '');
       }
       final err = normalizeModeError(e);
+      if (localOpenRefusalCodes.contains(err.code)) {
+        // Nothing changed on the server and lowering is still allowed, so
+        // the chip stays writable and shows the mode it already had.
+        return (ModeChangeOutcome.failed, err.message);
+      }
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
         return (ModeChangeOutcome.readOnly, modeReadOnlyText);
