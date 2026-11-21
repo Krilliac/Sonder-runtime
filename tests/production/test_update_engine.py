@@ -645,3 +645,50 @@ def test_install_carries_the_active_venv_into_the_new_release(env):
     new_release = Path(_pointer_text(env / "current"))
     assert (new_release / "venv" / "bin" / "python").exists()
     assert (new_release / "venv").resolve() == (bootstrap / "venv").resolve()
+
+
+def test_migrate_timeout_rolls_back_instead_of_stranding_the_plan(env, monkeypatch):
+    import subprocess
+
+    manager = _manager(env)
+    plan = _import_ok(manager, env, version="5.0.0")
+
+    def boom(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="migrate", timeout=1)
+
+    monkeypatch.setattr(manager, "_run_in_release", boom)
+    result = manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan), allow_unverified=True,
+    )
+    assert result["status"] == "rolled_back"
+    assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_unexpected_post_publish_exception_is_driven_to_a_terminal_state(env, monkeypatch):
+    manager = _manager(env)
+    plan = _import_ok(manager, env, version="5.1.0")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("health config broke")
+
+    monkeypatch.setattr(manager, "_run_health_checks", boom)
+    with pytest.raises(RuntimeError):
+        manager.install(
+            plan["update_id"], confirm=confirm_nonce_for(plan), allow_unverified=True,
+        )
+    final = manager.repository.get_plan(plan["update_id"])
+    assert final["status"] == "rolled_back"
+    assert final["error_code"] == "HEALTH_FAILED"
+
+
+def test_drain_hook_failure_marks_the_plan_failed(env):
+    manager = _manager(env)
+    manager._drain_hook = lambda: (_ for _ in ()).throw(RuntimeError("drain broke"))
+    plan = _import_ok(manager, env, version="5.2.0")
+    with pytest.raises(RuntimeError):
+        manager.install(
+            plan["update_id"], confirm=confirm_nonce_for(plan), allow_unverified=True,
+        )
+    final = manager.repository.get_plan(plan["update_id"])
+    assert final["status"] == "failed"
+    assert final["error_code"] == "DRAIN_FAILED"

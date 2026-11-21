@@ -250,6 +250,16 @@ class _Binding:
     cleanup_result: CleanupConformance | None = None
 
 
+def _in_subtree(candidate: CancellationNode, root: CancellationNode) -> bool:
+    """True when ``candidate`` is ``root`` or one of its descendants."""
+    current: CancellationNode | None = candidate
+    while current is not None:
+        if current is root:
+            return True
+        current = getattr(current, "_parent", None)
+    return False
+
+
 class DurableLoopControl:
     """Coordinate cancellation propagation and policy-backed retry decisions."""
 
@@ -271,7 +281,7 @@ class DurableLoopControl:
         node = self.cancellation.node(node_id)
         changed = node.cancel(reason=reason)
         with self._lock:
-            selected = tuple(binding for binding in self._bindings if binding.node.cancelled)
+            selected = tuple(binding for binding in self._bindings if _in_subtree(binding.node, node))
         reports: list[CleanupConformance] = []
         for binding in selected:
             # Cancellation requests are durable state transitions.  Cache the
