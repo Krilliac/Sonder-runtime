@@ -178,6 +178,7 @@ CATEGORIES = {
 _CATEGORY_BY_TOOL = {
     "tool_help": "agents",
     "claim_check": "dev",
+    "cloud_models_status": "system",
     "file_check": "dev",
     "sonder": "chat",
     "offload": "chat",
@@ -422,6 +423,9 @@ _READ_ONLY = frozenset({
     # Reads files the repository read guard allows and writes nothing
     # (bootstrap/claim_check_agent_tools.py; tests/test_claim_check_tool.py).
     "claim_check",
+    # Reads the cloud model refresh state files and model lists only; no
+    # network, no writes (bootstrap/cloud_models_agent_tools.py).
+    "cloud_models_status",
     "computer_use_status",
     "task_list", "task_show", "checklist_show", "admin_status",
     "admin_whoami", "autopilot_status", "calibration_status", "learn_tiers",
