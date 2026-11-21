@@ -34,6 +34,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
 
+from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.platform import version as sonder_version
 from sonder_runtime.platform.config import SonderConfig, validate_deployment
 from sonder_runtime.domain.deployment_topology import DeploymentStatus
@@ -658,9 +659,13 @@ class RuntimeLifecycle:
 
     def probe_ollama_once(self, timeout: float | None = None) -> bool:
         timeout = timeout if timeout is not None else self._ollama_probe_timeout
-        url = _ollama_url().rstrip("/") + "/api/tags"
         try:
-            with urllib.request.urlopen(
+            # Same target and transport as every other Ollama call: the typed
+            # endpoint when one is bound (OLLAMA_HOST only as its fallback),
+            # no environment proxies, no redirects, and the configured CA
+            # bundle for HTTPS. A refused endpoint reads as "probe failed".
+            url = ollama_endpoint.configured_origin() + "/api/tags"
+            with ollama_endpoint.open_url(
                 urllib.request.Request(url, method="GET"), timeout=timeout
             ) as response:
                 healthy = response.status == 200
@@ -1264,11 +1269,6 @@ def _peer_class(peer: str) -> str:
         return "loopback" if ipaddress.ip_address(peer).is_loopback else "remote"
     except ValueError:
         return "unknown"
-
-
-def _ollama_url() -> str:
-    raw = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
-    return raw if "://" in raw else f"http://{raw}"
 
 
 def sd_notify(message: str) -> None:
