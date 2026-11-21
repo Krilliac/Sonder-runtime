@@ -27,7 +27,7 @@ lives in an adapter, so the hook in ``server.py`` builds it from
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -172,10 +172,50 @@ def bind_helper_context(context: OperationContext) -> Iterator[None]:
 # only request-scoped instructions, never the disk-backed local profile,
 # emotion vectors, goal, or recalled memory/lessons.
 HOSTED_PROVIDERS = frozenset({"openrouter", "anthropic"})
+# Bridged providers whose endpoint the operator configures: a self-hosted
+# server on this machine or a third-party API.  Their name says nothing about
+# where prompts go, so a rung bound to one is hosted unless the endpoint
+# locality probe verifies its endpoint is loopback.
+ENDPOINT_CONFIGURED_PROVIDERS = frozenset({"openai_compatible"})
+
+# ``probe(provider) -> bool``: True only when ``provider``'s configured
+# endpoint is verified loopback.  Installed by the composition root (this
+# module reads no configuration); none installed means not verified.
+_ENDPOINT_LOCALITY_PROBE: Callable[[str], bool] | None = None
+
+
+def set_endpoint_locality_probe(
+    probe: Callable[[str], bool] | None,
+) -> Callable[[str], bool] | None:
+    """Install the endpoint locality probe; returns the one it replaces.
+
+    A single reference assignment, so a concurrent ``is_hosted`` sees either
+    the old probe or the new one.
+    """
+    global _ENDPOINT_LOCALITY_PROBE
+    previous = _ENDPOINT_LOCALITY_PROBE
+    _ENDPOINT_LOCALITY_PROBE = probe
+    return previous
 
 
 def is_hosted(provider: object) -> bool:
-    return provider in HOSTED_PROVIDERS
+    """Whether a rung bound to ``provider`` sends prompts off this machine.
+
+    Fails closed: an endpoint-configured provider is hosted unless the probe
+    positively verifies a loopback endpoint (no probe, a probe error or any
+    answer other than ``True`` all mean hosted).
+    """
+    if provider in HOSTED_PROVIDERS:
+        return True
+    if not isinstance(provider, str) or provider not in ENDPOINT_CONFIGURED_PROVIDERS:
+        return False
+    probe = _ENDPOINT_LOCALITY_PROBE
+    if probe is None:
+        return True
+    try:
+        return probe(provider) is not True
+    except Exception:  # noqa: BLE001 - an unverifiable endpoint is hosted
+        return True
 
 
 def hosted_rung_active() -> bool:
@@ -454,6 +494,7 @@ def generate_via_gateway(
 
 __all__ = [
     "BridgeFailure",
+    "ENDPOINT_CONFIGURED_PROVIDERS",
     "LEGACY_PROVIDER",
     "PROVIDER_UNAVAILABLE_KIND",
     "STREAMING_PROVIDERS",
@@ -467,10 +508,12 @@ __all__ = [
     "degradation_scope",
     "generate_via_gateway",
     "is_bridged",
+    "is_hosted",
     "model_request_from_ollama_payload",
     "ollama_only_feature",
     "ollama_shape",
     "provider_for_tier",
     "record_degradation",
+    "set_endpoint_locality_probe",
     "suspend_rung",
 ]

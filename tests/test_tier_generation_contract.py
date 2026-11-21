@@ -201,6 +201,9 @@ def test_agent_turn_routes_through_provider_and_keeps_hosted_system_private(monk
             calls.append((request, context))
             return ModelResponse('{"final":"Hello there."}', "bound-model", request.tier)
 
+        def endpoint_is_loopback(self):
+            return True  # an openai_compatible endpoint on this machine
+
     graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform(provider), model_gateway=Gateway())
     monkeypatch.setattr(server, "_APP_GRAPH", graph)
     monkeypatch.setattr(server, "_application", lambda: graph)
