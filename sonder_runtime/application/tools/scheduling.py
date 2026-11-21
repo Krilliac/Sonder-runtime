@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from threading import Condition, RLock, get_ident
+from typing import TYPE_CHECKING
 
 from ...domain.common.errors import Forbidden
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 class ToolConcurrencyGate:
@@ -19,7 +23,11 @@ class ToolConcurrencyGate:
         self._depth = 0
 
     @contextmanager
-    def admit(self, parallel: bool, check_control=lambda: None):
+    def admit(
+        self,
+        parallel: bool,
+        check_control: Callable[[], None] = lambda: None,
+    ) -> Iterator[None]:
         owner = get_ident()
         with self._condition:
             if self._writer == owner:
