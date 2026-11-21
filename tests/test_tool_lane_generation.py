@@ -166,6 +166,8 @@ def test_every_continuation_and_retry_keeps_the_text_only_declaration(posts, mon
 def _k3_then(posts, monkeypatch, fallback):
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "CLOUD_EXTRA_USAGE_FALLBACK_MODEL", fallback)
+    # The fallback follows the live model list's cloud code default; pin it too.
+    monkeypatch.setattr(server._model_list_consumers, "live_cloud_default", lambda tier, default: fallback)
 
     def fake_post(path, payload, **kwargs):
         posts.append((path, copy.deepcopy(payload), dict(kwargs)))

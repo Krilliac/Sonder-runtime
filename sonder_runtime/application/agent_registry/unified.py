@@ -25,6 +25,10 @@ class AdmissionReceipt:
     root_id: str
     depth: int
     budget: AgentBudget
+    parent_id: str = ""
+
+
+_TERMINAL = frozenset({"cancelled", "stopped", "failed", "completed"})
 
 
 class UnifiedAgentRegistryService:
@@ -42,6 +46,7 @@ class UnifiedAgentRegistryService:
         self._registrations: dict[str, AgentRegistration] = {}
         self._active: dict[str, int] = {}
         self._children: dict[str, int] = {}
+        self._receipts: dict[str, AdmissionReceipt] = {}
 
     @property
     def fleet(self) -> FleetAutopilotAdapter:
@@ -76,15 +81,27 @@ class UnifiedAgentRegistryService:
         return invocation
 
     def create(self, launch: AgentLaunch) -> Any:
-        receipt = self._admit(launch)
+        # An agent that already holds a reservation is an idempotent re-create:
+        # never take a second reservation, and never settle the original one
+        # on a failed retry.
+        fresh = launch.agent_id not in self._receipts
+        if fresh:
+            self._admit(launch)
         try:
             result = self._backend.create(launch)
         except Exception:
-            self._release(receipt)
+            if fresh:
+                self.settle(launch.agent_id)
             raise
         if result is None:
-            self._release(receipt)
+            if fresh:
+                self.settle(launch.agent_id)
             raise AgentRegistryError("backend refused agent admission")
+        if fresh:
+            # The backend may accept the create yet return an already-terminal
+            # row (e.g. a child of a cancelled parent).  Nothing later can
+            # cancel such a row, so release its reservation now.
+            self._settle_if_terminal(launch.agent_id, result)
         return result
 
     def resume(self, agent_id: str) -> Any:
@@ -96,12 +113,12 @@ class UnifiedAgentRegistryService:
 
     def cancel(self, agent_id: str, *, reason: str = "") -> Any:
         result = self._backend.cancel(agent_id, reason=reason)
-        self._release_by_agent(agent_id)
+        self._settle_if_terminal(agent_id, result)
         return result
 
     def stop(self, agent_id: str, *, reason: str = "") -> Any:
         result = self._backend.stop(agent_id, reason=reason)
-        self._release_by_agent(agent_id)
+        self._settle_if_terminal(agent_id, result)
         return result
 
     def status(self, agent_id: str) -> Any:
@@ -123,26 +140,52 @@ class UnifiedAgentRegistryService:
             children = self._children.get(launch.parent_id, 0)
             if children >= budget.max_children:
                 raise AgentRegistryError("child budget exhausted")
-        receipt = AdmissionReceipt(launch.agent_id, lineage.root_id, lineage.depth, budget)
+        receipt = AdmissionReceipt(
+            launch.agent_id, lineage.root_id, lineage.depth, budget, launch.parent_id or "",
+        )
+        self._receipts[launch.agent_id] = receipt
         self._active[lineage.root_id] = active + 1
         if launch.parent_id:
             self._children[launch.parent_id] = self._children.get(launch.parent_id, 0) + 1
         return receipt
 
-    def _release(self, receipt: AdmissionReceipt) -> None:
-        self._active[receipt.root_id] = max(0, self._active.get(receipt.root_id, 1) - 1)
-        if self._active[receipt.root_id] == 0:
-            self._active.pop(receipt.root_id, None)
+    def settle(self, agent_id: str) -> None:
+        """Release the reservation held by ``agent_id``, exactly once.
 
-    def _release_by_agent(self, agent_id: str) -> None:
-        # A cancelled/ stopped backend record is terminal; release the single
-        # process-local reservation conservatively without fabricating state.
-        for root_id, count in tuple(self._active.items()):
-            if count:
-                self._active[root_id] = count - 1
-                if self._active[root_id] <= 0:
-                    self._active.pop(root_id, None)
-                break
+        Unknown or already-settled agents change nothing.
+        """
+        receipt = self._receipts.pop(agent_id, None)
+        if receipt is None:
+            return
+        remaining = self._active.get(receipt.root_id, 0) - 1
+        if remaining > 0:
+            self._active[receipt.root_id] = remaining
+        else:
+            self._active.pop(receipt.root_id, None)
+        if receipt.parent_id:
+            left = self._children.get(receipt.parent_id, 0) - 1
+            if left > 0:
+                self._children[receipt.parent_id] = left
+            else:
+                self._children.pop(receipt.parent_id, None)
+
+    def _settle_if_terminal(self, agent_id: str, result: Any) -> None:
+        # A backend that only acknowledges the request (row still running or
+        # cancel_requested) keeps the reservation.
+        # A bulk result (fleet store cancel_agents) carries per-agent rows:
+        # settle every row the backend reports terminal, including cascaded
+        # children and prefix matches, and nothing else.
+        agents = result.get("agents") if isinstance(result, dict) else None
+        if isinstance(agents, (list, tuple)):
+            for row in agents:
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("id") or "")
+                if row_id and self._status(row) in _TERMINAL:
+                    self.settle(row_id)
+            return
+        if self._status(result) in _TERMINAL:
+            self.settle(agent_id)
 
     @staticmethod
     def _status(value: Any) -> str:
