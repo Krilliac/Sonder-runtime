@@ -145,14 +145,19 @@ def _sub_url_userinfo(text):
 
 _PATTERNS: tuple[re.Pattern, ...] = (
     # Keep the canonical marker handling idempotent (domain drift guard).
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"),
-    re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
+    # Quoted header names and quoted/delimited values: see the domain copy.
+    re.compile(
+        r"(?i)\b(authorization(?:\\?[\"'])?\s*[:=]\s*)"
+        r"(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"
+    ),
+    re.compile(r"(?i)\b((?:set-)?cookie(?:\\?[\"'])?\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"[\"']?\s*[:=]\s*)"
-        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
+        r"(?:\\?[\"'])?\s*[:=]\s*)"
+        r"(\\?\"[^\"\r\n]*\"|\\?'[^'\r\n]*'|\[REDACTED\](?=[\s,;}\])]|$)|"
+        r"\\?[\"']?[^\s\"']+[\"']?)"
     ),
     _URL_USERINFO,
     re.compile(

@@ -262,3 +262,19 @@ def test_activity_local_timestamp_uses_host_timezone_for_cross_source_order():
     stamp = "2026-10-01T12:15:00"
     rows = activity_progress({"events": [{"kind": "tool_result", "ts": stamp, "title": "finished"}]})
     assert rows[0]["at"] == datetime.fromisoformat(stamp).timestamp()
+
+
+def test_progress_redacts_quoted_json_and_dict_credential_keys():
+    for message, secret in (
+        ('{"api_key": "sk-live-123"}', "sk-live-123"),
+        ("{'password': 'hunter2'}", "hunter2"),
+        ('{\\"pwd\\": \\"s3cr3t\\"}', "s3cr3t"),
+        ('token: "correct horse" next', "horse"),
+    ):
+        rows = autopilot_progress({"run": {"id": "auto-quoted", "status": "running"},
+                                   "events": [{"event_id": 1, "ts": 1, "kind": "retry",
+                                                "message": message}]})
+        text = rows[0]["text"]
+        assert secret not in text, (message, text)
+        assert "<redacted>" in text
+    assert work_narration._redact_assignments('{"api_key": "sk-1"}') == '{"api_key": "<redacted>"}'
