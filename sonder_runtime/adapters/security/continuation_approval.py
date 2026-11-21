@@ -6,13 +6,10 @@ import time
 import uuid
 
 from sonder_runtime.application.ports.lane_continuation import (
-    GrantedApprovalEvidence, PendingApprovalEvidence, VerificationApprovalPending,
+    ApprovalOutcomeUnknown, GrantedApprovalEvidence, PendingApprovalEvidence,
+    VerificationApprovalPending,
 )
 from .approval_ledger import Approval, PendingCall, PENDING_RETENTION_SECONDS
-
-
-class ApprovalOutcomeUnknown(PermissionError):
-    """A potentially consumed approval must not return to resumable pending."""
 
 
 class _ObservedLedger:
@@ -69,6 +66,8 @@ class ContinuationApprovalBridge:
         if (decision.tool != tool or decision.call_id != digest[:16]
                 or self._digest(tool, frozen_arguments) != digest
                 or time.time() >= expires_at):
+            if observer.consumed is not None:
+                raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
             raise PermissionError("permission decision identity or deadline changed")
         if decision.allowed is True:
             if decision.source == "approval":
@@ -77,10 +76,10 @@ class ContinuationApprovalBridge:
                         or receipt.digest != digest or receipt.consumed_surface != surface
                         or not receipt.spent or receipt.revoked
                         or receipt.expires_ts <= time.time()):
-                    raise PermissionError("exact consumed approval evidence unavailable")
+                    raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
                 confirmed = pinned.get(receipt.nonce)
                 if confirmed != receipt:
-                    raise PermissionError("consumed approval receipt changed")
+                    raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
                 return GrantedApprovalEvidence(tool, digest, surface,
                     "approval:" + receipt.nonce, receipt.nonce,
                     min(expires_at, receipt.expires_ts), "approval")

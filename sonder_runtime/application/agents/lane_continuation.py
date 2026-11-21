@@ -13,6 +13,7 @@ import uuid
 
 from ..ports.managed_authority import ManagedAuthority
 from ..ports.lane_continuation import (
+    ApprovalOutcomeUnknown,
     ContinuationSelection,
     HostContinuationGrant,
     PreparedReattachment,
@@ -1023,10 +1024,22 @@ class LaneContinuationService:
                 self._save(tx, record)
             try:
                 approval = approve(prepared, context)
+            except ApprovalOutcomeUnknown:
+                # The approval may have been consumed: leave the claim in
+                # approval_deciding so it cannot be prepared and approved again.
+                raise
+            except PermissionError:
+                # A definite denial: release the claim so the continuation can
+                # be prepared and approved again.
+                self._resolve_denied(context, prepared, owner, record["epoch"])
+                raise
             except VerificationApprovalPending as pending:
                 if pending.evidence.expires_at <= time.time():
+                    # Definite failure: resolve the claim so it cannot strand.
+                    self._resolve_denied(context, prepared, owner, record["epoch"])
                     raise PermissionError("pending attachment ledger record expired")
                 evidence = asdict(pending.evidence)
+                identity_changed = False
                 with self._transaction(context) as tx:
                     current = self._row(tx, prepared.continuation_id)
                     self._current(tx, current, context)
@@ -1037,18 +1050,22 @@ class LaneContinuationService:
                         prior[k] != evidence[k]
                         for k in ("tool", "call_digest", "surface", "call_id")
                     ):
-                        raise PermissionError(
-                            "pending attachment ledger identity changed"
+                        identity_changed = True
+                    else:
+                        current.update(
+                            attachment_state="approval_pending",
+                            attachment_pending=evidence,
                         )
-                    current.update(
-                        attachment_state="approval_pending", attachment_pending=evidence
-                    )
-                    self._save(tx, current)
+                        self._save(tx, current)
+                if identity_changed:
+                    self._resolve_denied(context, prepared, owner, record["epoch"])
+                    raise PermissionError("pending attachment ledger identity changed")
                 raise
             if (
                 not isinstance(approval, GrantedApprovalEvidence)
                 or approval.expires_at <= time.time()
             ):
+                self._resolve_denied(context, prepared, owner, record["epoch"])
                 raise PermissionError("typed exact host reattachment approval required")
             with self._transaction(context) as tx:
                 current = self._row(tx, prepared.continuation_id)
@@ -1056,21 +1073,42 @@ class LaneContinuationService:
                 if current["owner"] != owner or current["epoch"] != record["epoch"]:
                     raise PermissionError("host attachment claim changed")
                 prior = current.get("attachment_pending")
-                if prior and any(
-                    prior[k] != getattr(approval, k)
-                    for k in ("tool", "call_digest", "surface")
-                ):
-                    raise PermissionError(
-                        "attachment approval does not cover pending identity"
+                uncovered = bool(
+                    prior
+                    and any(
+                        prior[k] != getattr(approval, k)
+                        for k in ("tool", "call_digest", "surface")
                     )
-                current.update(
-                    attachment_state="active", attachment_approval=asdict(approval)
                 )
-                self._save(tx, current)
+                if not uncovered:
+                    current.update(
+                        attachment_state="active",
+                        attachment_approval=asdict(approval),
+                    )
+                    self._save(tx, current)
+            if uncovered:
+                self._resolve_denied(context, prepared, owner, record["epoch"])
+                raise PermissionError(
+                    "attachment approval does not cover pending identity"
+                )
             return self._bound(current, context, lease)
         except BaseException:
             lease.close()
             raise
+
+    def _resolve_denied(self, context, prepared, owner, epoch):
+        with self._transaction(context) as tx:
+            current = self._row(tx, prepared.continuation_id)
+            if (
+                current["owner"] == owner
+                and current["epoch"] == epoch
+                and current.get("attachment_state") == "approval_deciding"
+            ):
+                current["attachment_state"] = "approval_denied"
+                # The denied ledger record is resolved; a stale pending identity
+                # would make the next fresh approval fail its identity check.
+                current.pop("attachment_pending", None)
+                self._save(tx, current)
 
     def recovery_page(self, context, *, cursor=0, limit=32, host_conversation_id=None):
         if (
