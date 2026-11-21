@@ -542,7 +542,11 @@ class DurableJobRegistry:
             for result in plan.results:
                 if result.action is DrainAction.MARK_INTERRUPTED:
                     current = self._records[result.observation.record_id]
-                    if not current.is_terminal and current.status is not JobStatus.INTERRUPTED:
+                    if (
+                        not current.is_terminal
+                        and current.status is not JobStatus.INTERRUPTED
+                        and current.status is not JobStatus.CANCELLATION_REQUESTED
+                    ):
                         self._records[current.identity.job_id] = replace(
                             current, status=JobStatus.INTERRUPTED, revision=current.revision + 1, updated_at=self._clock()
                         )
