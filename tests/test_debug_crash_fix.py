@@ -360,16 +360,16 @@ def test_excerpt_lines_lose_terminal_escapes_and_bidi_overrides():
 
 def test_user_paths_and_names_never_reach_the_brief():
     frames = (
-        _frame(0, "main", "/home/natew/proj/src/m.cpp", 3,
-               module="/home/natew/proj/build/app"),
-        _frame(1, "run", "C:\\Users\\Nate\\src\\game\\w.cpp", 9,
-               module="C:\\Users\\Nate\\build\\game.exe"),
+        _frame(0, "main", "/home/alice/proj/src/m.cpp", 3,
+               module="/home/alice/proj/build/app"),
+        _frame(1, "run", "C:\\Users\\Dana\\src\\game\\w.cpp", 9,
+               module="C:\\Users\\Dana\\build\\game.exe"),
     )
-    report = _report(frames, process="/home/natew/proj/build/app",
+    report = _report(frames, process="/home/alice/proj/build/app",
                      hints=(CauseHint("null_deref", "high", "read of /root/x and "
                                       "\\\\buildhost\\share\\a.pdb"),))
     brief = cf.render_crash_fix_brief(cf.build_crash_fix_handoff(report), run_id="r1")
-    for leaked in ("natew", "Nate", "/root/", "buildhost"):
+    for leaked in ("alice", "Dana", "/root/", "buildhost"):
         assert leaked not in brief
     assert "app!main (~/proj/src/m.cpp:3)" in brief and "in app thread 7" in brief
 

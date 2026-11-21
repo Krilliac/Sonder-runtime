@@ -18,7 +18,7 @@
 #   SONDER_LORA_OUT   run root (default ./sonder-personal-lora)
 #   SONDER_TRAIN_GPU_INDEX physical CUDA GPU index (default 0)
 #   HF_TOKEN          set to also push the adapter to the Hugging Face Hub
-#   HF_REPO           e.g. Krilliac/sonder-personal-lora (needed with HF_TOKEN)
+#   HF_REPO           e.g. your-hf-user/your-repo (needed with HF_TOKEN)
 set -euo pipefail
 
 BASE="${SONDER_BASE:-Qwen/Qwen2.5-Coder-7B-Instruct}"

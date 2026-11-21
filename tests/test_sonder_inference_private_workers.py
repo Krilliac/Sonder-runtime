@@ -27,7 +27,7 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.domain.common.errors import DependencyUnavailable, Forbidden, InvalidInput
 
 PRIMARY = "http://127.0.0.1:11437"
-WORKER = "https://10.77.0.2:8443/sonder-inference"
+WORKER = "https://192.0.2.2:8443/sonder-inference"
 TOKEN = "t" * 32
 PRIMARY_KEY = "p" * 32
 
@@ -138,12 +138,12 @@ def test_no_worker_list_means_no_workers(ca_bundle):
 
 
 @pytest.mark.parametrize("url, reason", [
-    ("http://10.77.0.2:8443", "https"),
+    ("http://192.0.2.2:8443", "https"),
     ("https://8.8.8.8:443", "not a private-network address"),
     ("https://node1.example.com:8443", "IP literal"),
     ("https://127.0.0.1:8443", "not a private-network address"),
-    ("https://10.77.0.2", "explicit port"),
-    ("https://user:pw@10.77.0.2:8443", "without credentials"),
+    ("https://192.0.2.2", "explicit port"),
+    ("https://user:pw@192.0.2.2:8443", "without credentials"),
 ])
 def test_worker_urls_are_private_https_ip_literals(ca_bundle, url, reason):
     raw = json.dumps([{"url": url, "ca_bundle": ca_bundle, "token_env": "NODE1_TOKEN"}])
@@ -180,11 +180,11 @@ def test_worker_entries_are_validated(ca_bundle, tmp_path):
         parse_private_workers(two, allow_remote=True)
     shared_token = json.dumps([
         {"url": WORKER, "ca_bundle": ca_bundle, "token_env": "A_TOKEN"},
-        {"url": "https://10.77.0.3:8443", "ca_bundle": ca_bundle, "token_env": "A_TOKEN"},
+        {"url": "https://192.0.2.3:8443", "ca_bundle": ca_bundle, "token_env": "A_TOKEN"},
     ])
     with pytest.raises(InvalidInput, match="token_env duplicates"):
         parse_private_workers(shared_token, allow_remote=True)
-    many = json.dumps([{"url": "https://10.77.0.%d:8443" % i, "ca_bundle": ca_bundle,
+    many = json.dumps([{"url": "https://192.0.2.%d:8443" % i, "ca_bundle": ca_bundle,
                         "token_env": "A_TOKEN"} for i in range(2, 11)])
     with pytest.raises(InvalidInput, match="1-8"):
         parse_private_workers(many, allow_remote=True)
@@ -200,13 +200,13 @@ def test_worker_serves_without_cloud_consent_and_never_needs_it(ca_bundle):
     response = gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx(cloud=False))
     assert response.text == "ok"
     assert [base for base, _h, _ca in hosts.posts] == [WORKER]
-    assert response.endpoint == "https://10.77.0.2:8443"
+    assert response.endpoint == "https://192.0.2.2:8443"
 
 
 def test_unlisted_remote_endpoint_still_needs_cloud_consent(ca_bundle):
     """The worker lane does not relax the primary's own remote rules."""
     hosts = Hosts()
-    env = _env(ca_bundle, SONDER_INFERENCE_BASE_URL="https://10.77.0.9:8443",
+    env = _env(ca_bundle, SONDER_INFERENCE_BASE_URL="https://192.0.2.9:8443",
                SONDER_INFERENCE_API_KEY=PRIMARY_KEY, **{ENV_PRIVATE_WORKERS: None})
     with pytest.raises(Forbidden, match="does not allow prompts to leave"):
         _gateway(hosts, env).generate(ModelRequest(prompt="x", tier="fast"), _ctx(cloud=False))
@@ -265,7 +265,7 @@ def test_concurrent_requests_spread_across_primary_and_worker(ca_bundle):
         thread.join(30)
     assert errors == []
     assert sorted(base for base, _h, _ca in hosts.posts) == sorted([PRIMARY, WORKER])
-    assert {r.endpoint for r in results} == {PRIMARY, "https://10.77.0.2:8443"}
+    assert {r.endpoint for r in results} == {PRIMARY, "https://192.0.2.2:8443"}
     assert gateway._inflight == {}
 
 
@@ -392,14 +392,14 @@ def test_worker_whose_health_cannot_be_read_gets_nothing(ca_bundle):
 def test_remote_primary_without_cloud_consent_is_not_a_candidate(ca_bundle):
     """Only the approved worker may take a no-cloud call; never a final Forbidden."""
     hosts = Hosts()
-    remote_primary = "https://10.77.0.9:8443"
+    remote_primary = "https://192.0.2.9:8443"
     hosts._base = staticmethod(lambda url: WORKER if url.startswith(WORKER) else PRIMARY)
     env = _env(ca_bundle, SONDER_INFERENCE_BASE_URL=remote_primary,
                SONDER_INFERENCE_API_KEY=PRIMARY_KEY)
     gateway = _gateway(hosts, env)
     for prompt in "abcd":
         response = gateway.generate(ModelRequest(prompt=prompt, tier="fast"), _ctx(cloud=False))
-        assert response.endpoint == "https://10.77.0.2:8443"
+        assert response.endpoint == "https://192.0.2.2:8443"
     assert {base for base, _h, _ca in hosts.posts} == {WORKER}
     # With cloud consent the remote primary is eligible again.
     hosts.posts.clear()
@@ -412,7 +412,7 @@ def test_status_lists_workers_without_secrets(ca_bundle):
     hosts = Hosts()
     status = _gateway(hosts, _env(ca_bundle)).provider_status()["sonder_inference"]
     assert status["workers"] == [{
-        "base_url": "https://10.77.0.2:8443", "state": "ready", "healthy": True,
+        "base_url": "https://192.0.2.2:8443", "state": "ready", "healthy": True,
         "detail": "ready: 1 model(s)", "models": ["sonder:latest"], "max_inflight": 1,
         "inflight": 0, "ms_per_token": None,
     }]

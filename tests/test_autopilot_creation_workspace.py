@@ -115,7 +115,7 @@ def test_project_less_internal_loop_keeps_its_own_root(monkeypatch, tmp_path, is
 
 # Windows refuses to create a directory whose path is 248 characters or longer
 # (MAX_PATH minus room for an 8.3 name) unless the host sets LongPathsEnabled.
-# Node1 does not, and pytest's temp base there is already ~90 characters, so a
+# A compute node does not, and pytest's temp base there is already ~90 characters, so a
 # fixed 168-character nesting overflowed (WinError 3 at mkdir). The test only
 # needs a project path over 200 characters: size the nesting to land it at
 # _PROJECT_LENGTH under any base. Where the base itself leaves no room, fall

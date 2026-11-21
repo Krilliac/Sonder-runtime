@@ -491,7 +491,7 @@ def _keep_alive():
     Ollama unloads an idle model after its default five minutes. A remote
     embedding host that is also busy with other work can then take tens of
     seconds to reload it (measured 2026-09-30: 31 s for a 0.5 GB model on a
-    loaded Node1), longer than recall callers wait. ``24h`` or ``-1`` keeps
+    loaded a compute node), longer than recall callers wait. ``24h`` or ``-1`` keeps
     the small embedder resident. Invalid values are ignored.
     """
     raw = os.environ.get("SONDER_EMBED_KEEP_ALIVE", "").strip()
@@ -512,7 +512,7 @@ def _num_ctx():
     Opt-in. Without it Ollama sizes the embedder's runner to the server's
     default context: on a host with a large GPU budget that default is 32k,
     which turned a 4 GB embedder into a 10.8 GB runner (measured 2026-09-30,
-    qwen3-embedding:4b-q8_0 on Node1) and kept it from staying resident next
+    qwen3-embedding:4b-q8_0 on a compute node) and kept it from staying resident next
     to the reasoning model. Embeddings never need more than EMBED_MAX_CHARS
     worth of tokens, so 4096 is a safe bound for every embedder shipped here
     (Ollama clamps it to a smaller model maximum, such as nomic's 2048).

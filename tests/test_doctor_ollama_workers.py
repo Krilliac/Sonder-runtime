@@ -136,7 +136,7 @@ def test_worker_probe_uses_the_configured_ca_bundle(monkeypatch, tmp_path):
 
     Runtime composition binds the bundle; doctor did not, so a healthy
     private-CA worker failed as ``self-signed certificate`` (observed
-    2026-10-08 with Node1) while the live pool reached it fine.
+    2026-10-08 with a compute node) while the live pool reached it fine.
     """
     bundle = tmp_path / "ca.pem"
     bundle.write_text("placeholder", encoding="ascii")

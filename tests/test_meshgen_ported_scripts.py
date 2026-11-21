@@ -3,7 +3,7 @@
 The originals ran as real Python inside Blender with an injected ``lf`` object.  The ports differ only where
 the dialect cannot express the original: a qualified ``lf_kit.`` module name, handles instead of reading
 ``part.name`` or ``lf.last_obj()``, and ``fit_height(h, parts)`` with the parts named explicitly.
-Skipped unless the Lanternfall ``lf_kit.py`` is on this machine.
+Skipped unless SONDER_TEST_MESHGEN_KIT points at a kit file.
 """
 from __future__ import annotations
 
@@ -18,12 +18,14 @@ from sonder_runtime.domain.meshgen.dsl import opschema
 from sonder_runtime.domain.meshgen.dsl.manifest import build_manifest
 from sonder_runtime.domain.meshgen.dsl.recorder import compile_script
 
-REAL_KIT = Path(r"D:\LanternfallGame\Lanternfall\tools\blender\lf_kit.py")
+_REAL_KIT_ENV = os.environ.get("SONDER_TEST_MESHGEN_KIT", "")
+REAL_KIT = Path(_REAL_KIT_ENV) if _REAL_KIT_ENV else None
 PORTS = Path(__file__).parent / "data" / "meshgen_ports"
 BLENDER = os.environ.get("SONDER_BLENDER", "")
 SCRIPTS = sorted(PORTS.glob("*.py"))
 
-pytestmark = pytest.mark.skipif(not REAL_KIT.is_file(), reason="the Lanternfall lf_kit.py is not on this machine")
+pytestmark = pytest.mark.skipif(REAL_KIT is None or not REAL_KIT.is_file(),
+                                reason="SONDER_TEST_MESHGEN_KIT is not set to a kit file")
 
 
 @pytest.fixture(scope="module")
