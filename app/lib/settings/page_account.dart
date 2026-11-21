@@ -37,7 +37,7 @@ extension _AccountPage on _SettingsScreenState {
         if (_needsBootstrap)
           SettingsFieldRow(
             label: 'Bootstrap secret',
-            description: 'Printed by Sonder on the PC for the first admin. '
+            description: 'The SONDER_BOOTSTRAP_SECRET value configured on the server. '
                 'Used once, never saved.',
             field: LabeledTextField(
               fieldKey: const Key('settings-bootstrap-secret'),
