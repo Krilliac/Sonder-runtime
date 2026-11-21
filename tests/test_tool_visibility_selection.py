@@ -110,7 +110,7 @@ def test_immutable_selection_survives_bounded_context_reset():
 def test_selected_catalog_omits_hidden_schemas_and_changes_digest():
     registry = InMemoryToolRegistry((
         ToolDescriptor("public", input_schema={"type": "object"}),
-        ToolDescriptor("hidden", input_schema={"type": "object", "secret": True}),
+        ToolDescriptor("hidden", input_schema={"type": "object", "description": "secret"}),
     ))
     selected = GeneratedCatalogs.generate(
         registry, event_kinds=[], selection=ToolSchemaSelection({"public"})
