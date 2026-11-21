@@ -22,6 +22,7 @@ import wave
 import zlib
 
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
+from sonder_runtime.adapters.filesystem.file_ops import _reject_network_path
 import media_assets
 import model_assets
 import ooxml_assets
@@ -173,6 +174,8 @@ def resolve_pack_dir(name: str, output_dir: str = "") -> str:
     so it may not be pointed at arbitrary project directories.
     """
     slug = _safe_slug(name)
+    if output_dir:
+        _reject_network_path(output_dir)
     base = output_dir.strip() if output_dir else default_asset_root()
     if not os.path.isabs(base):
         base = os.path.join(workspace_root(), base)
@@ -777,11 +780,13 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             "(no manifest.json from %s); choose another name or remove those files"
             % (", ".join(existing[:5]), _safe_slug(name), GENERATOR_ID)
         )
-    for filename in OWNED_FILENAMES:
+    for filename in sorted(OWNED_FILENAMES):
+        stale = os.path.join(root, filename)
+        if os.path.isdir(stale) and not os.path.islink(stale):
+            raise ValueError("generated file path is unexpectedly a directory: %s" % filename)
+    for filename in sorted(OWNED_FILENAMES):
         stale = os.path.join(root, filename)
         if os.path.lexists(stale):
-            if os.path.isdir(stale) and not os.path.islink(stale):
-                raise ValueError("generated file path is unexpectedly a directory: %s" % filename)
             os.remove(stale)
     palette = palette_from_brief(brief, THEMES[theme])
     selected = set(request["kinds"])
@@ -936,6 +941,7 @@ def generate_pack(name: str, dimension: str = "2d", theme: str = "arcane",
 
 
 def verify_pack(path: str) -> dict:
+    path = _reject_network_path(path)
     if not os.path.isabs(path):
         path = os.path.join(workspace_root(), path)
     root = os.path.abspath(path)
