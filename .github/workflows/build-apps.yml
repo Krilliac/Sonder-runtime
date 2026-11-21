@@ -393,7 +393,7 @@ jobs:
           generate_release_notes: true
           body: |
             Sonder Runtime builds — install on your phone or desktop, then
-            point the app at your `sonder_serve.py` server (Settings → Server URL).
+            point the app at your `python -m sonder_runtime serve` server (Settings → Server URL).
 
             | Platform | Download |
             |---|---|
