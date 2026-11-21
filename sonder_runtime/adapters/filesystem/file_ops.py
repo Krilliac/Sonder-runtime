@@ -260,12 +260,36 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
+def _parse_policy_root(raw: str) -> Path | None:
+    """Parse one policy-root entry, stripping ``\\\\?\\`` local prefixes and dropping other prefixed forms.
+
+    Extended-length local paths (``\\\\?\\D:\\x`` or ``//?/D:/x``) are stripped
+    with ``_EXTENDED_LOCAL_RE`` before ``Path()`` is built so containment checks
+    agree with ``resolve_path`` regardless of Python version (Python 3.12's
+    ``Path.resolve()`` preserves ``//?/`` while ``_reject_network_path`` strips
+    it). Every other prefixed or network form (``\\\\?\\UNC\\...``, ``\\\\.\\...``,
+    ``GLOBALROOT``, ``Volume{...}``, ``\\??\\...``, plain UNC ``\\\\host\\share``)
+    is dropped before ``Path()`` or ``resolve()`` ever sees it.
+    """
+    text = (raw or "").strip()
+    if not text or "\0" in text:
+        return None
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        text = text[extended.start(1):]
+    else:
+        flat = text.replace("/", "\\")
+        if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
+            return None
+    return Path(text).expanduser()
+
+
 def _split_roots(raw: str) -> list[Path]:
-    roots = []
+    roots: list[Path] = []
     for item in (raw or "").split(os.pathsep):
-        item = item.strip()
-        if item:
-            roots.append(Path(item).expanduser())
+        parsed = _parse_policy_root(item)
+        if parsed is not None:
+            roots.append(parsed)
     return roots
 
 
@@ -283,11 +307,13 @@ def _roots_from_file() -> list[Path]:
         lines = roots_file_path().read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):
         return []
-    roots = []
+    roots: list[Path] = []
     for line in lines:
         value = line.strip()
         if value and not value.startswith("#"):
-            roots.append(Path(value).expanduser())
+            parsed = _parse_policy_root(value)
+            if parsed is not None:
+                roots.append(parsed)
     return roots
 
 
