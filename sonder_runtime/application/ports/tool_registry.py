@@ -6,6 +6,7 @@ application services validate calls before they cross the policy boundary.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from copy import deepcopy
@@ -272,12 +273,39 @@ class ExecutableToolInventory:
         return descriptor
 
 
+_TEXT_CHUNK = 1 << 16
+
+
 def _text_bytes(text: str, budget: int) -> int:
-    # A string is never shorter in UTF-8 than its length in code points, so
-    # an oversized one is refused before it is encoded.
+    """Exact size of ``text`` as a quoted JSON string with ``ensure_ascii``.
+
+    That is the form ``permission_modes.call_digest`` and the audit encode
+    arguments in, and the largest one: a control character, ``DEL``, a lone
+    surrogate or any non-ASCII character becomes a 6-byte ``\\uXXXX`` escape,
+    and a character above U+FFFF a 12-byte surrogate pair.  Every code point
+    costs at least one byte, so an oversized string is refused before it is
+    encoded; the rest is encoded in chunks, so at most ``12 * _TEXT_CHUNK``
+    bytes are held at once, and encoding stops as soon as the budget is spent.
+    """
     if len(text) > budget:
         raise InvalidInput("tool arguments exceed the size limit")
-    return len(text.encode("utf-8", "surrogatepass")) + 2
+    size = 2
+    for start in range(0, len(text), _TEXT_CHUNK):
+        size += len(json.dumps(text[start:start + _TEXT_CHUNK], ensure_ascii=True)) - 2
+        if size > budget:
+            raise InvalidInput("tool arguments exceed the size limit")
+    return size
+
+
+def _key_bytes(key: Any, budget: int) -> int:
+    # ``json.dumps`` writes a non-string key as its quoted scalar form.
+    if isinstance(key, str):
+        return _text_bytes(key, budget)
+    if isinstance(key, int) and not isinstance(key, bool):
+        return key.bit_length() // 3 + 4
+    if isinstance(key, float):
+        return 26
+    return 8
 
 
 def _check_argument_limits(arguments: dict[str, Any]) -> None:
@@ -285,8 +313,11 @@ def _check_argument_limits(arguments: dict[str, Any]) -> None:
 
     Iterative on purpose: this runs before the recursive validator, so a
     deeply nested or self-referential argument is refused here instead of
-    raising ``RecursionError`` there.  The size is a conservative estimate of
-    the compact JSON encoding, not an exact byte count.
+    raising ``RecursionError`` there.  For JSON-native values the size is an
+    upper bound on the compact ``ensure_ascii`` JSON encoding: strings are
+    charged their exact escaped length, numbers a digit-count ceiling and
+    containers their brackets and separators.  It is not an exact byte count,
+    and an object outside the JSON data model is charged a flat 8 bytes.
     """
     budget = MAX_TOOL_ARGUMENT_BYTES
     nodes = 1
@@ -309,14 +340,16 @@ def _check_argument_limits(arguments: dict[str, Any]) -> None:
             nodes += len(value)
             if nodes > MAX_TOOL_ARGUMENT_NODES:
                 raise InvalidInput("tool arguments contain too many values")
-            budget -= 2 + len(value)
             if isinstance(value, dict):
+                # Braces, one colon per key and the commas between members.
+                budget -= 2 + 2 * len(value)
                 for key, child in value.items():
-                    budget -= _text_bytes(key, budget) if isinstance(key, str) else 8
+                    budget -= _key_bytes(key, budget)
                     if budget < 0:
                         raise InvalidInput("tool arguments exceed the size limit")
                     stack.append((child, depth + 1))
             else:
+                budget -= 2 + len(value)
                 stack.extend((child, depth + 1) for child in value)
         else:
             budget -= 8

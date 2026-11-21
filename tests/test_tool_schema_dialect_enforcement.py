@@ -21,6 +21,7 @@ import pytest
 
 from sonder_runtime.application.ports.tool_execution import ToolExecutionResult
 from sonder_runtime.application.ports.tool_registry import (
+    MAX_TOOL_ARGUMENT_BYTES,
     MAX_TOOL_ARGUMENT_DEPTH,
     MAX_TOOL_SCHEMA_DEPTH,
     SONDER_TOOL_SCHEMA_SUBSET_V1,
@@ -28,6 +29,7 @@ from sonder_runtime.application.ports.tool_registry import (
     ToolCall,
     ToolDescriptor,
     check_schema_supported,
+    validate_tool_arguments,
     validate_tool_call,
 )
 from sonder_runtime.application.tools.gateway_contract import (
@@ -349,6 +351,51 @@ def test_deep_or_oversized_arguments_are_refused_before_recursion():
     validate_tool_call(descriptor, ToolCall("probe", {"v": shallow}))
     with pytest.raises(InvalidInput, match="size limit"):
         validate_tool_call(descriptor, ToolCall("probe", {"v": "x" * (17 * 1024 * 1024)}))
+
+
+def _compact_ascii_json_size(arguments: Any) -> int:
+    # The encoding permission_modes.call_digest and the audit use.
+    return len(json.dumps(arguments, separators=(",", ":"), ensure_ascii=True))
+
+
+@pytest.mark.parametrize(
+    ("char", "escaped"),
+    [("\x00", 6), ("\x1f", 6), ("\x7f", 6), ("\ud800", 6), ("\u00e9", 6),
+     ("\U0001f600", 12)],
+)
+def test_argument_size_is_charged_at_the_escaped_json_size(char: str, escaped: int):
+    # Each of these is one code point and at most 4 UTF-8 bytes, but escapes
+    # to ``escaped`` bytes; a UTF-8 count let the JSON form exceed the limit.
+    count = MAX_TOOL_ARGUMENT_BYTES // escaped + 1
+    over = {"s": char * count}
+    assert _compact_ascii_json_size(over) > MAX_TOOL_ARGUMENT_BYTES
+    with pytest.raises(InvalidInput, match="size limit"):
+        validate_tool_arguments({"type": "object"}, over)
+    with pytest.raises(InvalidInput, match="size limit"):
+        validate_tool_arguments({"type": "object"}, {char * count: 0})
+    under = {"s": char * (MAX_TOOL_ARGUMENT_BYTES // escaped - 4)}
+    validate_tool_arguments({"type": "object"}, under)
+    assert _compact_ascii_json_size(under) <= MAX_TOOL_ARGUMENT_BYTES
+
+
+def test_argument_size_counts_integer_keys_at_their_digits():
+    # 10**4000 has 4001 digits, so each key is 4003 bytes in JSON; it used to
+    # be charged a flat 8 bytes.
+    keys = {10**4000 + i: 0 for i in range(MAX_TOOL_ARGUMENT_BYTES // 4003 + 1)}
+    assert _compact_ascii_json_size({"v": keys}) > MAX_TOOL_ARGUMENT_BYTES
+    with pytest.raises(InvalidInput, match="size limit"):
+        validate_tool_arguments({"type": "object"}, {"v": keys})
+
+
+def test_argument_size_counts_a_colon_and_a_comma_per_member():
+    # Each member costs a colon and a comma; one byte per member used to be
+    # charged for both, so this object, one byte over the limit, was accepted.
+    members = {f"k{i}": "" for i in range(100_000)}
+    arguments: dict[str, Any] = {"m": members, "s": ""}
+    arguments["s"] = "x" * (MAX_TOOL_ARGUMENT_BYTES + 1 - _compact_ascii_json_size(arguments))
+    assert _compact_ascii_json_size(arguments) == MAX_TOOL_ARGUMENT_BYTES + 1
+    with pytest.raises(InvalidInput, match="size limit"):
+        validate_tool_arguments({"type": "object"}, arguments)
 
 
 # --- composed routes: the invoker never runs on a refused call -------------
