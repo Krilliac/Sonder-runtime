@@ -37,9 +37,12 @@ from sonder_runtime.adapters.extensions.memory_limits import (
     ProcessContainmentResult,
 )
 from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
-from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
-
-
+from sonder_runtime.adapters.process_termination import ProcessTreeSupervisor
+
+
+
+
+
 @pytest.fixture(autouse=True)
 def _private_spools(tmp_path, monkeypatch):
     """Keep compute input/artifact spools per test.
@@ -1477,3 +1480,45 @@ def test_worker_rehydrates_digest_bound_receipt_after_restart(tmp_path: Path) ->
         assert reopened.status(started.remote_job_id).state in {"pending", "running"}
     finally:
         first_provider.cancel(started.remote_job_id, reason="test cleanup")
+
+
+def test_markerless_job_directory_is_reaped_instead_of_wedging_the_scan(tmp_path: Path) -> None:
+    import time
+
+    worker = ComputeJobWorker(
+        worker_id="worker-1", catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path}, provider=CapturingProvider(),
+        artifact_retention_seconds=60,
+    )
+    root = worker._artifact_root.path
+    stale = root / ("a" * 64)
+    fresh = root / ("b" * 64)
+    worker._artifact_root.child(stale.name)[0].close()
+    worker._artifact_root.child(fresh.name)[0].close()
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+
+    total, jobs = worker._artifact_spool_usage_locked(exclude_job="unrelated")
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert (total, jobs) == (0, 1)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="8.3 short names are Windows-only")
+def test_anchor_accepts_8dot3_short_name_base(tmp_path: Path) -> None:
+    import ctypes
+
+    long_dir = tmp_path / "a long directory name for spool"
+    long_dir.mkdir()
+    get_short = ctypes.windll.kernel32.GetShortPathNameW
+    get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    get_short.restype = ctypes.c_uint32
+    buffer = ctypes.create_unicode_buffer(1024)
+    if not get_short(str(long_dir), buffer, 1024) or buffer.value.lower() == str(long_dir).lower():
+        pytest.skip("8.3 short names are disabled on this volume")
+
+    with PrivateDirectoryAnchor.open_base(Path(buffer.value) / "spool") as anchor:
+        anchor.validate()
+        child, _ = anchor.child("ab12")
+        child.close()
