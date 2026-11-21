@@ -70,11 +70,29 @@ CREATE TABLE IF NOT EXISTS agent_lane_messages (
  acknowledged INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS agent_lane_messages_lane ON agent_lane_messages(lane_id,sequence);
 CREATE INDEX IF NOT EXISTS agent_lane_reports_sequence ON agent_lane_messages(report,sequence);
+CREATE TABLE IF NOT EXISTS agent_lane_artifacts (
+ artifact_id TEXT PRIMARY KEY, lane_id TEXT NOT NULL, principal TEXT NOT NULL,
+ project_scope TEXT NOT NULL, kind TEXT NOT NULL, source_id TEXT NOT NULL,
+ media_type TEXT NOT NULL, byte_count INTEGER NOT NULL, digest TEXT NOT NULL,
+ payload BLOB NOT NULL, created_at TEXT NOT NULL, UNIQUE(lane_id,kind,source_id));
 """
+
+# Complete lane outputs (oversized tool results, full child reports) live
+# beside the bounded event that names them. The bound keeps one artifact from
+# exhausting the host; lane events themselves stay at their 128 KiB limit.
+LANE_ARTIFACT_KINDS = frozenset({"tool_output", "report"})
+MAX_LANE_ARTIFACT_BYTES = 8 * 1024 * 1024
+LANE_ARTIFACT_PREFIX = "lane-artifact-"
 
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _report_ref(event_payload):
+    """Surface a truncated report's full-artifact pointer only when present."""
+    ref = event_payload.get("report_ref")
+    return {"report_ref": dict(ref)} if isinstance(ref, dict) else {}
 
 
 class LaneTransaction:
@@ -471,7 +489,54 @@ class LaneTransaction:
         )
         return cursor.lastrowid
 
-    def message(self, lane, content, author, *, report=False, source_sequence=0):
+    def store_artifact(self, lane, kind, source_id, media_type, payload):
+        """Persist one complete lane output under the lane's project scope.
+
+        Idempotent per (lane, kind, source): a retried delivery of identical
+        bytes returns the original reference, different bytes fail closed.
+        """
+        if kind not in LANE_ARTIFACT_KINDS:
+            raise ValueError("unsupported lane artifact kind")
+        for value in (source_id, media_type):
+            if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 256:
+                raise ValueError("lane artifact identity must be bounded text")
+        if not isinstance(payload, bytes):
+            raise ValueError("lane artifact payload must be bytes")
+        if len(payload) > MAX_LANE_ARTIFACT_BYTES:
+            raise ValueError("lane artifact exceeds durable payload bound")
+        digest = hashlib.sha256(payload).hexdigest()
+        row = self.conn.execute(
+            "SELECT artifact_id,digest,byte_count FROM agent_lane_artifacts "
+            "WHERE lane_id=? AND kind=? AND source_id=?",
+            (lane["id"], kind, source_id),
+        ).fetchone()
+        if row is not None:
+            if row[1] != digest or row[2] != len(payload):
+                raise ValueError("lane artifact source already holds different content")
+            return {"artifact_id": row[0], "digest": digest, "byte_count": len(payload)}
+        artifact_id = LANE_ARTIFACT_PREFIX + uuid.uuid4().hex
+        self.conn.execute(
+            """INSERT INTO agent_lane_artifacts
+          (artifact_id,lane_id,principal,project_scope,kind,source_id,media_type,
+           byte_count,digest,payload,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                artifact_id,
+                lane["id"],
+                lane["principal_id"],
+                lane["workspace_root"],
+                kind,
+                source_id,
+                media_type,
+                len(payload),
+                digest,
+                payload,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return {"artifact_id": artifact_id, "digest": digest, "byte_count": len(payload)}
+
+    def message(self, lane, content, author, *, report=False, source_sequence=0,
+                report_ref=None):
         pending = self.conn.execute(
             """SELECT COUNT(*) FROM agent_lane_messages
             WHERE lane_id=? AND delivery_state='queued' AND report=0""",
@@ -514,6 +579,8 @@ class LaneTransaction:
             "source_sequence": source_sequence,
             "artifacts": list(lane.get("artifacts", [])) if report else [],
         }
+        if report and report_ref is not None:
+            payload["report_ref"] = dict(report_ref)
         sequence = self.emit(
             lane,
             "lane.report" if report else "lane.message",
@@ -562,6 +629,7 @@ class LaneTransaction:
                     "source_sequence", 0
                 ),
                 artifacts=json.loads(r["event_payload"]).get("artifacts", []),
+                **_report_ref(json.loads(r["event_payload"])),
             )
             for r in reversed(rows)
         ]
@@ -600,6 +668,7 @@ class LaneTransaction:
                     summary=row["body"],
                     artifacts=list(event.get("artifacts", [])),
                     acknowledged=bool(row["acknowledged"]),
+                    **_report_ref(event),
                 )
             )
         return result
@@ -1008,6 +1077,30 @@ class SQLiteAgentLaneStore:
             "event_id": row[1],
             "event_type": row[2],
             "payload": json.loads(row[3]),
+        }
+
+    def artifact(self, lane_id, artifact_id):
+        """Read one complete lane artifact by identity, bound to its lane."""
+        with self._connection_scope() as conn:
+            row = conn.execute(
+                "SELECT artifact_id,lane_id,principal,project_scope,kind,source_id,"
+                "media_type,byte_count,digest,payload FROM agent_lane_artifacts "
+                "WHERE artifact_id=? AND lane_id=?",
+                (artifact_id, lane_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "artifact_id": row[0],
+            "lane_id": row[1],
+            "principal": row[2],
+            "project_scope": row[3],
+            "kind": row[4],
+            "source_id": row[5],
+            "media_type": row[6],
+            "byte_count": row[7],
+            "digest": row[8],
+            "payload": bytes(row[9]),
         }
 
     def tail_events(self, lane_id, limit=256):
