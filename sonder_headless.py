@@ -256,8 +256,11 @@ def _is_ollama_server_pid(pid: int) -> bool:
         if base:
             names.add(base)
     alternatives = "|".join(re.escape(name) for name in sorted(names))
-    return bool(re.search(
-        r'(?:^|[\\/"\s])(?:%s)(?:\.exe)?"?\s+serve(?:\s|$)' % alternatives,
+    # Anchor to the executable token so an unrelated process that merely
+    # mentions "ollama serve" in its arguments is not mistaken for the daemon.
+    return bool(re.match(
+        r'\s*(?:"[^"]*?[\/]?(?:%(n)s)(?:\.exe)?"|(?:[^\s"]*[\/])?(?:%(n)s)(?:\.exe)?)'
+        r'\s+serve(?:\s|$)' % {"n": alternatives},
         command,
     ))
 
@@ -514,9 +517,19 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded = _read_pid(name)
     recorded_for_other_port = False
     if name == "sonder_serve":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        if recorded_alive and not _is_sonder_server_pid(recorded):
+            # A reused PID: the pidfile is stale, but never kill the stranger.
+            try:
+                pid_file(name).unlink()
+            except OSError:
+                pass
+            return (
+                "%s: recorded pid %s is not a Sonder server; not stopped"
+                % (name, recorded)
+            )
         recorded_for_other_port = bool(
-            recorded and pid_alive(recorded)
-            and not _is_sonder_server_for_port(recorded, port)
+            recorded_alive and not _is_sonder_server_for_port(recorded, port)
         )
         candidates = ([] if recorded_for_other_port else [recorded]) + _listener_pids(host, port)
         pids = [
