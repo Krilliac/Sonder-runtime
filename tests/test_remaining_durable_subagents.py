@@ -475,3 +475,36 @@ def test_restart_recovery_requires_cleanup_and_storage_reconciliation(tmp_path):
 def test_lineage_rejects_cycles():
     with pytest.raises(ValueError):
         ChildSessionLineage("parent", ("ancestor", "parent"))
+
+
+def test_runner_raising_empty_message_still_settles_child_failed(tmp_path):
+    service = DurableContinuationService(SQLiteDurableContinuationRepository(tmp_path / "empty.sqlite"))
+
+    def silent(state, checkpoint, _cancel):
+        raise RuntimeError()
+
+    result = service.spawn(_request(), _context("empty"), silent).result(2)
+    assert result.status is SubagentStatus.FAILED
+    assert result.error.message == "RuntimeError"
+    service.close(1)
+
+
+def test_failure_handler_exception_does_not_strand_child_running(tmp_path):
+    service = DurableContinuationService(SQLiteDurableContinuationRepository(tmp_path / "crash.sqlite"))
+    real_write = service._write
+    calls = {"n": 0}
+
+    def flaky(op, *args, **kwargs):
+        if op == "update" and kwargs.get("status") is SubagentStatus.FAILED and calls["n"] == 0:
+            calls["n"] += 1
+            raise ValueError("handler blew up")
+        return real_write(op, *args, **kwargs)
+
+    service._write = flaky
+
+    def boom(state, checkpoint, _cancel):
+        raise RuntimeError("runner failed")
+
+    result = service.spawn(_request(), _context("crash"), boom).result(2)
+    assert result.status is SubagentStatus.FAILED
+    service.close(1)

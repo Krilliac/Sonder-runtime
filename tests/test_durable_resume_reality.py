@@ -184,3 +184,26 @@ def test_actual_conversational_request_consumes_delta_without_prefix_or_history_
     assert "HOST RESUME REALITY DELTA" not in requests[1].prompt
     assert requests[0].system == requests[1].system
     assert all("HOST RESUME REALITY DELTA" not in item["content"] for item in saved[-1]["history"])
+
+
+def test_conversational_model_failure_records_terminal_and_allows_retry(tmp_path):
+    from sonder_runtime.adapters.conversational_subagents import conversational_runner_factory
+    from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+    from sonder_runtime.application.session.capture import SessionCaptureService
+    from sonder_runtime.application.ports.model_gateway import ModelResponse
+    from types import SimpleNamespace
+    calls = []
+    class Gateway:
+        def generate(self, request, context):
+            calls.append(request)
+            if len(calls) == 1:
+                raise RuntimeError("model down")
+            return ModelResponse("ok", "test", request.tier, tokens_out=1)
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    runner = conversational_runner_factory(Gateway(), sessions, SessionCaptureService(sessions))(
+        _request(), local_owner_context(workspace_roots=(tmp_path,), correlation_id="fail"),
+    )
+    control = SimpleNamespace(cancelled=False)
+    with pytest.raises(RuntimeError, match="model down"):
+        runner({}, lambda state, cursor: None, control)
+    assert runner({}, lambda state, cursor: None, control) == "ok"
