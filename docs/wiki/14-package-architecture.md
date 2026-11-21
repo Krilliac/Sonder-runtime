@@ -22,9 +22,10 @@ sonder_runtime/
     chat/          ChatService
     runtime_policy/ policy use cases
   adapters/      implement the ports
-    ollama/        OllamaGateway (ModelGateway)
+    inference/     OllamaGateway (ModelGateway; re-exported via adapters/ollama/)
     filesystem/    atomic JSON + cross-process file lock
-    legacy/        wrap root modules behind ports during migration
+    persistence/   SQLite stores and repositories
+  interfaces/    inbound surfaces (http, mcp, repl, cli, sdk, editor, a2a)
   platform/      cross-cutting infra (config, paths, version, metrics, shutdown)
   bootstrap/     composition root (build_application) + entry point
 ```
@@ -33,7 +34,8 @@ sonder_runtime/
 
 ```
 domain  ← application ← adapters
-                     ← bootstrap → (adapters, application, platform)
+                      ← interfaces (application only)
+                      ← bootstrap → (adapters, application, interfaces, platform)
 platform  cross-cuts (imported by adapters/bootstrap)
 ```
 
@@ -78,20 +80,20 @@ Done: composition root; runtime-policy, memory, execution, and automation
 pure-rule extraction; the Ollama ModelGateway adapter; the first chat
 call-site (summarization/titling) migrated onto the port; the
 **AutomationRepository** and **MemoryRepository** ports made real and wired
-into the graph (`LegacyAutomationRepository` over `autopilot_store`;
-`LegacyUnitOfWork` owning a memory-store connection with `LegacyMemoryRepository`
-over `memory_store`/`recall`, exposed as a per-transaction factory).
+into the graph (`AutopilotRepository` over `sonder_runtime.adapters.persistence.autopilot_store`;
+`UnitOfWorkAdapter` owning a memory-store connection with `MemoryRepositoryAdapter`
+over `sonder_runtime.adapters.memory_store`/`sonder_runtime.adapters.recall`, exposed as a per-transaction factory).
 
 Remaining: migrating live call-sites onto the repositories/UnitOfWork,
 tightening the transaction boundary as legacy ops move off self-commit, an
 execution repository, training extraction, thin-transport reduction of
-`server.py`/`sonder_serve.py`, and removal of internal legacy imports. Live
+`server.py`/`sonder_runtime/interfaces/http/serve.py`, and removal of internal legacy imports. Live
 status: [PROGRAM-STATUS](../architecture/PROGRAM-STATUS.md).
 
 ## Why this shape
 
 The rationale is recorded as ADRs
-([001–008](../architecture/adr/)): a modular monolith over microservices,
+([001–009](../architecture/adr/)): a modular monolith over microservices,
 Ollama as an external inference service, per-domain SQLite, ports &
-adapters, explicit operation context, no ORM, compatibility shims, and
-local domain events without a broker.
+adapters, explicit operation context, no ORM, compatibility shims,
+local domain events without a broker, and bounded process-local observability.
