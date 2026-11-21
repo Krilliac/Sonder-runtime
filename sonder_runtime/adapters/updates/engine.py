@@ -528,7 +528,7 @@ class UpdateManager:
                     final_dir, ["-m", "sonder_runtime", "migrate", "--json"],
                     timeout=self._health_timeout,
                 )
-            except subprocess.SubprocessError as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 self.repository.record_step(
                     update_id, step, "migrate", "failed",
                     error_code="MIGRATION_FAILED",
