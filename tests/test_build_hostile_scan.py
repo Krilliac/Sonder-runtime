@@ -66,6 +66,15 @@ HOSTILE = [
     '#include <.env>\n',
     '#include <id_rsa>\n',
     '#include <.ssh/id_ed25519>\n',
+    # Per-component rules: dot directories and Windows aliases (G1262).
+    '#include <.git/config>\n',
+    '#include <.kube/config>\n',
+    '#include <node_modules/pkg/config>\n',
+    '#include <.aws/credentials >\n',
+    '#include <aws/credentials >\n',
+    '#include <aws/CREDEN~1>\n',
+    '#include <aws/credentials:stream>\n',
+    '#include <sub/CON>\n',
 ]
 
 
