@@ -74,11 +74,13 @@ class OpenAICompatibleProtocolProbe:
         )
         self._gateway._enforce_consent(config, context)
         timeout = self._gateway._check_liveness(context)
-        response = self._gateway._post(
-            "/v1/chat/completions",
+        # Metered like any other chat call: priced, reserved against the daily
+        # cap and recorded in the spend ledger when the endpoint is metered.
+        response = self._gateway._post_chat_accounted(
+            config,
             {"model": identity.model, "messages": messages, "stream": False,
-             "temperature": 0.0, "max_tokens": 128},
-            config, timeout, context=context,
+             "temperature": 0.0},
+            timeout, context=context, num_predict=128,
         )
         self._gateway._check_liveness(context, phase="during protocol probe")
         self._check_identity()
