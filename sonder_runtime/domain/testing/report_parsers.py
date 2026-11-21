@@ -7,6 +7,7 @@ case counts are capped, and every string is cut to a single bounded line.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -21,11 +22,16 @@ MAX_TESTCASES = 20_000
 MAX_JSON_LINES = 200_000
 MAX_TEXT_CHARS = 16 * 1024 * 1024
 _PY_LOCATION = re.compile(r"^(?P<file>[^\s:][^:\n]*?\.py):(?P<line>\d+): ", re.MULTILINE)
+# The location patterns run over failure text written by project code.  The
+# path runs are bounded and the scanned text is capped (LOCATION_SCAN_CHARS):
+# an unbounded run backtracks from every start offset of a long dotted or
+# "in in in ..." line, which is O(n^2) on megabytes of hostile text.
+LOCATION_SCAN_CHARS = 16 * 1024
 _GENERIC_LOCATION = re.compile(
-    r"(?P<file>[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
+    r"(?P<file>[A-Za-z0-9_./\\-]{1,260}\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
 _GO_OUTPUT_LOCATION = re.compile(r"^\s+(?P<file>[^\s:]+\.go):(?P<line>\d+): ?(?P<msg>.*)$")
 _JVM_LOCATION = re.compile(r"\((?P<file>[A-Za-z0-9_$]+\.(?:java|kt|groovy|scala)):(?P<line>\d+)\)")
-_TRX_LOCATION =re.compile(r"in (?P<file>[^\n]+?):line (?P<line>\d+)")
+_TRX_LOCATION = re.compile(r"in (?P<file>[^\n]{1,512}?):line (?P<line>\d+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +124,7 @@ def _case_identity(case: ET.Element, detail_text: str, strip_prefix: str) -> tup
                 rest = "::".join(parts[cut:])
                 return "%s::%s%s" % (file, rest + "::" if rest else "", name), file, found_line
     if not classname or classname == name:
-        location = _GENERIC_LOCATION.search(detail_text or "")
+        location = _GENERIC_LOCATION.search((detail_text or "")[:LOCATION_SCAN_CHARS])
         if location:
             return name, _relative(location.group("file"), strip_prefix), _int(location.group("line"))
         return name, "", None
@@ -258,12 +264,23 @@ def parse_go_test_json(text: str) -> ParsedResults:
         elif action == "fail":
             package_failed[package] = True
     failures: list[TestFailure] = []
+    # Failing names per package, sorted once: every subtest of ``test`` sorts
+    # contiguously from ``test + "/"``, so the parent check is one bisect, not a
+    # scan of every failing test (O(n^2) over 200k hostile events).
+    failing_names: dict[str, list[str]] = {}
+    for package, test in failing:
+        failing_names.setdefault(package, []).append(test)
+    for names in failing_names.values():
+        names.sort()
     for package, test in failing:
         if len(failures) >= MAX_FAILURES:
             truncated = True
             break
         # A parent test fails when a subtest fails; report the leaf only.
-        if any(other_pkg == package and other.startswith(test + "/") for other_pkg, other in failing):
+        names = failing_names[package]
+        prefix = test + "/"
+        index = bisect.bisect_left(names, prefix)
+        if index < len(names) and names[index].startswith(prefix):
             continue
         file, line_no, message = "", None, ""
         for chunk in outputs.get((package, test), ()):
@@ -352,7 +369,7 @@ def parse_trx(data: bytes) -> ParsedResults:
                 message = child.text or ""
             elif tag == "StackTrace" and not stack:
                 stack = child.text or ""
-        location = _TRX_LOCATION.search(stack)
+        location = _TRX_LOCATION.search(stack[:LOCATION_SCAN_CHARS])
         failures.append(TestFailure.bounded(
             element.get("testName", ""),
             location.group("file") if location else "",

@@ -23,11 +23,14 @@ module so that the parser itself is bounded:
   map of attacker-chosen length.  No Sonder reader needs sparse files;
 * a ZIP's end-of-central-directory record is read first, so the declared
   entry count and central-directory size can be checked before ``zipfile``
-  materializes one ``ZipInfo`` per entry.
+  materializes one ``ZipInfo`` per entry; the central-directory records
+  actually present are then counted, because ``zipfile`` walks the declared
+  size and ignores the declared count.
 """
 from __future__ import annotations
 
 import os
+import struct
 import tarfile
 import zipfile
 from typing import IO
@@ -162,6 +165,18 @@ def is_tarfile_bounded(name: str | os.PathLike) -> bool:
         return False
 
 
+def _end_record(stream: IO[bytes]) -> tuple[list, int, int]:
+    """Return ``(EOCD record, declared entries, central-directory bytes)``."""
+    record = zipfile._EndRecData(stream)
+    if not record:
+        raise zipfile.BadZipFile("ZIP end-of-central-directory record not found")
+    entries = int(record[zipfile._ECD_ENTRIES_TOTAL])
+    size = int(record[zipfile._ECD_SIZE])
+    if entries < 0 or size < 0:
+        raise zipfile.BadZipFile("ZIP central directory declares invalid sizes")
+    return record, entries, size
+
+
 def zip_central_directory(path: str | os.PathLike) -> tuple[int, int]:
     """Return ``(declared entries, central-directory bytes)`` from the EOCD.
 
@@ -169,27 +184,65 @@ def zip_central_directory(path: str | os.PathLike) -> tuple[int, int]:
     never the central directory itself.
     """
     with open(path, "rb") as stream:
-        record = zipfile._EndRecData(stream)
-    if not record:
-        raise zipfile.BadZipFile("ZIP end-of-central-directory record not found")
-    entries = int(record[zipfile._ECD_ENTRIES_TOTAL])
-    size = int(record[zipfile._ECD_SIZE])
-    if entries < 0 or size < 0:
-        raise zipfile.BadZipFile("ZIP central directory declares invalid sizes")
+        _record, entries, size = _end_record(stream)
     return entries, size
 
 
+def _require_record_count(stream: IO[bytes], record: list, size: int, max_entries: int) -> None:
+    """Count central-directory records, as ``zipfile`` will walk them, up to ``max_entries``.
+
+    ``zipfile`` ignores the declared entry count and parses records until the
+    declared central-directory size is consumed, so a directory of minimal
+    46-byte records behind a small declared count would still build one
+    ``ZipInfo`` per record.  Only the fixed headers are read; names, extra
+    fields and comments are skipped.  The walk mirrors
+    ``ZipFile._RealGetContents`` and stops quietly where that would raise, so
+    ``zipfile`` still reports a corrupt directory itself.
+    """
+    offset = int(record[zipfile._ECD_OFFSET])
+    concat = int(record[zipfile._ECD_LOCATION]) - size - offset
+    if record[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64:
+        concat -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+    start = offset + concat
+    if start < 0:
+        return
+    stream.seek(start)
+    count = total = 0
+    while total < size:
+        header = stream.read(zipfile.sizeCentralDir)
+        if len(header) != zipfile.sizeCentralDir:
+            return
+        fields = struct.unpack(zipfile.structCentralDir, header)
+        if fields[zipfile._CD_SIGNATURE] != zipfile.stringCentralDir:
+            return
+        count += 1
+        if count > max_entries:
+            raise ZipCentralDirectoryLimitError(
+                "ZIP central directory holds more than %d entries" % max_entries
+            )
+        skip = (fields[zipfile._CD_FILENAME_LENGTH] + fields[zipfile._CD_EXTRA_FIELD_LENGTH]
+                + fields[zipfile._CD_COMMENT_LENGTH])
+        stream.seek(skip, os.SEEK_CUR)
+        total += zipfile.sizeCentralDir + skip
+
+
 def require_zip_entry_bound(path: str | os.PathLike, max_entries: int) -> int:
-    """Reject a ZIP whose central directory exceeds ``max_entries`` before parsing it."""
-    entries, size = zip_central_directory(path)
-    if entries > max_entries:
-        raise ZipCentralDirectoryLimitError(
-            "ZIP declares %d entries (maximum %d)" % (entries, max_entries)
-        )
-    if size > max(1, entries) * MAX_ZIP_CENTRAL_DIRECTORY_BYTES_PER_ENTRY:
-        raise ZipCentralDirectoryLimitError(
-            "ZIP central directory is %d bytes for %d entries" % (size, entries)
-        )
+    """Reject a ZIP whose central directory exceeds ``max_entries`` before parsing it.
+
+    Checks the declared entry count and directory size, then counts the
+    records actually present, since ``zipfile`` trusts the size, not the count.
+    """
+    with open(path, "rb") as stream:
+        record, entries, size = _end_record(stream)
+        if entries > max_entries:
+            raise ZipCentralDirectoryLimitError(
+                "ZIP declares %d entries (maximum %d)" % (entries, max_entries)
+            )
+        if size > max(1, entries) * MAX_ZIP_CENTRAL_DIRECTORY_BYTES_PER_ENTRY:
+            raise ZipCentralDirectoryLimitError(
+                "ZIP central directory is %d bytes for %d entries" % (size, entries)
+            )
+        _require_record_count(stream, record, size, max_entries)
     return entries
 
 

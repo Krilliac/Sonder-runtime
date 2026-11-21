@@ -10,11 +10,14 @@ import re
 from typing import Any
 
 
+# Path-like token runs are bounded ({1,255}) so each start offset does bounded
+# work: an unbounded ``[\w.-]+`` backtracks over every '.' of a long dotted run
+# that never matches, which is O(n^2) on uncapped chat text.
 _LOCAL_TARGET = re.compile(
     r"(?:\b(?:workspace|work\s+space|repo(?:sitory)?|codebase|project|"
     r"folder|directory|file|files|scripts?|path|tree|module|package|README|LICENSE|Dockerfile|Makefile)\b|"
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]+\.(?:[A-Za-z]{2,10}|[ch])\b|"
-    r"\b(?:[\w.-]+[\\/])+[\w.-]+|\b[a-zA-Z_][\w.-]*_[\w.-]+\b))", re.IGNORECASE,
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]{1,255}\.(?:[A-Za-z]{2,10}|[ch])\b|"
+    r"\b(?:[\w.-]{1,255}[\\/])+[\w.-]{1,255}|\b[a-zA-Z_][\w.-]{0,255}_[\w.-]{1,255}\b))", re.IGNORECASE,
 )
 
 # Explicit mutation verbs.  These are intentionally separate from the broad
@@ -38,8 +41,8 @@ _MUTATION_TARGET = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_FILE = re.compile(
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]+[\\/])+[\w.-]+|"
-    r"\b[\w.-]+\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]{1,255}[\\/])+[\w.-]{1,255}|"
+    r"\b[\w.-]{1,255}\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
     re.IGNORECASE,
 )
 _INSPECTION = re.compile(

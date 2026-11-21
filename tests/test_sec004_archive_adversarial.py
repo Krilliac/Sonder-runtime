@@ -786,6 +786,47 @@ def test_zip_central_directory_size_is_checked_before_parsing(workspace, monkeyp
     assert parsed == [], "a ZIP reader parsed an oversized central directory"
 
 
+def _zip_understating_its_entry_count(path, entries: int, declared: int):
+    # A real archive of ``entries`` members whose EOCD claims only ``declared``.
+    # zipfile walks the central directory by its byte size, not the count.
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(entries):
+            archive.writestr("e%04d" % index, b"")
+    data = bytearray(path.read_bytes())
+    eocd = data.rfind(b"PK\x05\x06")
+    struct.pack_into("<HH", data, eocd + 8, declared, declared)
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_zip_entry_bound_counts_real_central_directory_records(workspace):
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+        zip_central_directory,
+    )
+
+    source = _zip_understating_its_entry_count(workspace / "liar.zip", 12_000, 200)
+    declared, size = zip_central_directory(source)
+    # The declared count and the per-entry size allowance both pass ...
+    assert declared == 200 and size <= 200 * 4096
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 12_000  # ... yet zipfile builds every ZipInfo.
+    with pytest.raises(ZipCentralDirectoryLimitError, match="more than 1000 entries"):
+        require_zip_entry_bound(source, 1000)
+    with pytest.raises(file_ops.ArchivePreviewRejected, match="central directory"):
+        file_ops._inspect_zip(source)
+
+
+def test_zip_entry_bound_accepts_an_honest_archive_at_the_limit(workspace):
+    from sonder_runtime.application.security.bounded_archives import require_zip_entry_bound
+
+    source = _zip_with_large_central_directory(workspace / "honest.zip", 50, 10)
+    assert require_zip_entry_bound(source, 50) == 50
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 50
+
+
 # ---------------------------------------------------------------------------
 # Review round 4 (PR #548 @ 82daa944): reader-specific messages, deadline
 # ---------------------------------------------------------------------------
