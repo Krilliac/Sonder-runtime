@@ -45,10 +45,10 @@ to continue with fresh budgets.
 ## Provider retries and verifier availability
 
 `SONDER_AUTOPILOT_INFRA_RETRIES` defaults to `3` (clamped to 0..3;
-invalid values use 3). Classified provider outages during task execution (planner and reviewer
+invalid values use 3). Classified provider outages during planning and task execution (reviewer
 outages fail the run) retry after 30, 60,
 and 120 seconds without consuming task attempts, cycles, or failures.
-Exhaustion pauses the run with `provider unavailable`; the retry count
+Exhaustion pauses the run with `provider unavailable`; a task's retry count
 survives an explicit resume.
 
 `SONDER_AUTOPILOT_REQUIRE_VERIFIER` defaults to `0`. Verifier preflight
