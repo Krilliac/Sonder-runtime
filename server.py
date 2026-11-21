@@ -929,7 +929,7 @@ def _remember_unsupported_think_option(model) -> None:
 def _cloud_extra_usage_fallback(model, error):
     """Return the plan-covered Kimi fallback for an unfunded K3 request."""
     return _extra_usage_fallback_policy(
-        model, error, fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
+        model, error, fallback_model=_model_list_consumers.live_cloud_default("code", CLOUD_EXTRA_USAGE_FALLBACK_MODEL),
     )
 
 
@@ -946,7 +946,7 @@ def _chat_request_with_cloud_fallback(
         allow_cloud_fallback=allow_cloud_fallback,
         chat_request=functools.partial(_chat_request, text_only=text_only),
         apply_thinking_policy=_apply_cloud_thinking_policy,
-        fallback_model=CLOUD_EXTRA_USAGE_FALLBACK_MODEL,
+        fallback_model=_model_list_consumers.live_cloud_default("code", CLOUD_EXTRA_USAGE_FALLBACK_MODEL),
     )
 
 
