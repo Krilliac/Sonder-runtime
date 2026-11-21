@@ -29,13 +29,13 @@ def invocation_mutates(tool_name, args):
     if tool_name == "text_patch":
         return args.get("apply") is True
     if tool_name == "rename_symbol":
-        return args.get("dry_run") is False
+        return not bool(args.get("dry_run", True))
     if tool_name == "apply_patch":
-        return args.get("check_only") is not True
+        return not bool(args.get("check_only", False))
     if tool_name == "lint_run":
-        return args.get("fix") is True
+        return bool(args.get("fix", False))
     if tool_name == "format_code":
-        return args.get("check_only") is not True
+        return not bool(args.get("check_only", False))
     if tool_name == "data_convert":
         return args.get("apply") is True
     if tool_name == "sqlite_mutate":

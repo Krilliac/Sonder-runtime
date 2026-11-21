@@ -75,11 +75,38 @@ class SessionCheckpointPrivacyService:
 
     def load_checkpoint(self, session_id: str, *, source_sequence: int | None = None,
                         source_hash: str | None = None) -> ProjectionCheckpoint | None:
-        search_limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
-        events = self._repository.search(session_id=session_id, event_type=CHECKPOINT_EVENT, limit=search_limit)
-        if not events:
+        page_limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
+        if isinstance(page_limit, bool) or not isinstance(page_limit, int) or page_limit < 1:
+            page_limit = self._max_scan
+        tail = self._repository.read_tail(session_id, limit=page_limit)
+        event = next(
+            (item for item in reversed(tail) if item.event_type == CHECKPOINT_EVENT),
+            None,
+        )
+        if event is None:
+            if len(tail) < page_limit:
+                return None
+            # Scan forward across bounded keyset pages up to the tail window
+            # so a checkpoint older than the tail is still the newest one.
+            tail_start = tail[0].sequence
+            next_seq = 1
+            while next_seq < tail_start:
+                batch = self._repository.read_range(
+                    session_id,
+                    start_sequence=next_seq,
+                    end_sequence=tail_start - 1,
+                    limit=page_limit,
+                )
+                if not batch:
+                    break
+                for item in batch:
+                    if item.event_type == CHECKPOINT_EVENT:
+                        event = item
+                if len(batch) < page_limit or batch[-1].sequence >= tail_start - 1:
+                    break
+                next_seq = batch[-1].sequence + 1
+        if event is None:
             return None
-        event = events[-1]
         payload = event.payload
         try:
             checkpoint = ProjectionCheckpoint.create(
@@ -98,31 +125,49 @@ class SessionCheckpointPrivacyService:
             raise IntegrityFailure("durable checkpoint envelope is invalid") from exc
 
     def retention_candidates(self, session_id: str, *, now_utc: datetime | None = None,
-                             limit: int | None = None) -> tuple[RetentionCandidate, ...]:
-        scan_limit = self._max_scan if limit is None else limit
-        if isinstance(scan_limit, bool) or not isinstance(scan_limit, int) or not 1 <= scan_limit <= self._max_scan:
-            raise InvalidInput(f"limit must be between 1 and {self._max_scan}")
-        adapter_limit = getattr(self._repository, "_max_read_limit", scan_limit)
+                             limit: int | None = None,
+                             start_sequence: int = 1) -> tuple[RetentionCandidate, ...]:
+        if isinstance(start_sequence, bool) or not isinstance(start_sequence, int) or start_sequence < 1:
+            raise InvalidInput("start_sequence must be positive")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self._max_scan:
+                raise InvalidInput(f"limit must be between 1 and {self._max_scan}")
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
         if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
-            adapter_limit = scan_limit
-        scan_limit = min(scan_limit, adapter_limit)
+            adapter_limit = self._max_scan
+        page_limit = min(self._max_scan, adapter_limit)
         now = now_utc or datetime.now(timezone.utc)
         if now.tzinfo is None:
             raise InvalidInput("now_utc must be timezone-aware")
         result: list[RetentionCandidate] = []
-        for event in self._repository.read_range(session_id, limit=scan_limit):
-            try:
-                privacy_class = EventPrivacyClass(event.payload.get("privacy_class", EventPrivacyClass.PUBLIC_METADATA.value))
-                rule = rule_for(privacy_class)
-                occurred = datetime.fromisoformat(event.occurred_at_utc.replace("Z", "+00:00"))
-                if occurred.tzinfo is None or rule.retention_days is None or not rule.allow_delete:
+        scanned = 0
+        next_sequence = start_sequence
+        while True:
+            batch_limit = page_limit if limit is None else min(page_limit, limit - scanned)
+            if batch_limit < 1:
+                break
+            batch = self._repository.read_range(
+                session_id, start_sequence=next_sequence, limit=batch_limit,
+            )
+            if not batch:
+                break
+            for event in batch:
+                try:
+                    privacy_class = EventPrivacyClass(event.payload.get("privacy_class", EventPrivacyClass.PUBLIC_METADATA.value))
+                    rule = rule_for(privacy_class)
+                    occurred = datetime.fromisoformat(event.occurred_at_utc.replace("Z", "+00:00"))
+                    if occurred.tzinfo is None or rule.retention_days is None or not rule.allow_delete:
+                        continue
+                except (TypeError, ValueError):
                     continue
-            except (TypeError, ValueError):
-                continue
-            expires = occurred + timedelta(days=rule.retention_days)
-            if expires <= now:
-                result.append(RetentionCandidate(event.session_id, event.sequence, event.event_id,
-                    privacy_class, expires.isoformat().replace("+00:00", "Z")))
+                expires = occurred + timedelta(days=rule.retention_days)
+                if expires <= now:
+                    result.append(RetentionCandidate(event.session_id, event.sequence, event.event_id,
+                        privacy_class, expires.isoformat().replace("+00:00", "Z")))
+            scanned += len(batch)
+            if len(batch) < batch_limit or (limit is not None and scanned >= limit):
+                break
+            next_sequence = batch[-1].sequence + 1
         return tuple(result)
 
 __all__ = ["CHECKPOINT_EVENT", "MAX_CHECKPOINT_BYTES", "RetentionCandidate", "SessionCheckpointPrivacyService"]
