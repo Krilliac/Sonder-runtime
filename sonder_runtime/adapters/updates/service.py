@@ -61,7 +61,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "staged": frozenset({"preflight", "cancelled"}),
     "preflight": frozenset({"blocked", "backing_up"}),
     "backing_up": frozenset({"draining", "failed"}),
-    "draining": frozenset({"installing"}),
+    "draining": frozenset({"installing", "failed"}),
     "installing": frozenset({"migrating", "rolling_back"}),
     "migrating": frozenset({"health_check", "rolling_back"}),
     "health_check": frozenset({"committed", "rolling_back"}),

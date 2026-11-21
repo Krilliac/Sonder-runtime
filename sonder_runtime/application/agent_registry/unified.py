@@ -128,6 +128,8 @@ class UnifiedAgentRegistryService:
         budget = launch.budget
         if budget is None:
             raise AgentRegistryError("explicit budget is required for unified admission")
+        if launch.agent_id in self._receipts:
+            raise AgentRegistryError("agent already admitted")
         lineage = launch.lineage or AgentLineage(launch.parent_id or launch.agent_id)
         if lineage.depth > budget.max_depth:
             raise AgentRegistryError("lineage depth exceeds budget")
