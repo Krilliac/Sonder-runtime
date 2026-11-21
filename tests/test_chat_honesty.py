@@ -123,3 +123,20 @@ def test_no_tools_guidance_for_file_fallback_is_idempotent() -> None:
     once = no_tools_system("system", prompt)
     assert once != "system"
     assert no_tools_system(once, prompt) == once
+
+
+def test_long_dotted_reply_is_scanned_in_linear_time() -> None:
+    # The passive "x.ext was saved" pattern used to backtrack over every '.'
+    # of a long dotted run with no following claim: O(n^2), ~20 s here.
+    import time
+
+    text = "a." * 10_000
+    started = time.monotonic()
+    assert guard_unsaved_file_claim(text, folder="creations/lane") == text
+    assert time.monotonic() - started < 3.0
+
+
+def test_passive_claim_with_bounded_token_still_gets_note() -> None:
+    text = "The file " + "dir/" * 10 + "report.txt was saved for you."
+    result = guard_unsaved_file_claim(text, folder="creations/lane")
+    assert result.endswith("write it to creations/lane.)")

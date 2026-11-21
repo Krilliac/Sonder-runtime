@@ -24,10 +24,13 @@ _FILE_CLAIM_PATH_RE = re.compile(
     r"(?:[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12}|file|script|document)\b",
     re.IGNORECASE,
 )
+# The leading token runs are bounded ({1,260}) because this pattern is not
+# anchored to a keyword: unbounded, each word boundary of a long dotted run in
+# the model reply scans to its end and backtracks, which is O(n^2).
 _PASSIVE_FILE_CLAIM_RE = re.compile(
-    r"\b(?:[A-Za-z0-9_.`'\"/\\-]+\s+)?(?:file|script|document)\b\s+"
+    r"\b(?:[A-Za-z0-9_.`'\"/\\-]{1,260}\s+)?(?:file|script|document)\b\s+"
     r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b"
-    r"|\b[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,12}\b\s+"
+    r"|\b[A-Za-z0-9_./\\-]{1,260}\.[A-Za-z0-9]{1,12}\b\s+"
     r"(?:was|has been|is)\s+(?:saved|created|written|generated)\b",
     re.IGNORECASE,
 )
