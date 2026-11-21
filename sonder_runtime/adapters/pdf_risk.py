@@ -53,6 +53,7 @@ _NAME_ESCAPE_RE = re.compile(br"#([0-9A-Fa-f]{2})")
 _FILTER_RE = re.compile(br"/Filter[\x00\t\n\x0c\r ]*(\[[^\]]*\]|/[A-Za-z0-9#]+)", re.S)
 _FILTER_KEY_RE = re.compile(br"/Filter(?![A-Za-z0-9#])")
 _NAME_RE = re.compile(br"/[A-Za-z0-9#]+")
+_ARRAY_OF_NAMES_RE = re.compile(br"\[(?:[\x00\t\n\x0c\r ]|/[A-Za-z0-9#]+)*\]")
 
 
 class PdfRiskError(ValueError):
@@ -452,8 +453,18 @@ def inspect_pdf(
             incomplete_reasons.append("ambiguous_stream_dictionary")
             continue
         normalized_dictionary = _normalize_names(dictionary)
-        if len(_FILTER_RE.findall(normalized_dictionary)) > 1:
+        filter_matches = _FILTER_RE.findall(normalized_dictionary)
+        filter_keys = len(_FILTER_KEY_RE.findall(normalized_dictionary))
+        if len(filter_matches) > 1 or filter_keys > 1:
             incomplete_reasons.append("ambiguous_stream_dictionary")
+            continue
+        if filter_keys != len(filter_matches) or (
+            filter_matches and filter_matches[0][:1] == b"[" and not _ARRAY_OF_NAMES_RE.fullmatch(filter_matches[0])
+        ):
+            # /Filter key whose value is not a plain name or an array holding
+            # only names (indirect reference, nested dictionary key): fail closed.
+            unsupported_filter_count += 1
+            incomplete_reasons.append("unsupported_stream_filter")
             continue
         stream_data = region[data_start:data_end]
         if _inner_stream_keyword(region, data_start, data_end) >= 0:
