@@ -40,7 +40,15 @@ _FEATURES = (
     ("external_uri", (b"/URI",), "medium"),
     ("acroform", (b"/AcroForm",), "low"),
 )
-_STREAM_RE = re.compile(br"(?:\r\n|\r|\n)stream(?:\r\n|\r|\n)(.*?)endstream", re.S)
+_STREAM_KEYWORD = b"stream"
+_ENDSTREAM_KEYWORD = b"endstream"
+_PDF_WHITESPACE = frozenset(b"\x00\t\n\x0c\r ")
+_INLINE_WHITESPACE = frozenset(b"\x00\t\x0c ")
+_PDF_DELIMITERS = frozenset(b"()<>[]{}/%")
+# ``stream`` right after ``/`` is part of a name and after ``%`` part of a comment.
+_KEYWORD_LEFT_BOUNDARY = _PDF_WHITESPACE | (_PDF_DELIMITERS - frozenset(b"/%"))
+_KEYWORD_RIGHT_BOUNDARY = _PDF_WHITESPACE | _PDF_DELIMITERS
+_DICTIONARY_WINDOW = 8192
 _NAME_ESCAPE_RE = re.compile(br"#([0-9A-Fa-f]{2})")
 _FILTER_RE = re.compile(br"/Filter\s*(\[[^\]]*\]|/[A-Za-z0-9#]+)", re.S)
 _NAME_RE = re.compile(br"/[A-Za-z0-9#]+")
@@ -201,9 +209,136 @@ def _filters(dictionary):
     return [name[1:].decode("ascii", errors="replace") for name in _NAME_RE.findall(match.group(1))]
 
 
+def _skip_whitespace_back(region, index, floor):
+    while index > floor and region[index - 1] in _PDF_WHITESPACE:
+        index -= 1
+    return index
+
+
+def _stream_spans(region, deadline):
+    """Yield ``(keyword, data_start, data_end)`` for each stream, scanning linearly.
+
+    A ``stream`` keyword counts when it is a standalone token (whitespace or a
+    delimiter on both sides) or when an EOL or ``>>`` (optionally followed by
+    whitespace) precedes it.  A standalone keyword counts even when no ``>>``
+    is found before it (a comment, or more whitespace than the dictionary
+    window, between dictionary and keyword); ``_stream_dictionary`` then
+    returns None, so the stream is reported as ambiguous instead of being
+    silently dropped.  Non-EOL whitespace after the keyword is skipped
+    up to the EOL that starts the data, as readers do.  A counted keyword with
+    no EOL after it yields ``data_start is None`` so the caller can mark the
+    scan incomplete instead of silently dropping the stream.  Each
+    ``endstream`` search starts after the previous stream ends, so the whole
+    region is scanned at most a constant number of times.  An unterminated
+    stream yields ``data_end == -1`` and ends the scan of the region.
+    """
+    position = 0
+    while True:
+        _deadline_check(deadline)
+        keyword = region.find(_STREAM_KEYWORD, position)
+        if keyword < 0:
+            return
+        after = keyword + len(_STREAM_KEYWORD)
+        position = after
+        standalone = (
+            (keyword == 0 or region[keyword - 1] in _KEYWORD_LEFT_BOUNDARY)
+            and (after == len(region) or region[after] in _KEYWORD_RIGHT_BOUNDARY)
+        )
+        if not standalone and region[keyword - 1:keyword] not in (b"\r", b"\n"):
+            floor = max(0, keyword - _DICTIONARY_WINDOW)
+            end = _skip_whitespace_back(region, keyword, floor)
+            if end - 2 < floor or region[end - 2:end] != b">>":
+                continue
+        while after < len(region) and region[after] in _INLINE_WHITESPACE:
+            after += 1
+        if region.startswith(b"\r\n", after):
+            data_start = after + 2
+        elif region[after:after + 1] in (b"\r", b"\n"):
+            data_start = after + 1
+        else:
+            position = after
+            yield keyword, None, None
+            continue
+        data_end = region.find(_ENDSTREAM_KEYWORD, data_start)
+        if data_end < 0:
+            yield keyword, data_start, -1
+            return
+        yield keyword, data_start, data_end
+        position = data_end + len(_ENDSTREAM_KEYWORD)
+
+
+def _is_escaped(region, index, floor):
+    backslashes = 0
+    while index - backslashes > floor and region[index - backslashes - 1] == 0x5C:
+        backslashes += 1
+    return backslashes % 2 == 1
+
+
+def _literal_string_start(region, close, floor):
+    """Return the index of the ``(`` that opens the literal string closed at ``close``."""
+    depth = 1
+    index = close
+    while index > floor:
+        index -= 1
+        byte = region[index]
+        if byte in (0x28, 0x29) and not _is_escaped(region, index, floor):
+            depth += 1 if byte == 0x29 else -1
+            if depth == 0:
+                return index
+    return None
+
+
+def _stream_dictionary(region, keyword):
+    """Return the dictionary that directly precedes a ``stream`` keyword, or None.
+
+    ``<<``/``>>`` are balanced backwards from the keyword, skipping literal
+    strings.  None means the dictionary cannot be located unambiguously: no
+    ``>>`` before the keyword, no balancing ``<<`` within the window, a stray
+    ``(``, or a ``%`` that could open a comment hiding delimiters.
+    """
+    floor = max(0, keyword - _DICTIONARY_WINDOW)
+    end = _skip_whitespace_back(region, keyword, floor)
+    if end - 2 < floor or region[end - 2:end] != b">>":
+        return None
+    depth = 0
+    index = end
+    start = None
+    while index > floor:
+        byte = region[index - 1]
+        pair = index - 2 >= floor and region[index - 2] == byte
+        if byte == 0x3E and pair:
+            depth += 1
+            index -= 2
+        elif byte == 0x3C and pair:
+            depth -= 1
+            index -= 2
+            if depth == 0:
+                start = index
+                break
+        elif byte == 0x29 and not _is_escaped(region, index - 1, floor):
+            index = _literal_string_start(region, index - 1, floor)
+            if index is None:
+                return None
+        elif byte == 0x28 and not _is_escaped(region, index - 1, floor):
+            return None
+        else:
+            index -= 1
+    if start is None:
+        return None
+    line_start = max(region.rfind(b"\n", floor, start), region.rfind(b"\r", floor, start)) + 1
+    if line_start == 0 and floor > 0:
+        return None
+    if b"%" in region[line_start:end]:
+        return None
+    return region[start:end]
+
+
 def _flate_decode(data, limit):
     decoder = zlib.decompressobj()
-    output = decoder.decompress(data, limit + 1)
+    try:
+        output = decoder.decompress(data, limit + 1)
+    except zlib.error as exc:
+        raise PdfRiskError("invalid FlateDecode stream") from exc
     if len(output) > limit or decoder.unconsumed_tail:
         return output[:limit], False
     try:
@@ -272,21 +407,34 @@ def inspect_pdf(
     decoded_total = 0
     unsupported_filter_count = 0
     malformed_streams = 0
-    stream_matches = (
-        (region, match)
+    stream_spans = (
+        (region, span)
         for region in scan_regions
-        for match in _STREAM_RE.finditer(region)
+        for span in _stream_spans(region, deadline)
     )
-    for region, match in stream_matches:
+    for region, (keyword, data_start, data_end) in stream_spans:
         _deadline_check(deadline)
+        if data_start is None:
+            if "stream_keyword_without_eol" not in incomplete_reasons:
+                incomplete_reasons.append("stream_keyword_without_eol")
+            continue
+        if data_end < 0:
+            incomplete_reasons.append("unterminated_stream")
+            continue
         streams_seen += 1
         if streams_seen > stream_cap:
             incomplete_reasons.append("stream_count_limit")
             break
-        dictionary = region[max(0, match.start() - 8192):match.start()]
-        dictionary = dictionary[dictionary.rfind(b"<<"):]
-        filters = _filters(_normalize_names(dictionary))
-        stream_data = match.group(1)
+        dictionary = _stream_dictionary(region, keyword)
+        if dictionary is None:
+            incomplete_reasons.append("ambiguous_stream_dictionary")
+            continue
+        normalized_dictionary = _normalize_names(dictionary)
+        if len(_FILTER_RE.findall(normalized_dictionary)) > 1:
+            incomplete_reasons.append("ambiguous_stream_dictionary")
+            continue
+        filters = _filters(normalized_dictionary)
+        stream_data = region[data_start:data_end]
         if not filters:
             decoded = stream_data
             decoded_ok = True
