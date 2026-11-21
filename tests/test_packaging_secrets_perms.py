@@ -26,8 +26,8 @@ def test_secrets_file_owned_by_sonder_and_mode_has_no_group_world_bits():
     assert re.search(rf"^chown sonder:sonder {ENV_PATH}$", text, re.MULTILINE)
     assert _installer_mode() & 0o077 == 0
     # Both must precede the preflight that runs as `sudo -u sonder`.
-    assert text.index("chown sonder:sonder") < text.index("if ! sudo -u sonder")
-    assert text.index("chmod 0600") < text.index("if ! sudo -u sonder")
+    assert text.index("chown sonder:sonder") < text.index('(cd "$RELEASE_DIR" && sudo -u sonder')
+    assert text.index("chmod 0600") < text.index('(cd "$RELEASE_DIR" && sudo -u sonder')
 
 
 @pytest.mark.skipif(os.name != "posix", reason="mode check is POSIX-only")

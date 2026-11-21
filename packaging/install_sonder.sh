@@ -63,7 +63,21 @@ if [ "${#VERSION_TAG}" -gt 64 ]; then
 fi
 
 RELEASE_DIR="/opt/sonder/releases/$VERSION_TAG"
-STAGING="$RELEASE_DIR.staging"
+# The release is built at its FINAL path: a virtualenv bakes its own location
+# into script shebangs and pyvenv.cfg, so building elsewhere and renaming
+# would leave a venv whose console scripts point at a deleted directory.
+# Until the release is committed (preflight passed and `current` flipped) an
+# EXIT trap removes the half-built tree, so a failed run never leaves a
+# partial release or a staging directory behind.
+RELEASE_CREATED=0
+RELEASE_COMMITTED=0
+cleanup_release() {
+  if [ "$RELEASE_CREATED" -eq 1 ] && [ "$RELEASE_COMMITTED" -eq 0 ]; then
+    echo "install failed; removing incomplete release $RELEASE_DIR" >&2
+    rm -r -- "$RELEASE_DIR"
+  fi
+}
+trap cleanup_release EXIT
 echo "installing release $VERSION_TAG"
 
 # 1. Service identity and directories.
@@ -77,11 +91,8 @@ if [ -e "$RELEASE_DIR" ]; then
   echo "release $RELEASE_DIR already exists; refusing to overwrite in place" >&2
   exit 1
 fi
-if [ -e "$STAGING" ]; then
-  echo "staging path $STAGING already exists; inspect and remove it explicitly" >&2
-  exit 1
-fi
-mkdir -p "$STAGING"
+mkdir "$RELEASE_DIR"
+RELEASE_CREATED=1
 
 # Verify and copy only files listed in PACKAGE-MANIFEST.json, using the
 # installer's OWN verifier (the tree this script ships in), never the copy
@@ -112,19 +123,17 @@ verifier.copy_verified_payload(package_source, staging)
 PY
   )
 }
-verify_and_stage_payload "$TRUSTED_ROOT" "$PACKAGE_SOURCE" "$STAGING"
-python3 -m venv "$STAGING/venv"
-"$STAGING/venv/bin/pip" install --quiet --upgrade pip
-"$STAGING/venv/bin/pip" install --quiet -r "$STAGING/requirements-runtime.txt"
+verify_and_stage_payload "$TRUSTED_ROOT" "$PACKAGE_SOURCE" "$RELEASE_DIR"
+python3 -m venv "$RELEASE_DIR/venv"
+"$RELEASE_DIR/venv/bin/pip" install --quiet --upgrade pip
+"$RELEASE_DIR/venv/bin/pip" install --quiet -r "$RELEASE_DIR/requirements-runtime.txt"
 # requirements-runtime.txt pins the top-level releases only; pip resolves the
 # transitive closure at install time and there is no hash lock yet (see
 # docs/runbooks/install-server-private.md).  Refuse an inconsistent
 # resolution before the release becomes current, and record exactly what was
 # installed next to the release for audit and reproduction.
-"$STAGING/venv/bin/python" -m pip check
-"$STAGING/venv/bin/python" -m pip freeze --all > "$STAGING/INSTALLED-REQUIREMENTS.txt"
-mv "$STAGING" "$RELEASE_DIR"
-ln -sfn "$RELEASE_DIR" /opt/sonder/current
+"$RELEASE_DIR/venv/bin/python" -m pip check
+"$RELEASE_DIR/venv/bin/python" -m pip freeze --all > "$RELEASE_DIR/INSTALLED-REQUIREMENTS.txt"
 
 # 3. Configuration and secrets (secrets file mode 0600, key never printed).
 if [ ! -f /etc/sonder/sonder.toml ]; then
@@ -151,20 +160,27 @@ fi
 chown sonder:sonder /etc/sonder/sonder.env
 chmod 0600 /etc/sonder/sonder.env
 
-# 4. Hardened service units and timers.
+# 4. Preflight against the not-yet-current release: `current` and the units
+# are only touched once it passes, so a failure leaves the previous install
+# running and the EXIT trap removes this release.
+# Run from the release directory: sonder_runtime is not installed into the venv,
+# so `-m sonder_runtime` only resolves via the working directory (as the
+# systemd units do with WorkingDirectory=/opt/sonder/current).
+if ! (cd "$RELEASE_DIR" && sudo -u sonder "$RELEASE_DIR/venv/bin/python" -m sonder_runtime preflight \
+    --config /etc/sonder/sonder.toml --secrets /etc/sonder/sonder.env --skip-ollama); then
+  echo "preflight reported problems — fix them and re-run the installer; the previous release (if any) is still current" >&2
+  exit 1
+fi
+
+# 5. Publish: flip `current`, then install the hardened units and timers.
+ln -sfn "$RELEASE_DIR" /opt/sonder/current
+RELEASE_COMMITTED=1
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder.service" /etc/systemd/system/
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder-backup.service" /etc/systemd/system/
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder-backup.timer" /etc/systemd/system/
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder-restore-smoke.service" /etc/systemd/system/
 install -m 0644 "$RELEASE_DIR/packaging/systemd/sonder-restore-smoke.timer" /etc/systemd/system/
 systemctl daemon-reload
-
-# 5. Preflight before anything is enabled; the listener never opens on failure.
-if ! sudo -u sonder "$RELEASE_DIR/venv/bin/python" -m sonder_runtime preflight \
-    --config /etc/sonder/sonder.toml --secrets /etc/sonder/sonder.env --skip-ollama; then
-  echo "preflight reported problems — fix them, then: systemctl enable --now sonder" >&2
-  exit 1
-fi
 
 cat <<'EOF'
 Install complete.
