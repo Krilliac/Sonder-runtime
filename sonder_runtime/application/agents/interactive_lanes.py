@@ -30,7 +30,7 @@ from ..ports.model_gateway import ModelRequest, require_model_text
 from ..ports.model_target import ResolvedModelRoute
 from ..ports.prompts import PromptRenderer
 from ...domain import prompt_templates
-from ...domain.common.errors import Forbidden
+from ...domain.common.errors import Forbidden, IntegrityFailure
 from ...domain.model_routing import is_cloud_model_name
 from ..session.capture import CapturedRequest, SessionCaptureService, _snapshot_payload
 from ..session.archive import ArchiveReference, SessionContextArchiveService
@@ -157,6 +157,13 @@ _ACTIVE = frozenset({"queued", "running", "interrupt_requested", "cancel_request
 # durable cumulative ceiling across archived lanes in one parent session.
 _MAX_EXPENSIVE_LANES_PER_PARENT = 32
 _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
+# A tool result above the lane payload ceiling is committed as a bounded
+# envelope; its complete output becomes a scoped, digest-verified artifact.
+_LANE_TOOL_RESULT_CEILING_BYTES = 65536
+_LANE_TOOL_RESULT_PREVIEW_BYTES = 16 * 1024
+# Parent mailbox reports stay bounded; a longer report carries a labelled
+# preview plus a reference to its complete artifact.
+_LANE_REPORT_INLINE_CHARS = 8000
 # Canonical session history is input to every live lane request. Keep this
 # archive pass bounded independently of the provider token budget.
 _LANE_CANONICAL_HISTORY_BYTES = 32 * 1024
@@ -196,6 +203,18 @@ def _text(value, name, maximum=8000):
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise ValueError(name + " must be nonempty bounded text")
     return value.strip()
+
+
+def _canonical_output(value):
+    """Canonical JSON bytes of a tool output; the digest covers exactly these."""
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _utf8_prefix(data, limit):
+    """Longest whole-code-point prefix of valid UTF-8 ``data`` within ``limit`` bytes."""
+    return data[:limit].decode("utf-8", errors="ignore")
 
 
 def _inside(path, root):
@@ -1159,11 +1178,12 @@ class AgentLaneService:
                 )
             if depth > 2:
                 raise ValueError("lane depth limit reached")
-            lanes = [lane_row for _, lane_row in tx.lanes(context.principal_id, limit=1000)]
-            retained = [lane_row for lane_row in lanes if lane_row.get("status") != "archived"]
-            if len(retained) >= 256 or sum(lane_row["root_id"] == root_id for lane_row in retained) >= 8:
+            retained_total, retained_for_root, active_total = tx.admission_counts(
+                context.principal_id, root_id, _ACTIVE
+            )
+            if retained_total >= 256 or retained_for_root >= 8:
                 raise ValueError("lane fanout or retained lane capacity reached")
-            if sum(lane_row["status"] in _ACTIVE for lane_row in retained) >= 8:
+            if active_total >= 8:
                 raise ValueError("principal queued lane capacity reached")
             # Explicit exclusive root grant; no implicit merge or shared checkout.
             for other in tx.all_lanes():
@@ -1354,6 +1374,12 @@ class AgentLaneService:
                     owner="",
                     error="",
                 )
+                if self.workspace_reality is not None:
+                    # Same barrier as control("resume"): the workspace may have
+                    # changed since the completed attempt sealed its snapshot.
+                    lane["resume_reality"] = dict(
+                        lane.get("resume_reality") or {}, pending=True
+                    )
                 schedule = True
             message_id = tx.message(lane, content, author)
             tx.save(lane)
@@ -1665,6 +1691,26 @@ class AgentLaneService:
         for event in events:
             if event["event_type"] != "tool.result":
                 continue
+            envelope = event["payload"].get("output")
+            if (event["payload"].get("output_truncated") is True
+                    and isinstance(envelope, Mapping)
+                    and isinstance(envelope.get("archive_id"), str)):
+                # The complete output is already a scoped lane artifact; point
+                # at it instead of archiving the bounded envelope again.
+                recent_tool_context.append((
+                    event["sequence"],
+                    event["payload"].get("call_id"),
+                    {
+                        "role": "user",
+                        "content": (
+                            "Tool result truncated (original "
+                            f"{envelope.get('original_bytes')} bytes, sha256 "
+                            f"{envelope.get('digest')}); full output archived for "
+                            f"this project; retrieve by reference {envelope['archive_id']}."
+                        ),
+                    },
+                ))
+                continue
             encoded = json.dumps(event["payload"], ensure_ascii=False, sort_keys=True)
             if len(encoded.encode("utf-8")) <= _LANE_INLINE_TOOL_RESULT_BYTES:
                 recent_tool_context.append((
@@ -1877,6 +1923,9 @@ class AgentLaneService:
         if (not isinstance(archive_id, str) or not archive_id.strip()
                 or len(archive_id) > 160):
             raise ValueError("archive_id must be bounded non-empty text")
+        artifact = self._lane_artifact(lane_id, lane, archive_id)
+        if artifact is not None:
+            return artifact
         matches = self.sessions.search(
             session_id=lane["session_id"],
             event_type="context.archive.created",
@@ -1958,6 +2007,32 @@ class AgentLaneService:
             "archive_id": archive_id,
             "project_id": lane["workspace_root"],
             "payload": recovered,
+        }
+
+    def _lane_artifact(self, lane_id, lane, archive_id):
+        """Resolve a complete lane artifact already authorized via ``inspect``."""
+        reader = getattr(self.store, "artifact", None)
+        record = reader(lane_id, archive_id) if callable(reader) else None
+        if record is None:
+            return None
+        owner = self.store.read_lane(lane_id)
+        if (record["lane_id"] != lane_id
+                or record["project_scope"] != lane["workspace_root"]
+                or record["principal"] != owner["principal_id"]):
+            raise ValueError("archive reference is unavailable for this lane")
+        data = record["payload"]
+        if (len(data) != record["byte_count"]
+                or hashlib.sha256(data).hexdigest() != record["digest"]):
+            raise IntegrityFailure("lane artifact digest changed")
+        text = data.decode("utf-8")
+        return {
+            "archive_id": archive_id,
+            "project_id": lane["workspace_root"],
+            "kind": record["kind"],
+            "media_type": record["media_type"],
+            "byte_count": record["byte_count"],
+            "digest": record["digest"],
+            "payload": json.loads(text) if record["kind"] == "tool_output" else text,
         }
 
     def _request(self, lane, messages, *, request_id=None, context=None):
@@ -2415,6 +2490,7 @@ class AgentLaneService:
                         and measured >= 0
                         else len(text)
                     )
+                    budget_overrun = False
                     with self.store.transaction() as tx:
                         lane = tx.lane(lane_id)
                         if lane["owner"] != self.owner:
@@ -2422,40 +2498,47 @@ class AgentLaneService:
                         lane["pending_effect"] = False
                         lane["used_tokens"] += charged
                         if lane["used_tokens"] > lane["max_output_tokens"]:
-                            raise TimeoutError("lane output budget exhausted")
-                        sequence = tx.emit(
-                            lane,
-                            "model.response",
-                            {
-                                "content": text,
-                                "turn_id": turn_id,
-                                "request_id": request_id,
-                                **prefix_stats,
-                            },
-                        )
-                        if prefix_stats:
-                            tx.emit(
+                            # Commit the paid-for charge and the cleared effect;
+                            # raising inside the transaction would roll both back
+                            # and leave the lane unresumable.
+                            tx.save(lane)
+                            budget_overrun = True
+                        else:
+                            sequence = tx.emit(
                                 lane,
-                                "inference.decode",
+                                "model.response",
                                 {
-                                    "step": lane["used_steps"],
+                                    "content": text,
                                     "turn_id": turn_id,
                                     "request_id": request_id,
-                                    "summary": "step %s cache_n=%s prompt_n=%s" % (
-                                        lane["used_steps"],
-                                        prefix_stats.get("cache_n"),
-                                        prefix_stats.get("prompt_n"),
-                                    ),
                                     **prefix_stats,
                                 },
                             )
-                        lane["pending_response"] = dict(
-                            text=text,
-                            source_sequence=sequence,
-                            attempt_id=lane["attempt_id"],
-                        )
-                        tx.handled(lane, [m["id"] for m in messages])
-                        tx.save(lane)
+                            if prefix_stats:
+                                tx.emit(
+                                    lane,
+                                    "inference.decode",
+                                    {
+                                        "step": lane["used_steps"],
+                                        "turn_id": turn_id,
+                                        "request_id": request_id,
+                                        "summary": "step %s cache_n=%s prompt_n=%s" % (
+                                            lane["used_steps"],
+                                            prefix_stats.get("cache_n"),
+                                            prefix_stats.get("prompt_n"),
+                                        ),
+                                        **prefix_stats,
+                                    },
+                                )
+                            lane["pending_response"] = dict(
+                                text=text,
+                                source_sequence=sequence,
+                                attempt_id=lane["attempt_id"],
+                            )
+                            tx.handled(lane, [m["id"] for m in messages])
+                            tx.save(lane)
+                    if budget_overrun:
+                        raise TimeoutError("lane output budget exhausted")
                     self._done()
                     _record_prefix_activity(
                         self._activity_observer, lane["used_steps"], prefix_stats,
@@ -2565,12 +2648,40 @@ class AgentLaneService:
                 tx.save(lane)
                 return False
             report_lane = dict(lane, attempt_id=known["attempt_id"])
+            report_text, report_ref = known["text"], None
+            if len(report_text) > _LANE_REPORT_INLINE_CHARS:
+                full_report = report_text.encode("utf-8")
+                media_type = "text/plain; charset=utf-8"
+                stored = tx.store_artifact(
+                    report_lane, "report", str(known["source_sequence"]),
+                    media_type, full_report,
+                )
+                label = (
+                    "[report truncated: {shown} of " + str(len(report_text))
+                    + " chars; full report ref " + stored["artifact_id"] + "]\n"
+                )
+                shown = _LANE_REPORT_INLINE_CHARS - len(
+                    label.format(shown=_LANE_REPORT_INLINE_CHARS)
+                )
+                report_ref = {
+                    "archive_id": stored["artifact_id"],
+                    "lane_id": lane_id,
+                    "source_sequence": known["source_sequence"],
+                    "truncated": True,
+                    "preview_chars": shown,
+                    "original_chars": len(report_text),
+                    "original_bytes": stored["byte_count"],
+                    "digest": stored["digest"],
+                    "media_type": media_type,
+                }
+                report_text = label.format(shown=shown) + report_text[:shown]
             tx.message(
                 report_lane,
-                known["text"][:8000],
+                report_text,
                 "child",
                 report=True,
                 source_sequence=known["source_sequence"],
+                report_ref=report_ref,
             )
             lane.update(
                 status="completed",
@@ -2658,11 +2769,57 @@ class AgentLaneService:
             output = output.output
         if not isinstance(output, (dict, list, str, int, float, bool, type(None))):
             output = str(output)
-        if len(json.dumps(output, ensure_ascii=False).encode("utf-8")) > 65536:
-            raise ValueError("tool result exceeds lane payload ceiling")
+        oversized = None
+        if (len(json.dumps(output, ensure_ascii=False).encode("utf-8"))
+                > _LANE_TOOL_RESULT_CEILING_BYTES):
+            # The effect has already happened. Its receipt is committed with
+            # a bounded envelope; the complete output becomes a lane artifact.
+            full = _canonical_output(output)
+            oversized = (full, {
+                "preview": _utf8_prefix(full, _LANE_TOOL_RESULT_PREVIEW_BYTES),
+                "truncated": True,
+                "original_bytes": len(full),
+                "digest": hashlib.sha256(full).hexdigest(),
+                "media_type": "application/json",
+                "scope": {"lane_id": lane["id"], "project_id": lane["workspace_root"]},
+            })
+        try:
+            self._commit_tool_result(
+                lane, name, args, effects, call_id, receipt, output, oversized,
+                archive=oversized is not None,
+            )
+        except Exception:
+            if oversized is None:
+                raise
+            # Artifact persistence failed and rolled back with its receipt.
+            # Commit the receipt alone so the effect is never dispatched again.
+            _LOG.warning(
+                "lane tool output artifact unavailable; committing receipt without it",
+                exc_info=True,
+            )
+            self._commit_tool_result(
+                lane, name, args, effects, call_id, receipt, output, oversized,
+                archive=False,
+            )
+        self._done()
+        self._loop_tool_completed(lane, loop_step, call_id, name, receipt)
+
+    def _commit_tool_result(self, lane, name, args, effects, call_id, receipt,
+                            output, oversized, *, archive):
         with self.store.transaction() as tx:
             fresh = tx.lane(lane["id"])
             fresh["pending_effect"] = False
+            result_output = output
+            if oversized is not None:
+                full, envelope = oversized
+                result_output = dict(envelope, archive_status="unavailable")
+                if archive:
+                    stored = tx.store_artifact(
+                        fresh, "tool_output", call_id, envelope["media_type"], full,
+                    )
+                    result_output.update(
+                        archive_status="stored", archive_id=stored["artifact_id"],
+                    )
             if receipt.success and (
                 "write_files" in effects
                 or name
@@ -2683,15 +2840,14 @@ class AgentLaneService:
                 "tool.result",
                 {
                     "name": name,
-                    "output": output,
+                    "output": result_output,
                     "call_id": call_id,
                     "success": bool(receipt.success),
                     "error_code": receipt.error_code,
+                    **({"output_truncated": True} if oversized is not None else {}),
                 },
             )
             tx.save(fresh)
-        self._done()
-        self._loop_tool_completed(lane, loop_step, call_id, name, receipt)
 
     def close(self):
         if self._pool:
