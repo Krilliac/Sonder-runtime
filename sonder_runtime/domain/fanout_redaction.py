@@ -13,6 +13,28 @@ import re
 REDACTED_PROMPT = "<redacted prompt>"
 REDACTED_ANSWER = "<redacted fanout answer>"
 
+_CREDENTIAL_RUN = re.compile(r"[A-Za-z0-9_./:+-]{8,}")
+_DIGIT = re.compile(r"\d")
+
+
+def _has_compact_credential(fragment: str) -> bool:
+    r"""True when an 8+ character credential-like run starts at or before a digit on its line.
+
+    Linear replacement for ``(?=.*\d)[A-Za-z0-9_./:+-]{8,}``: ``.`` stops at a
+    newline and a run never spans one, so each line is checked on its own and
+    the earliest run start is the best candidate against the line's last digit.
+    """
+    for line in fragment.split("\n"):
+        last_digit = -1
+        for digit in _DIGIT.finditer(line):
+            last_digit = digit.start()
+        if last_digit < 0:
+            continue
+        run = _CREDENTIAL_RUN.search(line)
+        if run is not None and run.start() <= last_digit:
+            return True
+    return False
+
 
 def redact_prompt_echo(value, prompt) -> str:
     """Remove verbatim request material before a durable receipt is written.
@@ -70,7 +92,7 @@ def redact_prompt_echo(value, prompt) -> str:
                     r"(?:api[ _-]?key|token|secret|password|bearer|authorization)",
                     fragment, re.IGNORECASE,
                 )
-                compact_credential = re.search(r"(?=.*\d)[A-Za-z0-9_./:+-]{8,}", fragment)
+                compact_credential = _has_compact_credential(fragment)
                 if size >= minimum_span or (size >= 8 and (labeled_secret or compact_credential)):
                     spans.append((left_response, right_response))
     if not spans:
