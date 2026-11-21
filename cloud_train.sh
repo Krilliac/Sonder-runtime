@@ -18,7 +18,10 @@
 #   SONDER_LORA_OUT   run root (default ./sonder-personal-lora)
 #   SONDER_TRAIN_GPU_INDEX physical CUDA GPU index (default 0)
 #   HF_TOKEN          set to also push the adapter to the Hugging Face Hub
-#   HF_REPO           e.g. your-hf-user/your-repo (needed with HF_TOKEN)
+#   HF_REPO           e.g. your-hf-user/your-repo (needed with HF_TOKEN); a new
+#                     repo is created private, and an existing public repo is
+#                     refused because the adapter is trained on private data
+#   SONDER_HF_ALLOW_PUBLIC  set to 1 to allow uploading to a public HF_REPO
 set -euo pipefail
 
 BASE="${SONDER_BASE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
@@ -124,13 +127,22 @@ echo "adapter packaged -> $HERE/$TARBALL ($(du -h "$TARBALL" | cut -f1))"
 if [ -n "${HF_TOKEN:-}" ] && [ -n "${HF_REPO:-}" ]; then
   echo "-- pushing adapter to HF Hub: $HF_REPO --"
   python -m pip install -q huggingface_hub
-  python - <<PY
+  python - <<'PY'
 import os
 from huggingface_hub import HfApi
+repo = os.environ["HF_REPO"]
 api = HfApi(token=os.environ["HF_TOKEN"])
-api.create_repo(os.environ["HF_REPO"], exist_ok=True)
-api.upload_folder(folder_path=os.environ["SONDER_CLOUD_ADAPTER_DIR"], repo_id=os.environ["HF_REPO"])
-print("pushed to", os.environ["HF_REPO"])
+# The adapter is trained on private, gitignored interaction data: never let a
+# push create a public repo, and never upload into an existing public one
+# unless the operator opted in explicitly.
+api.create_repo(repo, private=True, exist_ok=True)
+if api.repo_info(repo).private is not True and os.environ.get("SONDER_HF_ALLOW_PUBLIC") != "1":
+    raise SystemExit(
+        "refusing to push: HF repo %s is not private and the adapter is trained on "
+        "private data; make the repo private or set SONDER_HF_ALLOW_PUBLIC=1" % repo
+    )
+api.upload_folder(folder_path=os.environ["SONDER_CLOUD_ADAPTER_DIR"], repo_id=repo)
+print("pushed to", repo)
 PY
 fi
 
