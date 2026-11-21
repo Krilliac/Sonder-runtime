@@ -23,6 +23,23 @@ Future<ChatController> _start(
 }
 
 void main() {
+  testWidgets('prose mentioning verbose errors is sent, not toggled locally',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'sonder');
+    final before = c.verboseErrors;
+    final sent = c.send('show the full traceback for this error');
+    await tester.pump();
+    expect(backend.lastTurn.request.history.last.content,
+        'show the full traceback for this error');
+    expect(c.verboseErrors, before);
+    backend.lastTurn.done('answer');
+    await sent;
+    expect(c.localToggle('/verbose on'), contains('**on**'));
+    expect(c.verboseErrors, isTrue);
+    c.dispose();
+  });
+
   testWidgets('control commands use runtime model despite concrete selection', (
     tester,
   ) async {

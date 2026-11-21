@@ -806,11 +806,26 @@ class SonderApi implements SonderApiPort {
     final command = normalizedKind == 'fleet'
         ? '/agentcancel $normalizedId'
         : '/autopilot cancel $normalizedId';
-    final reply = await chatDetailed(
-      [ChatMessage(role: Role.user, content: command)],
-      model: 'sonder',
-      project: project,
-    );
+    // Never fall back to the local server: a cancel must reach the server that
+    // owns the work, and a fallback reply carries a warning prefix that would
+    // defeat the refusal check below.
+    final token = CancelToken();
+    _activeTurns.add(token);
+    final ChatReply reply;
+    try {
+      reply = await _chatOnce(
+        [ChatMessage(role: Role.user, content: command)],
+        model: 'sonder',
+        contextSize: '8192',
+        sessionId: '',
+        project: project,
+        allowApproximateLocation: false,
+        cancel: token,
+        allowFallback: false,
+      );
+    } finally {
+      _activeTurns.remove(token);
+    }
     if (reply.refusal != null ||
         RegExp(
           r'^\s*(?:refused|error|could not|usage:)',

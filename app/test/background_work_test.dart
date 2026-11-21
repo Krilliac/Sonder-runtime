@@ -9,6 +9,7 @@ import 'package:sonder_runtime/chat/commands.dart';
 import 'package:sonder_runtime/models.dart';
 
 void main() {
+  _cancelFallbackTests();
   for (final kind in ['fleet', 'autopilot']) {
     test('$kind cancellation uses the existing control command', () async {
       final requests = <http.Request>[];
@@ -101,5 +102,36 @@ void main() {
   test('offline palette exposes delegation and master orchestrate', () {
     expect(quickCommands['/delegate'], isNotEmpty);
     expect(quickCommands['/master_orchestrate'], isNotEmpty);
+  });
+}
+
+void _cancelFallbackTests() {
+  test('cancelBackground never falls back to the local server', () async {
+    final hosts = <String>[];
+    final api = SonderApi(baseUrl: 'https://pc.example', apiKey: 'k');
+    await expectLater(
+      http.runWithClient(
+        () => api.cancelBackground('fleet', 'fleet-1'),
+        () => MockClient((request) async {
+          hosts.add(request.url.host);
+          if (request.url.host == 'pc.example') {
+            throw http.ClientException(
+                'SocketException: Connection refused (OS Error: Connection '
+                'refused, errno = 111), address = pc.example, port = 443');
+          }
+          return http.Response(
+              jsonEncode({
+                'choices': [
+                  {
+                    'message': {'content': 'cancellation requested'}
+                  }
+                ]
+              }),
+              200);
+        }),
+      ),
+      throwsA(isA<SonderException>()),
+    );
+    expect(hosts, ['pc.example']);
   });
 }
