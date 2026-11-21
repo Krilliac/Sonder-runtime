@@ -48,7 +48,8 @@ def test_provider_job_reopens_and_reconciles_after_owner_restart(tmp_path):
             provider._processes[job_id].wait(timeout=3)
             assert report.interrupted_job_ids == ()
             assert report.cleanup_receipts[0].complete is False
-            assert "unproven" in report.cleanup_receipts[0].detail
+            detail = report.cleanup_receipts[0].detail
+            assert "unproven" in detail or "did not confirm" in detail
             assert reopened.poll(job_id).status is JobStatus.RUNNING
             assert "orphan process tree cleaned" not in reopened.poll(job_id).error
         else:

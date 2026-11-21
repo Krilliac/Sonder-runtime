@@ -616,6 +616,8 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             now = self._clock()
             if current.is_terminal or current.attempt >= current.max_attempts:
                 return None
+            if current.status is JobStatus.CANCELLATION_REQUESTED:
+                return None
             if row[16] and self._lease_active(row[17], now):
                 return None
             until = self._lease_until(now, lease_seconds)
@@ -647,6 +649,8 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             row = self._row(connection, job_id)
             current = self._record(row)
             if current is None or current.is_terminal:
+                return False
+            if current.status is JobStatus.CANCELLATION_REQUESTED:
                 return False
             now = self._clock()
             if row[16] != worker_id or not self._lease_active(row[17], now):
@@ -972,7 +976,7 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
                            max_records: int = 100, max_process_descendants: int = 64) -> DrainPlan:
         """Build the bounded process-tree recovery plan for startup."""
         observations = []
-        for record in self.all(limit=max_records + 1):
+        for record in self.list(include_terminal=False, limit=max_records + 1):
             view = self.view(record.identity.job_id)
             observations.append(StartupObservation(
                 RecordKind.JOB, record.identity.job_id, record.status.value,
@@ -986,7 +990,11 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
         for item in plan.results:
             if item.action is DrainAction.MARK_INTERRUPTED:
                 record = self.poll(item.observation.record_id)
-                if not record.is_terminal and record.status is not JobStatus.INTERRUPTED:
+                if (
+                    not record.is_terminal
+                    and record.status is not JobStatus.INTERRUPTED
+                    and record.status is not JobStatus.CANCELLATION_REQUESTED
+                ):
                     self.transition(record.identity.job_id, JobStatus.INTERRUPTED)
         return plan
 
@@ -1005,7 +1013,9 @@ class SQLiteDurableJobRegistry(SQLiteWorkerCapacity):
             receipts.append(receipt)
             if receipt.complete:
                 record = self.poll(intent.record_id)
-                if not record.is_terminal:
+                if record.status is JobStatus.CANCELLATION_REQUESTED:
+                    self.transition(intent.record_id, JobStatus.CANCELLED, error="orphan process tree cleaned")
+                elif not record.is_terminal:
                     self.transition(intent.record_id, JobStatus.INTERRUPTED, error="orphan process tree cleaned")
                     interrupted.append(intent.record_id)
         return JobRecoveryReport(plan, tuple(receipts), tuple(interrupted))
