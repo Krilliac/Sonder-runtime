@@ -179,6 +179,7 @@ class DurableToolAuditRepository:
             "auth_level": getattr(scope, "auth_level", ""),
             "success": receipt.success,
             "terminal": receipt.terminal,
+            "effect_certainty": receipt.effect_certainty,
             "output": receipt.output,
             "evidence": _json_safe(dict(receipt.evidence)),
             "error_code": receipt.error_code,
