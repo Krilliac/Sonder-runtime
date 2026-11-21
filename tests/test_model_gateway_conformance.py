@@ -368,6 +368,7 @@ def test_gate_4_openai_remote_endpoint_requires_consent():
         transport=lambda *args: calls.append(args) or {
             "choices": [{"message": {"content": "ok"}}]
         },
+        spend_ledger=None,
     )
     request = ModelRequest(prompt="x", tier="code")
     with pytest.raises(Forbidden):

@@ -180,7 +180,7 @@ def _recording_gateway(base_url, **config):
 
     gateway = OpenAICompatibleGateway(
         OpenAICompatibleConfig(base_url=base_url, api_key=_KEY, model="m", **config),
-        transport=transport,
+        transport=transport, spend_ledger=None,  # these tests are about transport policy, not spend
     )
     return gateway, calls
 

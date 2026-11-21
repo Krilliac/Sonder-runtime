@@ -16,8 +16,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sonder_runtime.adapters.inference.openai_compat_gateway import (
+    ENV_EMBED_PRICE,
+    ENV_PRICE,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
+    _env_daily_usd,
+    _env_max_tokens,
+    _env_price,
 )
 from sonder_runtime.adapters.inference.openai_protocol_probe import (
     OpenAICompatibleProtocolProbe,
@@ -39,6 +44,7 @@ from sonder_runtime.application.routing.backend_conformance import (
     run_gateway_probes,
 )
 from sonder_runtime.domain.common.errors import SonderError
+from sonder_runtime.domain.openai_spend_policy import parse_chat_price, parse_embed_price
 from sonder_runtime.domain.routing.backend_conformance import (
     BackendIdentity,
 )
@@ -209,10 +215,24 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("refusing non-loopback endpoint; pass --allow-cloud for explicit consent")
     if not loopback and parsed.scheme != "https":
         parser.error("non-loopback attestation requires HTTPS")
+    spend: dict[str, object] = {}
+    if not loopback:
+        # The gateway is metered on a non-loopback endpoint: carry the operator's
+        # prices, cap and output ceiling, as the env-resolved config would.
+        try:
+            spend = {
+                "price": _env_price(ENV_PRICE, parse_chat_price),
+                "embed_price": _env_price(ENV_EMBED_PRICE, parse_embed_price),
+                "daily_usd": _env_daily_usd(),
+                "max_tokens_ceiling": _env_max_tokens(),
+            }
+        except SonderError as exc:
+            parser.error(f"invalid OpenAI-compatible spend setting: {exc}")
     config = OpenAICompatibleConfig(
         base_url=args.base_url,
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=args.model,
+        **spend,
     )
     identity = None
     if args.identity_file:

@@ -162,7 +162,10 @@ binding, and sends privacy-first routing preferences (no prompt logging,
 zero data retention) unless overridden. Claude models can likewise be bound
 through the [Anthropic provider](docs/integration/anthropic.md): the same
 opt-in, `SONDER_ANTHROPIC_API_KEY` (plus an optional second key), and a
-`SONDER_ANTHROPIC_DAILY_USD` spend cap.
+`SONDER_ANTHROPIC_DAILY_USD` spend cap. A non-loopback OpenAI-compatible endpoint is
+likewise capped: it needs declared prices (`SONDER_OPENAI_PRICE_USD_PER_MTOK`,
+`SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK`) and obeys `SONDER_OPENAI_DAILY_USD` and
+`SONDER_OPENAI_MAX_TOKENS` (see [docs/integration/openai-compatible.md](docs/integration/openai-compatible.md)).
 
 ## Security model
 

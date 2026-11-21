@@ -1253,7 +1253,12 @@ policy. OpenRouter requires `SONDER_ALLOW_CLOUD=1`, an API key, and the
 operation's cloud consent. Anthropic requires the same, with
 `SONDER_ANTHROPIC_API_KEY` (optional `SONDER_ANTHROPIC_API_KEY_2`), the optional
 `anthropic` SDK, and a local daily cap `SONDER_ANTHROPIC_DAILY_USD` (default 10);
-see `docs/integration/anthropic.md`. Autopilot
+see `docs/integration/anthropic.md`. A remote OpenAI-compatible endpoint is metered the same way:
+it is refused unless `SONDER_OPENAI_PRICE_USD_PER_MTOK` (`<input>,<output>` USD per 1M tokens;
+`0,0` declares a free endpoint) is set, embeddings need `SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK`
+(`<input>`), `SONDER_OPENAI_DAILY_USD` (default 10, `0` refuses every metered call) caps the day's
+spend in `openai-spend.json`, and `SONDER_OPENAI_MAX_TOKENS` (default 16000) is the output ceiling
+for metered calls; see `docs/integration/openai-compatible.md`. Autopilot
 and other local-only routes refuse a hosted binding rather than silently
 changing providers. Ollama-bound tiers retain the existing request payload
 and route behavior byte-for-byte.
