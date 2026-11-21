@@ -16526,70 +16526,26 @@ def _safe_limit(limit, default=10, max_value=100):
 @mcp.tool()
 def memory_search(query: str, limit: int = 10) -> str:
     """Search local lessons, facts, sessions, and recent interactions."""
-    _maybe_live_reload()
     query = (query or "").strip()
     if not query:
         return "ERROR: empty query."
+    return _memory_search_scoped(query, limit)
+
+
+def _memory_search_scoped(query, limit, bound_project=""):
+    """``bound_project`` is the host-selected project root of a bound agent
+    (never a model argument); empty is the operator's all-project view."""
+    query = (query or "").strip()
+    if not query:
+        return memory_search(query)  # the tool's own empty-query refusal
+    _maybe_live_reload()
     limit = _safe_limit_policy(limit, 10, 50)
-    like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
+    from sonder_runtime.adapters.memory_search import search_memory
     conn = _open_db()
     try:
-        lesson_ids = memory_store.fts_search(conn, query, limit=limit)
-        lessons = []
-        for lesson_id in lesson_ids:
-            text = memory_store.get_lesson_text(conn, lesson_id)
-            if text:
-                lessons.append({"id": lesson_id, "text": text})
-        current, instants = memory_store.current_fact_params()  # expired facts stay out
-        facts = [dict(r) for r in conn.execute(
-            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' AND "
-            + current + " ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, *instants, limit),
-        ).fetchall()]
-        preferences = [dict(r) for r in conn.execute(
-            "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "
-            "WHERE text LIKE ? ESCAPE '\\' AND enabled=1 "
-            "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?",
-            (like, limit),
-        ).fetchall()]
-        sessions = [dict(r) for r in conn.execute(
-            "SELECT session_id, title, summary, project FROM sessions "
-            "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
-            "ORDER BY updated_ts DESC, rowid DESC LIMIT ?",
-            (like, like, limit),
-        ).fetchall()]
-        interactions = [dict(r) for r in conn.execute(
-            "SELECT id, task, response, tier, session_id, ts FROM interactions "
-            "WHERE task LIKE ? ESCAPE '\\' OR response LIKE ? ESCAPE '\\' "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, like, limit),
-        ).fetchall()]
+        return search_memory(conn, memory_store, query, limit, bound_project=bound_project)
     finally:
         conn.close()
-
-    lines = ["memory search: %r" % query]
-    lines.append("lessons (%d):" % len(lessons))
-    lines.extend(
-        "  - %s: %s" % (lesson["id"], lesson["text"][:220])
-        for lesson in lessons
-    )
-    lines.append("facts (%d):" % len(facts))
-    lines.extend("  - %s/%s: %s" % (f["project"], f["id"], f["text"][:220]) for f in facts)
-    lines.append("preferences (%d):" % len(preferences))
-    lines.extend("  - %s/%s: %s" % (
-        p["scope"], p["id"], p["text"][:220],
-    ) for p in preferences)
-    lines.append("sessions (%d):" % len(sessions))
-    lines.extend("  - %s [%s]: %s" % (
-        s["session_id"], s.get("project") or "default",
-        (s.get("title") or s.get("summary") or "(untitled)")[:220],
-    ) for s in sessions)
-    lines.append("interactions (%d):" % len(interactions))
-    lines.extend("  - %s [%s]: %s" % (
-        i["id"], i.get("tier") or "?",
-        (i.get("task") or "")[:220],
-    ) for i in interactions)
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -18438,7 +18394,11 @@ def _agent_dispatch(
             )
         return approximate_location_lookup(bool(args.get("consent", False)))
     if tool_name == "memory_search":
-        return memory_search(args.get("query", ""), args.get("limit", 10))
+        # A project-bound run reads only its host-selected project's memory.
+        return _memory_search_scoped(
+            args.get("query", ""), args.get("limit", 10),
+            bound_project=repository_extra_roots,
+        )
     if tool_name == "file_policy":
         return file_policy(
             token=args.get("token", ""),
@@ -19160,6 +19120,20 @@ def _agent_dispatch(
             scope=args.get("scope", "global"),
         )
     if tool_name == "preferences_status":
+        if repository_extra_roots:
+            # A project-bound run lists only global and its own project's
+            # preferences; no fallback to the unscoped list.
+            _maybe_live_reload()
+            from sonder_runtime.adapters.preference_adapters import (
+                preferences_status_scoped,
+            )
+
+            return preferences_status_scoped(
+                _application(),
+                include_disabled=args.get("include_disabled", False),
+                limit=args.get("limit", 50),
+                bound_project=repository_extra_roots,
+            )
         return preferences_status(
             include_disabled=args.get("include_disabled", False),
             limit=args.get("limit", 50),

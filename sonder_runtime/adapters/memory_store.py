@@ -4056,8 +4056,34 @@ def task_progress(conn, project="", account_scope=None):
     }
 
 
-def all_preferences(conn, limit=50, include_disabled=False):
-    where = "" if include_disabled else "WHERE enabled=1"
+def all_preferences(conn, limit=50, include_disabled=False, bound_project=""):
+    """List preferences; ``bound_project`` confines them to one project.
+
+    A bound list holds ``global`` plus the project's own scopes (``<root>``
+    and ``project:<root>``), matched lexically by
+    :func:`sonder_runtime.adapters.memory_search.bound_project_matcher`, and
+    the limit counts only those rows.  ``bound_project`` is the host-selected
+    root of a bound agent, never a model argument; empty is the operator view.
+    """
+    if bound_project and not isinstance(bound_project, str):
+        # Fail closed: a bound scope must never degrade to the global view.
+        raise TypeError("bound_project must be a project root path string")
+    clauses = [] if include_disabled else ["enabled=1"]
+    if bound_project:
+        from sonder_runtime.adapters.memory_search import (
+            _MATCH_FUNCTION,
+            bound_project_matcher,
+        )
+
+        conn.create_function(
+            _MATCH_FUNCTION, 1, bound_project_matcher(bound_project),
+            deterministic=True,
+        )
+        clauses.append(
+            "(scope='global' OR %s(scope) OR (substr(scope, 1, 8)='project:' "
+            "AND %s(substr(scope, 9))))" % (_MATCH_FUNCTION, _MATCH_FUNCTION)
+        )
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         "SELECT id, scope, key, text, source_interaction, confidence, "
         "evidence_count, enabled, revision, created_ts, updated_ts "

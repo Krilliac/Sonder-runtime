@@ -98,6 +98,22 @@ instruction.
   ATIF-v1.7 trajectory (one user and one agent step per turn, recorded token
   counts as step metrics, every string redacted); the default text transcript
   is unchanged.
+- A project-bound agent's `memory_search` reads only its host-selected
+  project: facts and sessions whose `project` names that root (sessions show
+  the project's own summary, never the all-project one), interactions with
+  explicit project provenance, and `global` plus the project's own
+  preferences. Lessons are global and stay visible. `preferences_status`
+  from a bound agent lists the same preference set, and its `limit` counts
+  only those rows. Project values match by lexically normalised path, so a
+  sibling (`<root>b`) or child (`<root>/sub`) directory is another project.
+  The root comes from the host, never from a model argument; the operator's
+  direct MCP calls still see every project.
+- A session event query or export resolves every retention marker in the
+  session before it returns a record, even when the markers do not fit in one
+  read. When that takes a full scan and the session holds more than 100,000
+  events, the read is refused rather than exported with an unread marker. The integrity report of a ranged export
+  covers exactly the exported window: each exported event's hash and its link
+  to the stored predecessor.
 - `learning_health_status` — outcome coverage, signal quality, distillation
   yield, the evidence-level findings above, and the attribution lane's own
   session counters (`grounded_outcomes`: noted / attributed / self-blocked /
