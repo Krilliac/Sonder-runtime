@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -197,6 +198,31 @@ def test_reference_python_game_runs_end_to_end(monkeypatch, tmp_path):
     assert result["ok"]
     assert "GAME_OK" in result["output"]
     assert os.path.getsize(result["frame"]) > 1024
+
+
+def test_prepare_project_uses_distinct_asset_pack_per_matrix_entry(monkeypatch, tmp_path):
+    _local_roots(monkeypatch, tmp_path)
+
+    first = game_forge.prepare_project("shared", "python", "2d", seed=1)
+    second = game_forge.prepare_project("shared", "cpp", "3d", seed=2)
+
+    assert first["pack"]["root"] != second["pack"]["root"]
+    with open(first["pack"]["manifest"], encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert manifest["dimension"] == "2d"
+    assert manifest["seed"] == 1
+
+
+def test_pack_names_stay_distinct_for_long_project_names():
+    name = "a" * assetgen.MAX_NAME
+    names = {
+        game_forge._pack_name(name, language, dimension)
+        for language, dimension in game_forge.SUPPORTED_MATRIX
+    }
+
+    assert len(names) == len(game_forge.SUPPORTED_MATRIX)
+    for pack_name in names:
+        assert assetgen._safe_slug(pack_name) == pack_name
 
 
 def test_reference_python_game_runs_from_unrelated_working_directory(
