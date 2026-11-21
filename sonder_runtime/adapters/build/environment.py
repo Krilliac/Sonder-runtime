@@ -494,10 +494,10 @@ class ScrubbedEnvironmentProvider:
         # A Windows-shaped PATH is only checked against the project roots on
         # Windows itself (or with an injected check): off Windows the default
         # guard would read ``C:\\...`` as a path relative to the cwd.
-        self._windows_project_local = project_local if project_local is not None or os.name == "nt" \
-            else None
+        injected = project_local is not None
         if project_local is None:
             from ..host_tools.guards import project_local
+        self._windows_project_local = project_local if injected or os.name == "nt" else None
         self._project_local = project_local
 
     def use_vcvars(self, capture: VcvarsCapture | None) -> None:
