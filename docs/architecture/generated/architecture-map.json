@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 479,
+      "file_count": 481,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -218,12 +218,14 @@
         "sonder_runtime/adapters/inference/anthropic_spend.py",
         "sonder_runtime/adapters/inference/capability_evidence.py",
         "sonder_runtime/adapters/inference/capability_refresh.py",
+        "sonder_runtime/adapters/inference/context_fit_route.py",
         "sonder_runtime/adapters/inference/exchange_transport.py",
         "sonder_runtime/adapters/inference/external_membership.py",
         "sonder_runtime/adapters/inference/gpu_admission.py",
         "sonder_runtime/adapters/inference/gpu_admission_store.py",
         "sonder_runtime/adapters/inference/gpu_residency.py",
         "sonder_runtime/adapters/inference/injected.py",
+        "sonder_runtime/adapters/inference/launch_profile_cache.py",
         "sonder_runtime/adapters/inference/log_safe.py",
         "sonder_runtime/adapters/inference/membership_high_water.py",
         "sonder_runtime/adapters/inference/model_gateway_factory.py",
@@ -523,7 +525,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 426,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -836,6 +838,7 @@
         "sonder_runtime/application/routing/backend_conformance.py",
         "sonder_runtime/application/routing/calibration.py",
         "sonder_runtime/application/routing/capability_router.py",
+        "sonder_runtime/application/routing/context_fit.py",
         "sonder_runtime/application/routing/evidence_gateway.py",
         "sonder_runtime/application/routing/identity_cache.py",
         "sonder_runtime/application/routing/long_context_overflow.py",
@@ -1458,7 +1461,7 @@
       ]
     },
     {
-      "file_count": 58,
+      "file_count": 59,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1516,6 +1519,7 @@
         "sonder_runtime/platform/speculation.py",
         "sonder_runtime/platform/symbol_consent.py",
         "sonder_runtime/platform/system_profile.py",
+        "sonder_runtime/platform/tier_model_options.py",
         "sonder_runtime/platform/toolchain_policy.py",
         "sonder_runtime/platform/unsafe_lab_policy.py",
         "sonder_runtime/platform/version.py"

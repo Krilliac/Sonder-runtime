@@ -7095,7 +7095,8 @@ def _answer_with_history_impl(
         if _explicit_serve_selection(tier, "")
         else _default_route_plan(prompt, start_rung)
     )
-    escalation_plan, overflow = _overflow_route.plan(sys.modules[__name__], prompt, history, escalation_plan)
+    escalation_plan, overflow = _overflow_route.plan(
+        sys.modules[__name__], prompt, history, escalation_plan, context_size=context_size)
     overflow_failure = ""
     temperature = _serve_temperature()
     pinned_ctx = (
