@@ -5,7 +5,6 @@ import os
 
 import pytest
 
-from sonder_runtime.adapters import claim_checker
 from sonder_runtime.adapters.claim_checker import ClaimChecker
 from sonder_runtime.adapters.security_eval import dataset as dataset_module
 from sonder_runtime.adapters.security_eval import output_store as store_module
