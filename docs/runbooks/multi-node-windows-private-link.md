@@ -8,7 +8,8 @@ The result is a **remote worker**, not one larger computer. Windows does not
 combine the two PCs' CPU, RAM, and GPU into one transparent resource pool.
 Send complete jobs to the worker instead: inference requests, builds, tests,
 indexing, rendering, or other bounded workloads. Sonder can pool independent
-Ollama requests across workers, but it does not split one model across hosts.
+Ollama requests across workers, but it does not split one model across hosts
+unless you opt in to llama.cpp RPC sharding ([rpc-sharding.md](rpc-sharding.md)).
 
 For an Ubuntu or other Linux worker, use
 [install-server-private.md](install-server-private.md) for the service layer.
