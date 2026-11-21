@@ -11,6 +11,10 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import os
 
 # Keep this literal synchronized with the release-tooling source contract in
 # ``sonder_version.py``.  The release policy tests assert that both surfaces
@@ -21,7 +25,9 @@ VERSION = "0.9.0.dev0"
 _BUILD_STAMP = Path(__file__).resolve().parents[2] / "sonder_build.json"
 
 
-def running_source_commit_at_import(root: Path | None = None) -> str:
+def running_source_commit_at_import(
+    root: str | os.PathLike[str] | None = None,
+) -> str:
     """Return the commit whose source tree was loaded by the process.
 
     This is a deliberately narrow startup probe: it reads only the current
@@ -51,7 +57,7 @@ class BuildInfo:
     commit_sha: str
     stamped: bool
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         return {
             "version": self.version,
             "commit_sha": self.commit_sha,

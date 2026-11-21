@@ -15,9 +15,13 @@ near 19.1 ms (k=3), so 40 ms spikes are flagged and 18 ms frames are not.
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import TYPE_CHECKING
 
 from sonder_runtime.domain.profiling.model import MAX_SPIKES, FrameStats, Spike
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Literal
 
 NS_PER_MS = 1_000_000
 SCALE_FLOOR_NS = 500_000  # 0.5 ms
@@ -96,7 +100,7 @@ def detect_spikes(
     *,
     k: float = 3.0,
     max_spikes: int = MAX_SPIKES,
-    kind: str = "frame",
+    kind: Literal["frame", "zone", "sample_density"] = "frame",
     label: str = "frame",
     starts_ns: Sequence[int | None] | None = None,
     labels: Sequence[str] | None = None,
