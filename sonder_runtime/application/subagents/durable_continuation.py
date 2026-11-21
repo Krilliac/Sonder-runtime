@@ -119,6 +119,11 @@ class DurableCancellation:
         return self._event.wait(timeout) or self.cancelled
 
 
+def _error_text(exc: BaseException) -> str:
+    """Non-empty message; SubagentError rejects blank text."""
+    return str(exc).strip() or type(exc).__name__
+
+
 class DurableContinuationService:
     """Worker supervision over a repository-backed child-session record."""
 
@@ -576,9 +581,31 @@ class DurableContinuationService:
         except ContinuationStorageFailure as error:
             self._storage_failures[child_id] = error
             control._event.set()
+        except Exception as exc:  # noqa: BLE001 - a dying worker must not strand the child RUNNING
+            self._settle_worker_crash(child_id, exc, started_at)
         finally:
             with self._lock:
                 self._contexts.pop(child_id, None)
+
+    def _settle_worker_crash(self, child_id: str, exc: Exception, started_at: float) -> None:
+        """Best-effort FAILED terminal when a failure handler itself raised."""
+        try:
+            record = self._require(child_id)
+            usage = SubagentUsage(
+                steps=max(record.usage.steps, 0),
+                output_tokens=record.usage.output_tokens,
+                wall_seconds=(record.usage.wall_seconds or 0.0) + max(0.0, monotonic() - started_at),
+            )
+            result = SubagentResult(
+                child_id, record.request.parent_id, SubagentStatus.FAILED,
+                error=SubagentError("runner_failed", _error_text(exc), True), usage=usage,
+            )
+            self._write("update", child_id, status=result.status, usage=usage,
+                        result=result, recovery_required=True)
+        except ContinuationStorageFailure as error:
+            self._storage_failures[child_id] = error
+        except Exception:  # noqa: BLE001 - nothing further can be recorded
+            return
 
     def _run_body(self, child_id: str, context: OperationContext, runner: Runner,
                   control: DurableCancellation, started_at: float,
@@ -665,7 +692,7 @@ class DurableContinuationService:
         except _Cancelled as exc:
             elapsed = usage()
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.CANCELLED,
-                                    error=SubagentError("cancelled", str(exc)), usage=elapsed)
+                                    error=SubagentError("cancelled", _error_text(exc)), usage=elapsed)
             self._write(
                 "update",
                 child_id,
@@ -680,17 +707,17 @@ class DurableContinuationService:
             else:
                 status, code, recoverable = SubagentStatus.TIMED_OUT, "budget_exhausted", False
             result = SubagentResult(child_id, record.request.parent_id, status,
-                                    error=SubagentError(code, str(exc), recoverable), usage=usage(output))
+                                    error=SubagentError(code, _error_text(exc), recoverable), usage=usage(output))
             self._write("update", child_id, status=status, usage=result.usage,
                         result=result, recovery_required=recoverable)
         except TimeoutError as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.TIMED_OUT,
-                                    error=SubagentError("deadline_exceeded", str(exc), True),
+                                    error=SubagentError("deadline_exceeded", _error_text(exc), True),
                                     usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
         except Exception as exc:
             result = SubagentResult(child_id, record.request.parent_id, SubagentStatus.FAILED,
-                                    error=SubagentError("runner_failed", str(exc), True),
+                                    error=SubagentError("runner_failed", _error_text(exc), True),
                                     usage=usage())
             self._write("update", child_id, status=result.status, usage=result.usage, result=result, recovery_required=True)
 
