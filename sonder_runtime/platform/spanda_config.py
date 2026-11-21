@@ -5,6 +5,14 @@ Default OFF. Enabling multi-samples chat completions; never weakens auth.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _HasSpanda(Protocol):
+        @property
+        def spanda(self) -> SpandaConfig: ...
 
 
 @dataclass(frozen=True)
@@ -18,7 +26,7 @@ class SpandaConfig:
     sample_temperature: float = 0.2
 
 
-def spanda_errors(config) -> list[str]:
+def spanda_errors(config: _HasSpanda) -> list[str]:
     section = config.spanda
     errors: list[str] = []
     if type(section.enabled) is not bool:

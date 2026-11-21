@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 
 
-def extract_agent_json(text):
+def extract_agent_json(text: str | None) -> object:
     """Parse an agent decision, tolerating markdown fences and prose framing.
 
     Small local models wrap decisions in ```json fences or surround them

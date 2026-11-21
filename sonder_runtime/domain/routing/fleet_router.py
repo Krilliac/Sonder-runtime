@@ -8,6 +8,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +98,8 @@ class FleetRouter:
     heuristics and numeric thresholds to select a tier.
     """
 
-    def __init__(self, tier_config: dict[ModelTier, dict] | None = None) -> None:
-        self._tier_config = dict(tier_config or {})
+    def __init__(self, tier_config: Mapping[ModelTier, Mapping[str, object]] | None = None) -> None:
+        self._tier_config: dict[ModelTier, Mapping[str, object]] = dict(tier_config or {})
         logger.info(
             "FleetRouter initialized: %d tier configs provided",
             len(self._tier_config),

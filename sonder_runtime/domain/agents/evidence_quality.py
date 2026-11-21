@@ -9,9 +9,13 @@ Slice with its behaviour byte-for-byte intact.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def codegen_build_succeeded(observation):
+def codegen_build_succeeded(observation: str | None) -> bool:
     """Read only the host-rendered terminal verdict from the codegen loop."""
     lines = {line.strip() for line in str(observation or "").splitlines()}
     return (
@@ -22,7 +26,12 @@ def codegen_build_succeeded(observation):
     )
 
 
-def tool_observation_ok(tool_name, observation, *, observation_ok):
+def tool_observation_ok(
+    tool_name: str | None,
+    observation: str | None,
+    *,
+    observation_ok: Callable[[str | None], bool],
+) -> bool:
     """Apply evidence-quality checks that are specific to a tool contract.
 
     ``observation_ok(observation)`` is the generic success predicate, injected

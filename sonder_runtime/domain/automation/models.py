@@ -55,7 +55,7 @@ class AutomationRun:
     revision: int
     objective: str
     correlation_id: str
-    config: dict = field(default_factory=dict)
+    config: dict[str, object] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 
