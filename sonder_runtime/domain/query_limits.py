@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
 
-def safe_limit(limit, default=10, max_value=100):
+
+def safe_limit(limit: object, default: int = 10, max_value: int = 100) -> int:
     """Coerce a caller-provided limit into the inclusive range ``1..max_value``.
 
     Invalid values retain the caller's default before the result is clamped.
@@ -11,7 +13,7 @@ def safe_limit(limit, default=10, max_value=100):
     default and ceiling without owning a duplicate parsing policy.
     """
     try:
-        value = int(limit)
+        value = int(cast(int, limit))
     except (TypeError, ValueError):
         value = default
     return max(1, min(value, max_value))
