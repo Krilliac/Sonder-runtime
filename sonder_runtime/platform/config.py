@@ -1592,10 +1592,9 @@ def _apply_environment(
             server, reasoning_audience=env["SONDER_REASONING_AUDIENCE"].strip().lower()
         )
     # SONDER_STATE_HOME is the historical name used by the migrated control
-    # plane tests and older local configurations.  Keep SONDER_HOME as the
-    # canonical spelling while honoring the compatibility alias when the
-    # canonical variable is absent.
-    state_home = env.get("SONDER_HOME", "").strip() or env.get("SONDER_STATE_HOME", "").strip()
+    # plane tests and older local configurations.  Precedence is shared with
+    # paths.default_home: SONDER_STATE_HOME, then SONDER_HOME.
+    state_home = sonder_paths.env_home_override(env)
     if state_home:
         state = replace(state, home=state_home)
     if env.get("SONDER_FILE_ROOTS", "").strip():
