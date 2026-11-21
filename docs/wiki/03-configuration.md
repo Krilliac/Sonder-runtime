@@ -288,6 +288,28 @@ The loader refuses a group/world-readable secrets file on POSIX. Rotate
 with `python -m sonder_runtime rotate-key` (overlap window; old key valid
 until expiry). See [rotate-credentials](../runbooks/rotate-credentials.md).
 
+### Cross-PC model sharding (llama.cpp RPC, opt-in)
+
+One model can run split across the main machine's GPU and one or more workers
+running llama.cpp `rpc-server` on a private link. The main machine runs
+`llama-server --rpc` on loopback and Sonder reaches it through the
+`openai-compatible` provider. Sharding is **off unless `SONDER_RPC_PEERS` is
+set**; no other variable turns it on. Procedure:
+[runbook](../runbooks/rpc-sharding.md); scripts:
+[`scripts/rpc/`](../../scripts/rpc/README.md). Policy source:
+`sonder_runtime/platform/rpc_sharding_config.py`, checked when configuration
+loads.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SONDER_RPC_PEERS` | unset (off) | Worker allowlist: comma- or semicolon-separated `ip` or `ip:port`, at most 16. Each must be a literal IPv4 address in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` or `169.254.0.0/16`; hostnames, IPv6, loopback, `0.0.0.0` and public or documentation addresses fail startup with an error naming the entry. When set, `SONDER_OPENAI_BASE_URL` must be an `http(s)` loopback URL, and `sonder serve` probes that server once in the background after it starts listening and logs the result. |
+| `SONDER_RPC_PORT` | `50052` | The one RPC port every worker uses. An entry without `:port` gets it; an entry naming another port fails startup. Validated even when sharding is off. |
+| `SONDER_OPENAI_BASE_URL`, `SONDER_OPENAI_MODEL` | unset | Point the `openai-compatible` provider at the sharded server (`http://127.0.0.1:11438` and the launcher's `-Alias`, default `sonder-rpc`). |
+| `SONDER_<TIER>_PROVIDER` | `ollama` | `openai-compatible` routes a tier to the sharded server; `rpc-sharded` and `distributed-rpc` are aliases for it. |
+| `SONDER_RPC_INSTALL_DIR` | `%LOCALAPPDATA%\sonder\llama-rpc` | Folder holding `llama-server` and `rpc-server` (scripts and `discover_rpc_binaries`). |
+| `SONDER_RPC_PROFILES_FILE` | shipped `sonder_runtime/adapters/data/rpc_sharding_profiles.json` | Named `--tensor-split`/context presets, `{"profiles": {"<name>": {"worker_device", "tensor_split", "ctx_size", "n_gpu_layers", "notes"}}}`; unknown or missing fields are refused. |
+| `SONDER_RPC_WORKER_ADDRESS` | unset | Worker script only (`start-rpc-worker.ps1`): the private address `rpc-server` binds to, same address rules as the allowlist. |
+
 ## Environment variables (compatibility surface)
 
 Core paths/identity: `SONDER_HOME`, `SONDER_DB`, `SONDER_AUTOPILOT_DB`,
