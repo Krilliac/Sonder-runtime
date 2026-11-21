@@ -34,7 +34,24 @@ _CREDENTIAL_NAME = re.compile(r"(?i)password|passwd|pwd|token|secret|api[-_]?key
 # Separator, then value. Whitespace before the separator is skipped in Python
 # (str.isspace is the test re's \s applies), so the pattern starts with a fixed
 # character rather than a repetition (CodeQL py/polynomial-redos).
-_ASSIGNED_VALUE = re.compile(r"[=:]\s*([^\s,;]+)")
+# A quoted value (plain or JSON-escaped quotes) is redacted between its
+# quotes, spaces included; the quoted body excludes the quote and backslash,
+# so it stops at the first one and each attempt is linear. An unquoted value,
+# or a quoted one that does not close cleanly, runs to whitespace, ',' or ';'.
+_ASSIGNED_VALUE = re.compile(
+    r"[=:]\s*(?:\\?\"([^\"\\]*)\\?\"|\\?'([^'\\]*)\\?'|([^\s,;]+))"
+)
+# The credential name may close a quote before the separator, as a JSON or
+# dict key does: ``{"api_key": ...}``, ``{'password': ...}``, ``{\"pwd\": ...}``.
+_NAME_CLOSING_QUOTES = ('\\"', "\\'", '"', "'")
+
+
+def _skip_space(text: str, start: int) -> int:
+    while start < len(text) and text[start].isspace():
+        start += 1
+    return start
+
+
 # A JWT is three dot-joined runs. The dotted tail is optional so a run that is
 # not one still matches, and is kept, instead of failing and being rescanned
 # from each later 'eyJ' inside it.
@@ -46,15 +63,18 @@ def _redact_assignments(text: str) -> str:
     for name in _NAME.finditer(text):
         if name.start() < cursor or not _CREDENTIAL_NAME.search(name.group()):
             continue
-        start = name.end()
-        while start < len(text) and text[start].isspace():
-            start += 1
+        start = _skip_space(text, name.end())
+        for quote in _NAME_CLOSING_QUOTES:
+            if text.startswith(quote, start):
+                start = _skip_space(text, start + len(quote))
+                break
         value = _ASSIGNED_VALUE.match(text, start)
         if value is None:
             continue
-        parts.append(text[cursor:value.start(1)])
+        group = value.lastindex or 1
+        parts.append(text[cursor:value.start(group)])
         parts.append("<redacted>")
-        cursor = value.end(1)
+        cursor = value.end(group)
     parts.append(text[cursor:])
     return "".join(parts)
 

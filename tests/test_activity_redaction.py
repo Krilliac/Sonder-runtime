@@ -427,3 +427,98 @@ def test_uri_credential_redaction_is_linear_on_long_scheme_runs():
         at._redact_text(run)
         # Quadratic scanning took seconds here; a linear scan takes milliseconds.
         assert time.perf_counter() - started < 1.0
+
+
+def test_non_bearer_authorization_credentials_are_redacted():
+    # The assignment rule takes only the scheme word, so the credential after
+    # `Basic`/`Token`/`Digest` used to survive into the persisted transcript.
+    cases = {
+        'curl -H "Authorization: Basic dXNlcjpwYXNz" https://host': "dXNlcjpwYXNz",
+        "Authorization: Token abc123xyz": "abc123xyz",
+        "Proxy-Authorization: Basic cHJveHk6cHc=": "cHJveHk6cHc=",
+        "Proxy-Authorization: Digest username=bob": "username=bob",
+        '{"Authorization": "Basic dXNlcjpwYXNz"}': "dXNlcjpwYXNz",
+    }
+    for text, secret in cases.items():
+        out = at._redact_text(text)
+        assert secret not in out, (text, out)
+        assert "<redacted>" in out
+    out = at._redact_text('curl -H "Authorization: Basic dXNlcjpwYXNz" https://host/x')
+    assert "https://host/x" in out
+
+
+def test_multi_parameter_authorization_values_are_redacted_whole():
+    # RFC 7616 Digest and AWS SigV4 credentials are comma-separated, quoted
+    # parameters; stopping at the first quote or comma left the response hash,
+    # nonce and signature in the persisted transcript.
+    digest = (
+        'Digest username="bob", realm="http-auth@example.org", '
+        'uri="/dir/index.html", algorithm=SHA-256, '
+        'nonce="7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", nc=00000001, '
+        'cnonce="f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", qop=auth, '
+        'response="753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1", '
+        'opaque="FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS"'
+    )
+    aws = (
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, "
+        "SignedHeaders=content-type;host;x-amz-date, "
+        "Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7"
+    )
+    escaped_digest = digest.replace('"', '\\"')
+    leaked = (
+        "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1",
+        "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v",
+        "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+        "http-auth@example.org",
+        "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
+        "AKIDEXAMPLE",
+    )
+    texts = (
+        f"Authorization: {digest}\nnext line",
+        f"Proxy-Authorization: {digest}",
+        f"Authorization: {aws}",
+        f"curl -H 'Authorization: {digest}' https://host/x",
+        f'curl -H "Authorization: {escaped_digest}" https://host/x',
+        f'{{"Authorization": "{escaped_digest}", "x": 1}}',
+    )
+    for text in texts:
+        out = at._redact_text(text)
+        for secret in leaked:
+            assert secret not in out, (text, out)
+        assert "<redacted>" in out
+    assert at._redact_text(f"Authorization: {digest}\nnext line").endswith("\nnext line")
+    assert "https://host/x" in at._redact_text(f"curl -H 'Authorization: {digest}' https://host/x")
+    assert '"x": 1}' in at._redact_text(f'{{"Authorization": "{escaped_digest}", "x": 1}}')
+
+
+def test_uri_password_containing_at_signs_is_redacted_whole():
+    out = at._redact_text("connect postgres://admin:p@ss@w0rd@db.internal/prod")
+    assert out == "connect postgres://<redacted>@db.internal/prod"
+
+
+def test_prefixed_or_bracketed_authorization_values_are_redacted():
+    # A printed bytes/ASGI header dict quotes the header NAME, so the quoted-
+    # header branch applied; a value starting with a string prefix or a bracket
+    # made that branch stop at the very next quote, one character in, and the
+    # Basic credential stayed visible.
+    cases = (
+        "{b'Authorization': b'Basic abc123secret'}",
+        "{'Proxy-Authorization': u'Basic abc123secret'}",
+        "{'Authorization': f'Basic abc123secret'}",
+        "{'Authorization': ['Basic abc123secret']}",
+        '{"Authorization": ["Basic abc123secret"]}',
+        "{'Authorization': ( 'Basic abc123secret', )}",
+        "[(b'authorization', b'Basic abc123secret'), (b'host', b'example.org')]",
+    )
+    for text in cases:
+        out = at._redact_text(text)
+        assert "abc123secret" not in out, (text, out)
+        assert "<redacted>" in out
+    out = at._redact_text("{'Authorization': rb'Basic abc123secret', 'Host': 'example.org'}")
+    assert "abc123secret" not in out
+    assert "'Host': 'example.org'}" in out
+    out = at._redact_text("[(b'authorization', b'Basic abc123secret'), (b'host', b'example.org')]")
+    assert "(b'host', b'example.org')]" in out
+    # The comma separator applies only to a name quoted on both sides.
+    prose = "The authorization, which was granted earlier, stays"
+    assert at._redact_text(prose) == prose

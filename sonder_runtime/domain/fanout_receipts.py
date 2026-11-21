@@ -36,10 +36,20 @@ def safe_answer(value, prompt):
         "Bearer <redacted>",
         rendered,
     )
+    # The name may carry an identifier prefix (``OPENAI_API_KEY``,
+    # ``aws_secret_access_key``, ``X-Api-Key``) but must end in the credential
+    # word, so ``max_tokens`` or ``secretary`` stay readable.
     rendered = re.sub(
-        r"(?i)(^|[\s,{])([\"']?(?:password|passwd|secret|token|api[-_]?key|credential)[\"']?)"
+        r"(?i)(^|[\s,{])([\"']?[\w-]*(?:password|passwd|secret|token|api[-_]?key|"
+        r"access[-_]?key|secret[-_]?key|private[-_]?key|credentials?)[\"']?)"
         r"\s*[:=]\s*(?!<(?:redacted|nested)>)(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)",
         r"\1\2=<redacted>",
+        rendered,
+    )
+    # Free-standing provider keys (``sk-...``, ``ghp_...``) with no label.
+    rendered = re.sub(
+        r"\b(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}",
+        "<redacted-key>",
         rendered,
     )
     return rendered
