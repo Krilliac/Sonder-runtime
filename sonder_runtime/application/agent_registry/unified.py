@@ -25,6 +25,7 @@ class AdmissionReceipt:
     root_id: str
     depth: int
     budget: AgentBudget
+    parent_id: str = ""
 
 
 class UnifiedAgentRegistryService:
@@ -42,6 +43,7 @@ class UnifiedAgentRegistryService:
         self._registrations: dict[str, AgentRegistration] = {}
         self._active: dict[str, int] = {}
         self._children: dict[str, int] = {}
+        self._receipts: dict[str, AdmissionReceipt] = {}
 
     @property
     def fleet(self) -> FleetAutopilotAdapter:
@@ -111,6 +113,8 @@ class UnifiedAgentRegistryService:
         budget = launch.budget
         if budget is None:
             raise AgentRegistryError("explicit budget is required for unified admission")
+        if launch.agent_id in self._receipts:
+            raise AgentRegistryError("agent already admitted")
         lineage = launch.lineage or AgentLineage(launch.parent_id or launch.agent_id)
         if lineage.depth > budget.max_depth:
             raise AgentRegistryError("lineage depth exceeds budget")
@@ -123,26 +127,38 @@ class UnifiedAgentRegistryService:
             children = self._children.get(launch.parent_id, 0)
             if children >= budget.max_children:
                 raise AgentRegistryError("child budget exhausted")
-        receipt = AdmissionReceipt(launch.agent_id, lineage.root_id, lineage.depth, budget)
+        receipt = AdmissionReceipt(
+            launch.agent_id, lineage.root_id, lineage.depth, budget, launch.parent_id or "",
+        )
+        self._receipts[launch.agent_id] = receipt
         self._active[lineage.root_id] = active + 1
         if launch.parent_id:
             self._children[launch.parent_id] = self._children.get(launch.parent_id, 0) + 1
         return receipt
 
     def _release(self, receipt: AdmissionReceipt) -> None:
-        self._active[receipt.root_id] = max(0, self._active.get(receipt.root_id, 1) - 1)
-        if self._active[receipt.root_id] == 0:
+        # Exactly-once: only the receipt still registered for this agent is released.
+        if self._receipts.get(receipt.agent_id) is not receipt:
+            return
+        del self._receipts[receipt.agent_id]
+        remaining = self._active.get(receipt.root_id, 0) - 1
+        if remaining > 0:
+            self._active[receipt.root_id] = remaining
+        else:
             self._active.pop(receipt.root_id, None)
+        if receipt.parent_id:
+            children = self._children.get(receipt.parent_id, 0) - 1
+            if children > 0:
+                self._children[receipt.parent_id] = children
+            else:
+                self._children.pop(receipt.parent_id, None)
 
     def _release_by_agent(self, agent_id: str) -> None:
-        # A cancelled/ stopped backend record is terminal; release the single
-        # process-local reservation conservatively without fabricating state.
-        for root_id, count in tuple(self._active.items()):
-            if count:
-                self._active[root_id] = count - 1
-                if self._active[root_id] <= 0:
-                    self._active.pop(root_id, None)
-                break
+        # Release only the reservation admitted for this agent; unknown or
+        # already-released ids are a no-op.
+        receipt = self._receipts.get(agent_id)
+        if receipt is not None:
+            self._release(receipt)
 
     @staticmethod
     def _status(value: Any) -> str:

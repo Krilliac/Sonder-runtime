@@ -330,3 +330,18 @@ class TestServeWiring:
             or "acquire_request_slot(mutating=True, owner=_admission_request_owner(context))"
             in source
         ), "the chat endpoint must admit under the caller's opaque owner key"
+
+
+def test_mutation_losing_drain_race_after_slot_is_rejected_and_slot_released(monkeypatch):
+    lifecycle = _lifecycle(owner_max_inflight=2)
+    monkeypatch.setattr(lifecycle.coordinator, "begin_mutation", lambda: False)
+    with pytest.raises(AdmissionRejected) as excinfo:
+        with lifecycle.acquire_request_slot(mutating=True, owner="ao-alice"):
+            raise AssertionError("an uncounted mutation must not run")
+    assert excinfo.value.code == "DRAINING"
+    assert excinfo.value.status == 503
+    assert lifecycle._owner_inflight == {}
+    assert lifecycle._active_requests == 0
+    # The execution slot was returned: a read-only request still admits.
+    with lifecycle.acquire_request_slot(mutating=False, owner="ao-alice"):
+        pass
