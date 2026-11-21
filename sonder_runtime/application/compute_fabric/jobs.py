@@ -1005,9 +1005,18 @@ class ComputeJobWorker:
             marker = directory / "receipt.json"
             if not marker.exists():
                 marker = directory / "binding.json"
-            if marker.is_symlink() or not marker.is_file():
+            if marker.is_symlink():
                 raise InvalidInput("compute artifact spool binding is unavailable")
-            if directory.name != excluded and marker.stat().st_mtime <= cutoff:
+            if marker.exists():
+                if not marker.is_file():
+                    raise InvalidInput("compute artifact spool binding is unavailable")
+                stamp = marker.stat().st_mtime
+            else:
+                # An interrupted stage (crash or I/O failure between creating
+                # the directory and writing binding.json): age it by the
+                # directory itself so it is reaped instead of wedging the scan.
+                stamp = directory.lstat().st_mtime
+            if directory.name != excluded and stamp <= cutoff:
                 stage, _ = self._artifact_root.child(directory.name)
                 with stage:
                     for item in os.scandir(stage.path):

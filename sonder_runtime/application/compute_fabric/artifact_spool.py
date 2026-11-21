@@ -385,7 +385,17 @@ class PrivateDirectoryAnchor:
     @classmethod
     def open_base(cls, path: Path, *, require_new: bool = False) -> "PrivateDirectoryAnchor":
         raw = Path(os.path.abspath(str(path)))
+        # Reject any symlink or junction among the original ancestors before
+        # canonicalizing: realpath follows them, which would otherwise make the
+        # ancestor check in __init__ vacuous for open_base callers.
+        for ancestor in (raw.parent, *raw.parent.parents):
+            if _is_reparse(ancestor):
+                raise ArtifactSpoolError("private artifact spool traverses a symlink or junction")
         raw.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # With no reparse component present, realpath only expands Windows 8.3
+        # short names and case variants, so later identity checks compare like
+        # with like.
+        raw = Path(os.path.realpath(raw.parent)) / raw.name
         return cls(raw, create=True, require_new=require_new)
 
     def _open(self) -> None:
