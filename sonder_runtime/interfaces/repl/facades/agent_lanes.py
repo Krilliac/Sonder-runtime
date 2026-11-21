@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import re
+import time
 import unicodedata
 import uuid
 
 from ....application.context import local_owner_context
 
 PAGE_SIZE = 20
+CONTEXT_TIMEOUT_SECONDS = 60
 HELP = """/lanes list [cursor]
 /lanes show <lane-id> [cursor]
 /lanes message <lane-id> <text>
@@ -148,7 +151,7 @@ class LaneConsoleFacade:
                 correlation_id="console-lanes-" + uuid.uuid4().hex,
                 source="repl",
                 workspace_roots=roots,
-                timeout_seconds=60,
+                timeout_seconds=CONTEXT_TIMEOUT_SECONDS,
                 remote_ollama_allowed=application.config.ollama.allow_remote,
             )
             service = application.agent_lanes()
@@ -318,13 +321,22 @@ class LaneConsoleFacade:
         allowed, reason = self._approve(approval_arguments)
         if not allowed:
             return "Lane action refused: " + str(reason)
+        # The operator's think time is not part of the request budget: the
+        # deadline restarts once the approval returns, and every scope check
+        # below still re-validates what was approved against live state.
+        context = replace(
+            context, deadline_monotonic=time.monotonic() + CONTEXT_TIMEOUT_SECONDS
+        )
         command = json.loads(encoded)
         if context.expired or context.cancellation.cancelled:
             raise PermissionError("console request expired or cancelled")
         current_config = self._factory().config
+        # Derived exactly as run() derived context.workspace_roots, so an
+        # unchanged configuration with an unavailable root still compares equal.
         configured = tuple(
             Path(root).resolve() for root in current_config.state.workspace_roots
         )
+        configured = tuple(root for root in configured if root.is_dir())
         if current_config.ollama.allow_remote != context.remote_ollama_allowed:
             raise PermissionError("remote model permission changed after approval")
         if set(configured) != set(context.workspace_roots):
