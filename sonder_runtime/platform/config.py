@@ -72,6 +72,11 @@ from sonder_runtime.platform.gpu_admission_config import (
     GpuAdmissionConfig, apply_gpu_admission_environment, gpu_admission_errors,
 )
 from sonder_runtime.platform import unsafe_lab_policy
+from sonder_runtime.platform.rpc_sharding_config import (
+    RPC_PEERS_ENV,
+    RpcShardingConfigError,
+    rpc_peer_allowlist,
+)
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
     env_bool,
@@ -1872,6 +1877,39 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
     return errors
 
 
+def _rpc_sharding_errors(env: dict[str, str]) -> list[str]:
+    """Fail closed on the opt-in llama.cpp RPC sharding settings.
+
+    Unset or blank ``SONDER_RPC_PEERS`` means sharding is inactive and only
+    ``SONDER_RPC_PORT`` is checked. Once peers are configured every entry must
+    pass the allowlist policy in ``rpc_sharding_config`` and the
+    OpenAI-compatible base URL must name the loopback sharded llama-server.
+    """
+    try:
+        allowlist = rpc_peer_allowlist(env)
+    except RpcShardingConfigError as exc:
+        return [str(exc)]
+    if not allowlist.active:
+        return []
+    base_url = str(env.get("SONDER_OPENAI_BASE_URL", "") or "").strip()
+    if not base_url:
+        return [
+            f"{RPC_PEERS_ENV} is set, so SONDER_OPENAI_BASE_URL must name the "
+            "loopback sharded llama-server (for example http://127.0.0.1:11438)"
+        ]
+    try:
+        parsed = urlsplit(base_url)
+        hostname = parsed.hostname
+    except ValueError:
+        return [f"{RPC_PEERS_ENV} is set, but SONDER_OPENAI_BASE_URL is not a valid URL"]
+    if parsed.scheme not in ("http", "https") or not _is_loopback_host(hostname):
+        return [
+            f"{RPC_PEERS_ENV} is set, so SONDER_OPENAI_BASE_URL must be an http(s) "
+            "loopback URL; the sharded llama-server never listens off-host"
+        ]
+    return []
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(_context_root_errors(config))
     try:
@@ -2580,6 +2618,7 @@ def load_config(
             setting="[observability].live_export_origins",
         ),
     ))
+    errors.extend(_rpc_sharding_errors(merged_env))
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)

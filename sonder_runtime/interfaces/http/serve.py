@@ -97,7 +97,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
-from sonder_runtime.adapters.inference import startup_prewarm
+from sonder_runtime.adapters.inference import rpc_cluster, startup_prewarm
 import sonder_runtime.adapters.cloud_model_refresh_schedule as cloud_model_refresh_schedule
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
@@ -8187,7 +8187,6 @@ def main(
 
         if _SESSION_FACADE is None:
             from sonder_runtime.bootstrap.app import default_app
-            from sonder_runtime.application.session.http_facade import HttpSessionFacade
 
             application = default_app(config=config)
             configure_session_facade(application.session_http_facade())
@@ -8287,6 +8286,7 @@ def main(
             origin=server.BASE, thread_factory=owned_runtime_thread, stop=cloud_refresh_stop)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        rpc_cluster.start_sharded_backend_probe(thread_factory=owned_runtime_thread)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())

@@ -86,6 +86,7 @@ sonder_runtime/adapters/inference/openai_protocol_probe.py
 sonder_runtime/adapters/inference/overflow_availability.py
 sonder_runtime/adapters/inference/prefix_cache.py
 sonder_runtime/adapters/inference/prewarm_gate.py
+sonder_runtime/adapters/inference/rpc_cluster.py
 sonder_runtime/adapters/inference/runner_footprint.py
 sonder_runtime/adapters/inference/served_tier_models.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
@@ -617,6 +618,7 @@ sonder_runtime/platform/netns_probe.py
 sonder_runtime/platform/npu_policy.py
 sonder_runtime/platform/process.py
 sonder_runtime/platform/reference_library_config.py
+sonder_runtime/platform/rpc_sharding_config.py
 sonder_runtime/platform/secret_presence.py
 sonder_runtime/platform/security_eval_config.py
 sonder_runtime/platform/spanda_http.py

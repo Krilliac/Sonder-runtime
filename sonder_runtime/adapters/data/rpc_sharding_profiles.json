@@ -1,0 +1,18 @@
+{
+  "profiles": {
+    "balanced-equal-vram": {
+      "worker_device": "",
+      "tensor_split": "1,1",
+      "ctx_size": 16384,
+      "n_gpu_layers": 999,
+      "notes": "Main and worker GPUs with similar free VRAM: split layers evenly."
+    },
+    "main-heavy-small-worker": {
+      "worker_device": "",
+      "tensor_split": "7,1",
+      "ctx_size": 4096,
+      "n_gpu_layers": 999,
+      "notes": "Worker with a small GPU or a shared-memory integrated GPU: keep most layers on the main GPU. Prefer a single-machine model when one fits."
+    }
+  }
+}
