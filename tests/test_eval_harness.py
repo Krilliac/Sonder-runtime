@@ -259,6 +259,74 @@ def test_case_wall_clock_timeout():
     assert case["failure"]["kind"] == "case_timeout"
 
 
+def _run_abandoned_case(gate_on):
+    """Time out a 3-attempt case whose worker is parked at `gate_on`
+    ("generate" call 2 or "exec" call 1), release it, and return the call
+    counters plus the outcome of a following case."""
+    import threading
+    release = threading.Event()
+    provider = eh.ReplayProvider(_cassette({
+        "slow": [{"response": BUGGY}, {"response": BUGGY},
+                 {"response": GOOD}],
+        "double": [{"response": GOOD}]}))
+    inner = provider.for_case("slow")
+    real_generate = inner.generate
+    calls = {"generate": 0, "exec": 0}
+
+    def gated_generate(prompt, history=None):
+        calls["generate"] += 1
+        if gate_on == "generate" and calls["generate"] == 2:
+            release.wait(5)
+        return real_generate(prompt)
+    inner.generate = gated_generate
+
+    def counting_run_code(code, check, timeout=8):
+        calls["exec"] += 1
+        if gate_on == "exec" and calls["exec"] == 1:
+            release.wait(5)
+        return _fake_run_code(code, check, timeout)
+
+    real_for_case = provider.for_case
+    provider.for_case = lambda sid: inner if sid == "slow" else real_for_case(sid)
+
+    slow = eh.run_case(_scenario(id="slow", max_attempts=3), provider,
+                       run_code_fn=counting_run_code, case_timeout=0.3)
+    assert slow["status"] == "timeout"
+    release.set()
+    time.sleep(0.5)
+    nxt = eh.run_case(_scenario(id="double"), provider,
+                      run_code_fn=counting_run_code)
+    return calls, nxt
+
+
+def test_timed_out_case_does_not_consume_next_cases_recordings():
+    calls, nxt = _run_abandoned_case("generate")
+    assert nxt["status"] == "pass"
+    # Released at generate call 2: the worker must not grade that response
+    # (exec stays at the 1 call made before the timeout) nor generate a 3rd
+    # time. (The next case's own exec adds 1; its generate uses another handle.)
+    assert calls["generate"] == 2
+    assert calls["exec"] == 1 + 1
+
+
+def test_abandoned_worker_does_not_generate_after_exec_release():
+    calls, nxt = _run_abandoned_case("exec")
+    assert nxt["status"] == "pass"
+    # Released inside exec call 1: the worker must not start generate call 2.
+    # (The next case's own exec adds 1; its generate uses another handle.)
+    assert calls["generate"] == 1
+    assert calls["exec"] == 1 + 1
+
+
+def test_recording_case_handle_keeps_its_scenario_id():
+    inner = eh.CallableProvider(lambda p: GOOD, name="live", deterministic=False)
+    rec = eh.RecordingProvider(inner, "unit")
+    first = rec.for_case("a")
+    rec.begin_case("b")
+    first.generate("p")
+    assert list(rec.cassette["entries"]) == ["a"]
+
+
 def test_case_exec_timeout_kind():
     hang = "```python\ndef double(x):\n    while True:\n        pass\n```"
     scenario = _scenario(timeout_s=1, max_attempts=1)
