@@ -1524,6 +1524,32 @@ def test_empty_length_without_explicit_thinking_retries_once_with_thinking_off()
     assert gateway.last_response_meta["empty_length_recovered"] is True
 
 
+def test_empty_length_retry_is_sent_under_the_pinned_trust_anchor(tmp_path):
+    # A private worker's ca_bundle is its only trust anchor; the non-thinking
+    # repair POST must be sent inside the same trust_scope as the first one.
+    ca_bundle = str(tmp_path / "worker-ca.pem")
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    responses = iter((first, _chat("OK")))
+    anchors = []
+
+    def chat(*_args):
+        anchors.append(getattr(gateway_module._TRUST, "ca_bundle", ""))
+        return next(responses)
+
+    fake = FakeInference(chat=chat)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(ca_bundle=ca_bundle), transport=fake.post,
+        get_transport=fake.get, env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    response = gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert response.text == "OK"
+    assert anchors == [ca_bundle, ca_bundle]
+    assert getattr(gateway_module._TRUST, "ca_bundle", "") == ""
+
+
 @pytest.mark.parametrize("think", [True, False])
 def test_empty_length_with_explicit_thinking_choice_is_not_replayed(think):
     first = _chat("")
