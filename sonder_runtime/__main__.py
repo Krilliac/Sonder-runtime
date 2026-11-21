@@ -20,6 +20,7 @@ Commands:
     eval-history  inspect or explicitly record precomputed evaluation evidence
     openrouter    list OpenRouter models / account credits, map a tier to a model
     anthropic     Anthropic provider status: key slots, SDK, today's spend vs cap
+    models        cloud-refresh: retire / record / ladder-rebind Ollama cloud models
 """
 from __future__ import annotations
 
@@ -1468,6 +1469,8 @@ def cmd_mcp(args) -> int:
         try:
             from sonder_runtime.bootstrap.app import start_inference_membership
             start_inference_membership(application)
+            from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
+            start_scheduled_refresh(origin=config.ollama.url)
             # run_native_mcp returns the number of frames served, not a
             # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
@@ -1522,6 +1525,8 @@ def cmd_mcp(args) -> int:
         configure_legacy_application(owned_application)
         from sonder_runtime.bootstrap.app import start_inference_membership
         start_inference_membership(owned_application)
+        from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
+        start_scheduled_refresh(origin=config.ollama.url)
 
     from sonder_runtime.adapters.security import unsafe_lab
 
@@ -1835,6 +1840,14 @@ def cmd_capabilities(args) -> int:
     return 0 if all(item["status"] == "measured" for item in result["models"]) else 1
 
 
+def cmd_models(args) -> int:
+    from sonder_runtime.bootstrap.cloud_models_cli import run_cloud_refresh
+
+    config = _load_config(args)
+    _configure_typed_home(config)
+    return run_cloud_refresh(args, origin=config.ollama.url, home=config.state.home or None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ProductionArgumentParser(
         prog="python -m sonder_runtime",
@@ -1868,6 +1881,9 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--timeout", type=float, default=120.0, help="wall seconds per model, maximum 300")
     cp.add_argument("--context-tokens", type=int, default=None, help="num_ctx used by probes and identity")
     cp.set_defaults(func=cmd_capabilities)
+    from sonder_runtime.bootstrap.cloud_models_cli import add_parser as add_models_parser
+
+    add_models_parser(sub, common=common, func=cmd_models)
 
     p = sub.add_parser("preflight", help="run startup checks, do not bind")
     common(p, ollama_flag=True)
