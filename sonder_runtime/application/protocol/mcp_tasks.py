@@ -144,7 +144,13 @@ class McpTaskHandler:
                 if not isinstance(reason, str) or not reason.strip():
                     raise InvalidInput("cancel reason must be a non-empty string")
                 records = tuple(self._jobs.cancel(task_id, reason=reason))
-                record = records[-1] if records else self._jobs.get(task_id)
+                # Cascading cancel returns the root first, then descendants;
+                # project the requested task, never a descendant.
+                record = next(
+                    (r for r in records if r.identity.job_id == task_id), None,
+                )
+                if record is None:
+                    record = self._jobs.get(task_id)
             else:
                 record = self._jobs.get(task_id)
             return project_job(
