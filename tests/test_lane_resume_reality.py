@@ -252,3 +252,46 @@ def test_real_certificate_cannot_survive_resume_workspace_change(tmp_path):
     verdict = verifier.validate(parent["parent_session_id"], prepared.verification_id,
                                 context=context, bound_parent_revision=1)
     assert not verdict.valid and verdict.code == "STALE_OR_UNAVAILABLE"
+
+
+def _service(tmp_path, model, reality):
+    sessions = SQLiteSessionRepository(tmp_path / "sessions.db")
+    store = SQLiteAgentLaneStore(tmp_path / "lanes.db", sessions)
+    service = AgentLaneService(store, sessions, model, auto_start=False, workspace_reality=reality)
+    root = tmp_path / "child"
+    root.mkdir()
+    context = local_owner_context(correlation_id="test", workspace_roots=(tmp_path,))
+    created = service.spawn(
+        command_id="spawn", parent_session_id="parent", task="inspect",
+        workspace_root=str(root), context=context,
+    )
+    return service, store, context, created["lane"]["id"]
+
+
+def test_send_message_requeue_of_completed_lane_revalidates_workspace(tmp_path):
+    model, reality = _Model(), _Reality()
+    service, store, context, lane_id = _service(tmp_path, model, reality)
+    service.run_pending(lane_id, context)
+    assert service.inspect(lane_id, context)["lane"]["status"] == "completed"
+    reality.changed = True
+    service.send_message(
+        lane_id, command_id="m", content="again", author="user", context=context
+    )
+    assert store.read_lane(lane_id)["resume_reality"]["pending"] is True
+    service.run_pending(lane_id, context)
+    assert reality.revalidations == 1
+    assert "resume reality delta" in model.requests[-1].prompt.casefold()
+
+
+def test_output_budget_overrun_commits_charge_and_fails_terminally(tmp_path):
+    class _Big:
+        def generate(self, request, context):
+            return ModelResponse("big", "fake", request.tier, tokens_out=10**6)
+
+    service, store, context, lane_id = _service(tmp_path, _Big(), _Reality())
+    service.run_pending(lane_id, context)
+    lane = store.read_lane(lane_id)
+    assert lane["pending_effect"] is False
+    assert lane["used_tokens"] >= 10**6
+    assert lane["status"] == "failed"
+    assert lane["error"] == "BUDGET_EXHAUSTED"

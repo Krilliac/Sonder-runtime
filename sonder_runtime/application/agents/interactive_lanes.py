@@ -1374,6 +1374,12 @@ class AgentLaneService:
                     owner="",
                     error="",
                 )
+                if self.workspace_reality is not None:
+                    # Same barrier as control("resume"): the workspace may have
+                    # changed since the completed attempt sealed its snapshot.
+                    lane["resume_reality"] = dict(
+                        lane.get("resume_reality") or {}, pending=True
+                    )
                 schedule = True
             message_id = tx.message(lane, content, author)
             tx.save(lane)
@@ -2484,6 +2490,7 @@ class AgentLaneService:
                         and measured >= 0
                         else len(text)
                     )
+                    budget_overrun = False
                     with self.store.transaction() as tx:
                         lane = tx.lane(lane_id)
                         if lane["owner"] != self.owner:
@@ -2491,40 +2498,47 @@ class AgentLaneService:
                         lane["pending_effect"] = False
                         lane["used_tokens"] += charged
                         if lane["used_tokens"] > lane["max_output_tokens"]:
-                            raise TimeoutError("lane output budget exhausted")
-                        sequence = tx.emit(
-                            lane,
-                            "model.response",
-                            {
-                                "content": text,
-                                "turn_id": turn_id,
-                                "request_id": request_id,
-                                **prefix_stats,
-                            },
-                        )
-                        if prefix_stats:
-                            tx.emit(
+                            # Commit the paid-for charge and the cleared effect;
+                            # raising inside the transaction would roll both back
+                            # and leave the lane unresumable.
+                            tx.save(lane)
+                            budget_overrun = True
+                        else:
+                            sequence = tx.emit(
                                 lane,
-                                "inference.decode",
+                                "model.response",
                                 {
-                                    "step": lane["used_steps"],
+                                    "content": text,
                                     "turn_id": turn_id,
                                     "request_id": request_id,
-                                    "summary": "step %s cache_n=%s prompt_n=%s" % (
-                                        lane["used_steps"],
-                                        prefix_stats.get("cache_n"),
-                                        prefix_stats.get("prompt_n"),
-                                    ),
                                     **prefix_stats,
                                 },
                             )
-                        lane["pending_response"] = dict(
-                            text=text,
-                            source_sequence=sequence,
-                            attempt_id=lane["attempt_id"],
-                        )
-                        tx.handled(lane, [m["id"] for m in messages])
-                        tx.save(lane)
+                            if prefix_stats:
+                                tx.emit(
+                                    lane,
+                                    "inference.decode",
+                                    {
+                                        "step": lane["used_steps"],
+                                        "turn_id": turn_id,
+                                        "request_id": request_id,
+                                        "summary": "step %s cache_n=%s prompt_n=%s" % (
+                                            lane["used_steps"],
+                                            prefix_stats.get("cache_n"),
+                                            prefix_stats.get("prompt_n"),
+                                        ),
+                                        **prefix_stats,
+                                    },
+                                )
+                            lane["pending_response"] = dict(
+                                text=text,
+                                source_sequence=sequence,
+                                attempt_id=lane["attempt_id"],
+                            )
+                            tx.handled(lane, [m["id"] for m in messages])
+                            tx.save(lane)
+                    if budget_overrun:
+                        raise TimeoutError("lane output budget exhausted")
                     self._done()
                     _record_prefix_activity(
                         self._activity_observer, lane["used_steps"], prefix_stats,
