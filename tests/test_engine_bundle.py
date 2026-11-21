@@ -191,6 +191,21 @@ def test_installs_model_store_atomically_and_reuses_verified_files(tmp_path):
     assert not list(destination.rglob(".*.*"))
 
 
+def test_install_replaces_regular_model_file_of_different_size(tmp_path):
+    root = make_bundle(tmp_path)
+    bundle = engine_bundle.load_engine_bundle(root)
+    home = tmp_path / "home"
+    destination, _, _ = engine_bundle.install_model_store(bundle, home)
+    record = next(item for item in bundle.files if item.relative.parts[0] == "models")
+    target = destination / Path(*record.relative.parts[1:])
+    target.write_bytes(b"truncated" + b"x" * (record.size + 7))
+
+    _, copied, reused = engine_bundle.install_model_store(bundle, home)
+
+    assert copied == 1
+    assert engine_bundle.sha256_file(target) == record.sha256
+
+
 def test_runtime_environment_uses_explicit_bundle_paths(tmp_path, monkeypatch):
     root = make_bundle(tmp_path)
     bundle = engine_bundle.load_engine_bundle(root)
