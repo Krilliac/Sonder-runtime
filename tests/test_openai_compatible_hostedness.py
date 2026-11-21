@@ -219,3 +219,22 @@ def test_remote_openai_compatible_rung_system_prompt_has_no_local_profile(monkey
     for marker in ("LOCAL-PROFILE", "LOCAL-EMOTIONS", "LOCAL-GOAL"):
         assert marker not in hosted
     assert "base rules" in hosted
+
+
+@pytest.mark.parametrize("url", [
+    "http://0.0.0.0:8080",
+    "ftp://127.0.0.1:8080",
+    "http://user:pass@127.0.0.1:8080",
+])
+def test_unusable_or_unspecified_endpoints_are_not_verified_loopback(url):
+    assert _openai(url).endpoint_is_loopback() is False
+
+
+def test_subclass_gateways_do_not_inherit_the_openai_env_probe(monkeypatch):
+    from sonder_runtime.adapters.inference.openrouter_gateway import OpenRouterGateway
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
+
+    monkeypatch.setenv("SONDER_OPENAI_BASE_URL", _LOCAL)
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://remote-inference.example.com")
+    assert OpenRouterGateway().endpoint_is_loopback() is False
+    assert SonderInferenceGateway().endpoint_is_loopback() is False

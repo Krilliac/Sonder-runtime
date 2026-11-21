@@ -381,8 +381,20 @@ class OpenAICompatibleGateway:
         resolve (the injected config, else ``SONDER_OPENAI_BASE_URL``).  No I/O;
         an unset or unparsable endpoint is not loopback.
         """
-        base_url = self._config.base_url if self._config is not None else _env_base_url()
-        return bool(base_url) and self._is_loopback(base_url)
+        try:
+            # The hook subclasses override, so a subclass never reads this
+            # class's SONDER_OPENAI_BASE_URL for its own endpoint.
+            base_url = self._resolved_config().base_url
+        except InvalidInput:
+            return False
+        parts = urlsplit_or_none(base_url)
+        if parts is None or parts.scheme not in ("http", "https"):
+            return False
+        if parts.username is not None or parts.password is not None:
+            return False
+        if (parts.hostname or "").lower() == "0.0.0.0":
+            return False  # unspecified address, not a verified loopback
+        return self._is_loopback(base_url)
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
