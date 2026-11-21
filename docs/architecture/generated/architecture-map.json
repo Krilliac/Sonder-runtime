@@ -523,7 +523,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 426,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -696,6 +696,7 @@
         "sonder_runtime/application/memory/playbook_context.py",
         "sonder_runtime/application/memory/procedural_learning.py",
         "sonder_runtime/application/memory/recall_service.py",
+        "sonder_runtime/application/memory/receipt_bound_fact_promotion.py",
         "sonder_runtime/application/memory/receipt_observation.py",
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
