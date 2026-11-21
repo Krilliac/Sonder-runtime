@@ -9133,6 +9133,17 @@ def permission_approve(
     try:
         if call_id:
             pending = ledger.resolve_call(call_id)
+            if not pending.complete:
+                # The operator cannot see all of what the digest binds; they
+                # approve it by giving the full arguments instead.
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "call %s's preview does not show everything the approval "
+                    "would cover (%s); approve it with /approve call %s <arguments "
+                    "json> giving its full arguments" % (
+                        pending.call_id, pending.preview.split("]", 1)[0].lstrip("["),
+                        pending.tool,
+                    )
+                )
             target, digest, preview = pending.tool, pending.digest, pending.preview
         elif tool and arguments_json:
             try:
@@ -9147,7 +9158,7 @@ def permission_approve(
                 )
             target = str(tool or "").strip().lstrip("/")
             digest = permission_modes.call_digest(target, arguments)
-            preview = permission_modes.argument_preview(arguments)
+            preview = permission_modes.preview_fields(arguments)
             if not digest:
                 raise approval_ledger_module.ApprovalLedgerError(
                     "that call has no canonical form and cannot be approved"
@@ -10753,7 +10764,7 @@ def _isolated_write_approved() -> tuple[bool, str]:
     try:
         ledger.record_pending(
             "isolated_run", digest, surface="tool",
-            preview=permission_modes.argument_preview(args),
+            preview=permission_modes.preview_fields(args),
         )
     except Exception:
         pass

@@ -482,6 +482,16 @@ BULK_ARGUMENTS = frozenset({
 
 CALL_ID_CHARS = 16
 
+# The longest line ``argument_preview`` returns; the same bound as the approval
+# ledger's ``MAX_PREVIEW_CHARS``. Values are not cut one by one: an operator
+# approving a call by its id must be able to read every non-bulk argument it
+# binds (a command padded past a per-value cut once hid its harmful tail). A
+# longer line is cut, ends in the ledger's ``PREVIEW_TRUNCATED`` and is led by
+# its ``PREVIEW_INCOMPLETE`` mark. The ledger redacts what it stores, so the
+# stored preview can show less than this line; it then carries the same mark
+# and the call is approvable only with its full arguments.
+PREVIEW_CHARS = 2000
+
 
 def _call_body(arguments) -> dict | None:
     if arguments is None:
@@ -520,17 +530,19 @@ def call_id(digest: str) -> str:
     return str(digest or "")[:CALL_ID_CHARS]
 
 
-def argument_preview(arguments, limit: int = 200) -> str:
-    """A bounded, content-free line naming what a call was about.
+def preview_fields(arguments) -> list[tuple[str, str, bool]]:
+    """``(key, value, literal)`` for every argument a call binds, sorted.
 
-    Keys and short scalar values, credential knobs omitted, bulk payloads
-    shown only by their length. This is what ``/approvals`` shows an operator
-    next to a call id; it identifies the call without reproducing it.
+    Credential knobs omitted; bulk payloads given only by their length; other
+    values in full -- strings as they are, anything else as JSON (``literal``,
+    shown unquoted). This is what the approval ledger stores as a pending
+    call's preview (``approval_ledger.render_preview``), redacting each
+    ``key=value`` field as one unit.
     """
     body = _call_body(arguments)
     if not body:
-        return ""
-    parts = []
+        return []
+    fields = []
     for key in sorted(body):
         value = body[key]
         if key in BULK_ARGUMENTS:
@@ -538,22 +550,31 @@ def argument_preview(arguments, limit: int = 200) -> str:
                 size = len(value) if isinstance(value, (str, bytes, list, tuple, dict)) else len(str(value))
             except Exception:
                 size = 0
-            parts.append("%s=<%d chars>" % (key, size) if isinstance(value, str)
-                         else "%s=<%d items>" % (key, size))
+            fields.append((key, ("<%d chars>" if isinstance(value, str) else "<%d items>") % size, True))
             continue
         if isinstance(value, str):
-            text = value
-        else:
-            try:
-                text = json.dumps(value, sort_keys=True, default=str, ensure_ascii=True)
-            except (TypeError, ValueError):
-                text = str(value)
-        text = text.replace("\r", " ").replace("\n", " ")
-        if len(text) > 40:
-            text = text[:37] + "..."
-        parts.append("%s=%s" % (key, text))
-    line = " ".join(parts)
-    return line if len(line) <= limit else line[:limit - 3] + "..."
+            fields.append((key, value, False))
+            continue
+        try:
+            fields.append((key, json.dumps(value, sort_keys=True, default=str, ensure_ascii=True), True))
+        except (TypeError, ValueError):
+            fields.append((key, str(value), False))
+    return fields
+
+
+def argument_preview(arguments, limit: int = PREVIEW_CHARS) -> str:
+    """``preview_fields`` as one bounded, unredacted ``key=value`` line.
+
+    Keys and string values are shown bare only when they are a single plain
+    token, JSON-quoted (control, bidi and other non-ASCII characters escaped)
+    otherwise. A line over ``limit`` is cut, ends in ``PREVIEW_TRUNCATED`` and
+    starts with ``PREVIEW_INCOMPLETE`` (both the ledger's). What the ledger
+    stores and ``/approvals`` shows is this line after redaction, which may
+    show less (and is then marked the same way).
+    """
+    from sonder_runtime.adapters.security import approval_ledger
+
+    return approval_ledger.render_preview(preview_fields(arguments), limit=limit)
 
 # Read-only branches of a slash command that fronts a dangerous tool, graded
 # because they were declared. ``/selfmod status`` reads
@@ -1767,7 +1788,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 try:
                     ledger.record_pending(
                         name, digest, surface=surface,
-                        preview=argument_preview(arguments),
+                        preview=preview_fields(arguments),
                     )
                 except Exception:
                     # The ledger is a route out, not the gate: a ledger that

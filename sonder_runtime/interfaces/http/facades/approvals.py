@@ -304,6 +304,12 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
     if wanted_tool is not None and str(wanted_tool).strip().lstrip("/") != pending.tool:
         return _error(409, "CALL_DIGEST_MISMATCH",
                       "call %s is a %s call, not %s" % (pending.call_id, pending.tool, wanted_tool))
+    if not pending.complete:
+        return _error(409, "PREVIEW_INCOMPLETE",
+                      "call %s's preview does not show everything the approval would "
+                      "cover (redacted or truncated); approve it at the console with "
+                      "/approve call %s <arguments json> giving its full arguments"
+                      % (pending.call_id, pending.tool))
     with _ISSUE_LOCK:
         now = time.time()
         for existing in ledger.approvals(include_spent=False, limit=200):
