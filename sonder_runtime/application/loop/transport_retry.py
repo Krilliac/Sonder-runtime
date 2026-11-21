@@ -6,13 +6,13 @@ explicit: idempotency state is written before dispatch, retry evidence is
 retained, unknown outcomes require reconciliation, and untyped failures fail
 closed instead of being guessed into a retryable class.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import time
-from typing import Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from ...domain.cancellation_tree import CancellationNode
 from ...domain.loop_retry_policy import ReplayAction, SideEffectClass
@@ -24,8 +24,11 @@ from .durable_control import (
     RetryEvidenceLedger,
 )
 
+if TYPE_CHECKING:
+    from ...domain.loop_retry_policy import RetryDecision
 
-RequestT = TypeVar("RequestT")
+
+RequestT = TypeVar("RequestT", contravariant=True)  # noqa: PLC0105
 ResponseT = TypeVar("ResponseT")
 
 
@@ -126,12 +129,12 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
         fingerprint: str,
         idempotency_key: str,
         max_attempts: int = 3,
-        effect: SideEffectClass = SideEffectClass.IDEMPOTENT,
+        effect: SideEffectClass | str = SideEffectClass.IDEMPOTENT,
         traits: ToolTraits | None = None,
     ) -> RetryExecutionResult[ResponseT]:
         self._validate(operation_id, fingerprint, idempotency_key, max_attempts, effect, traits)
         effect = SideEffectClass(effect)
-        existing = self._idempotency.begin(idempotency_key, fingerprint)
+        existing: IdempotencyReceipt = self._idempotency.begin(idempotency_key, fingerprint)
         if existing.status in {"completed", "reconciled"}:
             return RetryExecutionResult(existing.result, 0, True, ())
 
@@ -212,7 +215,14 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
         self._check_cancelled()
 
     @staticmethod
-    def _decision(failure, attempt, max_attempts, effect, key, traits=None):
+    def _decision(
+        failure: TransportFailure,
+        attempt: int,
+        max_attempts: int,
+        effect: SideEffectClass | str,
+        key: str,
+        traits: ToolTraits | None = None,
+    ) -> RetryDecision:
         from ...domain.loop_retry_policy import retry_decision
 
         decision = retry_decision(
@@ -223,7 +233,14 @@ class TransportRetryExecutor(Generic[RequestT, ResponseT]):
         return decision
 
     @staticmethod
-    def _validate(operation_id, fingerprint, key, max_attempts, effect, traits=None) -> None:
+    def _validate(
+        operation_id: str,
+        fingerprint: str,
+        key: str,
+        max_attempts: int,
+        effect: SideEffectClass | str,
+        traits: ToolTraits | None = None,
+    ) -> None:
         if not str(operation_id).strip() or not str(fingerprint).strip() or not str(key).strip():
             raise ValueError("operation_id, fingerprint, and idempotency_key are required")
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:

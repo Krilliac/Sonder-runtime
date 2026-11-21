@@ -29,7 +29,7 @@ class ExpansionRequest:
 def expand(evidence: tuple[NavigationEvidence, ...], request: ExpansionRequest) -> tuple[NavigationEvidence, ...]:
     roots = set(request.root_ids)
     seeds = set(request.seed_symbols)
-    selected = []
+    selected: list[NavigationEvidence] = []
     frontier = set(seeds)
     for hop in range(request.max_hops + 1):
         if not frontier or len(selected) >= request.max_symbols:

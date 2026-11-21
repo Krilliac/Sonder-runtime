@@ -18,13 +18,41 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, cast, overload
 
 from .resumable_streams import ResumableStream, ResumeBatch, StreamGap
 
+if TYPE_CHECKING:
+    from typing import Protocol, TypeAlias, TypedDict
+
+    class _CatalogBundleLike(Protocol):
+        @property
+        def client(self) -> Mapping[str, object]: ...
+        @property
+        def mcp(self) -> Mapping[str, object]: ...
+        @property
+        def openai(self) -> Mapping[str, object]: ...
+        @property
+        def cli(self) -> Mapping[str, object]: ...
+
+    _CatalogParts: TypeAlias = tuple[
+        Mapping[str, object],
+        Mapping[str, object],
+        Mapping[str, object],
+        Mapping[str, object],
+    ]
+
+    class _UnsignedClientSchema(TypedDict):
+        client: Mapping[str, object]
+        schema: str
+        schema_version: str
+        sdk: Mapping[str, object]
+        source_catalog_digest: str
+        stream: Mapping[str, object]
+
 
 SCHEMA_NAME = "sonder-client-sdk-schema-v1"
-DEFAULT_STREAM_CONTRACT: Mapping[str, Any] = {
+DEFAULT_STREAM_CONTRACT: Mapping[str, object] = {
     "kind": "snapshot-plus-events",
     "sequence": "strictly-increasing",
     "watermark": "opaque-monotonic-integer",
@@ -51,15 +79,23 @@ class ResumeDisposition(str, Enum):
     REJECTED = "rejected"
 
 
-def _canonical(value: Any) -> str:
+def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _digest(value: Any) -> str:
+def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-def _plain(value: Any) -> Any:
+@overload
+def _plain(value: Mapping[str, object]) -> dict[str, object]: ...
+
+
+@overload
+def _plain(value: object) -> object: ...
+
+
+def _plain(value: object) -> object:
     """Convert mappings/sequences to JSON-safe deterministic plain values."""
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
@@ -70,7 +106,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _require_digest(value: Any, label: str = "schema digest") -> str:
+def _require_digest(value: object, label: str = "schema digest") -> str:
     if not isinstance(value, str) or len(value) != 64:
         raise ClientSchemaError(f"{label} must be a SHA-256 hex digest")
     try:
@@ -80,17 +116,22 @@ def _require_digest(value: Any, label: str = "schema digest") -> str:
     return value.lower()
 
 
-def _catalog_parts(catalogs: Any) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+def _catalog_parts(catalogs: _CatalogBundleLike | Mapping[str, object]) -> _CatalogParts:
     """Read a CatalogBundle or equivalent mapping without coupling to it."""
     if hasattr(catalogs, "client"):
-        parts = (catalogs.client, catalogs.mcp, catalogs.openai, catalogs.cli)
+        parts: tuple[object, ...] = (
+            cast("_CatalogBundleLike", catalogs).client,
+            cast("_CatalogBundleLike", catalogs).mcp,
+            cast("_CatalogBundleLike", catalogs).openai,
+            cast("_CatalogBundleLike", catalogs).cli,
+        )
     elif isinstance(catalogs, Mapping):
         parts = tuple(catalogs.get(name, {}) for name in ("client", "mcp", "openai", "cli"))
     else:
         raise ClientSchemaError("catalogs must be a generated catalog bundle or mapping")
     if any(not isinstance(part, Mapping) for part in parts):
         raise ClientSchemaError("catalog projections must be objects")
-    return parts  # type: ignore[return-value]
+    return cast("_CatalogParts", parts)
 
 
 @dataclass(frozen=True)
@@ -100,9 +141,9 @@ class ClientSchema:
     schema: str
     schema_version: str
     source_catalog_digest: str
-    client: Mapping[str, Any]
-    sdk: Mapping[str, Any]
-    stream: Mapping[str, Any]
+    client: Mapping[str, object]
+    sdk: Mapping[str, object]
+    stream: Mapping[str, object]
     digest: str
 
     def __post_init__(self) -> None:
@@ -117,7 +158,7 @@ class ClientSchema:
         if not isinstance(self.stream, Mapping):
             raise ClientSchemaError("stream contract must be an object")
 
-    def unsigned(self) -> dict[str, Any]:
+    def unsigned(self) -> dict[str, object]:
         return {
             "client": _plain(self.client),
             "schema": self.schema,
@@ -127,12 +168,12 @@ class ClientSchema:
             "stream": _plain(self.stream),
         }
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, object]:
         result = self.unsigned()
         result["digest"] = self.digest
         return result
 
-    def freshness(self, advertised_digest: str | None) -> "FreshnessResult":
+    def freshness(self, advertised_digest: str | None) -> FreshnessResult:
         return check_schema_freshness(advertised_digest, self)
 
 
@@ -149,13 +190,13 @@ class FreshnessResult:
 
 
 def build_client_schema(
-    catalogs: Any,
+    catalogs: _CatalogBundleLike | Mapping[str, object],
     *,
-    stream_contract: Mapping[str, Any] | None = None,
+    stream_contract: Mapping[str, object] | None = None,
 ) -> ClientSchema:
     """Build the client and SDK projections from runtime-generated catalogs."""
     client, mcp, openai, cli = _catalog_parts(catalogs)
-    source_digest = getattr(catalogs, "digest", None)
+    source_digest: object = getattr(catalogs, "digest", None)
     if source_digest is None and isinstance(catalogs, Mapping):
         source_digest = catalogs.get("digest")
     if source_digest is None:
@@ -164,7 +205,7 @@ def build_client_schema(
         source_digest = _digest({"client": client, "cli": cli, "mcp": mcp, "openai": openai})
     source_digest = _require_digest(source_digest, "source catalog digest")
     client_projection = _plain(client)
-    sdk_projection = {
+    sdk_projection: dict[str, object] = {
         "commands": _plain(cli.get("commands", ())),
         "events": _plain(client.get("events", ())),
         "mcp": _plain(mcp),
@@ -176,7 +217,7 @@ def build_client_schema(
         if not isinstance(stream_contract, Mapping):
             raise ClientSchemaError("stream_contract must be an object")
         stream.update(_plain(stream_contract))
-    unsigned = {
+    unsigned: _UnsignedClientSchema = {
         "client": client_projection,
         "schema": SCHEMA_NAME,
         "schema_version": str(client.get("schema_version", "1")),
