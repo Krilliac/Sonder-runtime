@@ -1140,6 +1140,131 @@ def test_health_probe_uses_configured_ipv6_loopback(monkeypatch, tmp_path):
     assert seen["url"].startswith("http://[::1]:25435")
 
 
+def _scripted_health_probe(monkeypatch, controller, outcomes):
+    """Drive the real ``_server_state`` through scripted probe outcomes.
+
+    Each outcome is ``"closed"`` (port not reachable), ``"valid"`` (a
+    verified managed payload) or an exception the opener raises.
+    """
+    script = iter(outcomes)
+    current = {}
+
+    class Response:
+        status = 200
+
+        def read(self, size):
+            return json.dumps(
+                sonder_launcher.sonder_health.response_payload(
+                    controller.health_token,
+                    current["nonce"],
+                    controller.server_port,
+                    pid=123,
+                )
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Opener:
+        def open(self, request, timeout):
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            current["nonce"] = headers[
+                sonder_launcher.sonder_health.NONCE_HEADER.lower()
+            ]
+            outcome = current["outcome"]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return Response()
+
+    def reachable(*args, **kwargs):
+        current["outcome"] = next(script)
+        return current["outcome"] != "closed"
+
+    monkeypatch.setattr(sonder_launcher, "_reachable", reachable)
+    monkeypatch.setattr(
+        sonder_launcher.urllib.request, "build_opener", lambda handler: Opener(),
+    )
+
+
+@pytest.mark.parametrize("error", [
+    TimeoutError("timed out"),
+    ConnectionResetError("reset"),
+    urllib.error.URLError(TimeoutError("timed out")),
+])
+def test_health_probe_without_an_answer_is_indeterminate(monkeypatch, tmp_path, error):
+    controller = make_controller(tmp_path)
+    _scripted_health_probe(monkeypatch, controller, [error])
+    assert controller._server_state() == "indeterminate"
+
+
+def test_health_probe_http_error_is_a_foreign_listener(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    error = urllib.error.HTTPError("http://127.0.0.1/", 404, "Not Found", {}, io.BytesIO())
+    _scripted_health_probe(monkeypatch, controller, [error])
+    assert controller._server_state() == "foreign_listener"
+
+
+def test_start_keeps_polling_while_the_bound_runtime_is_not_yet_serving(
+    monkeypatch, tmp_path,
+):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    # initial check: port closed; after start: bound but slow, then verified;
+    # status(): verified.
+    _scripted_health_probe(
+        monkeypatch, controller,
+        ["closed", TimeoutError("timed out"), TimeoutError("timed out"), "valid", "valid"],
+    )
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: (0, "", ["python", "headless", "start"]),
+    )
+
+    payload = controller.action("start")
+
+    assert payload["ok"] is True, payload["last_error"]
+    assert payload["server_state"] == "healthy"
+
+
+def test_initial_check_retries_an_unanswered_probe_before_deciding(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    _scripted_health_probe(
+        monkeypatch, controller, [TimeoutError("timed out"), "valid", "valid"],
+    )
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: pytest.fail("a healthy runtime needs no start"),
+    )
+
+    payload = controller.action("start")
+
+    assert payload.get("ok", True) is True
+    assert "already running" in payload["message"]
+
+
+def test_a_port_that_never_answers_is_refused_before_any_command(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    from sonder_runtime.adapters import launcher_probe
+
+    monkeypatch.setattr(launcher_probe, "INITIAL_PROBE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(controller, "_server_state", lambda: "indeterminate")
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: pytest.fail("an unverified listener must block commands"),
+    )
+
+    payload = controller.action("restart")
+
+    assert payload["ok"] is False
+    assert "unverified listener" in payload["last_error"]
+    assert payload["server_running"] is False
+
+
 def test_launcher_status_reports_only_verified_managed_role(monkeypatch, tmp_path):
     controller = make_controller(tmp_path)
     monkeypatch.setattr(controller, "_server_state", lambda: "healthy")

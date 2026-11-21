@@ -67,6 +67,33 @@ def _identity(value: str, label: str) -> str:
     return value
 
 
+def _open_regular_file(path: Path, refuse: Callable[[], Exception]):
+    """Open ``path`` for binary reading only when it is a regular file.
+
+    The open uses ``O_NONBLOCK`` where the platform has it, so a FIFO at
+    ``path`` cannot block the caller (and any lock it holds) waiting for a
+    writer; the descriptor is checked with ``fstat`` and blocking mode is
+    restored before the stream is returned. Anything that is not a regular
+    file is closed and ``refuse()`` is raised. The caller owns the stream.
+    """
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    flags = (os.O_RDONLY | nonblock | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    descriptor = os.open(path, flags)
+    try:
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            raise refuse()
+        if nonblock:
+            import fcntl
+
+            current = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+            fcntl.fcntl(descriptor, fcntl.F_SETFL, current & ~nonblock)
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _relative(value: str, label: str, *, allow_dot: bool = True) -> str:
     if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
         raise ValueError(f"{label} must be a bounded relative path")
@@ -250,6 +277,8 @@ def _validate_arguments(
         if policy is ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS:
             path_part = value.split("::", 1)[0]
             _relative(path_part, "argument")
+        elif policy is ArgumentPolicy.BOUNDED:
+            _relative(value, "argument")
 
 
 def _validate_envelope_arguments(arguments: tuple[str, ...]) -> None:
@@ -280,6 +309,10 @@ def _relative_argument_paths(
                 paths.append(option_value)
         elif entry.argument_policy is ArgumentPolicy.RELATIVE_PATHS_AND_TEST_SELECTORS:
             paths.append(value.split("::", 1)[0])
+        elif entry.argument_policy is ArgumentPolicy.BOUNDED:
+            # A positional (e.g. cmake --build <dir>) may name a path; resolve-
+            # contain it so a workspace symlink cannot point it outside.
+            paths.append(value)
     return tuple(paths)
 
 
@@ -1258,7 +1291,9 @@ class ComputeJobWorker:
                 target_path = cls._opened_file_path(target)
                 if not target_path.is_relative_to(stage.path):
                     raise InvalidInput("compute artifact snapshot escaped its private root")
-                with candidate.open("rb") as source:
+                with _open_regular_file(candidate, lambda: InvalidInput(
+                    "catalog artifact is not a regular file"
+                )) as source:
                     size = os.fstat(source.fileno()).st_size
                     if shutil.disk_usage(stage.path).free < size + min_free_bytes:
                         raise InvalidInput("compute artifact spool lacks disk space headroom")
@@ -1343,7 +1378,9 @@ class ComputeJobWorker:
                 digest = hashlib.sha256()
                 size = 0
                 try:
-                    with candidate.open("rb") as source, destination.open("xb") as target:
+                    with _open_regular_file(candidate, lambda: ValueError(
+                        "input artifact is not a regular file"
+                    )) as source, destination.open("xb") as target:
                         opened_path = cls._opened_file_path(source)
                         if not opened_path.is_relative_to(root):
                             raise ValueError(

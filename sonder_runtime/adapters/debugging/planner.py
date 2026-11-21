@@ -20,7 +20,10 @@ llvm-symbolizer and dump_syms are planned only for modules whose PE and PDB
 identities verify in pure Python first (GUID and age, ``pdb_matches``); the
 verified pair is staged side by side in the run directory so the symbolizer's
 exe-directory lookup always wins over the binary-controlled RSDS path. A
-mismatched PDB gives ``symbols=mismatch`` and no step.
+mismatched PDB gives ``symbols=mismatch`` and no step. cdb's ``-y``/``-i``
+never name the caller's symbol dirs: PDBs whose GUID/age match a module's
+CodeView record are copied into ``{rundir}\\sym``, and the image path is the
+run's empty ``{rundir}\\img``.
 
 Operator symbol stores come only from platform consent (``SONDER_SYMBOL_STORES``)
 and only when the service has already established network consent. Linux
@@ -73,6 +76,7 @@ from .symbol_dirs import PLACEHOLDER_TEXT, contain_symbol_dirs
 GIB = 1 << 30
 MAX_SYMBOLIZER_STEPS = 3
 MAX_DUMP_SYMS_MODULES = 16
+MAX_CDB_STAGED_PDBS = 16
 PROFILER_MEMORY_BYTES = 2 * GIB
 WINDOWS_DEBUGGER_MEMORY_BYTES = 4 * GIB
 MIN_TIMEOUT = 10
@@ -389,7 +393,8 @@ class HostDebugPlanner:
                 record = self._tool("cdb", required=explicit)
                 if record is None:
                     continue
-                self._add_cdb(build, record, identity, dirs, network, stores, timeout_request)
+                self._add_cdb(build, record, identity, tier0, dirs, network, stores,
+                              timeout_request)
                 return
             if candidate == "minidump_stackwalk":
                 record = self._tool("minidump_stackwalk", required=explicit)
@@ -409,7 +414,8 @@ class HostDebugPlanner:
         if engine == "auto" and not build.steps:
             build.note("no Tier-1 engine applies; the pure reader's result is returned")
 
-    def _add_cdb(self, build, record, identity, dirs, network, stores, timeout_request) -> None:
+    def _add_cdb(self, build, record, identity, tier0, dirs, network, stores,
+                 timeout_request) -> None:
         template = T.cdb_template(record.path, network=network)
         if network:
             cache = str(Path(self._state_dir) / "debug-symcache") if self._state_dir else "{rundir}\\symcache"
@@ -417,8 +423,14 @@ class HostDebugPlanner:
             cache = "{rundir}\\symcache"
         build.mkdir("symcache")
         build.mkdir("img")
-        build.bindings["sympath"] = build_cdb_symbol_path(cache, dirs, stores, network=network)
-        build.bindings["imagepath"] = ";".join(dirs) if dirs else "{rundir}\\img"
+        # The caller's symbol dirs are workspace (agent-writable) directories
+        # and dbgeng can load executable images, a DAC among them, from -y/-i.
+        # Neither path names them: only PDBs whose GUID/age match a module's
+        # CodeView record are copied into the run directory, and the image
+        # path is the run's empty img directory.
+        local = ("{rundir}\\sym",) if self._stage_cdb_pdbs(build, tier0, dirs) else ()
+        build.bindings["sympath"] = build_cdb_symbol_path(cache, local, stores, network=network)
+        build.bindings["imagepath"] = "{rundir}\\img"
         timeout = self._timeout(timeout_request, template.timeout_default)
         self._add_step(build, template, record, network=network, timeout=timeout,
                        memory=WINDOWS_DEBUGGER_MEMORY_BYTES)
@@ -509,6 +521,56 @@ class HostDebugPlanner:
         build.identities.append("stage:%s" % self._stat_identity(image))
         build.identities.append("stage:%s" % self._stat_identity(pdb_path))
         return name
+
+    def _stage_cdb_pdbs(self, build, tier0, dirs) -> int:
+        """Stage GUID/age-verified PDBs flat under ``{rundir}\\sym`` for cdb.
+
+        A PDB is staged under its module's CodeView basename only when that
+        name ends in ``.pdb``, the file in ``dirs`` parses as a PDB, and its
+        GUID plus DBI age (PDB-stream age when there is no DBI stream, the
+        ``pdb_matches`` rule) equal the module's CodeView debug id. Because
+        every staged name ends in ``.pdb``, a file swapped in after planning
+        is still not found under an executable image name. Returns the
+        number of files staged.
+        """
+        if tier0 is None or not dirs:
+            return 0
+        staged: set[str] = set()
+        modules = sorted(getattr(tier0, "modules", ()), key=lambda m: not m.in_project)
+        for module in modules:
+            if len(staged) >= MAX_CDB_STAGED_PDBS:
+                break
+            if not module.debug_id or not module.debug_file:
+                continue
+            pdb_name = _basename(module.debug_file)
+            key = pdb_name.lower()
+            if not key.endswith(".pdb") or key in staged:
+                continue
+            try:
+                T._stem(pdb_name)
+            except T.TemplateError:
+                continue
+            pdb_path = self._find_in_dirs(dirs, pdb_name)
+            if pdb_path is None:
+                continue
+            pdb = self._read_identity(pdb_path, read_pdb_identity)
+            if pdb is None:
+                continue
+            age = pdb.dbi_age if pdb.dbi_age is not None else pdb.pdb_age
+            try:
+                pdb_id = breakpad_debug_id(pdb.guid, age)
+            except InvalidInput:
+                continue
+            if pdb_id.upper() != str(module.debug_id).upper():
+                build.module_symbols.append((module.name, "mismatch"))
+                build.note("%s: %s does not match %s (GUID/age)" % (PDB_MISMATCH, pdb_name,
+                                                                     _basename(module.name)))
+                continue
+            staged.add(key)
+            build.mkdir("sym")
+            build.staged.append((pdb_path, "sym/%s" % pdb_name))
+            build.identities.append("stage:%s" % self._stat_identity(pdb_path))
+        return len(staged)
 
     @staticmethod
     def _addresses(tier0, module_name: str) -> list[int]:

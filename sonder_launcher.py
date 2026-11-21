@@ -39,6 +39,7 @@ from sonder_runtime.adapters.launcher_idempotency import (
     normalize_idempotency_key,
     valid_command_replay,
 )
+from sonder_runtime.adapters.launcher_probe import probe_error_state, settle_probe
 from sonder_runtime.adapters.launcher_output import (
     bounded_seconds,
     output_text,
@@ -1319,7 +1320,7 @@ class LauncherController:
         return int(return_code), output, command
 
     def _server_state(self):
-        """Return healthy, stopped, or foreign_listener for the managed port."""
+        """Return healthy, stopped, foreign_listener or indeterminate (see launcher_probe)."""
         # The managed runtime may deliberately bind IPv6 loopback.  Probe the
         # controller's configured loopback host rather than silently checking
         # the IPv4 default, otherwise a healthy ``::1`` runtime is treated as
@@ -1341,8 +1342,8 @@ class LauncherController:
                 if response.status != 200:
                     return "foreign_listener"
                 raw = response.read(4097)
-        except (OSError, urllib.error.URLError, ValueError):
-            return "foreign_listener"
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            return probe_error_state(exc)
         if len(raw) > 4096:
             return "foreign_listener"
         try:
@@ -1813,8 +1814,8 @@ class LauncherController:
             if action not in {"start", "stop", "restart"}:
                 raise ValueError("unsupported launcher action")
             context_size = normalize_context_size(context_size)
-            initial_state = self._server_state()
-            if initial_state == "foreign_listener":
+            initial_state = settle_probe(self._server_state, POLL_INTERVAL_SECONDS)
+            if initial_state in ("foreign_listener", "indeterminate"):
                 failure = (
                     "the configured port is occupied by an unverified listener; "
                     "refusing to run launcher commands"
