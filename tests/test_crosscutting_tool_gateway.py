@@ -72,8 +72,10 @@ def test_required_approval_is_explicit_and_blocks_invocation():
     gateway, receipts = make_gateway(events, approval=False)
     with pytest.raises(Forbidden):
         gateway.execute(request(approval=ApprovalMode.REQUIRED, approval_token="approval-1"))
-    # the refusal is an outcome: it leaves a receipt that says so
-    assert events == [("schema", "read", {"path": "x"}), ("permission", "read"), "approval", "receipt"]
+    # the refusal is an outcome: it leaves a receipt that says so, and its
+    # text passes through the redactor before it is published
+    assert events == [("schema", "read", {"path": "x"}), ("permission", "read"), "approval",
+                      "redact", "receipt"]
     assert receipts.items[-1].terminal == "policy_denied"
     assert receipts.items[-1].success is False
 
@@ -86,8 +88,9 @@ def test_deadline_and_cancellation_are_checked_before_provider_boundary():
     token = Cancel(); token.cancelled = True
     with pytest.raises(Cancelled):
         gateway.execute(request(cancellation=token))
-    # nothing past the control point ran, and each exit still left its receipt
-    assert events == ["receipt", "receipt"]
+    # nothing past the control point ran, and each exit still left its
+    # receipt, its text redacted first
+    assert events == ["redact", "receipt", "redact", "receipt"]
     assert [item.terminal for item in receipts.items] == ["deadline_exceeded", "cancelled"]
 
 
@@ -110,4 +113,4 @@ def test_permission_effects_cannot_exceed_request_scope():
             scope=ToolScope("owner", ("project",), frozenset({"read"})),
             permission=ToolPermission(frozenset({"write"})),
         ))
-    assert events == [("schema", "write", {}), "receipt"]
+    assert events == [("schema", "write", {}), "redact", "receipt"]
