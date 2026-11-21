@@ -75,6 +75,23 @@ and model-less reads) and model-pinned inference time, which excludes time
 spent in GPU admission. Inference requests rank by inference time once every
 candidate worker has one.
 
+A capability probe reads `/api/version`, `/api/tags` and, best effort,
+`/api/ps` (which models are loaded now and at what context window). Per-model
+metadata from `POST /api/show` (trained context length, tool support, MoE
+active parameters) is never fetched inside the probe: the probe reports what
+is cached and starts at most one background fill per worker for up to eight
+uncached models, so a slow or hanging `/api/show` cannot fail the probe and a
+large inventory fills in over successive probes. The cache is keyed by worker,
+model and digest (a re-pulled model is read again), and a failed `/api/show`
+is retried with exponential backoff (30 s doubling to 10 min). For a loaded
+model the `/api/ps` window wins over the trained maximum. Stock Ollama reports
+no host VRAM, RAM or KV-cache type, so the probe never invents them. A
+model-pinned request then ranks candidate workers in this order: workers whose
+inventory lists the model, then workers that have it loaded, then workers whose
+known window covers the request's `options.num_ctx`, then in-flight work times
+latency. If a TLS proxy filters paths, let `GET /api/ps` and `POST /api/show`
+through; without them routing still works, only less informed.
+
 Idempotent control reads may fail over; model POSTs never do. A transport timeout
 cannot prove that a remote worker did not receive a request body, so Sonder
 surfaces ambiguous failures instead of replaying the POST. Administrative status
