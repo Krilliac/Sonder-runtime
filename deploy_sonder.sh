@@ -26,7 +26,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required for the fail-closed Ollama endpoint preflight" >&2
   exit 1
 fi
-CLIENT_OLLAMA_HOST="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import ollama_endpoint; print(ollama_endpoint.configured_origin(allow_remote=False))')"
+CLIENT_OLLAMA_HOST="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'from sonder_runtime.adapters.inference import ollama_endpoint; print(ollama_endpoint.configured_origin(allow_remote=False))')"
 
 export SONDER_NUM_THREAD="${SONDER_NUM_THREAD:-$(nproc 2>/dev/null || echo 4)}"
 export SONDER_NUM_GPU="${SONDER_NUM_GPU:-999}"
@@ -183,7 +183,10 @@ systemctl enable --now sonder
 echo ""
 echo "DONE. Sonder Runtime is running on loopback only."
 echo "  Local URL:   http://127.0.0.1:${PORT}/v1"
-echo "  API key:     ${KEY}"
+# Never echo the bearer secret: stdout ends up in terminal scrollback and
+# captured install logs. Point at the root-only file that holds it instead.
+echo "  API key:     stored in /etc/sonder/sonder-local.env (root-only, 0600)"
+echo "               read it with: sudo grep '^SONDER_API_KEY=' /etc/sonder/sonder-local.env"
 echo ""
 echo "  Do not open or port-forward ${PORT}. For remote clients, install the"
 echo "  server-private profile and terminate TLS at the reference reverse proxy:"

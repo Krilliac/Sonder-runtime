@@ -20,6 +20,7 @@ Commands:
     eval-history  inspect or explicitly record precomputed evaluation evidence
     openrouter    list OpenRouter models / account credits, map a tier to a model
     anthropic     Anthropic provider status: key slots, SDK, today's spend vs cap
+    models        cloud-refresh: retire / record / ladder-rebind Ollama cloud models
 """
 from __future__ import annotations
 
@@ -589,6 +590,13 @@ def cmd_migrate(args) -> int:
             )
 
             home = runtime_paths.default_home()
+            if not home.is_dir():
+                print(
+                    f"--adopt-epoch2: state home does not exist: {home}; "
+                    "nothing to adopt (a fresh home is stamped by serve)",
+                    file=sys.stderr,
+                )
+                return 2
             # Re-running an already verified adoption used to take another
             # full pre-epoch2 copy every time. A home that already passes the
             # read-only adoption check is a verified no-op: nothing is copied
@@ -639,6 +647,7 @@ def cmd_migrate(args) -> int:
                 as_json=args.json,
             )
             return 0
+        _stamp_home_before_stores(gate=False)
         if args.store:
             results = {
                 args.store: sonder_migrations.migrate_store(args.store)
@@ -1168,6 +1177,35 @@ def _configure_typed_home(config) -> None:
         runtime_paths.configure_home(config.state.home)
 
 
+def _stamp_home_before_stores(*, gate: bool) -> bool:
+    """Stamp a fresh state home at epoch 2 before any store is created.
+
+    Every entry point that creates stores (``migrate``, ``repl``, ``mcp``)
+    must do this exactly as ``serve`` does, otherwise it leaves an unstamped
+    home that the next ``serve`` refuses.  A home holding legacy state is left
+    untouched.  With ``gate`` the home must also already be at epoch 2 (the
+    ``serve`` contract); a refusal is printed and ``False`` returned.
+    """
+    from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+        require_epoch_2, stamp_fresh_home,
+    )
+    from sonder_runtime.domain.common.errors import MigrationRequired
+
+    home = runtime_paths.ensure_home()
+    try:
+        stamp_fresh_home(home)
+        if gate:
+            require_epoch_2(home)
+    except MigrationRequired as exc:
+        print(
+            f"migration required before startup: {exc}; "
+            "run `migrate --adopt-epoch2`",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def cmd_serve(args) -> int:
     try:
         config = _load_config(args)
@@ -1390,6 +1428,9 @@ def cmd_repl(args) -> int:
     _configure_repl_logging(config, machine_output=bool(args.json))
     _export_runtime_environment(config)
     import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+    if not _stamp_home_before_stores(gate=True):
+        _erase_startup_notice(notice)
+        return 1
     try:
         sonder_migrations.migrate_all(
             busy_timeout_ms=config.state.sqlite_busy_timeout_ms
@@ -1457,6 +1498,8 @@ def cmd_mcp(args) -> int:
         )
         _export_runtime_environment(config, include_typed_runtime=False)
         import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+        if not _stamp_home_before_stores(gate=True):
+            return 1
         try:
             sonder_migrations.migrate_all(
                 busy_timeout_ms=config.state.sqlite_busy_timeout_ms
@@ -1468,6 +1511,8 @@ def cmd_mcp(args) -> int:
         try:
             from sonder_runtime.bootstrap.app import start_inference_membership
             start_inference_membership(application)
+            from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
+            start_scheduled_refresh(origin=config.ollama.url)
             # run_native_mcp returns the number of frames served, not a
             # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
@@ -1491,6 +1536,7 @@ def cmd_mcp(args) -> int:
             redactor=_redactor_for_config(config),
         )
         _export_runtime_environment(config)
+        _stamp_home_before_stores(gate=False)
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
         from sonder_runtime.adapters.inference import ollama_endpoint
@@ -1522,6 +1568,8 @@ def cmd_mcp(args) -> int:
         configure_legacy_application(owned_application)
         from sonder_runtime.bootstrap.app import start_inference_membership
         start_inference_membership(owned_application)
+        from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
+        start_scheduled_refresh(origin=config.ollama.url)
 
     from sonder_runtime.adapters.security import unsafe_lab
 
@@ -1835,6 +1883,14 @@ def cmd_capabilities(args) -> int:
     return 0 if all(item["status"] == "measured" for item in result["models"]) else 1
 
 
+def cmd_models(args) -> int:
+    from sonder_runtime.bootstrap.cloud_models_cli import run_cloud_refresh
+
+    config = _load_config(args)
+    _configure_typed_home(config)
+    return run_cloud_refresh(args, origin=config.ollama.url, home=config.state.home or None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ProductionArgumentParser(
         prog="python -m sonder_runtime",
@@ -1868,6 +1924,9 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("--timeout", type=float, default=120.0, help="wall seconds per model, maximum 300")
     cp.add_argument("--context-tokens", type=int, default=None, help="num_ctx used by probes and identity")
     cp.set_defaults(func=cmd_capabilities)
+    from sonder_runtime.bootstrap.cloud_models_cli import add_parser as add_models_parser
+
+    add_models_parser(sub, common=common, func=cmd_models)
 
     p = sub.add_parser("preflight", help="run startup checks, do not bind")
     common(p, ollama_flag=True)

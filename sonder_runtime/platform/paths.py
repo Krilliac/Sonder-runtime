@@ -154,16 +154,24 @@ def macos_default_home(user_home: Path | None = None) -> Path:
     return native
 
 
+def env_home_override(env=None) -> str:
+    """Return the state-home override from the environment, or ``""``.
+
+    The one documented precedence (docs/wiki/03-configuration.md):
+    ``SONDER_STATE_HOME`` first, then ``SONDER_HOME``.  Blank values count as
+    unset.  Both ``default_home`` and the typed config use this resolver.
+    """
+    values = os.environ if env is None else env
+    return str(values.get("SONDER_STATE_HOME", "")).strip() or str(
+        values.get("SONDER_HOME", "")
+    ).strip()
+
+
 def default_home() -> Path:
     configured = _configured_home()
     if configured is not None:
         return configured
-    # SONDER_STATE_HOME is the historical spelling retained for migrated
-    # local configurations.  An explicitly supplied alias wins over the
-    # process-wide default so a migrated test or launcher can isolate state.
-    override = os.environ.get("SONDER_STATE_HOME", "").strip() or os.environ.get(
-        "SONDER_HOME", ""
-    ).strip()
+    override = env_home_override()
     if override:
         return Path(override).expanduser()
     system = platform.system()
