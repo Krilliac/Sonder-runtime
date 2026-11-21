@@ -135,6 +135,29 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
+# An Authorization header carries ``<scheme> <credential>`` for any scheme
+# (Basic, Token, Digest, AWS4-HMAC-SHA256, ...), not only Bearer, and a Digest
+# or AWS4 credential is several comma-separated, often quoted, parameters. So
+# the whole value after the separator is redacted: a quoted value (escapes
+# honoured) to its closing quote; when the header itself opens a quote, as in
+# ``curl -H "Authorization: ..."``, to that quote's partner; otherwise to end
+# of line. It runs before the assignment rule, which would take only the
+# scheme word and leave the credential behind.
+# A quoted value may follow an opening ``[``/``(`` and carry a Python string
+# prefix (``b'...'``, ``u'...'``, ``f'...'``, ``rb'...'``), as in a printed bytes/ASGI header
+# dict ``{b'Authorization': b'Basic ...'}``. Without that, the quoted-header
+# branch saw the prefix as the value and stopped at the very next quote, one
+# character in, leaving the credential visible. A quoted name may also be
+# followed by ``,`` -- the ASGI ``(b'authorization', b'Basic ...')`` tuple --
+# but only when the name is quoted on both sides, so prose such as
+# "authorization, which ..." is not read as a header.
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(?:(?P<q>[\"'])|\b)(?P<name>(?:proxy-)?authorization)"
+    r"(?:(?:\\?[\"'])?[ \t]*[:=]|(?(q)(?P=q)[ \t]*,|(?!)))[ \t]*"
+    r"(?:[\[(][ \t]*)?(?:[bufr]{1,2}(?=[\"']))?"
+    r"(?:\"(?:[^\"\\\r\n]|\\.)*\"|'(?:[^'\\\r\n]|\\.)*'|"
+    r"(?(q)(?:[^\\\r\n]|\\.)*?(?=(?P=q)|[\r\n]|$)|[^\r\n]+))"
+)
 _KEY_SHAPE_RE = re.compile(
     r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
     r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
@@ -143,9 +166,12 @@ _JWT_RE = re.compile(r"\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4
 # Anchored at the start of the whole scheme-character run (not ``\b``): a word
 # boundary also admits starts after every ``-``/``.`` inside a run, which made
 # long runs like ``a-a-a-...`` quadratic. Leading non-letters stay in group 1,
-# so the substituted text is unchanged.
+# so the substituted text is unchanged. The password runs to the LAST ``@``
+# before the next ``/`` or whitespace, so ``user:p@ss@host`` leaves no part of
+# ``p@ss`` behind. Every later ``://`` holds a ``/``, so one scan never leaves
+# its own authority and the rule stays linear.
 _URI_CREDENTIAL_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
+    r"(?i)(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/\s]+@"
 )
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
@@ -153,9 +179,13 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 def _redact_text(value):
     try:
         text = str(value or "")
-        # Bearer first: the assignment rule now matches `Authorization:` too, and it
-        # consumes only up to the next space -- so running it first would eat the
-        # word "Bearer" and leave the token itself behind, unmatchable.
+        # Authorization headers and Bearer first: the assignment rule matches
+        # `Authorization:` too, and it consumes only up to the next space -- so
+        # running it first would eat the scheme word ("Bearer", "Basic") and
+        # leave the credential itself behind, unmatchable.
+        text = _AUTH_HEADER_RE.sub(
+            lambda match: f"{match.group('q') or ''}{match.group('name')}: <redacted>", text,
+        )
         text = _BEARER_RE.sub("Bearer <redacted>", text)
         text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
         text = _SECRET_ASSIGNMENT_RE.sub(

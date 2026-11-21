@@ -106,14 +106,25 @@ def _sub_url_userinfo(text):
 PATTERNS: tuple[re.Pattern, ...] = (
     # A prior pass replaced the complete credential with this single marker.
     # Repeated redaction must not consume the ordinary word following it.
-    re.compile(r"(?i)\b(authorization\s*[:=]\s*)(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"),
-    re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n]+)"),
+    # A header name may close a quote, plain or JSON-escaped, as in a
+    # serialized header dict: ``"Authorization": "Basic ..."``.
+    re.compile(
+        r"(?i)\b(authorization(?:\\?[\"'])?\s*[:=]\s*)"
+        r"(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"
+    ),
+    re.compile(r"(?i)\b((?:set-)?cookie(?:\\?[\"'])?\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
+    # A quoted value (plain or JSON-escaped quotes) is taken to its closing
+    # quote, spaces included. An unquoted one runs to the next whitespace or
+    # quote, delimiters included, so ``password=ab,cdefgh`` is not left
+    # half visible. A marker left by a prior pass before a delimiter is kept
+    # as it is, so a repeat pass does not eat the ``,`` or ``}`` after it.
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"[\"']?\s*[:=]\s*)"
-        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
+        r"(?:\\?[\"'])?\s*[:=]\s*)"
+        r"(\\?\"[^\"\r\n]*\"|\\?'[^'\r\n]*'|\[REDACTED\](?=[\s,;}\])]|$)|"
+        r"\\?[\"']?[^\s\"']+[\"']?)"
     ),
     _URL_USERINFO,
     re.compile(
@@ -245,25 +256,55 @@ MAX_WALK_DEPTH = 32
 MAX_WALK_ITEMS = 10_000
 
 
-# A mapping key that names a credential. Its string value is replaced whole
-# when a walk asks for key awareness: ``{"password": "hunter2"}`` carries no
-# shape a text pattern can see once the key and value are separate objects.
+# A mapping key that names a credential. Its value is replaced when a walk
+# asks for key awareness: ``{"password": "hunter2"}`` carries no shape a text
+# pattern can see once the key and value are separate objects. The credential
+# word may follow a ``_``/``-`` prefix or a camelCase boundary: lower-to-upper
+# (``dbPassword``, ``authToken``) or acronym-to-word (``AWSSecretKey``,
+# ``HTTPAuthorization``). The boundary is case-sensitive, so ``mypassword``
+# stays out, and the word must end the key, so ``maxTokens`` stays out.
 SENSITIVE_KEY = re.compile(
-    r"(?i)^(?:.*[_-])?(?:api[_-]?key|auth[_-]?secret|client[_-]?secret|secret|"
+    r"(?i)^(?:.*[_-]|.*(?-i:[a-z0-9](?=[A-Z])|[A-Z](?=[A-Z][a-z])))?"
+    r"(?:api[_-]?key|auth[_-]?secret|client[_-]?secret|secret|"
     r"token|access[_-]?token|refresh[_-]?token|password|passwd|pwd|credentials?|"
-    r"secret[_-]access[_-]key|"
+    r"secret[_-]?key|secret[_-]access[_-]key|"
     r"authorization|cookie|private[_-]?key)$"
 )
 
 
-def redact_structure(value, redact=None, *, sensitive_keys=False, _depth=0, _budget=None):
+def _is_sensitive_key(key):
+    return isinstance(key, str) and SENSITIVE_KEY.match(key) is not None
+
+
+def _redact_secret_leaf(value):
+    """Replacement for a non-container value stored under a sensitive key.
+
+    Every leaf is replaced except None, a bool, and an empty string, ``bytes``
+    or ``bytearray``. Numbers are replaced too, zero included: a PIN or a
+    numeric password is still a credential. Any other object (a set, a custom
+    type) is replaced whole, since the walk does not look inside it.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (str, bytes, bytearray)) and not value:
+        return value
+    return REDACTED
+
+
+def redact_structure(
+    value, redact=None, *, sensitive_keys=False, _depth=0, _budget=None, _under_secret=False,
+):
     """Redact every string inside a JSON-shaped structure, preserving shape.
 
     ``redact`` is a ``str -> str`` callable (defaults to :func:`redact_text`
-    with patterns only). Dict keys, numbers, bools, and None pass through
-    unchanged. With ``sensitive_keys=True`` a non-empty string stored under a
-    key matching :data:`SENSITIVE_KEY` is replaced with :data:`REDACTED`
-    outright. Beyond :data:`MAX_WALK_DEPTH` or :data:`MAX_WALK_ITEMS` the
+    with patterns only). Dict keys always pass through unchanged; numbers,
+    bools and None do too, except as below. With ``sensitive_keys=True`` a value stored under a key matching
+    :data:`SENSITIVE_KEY` is replaced with :data:`REDACTED` outright: a
+    non-empty string, ``bytes`` or ``bytearray``, a number (``int`` or
+    ``float``, zero included), or any other non-container object. Only None,
+    bools and empty strings/bytes stay as they are. A list, tuple or dict stored
+    there keeps its shape and every leaf inside it is replaced the same way. Beyond
+    :data:`MAX_WALK_DEPTH` or :data:`MAX_WALK_ITEMS` the
     remaining subtree is replaced with :data:`REDACTED` rather than returned
     unexamined: when the walker must stop checking, it must not pass content
     it has stopped checking.
@@ -275,26 +316,28 @@ def redact_structure(value, redact=None, *, sensitive_keys=False, _depth=0, _bud
     _budget[0] -= 1
     if _depth > MAX_WALK_DEPTH or _budget[0] < 0:
         return REDACTED
+    if _under_secret and not isinstance(value, (dict, list, tuple)):
+        return _redact_secret_leaf(value)
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {
-            key: (
-                REDACTED
-                if sensitive_keys and isinstance(key, str) and isinstance(item, str)
-                and item and SENSITIVE_KEY.match(key)
-                else redact_structure(
+        walked_items = {}
+        for key, item in value.items():
+            secret = _under_secret or (sensitive_keys and _is_sensitive_key(key))
+            if secret and not isinstance(item, (dict, list, tuple)):
+                # Replaced without a walk step, as a sensitive string always was.
+                walked_items[key] = _redact_secret_leaf(item)
+            else:
+                walked_items[key] = redact_structure(
                     item, redact, sensitive_keys=sensitive_keys,
-                    _depth=_depth + 1, _budget=_budget,
+                    _depth=_depth + 1, _budget=_budget, _under_secret=secret,
                 )
-            )
-            for key, item in value.items()
-        }
+        return walked_items
     if isinstance(value, (list, tuple)):
         walked = [
             redact_structure(
                 item, redact, sensitive_keys=sensitive_keys,
-                _depth=_depth + 1, _budget=_budget,
+                _depth=_depth + 1, _budget=_budget, _under_secret=_under_secret,
             )
             for item in value
         ]

@@ -35,3 +35,23 @@ def test_signed_activation_health_gate_and_rollback():
     assert manager.rollback().manifest.version == "1"
     with pytest.raises(ValueError):
         manager.activate(SignedManifest("x", digest_a, "release", "bad"), artifact_b)
+
+
+def test_secret_scanner_finds_prefixed_and_quoted_credential_assignments():
+    scanner = CredentialScanner()
+    for text in ("OPENAI_API_KEY=sk-live", "DB_PASSWORD=hunter2", "client_secret: abc",
+                 "GITHUB_TOKEN=x", '{"password": "hunter2"}', '{\\"token\\": \\"t1\\"}'):
+        kinds = {item.kind for item in scanner.scan(text)}
+        assert "credential_assignment" in kinds, text
+    assert scanner.scan("tokenizer: x and skip task-1") == ()
+
+
+def test_secret_scanner_refuses_oversized_input_before_decoding():
+    class NoDecode(bytes):
+        def decode(self, *args, **kwargs):
+            raise AssertionError("oversized input was decoded before the bound check")
+
+    with pytest.raises(ValueError):
+        CredentialScanner(max_bytes=16).scan(NoDecode(b"x" * 17))
+    with pytest.raises(ValueError):
+        CredentialScanner(max_bytes=16).scan("y" * 17)
