@@ -276,6 +276,9 @@ def test_gateway_offload_inside_a_rung_takes_its_own_route(monkeypatch):
 
 
 def test_missing_embeddings_on_a_bridged_turn_degrade_loudly(monkeypatch, caplog):
+    # A loopback endpoint: a remote one is hosted and never gets memory recall.
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
+    monkeypatch.setenv("SONDER_OPENAI_BASE_URL", "http://127.0.0.1:18999")
     monkeypatch.setattr(server.embeddings, "embed", lambda text: None)
     monkeypatch.setattr(server, "_preference_facts", lambda *a, **k: [])
     monkeypatch.setattr(server, "_capture_preferences", lambda *a, **k: None)

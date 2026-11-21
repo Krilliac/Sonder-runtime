@@ -5186,6 +5186,14 @@ def _bridge_provider_for_tier(tier_label, cloud=False):
     return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, _APP_GRAPH)
 
 
+def _bridge_endpoint_is_loopback(provider):
+    """Hostedness of an endpoint-configured rung follows the live graph's endpoint."""
+    return _legacy_chat_bridge.endpoint_is_loopback(provider, _APP_GRAPH)
+
+
+_provider_bridge.set_endpoint_locality_probe(_bridge_endpoint_is_loopback)
+
+
 def _bridge_operation_context(timeout, cancel_check):
     return _legacy_chat_bridge.operation_context(
         timeout, cancel_check,

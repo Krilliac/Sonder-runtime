@@ -224,6 +224,9 @@ class Gateway:
         self.calls.append(request)
         return ModelResponse(text="bridged answer", model=self.served, tier=request.tier, tokens_out=1)
 
+    def endpoint_is_loopback(self):
+        return True  # an openai_compatible endpoint on this machine (not hosted)
+
 
 def bridged(monkeypatch, provider, env, served="ordinary-served:8b"):
     monkeypatch.setenv("SONDER_CODE_PROVIDER", provider)
