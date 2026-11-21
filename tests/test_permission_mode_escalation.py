@@ -110,3 +110,20 @@ def test_escalation_matrix():
         for target in pm.MODES:
             expected = rank[target] > max(rank[current], rank[pm.MANUAL])
             assert pm.is_unattended_escalation(current, target) is expected
+
+
+
+def test_piped_console_cannot_raise_autonomy(monkeypatch):
+    """`echo /mode auto | sonder` has nobody at the keyboard to attend it."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("/mode auto"))
+    pm.set_mode(pm.MANUAL)
+    out = sonder_repl._mode_command("auto")
+    assert out.startswith("refused")
+    assert pm.current_mode() == pm.MANUAL
+
+
+def test_piped_console_may_still_lower_the_mode(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("/mode plan"))
+    pm.set_mode(pm.AUTO)
+    sonder_repl._mode_command("plan")
+    assert pm.current_mode() == pm.PLAN

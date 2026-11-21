@@ -38,3 +38,13 @@ def test_bare_weather_and_forecast_route_to_the_weather_usage_command():
         assert cr.resolve(phrase) == "/weather", phrase
     assert cr.resolve("weather in Chicago") == "/weather Chicago"
     assert cr.resolve("forecast for 60601") == "/weather 60601"
+
+
+
+def test_capitalized_place_rule_does_not_hijack_lowercase_prose():
+    # The capital letter is the rule's only evidence of a place name; under
+    # the rule's case-insensitive flag it matched any word.
+    assert cr.resolve("forecast revenue growth next quarter") is None
+    assert cr.resolve("weather patterns in my dataset") is None
+    assert cr.resolve("weather London") == "/weather London"
+    assert cr.resolve("forecast Paris") == "/weather Paris"
