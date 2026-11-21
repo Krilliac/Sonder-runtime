@@ -188,6 +188,46 @@ def zip_central_directory(path: str | os.PathLike) -> tuple[int, int]:
     return entries, size
 
 
+def _unverifiable(reason: str) -> ZipCentralDirectoryLimitError:
+    return ZipCentralDirectoryLimitError(
+        "ZIP central directory entry count cannot be verified: %s" % reason
+    )
+
+
+def _central_directory_start(stream: IO[bytes], record: list, size: int) -> int:
+    """Return the offset where the running ``zipfile`` starts its directory walk.
+
+    ``zipfile`` starts at ``_ECD_LOCATION - size``, less the ZIP64 end record
+    and locator when ``_ECD_LOCATION`` still points at the classic EOCD.
+    Whether it does differs between patch levels, not just minor versions:
+    older releases leave ``_ECD_LOCATION`` at the EOCD, while releases with
+    the CVE-2025-8291 fix rewrite it to the ZIP64 end record's own offset.
+    Both kinds verified the signature at that location before returning, so
+    reading it tells which rule the running ``zipfile`` applied.  For ZIP64
+    the directory must also end exactly at a ZIP64 end record; anything else
+    is rejected rather than walked from a guessed offset.
+    """
+    location = int(record[zipfile._ECD_LOCATION])
+    if record[zipfile._ECD_SIGNATURE] != zipfile.stringEndArchive64:
+        return location - size
+    if location < 0:
+        raise _unverifiable("bad end-of-central-directory location")
+    stream.seek(location)
+    signature = stream.read(len(zipfile.stringEndArchive64))
+    if signature == zipfile.stringEndArchive64:
+        zip64_end = location
+    elif signature == zipfile.stringEndArchive:
+        zip64_end = location - zipfile.sizeEndCentDir64 - zipfile.sizeEndCentDir64Locator
+    else:
+        raise _unverifiable("unrecognised end-of-central-directory location")
+    if zip64_end < 0:
+        raise _unverifiable("bad ZIP64 end-record offset")
+    stream.seek(zip64_end)
+    if stream.read(len(zipfile.stringEndArchive64)) != zipfile.stringEndArchive64:
+        raise _unverifiable("central directory does not end at the ZIP64 end record")
+    return zip64_end - size
+
+
 def _require_record_count(stream: IO[bytes], record: list, size: int, max_entries: int) -> None:
     """Count central-directory records, as ``zipfile`` will walk them, up to ``max_entries``.
 
@@ -196,25 +236,25 @@ def _require_record_count(stream: IO[bytes], record: list, size: int, max_entrie
     46-byte records behind a small declared count would still build one
     ``ZipInfo`` per record.  Only the fixed headers are read; names, extra
     fields and comments are skipped.  The walk mirrors
-    ``ZipFile._RealGetContents`` and stops quietly where that would raise, so
-    ``zipfile`` still reports a corrupt directory itself.
+    ``ZipFile._RealGetContents`` and fails closed: where it cannot count every
+    record (a negative start, a fixed header that runs past the declared size
+    or the file, or a bad record signature before the declared size is
+    consumed) it raises instead of accepting the archive with a partial count.
     """
-    offset = int(record[zipfile._ECD_OFFSET])
-    concat = int(record[zipfile._ECD_LOCATION]) - size - offset
-    if record[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64:
-        concat -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
-    start = offset + concat
+    start = _central_directory_start(stream, record, size)
     if start < 0:
-        return
+        raise _unverifiable("bad central-directory offset")
     stream.seek(start)
     count = total = 0
     while total < size:
+        if total + zipfile.sizeCentralDir > size:
+            raise _unverifiable("truncated central directory")
         header = stream.read(zipfile.sizeCentralDir)
         if len(header) != zipfile.sizeCentralDir:
-            return
+            raise _unverifiable("truncated central directory")
         fields = struct.unpack(zipfile.structCentralDir, header)
         if fields[zipfile._CD_SIGNATURE] != zipfile.stringCentralDir:
-            return
+            raise _unverifiable("bad central-directory record signature")
         count += 1
         if count > max_entries:
             raise ZipCentralDirectoryLimitError(
