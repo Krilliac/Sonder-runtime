@@ -70,7 +70,7 @@ class OutputStore:
     """Append-only item rows plus atomically replaced report files."""
 
     def __init__(self, out_dir: str, *, protected_roots: Sequence[str] = (),
-                 dataset_path: str | None = None) -> None:
+                 dataset_path: str | None = None, allowlist: Sequence[str] | None = None) -> None:
         if not isinstance(out_dir, str) or not out_dir.strip() or "\x00" in out_dir:
             raise OutputDirRefused("out_dir is required")
         try:
@@ -82,7 +82,12 @@ class OutputStore:
         target = os.path.abspath(out_dir)
         real_target = _real(target)
         for root in protected_roots:
-            if root and (_inside(target, root) or _inside_resolved(real_target, root)):
+            if not root:
+                continue
+            # Dataset-supplied roots outside the operator allowlist are refused later by ConfinedRepo;
+            # never realpath one here.
+            resolvable = allowlist is None or any(_inside(root, entry) for entry in allowlist if entry)
+            if _inside(target, root) or (resolvable and _inside_resolved(real_target, root)):
                 raise OutputDirRefused("out_dir may not lie inside a repo root")
         if os.path.lexists(target) and not os.path.isdir(target):
             raise OutputDirRefused("out_dir exists and is not a directory")
@@ -92,6 +97,11 @@ class OutputStore:
         if dataset_path:
             dataset = _norm(dataset_path)
             if dataset == _norm(target) or dataset in {_norm(path) for path in self._paths.values()}:
+                raise OutputDirRefused("out_dir may not be, or write over, the dataset file")
+            real_dataset = _real(dataset_path)
+            if real_dataset is not None and (
+                    real_dataset == real_target
+                    or real_dataset in {_real(path) for path in self._paths.values()}):
                 raise OutputDirRefused("out_dir may not be, or write over, the dataset file")
         os.makedirs(target, exist_ok=True)
         self._check_components(target)

@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
+
 from ...domain.security_eval.errors import DatasetError
 from ...domain.security_eval.records import HypothesisRecord, collect_records
 
@@ -26,7 +28,11 @@ def load_dataset(path: str, *, max_bytes: int, max_records: int) -> DatasetLoad:
     """
     if not isinstance(path, str) or not path.strip() or "\x00" in path:
         raise DatasetError("no dataset path was given (argument or SONDER_SECURITY_EVAL_DATASET)")
-    target = os.path.abspath(path.strip())
+    try:
+        local = file_ops._reject_network_path(path.strip())
+    except PermissionError:
+        raise DatasetError("the dataset may not be a UNC, network or device path") from None
+    target = os.path.abspath(local)
     try:
         size = os.stat(target).st_size
         if not os.path.isfile(target):

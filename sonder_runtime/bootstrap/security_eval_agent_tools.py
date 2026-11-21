@@ -159,7 +159,7 @@ def evaluate(application: Any, *, model: str = "", out_dir: str = "", dataset: s
     if cfg.think is not None:
         options["think"] = cfg.think
     roots = tuple(dict.fromkeys(record.repo_root for record in loaded.records))
-    store = OutputStore(out_dir, protected_roots=roots, dataset_path=loaded.path)
+    store = OutputStore(out_dir, protected_roots=roots, dataset_path=loaded.path, allowlist=cfg.repo_roots)
     limits = RepoLimits(cfg.index_max_files, cfg.index_max_bytes, cfg.max_file_bytes, float(cfg.index_timeout_seconds))
     settings = RetrievalSettings(cfg.max_identifiers, cfg.max_hits_per_kind, cfg.snippet_lines,
                                  cfg.common_hit_limit, cfg.max_context_chars)
