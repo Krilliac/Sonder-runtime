@@ -547,8 +547,6 @@ sonder_runtime/domain/agent_observation_quality.py
 sonder_runtime/domain/agent_path_keys.py
 sonder_runtime/domain/agents/activity_command.py
 sonder_runtime/domain/agents/claim_review.py
-sonder_runtime/domain/agents/decision_parsing.py
-sonder_runtime/domain/agents/evidence_quality.py
 sonder_runtime/domain/agents/file_page_rendering.py
 sonder_runtime/domain/agents/observation_prompt.py
 sonder_runtime/domain/agents/sampling_policy.py
@@ -558,9 +556,7 @@ sonder_runtime/domain/agents/tool_naming.py
 sonder_runtime/domain/agents/verification_reach.py
 sonder_runtime/domain/artifact_retention.py
 sonder_runtime/domain/artifact_risk_policy.py
-sonder_runtime/domain/automation/checkpoint.py
 sonder_runtime/domain/automation/command_programs.py
-sonder_runtime/domain/automation/models.py
 sonder_runtime/domain/automation/selfmod_test_commands.py
 sonder_runtime/domain/backpressure.py
 sonder_runtime/domain/batch_coalescing.py
@@ -596,7 +592,6 @@ sonder_runtime/domain/computer_use/controls.py
 sonder_runtime/domain/computer_use/rules.py
 sonder_runtime/domain/consistent_hash.py
 sonder_runtime/domain/context/compaction.py
-sonder_runtime/domain/context/compaction_plan_formatting.py
 sonder_runtime/domain/context/hardware_sizing.py
 sonder_runtime/domain/context/overflow.py
 sonder_runtime/domain/context/pack_arguments.py
@@ -621,7 +616,6 @@ sonder_runtime/domain/diagnostics/summary.py
 sonder_runtime/domain/ensemble_synthesis.py
 sonder_runtime/domain/events.py
 sonder_runtime/domain/execution/policy.py
-sonder_runtime/domain/execution/status.py
 sonder_runtime/domain/execution_route_formatting.py
 sonder_runtime/domain/extensions/manifest.py
 sonder_runtime/domain/fanout_admission.py
@@ -655,7 +649,6 @@ sonder_runtime/domain/memory/rules.py
 sonder_runtime/domain/memory/write_quality.py
 sonder_runtime/domain/meshgen/connectivity.py
 sonder_runtime/domain/meshgen/critique.py
-sonder_runtime/domain/meshgen/dsl/errors.py
 sonder_runtime/domain/meshgen/dsl/manifest.py
 sonder_runtime/domain/meshgen/dsl/opschema.py
 sonder_runtime/domain/meshgen/dsl/predicates.py
@@ -683,7 +676,6 @@ sonder_runtime/domain/permission_context.py
 sonder_runtime/domain/profiling/callgrind.py
 sonder_runtime/domain/profiling/chrome_trace.py
 sonder_runtime/domain/profiling/folded.py
-sonder_runtime/domain/profiling/frames.py
 sonder_runtime/domain/profiling/heaptrack_text.py
 sonder_runtime/domain/profiling/model.py
 sonder_runtime/domain/profiling/render.py
@@ -704,9 +696,7 @@ sonder_runtime/domain/retrieval_policy.py
 sonder_runtime/domain/retry_after.py
 sonder_runtime/domain/routing/backend_conformance.py
 sonder_runtime/domain/routing/capability_router.py
-sonder_runtime/domain/routing/fleet_router.py
 sonder_runtime/domain/routing/route_planner.py
-sonder_runtime/domain/routing/semantic_tier.py
 sonder_runtime/domain/runtime_model_binding.py
 sonder_runtime/domain/runtime_policy/rules.py
 sonder_runtime/domain/runtime_update_parsing.py
@@ -802,7 +792,6 @@ sonder_runtime/platform/declared_context.py
 sonder_runtime/platform/deployment_auth.py
 sonder_runtime/platform/environment_options.py
 sonder_runtime/platform/environment_probe.py
-sonder_runtime/platform/hardware_identity.py
 sonder_runtime/platform/hardware_probe.py
 sonder_runtime/platform/local_retry_policy.py
 sonder_runtime/platform/location_consent.py
@@ -810,18 +799,13 @@ sonder_runtime/platform/logging.py
 sonder_runtime/platform/memory_replication_config.py
 sonder_runtime/platform/metrics.py
 sonder_runtime/platform/model_context_memory.py
-sonder_runtime/platform/model_paths.py
 sonder_runtime/platform/paths.py
 sonder_runtime/platform/playbooks_config.py
 sonder_runtime/platform/private_cot_policy.py
 sonder_runtime/platform/private_files.py
 sonder_runtime/platform/reasoning_policy.py
-sonder_runtime/platform/runtime_summary.py
 sonder_runtime/platform/runtime_threads.py
-sonder_runtime/platform/service_state.py
 sonder_runtime/platform/shutdown.py
-sonder_runtime/platform/spanda_config.py
 sonder_runtime/platform/system_profile.py
 sonder_runtime/platform/toolchain_policy.py
 sonder_runtime/platform/unsafe_lab_policy.py
-sonder_runtime/platform/version.py

@@ -47,7 +47,7 @@ def accelerator_record(
     memory_kind: str = "unknown", integrated: bool | None = None, probe: str,
     device_id: str = "",
     presence_verified: bool | None = True,
-) -> dict:
+) -> dict[str, object]:
     """Build the normalized record emitted by platform accelerator probes."""
     if integrated is None:
         integrated = looks_integrated(name, vendor)

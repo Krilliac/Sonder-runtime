@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 
-def model_roots(env: dict[str, str] | None = None) -> tuple[Path, ...]:
+def model_roots(env: Mapping[str, str] | None = None) -> tuple[Path, ...]:
     """Return configured/default Ollama model roots without creating them."""
     values = os.environ if env is None else env
     configured = str(values.get("OLLAMA_MODELS", "")).strip()
@@ -17,7 +21,7 @@ def model_roots(env: dict[str, str] | None = None) -> tuple[Path, ...]:
     return _unique_paths(candidates)
 
 
-def _unique_paths(paths) -> tuple[Path, ...]:
+def _unique_paths(paths: Iterable[str | os.PathLike[str]]) -> tuple[Path, ...]:
     result: list[Path] = []
     seen: set[str] = set()
     for path in paths:
