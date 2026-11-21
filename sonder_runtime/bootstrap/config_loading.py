@@ -9,12 +9,17 @@ this module owns the bootstrap-facing diagnostic policy around that loader.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sonder_runtime.platform.config import SonderConfig
 
 logger = logging.getLogger(__name__)
 
 
-def load_config_or_none() -> Any:
+def load_config_or_none() -> SonderConfig | None:
     """Return the production configuration when available, otherwise ``None``."""
     logger.debug("load_config_or_none: attempting config load")
     try:
@@ -36,7 +41,7 @@ def load_config_or_none() -> Any:
         return None
 
 
-def check_config():
+def check_config() -> Callable[[], dict[str, str]]:
     """Return a read-only doctor check for the production configuration."""
     logger.debug("check_config: building config check callable")
     try:
@@ -53,7 +58,7 @@ def check_config():
         detail = "sonder_config unavailable (%s)" % exc
         return lambda: {"status": "skipped", "detail": detail}
 
-    def check():
+    def check() -> dict[str, str]:
         logger.debug("check_config: executing config validation")
         try:
             config = sonder_config.load_config()
@@ -67,7 +72,10 @@ def check_config():
             logger.warning(f"configuration load failed during doctor check: {type(exc).__name__}")
             logger.debug(f"check_config: config load failed: {exc}")
             return {"status": "skipped", "detail": "config load failed (%s)" % exc}
-        result = validated_config_check(config)()
+        result = cast(
+            "Callable[[SonderConfig], Callable[[], dict[str, str]]]",
+            validated_config_check,
+        )(config)()
         logger.debug(f"check_config: result status={result.get('status', '?')!r}")
         return result
 
