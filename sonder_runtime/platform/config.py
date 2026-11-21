@@ -1598,13 +1598,22 @@ def _apply_environment(
     if state_home:
         state = replace(state, home=state_home)
     if env.get("SONDER_FILE_ROOTS", "").strip():
-        roots = tuple(
-            part.strip()
-            for part in env["SONDER_FILE_ROOTS"].split(os.pathsep)
-            if part.strip()
-        )
-        if roots:
-            state = replace(state, workspace_roots=roots)
+        extended_local_re = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+        parsed_roots: list[str] = []
+        for part in env["SONDER_FILE_ROOTS"].split(os.pathsep):
+            item = part.strip()
+            if not item or "\0" in item:
+                continue
+            matched = extended_local_re.match(item)
+            if matched:
+                item = item[matched.start(1):]
+            else:
+                flat = item.replace("/", "\\")
+                if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
+                    continue
+            parsed_roots.append(item)
+        if parsed_roots:
+            state = replace(state, workspace_roots=tuple(parsed_roots))
     # Empty keeps the configured value, as env_bool_from_env reads it later.
     if env.get("SONDER_AUTO_WORKSPACE", "").strip():
         state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
