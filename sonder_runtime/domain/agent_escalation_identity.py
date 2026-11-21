@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 
 
-def escalation_key(tier, prompt) -> str:
+def escalation_key(tier: str | None, prompt: str | None) -> str:
     """Identity of one agent run for the failure note: its tier and prompt."""
     digest = hashlib.sha256(
         str(prompt or "").encode("utf-8", "replace")

@@ -7,7 +7,7 @@ DEFAULT_FOOTER_PREFIX = "\n\n[interaction_id: "
 
 
 def trailing_interaction_id(
-    text: object,
+    text: str | None,
     footer_prefix: str = DEFAULT_FOOTER_PREFIX,
 ) -> str | None:
     """Return the opaque interaction id from a well-formed response footer.

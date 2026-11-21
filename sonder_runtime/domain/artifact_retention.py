@@ -112,7 +112,7 @@ def _reason(value: object) -> str:
     return value
 
 
-def _enum(value: object, enum_type: type[StrEnum], field: str):
+def _enum(value: object, enum_type: type[StrEnum], field: str) -> StrEnum:
     if not isinstance(value, enum_type):
         raise ValueError(f"{field} must be a {enum_type.__name__}")
     return value

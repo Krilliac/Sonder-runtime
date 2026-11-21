@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 
-def parse_update_object(value, label: str) -> dict:
+def parse_update_object(value: object, label: str) -> dict[str, Any]:
     """Accept a dict, a JSON string, None, or empty string; return a dict.
 
     Raises ValueError when *value* is not (or does not decode to) a JSON

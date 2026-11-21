@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from math import isfinite
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
 
 
 # Approximate resident weight size in decimal GB per billion parameters.  The
@@ -51,7 +55,7 @@ def _positive(value: Any) -> float | None:
     return number if isfinite(number) and number > 0 else None
 
 
-def _bool_or_none(value: Any) -> bool | None:
+def _bool_or_none(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
@@ -176,7 +180,7 @@ def build_hardware_capabilities(
     if vram_free is None and hardware.get("vram_availability_live") is True:
         # A live zero is meaningful pressure, not an invitation to estimate.
         try:
-            vram_free = max(0.0, float(hardware.get("vram_free_gb")))
+            vram_free = max(0.0, float(cast(float, hardware.get("vram_free_gb"))))
         except (TypeError, ValueError):
             vram_free = None
     live = hardware.get("vram_availability_live") is True and vram_free is not None
@@ -211,7 +215,7 @@ def build_hardware_capabilities(
     )
 
 
-def kv_gb_per_8k(total_params_b: float) -> float:
+def kv_gb_per_8k(total_params_b: float | None) -> float:
     """Planning KV-cache envelope in GB per 8192 tokens for a model size."""
     total = _positive(total_params_b)
     if total is None:
