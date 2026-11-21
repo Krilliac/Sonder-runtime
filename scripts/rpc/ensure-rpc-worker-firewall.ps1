@@ -28,12 +28,16 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rpc-policy.ps1')
 
+$null = Assert-RpcFirewallDisplayName -DisplayName $DisplayName
 $local = ConvertTo-RpcPrivateIPv4 -Address $LocalAddress -Label 'Worker (local) address'
 $remote = ConvertTo-RpcPrivateIPv4 -Address $RemoteAddress -Label 'Main (remote) address'
 if ($local -eq $remote) { throw 'LocalAddress and RemoteAddress must differ.' }
 $rpcPort = if (([string]$Port).Trim()) { ConvertTo-RpcPort -Value $Port -Label 'Port' } else { $script:RpcDefaultPort }
 
-Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# Match the exact name (case-sensitive) after a full listing: -DisplayName would
+# treat any wildcard as a pattern.
+@(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -ceq $DisplayName }) |
+  Remove-NetFirewallRule
 
 New-NetFirewallRule -DisplayName $DisplayName `
   -Direction Inbound `
@@ -45,7 +49,7 @@ New-NetFirewallRule -DisplayName $DisplayName `
   -Profile Any `
   -Description "Peer-only llama.cpp rpc-server worker: $remote -> ${local}:$rpcPort" | Out-Null
 
-Get-NetFirewallRule -DisplayName $DisplayName | ForEach-Object {
+@(Get-NetFirewallRule | Where-Object { $_.DisplayName -ceq $DisplayName }) | ForEach-Object {
   $p = $_ | Get-NetFirewallPortFilter
   $a = $_ | Get-NetFirewallAddressFilter
   [pscustomobject]@{

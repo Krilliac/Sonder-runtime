@@ -18,6 +18,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 import urllib.error
@@ -156,6 +157,10 @@ def _validate_loopback_base_url(base_url: str) -> str:
         raise RpcClusterConfigError(f"invalid sharded server URL: {base_url!r}") from exc
     if parsed.scheme not in ("http", "https") or not hostname:
         raise RpcClusterConfigError(f"invalid sharded server URL: {base_url!r}")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise RpcClusterConfigError("sharded server URL must not contain credentials")
+    if parsed.query or parsed.fragment or "?" in raw or "#" in raw:
+        raise RpcClusterConfigError("sharded server URL must not contain a query or fragment")
     if hostname.lower() not in _LOOPBACK_HOSTS:
         raise RpcClusterConfigError(
             f"sharded llama-server URL must be loopback-only, got {base_url!r}"
@@ -482,8 +487,15 @@ def _default_tcp_connect(address: tuple[str, int], timeout: float) -> None:
         return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the loopback probe can never be steered off-host."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
 def _default_http_get(url: str, timeout: float) -> tuple[int, bytes]:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     request = urllib.request.Request(url, method="GET")
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -678,6 +690,9 @@ def discover_rpc_binaries(
     }
 
 
+_OLLAMA_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
 def _parse_ollama_model_ref(model_name: str) -> tuple[str, str, str]:
     raw = str(model_name or "").strip()
     if not raw:
@@ -687,7 +702,9 @@ def _parse_ollama_model_ref(model_name: str) -> tuple[str, str, str]:
     else:
         repo_part, tag = raw, "latest"
     segments = [seg for seg in repo_part.split("/") if seg]
-    if not segments or not tag or any(seg in (".", "..") for seg in (*segments, tag)):
+    if not segments or not tag or not all(
+        _OLLAMA_SEGMENT_RE.fullmatch(seg) for seg in (*segments, tag)
+    ):
         raise RpcClusterConfigError(f"invalid Ollama model name {model_name!r}")
     if len(segments) == 1:
         return "registry.ollama.ai", "library", f"{segments[0]}/{tag}"
@@ -712,6 +729,12 @@ def resolve_ollama_gguf_blob(
     registry, namespace, model_and_tag = _parse_ollama_model_ref(model_name)
     model_part, tag_part = model_and_tag.rsplit("/", 1)
     manifest_path = base_dir / "manifests" / registry / namespace / model_part / tag_part
+    try:
+        manifests_root = (base_dir / "manifests").resolve()
+        if not manifest_path.resolve().is_relative_to(manifests_root):
+            return None
+    except (OSError, ValueError):
+        return None
     if not manifest_path.is_file():
         return None
     try:

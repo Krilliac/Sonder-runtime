@@ -105,3 +105,132 @@ function Test-RpcTcpReachable([string]$TargetHost, [int]$TargetPort, [int]$Timeo
         $client.Close()
     }
 }
+
+function ConvertTo-RpcArgumentString([string[]]$Arguments) {
+    # Quote per the CommandLineToArgvW rules so Start-Process -ArgumentList
+    # reaches the child as exactly these argv entries on Windows PowerShell 5.1
+    # and PowerShell 7 (5.1 joins an array with spaces and does not quote).
+    $parts = foreach ($arg in $Arguments) {
+        $text = [string]$arg
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
+            $text
+        }
+        else {
+            $escaped = [regex]::Replace($text, '(\\*)"', '$1$1\"')
+            $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+            '"' + $escaped + '"'
+        }
+    }
+    return ($parts -join ' ')
+}
+
+function ConvertTo-RpcBaseUrl([string]$HostAddress, [int]$Port) {
+    $hostText = ([string]$HostAddress).Trim()
+    if ($hostText.Contains(':') -and -not $hostText.StartsWith('[')) { $hostText = "[$hostText]" }
+    return "http://${hostText}:$Port"
+}
+
+function Assert-RpcBaseUrl([string]$BaseUrl) {
+    $text = ([string]$BaseUrl).Trim()
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($text, [System.UriKind]::Absolute, [ref]$uri) -or
+        ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https')) {
+        throw "Invalid base URL '$BaseUrl'."
+    }
+    if ($uri.UserInfo -or $text.Contains('@')) { throw 'Base URL must not contain credentials.' }
+    if ($uri.Query -or $uri.Fragment -or $text.Contains('?') -or $text.Contains('#')) {
+        throw 'Base URL must not contain a query or fragment.'
+    }
+    return $text.TrimEnd('/')
+}
+
+function Assert-RpcFirewallDisplayName([string]$DisplayName) {
+    $prefix = 'Sonder llama-rpc '
+    if ($DisplayName -match '[*?\[\]]') {
+        throw "Firewall rule display name must not contain wildcard characters, got '$DisplayName'."
+    }
+    if (-not $DisplayName.StartsWith($prefix, [System.StringComparison]::Ordinal) -or $DisplayName.Length -le $prefix.Length) {
+        throw "Firewall rule display name must start with '$prefix', got '$DisplayName'."
+    }
+    return $DisplayName
+}
+
+function Resolve-OllamaBlob([string]$Tag, [string]$ModelsRoot) {
+    if (-not $ModelsRoot) {
+        $ModelsRoot = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } else { Join-Path $env:USERPROFILE '.ollama\models' }
+    }
+    $segmentPattern = '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    if ($Tag -match ':') {
+        $idx = $Tag.LastIndexOf(':')
+        $repo = $Tag.Substring(0, $idx)
+        $ver = $Tag.Substring($idx + 1)
+    }
+    else {
+        $repo = $Tag
+        $ver = 'latest'
+    }
+    $segs = @($repo.Split('/') | Where-Object { $_ })
+    if ($segs.Count -eq 0 -or -not $ver) { throw "Invalid Ollama model name '$Tag'." }
+    foreach ($seg in @($segs) + @($ver)) {
+        if ($seg -notmatch $segmentPattern) { throw "Invalid Ollama model name '$Tag'." }
+    }
+    if ($segs.Count -eq 1) {
+        $relative = "registry.ollama.ai\library\$($segs[0])\$ver"
+    }
+    elseif ($segs.Count -eq 2) {
+        $relative = "registry.ollama.ai\$($segs[0])\$($segs[1])\$ver"
+    }
+    else {
+        $relative = "$($segs[0])\$(($segs[1..($segs.Count - 1)]) -join '\')\$ver"
+    }
+    $manifestsRoot = [System.IO.Path]::GetFullPath((Join-Path $ModelsRoot 'manifests')).TrimEnd('\') + '\'
+    $manifest = [System.IO.Path]::GetFullPath((Join-Path $manifestsRoot $relative))
+    if (-not $manifest.StartsWith($manifestsRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Invalid Ollama model name '$Tag': manifest path escapes the manifests directory."
+    }
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Ollama manifest not found for '$Tag' at '$manifest'."
+    }
+    $doc = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $modelLayer = @($doc.layers | Where-Object { $_.mediaType -eq 'application/vnd.ollama.image.model' }) | Select-Object -First 1
+    if (-not $modelLayer -or -not $modelLayer.digest) {
+        throw "No model layer digest found in Ollama manifest '$manifest'."
+    }
+    $digest = [string]$modelLayer.digest
+    if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Ollama manifest '$manifest' has an invalid model layer digest."
+    }
+    $blobPath = Join-Path $ModelsRoot ('blobs\' + $digest.Replace(':', '-'))
+    if (-not (Test-Path -LiteralPath $blobPath)) {
+        throw "Resolved Ollama blob missing at '$blobPath'."
+    }
+    return $blobPath
+}
+
+function Test-RpcOwnedProcess([int]$ProcessId, [string]$ExePath, [string]$StartedUtc) {
+    # True only when the live process still is the one we launched: same
+    # executable and same start time (guards against PID reuse).
+    if ($ProcessId -le 0 -or -not $ExePath -or -not $StartedUtc) { return $false }
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { return $false }
+    try {
+        $actualPath = [string]$proc.Path
+        $actualStart = $proc.StartTime.ToUniversalTime()
+    }
+    catch { return $false }
+    if (-not $actualPath -or -not [string]::Equals($actualPath, $ExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $recorded = [datetime]::MinValue
+    if (-not [datetime]::TryParse($StartedUtc, [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+            [ref]$recorded)) {
+        return $false
+    }
+    return ([math]::Abs(($actualStart - $recorded).TotalSeconds) -lt 2)
+}
+
+function Get-RpcProcessStartUtc([int]$ProcessId) {
+    $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+    return $proc.StartTime.ToUniversalTime().ToString('o')
+}

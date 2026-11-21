@@ -21,17 +21,22 @@ param(
     [string]$Action = 'Start',
     [string]$ModelPath = '',
     [string]$OllamaModel = '',
+    [ValidatePattern('^[A-Za-z0-9._:-]+$')]
     [string]$Alias = 'sonder-rpc',
     [string]$BindHost = '127.0.0.1',
+    [ValidateRange(1, 65535)]
     [int]$Port = 11438,
     [string[]]$RpcPeers = @(),
     [string]$RpcPort = $env:SONDER_RPC_PORT,
     [int]$CtxSize = 8192,
     [int]$GpuLayers = 999,
+    [ValidatePattern('^([0-9.]+(,[0-9.]+)*)?$')]
     [string]$TensorSplit = '',
     [ValidateSet('on', 'off', 'auto')]
     [string]$FlashAttn = 'on',
+    [ValidateSet('f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1')]
     [string]$CacheTypeK = 'q8_0',
+    [ValidateSet('f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1')]
     [string]$CacheTypeV = 'q8_0',
     [int]$Parallel = 1,
     [int]$LogVerbosity = 4,
@@ -69,48 +74,14 @@ function Assert-LoopbackHost([string]$Address) {
     return $parsed.IPAddressToString
 }
 
-function Resolve-OllamaBlob([string]$Tag) {
-    $modelsRoot = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } else { Join-Path $env:USERPROFILE '.ollama\models' }
-    if ($Tag -match ':') {
-        $idx = $Tag.LastIndexOf(':')
-        $repo = $Tag.Substring(0, $idx)
-        $ver = $Tag.Substring($idx + 1)
-    }
-    else {
-        $repo = $Tag
-        $ver = 'latest'
-    }
-    $segs = @($repo.Split('/') | Where-Object { $_ })
-    if ($segs.Count -eq 1) {
-        $manifest = Join-Path $modelsRoot "manifests\registry.ollama.ai\library\$($segs[0])\$ver"
-    }
-    elseif ($segs.Count -eq 2) {
-        $manifest = Join-Path $modelsRoot "manifests\registry.ollama.ai\$($segs[0])\$($segs[1])\$ver"
-    }
-    else {
-        $tail = ($segs[1..($segs.Count - 1)] -join '\')
-        $manifest = Join-Path $modelsRoot "manifests\$($segs[0])\$tail\$ver"
-    }
-    if (-not (Test-Path -LiteralPath $manifest)) {
-        throw "Ollama manifest not found for '$Tag' at '$manifest'."
-    }
-    $doc = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-    $modelLayer = @($doc.layers | Where-Object { $_.mediaType -eq 'application/vnd.ollama.image.model' }) | Select-Object -First 1
-    if (-not $modelLayer -or -not $modelLayer.digest) {
-        throw "No model layer digest found in Ollama manifest '$manifest'."
-    }
-    $blobName = ([string]$modelLayer.digest).Replace(':', '-')
-    $blobPath = Join-Path $modelsRoot "blobs\$blobName"
-    if (-not (Test-Path -LiteralPath $blobPath)) {
-        throw "Resolved Ollama blob missing at '$blobPath'."
-    }
-    return $blobPath
-}
-
 function Get-ServerHealth([string]$BaseUrl) {
+    # No redirects and no proxy: the probe must only talk to the loopback listener
+    # it was pointed at. Windows PowerShell 5.1 has no -NoProxy parameter.
+    $request = @{ TimeoutSec = 3; MaximumRedirection = 0 }
+    if ((Get-Command Invoke-RestMethod).Parameters.ContainsKey('NoProxy')) { $request['NoProxy'] = $true }
     try {
-        $health = Invoke-RestMethod -Uri "$BaseUrl/health" -TimeoutSec 3
-        $models = Invoke-RestMethod -Uri "$BaseUrl/v1/models" -TimeoutSec 3
+        $health = Invoke-RestMethod -Uri "$BaseUrl/health" @request
+        $models = Invoke-RestMethod -Uri "$BaseUrl/v1/models" @request
         $ids = @($models.data | ForEach-Object { [string]$_.id })
         return [pscustomobject]@{
             healthy = ($health.status -eq 'ok')
@@ -130,7 +101,7 @@ $validatedPeers = @(ConvertTo-RpcPeerList -Entries $peerEntries -Port $rpcPortVa
 if ($validatedPeers.Count -eq 0) {
     throw 'No RPC peers configured: pass -RpcPeers <worker-ip> or set SONDER_RPC_PEERS. Sharding stays off until one is configured.'
 }
-$baseUrl = "http://${loopbackHost}:${Port}"
+$baseUrl = Assert-RpcBaseUrl (ConvertTo-RpcBaseUrl -HostAddress $loopbackHost -Port $Port)
 $runDir = Join-Path $env:LOCALAPPDATA 'sonder\run'
 $logDir = Join-Path $env:LOCALAPPDATA 'sonder\logs'
 $statePath = Join-Path $runDir 'llama-rpc-server.json'
@@ -208,19 +179,21 @@ switch ($Action) {
     'Stop' {
         $state = Get-CurrentState
         if ($state) {
-            Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
-            if ($state.wrapperPid) {
-                Stop-Process -Id ([int]$state.wrapperPid) -Force -ErrorAction SilentlyContinue
+            # Only stop a process that is still the one we launched (same exe and
+            # start time); a recycled PID or a foreign listener is left alone.
+            if (Test-RpcOwnedProcess -ProcessId ([int]$state.pid) -ExePath ([string]$state.exe) -StartedUtc ([string]$state.startedUtc)) {
+                Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
+                Write-Output "Stopped sharded llama-server ($baseUrl)"
+            }
+            else {
+                Write-Warning "PID $($state.pid) is not the llama-server recorded in the state file; not stopping it."
             }
         }
-        Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalAddress -eq $loopbackHost } |
-            ForEach-Object {
-                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-            }
+        else {
+            Write-Output "No tracked sharded llama-server to stop ($baseUrl)"
+        }
         Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-        Write-Output "Stopped sharded llama-server ($baseUrl)"
         exit 0
     }
 
@@ -280,54 +253,40 @@ switch ($Action) {
                 $serverArgs += @('--tensor-split', $TensorSplit.Trim())
             }
 
-            $argLine = ($serverArgs | ForEach-Object {
-                if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
-            }) -join ' '
-            $wrapperScript = "& `"$llamaExe`" $argLine 1> `"$stdout`" 2> `"$stderr`""
-            $encodedWrapper = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapperScript))
-            $cmdLine = "powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand $encodedWrapper"
-
-            $cimResult = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-                CommandLine      = $cmdLine
-                CurrentDirectory = $InstallDir
-            }
-            if ($cimResult.ReturnValue -ne 0) {
-                throw "Win32_Process Create failed with return code $($cimResult.ReturnValue)."
-            }
-            $wrapperPid = [int]$cimResult.ProcessId
+            $proc = Start-Process -FilePath $llamaExe `
+                -ArgumentList (ConvertTo-RpcArgumentString $serverArgs) `
+                -WorkingDirectory $InstallDir `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+                -WindowStyle Hidden -PassThru
+            $launchedPid = [int]$proc.Id
+            $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
 
             $deadline = [DateTime]::UtcNow.AddSeconds($ReadyWaitSeconds)
             $ready = $null
-            $serverPid = $null
             while ([DateTime]::UtcNow -lt $deadline) {
-                $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
-                    Where-Object { $_.LocalAddress -eq $loopbackHost } |
-                    Select-Object -First 1
-                if ($null -ne $listener) {
-                    $serverPid = [int]$listener.OwningProcess
-                }
                 $h = Get-ServerHealth $baseUrl
                 if ($null -ne $h -and $h.healthy) {
                     $ready = $h
                     break
                 }
-                $wrapperAlive = Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue
-                if ($null -eq $wrapperAlive -and $null -eq $serverPid) {
+                $alive = Get-Process -Id $launchedPid -ErrorAction SilentlyContinue
+                if ($null -eq $alive) {
                     $tail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 30) -join "`n" } else { '' }
                     throw "llama-server exited during startup:`n$tail"
                 }
                 Start-Sleep -Milliseconds 750
             }
             if ($null -eq $ready) {
-                if ($serverPid) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
-                Stop-Process -Id $wrapperPid -Force -ErrorAction SilentlyContinue
+                if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $llamaExe -StartedUtc $startedUtc) {
+                    Stop-Process -Id $launchedPid -Force -ErrorAction SilentlyContinue
+                }
                 throw "Sharded llama-server did not become healthy within ${ReadyWaitSeconds}s. See $stderr"
             }
 
             $stateObj = [ordered]@{
-                pid        = $serverPid
-                wrapperPid = $wrapperPid
+                pid        = $launchedPid
                 exe        = $llamaExe
+                startedUtc = $startedUtc
                 baseUrl    = $baseUrl
                 modelPath  = $ModelPath
                 alias      = $Alias
