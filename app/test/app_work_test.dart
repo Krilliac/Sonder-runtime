@@ -240,4 +240,47 @@ void main() {
     expect(client.work!.state, 'prepared');
     expect(client.workPrompt, 'Inspect the repository');
   });
+
+  test('a definitive refusal of work preparation clears the held command',
+      () async {
+    final client = AppControlClient(
+        context: fixture.context,
+        transportFactory: () => MockClient((request) async {
+              if (request.url.path.endsWith('/enroll')) {
+                return http.Response(jsonEncode(fixture.enrollment()), 201);
+              }
+              if (request.url.path.endsWith('/selection')) {
+                return http.Response(
+                    jsonEncode({
+                      'ok': true,
+                      'selection': {
+                        'selection_id': 's1',
+                        'binding_id': 'b1',
+                        'binding_revision': 1,
+                        'epoch': 1
+                      }
+                    }),
+                    200);
+              }
+              return http.Response(
+                  jsonEncode({
+                    'ok': false,
+                    'error': {'code': 'APP_CONTROL_REFUSED'}
+                  }),
+                  403);
+            }));
+    addTearDown(client.dispose);
+    await client.enroll(project: 'demo', password: 'disposable');
+    await client.loadSelection();
+    await expectLater(client.prepareWork(prompt: 'Inspect only'),
+        throwsA(isA<AppControlFailure>()));
+    expect(client.workPreparationPending, isFalse);
+    expect(client.workPrompt, isEmpty);
+    // Preparation is not locked: a new attempt is accepted (and refused again
+    // by the server, not by REQUEST_PENDING).
+    await expectLater(
+        client.prepareWork(prompt: 'Inspect only'),
+        throwsA(isA<AppControlFailure>()
+            .having((e) => e.code, 'code', 'APP_CONTROL_REFUSED')));
+  });
 }
