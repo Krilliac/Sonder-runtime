@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime
+import importlib.util
 import os
 from pathlib import Path
 import shutil
+import threading
 from typing import TYPE_CHECKING, cast
 
 from ...domain.compute_fabric import (
@@ -48,7 +50,25 @@ _TOOL_CAPABILITIES = {
     "sccache": ComputeCapability.SCCACHE,
     "ollama": ComputeCapability.OLLAMA,
     "llama-server": ComputeCapability.LLAMACPP,
+    "psql": ComputeCapability.DATABASE,
+    "sqlite3": ComputeCapability.DATABASE,
+    "mysql": ComputeCapability.DATABASE,
+    "mariadb": ComputeCapability.DATABASE,
 }
+
+# Python-module capabilities: every module in one group must be importable
+# (checked by spec lookup only, never imported); any satisfied group suffices.
+_MODULE_CAPABILITIES: dict[ComputeCapability, tuple[tuple[str, ...], ...]] = {
+    ComputeCapability.QLORA: (("peft", "bitsandbytes"),),
+    ComputeCapability.EMBEDDINGS: (("sentence_transformers",), ("fastembed",)),
+}
+
+
+def _module_present(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, AttributeError):
+        return False
 
 
 def _bytes_from_gib(value: object) -> int | None:
@@ -78,6 +98,8 @@ class LocalComputeSnapshotSource:
         disk_probe: Callable[[Path], _DiskUsage] = shutil.disk_usage,
         active_jobs: Callable[[], int] = lambda: 0,
         load_probe: Callable[[int | None], float | None] = _default_load,
+        tool_probe: Callable[[str], str | None] = shutil.which,
+        module_probe: Callable[[str], bool] = _module_present,
         storage_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self._environment_probe = environment_probe
@@ -85,7 +107,43 @@ class LocalComputeSnapshotSource:
         self._disk_probe = disk_probe
         self._active_jobs = active_jobs
         self._load_probe = load_probe
+        self._tool_probe = tool_probe
+        self._module_probe = module_probe
         self._storage_path = Path.cwd() if storage_path is None else Path(storage_path)
+        self._probed: frozenset[ComputeCapability] | None = None
+        self._probed_lock = threading.Lock()
+
+    def _probed_capabilities(self) -> frozenset[ComputeCapability]:
+        """PATH/module presence for mapped tools, computed once per source.
+
+        The shared environment profile lists only a fixed subset of tools.
+        Looking up the rest costs filesystem stats per PATH entry, so the
+        result is memoised like environment_probe.probe() (process-lifetime
+        cache). No process is started and no network is used.
+        """
+        cached = self._probed
+        if cached is not None:
+            return cached
+        with self._probed_lock:
+            if self._probed is not None:
+                return self._probed
+            found: set[ComputeCapability] = set()
+            for name, capability in _TOOL_CAPABILITIES.items():
+                if capability in found:
+                    continue
+                try:
+                    if self._tool_probe(name):
+                        found.add(capability)
+                except Exception:
+                    continue
+            for capability, groups in _MODULE_CAPABILITIES.items():
+                try:
+                    if any(all(self._module_probe(m) for m in group) for group in groups):
+                        found.add(capability)
+                except Exception:
+                    continue
+            self._probed = frozenset(found)
+            return self._probed
 
     def snapshot(self, node: ComputeNode, *, now: datetime) -> NodeSnapshot:
         if not isinstance(node, ComputeNode) or not node.local:
@@ -117,6 +175,8 @@ class LocalComputeSnapshotSource:
             capability = _TOOL_CAPABILITIES.get(str(name).casefold())
             if capability is not None:
                 capabilities.add(capability)
+
+        capabilities |= self._probed_capabilities()
 
         if bool(getattr(hardware, "cuda_available", False)):
             capabilities.add(ComputeCapability.CUDA)
