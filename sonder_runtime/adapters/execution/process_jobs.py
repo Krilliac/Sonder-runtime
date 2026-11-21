@@ -271,6 +271,9 @@ class SubprocessJobProvider:
             # Decode process output as UTF-8 consistently across hosts;
             # the Windows locale must not reinterpret child bytes.
             "encoding": "utf-8",
+            # A strict decoder would raise on non-UTF-8 child bytes, stop the
+            # reader and leave the pipe undrained; replace them instead.
+            "errors": "replace",
         }
         process_group_id: int | None = None
         if self._platform == "posix":
