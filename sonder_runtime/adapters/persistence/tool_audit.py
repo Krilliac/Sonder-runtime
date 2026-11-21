@@ -138,13 +138,15 @@ class DurableToolAuditRepository:
                 line = self._line(request, receipt, "", rotated_from)
                 current = b""
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Existing records are never truncated: only the new line is
+            # appended, and a rotated-away file leaves a fresh one to create.
             # Owner-only audit file: created 0600, an older 0644 tightened.
             prepare_private_file(self.path)
             if pending_prune:
                 # The deletion record must reach stable storage before any
                 # older chain it names can be removed.
-                with self.path.open("wb") as stream:
-                    stream.write(current + line)
+                with self.path.open("ab") as stream:
+                    stream.write(line)
                     stream.flush()
                     os.fsync(stream.fileno())
                 for candidate in pending_prune:
@@ -159,8 +161,8 @@ class DurableToolAuditRepository:
             else:
                 # A journal terminal outcome may refer to this receipt as
                 # soon as append returns. Flush it before that can happen.
-                with self.path.open("wb") as stream:
-                    stream.write(current + line)
+                with self.path.open("ab") as stream:
+                    stream.write(line)
                     stream.flush()
                     os.fsync(stream.fileno())
 
