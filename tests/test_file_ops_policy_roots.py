@@ -12,10 +12,14 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from sonder_runtime.adapters.filesystem import file_ops
+from sonder_runtime.bootstrap import app as runtime_app
+from sonder_runtime.interfaces.http import serve as http_serve
+from sonder_runtime.platform import config as runtime_config
 
 WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows drive/extended path semantics")
 
@@ -250,3 +254,183 @@ def test_reach_scope_strips_extended_local_and_drops_disallowed(isolated_root_po
         assert project.resolve() in roots
         assert all(not str(root).startswith(("\\\\", "//", "\\??")) for root in roots)
         assert file_ops.resolve_path(str(note)) == note.resolve()
+
+
+def _guard_resolve_against_disallowed(monkeypatch) -> list[str]:
+    seen: list[str] = []
+    real_resolve = Path.resolve
+
+    def spy_resolve(self, *args, **kwargs):
+        text = str(self)
+        seen.append(text)
+        flat = text.replace("/", "\\")
+        if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
+            raise AssertionError("Path.resolve() must never be called on disallowed root: %r" % text)
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "bad_home",
+    [
+        pytest.param("\\\\host\\share", id="unc-home"),
+        pytest.param("//host/share", id="unc-slash-home"),
+        pytest.param("\\\\?\\UNC\\nohost.invalid\\share", id="extended-unc-home"),
+        pytest.param("\\\\.\\C:\\Users\\me", id="device-home"),
+        pytest.param("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\Users\\me", id="globalroot-home"),
+        pytest.param("\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\Users\\me", id="volume-home"),
+        pytest.param("\\??\\C:\\Users\\me", id="nt-namespace-home"),
+    ],
+)
+@pytest.mark.parametrize("tilde_entry", ["~", "~\\proj", "~/proj"], ids=["bare-tilde", "tilde-backslash", "tilde-slash"])
+def test_tilde_expansion_against_disallowed_userprofile_is_dropped(
+    isolated_root_policy, monkeypatch, bad_home, tilde_entry,
+):
+    """A UNC/prefixed ``USERPROFILE`` or ``HOME`` must not turn ``~`` into a network or device root."""
+    monkeypatch.setenv("USERPROFILE", bad_home)
+    monkeypatch.setenv("HOME", bad_home)
+    _guard_resolve_against_disallowed(monkeypatch)
+
+    assert file_ops._parse_policy_root(tilde_entry) is None
+    assert file_ops._split_roots(tilde_entry) == []
+
+    isolated_root_policy.write_text(tilde_entry + "\n", encoding="utf-8")
+    assert file_ops._roots_from_file() == []
+
+    baseline = file_ops.allowed_roots()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", tilde_entry)
+    assert file_ops.allowed_roots() == baseline
+
+
+@WINDOWS_ONLY
+def test_tilde_expansion_against_extended_local_userprofile_strips_prefix(
+    isolated_root_policy, monkeypatch, tmp_path,
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setenv("USERPROFILE", "\\\\?\\" + str(tmp_path))
+    monkeypatch.setenv("HOME", "\\\\?\\" + str(tmp_path))
+
+    parsed = file_ops._parse_policy_root("~\\proj")
+    assert parsed == Path(str(proj))
+    assert not str(parsed).startswith(("\\\\?\\", "//?/"))
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize(
+    "configured_bad",
+    [
+        pytest.param("\\\\?\\UNC\\nohost.invalid\\share", id="extended-unc"),
+        pytest.param("\\\\host\\share\\proj", id="plain-unc"),
+        pytest.param("//host/share/proj", id="plain-unc-slash"),
+        pytest.param("\\\\.\\C:\\proj", id="device"),
+        pytest.param("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\proj", id="globalroot"),
+        pytest.param("\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\proj", id="volume"),
+        pytest.param("\\??\\C:\\proj", id="nt-namespace"),
+        pytest.param("/??/C:/proj", id="nt-namespace-slash"),
+    ],
+)
+def test_lane_grant_roots_configured_drops_disallowed_and_strips_extended_local(
+    isolated_root_policy, monkeypatch, tmp_path, configured_bad,
+):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    baseline = file_ops.lane_grant_roots(())
+    _guard_resolve_against_disallowed(monkeypatch)
+
+    assert file_ops.lane_grant_roots((configured_bad,)) == baseline
+
+    grants = file_ops.lane_grant_roots((configured_bad, "\\\\?\\" + str(plain), "//?/" + plain.as_posix()))
+    assert str(plain.resolve()) in grants
+    assert all(not grant.startswith(("\\\\", "//", "\\??")) for grant in grants)
+
+
+@WINDOWS_ONLY
+def test_lane_grant_roots_configured_drops_tilde_when_userprofile_is_unc(
+    isolated_root_policy, monkeypatch,
+):
+    monkeypatch.setenv("USERPROFILE", "\\\\nohost.invalid\\share")
+    monkeypatch.setenv("HOME", "\\\\nohost.invalid\\share")
+    baseline = file_ops.lane_grant_roots(())
+    _guard_resolve_against_disallowed(monkeypatch)
+
+    assert file_ops.lane_grant_roots(("~", "~\\proj")) == baseline
+
+
+@WINDOWS_ONLY
+def test_config_apply_environment_and_production_lane_grant_call_shape(
+    isolated_root_policy, monkeypatch, tmp_path,
+):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    _guard_resolve_against_disallowed(monkeypatch)
+
+    # Disallowed-only SONDER_FILE_ROOTS never enters state.workspace_roots or lane_grant_roots.
+    errors_bad: list[str] = []
+    cfg_bad = runtime_config._apply_environment(
+        runtime_config.SonderConfig(),
+        {"SONDER_FILE_ROOTS": "\\\\?\\UNC\\nohost.invalid\\share" + os.pathsep + "\\\\host\\share" + os.pathsep + "\\??\\C:\\x"},
+        errors_bad,
+    )
+    assert cfg_bad.state.workspace_roots == ()
+    baseline = file_ops.lane_grant_roots(())
+    assert file_ops.lane_grant_roots(cfg_bad.state.workspace_roots) == baseline
+
+    # Extended-length local SONDER_FILE_ROOTS is stripped in config AND through lane_grant_roots.
+    errors_ok: list[str] = []
+    combined = os.pathsep.join([
+        "\\\\?\\UNC\\nohost.invalid\\share",
+        "\\\\.\\PhysicalDrive0",
+        "\\\\?\\" + str(plain),
+    ])
+    cfg_ok = runtime_config._apply_environment(
+        runtime_config.SonderConfig(),
+        {"SONDER_FILE_ROOTS": combined},
+        errors_ok,
+    )
+    assert cfg_ok.state.workspace_roots == (str(plain),)
+    assert all(not r.startswith(("\\\\", "//", "\\??")) for r in cfg_ok.state.workspace_roots)
+
+    monkeypatch.setenv("SONDER_FILE_ROOTS", combined)
+    grants = file_ops.lane_grant_roots(cfg_ok.state.workspace_roots)
+    assert str(plain.resolve()) in grants
+    assert all(not grant.startswith(("\\\\", "//", "\\??")) for grant in grants)
+
+
+@WINDOWS_ONLY
+def test_http_workspace_roots_strips_extended_local_and_drops_disallowed_and_unc_tilde(
+    isolated_root_policy, monkeypatch, tmp_path,
+):
+    plain = tmp_path / "http_plain"
+    plain.mkdir()
+    monkeypatch.setenv("USERPROFILE", "\\\\nohost.invalid\\share")
+    monkeypatch.setenv("HOME", "\\\\nohost.invalid\\share")
+    monkeypatch.setattr(http_serve, "_admin_authorized", lambda auth: bool(auth))
+    _guard_resolve_against_disallowed(monkeypatch)
+
+    fake_app = SimpleNamespace(
+        config=SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_roots=(
+                    "\\\\?\\" + str(plain),
+                    "//?/" + plain.as_posix(),
+                    "\\\\?\\UNC\\nohost.invalid\\share",
+                    "\\\\host\\share\\proj",
+                    "\\\\.\\C:\\proj",
+                    "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\proj",
+                    "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\proj",
+                    "\\??\\C:\\proj",
+                    "~",
+                    "~\\proj",
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(runtime_app, "default_app", lambda: fake_app)
+
+    assert http_serve._http_workspace_roots(False) == ()
+    roots = http_serve._http_workspace_roots(True)
+    assert roots == (str(plain.resolve()),)
+    assert all(not root.startswith(("\\\\", "//", "\\??")) for root in roots)

@@ -260,6 +260,19 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
+def _normalize_policy_root_text(raw: str) -> str | None:
+    text = (raw or "").strip()
+    if not text or "\0" in text:
+        return None
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        return text[extended.start(1):]
+    flat = text.replace("/", "\\")
+    if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
+        return None
+    return text
+
+
 def _parse_policy_root(raw: str) -> Path | None:
     """Parse one policy-root entry, stripping ``\\\\?\\`` local prefixes and dropping other prefixed forms.
 
@@ -269,19 +282,21 @@ def _parse_policy_root(raw: str) -> Path | None:
     ``Path.resolve()`` preserves ``//?/`` while ``_reject_network_path`` strips
     it). Every other prefixed or network form (``\\\\?\\UNC\\...``, ``\\\\.\\...``,
     ``GLOBALROOT``, ``Volume{...}``, ``\\??\\...``, plain UNC ``\\\\host\\share``)
-    is dropped before ``Path()`` or ``resolve()`` ever sees it.
+    is dropped before ``Path()`` or ``resolve()`` ever sees it, and the same
+    check is re-run after ``expanduser()`` so a UNC or prefixed ``USERPROFILE``
+    cannot turn ``~`` into a network or device root.
     """
-    text = (raw or "").strip()
-    if not text or "\0" in text:
+    text = _normalize_policy_root_text(raw)
+    if text is None:
         return None
-    extended = _EXTENDED_LOCAL_RE.match(text)
-    if extended:
-        text = text[extended.start(1):]
-    else:
-        flat = text.replace("/", "\\")
-        if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
-            return None
-    return Path(text).expanduser()
+    try:
+        expanded = Path(text).expanduser()
+    except RuntimeError:
+        return None
+    checked = _normalize_policy_root_text(str(expanded))
+    if checked is None:
+        return None
+    return Path(checked)
 
 
 def _split_roots(raw: str) -> list[Path]:
@@ -439,15 +454,23 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
             excluded.append(root.resolve())
         except OSError:
             excluded.append(_normalized_absolute(root))
-    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
+    explicit: list[Path] = []
+    for item in configured or ():
+        if item is None:
+            continue
+        parsed = _parse_policy_root(str(item))
+        if parsed is not None:
+            explicit.append(parsed)
     roots = []
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     default_root = None
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         default_root = runtime_paths.default_workspace_root()
-    if default_root is not None and os.path.isdir(default_root):
-        roots.append(Path(default_root))
+    if default_root is not None:
+        parsed_default = _parse_policy_root(str(default_root))
+        if parsed_default is not None and parsed_default.is_dir():
+            roots.append(parsed_default)
     out: list[str] = []
     for root in explicit + roots:
         try:
