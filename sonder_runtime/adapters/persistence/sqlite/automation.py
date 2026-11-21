@@ -4,16 +4,20 @@ Owns automation.db: tasks, autopilot, fleet, and workflow runs
 under a unified automation_runs/automation_steps schema with a kind
 discriminator.  Includes outbox_events for transactional event dispatch.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
-import json
+import json  # noqa: F401
 import logging
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from .outbox import OUTBOX_DDL
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,9 @@ CREATE TABLE IF NOT EXISTS schema_epoch (
 def init_automation_db(db_path: Path) -> sqlite3.Connection:
     """Open or create automation.db with the SPEC-5 schema."""
     logger.debug(f"initializing automation.db at {db_path!r}")
-    conn = owned_sqlite_connect(str(db_path))
+    conn = cast("Callable[[str], sqlite3.Connection]", owned_sqlite_connect)(
+        str(db_path)
+    )
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
