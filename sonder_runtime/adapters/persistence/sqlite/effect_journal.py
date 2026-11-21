@@ -493,7 +493,14 @@ class SQLiteEffectJournal:
         transaction. A pending sibling keeps the whole run fenced.
         """
         if run_id not in self._live_latches:
-            return
+            # After a restart the in-memory latch is empty; the durable flag
+            # alone may still fence the run.
+            fenced = connection.execute(
+                "SELECT 1 FROM effect_owner WHERE run_id=? AND recovery_required=1 LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if fenced is None:
+                return
         unresolved = connection.execute(
             "SELECT 1 FROM effect_journal WHERE run_id=? AND state IN (?,?) LIMIT 1",
             (run_id, EffectState.INTENT.value, EffectState.UNCERTAIN.value),
