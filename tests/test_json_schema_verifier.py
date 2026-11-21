@@ -725,3 +725,54 @@ def test_nesting_within_the_limit_is_still_fully_checked():
     schema_cursor["properties"] = {"c": {"type": "object"}}
     document_cursor["c"] = "not an object"
     assert J.validate(document, schema), "a violation at the bottom must still be found"
+
+
+@pytest.mark.parametrize("artifact, schema", [
+    ("NaN", {"type": "number", "minimum": 0}),
+    ("NaN", {"type": "number", "maximum": 10}),
+    ("NaN", {"type": "number", "exclusiveMinimum": 0}),
+    ("Infinity", {"type": "number", "multipleOf": 2}),
+    ("-Infinity", {"type": "number", "multipleOf": 0.1}),
+    ("NaN", {"type": "number", "multipleOf": 3}),
+])
+def test_non_finite_numbers_fail_numeric_keywords_without_raising(artifact, schema):
+    verdict = J.json_schema_verify(artifact, {"schema": schema})
+    assert verdict.passed is False
+    assert "finite" in verdict.reason
+
+
+def test_non_finite_number_without_numeric_keywords_is_unchanged():
+    assert J.json_schema_verify("NaN", {"schema": {"type": "number"}}).passed is True
+
+
+def test_huge_integer_multiple_of_is_exact_and_never_raises():
+    huge = 10 ** 400
+    assert J.json_schema_verify(str(huge), {"schema": {"multipleOf": 3}}).passed is False
+    assert J.json_schema_verify(str(3 * 10 ** 400), {"schema": {"multipleOf": 3}}).passed is True
+    # 10**400 cannot be divided by 0.1 in floats: that is a limit of the checker,
+    # so it is reported as unchecked (the module docstring), not as a violation.
+    unchecked = J.json_schema_verify(str(huge), {"schema": {"multipleOf": 0.1}})
+    assert unchecked.passed is False
+    assert unchecked.reason.startswith("cannot verify")
+    errors, gaps = J.check(huge, {"multipleOf": 0.1})
+    assert errors == []
+    assert len(gaps) == 1
+
+
+def test_integral_float_multiple_of_is_checked_with_exact_integers():
+    schema = {"multipleOf": 2.0}
+    assert J.json_schema_verify("100000000000000001", {"schema": schema}).passed is False
+    assert J.json_schema_verify("100000000000000002", {"schema": schema}).passed is True
+    assert J.json_schema_verify("9007199254740993", {"schema": {"multipleOf": 3.0}}).passed is True
+    assert J.json_schema_verify("9007199254740994", {"schema": {"multipleOf": 3.0}}).passed is False
+
+
+def test_integer_too_long_for_json_loads_is_a_failed_verdict_not_a_raise():
+    verdict = J.json_schema_verify("1" * 5000, {"schema": {"type": "integer"}})
+    assert verdict.passed is False
+    assert "invalid json" in verdict.reason
+
+
+def test_numeric_keyword_set_is_not_duplicated():
+    assert not hasattr(J, "_NUMERIC_KEYWORDS")
+    assert J.json_schema_verify("7", {"schema": {"multipleOf": 7}}).passed is True

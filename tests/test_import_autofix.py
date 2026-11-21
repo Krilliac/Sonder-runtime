@@ -247,3 +247,86 @@ def test_grounded_pygame_math_attr_case():
 
     ok2, out2 = grounding.run_code(fixed)
     assert ok2 is True, out2
+
+
+_NAME_ERROR = "NameError: name 'random' is not defined"
+
+
+def test_import_goes_after_future_imports_and_docstring_and_shebang():
+    code = '#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"""Doc."""\nfrom __future__ import annotations\n\nx = random.random()\n'
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    compile(fixed, "<t>", "exec")
+    assert fixed == '#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"""Doc."""\nfrom __future__ import annotations\nimport random\n\nx = random.random()\n'
+
+
+def test_import_keeps_docstring_first_and_survives_future_only_module():
+    doc = '"""Doc."""\nx = random.random()\n'
+    fixed = import_autofix.fix_missing_imports(doc, _NAME_ERROR)
+    assert fixed.startswith('"""Doc."""\nimport random\n')
+    fut = "from __future__ import annotations\nx = random.random()\n"
+    compile(import_autofix.fix_missing_imports(fut, _NAME_ERROR), "<t>", "exec")
+
+
+def test_import_preserves_crlf_and_plain_prepend():
+    assert import_autofix.fix_missing_imports("x = random.random()\n", _NAME_ERROR) == "import random\nx = random.random()\n"
+    crlf = '"""D."""\r\nx = random.random()\r\n'
+    assert import_autofix.fix_missing_imports(crlf, _NAME_ERROR) == '"""D."""\r\nimport random\r\nx = random.random()\r\n'
+
+
+def test_wrong_module_attr_fix_places_math_import_legally():
+    code = '"""Doc."""\nfrom __future__ import annotations\nimport pygame\ny = pygame.cos(1)\n'
+    fixed = import_autofix.fix_wrong_module_attrs(code, "AttributeError: module 'pygame' has no attribute 'cos'")
+    compile(fixed, "<t>", "exec")
+    assert fixed.index("import math") > fixed.index("from __future__")
+    assert "math.cos(1)" in fixed
+
+
+def _run(source):
+    namespace = {"__name__": "__autofix_test__"}
+    exec(compile(source, "<t>", "exec"), namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("code", [
+    '"""doc"""; x = random.random()\n',
+    "from __future__ import annotations; x = random.random()\n",
+    '"""doc"""; from __future__ import annotations; x = random.random()\n',
+    '"""doc"""  ; x = random.random()  # trailing\n',
+    '"""caf\u00e9"""; x = random.random()\r\n',
+    '#!/usr/bin/env python\n"""doc"""; x = random.random()\n',
+])
+def test_import_precedes_first_use_when_anchor_shares_its_line(code):
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    namespace = _run(fixed)
+    assert 0.0 <= namespace["x"] < 1.0
+    assert fixed.count("import random") == 1
+
+
+def test_shared_line_docstring_stays_the_module_docstring():
+    namespace = _run(import_autofix.fix_missing_imports('"""doc"""; x = random.random()\n', _NAME_ERROR))
+    assert namespace["__doc__"] == "doc"
+
+
+def test_shebang_without_docstring_keeps_the_shebang_first():
+    code = "#!/usr/bin/env python\nx = random.random()\n"
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed == "#!/usr/bin/env python\nimport random\nx = random.random()\n"
+    _run(fixed)
+
+
+@pytest.mark.parametrize("code, expected_prefix", [
+    ("# generated file\n# -*- coding: latin-1 -*-\nx = random.random()\n",
+     "# generated file\n# -*- coding: latin-1 -*-\nimport random\n"),
+    ("\n# coding: utf-8\nx = random.random()\n", "\n# coding: utf-8\nimport random\n"),
+    ("# just a comment\nx = random.random()\n", "import random\n# just a comment\n"),
+])
+def test_encoding_cookie_stays_within_the_first_two_lines(code, expected_prefix):
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed.startswith(expected_prefix)
+    _run(fixed)
+
+
+def test_cookie_like_comment_on_line_two_after_code_is_not_a_cookie():
+    code = "y = 1\n# coding: utf-8\nx = random.random()\n"
+    fixed = import_autofix.fix_missing_imports(code, _NAME_ERROR)
+    assert fixed.startswith("import random\ny = 1\n")
