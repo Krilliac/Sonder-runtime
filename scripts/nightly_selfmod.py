@@ -1832,8 +1832,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
 
 def main() -> int:
     import server
+    from sonder_runtime.domain.security.redaction import redact_text
     def log(message):
-        print(message, flush=True)
+        print(redact_text(message), flush=True)
     log(json.dumps(selfmod.settings()))
     log(run(server, log))
     return 0

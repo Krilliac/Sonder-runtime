@@ -438,7 +438,9 @@ The details are in [Crash and profile digests](../crash-profile-digest.md).
   `approximate_location_lookup` — gated by `SONDER_WEB_TOOLS`.
 - **Artifacts:** `artifact_generate` / `artifact_verify` /
   `ground_artifact` — stdlib images, SVG, Office, audio, GLB, etc., with
-  deterministic verification.
+  deterministic verification. Credential-shaped text in the brief (for
+  example `api_key=...`) is redacted before it is written into any
+  generated file or the manifest.
 - **Tasks/checklists:** `task_*`, `checklist_*` — shared todo/checklist
   state across console, app, agents, and MCP.
 - **Memory/learning:** see [Memory & Learning](06-memory-and-learning.md).
