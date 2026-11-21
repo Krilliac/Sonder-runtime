@@ -121,7 +121,8 @@ For the genuinely hard minority, pick one:
   roughly 48 GB). Bind it to a ladder tier such as `reasoning` and raise
   `SONDER_KEEP_ALIVE` so its long load is not re-paid. Private, slow. A tier on
   the ladder is an automatic escalation rung (see below).
-- **Consented cloud** — set `SONDER_ALLOW_CLOUD=1` and route the `cloud-*` tier.
+- **Consented cloud** — set `SONDER_ALLOW_CLOUD=1` and pick a `cloud-*` tier;
+  setup is in [Hosted cloud tiers](#hosted-cloud-tiers-optional) below.
   Prompts leave the machine on that tier only; every other tier stays local.
 
 Automatic escalation never reaches a `cloud-*` tier: after a failed run, an
@@ -134,6 +135,70 @@ bound to a ladder tier such as `reasoning` is different: it is an automatic
 escalation rung, so a failed or empty attempt on a lower tier can reach it. Bind
 it to `reasoning` only if that is acceptable.
 
+## Hosted cloud tiers (optional)
+
+This section is the one home for cloud-tier setup (checked 2026-11-20). The
+tiers are `cloud-code` and `cloud-general`; they run on Ollama's hosted
+service, need no local weights, and are never a startup requirement.
+
+1. **Consent.** Set `SONDER_ALLOW_CLOUD` to `1` (`true`, `yes` and `on` also
+   count) in the environment of every process that should be allowed to use
+   them:
+
+   ```powershell
+   $env:SONDER_ALLOW_CLOUD = '1'     # this PowerShell session only
+   ```
+
+   ```bash
+   export SONDER_ALLOW_CLOUD=1       # this shell only
+   ```
+
+   Without it a cloud request is refused before anything leaves the machine
+   with `hosted/cloud tiers are disabled. Set SONDER_ALLOW_CLOUD=1 to opt in;
+   prompts sent to cloud tiers leave this machine.`, and `/model` and
+   `/v1/models` do not offer the tiers.
+2. **Models.** The default model ids are listed in the
+   [tier table](../wiki/08-model-tiers-and-gateway.md#remote--cloud-opt-in)
+   (authoritative source: `default_cloud_models` in
+   `sonder_runtime/adapters/data/model_lists.json`). Override either with
+   `SONDER_CLOUD_CODE` / `SONDER_CLOUD_GENERAL`. A value naming a retired cloud
+   model (`qwen3-coder:480b-cloud`, `deepseek-v4-flash:cloud`) is ignored with a
+   logged warning and the default is used instead.
+3. **Use a host Ollama, not the bundled one.** `SONDER_ALLOW_CLOUD` only gates
+   Sonder. When the runtime uses a sealed engine bundle that ships Ollama, the
+   launchers (`sonder-runtime.sh`, `sonder-runtime.cmd`) set `OLLAMA_NO_CLOUD=1`
+   for that Ollama, and Ollama's own setting turns off cloud models
+   ([Ollama FAQ](https://docs.ollama.com/faq)). When the bundled Ollama is the
+   one serving, the tiers are listed but every cloud request fails at Ollama. If
+   a host Ollama is already answering, bootstrap uses it instead
+   (`bootstrap_engine.py:159-160`) and the launcher's `OLLAMA_NO_CLOUD` does not
+   apply to that process. For cloud tiers, run Sonder without the
+   bundle (a source checkout with no `engine/` bundle and no
+   `SONDER_ENGINE_BUNDLE`) against a host Ollama that is signed in to Ollama's
+   hosted service.
+4. **Verify with a real request.** In the REPL, `/model` now lists `cloud-code`
+   and `cloud-general`; `/model cloud-code` selects one for the session. Then
+   send one short prompt such as `Say hello in one short sentence.`
+   Expected: a normal answer. If it instead fails with a provider error from
+   Ollama (the wording is Ollama's, not Sonder's) while `/model` still lists the
+   tier, cloud is off or not signed in at the Ollama you are using; check
+   step 3. Selecting is a deliberate act: automatic escalation never reaches a
+   cloud tier (section 6). Listing alone does not prove cloud works.
+5. **Rollback.** Unset `SONDER_ALLOW_CLOUD` (or set it to `0`) and restart the
+   process; the tiers disappear again. To revoke consent at once without a
+   restart, call the process-local `cloud_opt_in` MCP tool with
+   `action="off"` ([consent paths](../wiki/08-model-tiers-and-gateway.md#remote--cloud-opt-in)).
+   Nothing is stored in the runtime policy (it cannot enable cloud).
+
+Account sign-in with Ollama's hosted service is done with Ollama itself and is
+not driven or checked by Sonder; this runbook does not cover it.
+
+Other hosted providers are separate gateways with their own keys, spend caps
+and consent steps: [OpenRouter](../integration/openrouter.md) and
+[Anthropic](../integration/anthropic.md). Remote (non-cloud) Ollama is a
+different gate:
+[remote-ollama-caddy](remote-ollama-caddy.md#coordinator-settings).
+
 ## Rollback
 
 `/runtime reset` restores safe defaults (all local base tiers). Pulled models
@@ -143,8 +208,12 @@ remain in Ollama's store; remove any with `ollama rm <model>`.
 
 - Policy can never enable cloud, widen permissions/roots, or store credentials
   ([Security Model](../wiki/09-security-model.md)) — apart from `provider_models`,
-  which names the model an already-bound, already-consented OpenRouter tier
-  serves, it only selects local
-  aliases and lanes. Cloud remains a separate host-owned consent gate.
+  which names the model an already-bound, already-consented **OpenRouter** tier
+  serves (only the `openrouter` section is read), it only selects local
+  aliases and lanes. Anthropic does not use `provider_models`: its model comes
+  from an explicit request `model` option, else `SONDER_ANTHROPIC_TIER_MODELS`
+  (`tier=model,...`), else `SONDER_ANTHROPIC_MODEL`, else a built-in default
+  (see [Anthropic](../integration/anthropic.md) for the current one). Cloud
+  remains a separate host-owned consent gate.
 - Changing hardware changes only the model sizes, not this procedure; re-run
   `sonder_hardware.py` and re-pick from the band table.

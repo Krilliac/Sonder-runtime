@@ -35,7 +35,11 @@ Do this:
 
 3. Register the MCP server for whichever agent you are, using the venv
    interpreter inside the checkout and absolute paths for this machine. Not a
-   system python. Show me the exact config change first.
+   system python. The server command is `<venv python> -m sonder_runtime mcp`,
+   not `server.py`. The checkout is not an installed package, so set
+   PYTHONPATH to the checkout in the server's environment (claude mcp add -e,
+   or the env table in the config). Without it the server fails with "No module
+   named sonder_runtime". Show me the exact config change first.
 
 4. Append the guidance file to my agent config — CLAUDE.sonder.md to
    ~/.claude/CLAUDE.md if you are Claude Code, AGENTS.sonder.md to

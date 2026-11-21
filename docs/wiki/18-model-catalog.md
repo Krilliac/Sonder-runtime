@@ -333,36 +333,32 @@ tiers to a loopback OpenAI-compatible server such as Prism/llama.cpp. Unset
 provider bindings inherit `SONDER_MODEL_BACKEND`, so existing single-provider
 installations do not change.
 
-For the production Bonsai/Qwen split:
+Example: route `fast` and `general` to a loopback llama.cpp server and keep
+`code` and `reasoning` on Ollama (this relies on `SONDER_MODEL_BACKEND` being
+unset, which defaults to `ollama`; if your host sets it to something else, add
+`SONDER_CODE_PROVIDER=ollama` and `SONDER_REASONING_PROVIDER=ollama`, and
+`SONDER_VISION_PROVIDER` too if you use the vision tier, which also inherits the
+backend; `provider_bindings.py:15`):
 
 ```text
-SONDER_MODEL_BACKEND=ollama
 SONDER_FAST_PROVIDER=openai-compatible
 SONDER_GENERAL_PROVIDER=openai-compatible
-SONDER_CODE_PROVIDER=ollama
-SONDER_REASONING_PROVIDER=ollama
 SONDER_EMBEDDING_PROVIDER=ollama
 SONDER_OPENAI_BASE_URL=http://127.0.0.1:18080
-SONDER_OPENAI_MODEL=sonder-bonsai
+SONDER_OPENAI_MODEL=<served-model-id>
 ```
 
+Setup, every variable and the failure modes are in
+[OpenAI-compatible providers](../integration/openai-compatible.md).
+
 The dispatcher makes one provider call and never falls through to another
-provider, except for the opt-in Sonder Inference fallback below. Non-loopback
+provider, except for the opt-in Sonder Inference fallback. Non-loopback
 OpenAI-compatible endpoints still require explicit cloud consent, and remote
 Ollama still requires explicit remote-Ollama consent.
 
-To run tiers on Sonder Inference (`sonder-infer serve`) instead:
-
-```text
-SONDER_MODEL_BACKEND=sonder-inference
-SONDER_EMBEDDING_PROVIDER=ollama
-SONDER_INFERENCE_BASE_URL=http://127.0.0.1:11437
-SONDER_INFERENCE_TIER_MODELS=fast=qwen2.5:3b,general=qwen2.5:7b
-# optional: requests Inference never received go to local Ollama once
-SONDER_INFERENCE_FALLBACK=ollama
-```
-
-Tier model ids are Inference's served ids, not the runtime policy's Ollama
-names, which are never forwarded. The fallback triggers only when Inference
-provably did not run the request; timeouts and server errors surface as
-errors. See the [Sonder Inference runbook](../runbooks/sonder-inference.md).
+To run tiers on Sonder Inference (`sonder-infer serve`) instead, set
+`SONDER_MODEL_BACKEND=sonder-inference` (and keep
+`SONDER_EMBEDDING_PROVIDER=ollama`, because that gateway does not serve
+embeddings). Tier model ids are Inference's served ids, not the runtime
+policy's Ollama names. Install, variables, the opt-in Ollama fallback and
+failure modes: [Sonder Inference runbook](../runbooks/sonder-inference.md).

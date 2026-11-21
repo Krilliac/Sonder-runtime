@@ -1,15 +1,33 @@
 # Suspected secret exposure
 
 Treat any plausible exposure (key in a pasted log, screen share, stolen
-laptop, world-readable secrets file) as real until proven otherwise.
+laptop, world-readable secrets file) as real until proven otherwise. Terminal
+scrollback and shell logs count: `deploy_sonder.sh --serve` prints the API key to
+the terminal (`deploy_sonder.sh:186`), so rotate if that output was captured, recorded or
+shared.
 
 ## 1. Contain — rotate with minimal overlap
 
 ```bash
-sudo -u sonder /opt/sonder/current/venv/bin/python -m sonder_runtime rotate-key \
+sudo systemctl stop sonder
+sudo /opt/sonder/current/venv/bin/python -m sonder_runtime rotate-key \
+    --config /etc/sonder/sonder.toml \
     --secrets /etc/sonder/sonder.env --overlap-seconds 60
-sudo systemctl restart sonder
+sudo chown sonder:sonder /etc/sonder/sonder.env
+sudo chmod 0600 /etc/sonder/sonder.env
+sudo chown sonder:sonder /var/lib/sonder/secrets/rotation.json
+sudo chmod 0600 /var/lib/sonder/secrets/rotation.json
+sudo chown sonder:sonder /var/lib/sonder/operations.db*
+sudo systemctl start sonder
 ```
+
+`--config` is required: it selects the state home that receives
+`rotation.json` and the `API_KEY_ROTATED` event that section 5 relies on;
+without it the command uses the default home of the invoking user
+(`__main__.py:60-87`, `:1654-1657`). 60 seconds is the shortest overlap the
+tool accepts (`secrets.py:24-26`, `:136-139`). The `chown` lines and why the
+command runs as root rather than `sonder` are in
+[rotate-credentials](rotate-credentials.md#why-not-sudo--u-sonder).
 
 If account auth is in use, also rotate `SONDER_AUTH_SECRET` (invalidates
 all tokens) and force re-login.

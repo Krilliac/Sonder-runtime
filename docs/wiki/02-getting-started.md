@@ -1,145 +1,65 @@
 # Getting Started
 
-Two supported profiles: **workstation-local** (your machine, loopback
-only) and **server-private** (self-hosted Linux, systemd, TLS reverse
-proxy for remote access). This page gets you running; the runbooks cover
-production install in detail.
+This page is the conceptual overview: what runs where and which ports it
+uses. The ordered, copy-pasteable setup steps live in one place:
+**For the ordered setup steps see
+[Set up Sonder: start here](../runbooks/setup-start-here.md).**
 
-## Prerequisites
+## Profiles
 
-- Python 3.11+ (3.12 in CI).
-- [Ollama](https://ollama.com) installed and running.
-- A model. Either pull one online, or import a portable GGUF (see
-  [Model Tiers & Gateway](08-model-tiers-and-gateway.md) and the
-  [facts. runbook](../runbooks/use-facts-model.md)). One generative local
-  model is the whole requirement — see
+Two supported profiles (`PROFILES`, `sonder_runtime/platform/config.py:81`):
+
+- **workstation-local**: your machine, intended for loopback. This is the code
+  default (`config.py:639`).
+- **server-private**: self-hosted Linux, systemd, a TLS reverse proxy for
+  remote access. It refuses to start without a `SONDER_API_KEY` of at least
+  24 characters (`config.py:1991-1996`).
+
+The listener binds `127.0.0.1` unless configured otherwise
+(`config.py:151`). Authentication defaults and the no-key loopback behaviour
+are in [configure-authentication](../runbooks/configure-authentication.md).
+
+## Deployment shapes
+
+| Shape | What it is | Setup home |
+|---|---|---|
+| Workstation-local from source | Python venv on Windows, Linux or macOS, intended for loopback | [install-workstation-local](../runbooks/install-workstation-local.md) |
+| Extracted local-system bundle | Self-contained archive, does not change `PATH`; no bare `sonder` wrapper ships for POSIX | [bundle section](../runbooks/install-workstation-local.md#extracted-local-system-bundle) |
+| WSL2 | Linux inside Windows, same as native Linux plus NAT and `.wslconfig` caveats | [WSL2 section](../runbooks/install-workstation-local.md#wsl2-linux-inside-windows) |
+| Server-private | Dedicated OS user, versioned release, hardened systemd units | [install-server-private](../runbooks/install-server-private.md) |
+| Multi-host | A coordinator routing across remote Ollama workers, each behind an HTTPS proxy (never the raw worker port) | [remote-ollama-caddy](../runbooks/remote-ollama-caddy.md), [multi-node-ollama](../runbooks/multi-node-ollama.md) |
+
+Remote access to Sonder itself is a TLS reverse proxy in front of the
+loopback listener, never a direct public bind
+([secure-remote-access](../runbooks/secure-remote-access.md)).
+
+## Ports (checked 2026-11-20)
+
+| Port | Service | Source |
+|---|---|---|
+| 11435 | Sonder HTTP server | `platform/config.py:152` |
+| 11434 | Ollama | `domain/ollama_policy.py:16` |
+| 11436 | Mobile launcher | `sonder_launcher.py:64` |
+| 11437 | Sonder Inference gateway | `adapters/inference/sonder_inference_gateway.py:125` |
+
+## Prerequisites in brief
+
+- Python: the installer script accepts 3.11 or newer as a floor
+  (`packaging/install_workstation_local.ps1:154`); CI on `main` runs 3.14,
+  with a non-required 3.12 compatibility job (`.github/workflows/ci.yml:38,185-195`).
+  3.11 is not tested.
+- A generative local model; see
   [Model Requirements & Onboarding](19-model-requirements-and-onboarding.md)
-  for what is optional and how to verify what you have.
-- RAM: 8 GB minimum for a 4B model; more for 7B+.
+  and [Model Tiers & Gateway](08-model-tiers-and-gateway.md).
+- State home location and precedence: [Configuration](03-configuration.md#state-home); the default folder is `%LOCALAPPDATA%\sonder` on Windows,
+  `~/Library/Application Support/sonder` on macOS and `$XDG_DATA_HOME/sonder`
+  (else `~/.local/share/sonder`) on Linux ([full order](../runbooks/install-workstation-local.md#state-home-location)).
 
-## Workstation quickstart (Linux/macOS)
+## First-run checks
 
-```bash
-git clone <your-fork> Sonder-runtime && cd Sonder-runtime
-python3 -m venv venv
-./venv/bin/pip install -r requirements-runtime.txt
-
-# Create the sonder:latest alias from a coder model (online):
-./venv/bin/python setup_alias.py
-# ...or import a portable GGUF offline:
-./venv/bin/python setup_alias.py --from-usb
-
-# Validate, migrate, run:
-./venv/bin/python -m sonder_runtime preflight --skip-ollama
-./venv/bin/python -m sonder_runtime migrate
-./venv/bin/python -m sonder_runtime serve      # OpenAI API on 127.0.0.1:11435
-# or:
-./venv/bin/python -m sonder_runtime repl       # interactive
-```
-
-Point any OpenAI-compatible chat UI at `http://127.0.0.1:11435/v1`. State
-lives under `$XDG_DATA_HOME/sonder` or `~/.local/share/sonder` on Linux and
-`~/Library/Application Support/sonder` on macOS (override with `SONDER_HOME`).
-
-On Windows PowerShell, use the same commands with
-`venv\Scripts\python.exe` / `venv\Scripts\pip.exe`. State normally lives at
-`%LOCALAPPDATA%\sonder`; minimal service environments fall back through
-`%USERPROFILE%`, then `%SystemDrive%\Sonder`.
-
-### Extracted local-system bundle
-
-The local-system archive is self-contained and does not change `PATH`. Run
-the launcher from its extracted directory:
-
-```powershell
-# Windows PowerShell
-.\bootstrap-engine.cmd
-.\sonder.cmd
-```
-
-```bash
-# Linux/macOS
-./bootstrap-engine.sh
-. ./sonder-runtime.sh
-"$SONDER_PYTHON" ./sonder_repl.py
-```
-
-If a launcher has been installed on `PATH`, invoking `sonder` is equivalent on
-Windows (`sonder.cmd`). An extracted POSIX bundle does not ship a bare
-`sonder` executable, so retain the explicit command above unless you create a
-local wrapper yourself.
-
-## Server-private (production)
-
-Use the installer, which creates a dedicated OS user, installs an
-immutable versioned release under `/opt/sonder`, writes `0600` secrets
-(never printing the key), and installs hardened systemd units:
-
-```bash
-python3 scripts/package_local_system.py --out dist/local-system
-sudo packaging/install_sonder.sh --package-source dist/local-system \
-  --version-tag "$(git describe --always)"
-sudo systemctl enable --now sonder
-```
-
-Full walkthrough: [install-server-private](../runbooks/install-server-private.md).
-Remote access is a TLS reverse proxy in front of the loopback listener —
-never a direct public bind ([secure-remote-access](../runbooks/secure-remote-access.md)).
-
-## WSL2 deployment (Linux inside Windows)
-
-Sonder runs inside WSL2 (Ubuntu 24.04+) the same as native Linux. Key
-differences:
-
-- **Resource limits** — set `memory`, `processors`, and `swap` in
-  `C:\Users\<you>\.wslconfig` under `[wsl2]`.
-- **systemd** — requires `systemd=true` in `/etc/wsl.conf`. Both Ollama
-  and Sonder systemd units work normally once enabled.
-- **Port access from the Windows host** — WSL2 uses NAT. Forward ports
-  with `netsh interface portproxy` if external machines need to reach
-  services inside WSL. The WSL2 IP changes on reboot; automate the
-  forwarding rule in a startup task.
-- **Ollama GPU access** — WSL2 passes through the host GPU automatically
-  with an up-to-date Windows driver. Verify with `ollama ps` after loading
-  a model.
-
-See [multi-node-ollama](../runbooks/multi-node-ollama.md) for using a WSL2
-node as a remote Ollama worker in a multi-machine pool.
-
-## Multi-node Ollama pools
-
-A single coordinator can route inference across Ollama instances on
-multiple machines.  Add remote workers in `[ollama].workers` with
-`allow_remote = true`.  Remote workers must use HTTPS (an authenticated
-TLS proxy in front of the worker, never its raw `:11434` port), even on a
-private LAN; `trusted_origins` is legacy metadata and never permits HTTP.
-
-Full walkthrough: [multi-node-ollama](../runbooks/multi-node-ollama.md).
-
-## First-run sanity checks
-
-```bash
-curl -s http://127.0.0.1:11435/live      # {"status":"alive"}
-curl -s http://127.0.0.1:11435/ready     # ready once Ollama is reachable
-curl -s http://127.0.0.1:11435/version
-```
-
-If `/ready` is 503 with "required dependency ollama": start Ollama; the
-runtime recovers on its own (it probes every 15s), no restart needed.
-
-## Clients
-
-- **OpenAI-compatible UIs** — use `http://127.0.0.1:11435/v1` locally or the
-  configured `https://` reverse-proxy URL remotely, with the bearer key.
-- **REPL** — `python -m sonder_runtime repl`; slash commands like `/stats`,
-  `/run`, `/permissions`, `/autopilot`.
-- **MCP** — `python -m sonder_runtime mcp` exposes the tool surface to MCP
-  clients.
-- **Flutter app** — in `app/`; its System page shows version, update
-  status, and rollback ([Update Manager](13-update-manager.md)). API and host
-  launcher bearer tokens use the platform credential store rather than app
-  preferences. Use **Forget local session** to remove the account token from
-  this device; copied tokens remain valid until server expiry or revocation.
+Install and first run: [install-workstation-local](../runbooks/install-workstation-local.md).
+Health endpoints (`/live`, `/ready`, `/version`): [HTTP API & Lifecycle](05-http-api-and-lifecycle.md).
+Connecting UIs and tools: [connect-clients](../runbooks/connect-clients.md).
 
 ## Source checkout updates from the REPL
 
