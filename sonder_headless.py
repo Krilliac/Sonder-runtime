@@ -236,6 +236,32 @@ def _is_sonder_server_for_port(pid: int, port: int) -> bool:
     return int(port) == DEFAULT_PORT
 
 
+def _is_ollama_server_pid(pid: int) -> bool:
+    """Return whether ``pid`` is an ``ollama serve`` process like ``start_ollama``'s.
+
+    ``ollama.pid`` can outlive the daemon (crash, reboot) and the OS may later
+    reuse that PID for an unrelated program.  ``stop`` force-kills the whole
+    process tree, so it must prove the identity first, exactly as it already
+    does for ``sonder_serve``.
+    """
+    command = _pid_command_line(pid).strip().lower()
+    if not command:
+        return False
+    names = {"ollama"}
+    configured = ollama_exe()
+    if configured:
+        base = re.split(r"[\\/]", configured.strip().strip('"'))[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        if base:
+            names.add(base)
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    return bool(re.search(
+        r'(?:^|[\\/"\s])(?:%s)(?:\.exe)?"?\s+serve(?:\s|$)' % alternatives,
+        command,
+    ))
+
+
 def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     """Resolve a service PID, repairing stale Windows venv-launcher pidfiles."""
     recorded = _read_pid(name)
@@ -464,8 +490,11 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         merged_env[sonder_health.ROLE_ENV] = runtime_role
     else:
         merged_env.pop(sonder_health.ROLE_ENV, None)
-    merged_env.setdefault("SONDER_HOST", host)
-    merged_env.setdefault("SONDER_PORT", str(port))
+    # The explicit launcher arguments are what ``_require_safe_unsafe_lab_start``
+    # validated and what readiness probes below; an inherited parent
+    # SONDER_HOST/SONDER_PORT must never make the child bind elsewhere.
+    merged_env["SONDER_HOST"] = str(host)
+    merged_env["SONDER_PORT"] = str(port)
     pid = _popen(cmd, "sonder_serve", env=merged_env)
     # ``wait_until`` can expire at the same instant the child binds the port;
     # perform one final direct probe before reporting a failed startup.  The
@@ -483,6 +512,7 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
 
 def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded = _read_pid(name)
+    recorded_for_other_port = False
     if name == "sonder_serve":
         recorded_for_other_port = bool(
             recorded and pid_alive(recorded)
@@ -494,19 +524,34 @@ def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
             if pid and pid not in candidates[:index] and pid_alive(pid)
             and _is_sonder_server_for_port(pid, port)
         ]
+    elif name == "ollama":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        if recorded_alive and not _is_ollama_server_pid(recorded):
+            # A reused PID: the pidfile is stale, but never kill the stranger.
+            try:
+                pid_file(name).unlink()
+            except OSError:
+                pass
+            return (
+                "%s: recorded pid %s is not an Ollama server; not stopped"
+                % (name, recorded)
+            )
+        pids = [recorded] if recorded_alive else []
     else:
         pids = [recorded] if recorded and pid_alive(recorded) else []
     if not pids:
+        if recorded_for_other_port:
+            # The pidfile belongs to the live instance on another port; keep it
+            # so a later ``stop`` for that port can still find the server.
+            return (
+                "%s: recorded pid %s is not for port %s; not stopped"
+                % (name, recorded, port)
+            )
         try:
             pid_file(name).unlink()
         except OSError:
             pass
         if recorded:
-            if name == "sonder_serve" and recorded_for_other_port:
-                return (
-                    "%s: recorded pid %s is not for port %s; not stopped"
-                    % (name, recorded, port)
-                )
             return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
     try:
