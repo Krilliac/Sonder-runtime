@@ -267,3 +267,44 @@ def test_missing_durable_parent_refuses_export(tmp_path):
         with pytest.raises(MigrationRefused, match="missing durable parent"):
             export_snapshot(source, bundle, target_identity="a" * 64)
         assert not bundle.has_manifest()
+
+
+def test_sqlite_migration_preserves_keys_and_terminal_verification(tmp_path):
+    import json
+    import sqlite3
+
+    from sonder_runtime.adapters.persistence.child_migration import (
+        SQLiteChildMigrationStore,
+    )
+    from sonder_runtime.adapters.filesystem.child_migration_bundle import (
+        ChildMigrationBundle,
+    )
+    from sonder_runtime.application.subagents.child_migration import (
+        export_snapshot,
+        stage_snapshot,
+        verify_snapshot,
+    )
+
+    source_path, target_path = tmp_path / "source.db", tmp_path / "target.db"
+    seed(source_path, 2)
+    with sqlite3.connect(source_path) as connection:
+        connection.execute(
+            "UPDATE durable_child_session SET resume_key='rk', idempotency_key='ik',"
+            "terminal_verification_json=? WHERE child_id='child-0000'",
+            (json.dumps({"verified": True}),),
+        )
+    source = SQLiteChildMigrationStore(source_path)
+    target = SQLiteChildMigrationStore(target_path)
+    with ChildMigrationBundle(
+        tmp_path / "private-bundle", writable_roots=lambda: ()
+    ) as bundle:
+        export_snapshot(source, bundle, target_identity=target.identity)
+        stage_snapshot(bundle, target)
+        assert verify_snapshot(bundle, target)["verified"]
+    with sqlite3.connect(target_path) as connection:
+        row = connection.execute(
+            "SELECT resume_key,idempotency_key,terminal_verification_json "
+            "FROM durable_child_session WHERE child_id='child-0000'"
+        ).fetchone()
+    assert row[0] == "rk" and row[1] == "ik"
+    assert json.loads(row[2]) == {"verified": True}
