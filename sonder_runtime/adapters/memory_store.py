@@ -1438,15 +1438,22 @@ def record_outcome_and_claim_lesson_distillation(
             has_good, has_contradiction = _distillation_evidence(
                 conn, interaction_id,
             )
-            if not has_good or has_contradiction:
-                _cancel_live_distillation(
-                    conn, interaction_id, signal,
-                    "contradictory outcome evidence",
-                )
-            else:
+            if has_good and not has_contradiction:
                 claimed = _claim_distillation(
                     conn, interaction_id, signal, claim_token, owner,
                     owner_probe, claimed_at,
+                )
+            elif has_contradiction or (
+                _distillation_row(conn, interaction_id) is not None
+            ):
+                # Evidence that is merely not-yet-good (a weak positive, or
+                # only `attributed` good rows) must not write a terminal
+                # 'cancelled' row for an interaction that has no job yet:
+                # that would block the later grounded outcome from ever
+                # claiming. It may still cancel an existing live job.
+                _cancel_live_distillation(
+                    conn, interaction_id, signal,
+                    "contradictory outcome evidence",
                 )
         row = _distillation_row(conn, interaction_id)
         conn.commit()

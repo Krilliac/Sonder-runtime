@@ -273,6 +273,27 @@ def test_oversized_captures_are_refused_by_kind(root, monkeypatch):
     assert cs.size_cap("chrome_trace") == 1 << 30
 
 
+def test_explicit_max_bytes_raises_the_cap_for_unknown_kind_identity_reads(
+    root, monkeypatch,
+):
+    # A PE/PDB/ELF has no capture magic, sniffs as "unknown" and gets the text
+    # cap by default; the planner's identity read passes an explicit larger cap.
+    binary = root / "engine.pdb"
+    binary.write_bytes(b"\x00" * 5000)
+    monkeypatch.setattr(cs, "TEXT_CAP_BYTES", 1000)
+    with pytest.raises(SonderError) as caught:
+        GuardedCaptureSource().open_reader(str(binary))
+    assert _code(caught) == "CAPTURE_TOO_LARGE"
+    reader, ident = GuardedCaptureSource().open_reader(str(binary), max_bytes=10_000)
+    try:
+        assert ident.size == 5000
+    finally:
+        reader.close()
+    with pytest.raises(SonderError) as caught:
+        GuardedCaptureSource().open_reader(str(binary), max_bytes=4000)
+    assert _code(caught) == "CAPTURE_TOO_LARGE"
+
+
 def test_a_capture_changed_while_it_is_read_is_input_changed(root):
     log = root / "asan.log"
     log.write_bytes(b"==1==ERROR: AddressSanitizer: x\n")

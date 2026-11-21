@@ -81,7 +81,9 @@ def _visible_text(task: object) -> str:
     value = re.sub(r"```.*?```", " ", value, flags=re.DOTALL)
     value = re.sub(r"`[^`]*`", " ", value)
     value = re.sub(r'"(?:\\.|[^"\\])*"', " ", value)
-    value = re.sub(r"'(?:\\.|[^'\\])*'", " ", value)
+    # A quote glued to a letter is an apostrophe ("don't", "it's"), not a
+    # delimiter; pairing two of them would erase the negation between them.
+    value = re.sub(r"(?<!\w)'(?:\\.|[^'\\])*'(?!\w)", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
