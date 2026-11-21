@@ -225,6 +225,15 @@ _CATEGORY_PATTERNS = (
         r"mention\s+what\s+changed|show\s+(?:your\s+)?progress)\b", re.I,
     )),
 )
+# An identity preference is only ever the complete normalized form produced by
+# the "call me" / "my name is" patterns. Matching "name is" anywhere would let an
+# arbitrary standing directive ride along with a trailing name and skip the
+# safe-grammar check every other category needs.
+_IDENTITY_CANONICAL_RE = re.compile(
+    r"^user(?:['’]s\s+name\s+is|\s+wants\s+to\s+be\s+called)\s+"
+    r"[A-Za-zÀ-ɏ'’\-]+(?:\s[A-Za-zÀ-ɏ'’\-]+){0,3}\.?$",
+    re.I,
+)
 _GENERIC_DURABLE_RE = re.compile(
     r"^(?:user\s+(?:prefers\b|does\s+not\s+(?:want\s+sonder\s+to|like)\b|"
     r"likes\s+it\s+when\b|wants\s+sonder\s+to\s+always\b)|"
@@ -395,7 +404,11 @@ def preference_category(text):
         return "shell"
     for category, pattern in _CATEGORY_PATTERNS:
         if pattern.search(value):
-            if category == "identity" or _category_shape_safe(category, value):
+            if category == "identity":
+                if _IDENTITY_CANONICAL_RE.fullmatch(value):
+                    return category
+                continue
+            if _category_shape_safe(category, value):
                 return category
     if (
         _GENERIC_DURABLE_RE.search(value)
