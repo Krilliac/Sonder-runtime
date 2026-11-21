@@ -51,6 +51,7 @@ from sonder_runtime.application.lifecycle import (
 )
 from sonder_runtime.platform.paths import state_path
 from sonder_runtime.platform.runtime_threads import run_bounded
+from sonder_runtime.interfaces.http import deferred_tls
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY,
     host_decision,
@@ -1945,7 +1946,7 @@ def parse_launcher_allowed_hosts(value):
     return tuple(dict.fromkeys(parsed))
 
 
-class LauncherServer(ThreadingHTTPServer):
+class LauncherServer(deferred_tls.DeferredTLSHandshakeMixin, ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
@@ -2425,7 +2426,7 @@ def serve(
         controller=controller or LauncherController(), token=token,
     )
     if context is not None:
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.socket = deferred_tls.wrap_listener(context, server.socket)  # no accept() stall
     warning = unauthenticated_loopback_warning(host, token)
     if warning:
         print(warning, file=sys.stderr, flush=True)
