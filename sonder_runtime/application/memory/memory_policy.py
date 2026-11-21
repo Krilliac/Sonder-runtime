@@ -12,8 +12,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hashlib
+import json
 import math
-from typing import Iterable, Mapping, Sequence
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Sequence
 
 from ...domain.memory.wp6_typed import MemoryLabel, TypedMemory
 
@@ -133,6 +135,26 @@ def policy_for(memory_class: MemoryClass | str) -> MemoryClassPolicy:
         raise ValueError(f"unknown memory class: {memory_class!r}") from exc
 
 
+def _resolve_class_policy(
+    kind: MemoryClass, policy: MemoryClassPolicy | None,
+) -> MemoryClassPolicy:
+    """Return the policy an evaluator must enforce for ``kind``.
+
+    ``None`` selects the default matrix.  An explicit policy is the caller's
+    already-resolved class policy; one written for a different class is
+    rejected rather than silently applied.
+    """
+    if policy is None:
+        return policy_for(kind)
+    if not isinstance(policy, MemoryClassPolicy):
+        raise ValueError("policy must be a MemoryClassPolicy")
+    if policy.memory_class is not kind:
+        raise ValueError(
+            f"policy for {policy.memory_class.value!r} cannot govern {kind.value!r}"
+        )
+    return policy
+
+
 def memory_class_for_label(label: MemoryLabel | str) -> MemoryClass:
     """Map the WP6 label vocabulary into this broader lifecycle vocabulary."""
     value = label.value if isinstance(label, MemoryLabel) else str(label)
@@ -153,6 +175,9 @@ class WriteDecision:
     disposition: RetrievalDisposition
     memory_class: MemoryClass
     reasons: tuple[str, ...] = ()
+    # Revision of the injected ``MemoryPolicy`` that produced this decision;
+    # ``None`` when the standalone evaluator resolved the default matrix.
+    policy_revision: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -168,15 +193,19 @@ def evaluate_write(
     explicit_confirmation: bool = False,
     privacy: PrivacyClass | str = PrivacyClass.PUBLIC,
     content: str = "memory",
+    policy: MemoryClassPolicy | None = None,
 ) -> WriteDecision:
     """Evaluate admission without writing anything.
 
     Model assertions alone do not satisfy classes whose policy requires
     provenance and evidence/explicit confirmation.  Secret content is always
     rejected at this boundary; callers must use the credential/secret paths.
+
+    ``policy`` is the class policy to enforce; when omitted the default
+    matrix is used.  It must be the policy for ``memory_class``.
     """
     kind = memory_class if isinstance(memory_class, MemoryClass) else MemoryClass(memory_class)
-    policy = policy_for(kind)
+    policy = _resolve_class_policy(kind, policy)
     reasons: list[str] = []
     if not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
         reasons.append("confidence must be finite")
@@ -213,6 +242,8 @@ class RetrievalDecision:
     freshness: float
     confidence: float
     exclusion_reasons: tuple[str, ...] = ()
+    # See ``WriteDecision.policy_revision``.
+    policy_revision: str | None = None
 
     @property
     def included(self) -> bool:
@@ -232,11 +263,16 @@ def evaluate_retrieval(
     temporal: "TemporalTruth | None" = None,
     now: datetime | None = None,
     include_stale: bool = False,
+    policy: MemoryClassPolicy | None = None,
 ) -> RetrievalDecision:
-    """Return an explained, class-aware retrieval decision."""
+    """Return an explained, class-aware retrieval decision.
+
+    ``policy`` is the class policy to enforce; when omitted the default
+    matrix is used.  It must be the policy for ``memory_class``.
+    """
     memory_id = _nonempty(memory_id, "memory_id")
     kind = memory_class if isinstance(memory_class, MemoryClass) else MemoryClass(memory_class)
-    policy = policy_for(kind)
+    policy = _resolve_class_policy(kind, policy)
     reasons: list[str] = []
     if not policy.retrieval_enabled:
         reasons.append("retrieval disabled for class")
@@ -270,13 +306,94 @@ def evaluate_retrieval(
     )
 
 
+def _policy_revision(policies: Mapping[MemoryClass, MemoryClassPolicy]) -> str:
+    """Content digest of a complete per-class matrix."""
+    payload = [
+        {
+            "memory_class": kind.value,
+            "write_min_confidence": float(item.write_min_confidence),
+            "write_requires_provenance": bool(item.write_requires_provenance),
+            "write_requires_explicit_or_evidence": bool(
+                item.write_requires_explicit_or_evidence
+            ),
+            "retrieval_enabled": bool(item.retrieval_enabled),
+            "retrieval_requires_scope": bool(item.retrieval_requires_scope),
+            "default_max_age_seconds": (
+                None if item.default_max_age is None
+                else item.default_max_age.total_seconds()
+            ),
+            "promotion_enabled": bool(item.promotion_enabled),
+            "export_allowed": bool(item.export_allowed),
+            "deletion_allowed": bool(item.deletion_allowed),
+            "private_by_default": bool(item.private_by_default),
+        }
+        for kind, item in sorted(policies.items(), key=lambda pair: pair[0].value)
+    ]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class MemoryPolicy:
-    """Small facade for callers that want one injected policy object."""
+    """One injected, immutable per-class policy matrix.
+
+    Inspection (``for_class``), admission (``write``) and recall
+    (``retrieve``) all resolve the class policy from this instance's own
+    mapping, so an injected override governs enforcement and two instances
+    never affect each other.  The mapping is copied and frozen at
+    construction and must cover every ``MemoryClass``: an incomplete mapping
+    is rejected instead of falling back to defaults.  Use ``with_overrides``
+    to inherit the default matrix explicitly.
+    """
 
     policies: Mapping[MemoryClass, MemoryClassPolicy] = field(
         default_factory=lambda: MEMORY_CLASS_POLICIES
     )
+    # Content digest of the effective matrix, stamped on every decision.
+    revision: str = field(init=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policies, Mapping):
+            raise ValueError("policies must be a mapping of MemoryClass to MemoryClassPolicy")
+        frozen: dict[MemoryClass, MemoryClassPolicy] = {}
+        for key, value in self.policies.items():
+            if not isinstance(key, MemoryClass):
+                raise ValueError(f"policy key must be a MemoryClass: {key!r}")
+            if not isinstance(value, MemoryClassPolicy):
+                raise ValueError(f"policy for {key.value!r} must be a MemoryClassPolicy")
+            if value.memory_class is not key:
+                raise ValueError(
+                    f"policy for {value.memory_class.value!r} is registered under {key.value!r}"
+                )
+            frozen[key] = value
+        missing = sorted(kind.value for kind in MemoryClass if kind not in frozen)
+        if missing:
+            raise ValueError("policies must cover every memory class; missing: " + ", ".join(missing))
+        # The dataclass is frozen, so the defensive copy is installed directly.
+        object.__setattr__(self, "policies", MappingProxyType(frozen))
+        object.__setattr__(self, "revision", _policy_revision(frozen))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # ``mappingproxy`` cannot be copied or pickled; rebuild from a plain
+        # mapping so the copy is re-validated and re-frozen.
+        return (type(self), (dict(self.policies),))
+
+    @classmethod
+    def with_overrides(cls, *overrides: MemoryClassPolicy) -> MemoryPolicy:
+        """Build a policy that inherits the default matrix except ``overrides``.
+
+        Each override names its own class through ``memory_class``.
+        """
+        merged: dict[MemoryClass, MemoryClassPolicy] = dict(MEMORY_CLASS_POLICIES)
+        seen: set[MemoryClass] = set()
+        for item in overrides:
+            if not isinstance(item, MemoryClassPolicy):
+                raise ValueError("overrides must be MemoryClassPolicy instances")
+            if item.memory_class in seen:
+                raise ValueError(f"duplicate override for {item.memory_class.value!r}")
+            seen.add(item.memory_class)
+            merged[item.memory_class] = item
+        return cls(merged)
 
     def for_class(self, memory_class: MemoryClass | str) -> MemoryClassPolicy:
         kind = memory_class if isinstance(memory_class, MemoryClass) else MemoryClass(memory_class)
@@ -285,13 +402,21 @@ class MemoryPolicy:
         except KeyError as exc:
             raise ValueError(f"unknown memory class: {memory_class!r}") from exc
 
-    def write(self, memory_class: MemoryClass | str, **kwargs) -> WriteDecision:
-        # Keep the standalone function as the single implementation so the
-        # facade cannot drift from the documented default matrix.
-        return evaluate_write(memory_class, **kwargs)
+    def write(self, memory_class: MemoryClass | str, **kwargs: Any) -> WriteDecision:
+        # The standalone function stays the single evaluator; this instance
+        # only supplies the class policy it resolved from its own mapping.
+        decision = evaluate_write(
+            memory_class, policy=self.for_class(memory_class), **kwargs
+        )
+        return replace(decision, policy_revision=self.revision)
 
-    def retrieve(self, memory_id: str, memory_class: MemoryClass | str, **kwargs) -> RetrievalDecision:
-        return evaluate_retrieval(memory_id, memory_class, **kwargs)
+    def retrieve(
+        self, memory_id: str, memory_class: MemoryClass | str, **kwargs: Any
+    ) -> RetrievalDecision:
+        decision = evaluate_retrieval(
+            memory_id, memory_class, policy=self.for_class(memory_class), **kwargs
+        )
+        return replace(decision, policy_revision=self.revision)
 
 
 @dataclass(frozen=True)
