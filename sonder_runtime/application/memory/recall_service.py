@@ -8,6 +8,7 @@ directly.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Protocol, Sequence
 
 from ...domain.memory.rules import (
@@ -82,6 +83,9 @@ class RecallService:
             return [r["text"] for r in lexical[:k]]
 
         query_vec = self._embed.embed(task)
+        if query_vec is not None and not _valid_vector(query_vec):
+            logger.warning("query embedding is empty or non-finite, falling back to lexical-only recall")
+            return [r["text"] for r in lexical[:k]]
         if query_vec is None:
             logger.error(f"embedding failed for recall query, falling back to lexical-only: project={project!r}")
             logger.warning("embedding returned None (embedder may be overloaded), falling back to lexical-only recall")
@@ -99,7 +103,14 @@ class RecallService:
         scored = []
         for c in candidates:
             vec = c.get("embedding")
-            if vec is None:
+            if vec is None or not _valid_vector(vec) or len(vec) != len(query_vec):
+                continue
+            if embedding_model and c.get("embedding_model") != embedding_model:
+                continue
+            if (
+                embedding_revision is not None
+                and (c.get("embedding_revision") or None) != (embedding_revision or None)
+            ):
                 continue
             sim = self._sim_fn(query_vec, vec)
             if passes_similarity(sim, effective_min_sim):
@@ -122,10 +133,21 @@ class RecallService:
         return [id_to_text[cid] for cid in mmr_ids if cid in id_to_text]
 
 
+def _valid_vector(v: Sequence[float]) -> bool:
+    """Non-empty, all finite numbers, not the zero vector."""
+    return len(v) > 0 and any(x != 0 for x in v) and all(
+        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+        for x in v
+    )
+
+
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Cosine similarity; 0.0 for unequal length, empty, non-finite or zero-norm input."""
+    if len(a) != len(b) or not _valid_vector(a) or not _valid_vector(b):
+        return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (norm_a * norm_b)
