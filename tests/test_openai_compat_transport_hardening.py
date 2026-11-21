@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.server
 import json
 import threading
+import urllib.request
 from contextlib import contextmanager
 
 import pytest
@@ -180,7 +181,7 @@ def _recording_gateway(base_url, **config):
 
     gateway = OpenAICompatibleGateway(
         OpenAICompatibleConfig(base_url=base_url, api_key=_KEY, model="m", **config),
-        transport=transport,
+        transport=transport, spend_ledger=None,  # these tests are about transport policy, not spend
     )
     return gateway, calls
 
@@ -232,3 +233,42 @@ def test_env_config_reads_the_plaintext_network_allowlist(monkeypatch):
     monkeypatch.setenv("SONDER_OPENAI_ALLOW_HTTP_NETWORKS", "10.1.0.0/16; 192.168.0.0/16")
     cfg = gateway_module._config_from_env()
     assert cfg.plaintext_networks == ("10.1.0.0/16", "192.168.0.0/16")
+
+
+def _active_proxies(opener):
+    # build_opener() installs an environment-reading ProxyHandler unless one
+    # is passed; an empty ProxyHandler({}) registers no *_open methods, so a
+    # bypassing opener has no ProxyHandler left in its handler list at all.
+    return [h.proxies for h in opener.handlers
+            if isinstance(h, urllib.request.ProxyHandler) and h.proxies]
+
+
+def _streaming_opener(monkeypatch, url):
+    captured = {}
+
+    def fake_post_streaming(*_args, **kwargs):
+        captured["factory"] = kwargs["opener_factory"]
+        return {}
+
+    monkeypatch.setattr(gateway_module, "post_streaming", fake_post_streaming)
+    gateway_module._stream_transport(url, {}, {}, 5.0)
+    return captured["factory"](gateway_module._ExchangeBudget(5.0))
+
+
+@pytest.mark.parametrize("url", [
+    "http://10.0.0.5:8080/v1/chat/completions",      # operator-trusted private plaintext
+    "http://192.168.1.50:8080/v1/models",
+    "http://127.0.0.1:8080/v1/chat/completions",
+    "https://localhost:8443/v1/chat/completions",
+])
+def test_plaintext_and_loopback_openers_never_use_the_ambient_proxy(
+        ambient_proxy, monkeypatch, url):
+    assert _active_proxies(gateway_module._opener_for(url)) == []
+    assert _active_proxies(_streaming_opener(monkeypatch, url)) == []
+
+
+def test_remote_https_opener_keeps_the_ambient_proxy(ambient_proxy, monkeypatch):
+    # Control: the proxy env is visible, so an empty list above is a real bypass.
+    url = "https://api.example.com/v1/chat/completions"
+    assert _active_proxies(gateway_module._opener_for(url))
+    assert _active_proxies(_streaming_opener(monkeypatch, url))
