@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from sonder_runtime.domain.build.presets import MAX_PRESET_FILES, parse_cmake_presets
@@ -104,3 +105,26 @@ def test_user_presets_and_bad_documents():
     odd = parse_cmake_presets(_doc(configurePresets=[{"name": "has space"}, {"name": "-x"}]),
                               includes={}, source_root=ROOT)
     assert odd.configure == ()
+
+
+def test_diamond_inheritance_is_walked_once_per_preset():
+    # Each preset of layer k inherits all four presets of layer k+1. Without
+    # memoisation the walk visits 4**layers paths (G1261).
+    layers, width = 11, 4
+    configure = [{"name": "top", "inherits": ["l0_%d" % i for i in range(width)]}]
+    for layer in range(layers):
+        for i in range(width):
+            preset = {"name": "l%d_%d" % (layer, i), "hidden": True}
+            if layer + 1 < layers:
+                preset["inherits"] = ["l%d_%d" % (layer + 1, j) for j in range(width)]
+            else:
+                preset.update(generator="Ninja", binaryDir="${sourceDir}/deep",
+                              cacheVariables={"CMAKE_BUILD_TYPE": "Debug"})
+            configure.append(preset)
+    started = time.perf_counter()
+    presets = parse_cmake_presets(_doc(configurePresets=configure), includes={}, source_root=ROOT)
+    elapsed = time.perf_counter() - started
+    top = presets.find("top")
+    assert top.generator == "Ninja" and top.binary_dir == ROOT + "/deep"
+    assert dict(top.cache) == {"CMAKE_BUILD_TYPE": "Debug"}
+    assert elapsed < 2.0, elapsed
