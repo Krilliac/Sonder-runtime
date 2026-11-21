@@ -41,7 +41,12 @@ to the build process.
 
 Only that disposable source snapshot is mounted, read-only, into `/workspace`.
 The fixed image launcher copies it into `/build/project` on a 1024 MiB tmpfs;
-build writes do not touch the host project or fill a host bind. The container
+build writes do not touch the host project or fill a host bind. The launcher
+walks the snapshot through directory descriptors: each entry is opened with
+`openat` without following a final symlink, and the opened descriptor is
+checked with `fstat` before it is read or recursed into, so a name replaced
+after the check cannot redirect the copy. A symlink in place of `/workspace`
+is refused. The container
 has no network, no inherited environment or host home, no engine socket,
 an unprivileged UID/GID, no Linux capabilities, no-new-privileges, a read-only
 image root, and fixed process, CPU, RAM and wall limits. The underlying engine,

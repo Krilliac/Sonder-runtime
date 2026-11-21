@@ -554,10 +554,12 @@ def _clean_bing_result_url(url):
 
 
 def _search_rows(text, source_url, limit):
-    host = (urllib.parse.urlparse(source_url).hostname or "").lower()
-    if host.endswith("bing.com"):
+    # The provider's own domain or any subdomain of it (www., cn., ...); the
+    # leading dot keeps look-alikes such as evilbing.com on the generic parser.
+    host = urllib.parse.urlsplit(source_url).hostname or ""
+    if host == "bing.com" or host.endswith(".bing.com"):
         parser = _BingSearchParser()
-    elif host.endswith("mojeek.com"):
+    elif host == "mojeek.com" or host.endswith(".mojeek.com"):
         parser = _MojeekSearchParser()
     else:
         parser = _SearchParser()
