@@ -529,3 +529,62 @@ def test_source_limits_and_private_root_overlap_fail_closed(tmp_path, monkeypatc
     )
     with pytest.raises(ConfigError, match="overlaps"):
         ArtifactMobilitySourceBinding(lambda: ambient_config)
+
+
+def _store_with_rows(tmp_path, rows):
+    from sonder_runtime.adapters.persistence.artifact_mobility_source import (
+        SQLiteArtifactMobilitySourceStore,
+    )
+
+    root = tmp_path / "reap-store"
+    store = SQLiteArtifactMobilitySourceStore(root)
+    with sqlite3.connect(root / "mobility-source.sqlite") as connection:
+        for row in rows:
+            connection.execute(
+                """INSERT INTO mobility_source_artifacts
+                   (id,scope,sha256,size_bytes,media_type,created_at,expires_at,state)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                row,
+            )
+    return root, store
+
+
+def test_pending_row_without_payload_directory_is_reaped_on_open(tmp_path):
+    from sonder_runtime.adapters.persistence.artifact_mobility_source import (
+        SQLiteArtifactMobilitySourceStore,
+    )
+
+    root, store = _store_with_rows(
+        tmp_path, [("a" * 32, "b" * 64, "c" * 64, 1, "x/y", 1.0, 2e12, "pending")]
+    )
+    store.close()
+    reopened = SQLiteArtifactMobilitySourceStore(root)
+    reopened.close()
+    with sqlite3.connect(root / "mobility-source.sqlite") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mobility_source_artifacts"
+        ).fetchone()[0] == 0
+
+
+def test_quota_rejection_after_reaping_keeps_reaped_rows_deleted(tmp_path):
+    from sonder_runtime.application.artifacts.mobility_source import (
+        SourceArtifactLimits,
+        SourceAuthority,
+    )
+
+    root, store = _store_with_rows(
+        tmp_path, [("a" * 32, "b" * 64, "c" * 64, 1, "x/y", 1.0, 2.0, "sealed")]
+    )
+    authority = SourceAuthority(
+        scope_id="d" * 64,
+        limits=SourceArtifactLimits(max_object_bytes=4, total_bytes=4, ttl_seconds=60),
+    )
+    spec = {"sha256": "e" * 64, "size_bytes": 8, "media_type": "x/y"}
+    for _ in range(2):
+        with pytest.raises(MobilitySourceError, match="QUOTA"):
+            store._reserve_pending(spec, authority)
+    with sqlite3.connect(root / "mobility-source.sqlite") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mobility_source_artifacts"
+        ).fetchone()[0] == 0
+    store.close()
