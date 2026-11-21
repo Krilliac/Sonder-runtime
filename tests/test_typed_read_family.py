@@ -372,7 +372,10 @@ def test_a_tool_outside_the_family_is_unknown_to_the_typed_registry(tmp_path, wo
     facade, _audit_repo = _facade(tmp_path)
     with pytest.raises(InvalidInput):
         facade.execute(_request("run_program", {"program": "python", "args_json": "[]"}))
-    assert facade.receipts == ()
+    # The refusal is an outcome: one failed receipt for a call that never started.
+    (receipt,) = facade.receipts
+    assert (receipt.success, receipt.terminal, receipt.error_code, receipt.effect_certainty) == (
+        False, "failed", "InvalidInput", "not_started")
 
 
 def test_the_permission_evaluator_refuses_with_the_decision_attached(monkeypatch):

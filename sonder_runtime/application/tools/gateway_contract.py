@@ -6,13 +6,49 @@ permission checks, approval, deadline/cancellation checks, invocation,
 output redaction, and receipt publication.  The collaborators are ports and
 must not perform provider, network, filesystem, or process I/O here.
 
-Every request that gets past schema validation ends in exactly one receipt,
-whichever way it ends: the receipt's ``terminal`` names the outcome
-(``completed``, ``failed``, ``cancelled``, ``deadline_exceeded`` or
-``policy_denied``), and the early exits publish theirs before re-raising, so
-the durable audit sees a refused or abandoned call as plainly as a finished
-one.  This is the repository's first terminal-reason vocabulary; grow it
-from here rather than inventing another.
+A receipt's ``terminal`` names how the request ended (``completed``,
+``failed``, ``cancelled``, ``deadline_exceeded`` or ``policy_denied``).  Most
+exits that raise publish a receipt before re-raising -- a refusal, a
+cancellation or deadline, a crash in admission or in the invoker, and a
+failure to redact the invoker's outcome or build its receipt (published as a
+withheld ``failed`` fault with an ``uncertain`` effect) -- so the durable audit
+sees those calls as plainly as a finished one.  This is the repository's
+first terminal-reason vocabulary; grow it from here rather than inventing
+another.
+
+These exits publish no receipt (publication itself failing is covered
+below):
+
+* An exception from the descriptor and trait lookup in ``execute`` (before
+  admission starts).
+* During effect-journal admission and settled replay, any failure other than
+  the caller-facing exits (cancellation, deadline, refusal) -- a journal
+  storage error, a divergent or halted replay, a settled receipt that does
+  not match -- because a replayed request id may already be in the audit and
+  a second receipt under it would make the chain ambiguous.
+* Any failure after the outcome receipt was handed to publication (the audit
+  or sink raising, or the journal completion after it), for the same reason:
+  that receipt may already be durable, so no second one follows it.
+* A ``BaseException`` that is not an ``Exception`` (interrupt, exit), at any
+  stage.
+
+A receipt keeps three facts apart.  ``terminal`` is how the operation ended.
+``effect_certainty`` is what that says about the tool's effect: ``settled``
+(the tool returned its outcome), ``not_started`` (the call ended before the
+invoker was entered) or ``uncertain`` (the invoker was entered and raised, or
+returned an outcome that could not be redacted or receipted, so nothing here
+can say its effect did not happen; a bound effect journal keeps the intent
+unresolved for reconciliation).  Persistence is implicit: a
+receipt exists only once it is published, and a failed publication of a
+failure receipt is logged and never replaces the original exception.
+
+Exception text is caller-derived and may quote arguments, paths or OS text,
+so it is never published raw.  The caller-facing exits (cancellation,
+deadline, refusal) pass their message through the gateway redactor, bounded,
+with ``redaction_applied`` saying what the redactor actually did; if
+redaction fails only a constant summary is published, with a diagnostic id
+that is also logged.  Any other exception is a fault, not a message for the
+caller, and is published as the same constant summary without its text.
 """
 from __future__ import annotations
 
@@ -22,8 +58,10 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping, Protocol
+from uuid import uuid4
 
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
+from ...domain.security.redaction import REDACTION_FAILED
 from ...domain.tools.builtin_traits import builtin_traits
 from ...domain.tools.traits import ToolTraits
 from ..execution import effect_journal, gateway_calls
@@ -56,6 +94,20 @@ CANCELLED = "cancelled"
 DEADLINE_EXCEEDED = "deadline_exceeded"
 POLICY_DENIED = "policy_denied"
 TERMINAL_STATES = (COMPLETED, FAILED, CANCELLED, DEADLINE_EXCEEDED, POLICY_DENIED)
+
+# What a receipt can say about the tool's effect (see the module docstring).
+EFFECT_SETTLED = "settled"
+EFFECT_NOT_STARTED = "not_started"
+EFFECT_UNCERTAIN = "uncertain"
+EFFECT_CERTAINTIES = (EFFECT_SETTLED, EFFECT_NOT_STARTED, EFFECT_UNCERTAIN)
+
+# Bound on the exception text a failure receipt carries, applied after
+# redaction so a secret that straddles the cut is redacted whole.
+MAX_EARLY_ERROR_CHARS = 2000
+# DoS bound on the exit text handed to the redactor. Longer text is not
+# redacted piecewise (a cut could split a secret); it counts as a redaction
+# failure and only the constant summary is published.
+MAX_EXIT_TEXT_REDACTION_CHARS = 64 * 1024
 
 # Receipts for a tool call never name a model: nothing in this seam generates.
 NOT_A_MODEL_CALL = ""
@@ -228,11 +280,20 @@ class ToolReceipt:
     model: str = NOT_A_MODEL_CALL
     terminal: str = COMPLETED
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    effect_certainty: str = EFFECT_SETTLED
 
     def __post_init__(self) -> None:
         if self.terminal not in TERMINAL_STATES:
             raise InvalidInput("tool receipt terminal must be one of %s"
                                % ", ".join(TERMINAL_STATES))
+        if self.effect_certainty not in EFFECT_CERTAINTIES:
+            raise InvalidInput("tool receipt effect_certainty must be one of "
+                               + ", ".join(EFFECT_CERTAINTIES))
+
+
+# The exits whose message is written for the caller. Any other exception is
+# a fault whose text is never published.
+_CALLER_FACING = (Cancelled, DeadlineExceeded, Forbidden)
 
 
 def _terminal_for(exc: BaseException) -> str:
@@ -240,7 +301,13 @@ def _terminal_for(exc: BaseException) -> str:
         return CANCELLED
     if isinstance(exc, DeadlineExceeded):
         return DEADLINE_EXCEEDED
-    return POLICY_DENIED
+    if isinstance(exc, Forbidden):
+        return POLICY_DENIED
+    return FAILED
+
+
+def _withheld_summary(terminal: str, exc: BaseException) -> str:
+    return f"tool call ended as {terminal} ({type(exc).__name__}); details withheld"
 
 
 def _match_text(value: Any) -> str:
@@ -344,6 +411,11 @@ class ToolGateway:
         policy_match = ""
         journal_binding = effect_journal.current()
         journal_intent = None
+        # Which part of the call an exception came from. A journal admission
+        # or settled-replay failure keeps its original contract (only the
+        # caller-facing exits publish), so a refused replay never adds a
+        # second receipt under a request id the audit already holds.
+        stage = "admission"
         try:
             self._check_control(request)
             if request.schema_selection is None:
@@ -374,6 +446,7 @@ class ToolGateway:
                 if journal_binding is not None and (
                     request.permission.effects or not request.permission.traits.is_read_only
                 ):
+                    stage = "journal"
                     try:
                         journal_intent = self._begin_journaled(journal_binding, request)
                     except effect_journal.SettledEffectReplay as replay:
@@ -397,6 +470,7 @@ class ToolGateway:
                             calls.halt(error)
                             raise
                         return receipt
+                stage = "invoke"
                 try:
                     result = self._invoker.invoke(request)
                 except BaseException as exc:
@@ -412,14 +486,21 @@ class ToolGateway:
             # The executor returned the terminal outcome of an already admitted
             # effect. Preserve that truth even if cancellation/deadline arrived
             # in flight; the next invocation still fails its admission checks.
-        except (Cancelled, DeadlineExceeded, Forbidden) as exc:
-            # The early exits are outcomes too: publish the receipt that names
-            # how the call ended, then let the surface answer its caller.
-            self._publish(request, self._early_receipt(
-                request, exc, started,
-                policy_match or _match_text(getattr(exc, "policy_match", "")),
-            ))
+        except Exception as exc:
+            # The exits that raise are outcomes too: publish the receipt that
+            # names how the call ended, then let the surface answer its
+            # caller. A BaseException that is not an Exception (interrupt,
+            # exit) publishes nothing; the journal handling above still runs.
+            if stage != "journal" or isinstance(exc, _CALLER_FACING):
+                self._publish_failure(
+                    request, exc, started,
+                    policy_match or _match_text(getattr(exc, "policy_match", "")),
+                    EFFECT_UNCERTAIN if stage == "invoke" else EFFECT_NOT_STARTED,
+                )
             raise
+        # Once the outcome receipt has been handed to ``_publish`` it may
+        # already be in the audit, so no failure receipt may follow it.
+        publish_attempted = False
         try:
             redacted = self._redactor.redact(request.tool_name, result.output)
             if isinstance(redacted, RedactedOutput):
@@ -462,6 +543,7 @@ class ToolGateway:
             # Durable audit publication is part of the effect receipt. Keep
             # the journal unresolved until it succeeds, so an audit failure
             # cannot certify an effect that a retry could repeat.
+            publish_attempted = True
             self._publish(request, receipt)
             if journal_binding is not None and journal_intent is not None:
                 journal_binding.complete(
@@ -492,6 +574,12 @@ class ToolGateway:
                     # blocks safe checkpoint restore and blind replay.
                     _LOG.error("tool effect uncertainty publication failed: %s",
                                type(recovery_error).__name__)
+            if not publish_attempted and isinstance(error, Exception):
+                # The invoker ran but its outcome could not be redacted or
+                # put into a receipt: the audit still records that the call
+                # ended, as a fault whose text is withheld.
+                self._publish_failure(request, error, started, policy_match,
+                                      EFFECT_UNCERTAIN, fault=True)
             raise
         return receipt
 
@@ -525,16 +613,29 @@ class ToolGateway:
         )
 
     def _early_receipt(self, request: ToolGatewayRequest, exc: BaseException,
-                       started: float, policy_match: str) -> ToolReceipt:
+                       started: float, policy_match: str, *,
+                       effect_certainty: str, fault: bool = False) -> ToolReceipt:
+        # ``fault``: the exception is a gateway fault whatever its type (a
+        # post-invoke redaction or receipt failure), never a caller exit.
+        terminal = FAILED if fault else _terminal_for(exc)
+        evidence: dict[str, Any] = {}
+        if isinstance(exc, _CALLER_FACING) and not fault:
+            error, redaction_applied, diagnostic_id = self._redact_exit_text(request, exc)
+            if diagnostic_id:
+                error = _withheld_summary(terminal, exc)
+                evidence = {"error_redaction": "fallback", "diagnostic_id": diagnostic_id}
+        else:
+            # The text of a fault is unvetted; the type name is bounded.
+            error, redaction_applied = _withheld_summary(terminal, exc), True
         return ToolReceipt(
             request_id=request.request_id,
             tool_name=request.tool_name,
             success=False,
             output="",
             error_code=type(exc).__name__,
-            error=str(exc),
+            error=error,
             duration_ms=max(0, int((time.monotonic() - started) * 1000)),
-            redaction_applied=True,
+            redaction_applied=redaction_applied,
             approval_required=request.permission.approval is ApprovalMode.REQUIRED,
             requester_id=request.scope.principal_id,
             argument_digest=_digest(dict(request.arguments)),
@@ -544,8 +645,59 @@ class ToolGateway:
             resource=self._resource(request),
             effects=tuple(sorted(request.permission.effects)),
             model=NOT_A_MODEL_CALL,
-            terminal=_terminal_for(exc),
+            terminal=terminal,
+            evidence=evidence,
+            effect_certainty=effect_certainty,
         )
+
+    def _redact_exit_text(self, request: ToolGatewayRequest,
+                          exc: BaseException) -> tuple[str, bool, str]:
+        """Redact a caller-facing exit message: (text, applied, diagnostic id).
+
+        A non-empty diagnostic id means redaction failed and the text must
+        not be published; only the failure's type and the id are logged.
+        The whole message is redacted before it is cut to
+        ``MAX_EARLY_ERROR_CHARS``; one longer than
+        ``MAX_EXIT_TEXT_REDACTION_CHARS`` is a redaction failure.
+        """
+        try:
+            text = str(exc)
+            if len(text) > MAX_EXIT_TEXT_REDACTION_CHARS:
+                raise ValueError("exit text exceeds the redaction bound")
+            redacted = self._redactor.redact(request.tool_name, text)
+            if isinstance(redacted, RedactedOutput):
+                value, applied = redacted.value, redacted.applied
+            else:
+                value, applied = redacted, True
+            if not isinstance(value, str) or value == REDACTION_FAILED:
+                raise TypeError("redactor returned no safe text")
+            return value[:MAX_EARLY_ERROR_CHARS], bool(applied), ""
+        except Exception as redaction_error:  # noqa: BLE001 - fall back to a constant summary
+            diagnostic_id = uuid4().hex
+            _LOG.warning("tool exit text redaction failed (%s); diagnostic_id=%s",
+                         type(redaction_error).__name__, diagnostic_id)
+            return "", True, diagnostic_id
+
+    def _publish_failure(self, request: ToolGatewayRequest, exc: BaseException,
+                         started: float, policy_match: str,
+                         effect_certainty: str, *, fault: bool = False) -> None:
+        """Build and publish the failure receipt without ever replacing ``exc``.
+
+        A receipt that could not be built or published says nothing about the
+        effect: the journal state set before this call stands. The error is
+        logged by type and chained as the cause unless ``exc`` already has
+        one.
+        """
+        try:
+            self._publish(request, self._early_receipt(
+                request, exc, started, policy_match, effect_certainty=effect_certainty,
+                fault=fault,
+            ))
+        except Exception as publish_error:  # noqa: BLE001 - the original exit wins
+            _LOG.error("tool failure receipt publication failed: %s",
+                       type(publish_error).__name__)
+            if exc.__cause__ is None:
+                exc.__cause__ = publish_error
 
     @staticmethod
     def _resource(request: ToolGatewayRequest) -> dict[str, Any]:
@@ -573,7 +725,9 @@ class ToolGateway:
 
 __all__ = [
     "ApprovalGate", "ApprovalMode", "AUTH_LEVELS", "CANCELLED", "COMPLETED",
-    "CancellationSignal", "DEADLINE_EXCEEDED", "FAILED", "NOT_A_MODEL_CALL",
+    "CancellationSignal", "DEADLINE_EXCEEDED", "EFFECT_CERTAINTIES",
+    "EFFECT_NOT_STARTED", "EFFECT_SETTLED", "EFFECT_UNCERTAIN", "FAILED",
+    "MAX_EARLY_ERROR_CHARS", "MAX_EXIT_TEXT_REDACTION_CHARS", "NOT_A_MODEL_CALL",
     "OutputRedactor", "POLICY_DENIED", "PermissionEvaluator", "ReceiptSink",
     "RedactedOutput", "SOURCES", "SchemaValidator", "TERMINAL_STATES",
     "ToolAuditRepository", "ToolGateway", "ToolGatewayRequest",

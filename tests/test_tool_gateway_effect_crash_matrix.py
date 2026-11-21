@@ -260,7 +260,10 @@ def test_redactor_failure_after_physical_effect_requires_reconciliation(tmp_path
     journal = SQLiteEffectJournal(tmp_path / "effects.db")
     binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
     assert binding.recover_before_restart().action == "resume"
-    gateway = _gateway(lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok"))
+    audit = _RecordingAudit()
+    gateway = _gateway(
+        lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok"), audit=audit,
+    )
 
     def broken_redaction(_tool, _value):
         raise RuntimeError("redaction unavailable")
@@ -271,6 +274,11 @@ def test_redactor_failure_after_physical_effect_requires_reconciliation(tmp_path
     assert _physical_effects(tmp_path) == "x"
     assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
     assert journal.recover("run", live_workers={"worker": 1}).action == "reconcile"
+    # The effect ran, so the audit records how the call ended.
+    (receipt,) = audit.items
+    assert (receipt.success, receipt.terminal, receipt.effect_certainty) == (
+        False, "failed", "uncertain")
+    assert "redaction unavailable" not in repr(receipt)
 
 
 def test_audit_failure_keeps_effect_uncertain_before_completion(tmp_path):
@@ -288,6 +296,65 @@ def test_audit_failure_keeps_effect_uncertain_before_completion(tmp_path):
     )
     with bound(binding.binding()), pytest.raises(OSError, match="audit unavailable"):
         gateway.execute(_request("tool-1"))
+    assert _physical_effects(tmp_path) == "x"
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+
+
+class _RecordingAudit:
+    def __init__(self, error=None):
+        self.error, self.items = error, []
+
+    def append(self, _request, receipt):
+        if self.error is not None:
+            raise self.error
+        self.items.append(receipt)
+
+
+def test_ordinary_invoker_exception_publishes_failure_and_keeps_effect_uncertain(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+    audit = _RecordingAudit()
+    error = RuntimeError("handler bug canary-SECRET-123")
+
+    def invoke(_request):
+        _append(tmp_path, "x")
+        raise error
+
+    with bound(binding.binding()), pytest.raises(RuntimeError) as caught:
+        _gateway(invoke, audit=audit).execute(_request("tool-1"))
+    assert caught.value is error
+    assert _physical_effects(tmp_path) == "x"
+    (receipt,) = audit.items
+    assert (receipt.success, receipt.terminal, receipt.effect_certainty) == (
+        False, "failed", "uncertain")
+    assert "canary-SECRET-123" not in repr(receipt)
+    # The failure receipt never settles the journal: the effect stays fenced.
+    assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
+    assert journal.recover("run", live_workers={"worker": 1}).action == "reconcile"
+    # A retry under the same identity is refused by the journal and adds no
+    # second receipt for the request id the audit already holds.
+    with bound(binding.binding()), pytest.raises(EffectJournalError):
+        _gateway(invoke, audit=audit).execute(_request("tool-1"))
+    assert _physical_effects(tmp_path) == "x" and len(audit.items) == 1
+
+
+def test_failure_receipt_audit_error_keeps_original_error_and_uncertainty(tmp_path):
+    journal = SQLiteEffectJournal(tmp_path / "effects.db")
+    binding = AuthenticatedWorkerBinding(journal, "run", "worker", 1, str(tmp_path))
+    assert binding.recover_before_restart().action == "resume"
+    error = KeyError("handler bug")
+    audit_error = OSError("audit unavailable")
+
+    def invoke(_request):
+        _append(tmp_path, "x")
+        raise error
+
+    gateway = _gateway(invoke, audit=_RecordingAudit(audit_error))
+    with bound(binding.binding()), pytest.raises(KeyError) as caught:
+        gateway.execute(_request("tool-1"))
+    # A failed publication proves nothing about the effect.
+    assert caught.value is error and caught.value.__cause__ is audit_error
     assert _physical_effects(tmp_path) == "x"
     assert journal.get("run:tool-1").state is EffectState.UNCERTAIN
 
@@ -444,11 +511,15 @@ def test_receipt_failure_preserves_original_error_and_durable_effect_state(tmp_p
         raise RuntimeError("receipt acknowledgement lost")
 
     journal.outcome = fail_receipt
+    audit = _RecordingAudit()
     with bound(binding.binding()), pytest.raises(RuntimeError, match="receipt acknowledgement lost"):
-        _gateway(lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok")).execute(
-            _request("tool-1")
-        )
+        _gateway(
+            lambda _request: _append(tmp_path, "x") or ToolInvocationOutput(True, "ok"), audit=audit,
+        ).execute(_request("tool-1"))
     assert _physical_effects(tmp_path) == "x"
+    # The outcome receipt was already handed to publication; no failure
+    # receipt follows it under the same request id.
+    assert [receipt.terminal for receipt in audit.items] == ["completed"]
     assert journal.get("run:tool-1").state is (
         EffectState.COMPLETED if committed else EffectState.UNCERTAIN
     )
