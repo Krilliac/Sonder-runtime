@@ -92,6 +92,7 @@ sonder_runtime/adapters/inference/sonder_inference_probe.py
 sonder_runtime/adapters/inference/startup_prewarm.py
 sonder_runtime/adapters/inference_telemetry.py
 sonder_runtime/adapters/launcher_output.py
+sonder_runtime/adapters/launcher_probe.py
 sonder_runtime/adapters/learning_tier_formatting.py
 sonder_runtime/adapters/live_checkout.py
 sonder_runtime/adapters/live_checkout_git_probe.py
