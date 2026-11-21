@@ -6,7 +6,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from types import TracebackType
+    from typing import Self
 
 
 class CancellationStatus(str, Enum):
@@ -26,7 +31,7 @@ class CancellationSnapshot:
 class CancellationLease:
     """A counted unit of work that must leave before its node is quiescent."""
 
-    def __init__(self, node: "CancellationNode") -> None:
+    def __init__(self, node: CancellationNode) -> None:
         self._node = node
         self._released = False
 
@@ -39,10 +44,15 @@ class CancellationLease:
             self._released = True
             self._node._release_lease()
 
-    def __enter__(self) -> "CancellationLease":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.release()
 
 
@@ -54,7 +64,7 @@ class CancellationNode:
     released. The first cancellation reason is retained for stable reporting.
     """
 
-    def __init__(self, *, node_id: str | None = None, parent: "CancellationNode | None" = None) -> None:
+    def __init__(self, *, node_id: str | None = None, parent: CancellationNode | None = None) -> None:
         self.node_id = node_id or uuid.uuid4().hex
         self._parent = parent
         self._lock = threading.RLock()
@@ -67,7 +77,7 @@ class CancellationNode:
         if parent is not None:
             parent._add_child(self)
 
-    def _add_child(self, child: "CancellationNode") -> None:
+    def _add_child(self, child: CancellationNode) -> None:
         with self._condition:
             if child.node_id in self._children:
                 raise ValueError(f"duplicate cancellation node id: {child.node_id}")
@@ -76,7 +86,7 @@ class CancellationNode:
         if inherited_reason is not None:
             child.cancel(reason=inherited_reason)
 
-    def child(self, *, node_id: str | None = None) -> "CancellationNode":
+    def child(self, *, node_id: str | None = None) -> CancellationNode:
         return CancellationNode(node_id=node_id, parent=self)
 
     @property
@@ -156,7 +166,7 @@ class CancellationNode:
         """Wait for the cancellation request; return whether it was requested."""
         return self._cancel_event.wait(timeout)
 
-    def children(self) -> Iterator["CancellationNode"]:
+    def children(self) -> Iterator[CancellationNode]:
         with self._lock:
             yield from tuple(self._children.values())
 

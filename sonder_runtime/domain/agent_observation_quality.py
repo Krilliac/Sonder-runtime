@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def observation_ok(observation) -> bool:
+def observation_ok(observation: str | None) -> bool:
     """Return False when the observation text signals a failed tool step."""
     text = str(observation or "")
     lowered = text.lower()

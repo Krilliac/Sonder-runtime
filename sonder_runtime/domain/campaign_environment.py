@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def environment_failure(output) -> bool:
+def environment_failure(output: str | None) -> bool:
     """Return whether a failed campaign attempt was caused by the host.
 
     A missing interpreter or compiler fails every attempt in that language and

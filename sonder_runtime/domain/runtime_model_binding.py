@@ -8,10 +8,15 @@ Three-Hundred-Tenth Slice with its behaviour byte-for-byte intact.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sonder_runtime.domain.fanout_policy import nonchat_reason
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
-def model_is_installed(model: str, installed) -> bool:
+
+def model_is_installed(model: str, installed: Iterable[str]) -> bool:
     requested = str(model or "").strip().casefold()
     available = {str(name or "").strip().casefold() for name in installed}
     if requested in available:
@@ -25,7 +30,13 @@ def model_is_installed(model: str, installed) -> bool:
     return False
 
 
-def model_capability_error(tier: str, model: str, records, *, vision_only_model_families) -> str:
+def model_capability_error(
+    tier: str,
+    model: str,
+    records: Iterable[tuple[str, object]],
+    *,
+    vision_only_model_families: Iterable[str],
+) -> str:
     """Return a proven capability mismatch for a local tier binding.
 
     Installation alone is not enough to make a model usable by a chat tier:
