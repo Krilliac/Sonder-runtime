@@ -24,8 +24,8 @@ under `<SONDER_HOME>/playbooks/` with explicit approval and a stable trigger ind
    `record_outcome(iid, signal)`.
 3. The outcome is **priced** into a scalar reward
    ([domain/memory/rules.py](../../sonder_runtime/domain/memory/rules.py)):
-   `tests_passed 1.0`, `used 0.9`, `accepted 0.8`, `compiled 0.7`,
-   `rejected -0.5`, `failed -1.0`. The "good" threshold is `0.71` — above
+   `tests_passed 1.0`, `used 0.9`, `copied 0.85`, `accepted 0.8`,
+   `edited 0.75`, `compiled 0.7`, `rejected -0.5`, `failed -1.0`. The "good" threshold is `0.71` — above
    `compiled`, deliberately, so only verified-correct work distills.
 4. A good outcome **distills a lesson** (deduped, FTS + vector indexed).
 5. Next time, similar tasks **retrieve** those lessons and prior good
@@ -38,7 +38,7 @@ local model.
 
 ## Retrieval (recall)
 
-`recall.py` finds prior **good-outcome** interactions whose task is
+`sonder_runtime/adapters/recall.py` finds prior **good-outcome** interactions whose task is
 semantically close to the current one (cosine over embeddings, floor
 `DEFAULT_RECALL_MIN_SIM = 0.72`), and injects a bounded, project-scoped set
 into the prompt. Lessons are retrieved via FTS + vector search, then
@@ -142,7 +142,7 @@ instruction.
 
 Scoring, the recall threshold, and MMR selection are pure functions in
 `sonder_runtime/domain/memory/rules.py` (similarity injected, no embedding
-adapter). `sonder_runtime.adapters.memory_rerank` and `recall.py` delegate to
+adapter). `sonder_runtime.adapters.memory_rerank` and `sonder_runtime.adapters.recall` delegate to
 them, while reward callers use the domain rules directly —
 one definition, unchanged behavior. See
 [Package Architecture](14-package-architecture.md).

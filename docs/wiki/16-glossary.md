@@ -37,7 +37,7 @@ Source Everything; imported as a Sonder tier
 **Lesson** — a short, reusable takeaway distilled from a *successful*
 interaction, retrieved into later prompts.
 
-**Lane / routing lane** — a named execution path (`router`, `workbench`,
+**Lane / routing lane** — a named execution path (`chat`, `router`, `workbench`,
 `autopilot`, `fleet`, `review`) mapped to a tier by runtime policy.
 
 **Maintenance lock** — a named lock in `operations.db` serializing
