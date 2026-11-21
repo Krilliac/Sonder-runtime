@@ -128,8 +128,20 @@ class AppWorkRecoveryRegistry:
                     if self._scope(prior.selection) != self._scope(selection):
                         raise CommandConflict("recovery authority changed")
                     return self._snapshot(prior)
-                if self._active or len(self._entries) >= self._limit:
+                open_count = sum(
+                    1 for item in self._entries.values() if item.phase != "closed"
+                )
+                if self._active or open_count >= self._limit:
                     raise ControlError(429, "APP_RECOVERY_BUSY")
+                # Closed, released entries only keep idempotent replies; bound
+                # them by evicting the oldest so they never exhaust the limit.
+                closed = [
+                    key
+                    for key, item in self._entries.items()
+                    if item.phase == "closed" and item.released and not item.busy
+                ]
+                for key in closed[: max(0, len(closed) - self._limit + 1)]:
+                    del self._entries[key]
                 entry = _Entry(identity, selection, inputs, lease)
                 self._entries[identity] = entry
                 self._active = retained = True
