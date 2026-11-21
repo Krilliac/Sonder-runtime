@@ -82,6 +82,7 @@ class AttendedTrainingExecutionService:
                 raise Conflict("training process failed; deployment was not attempted")
 
             reservation = self._policy.reserve(request.run_id, launch.adapter_digest)
+            activated = False
             try:
                 self._journal.append(
                     JournalEvent(request.run_id, "candidate", digest, launch.adapter_digest)
@@ -89,6 +90,7 @@ class AttendedTrainingExecutionService:
                 deployment = self._deployment.activate(
                     launch.adapter_digest, attended=True
                 )
+                activated = True
                 self._policy.commit(reservation)
                 self._journal.append(JournalEvent(request.run_id, "deployed", digest))
                 return AttendedTrainingResult(
@@ -97,11 +99,17 @@ class AttendedTrainingExecutionService:
             except Exception as exc:
                 try:
                     self._policy.restore(reservation)
-                    self._deployment.rollback(
-                        attended=True, reason="training activation failed"
-                    )
+                    if activated:
+                        self._deployment.rollback(
+                            attended=True, reason="training activation failed"
+                        )
                     self._journal.append(
-                        JournalEvent(request.run_id, "rolled_back", digest, str(exc)[:160])
+                        JournalEvent(
+                            request.run_id,
+                            "rolled_back" if activated else "activation_rejected",
+                            digest,
+                            str(exc)[:160],
+                        )
                     )
                 except Exception as recovery_error:
                     self._journal.append(
