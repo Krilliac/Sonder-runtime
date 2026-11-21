@@ -1,5 +1,7 @@
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,52 @@ def test_legacy_serve_installer_is_loopback_only_and_keeps_key_out_of_unit():
     assert "Environment=SONDER_API_KEY=" not in deploy
     assert "SERVER_IP=" not in deploy
     assert "Public URL:" not in deploy
+
+
+def test_legacy_deploy_preflight_imports_the_packaged_ollama_endpoint():
+    deploy = _text("deploy_sonder.sh")
+
+    # The top-level ``ollama_endpoint`` module moved into the package; a bare
+    # import makes the script die on its first real line under ``set -e``.
+    assert not (ROOT / "ollama_endpoint.py").exists()
+    assert not re.search(r"(?<!inference )import ollama_endpoint\b", deploy)
+
+    snippets = re.findall(r"python3 -c '([^']+)'", deploy)
+    assert len(snippets) == 1
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(ROOT)
+    environment.pop("OLLAMA_HOST", None)
+    # ``-S``: the preflight runs on the system interpreter before the venv
+    # exists, so it must import with no third-party packages available.
+    preflight = subprocess.run(
+        [sys.executable, "-S", "-c", snippets[0]],
+        cwd=ROOT.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert preflight.returncode == 0, preflight.stderr
+    assert preflight.stdout.strip() == "http://127.0.0.1:11434"
+
+
+def test_legacy_deploy_never_prints_the_api_key():
+    deploy = _text("deploy_sonder.sh")
+    lines = deploy.splitlines()
+
+    # The only place the generated secret may be expanded is the line that
+    # writes it into the root-only environment file.
+    uses = [line.strip() for line in lines if re.search(r"\$\{?KEY\b", line)]
+    assert uses == ["SONDER_API_KEY=$KEY"]
+    printed = [
+        line
+        for line in lines
+        if re.match(r"\s*(echo|printf)\b", line)
+        and re.search(r"\$\{?(KEY|SONDER_API_KEY)\b", line)
+    ]
+    assert printed == []
+    assert "set -x" not in deploy
+    assert "stored in /etc/sonder/sonder-local.env" in deploy
 
 
 def test_production_installer_uses_manifest_copy_and_validates_release_tag():
