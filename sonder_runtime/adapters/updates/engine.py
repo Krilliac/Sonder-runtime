@@ -501,6 +501,21 @@ class UpdateManager:
             )
             plan = self.repository.advance(plan, "migrating")
 
+            # Bundles never ship a venv (DEFAULT_BUNDLE_EXCLUDES), yet the
+            # systemd units run <current>/venv/bin/python.  Carry the active
+            # release's venv forward so the switch cannot strand the units.
+            step += 1
+            venv_problem = self._carry_venv_forward(final_dir)
+            if venv_problem:
+                self.repository.record_step(
+                    update_id, step, "venv-link", "failed",
+                    error_code="VENV_LINK_FAILED",
+                    evidence={"problem": venv_problem},
+                )
+                return self._roll_back_activation(
+                    plan, final_dir, step, error_code="VENV_LINK_FAILED",
+                )
+
             # Run migrations using the target release's code (R-M9).
             step += 1
             migrate_result = self._run_in_release(
@@ -659,6 +674,26 @@ class UpdateManager:
         (R-M10, R-M18 handoff safety).
         """
         return sonder_updates.switch_active_pointer(self.current_link, target)
+
+    def _carry_venv_forward(self, release_dir: Path) -> str | None:
+        """Link the active release's ``venv`` into ``release_dir``.
+
+        Returns a problem string, or None when nothing was needed or the link
+        was made.  The link targets the resolved real venv so repeated
+        updates never build a chain through retired releases.
+        """
+        active = sonder_updates._read_pointer(self.current_link)
+        if not active:
+            return None
+        previous = Path(active) / "venv"
+        link = release_dir / "venv"
+        if link.exists() or link.is_symlink() or not previous.is_dir():
+            return None
+        try:
+            os.symlink(previous.resolve(), link, target_is_directory=True)
+        except OSError as exc:
+            return f"cannot link venv: {type(exc).__name__}"
+        return None
 
     def _run_in_release(
         self, release_dir: Path, args: list[str], *, timeout: float
