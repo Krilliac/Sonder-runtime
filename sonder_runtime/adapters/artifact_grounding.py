@@ -16,6 +16,7 @@ import zipfile
 import zlib
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 
@@ -26,6 +27,29 @@ MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_OOXML_ENTRIES = 1000
 MAX_OOXML_BYTES = 128 * 1024 * 1024
 MAX_GLB_ACCESSOR_ITEMS = 2_000_000
+# Aggregate budget, in value slots, across every accessor materialised for
+# one GLB. Accessors may alias one bufferView, so a small BIN chunk can be
+# unpacked many times over and the per-accessor row cap alone does not bound
+# memory. Each accessor is charged _glb_accessor_slot_charge() slots before
+# it is unpacked: count * (components + 2) for its rows (a list slot, a
+# tuple and one number object per component) plus GLB_ACCESSOR_FIXED_SLOTS
+# for the accessor itself (its list object and item array, its
+# accessor_cache entry and int key). Without the fixed term many count=1
+# accessors cost 50-100 bytes per slot. The process commit charge measured
+# on 64-bit CPython 3.12 (Windows), from just before validation to the
+# glb-accessors check and including dict-resize transients, is at most
+# about 40 bytes per charged slot: MAT4 count=1 accessors of floats or of
+# uint32 values >= 2**30, right after an accessor_cache resize, are the
+# worst case; 1,000-row MAT4 accessors measure about 39 and SCALAR..MAT3
+# count=1 accessors 37-39. GLB_ACCESSOR_SLOT_BYTES keeps about 10% headroom
+# over that, so the rows and cache entries held for one GLB stay under
+# 11M * 44 B = 484 MB for any mix of accessor types and counts. Not counted:
+# the file bytes, the parsed JSON and the json.dumps copy of it, per-accessor
+# error strings, and transient lists built by the later geometry/animation
+# passes.
+GLB_ACCESSOR_SLOT_BYTES = 44
+GLB_ACCESSOR_FIXED_SLOTS = 5
+MAX_GLB_TOTAL_ACCESSOR_SLOTS = 11_000_000
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -388,11 +412,13 @@ def _validate_csv(path: Path, requirements: dict, checks: list):
 # apart from `refs` because `refs` also drives the local-reference existence
 # check, which cannot resolve a srcset descriptor list or a CSS url() fragment.
 _HTML_RESOURCE_ATTRS = ("srcset", "poster", "data", "action", "formaction", "background")
-# Only "//"-prefixed matches are collected, so a relative url(fonts/x.woff2) or
-# a same-directory srcset entry is never mistaken for a network fetch.
-_ABSOLUTE_URL_RE = re.compile(r"(?:https?:)?//[^\s'\"()<>]+", re.IGNORECASE)
+# Only "//"-prefixed matches are collected (either slash may be a backslash,
+# which browsers treat as "/" and Windows treats as a UNC prefix), so a
+# relative url(fonts/x.woff2) or a same-directory srcset entry is never
+# mistaken for a network fetch.
+_ABSOLUTE_URL_RE = re.compile(r"(?:https?:)?[/\\]{2}[^\s'\"()<>]+", re.IGNORECASE)
 _CSS_EXTERNAL_URL_RE = re.compile(
-    r"""(?:url\(\s*['"]?|@import\s+['"])\s*((?:https?:)?//[^)'"\s]+)""",
+    r"""(?:url\(\s*['"]?|@import\s+['"])\s*((?:https?:)?[/\\]{2}[^)'"\s]+)""",
     re.IGNORECASE,
 )
 
@@ -430,8 +456,15 @@ class _HTMLAudit(HTMLParser):
 
 
 def _is_external_ref(value: str) -> bool:
-    lowered = value.strip().lower()
-    return lowered.startswith(("http://", "https://", "//"))
+    # Backslashes are normalised so a Windows UNC ref (\\host\share\x.png),
+    # which a browser on Windows fetches over SMB, counts as external like
+    # the equivalent //host/share form; file: refs leave the bundle too.
+    lowered = value.strip().replace("\\", "/").lower()
+    return lowered.startswith(("http://", "https://", "//", "file:"))
+
+
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 
 def _validate_html(path: Path, requirements: dict, checks: list):
@@ -464,14 +497,54 @@ def _validate_html(path: Path, requirements: dict, checks: list):
             "external references: %s" % (", ".join(external[:10]) or "none"),
         )
     missing = []
+    root = path.parent.resolve()
     for ref in parser.refs:
-        clean = ref.split("#", 1)[0].split("?", 1)[0]
-        if not clean or clean.startswith(("#", "data:", "mailto:", "javascript:")):
+        clean = ref.strip().split("#", 1)[0].split("?", 1)[0]
+        if not clean or _is_external_ref(clean):
             continue
-        if _is_external_ref(clean):
+        if _URI_SCHEME_RE.match(clean) and not _DRIVE_PREFIX_RE.match(clean):
+            # tel:, blob:, mailto:, data:, javascript: ... are not files.
             continue
-        candidate = (path.parent / clean).resolve()
-        if path.parent.resolve() not in (candidate, *candidate.parents) or not candidate.exists():
+        # Every ref that is not a plain relative path is rejected before any
+        # filesystem call: joining an absolute, drive-qualified or UNC ref
+        # onto the page directory replaces it, and resolve()/exists() on a
+        # UNC path opens an outbound SMB connection from the validator.
+        decoded = unquote(clean).replace("\\", "/")
+        pure = PurePosixPath(decoded)
+        if (
+            "\x00" in decoded
+            or pure.is_absolute()
+            or any(":" in part for part in pure.parts)
+        ):
+            missing.append(ref)
+            continue
+        # Walked one component at a time and never through a link: resolve()
+        # on the joined path would follow a symlink or junction in the page
+        # directory to whatever it targets (a UNC share included) before
+        # containment could be checked. Each component is lstat-ed only
+        # after every component before it proved not to be a link, so a ref
+        # that passes through a link is reported missing without touching
+        # its target. resolve() then runs on a link-free local path and only
+        # feeds the containment check, which still catches any spelling the
+        # OS normalises differently from posixpath.normpath.
+        parts = PurePosixPath(posixpath.normpath(decoded)).parts
+        if parts[:1] == ("..",):
+            missing.append(ref)
+            continue
+        candidate = root
+        found = True
+        try:
+            for part in parts:
+                candidate = candidate / part
+                if _is_reparse_point(candidate):
+                    found = False
+                    break
+            if found:
+                resolved = candidate.resolve()
+                found = root in (resolved, *resolved.parents) and resolved.exists()
+        except (OSError, ValueError):
+            found = False
+        if not found:
             missing.append(ref)
     _check(
         checks,
@@ -1561,6 +1634,15 @@ def _glb_integer(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _glb_accessor_slot_charge(count, value_type):
+    """Budget slots charged for caching one accessor of *count* rows.
+
+    *value_type* must be a key of GLB_TYPES. See MAX_GLB_TOTAL_ACCESSOR_SLOTS
+    for what the terms cover.
+    """
+    return count * (GLB_TYPES[value_type] + 2) + GLB_ACCESSOR_FIXED_SLOTS
+
+
 def _glb_accessor_values(document, binary, index):
     accessors = document.get("accessors", [])
     views = document.get("bufferViews", [])
@@ -1690,6 +1772,8 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         accessor_errors.append("accessors must be a non-empty array")
         accessors = []
     accessor_cache = {}
+    materialized_slots = 0
+    accessor_budget_exceeded = False
     for index, accessor in enumerate(accessors):
         if not isinstance(accessor, dict):
             accessor_errors.append("accessor %d is not an object" % index)
@@ -1701,11 +1785,25 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         if component_type not in GLB_COMPONENTS or value_type not in GLB_TYPES:
             accessor_errors.append("accessor %d has an invalid component/type" % index)
             continue
+        declared_count = accessor.get("count")
+        slots = 0
+        # An out-of-range count is refused by _glb_accessor_values before it
+        # unpacks anything, so it is not charged and keeps its own error.
+        if _glb_integer(declared_count) and 0 < declared_count <= MAX_GLB_ACCESSOR_ITEMS:
+            slots = _glb_accessor_slot_charge(declared_count, value_type)
+        if materialized_slots + slots > MAX_GLB_TOTAL_ACCESSOR_SLOTS:
+            accessor_errors.append(
+                f"accessor {index} exceeds the total accessor data budget"
+                f" of {MAX_GLB_TOTAL_ACCESSOR_SLOTS} value slots"
+            )
+            accessor_budget_exceeded = True
+            break
         if accessor.get("normalized") and component_type == 5126:
             accessor_errors.append("accessor %d normalizes floating-point data" % index)
         try:
             values = _glb_accessor_values(document, binary, index)
             accessor_cache[index] = values
+            materialized_slots += slots
         except (ValueError, struct.error) as exc:
             accessor_errors.append(str(exc))
             continue
@@ -1734,6 +1832,10 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         not accessor_errors,
         "; ".join(accessor_errors[:8]) or "%d accessor(s)" % len(accessors),
     )
+    if accessor_budget_exceeded:
+        # Later checks re-materialise any accessor missing from the cache,
+        # which would bypass the budget; the GLB is already rejected.
+        return
 
     nodes = document.get("nodes", [])
     meshes = document.get("meshes", [])
