@@ -20,16 +20,32 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Callable
+from typing import TYPE_CHECKING, Protocol
 
 import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+
+if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
 
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _BLOB_NAME = re.compile(r"sha256[-:][0-9a-fA-F]{64}\Z")
 
-Opener = Callable[..., object]
+
+class _Response(Protocol):
+    def read(self, amt: int, /) -> bytes: ...
+
+
+class Opener(Protocol):
+    def __call__(
+        self,
+        request: urllib.request.Request,
+        /,
+        *,
+        timeout: float,
+        allow_remote: bool,
+    ) -> AbstractContextManager[_Response]: ...
 
 
 def model_root_from_modelfile(modelfile: str) -> str | None:
@@ -66,7 +82,7 @@ def discover_daemon_model_root(
     """
     if not url or not ollama_endpoint.is_loopback(url):
         return None
-    open_url = opener or ollama_endpoint.open_url
+    open_url: Opener = opener or ollama_endpoint.open_url
     base = url.rstrip("/")
     try:
         with open_url(

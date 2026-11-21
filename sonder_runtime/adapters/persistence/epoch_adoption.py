@@ -1,14 +1,14 @@
 """Read-only epoch-2 adoption and temporary-schema cleanup checks."""
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect  # isort: skip
 
 import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.adapters.persistence.migrations import status_read_only
 from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
@@ -16,6 +16,10 @@ from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
     check_epoch,
     require_epoch_2,
 )
+
+if TYPE_CHECKING:
+    import os
+    from collections.abc import Callable, Mapping
 
 
 KNOWN_MIGRATION_STORES = MappingProxyType({
@@ -37,9 +41,9 @@ class Epoch2CleanupReport:
 def _temporary_objects(path: Path) -> tuple[str, ...]:
     if not path.is_file():
         return ()
-    conn = owned_sqlite_connect(str(path))
+    conn = cast("Callable[[str], sqlite3.Connection]", owned_sqlite_connect)(str(path))
     try:
-        names = {
+        names: set[str] = {
             row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger','view')"
             )
@@ -50,7 +54,7 @@ def _temporary_objects(path: Path) -> tuple[str, ...]:
 
 
 def check_epoch2_cleanup(
-    sonder_home: str | Path,
+    sonder_home: str | os.PathLike[str],
     *,
     temporary_paths: tuple[str, ...] = (),
 ) -> Epoch2CleanupReport:
@@ -101,7 +105,7 @@ def check_epoch2_cleanup(
 
     try:
         require_epoch_2(home)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         reasons.append(f"runtime epoch gate rejected state: {type(exc).__name__}")
 
     return Epoch2CleanupReport(
