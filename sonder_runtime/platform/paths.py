@@ -353,6 +353,14 @@ def _reclaim_abandoned_migration_lock(lock: Path) -> bool:
         return False
 
 
+def _path_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
 def _migrate_legacy_memory_db(legacy: Path, target: Path) -> None:
     """Copy one legacy SQLite store without racing another startup process."""
     from sonder_runtime.adapters.filesystem.durable_locks import exclusive_file_lock
@@ -408,21 +416,49 @@ def _migrate_legacy_memory_db_owned(legacy: Path, target: Path) -> None:
                 return
             nonce = uuid.uuid4().hex
             staged_db = target.with_name(".%s.%s.tmp" % (target.name, nonce))
-            shutil.copy2(legacy, staged_db)
             stage_paths.append(staged_db)
             staged_sidecars: list[tuple[Path, Path]] = []
+            # Copy the database and any WAL/SHM sidecars consistently: retry if
+            # a concurrent writer updates either file mid-copy so we never pair
+            # a database snapshot with a stale or torn -wal.
+            for _attempt in range(5):
+                before_db = _path_stamp(legacy)
+                before_wal = _path_stamp(Path(str(legacy) + "-wal"))
+                before_shm = _path_stamp(Path(str(legacy) + "-shm"))
+                shutil.copy2(legacy, staged_db)
+                staged_sidecars.clear()
+                for suffix in ("-shm", "-wal"):
+                    source = Path(str(legacy) + suffix)
+                    if source.exists():
+                        staged = target.with_name(
+                            ".%s%s.%s.tmp" % (target.name, suffix, nonce)
+                        )
+                        shutil.copy2(source, staged)
+                        if staged not in stage_paths:
+                            stage_paths.append(staged)
+                        staged_sidecars.append((staged, Path(str(target) + suffix)))
+                after_db = _path_stamp(legacy)
+                after_wal = _path_stamp(Path(str(legacy) + "-wal"))
+                after_shm = _path_stamp(Path(str(legacy) + "-shm"))
+                if (after_db, after_wal, after_shm) == (before_db, before_wal, before_shm):
+                    break
+            # Never leave a stale -wal/-shm beside a newly migrated database.
             for suffix in ("-shm", "-wal"):
-                source = Path(str(legacy) + suffix)
-                if source.exists():
-                    staged = target.with_name(".%s%s.%s.tmp" % (target.name, suffix, nonce))
-                    shutil.copy2(source, staged)
-                    stage_paths.append(staged)
-                    staged_sidecars.append((staged, Path(str(target) + suffix)))
-            for staged, destination in staged_sidecars:
-                os.replace(staged, destination)
-                stage_paths.remove(staged)
-            os.replace(staged_db, target)
-            stage_paths.remove(staged_db)
+                sidecar_dest = Path(str(target) + suffix)
+                if not any(dest == sidecar_dest for _s, dest in staged_sidecars):
+                    sidecar_dest.unlink(missing_ok=True)
+            published_sidecars: list[Path] = []
+            try:
+                for staged, destination in staged_sidecars:
+                    os.replace(staged, destination)
+                    stage_paths.remove(staged)
+                    published_sidecars.append(destination)
+                os.replace(staged_db, target)
+                stage_paths.remove(staged_db)
+            except BaseException:
+                for destination in published_sidecars:
+                    destination.unlink(missing_ok=True)
+                raise
             return
         finally:
             for staged in stage_paths:
