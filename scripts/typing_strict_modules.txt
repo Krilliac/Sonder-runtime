@@ -100,6 +100,7 @@ sonder_runtime/adapters/mcp_tool_manifest.py
 sonder_runtime/adapters/memory_lesson_ids.py
 sonder_runtime/adapters/memory_replication/__init__.py
 sonder_runtime/adapters/memory_rerank.py
+sonder_runtime/adapters/memory_search.py
 sonder_runtime/adapters/meshgen/__init__.py
 sonder_runtime/adapters/model_bootstrap.py
 sonder_runtime/adapters/model_gateway_factory.py

@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 479,
+      "file_count": 480,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -285,6 +285,7 @@
         "sonder_runtime/adapters/memory_replication/http_client.py",
         "sonder_runtime/adapters/memory_repository.py",
         "sonder_runtime/adapters/memory_rerank.py",
+        "sonder_runtime/adapters/memory_search.py",
         "sonder_runtime/adapters/memory_store.py",
         "sonder_runtime/adapters/meshgen/__init__.py",
         "sonder_runtime/adapters/meshgen/blender_runner.py",

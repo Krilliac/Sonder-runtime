@@ -55,6 +55,10 @@ def _redact(value: Any, redactor: TelemetryRedactor) -> Any:
 
 
 _RETENTION_ENVELOPE_KEYS = frozenset({"privacy_class", "redacted"})
+_RETENTION_MARKER_EVENT = "session.retention.applied"
+# Events a complete marker scan may read before the read is refused: the
+# engine's own max_scan ceiling and the adapter's complete-history bound.
+_MAX_MARKER_SCAN_EVENTS = 100_000
 
 
 def retention_envelope(privacy_class: str) -> dict[str, object]:
@@ -209,12 +213,49 @@ class SessionQueryEngine:
         self._max_scan = max_scan
         self._redactor = redactor if redactor is not None else DefaultExportRedactor()
 
-    def _privacy_targets(self, session_id: str) -> dict[int, str]:
-        """Read append-only privacy markers and fail closed on malformed ones."""
-        limit = min(self._max_scan, getattr(self._repository, "_max_read_limit", self._max_scan))
+    def _scan_limit(self) -> int:
+        """Rows per read: the service bound, lowered to the adapter's ceiling."""
+        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
+        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
+            adapter_limit = self._max_scan
+        return min(self._max_scan, adapter_limit)
+
+    def _retention_markers(self, session_id: str) -> tuple[SessionEvent, ...]:
+        """Every retention marker of the session, or refuse the read.
+
+        One bounded search answers the usual case.  Search is oldest-first
+        with a row limit, so a full page cannot prove that no later marker
+        was cut off -- and a later marker can withhold an earlier event.  A
+        full page therefore falls back to a keyset scan of the whole session
+        that keeps only the markers, and a session too long to scan is
+        refused instead of exported with a marker it never read.
+        """
+        limit = self._scan_limit()
         markers = self._repository.search(
-            session_id=session_id, event_type="session.retention.applied", limit=limit,
+            session_id=session_id, event_type=_RETENTION_MARKER_EVENT, limit=limit,
         )
+        if len(markers) < limit:
+            return tuple(markers)
+        found: list[SessionEvent] = []
+        start, scanned = 1, 0
+        while True:
+            page = self._repository.read_range(session_id, start_sequence=start, limit=limit)
+            if not page:
+                break
+            scanned += len(page)
+            if scanned > _MAX_MARKER_SCAN_EVENTS:
+                raise QueryExportError("session is too long to resolve its privacy markers")
+            if page[-1].sequence < start:
+                raise QueryExportError("session read did not advance past its start sequence")
+            found.extend(event for event in page if event.event_type == _RETENTION_MARKER_EVENT)
+            if len(page) < limit:
+                break
+            start = page[-1].sequence + 1
+        return tuple(found)
+
+    def _privacy_targets(self, session_id: str) -> dict[int, str]:
+        """Resolve every append-only privacy marker; fail closed on malformed ones."""
+        markers = self._retention_markers(session_id)
         targets: dict[int, str] = {}
         for marker in markers:
             raw_targets = marker.payload.get("targets")
@@ -289,10 +330,7 @@ class SessionQueryEngine:
         # page is terminal without issuing an unbounded follow-up query.
         # A port implementation may enforce a lower adapter-side ceiling.  A
         # service-level bound must never turn into an adapter validation error.
-        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
-        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
-            adapter_limit = self._max_scan
-        scan_limit = min(self._max_scan, adapter_limit)
+        scan_limit = self._scan_limit()
         raw = self._repository.read_range(session_id, start_sequence=next_sequence,
                                           end_sequence=end_sequence, limit=scan_limit)
         privacy_targets = self._privacy_targets(session_id)
@@ -335,12 +373,15 @@ class SessionQueryEngine:
         privacy_targets = self._privacy_targets(session_id)
         records = tuple(self._record_for_event(event, privacy_targets) for event in events)
         transcript = self._transcript(records)
-        # Integrity is a property of the chain, not merely of the selected
-        # slice.  Starting verification at sequence two would necessarily
-        # report a false predecessor mismatch, so verify from the chain root
-        # while retaining the caller's end and event bound.
+        # Integrity covers exactly the exported window: every exported event's
+        # own hash plus its link to the stored predecessor, which a ranged
+        # inspection reads itself.  Verifying from the chain root under the
+        # export's event bound checked a different window whenever the export
+        # started past sequence one: an altered exported event passed while
+        # the report vouched only for events that were never exported.
         integrity = self._repository.inspect_integrity(
-            session_id, start_sequence=1, end_sequence=end_sequence,
+            session_id, start_sequence=start_sequence,
+            end_sequence=events[-1].sequence if events else end_sequence,
             limit=read_limit,
         ) if include_integrity else None
         truncated = len(events) == read_limit
