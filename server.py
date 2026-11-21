@@ -62,6 +62,7 @@ from sonder_runtime.application.command_surface.command_text import slash_head a
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
+from sonder_runtime.domain.session_ref import parse_session_ref
 import reflection
 import sonder_runtime.adapters.embeddings as embeddings
 import personas
@@ -16719,7 +16720,7 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
 
 @mcp.tool()
 def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
-    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON)."""
+    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link."""
     _maybe_live_reload()
     export_format = "text"
     if str(format or "").strip():  # the default text path stays import-free
@@ -16727,7 +16728,7 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         export_format = atif_export.normalize_session_export_format(format)
         if export_format is None:
             raise InvalidInput("unknown session_export format (use 'text' or 'atif')")
-    session_id = _resolve_session(session)
+    session_id = _resolve_session(parse_session_ref(session) or session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
     limit = _safe_limit_policy(limit, 50, 200)
