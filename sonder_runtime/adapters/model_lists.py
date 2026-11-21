@@ -303,6 +303,19 @@ def load_shipped_document() -> dict[str, Any]:
     return cast(dict[str, Any], document)
 
 
+def _overlay_patch(path: Path) -> Any:
+    """The overlay document at ``path``; a missing file is the empty overlay."""
+    try:
+        return read_document(path)
+    except FileNotFoundError:
+        return {"version": SCHEMA_VERSION}
+
+
+def validate_overlay_file(path: Path) -> None:
+    """Load ``path`` back through the loader's own overlay path; raise if it would be ignored."""
+    merge(load_shipped_document(), _overlay_patch(Path(path)))
+
+
 FileIdentity = tuple[str, int, int, int] | tuple[str, None]
 IdentityKey = tuple[FileIdentity, FileIdentity]
 
@@ -353,10 +366,7 @@ def load() -> ModelListsConfig:
     path = "(unknown)"
     try:
         path = str(overlay_path())
-        try:
-            patch = read_document(Path(path))
-        except FileNotFoundError:
-            patch = {"version": SCHEMA_VERSION}
+        patch = _overlay_patch(Path(path))
         effective = merge(shipped, patch)
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         issues = (ConfigIssue(ConfigSource.OVERLAY, path, str(exc)),)
