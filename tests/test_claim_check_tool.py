@@ -343,3 +343,25 @@ def test_a_refused_root_is_still_root_refused(repo):
 
     out = tool.run_claim_check({"root": str(repo), "file": "P.cs", "line": 3}, root_guard=refuse)
     assert out["error"]["code"] == "root_refused"
+
+
+@pytest.mark.parametrize("root", [
+    r"\\attacker-host\share\repo",
+    "//attacker-host/share/repo",
+    r"\\?\UNC\attacker-host\share\repo",
+    r"\\.\pipe\repo",
+])
+def test_native_root_guard_refuses_a_network_root_before_resolving_it(repo, monkeypatch, root):
+    real_realpath = tool.os.path.realpath
+    resolved = []
+
+    def recording_realpath(path, *args, **kwargs):
+        resolved.append(str(path))
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(tool.os.path, "realpath", recording_realpath)
+    out = tool.native_claim_check({"root": root, "file": "P.cs", "line": 1}, roots=[str(repo)],
+                                  file_guard=allow_all)
+    assert out["isError"] is True
+    assert json.loads(out["output"])["error"]["code"] == "root_refused"
+    assert not [p for p in resolved if "attacker-host" in p or "pipe" in p]

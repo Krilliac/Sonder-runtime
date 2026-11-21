@@ -233,6 +233,10 @@ def _within_roots(roots: Iterable[str | os.PathLike[str]]) -> Callable[[str], st
     resolved = [Path(os.path.realpath(r)) for r in roots]
 
     def guard(root: str) -> str:
+        from ..adapters.filesystem.file_ops import _reject_network_path
+        # Lexical refusal first: realpath on a UNC/device spelling opens an SMB
+        # connection (and can leak NTLM credentials) before containment is checked.
+        root = _reject_network_path(root)
         target = Path(os.path.realpath(Path(root).expanduser()))
         if not any(target == base or target.is_relative_to(base) for base in resolved):
             raise PermissionError("claim_check root is outside the native workspace roots")
