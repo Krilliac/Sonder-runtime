@@ -92,6 +92,87 @@ def test_local_snapshot_keeps_unknown_free_capacity_unknown() -> None:
     assert ComputeCapability.CUDA in result.live_capabilities
 
 
+def test_local_snapshot_detects_media_index_ml_and_database_capabilities() -> None:
+    hardware = SimpleNamespace(
+        system_ram_total_gb=32.0,
+        system_ram_available_gb=12.0,
+        system_ram_availability_live=True,
+        cuda_available=False,
+        vram_total_gb=0.0,
+        vram_free_gb=0.0,
+        vram_availability_live=False,
+    )
+    present_tools = {"ffmpeg", "blender", "clangd", "psql"}
+    present_modules = {"peft", "bitsandbytes", "fastembed"}
+    source = LocalComputeSnapshotSource(
+        environment_probe=lambda: {"cpu_count": 8, "toolchains": {}, "specialist_tools": {}},
+        hardware_probe=lambda: hardware,
+        disk_probe=lambda _path: SimpleNamespace(total=1 << 30, free=1 << 29),
+        tool_probe=lambda name: f"/bin/{name}" if name in present_tools else None,
+        module_probe=lambda name: name in present_modules,
+    )
+    live = source.snapshot(_local_node(), now=NOW).live_capabilities
+    for expected in (
+        ComputeCapability.FFMPEG,
+        ComputeCapability.BLENDER,
+        ComputeCapability.CLANGD,
+        ComputeCapability.DATABASE,
+        ComputeCapability.QLORA,
+        ComputeCapability.EMBEDDINGS,
+    ):
+        assert expected in live
+    assert ComputeCapability.CMAKE not in live
+
+    partial = LocalComputeSnapshotSource(
+        environment_probe=lambda: {"cpu_count": 8, "toolchains": {}, "specialist_tools": {}},
+        hardware_probe=lambda: hardware,
+        disk_probe=lambda _path: SimpleNamespace(total=1 << 30, free=1 << 29),
+        tool_probe=lambda _name: None,
+        module_probe=lambda name: name == "peft",
+    ).snapshot(_local_node(), now=NOW).live_capabilities
+    assert ComputeCapability.QLORA not in partial
+    assert ComputeCapability.EMBEDDINGS not in partial
+
+
+def test_local_snapshot_memoises_tool_and_module_probes() -> None:
+    hardware = SimpleNamespace(
+        system_ram_total_gb=32.0,
+        system_ram_available_gb=12.0,
+        system_ram_availability_live=True,
+        cuda_available=False,
+        vram_total_gb=0.0,
+        vram_free_gb=0.0,
+        vram_availability_live=False,
+    )
+    tool_calls: list[str] = []
+    module_calls: list[str] = []
+
+    def tool_probe(name: str) -> str | None:
+        tool_calls.append(name)
+        return "/bin/ffmpeg" if name == "ffmpeg" else None
+
+    def module_probe(name: str) -> bool:
+        module_calls.append(name)
+        return name == "fastembed"
+
+    source = LocalComputeSnapshotSource(
+        environment_probe=lambda: {"cpu_count": 8, "toolchains": {}, "specialist_tools": {}},
+        hardware_probe=lambda: hardware,
+        disk_probe=lambda _path: SimpleNamespace(total=1 << 30, free=1 << 29),
+        tool_probe=tool_probe,
+        module_probe=module_probe,
+    )
+    first = source.snapshot(_local_node(), now=NOW).live_capabilities
+    tool_count, module_count = len(tool_calls), len(module_calls)
+    assert tool_count > 0 and module_count > 0
+    second = source.snapshot(_local_node(), now=NOW).live_capabilities
+    assert len(tool_calls) == tool_count
+    assert len(module_calls) == module_count
+    assert first == second
+    assert ComputeCapability.FFMPEG in second
+    assert ComputeCapability.EMBEDDINGS in second
+
+
 def test_local_snapshot_rejects_remote_identity_before_probing() -> None:
     source = LocalComputeSnapshotSource(
         environment_probe=lambda: pytest.fail("must not probe"),

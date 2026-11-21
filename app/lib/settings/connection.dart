@@ -142,7 +142,8 @@ ConnectionDiagnosis diagnoseConnectionError(Object error, String serverUrl) {
   );
 }
 
-/// The first admin needs the bootstrap secret the server printed.
+/// The first admin needs the bootstrap secret the operator configured as
+/// `SONDER_BOOTSTRAP_SECRET` in the server environment.
 class BootstrapSecretRequired implements Exception {
   final String message;
   const BootstrapSecretRequired(this.message);
