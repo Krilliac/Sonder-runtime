@@ -8,6 +8,7 @@ import html
 from html.parser import HTMLParser
 import base64
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -198,6 +199,67 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
+class _DeadlineSocketReader(io.RawIOBase):
+    """Raw response reader that applies one wall-clock deadline to every recv.
+
+    http.client applies the socket timeout per blocking operation, so a peer
+    that trickles one byte just inside that timeout could hold a fetch open
+    indefinitely.  Each read here first narrows the socket timeout to the time
+    left before ``deadline`` (``time.monotonic()``), so headers and body
+    together can never outlive it.  The wrapped reader comes from
+    ``sock.makefile`` so the socket's io-reference count still defers the real
+    close that http.client performs for ``Connection: close`` responses.
+    """
+
+    def __init__(self, sock, deadline):
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+        self._raw = sock.makefile("rb", buffering=0)
+
+    def readable(self):
+        return True
+
+    def fileno(self):
+        return self._raw.fileno()
+
+    def readinto(self, buffer):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("web request exceeded its total timeout")
+        self._sock.settimeout(remaining)
+        return self._raw.readinto(buffer)
+
+    def close(self):
+        if not self.closed:
+            try:
+                self._raw.close()
+            finally:
+                super().close()
+
+
+class _DeadlineSocketView:
+    """Socket stand-in whose makefile() yields a deadline-bounded reader."""
+
+    def __init__(self, sock, deadline):
+        self._sock = sock
+        self._deadline = deadline
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise ValueError("deadline socket view only supports binary reads")
+        return io.BufferedReader(_DeadlineSocketReader(self._sock, self._deadline))
+
+
+def _deadline_response_class(deadline):
+    def build(sock, *args, **kwargs):
+        return http.client.HTTPResponse(
+            _DeadlineSocketView(sock, deadline), *args, **kwargs,
+        )
+
+    return build
+
+
 class _PinnedResponse:
     def __init__(self, response, connection):
         self._response = response
@@ -247,14 +309,26 @@ def _urlopen(req, timeout=10):
     connection_type = (
         _PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection
     )
+    # _request attaches one monotonic deadline for the whole fetch (every
+    # redirect hop, connect, TLS, headers and body).  Other callers, such as
+    # large update downloads, keep the per-operation socket timeout only.
+    deadline = getattr(req, "_sonder_deadline", None)
     last_error = None
     for address in addresses:
+        connect_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("web request exceeded its total timeout")
+            connect_timeout = min(timeout, remaining)
         connection = connection_type(
             host,
             port,
             connect_host=address,
-            timeout=timeout,
+            timeout=connect_timeout,
         )
+        if deadline is not None:
+            connection.response_class = _deadline_response_class(deadline)
         try:
             connection.request(
                 req.get_method(),
@@ -266,6 +340,13 @@ def _urlopen(req, timeout=10):
         except Exception as exc:
             last_error = exc
             connection.close()
+            # A socket timeout here was already capped at the remaining
+            # budget (Windows may wake a few ms early), so either way the
+            # whole-fetch deadline is spent: do not try further addresses.
+            if deadline is not None and (
+                isinstance(exc, TimeoutError) or deadline - time.monotonic() <= 0
+            ):
+                raise TimeoutError("web request exceeded its total timeout") from exc
     raise urllib.error.URLError(last_error or "no validated address was reachable")
 
 
@@ -688,15 +769,22 @@ def _decode_content_encoding(raw, encoding):
 def _request(url, timeout=10):
     current_url = url
     redirects = 0
+    # ``timeout`` bounds the whole fetch, not each socket operation, so a
+    # slow-drip server cannot stall the calling tool past it.
+    deadline = time.monotonic() + timeout
     while True:
         _, addresses = _validated_public_target(current_url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("web request exceeded its total timeout")
         req = urllib.request.Request(current_url, headers={
             "User-Agent": USER_AGENT,
             "Accept-Encoding": "identity",
         })
         req._sonder_addresses = addresses
+        req._sonder_deadline = deadline
         try:
-            response = _urlopen(req, timeout=timeout)
+            response = _urlopen(req, timeout=remaining)
         except urllib.error.HTTPError as exc:
             if exc.code not in _REDIRECT_CODES:
                 raise

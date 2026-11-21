@@ -166,6 +166,29 @@ def test_direct_transport_ignores_proxy_env_and_sends_no_auth_or_cookies(
     assert b"cookie" not in lowered
 
 
+def test_wire_query_matches_the_validated_query(monkeypatch):
+    fake = _FakeSocket(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    monkeypatch.setattr(probe.socket, "socket", lambda *args, **kwargs: fake)
+    # parse_qsl sees one "q" parameter here, so validation accepts it.  The
+    # wire request must carry exactly that parameter, not a decoded
+    # "q=a&token=secret" that smuggles a credential key past the filter.
+    parsed, addresses = probe._validate_target(
+        "http://127.0.0.1:8080/x?q=a%26token%3Dsecret&n=a b"
+    )
+
+    probe._request_once(parsed, addresses, "GET", 1.0)
+
+    request_line = fake.sent.split(b"\r\n", 1)[0]
+    assert request_line == b"GET /x?q=a%26token%3Dsecret&n=a%20b HTTP/1.1"
+    target = request_line.split(b" ")[1].decode("ascii")
+    sent_keys = [
+        key for key, _value in probe.urllib.parse.parse_qsl(
+            probe.urllib.parse.urlsplit(target).query, keep_blank_values=True,
+        )
+    ]
+    assert sent_keys == ["q", "n"]
+
+
 def test_header_and_body_caps_are_enforced(monkeypatch):
     oversized_headers = _FakeSocket(
         b"HTTP/1.1 200 OK\r\nX-Large: "
