@@ -45,6 +45,34 @@ def test_command_alias_and_scalar_coercions_are_bounded():
     assert any("clamped" in note for note in notes)
 
 
+def test_command_normalization_keeps_explicitly_supplied_args():
+    args, _ = normalize_tool_args(
+        "workspace_run", {"command": "python", "args": ["-m", "pytest", "-q"]}, RUN,
+    )
+    assert args == {"program": "python", "args": ["-m", "pytest", "-q"]}
+    args, _ = normalize_tool_args(
+        "workspace_run", {"command": "python -m", "args": ["pytest", "-q"]}, RUN,
+    )
+    assert args == {"program": "python", "args": ["-m", "pytest", "-q"]}
+
+
+def test_command_normalization_treats_null_or_blank_args_as_not_supplied():
+    for empty in (None, "", "   "):
+        args, _ = normalize_tool_args(
+            "workspace_run", {"command": "git status", "args": empty}, RUN,
+        )
+        assert args == {"program": "git", "args": ["status"]}, empty
+
+
+def test_command_normalization_decodes_json_list_args_before_merging():
+    args, _ = normalize_tool_args(
+        "workspace_run", {"command": "python -m", "args": '["pytest"]'}, RUN,
+    )
+    assert args == {"program": "python", "args": ["-m", "pytest"]}
+    again, _ = normalize_tool_args("workspace_run", args, RUN)
+    assert again == args
+
+
 def test_content_fence_is_stripped_once():
     args, notes = normalize_tool_args(
         "file_write", {"body": "```python\ndef f():\n    return 1\n```"},
@@ -173,6 +201,52 @@ def test_workspace_args_alias_remains_supported_by_dispatch_schema():
     schema = argument_schema(server.mcp, "workspace_run")
     result, _ = normalize_tool_args("workspace_run", {"cmd": "python -m pytest -q"}, schema)
     assert result == {"program": "python", "args": ["-m", "pytest", "-q"]}
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    # args_json alone, as a JSON string or a list.
+    ({"command": "python -m", "args_json": '["pytest"]'}, ["-m", "pytest"]),
+    ({"command": "python -m", "args_json": ["pytest"]}, ["-m", "pytest"]),
+    # Both keys: the agent dispatcher reads args_json when the key is
+    # present, so args_json is the supplied argv and args is ignored.
+    ({"command": "python -m", "args": [], "args_json": ["pytest"]}, ["-m", "pytest"]),
+    ({"command": "python -m", "args": ["x"], "args_json": ["pytest"]}, ["-m", "pytest"]),
+    ({"command": "python -m", "args": ["pytest"], "args_json": '["pytest"]'}, ["-m", "pytest"]),
+    # A present but empty args_json still wins over args, as in dispatch.
+    ({"command": "python -m", "args": ["x"], "args_json": ""}, ["-m"]),
+    ({"command": "python -m", "args": ["x"], "args_json": None}, ["-m"]),
+    # args alone.
+    ({"command": "python -m", "args": ["pytest", "-q"]}, ["-m", "pytest", "-q"]),
+])
+def test_command_words_reach_the_real_agent_dispatcher(
+    raw, expected, monkeypatch, unattended_effects_allowed, every_tool_allowed_by_rule,
+):
+    """Normalized args go from the agent loop to ``server._agent_dispatch``.
+
+    That dispatcher reads ``args_json`` before ``args``.  The normalized call
+    must carry the command words plus the argv dispatch would have used, in
+    one key only, so no reader can pick a different list.
+    """
+    import server
+    from sonder_runtime.bootstrap.agent_help_tools import argument_schema
+    tool = "workspace_run"
+    schema = argument_schema(server.mcp, tool)
+    assert {"program", "args", "args_json"} <= set(schema["properties"])
+    result, notes = normalize_tool_args(tool, raw, schema)
+    assert not ("args" in result and "args_json" in result), result
+    # The selfmod policy reads ``args_json or args``; it must see the same argv.
+    assert (result.get("args_json") or result.get("args")) == expected
+    calls = []
+    monkeypatch.setattr(
+        server, "workspace_run", lambda **kwargs: calls.append(kwargs) or "ran",
+    )
+    assert server._agent_dispatch(tool, result) == "ran"
+    assert calls[0]["program"] == "python"
+    assert calls[0]["args_json"] == expected
+    supplied_args = raw.get("args")
+    overridden = "args_json" in raw and "args" in raw and supplied_args != expected[1:]
+    assert any("args_json takes precedence" in n for n in notes) is overridden
+    assert normalize_tool_args(tool, result, schema)[0] == result
 
 
 def test_empty_quoted_argument_and_legitimate_nested_args_survive():

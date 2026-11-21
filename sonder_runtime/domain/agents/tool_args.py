@@ -124,6 +124,14 @@ def _command_parts(value: Any) -> tuple[Any, Any]:
     return parts[0], parts[1:]
 
 
+def _argv_value(value: Any) -> Any:
+    """Return a supplied argv as a list, ``[]`` for null/blank, else unchanged."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    decoded = _decode_mapping(value)
+    return list(decoded) if isinstance(decoded, (list, tuple)) else decoded
+
+
 def normalize_tool_args(tool: str | None, args: Any, schema: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], list[str]]:
     """Return canonical arguments and host-readable normalization notes.
 
@@ -183,7 +191,28 @@ def normalize_tool_args(tool: str | None, args: Any, schema: Mapping[str, Any] |
         if allowed is None or "program" in allowed:
             result["program"] = program
         if command_args is not None and (allowed is None or "args" in allowed):
-            result["args"] = command_args
+            # Words split off the command go in front of the explicitly
+            # supplied argv; they never replace it.  The supplied argv is
+            # chosen the way the agent dispatcher picks it
+            # (``server._agent_dispatch`` reads
+            # ``args.get("args_json", args.get("args", []))`` for
+            # workspace_run): ``args_json`` when that key is present, else
+            # ``args``.  A null or blank value contributes no words.  The
+            # merged list is stored under ``args`` alone and ``args_json`` is
+            # removed, so every reader (that dispatcher, the selfmod policy's
+            # ``args_json or args`` check, and the args-first loop
+            # dispatcher) sees the same argv.  An ``args`` value that
+            # ``args_json`` overrides is dropped with a note, as dispatch
+            # would ignore it.  A supplied value that is not a list (or a
+            # JSON-encoded list) is left in place for dispatch to refuse.
+            source_key = "args_json" if "args_json" in result else "args"
+            supplied = _argv_value(result.get(source_key))
+            if isinstance(supplied, (list, tuple)):
+                if (source_key == "args_json" and "args" in result
+                        and _argv_value(result["args"]) != supplied):
+                    notes.append("ignored args because args_json takes precedence")
+                result.pop("args_json", None)
+                result["args"] = [*command_args, *supplied]
         notes.append("normalized command to program and args")
         for key in ("cmd", "command"):
             if allowed is None or key not in allowed:

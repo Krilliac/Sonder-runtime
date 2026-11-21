@@ -50,10 +50,14 @@ def test_concrete_creation_requests_are_build(task: str) -> None:
         "Do not modify files; tell me what to change",
         "What does `build an app` mean here?",
         'Discuss the phrase "create a game"',
+        "Discuss the phrase 'create a game'",
         "build",
         "something about implementation",
         "I am unsure what to make",
         "Have the fleet review the proposed patch",
+        # Contractions are apostrophes, not a quoted span that hides "don't".
+        "Write a tool spec, but don't implement it; it's just a plan",
+        "Write a tool, but don't edit it's files",
     ],
 )
 def test_questions_and_advice_remain_advice(task: str) -> None:
