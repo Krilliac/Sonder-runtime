@@ -363,8 +363,14 @@ def _request_once(
             urllib.parse.unquote(parsed.path or "/"),
             safe="/:@!$&'()*+,;=-._~%",
         )
+        # Never decode the query before sending it: _validate_target checked
+        # the parameters parse_qsl sees in the raw query, and decoding here
+        # would turn an escaped "%26token%3D..." value into real separators
+        # that the credential-parameter filter never inspected.  "%" is safe,
+        # so existing escapes pass through and only raw unsafe characters
+        # (spaces, non-ASCII) are encoded.
         query = urllib.parse.quote(
-            urllib.parse.unquote(parsed.query),
+            parsed.query,
             safe="!$&'()*+,;=:@/?-._~%",
         )
         target = urllib.parse.urlunsplit(("", "", path, query, ""))
