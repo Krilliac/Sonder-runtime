@@ -330,3 +330,31 @@ def test_stream_inside_other_tokens_is_not_a_keyword(project, text):
     assert result["streams_seen"] == 0
     assert result["scan_complete"] is True
     assert result["risk"] == "none_detected"
+
+
+def _flate_js_obj(dictionary):
+    data = zlib.compress(b"<< /S /JavaScript /JS (app.alert(1)) >>")
+    return b"2 0 obj\n" + dictionary + b"\nstream\n" + data + b"\nendstream\nendobj"
+
+
+@pytest.mark.parametrize("decoy", [b"(\n<< >>\nstream\n)", b"(<< >> stream\n)"])
+def test_stream_keyword_inside_literal_string_does_not_hide_next_stream(project, decoy):
+    path = project / "decoy.pdf"
+    body = b"<< /Info " + decoy + b" >>\nendobj\n" + _flate_js_obj(b"<< /Filter /FlateDecode >>")
+    path.write_bytes(_pdf(body))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["risk"] in ("high", "unknown")
+    assert result["scan_complete"] is False or "javascript" in _features(result)
+
+
+@pytest.mark.parametrize("dictionary", [
+    b"<< /Filter 5 0 R >>",
+    b"<< /Filter\x00/FlateDecode >>",
+    b"<< /Filter\x00[/FlateDecode] >>",
+])
+def test_indirect_or_nul_separated_filter_never_reports_clean(project, dictionary):
+    path = project / "filter.pdf"
+    path.write_bytes(_pdf(_flate_js_obj(dictionary)))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["risk"] in ("high", "unknown")
+    assert result["scan_complete"] is False or "javascript" in _features(result)
