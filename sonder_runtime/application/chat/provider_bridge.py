@@ -33,6 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from ...domain.request_temperature import validate_request_temperature
 from ...domain.thinking_controls import with_local_thinking_budget
 from ...domain.common.errors import (
     Cancelled,
@@ -344,7 +345,7 @@ def model_request_from_ollama_payload(
             if key in {"num_predict", "num_ctx"} and int(value) <= 0:
                 continue
             if key == "temperature":
-                options[key] = float(value)
+                options[key] = float(validate_request_temperature(value))
             elif key == "top_k" or key in {"num_predict", "num_ctx", "seed"}:
                 options[key] = int(value)
             else:

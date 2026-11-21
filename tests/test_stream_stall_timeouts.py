@@ -340,7 +340,9 @@ def test_a_bound_openai_compatible_tier_claims_the_stream_through_the_bridge():
 
 @contextmanager
 def _watch():
-    started = time.monotonic()
+    # A whole-second base keeps the synthetic offsets exact in float, so the
+    # strict ">" boundary below does not depend on the runner's clock value.
+    started = float(int(time.monotonic()))
     watch = sse_stream._StallWatch(
         object(), sse_stream.StallLimits(idle=100.0, first_content=200.0), started, "endpoint",
     )
