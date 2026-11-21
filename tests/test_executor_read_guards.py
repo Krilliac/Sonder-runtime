@@ -13,6 +13,7 @@ protected entries, as ``text_search`` does.
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 
 import pytest
@@ -122,6 +123,209 @@ def test_secret_scan_skips_credential_stores(workspace, root):
         # Ordinary workspace files are still scanned and reported, redacted.
         assert "src/config.env" in files
         assert "ordinary-leak" not in result.output
+
+
+def _link(link, target, kind):
+    """Create a junction or symlink, or skip where the OS will not allow one."""
+    if kind == "junction":
+        winapi = pytest.importorskip("_winapi", reason="junctions are Windows-only")
+        if not hasattr(winapi, "CreateJunction"):
+            pytest.skip("this Python cannot create a junction")
+        try:
+            winapi.CreateJunction(str(target), str(link))
+        except OSError as exc:
+            pytest.skip("cannot create a junction here: %s" % type(exc).__name__)
+        return
+    try:
+        os.symlink(str(target), str(link), target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip("cannot create a symlink here: %s" % type(exc).__name__)
+
+
+def _scanned_files(result):
+    assert result.ok, result.output
+    return {finding["file"].replace("\\", "/") for finding in result.evidence["findings"]}
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_secret_scan_does_not_follow_a_directory_link_out_of_the_roots(workspace, kind):
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    (outside / "leak.env").write_text("API_KEY=%s-outside-leak\n" % MARK, encoding="utf-8")
+    _link(workspace / "src" / "out", outside, kind)
+    result = _run("secret_scan", {"root": "."})
+    files = _scanned_files(result)
+    assert not any(name.startswith("src/out") for name in files), files
+    assert result.evidence["links_skipped"] >= 1
+    assert "skipped 1 symlink or junction" in result.output
+    # The walk itself still works: an ordinary file beside the link is scanned.
+    assert "src/config.env" in files
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_secret_scan_does_not_follow_a_directory_link_into_a_credential_store(workspace, kind):
+    # Not a credential store by its own name: only its real location makes it one.
+    (workspace / ".ssh" / "notes.txt").write_text(
+        "API_KEY=%s-store-leak\n" % MARK, encoding="utf-8",
+    )
+    _link(workspace / "src" / "keys", workspace / ".ssh", kind)
+    result = _run("secret_scan", {"root": "."})
+    files = _scanned_files(result)
+    assert not any(name.startswith("src/keys") for name in files), files
+    assert result.evidence["links_skipped"] >= 1
+    assert "src/config.env" in files
+
+
+@pytest.mark.parametrize("target", ["store", "outside"])
+def test_secret_scan_does_not_open_a_file_symlink(workspace, target):
+    if target == "store":
+        real = workspace / ".ssh" / "id_rsa"
+    else:
+        (workspace.parent / "outside").mkdir()
+        real = workspace.parent / "outside" / "leak.env"
+        real.write_text("API_KEY=%s-outside-leak\n" % MARK, encoding="utf-8")
+    _link(workspace / "src" / "alias.txt", real, "symlink")
+    result = _run("secret_scan", {"root": "."})
+    files = _scanned_files(result)
+    assert "src/alias.txt" not in files, files
+    assert result.evidence["links_skipped"] >= 1
+    assert "src/config.env" in files
+
+
+def test_secret_scan_rechecks_the_resolved_path_of_every_file(workspace, monkeypatch):
+    """A path whose real location is a credential store or outside the scan
+    root is not opened, even when no link is visible on the walked path."""
+    import sonder_runtime.adapters.secret_scan as secret_scan
+
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    (outside / "leak.env").write_text("API_KEY=%s-outside-leak\n" % MARK, encoding="utf-8")
+    (workspace / "src" / "moved.txt").write_text("API_KEY=%s-moved\n" % MARK, encoding="utf-8")
+    (workspace / "src" / "stored.txt").write_text("API_KEY=%s-stored\n" % MARK, encoding="utf-8")
+    real_resolve = secret_scan.Path.resolve
+
+    def resolve(self, strict=False):
+        if self.name == "moved.txt":
+            return outside / "leak.env"
+        if self.name == "stored.txt":
+            return workspace / ".ssh" / "id_rsa"
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(secret_scan.Path, "resolve", resolve)
+    result = _run("secret_scan", {"root": "."})
+    files = _scanned_files(result)
+    assert not files & {"src/moved.txt", "src/stored.txt"}, files
+    assert result.evidence["links_skipped"] >= 1
+    assert result.evidence["credential_files_skipped"] >= 1
+    assert "src/config.env" in files
+
+
+# ``harness_tools.secret_scan`` is the same tool through the other entry point
+# (the ``secret_scan`` MCP tool and the agent dispatcher in server.py). It kept
+# its own ``rglob`` walk, so it needs the same proofs as the adapter above.
+
+def _harness_leak(path, tag):
+    """A line the harness scanner's own patterns report (its API-key pattern
+    does not match the adapter fixtures)."""
+    path.write_text('password = "%s-%s"\n' % (MARK, tag), encoding="utf-8")
+
+
+def _harness_scan(workspace, root=None):
+    import harness_tools
+
+    # The control every test below asserts on: an ordinary file is still found.
+    _harness_leak(workspace / "src" / "plain.py", "ordinary-leak")
+    result = harness_tools.secret_scan(root=str(root or workspace))
+    assert result["ok"] is True, result
+    return result, {finding["file"].replace("\\", "/") for finding in result["findings"]}
+
+
+@pytest.mark.parametrize("root", [".", ".ssh"])
+def test_harness_secret_scan_skips_credential_stores(workspace, root):
+    result, files = _harness_scan(workspace, workspace / root)
+    assert not files & {"id_rsa", ".ssh/id_rsa", "id_ed25519", ".env"}, files
+    assert result["credential_files_skipped"] >= 1
+    if root == ".":
+        assert "src/plain.py" in files
+        assert MARK not in json.dumps(result)
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_harness_secret_scan_does_not_follow_a_directory_link_out_of_the_roots(workspace, kind):
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    _harness_leak(outside / "leak.env", "outside-leak")
+    _link(workspace / "src" / "out", outside, kind)
+    result, files = _harness_scan(workspace)
+    assert not any(name.startswith("src/out") for name in files), files
+    assert result["links_skipped"] >= 1
+    assert "src/plain.py" in files
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_harness_secret_scan_does_not_follow_a_directory_link_into_a_credential_store(workspace, kind):
+    _harness_leak(workspace / ".ssh" / "notes.txt", "store-leak")
+    _link(workspace / "src" / "keys", workspace / ".ssh", kind)
+    result, files = _harness_scan(workspace)
+    assert not any(name.startswith("src/keys") for name in files), files
+    assert result["links_skipped"] >= 1
+    assert "src/plain.py" in files
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_harness_secret_scan_does_not_descend_a_link_loop(workspace, kind):
+    deep = workspace / "deep" / "a"
+    deep.mkdir(parents=True)
+    _harness_leak(deep / "leak.txt", "loop-leak")
+    _link(deep / "loop", workspace, kind)
+    result, files = _harness_scan(workspace)
+    assert not any("loop" in name for name in files), files
+    assert result["truncated"] is False
+    assert result["links_skipped"] >= 1
+    assert "deep/a/leak.txt" in files
+
+
+@pytest.mark.parametrize("target", ["store", "outside"])
+def test_harness_secret_scan_does_not_open_a_file_symlink(workspace, target):
+    if target == "store":
+        real = workspace / ".ssh" / "id_rsa"
+    else:
+        (workspace.parent / "outside").mkdir()
+        real = workspace.parent / "outside" / "leak.env"
+        _harness_leak(real, "outside-leak")
+    _link(workspace / "src" / "alias.txt", real, "symlink")
+    result, files = _harness_scan(workspace)
+    assert "src/alias.txt" not in files, files
+    assert result["links_skipped"] >= 1
+    assert "src/plain.py" in files
+
+
+def test_harness_secret_scan_rechecks_the_resolved_path_of_every_file(workspace, monkeypatch):
+    """No link is created, so this one runs on every OS and account."""
+    import sonder_runtime.adapters.secret_scan as secret_scan
+
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    _harness_leak(outside / "leak.env", "outside-leak")
+    _harness_leak(workspace / "src" / "moved.txt", "moved")
+    _harness_leak(workspace / "src" / "stored.txt", "stored")
+    real_resolve = secret_scan.Path.resolve
+
+    def resolve(self, strict=False):
+        if self.name == "moved.txt":
+            return outside / "leak.env"
+        if self.name == "stored.txt":
+            return workspace / ".ssh" / "id_rsa"
+        return real_resolve(self, strict=strict)
+
+    # Resolve the root first: the patch below must not change what it resolves to.
+    root = workspace.resolve()
+    monkeypatch.setattr(secret_scan.Path, "resolve", resolve)
+    result, files = _harness_scan(workspace, root)
+    assert not files & {"src/moved.txt", "src/stored.txt"}, files
+    assert result["links_skipped"] >= 1
+    assert result["credential_files_skipped"] >= 1
+    assert "src/plain.py" in files
 
 
 @pytest.mark.parametrize("path", [".", ".ssh"])

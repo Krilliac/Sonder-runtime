@@ -1156,6 +1156,10 @@ def _is_reparse_point(path: Path) -> bool:
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+# Public name for walks outside this module (the secret scan).
+is_reparse_point = _is_reparse_point
+
+
 def _require_no_reparse_components(path: Path) -> None:
     current = path
     while True:

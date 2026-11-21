@@ -13708,6 +13708,13 @@ def secret_scan(
     ]
     for f in findings:
         lines.append("  %s:%d  [%s]  %s" % (f["file"], f["line"], f["type"], f["match"]))
+    # Entries the scan refused to open are reported, so a scan that skipped
+    # something is never read as a clean one.
+    if data.get("credential_files_skipped"):
+        lines.append("  skipped %d credential-store file(s) (not opened)" % data["credential_files_skipped"])
+    if data.get("links_skipped"):
+        lines.append("  skipped %d symlink or junction entr%s (not followed)" % (
+            data["links_skipped"], "y" if data["links_skipped"] == 1 else "ies"))
     if data.get("timed_out"):
         lines.append("  ... (incomplete: stopped at the %ss timeout; raise timeout "
                      "to scan the rest)" % data.get("timeout", timeout))
