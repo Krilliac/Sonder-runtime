@@ -27,7 +27,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from .trajectory_replay import TrajectoryRecord, TrajectoryStep
 
@@ -537,7 +537,7 @@ def minimize_failure(
     )
     return MinimizedFailure(
         expected.trajectory_id, expected.digest, policy, chosen, steps,
-        divergences[0], digests.pop(), evaluations, converged,
+        cast(MeaningfulDivergence, divergences[0]), digests.pop(), evaluations, converged,
         STRATEGY_DIFFERENTIAL if baseline_factory is not None else STRATEGY_PREFIX,
     )
 

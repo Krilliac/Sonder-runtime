@@ -192,6 +192,7 @@ sonder_runtime/application/agent_registry/unified.py
 sonder_runtime/application/agent_registry/workbench_review.py
 sonder_runtime/application/agents/__init__.py
 sonder_runtime/application/agents/durable_lineage.py
+sonder_runtime/application/agents/fleet_breadth.py
 sonder_runtime/application/agents/lineage_delegation.py
 sonder_runtime/application/agents/presets.py
 sonder_runtime/application/agents/recursive_delegation.py
@@ -229,11 +230,15 @@ sonder_runtime/application/compaction/legacy.py
 sonder_runtime/application/compute_fabric/__init__.py
 sonder_runtime/application/compute_fabric/capacity.py
 sonder_runtime/application/compute_fabric/deployment_admission.py
+sonder_runtime/application/compute_fabric/placement_queue.py
+sonder_runtime/application/compute_fabric/refresh.py
 sonder_runtime/application/context.py
 sonder_runtime/application/context_health.py
+sonder_runtime/application/context_integration.py
 sonder_runtime/application/context_manifest.py
 sonder_runtime/application/context_overflow_recovery.py
 sonder_runtime/application/context_planner.py
+sonder_runtime/application/context_priority.py
 sonder_runtime/application/control_plane/__init__.py
 sonder_runtime/application/control_plane/service.py
 sonder_runtime/application/control_plane/snapshot.py
@@ -247,6 +252,7 @@ sonder_runtime/application/errors.py
 sonder_runtime/application/evaluation/__init__.py
 sonder_runtime/application/evaluation/case_manifest.py
 sonder_runtime/application/evaluation/corpus_inventory.py
+sonder_runtime/application/evaluation/divergence.py
 sonder_runtime/application/evaluation/integrity.py
 sonder_runtime/application/evaluation/promotion_gates.py
 sonder_runtime/application/evaluation/proposal_lifecycle.py
@@ -276,6 +282,7 @@ sonder_runtime/application/inference_membership/__init__.py
 sonder_runtime/application/inspection/__init__.py
 sonder_runtime/application/inspection/use_cases.py
 sonder_runtime/application/instruction_discovery/__init__.py
+sonder_runtime/application/jobs/generic_jobs.py
 sonder_runtime/application/jobs/session_lifecycle.py
 sonder_runtime/application/lifecycle_hooks/__init__.py
 sonder_runtime/application/lifecycle_hooks/registry.py
