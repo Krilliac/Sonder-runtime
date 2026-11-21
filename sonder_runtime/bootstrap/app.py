@@ -995,20 +995,25 @@ def build_application(
     agent_workflow: AgentWorkflowService | None = None
     lineage: DurableLineageQuery | None = None
 
+    # One reentrant lock serialises the lazily built session/job/process
+    # singletons; they call each other, so a single lock avoids ordering cycles.
+    durable_lazy_lock = RLock()
+
     def get_session_repository() -> SessionRepository:
         nonlocal session_repository
-        if session_repository is None:
-            from ..platform.paths import state_path
+        with durable_lazy_lock:
+            if session_repository is None:
+                from ..platform.paths import state_path
 
-            database = os.environ.get("SONDER_SESSIONS_DB", "").strip()
-            if not database:
-                database = state_path("sessions.db", "SONDER_SESSIONS_DB")
-            logger.debug(f"lazy-init session repository at {database!r}")
-            logger.info("session repository initialized")
-            session_repository = SQLiteSessionRepository(
-                database
-            )
-        return session_repository
+                database = os.environ.get("SONDER_SESSIONS_DB", "").strip()
+                if not database:
+                    database = state_path("sessions.db", "SONDER_SESSIONS_DB")
+                logger.debug(f"lazy-init session repository at {database!r}")
+                logger.info("session repository initialized")
+                session_repository = SQLiteSessionRepository(
+                    database
+                )
+            return session_repository
 
     evaluation_service = None
     evaluation_lock = RLock()
@@ -1030,13 +1035,14 @@ def build_application(
 
     def get_job_registry() -> JobRegistry:
         nonlocal job_registry
-        if job_registry is None:
-            from ..platform.paths import state_path
-            db_path = state_path("jobs.db", "SONDER_JOBS_DB")
-            logger.debug(f"lazy-init job registry at {db_path!r}")
-            logger.info("job registry initialized")
-            job_registry = SQLiteDurableJobRegistry(db_path)
-        return job_registry
+        with durable_lazy_lock:
+            if job_registry is None:
+                from ..platform.paths import state_path
+                db_path = state_path("jobs.db", "SONDER_JOBS_DB")
+                logger.debug(f"lazy-init job registry at {db_path!r}")
+                logger.info("job registry initialized")
+                job_registry = SQLiteDurableJobRegistry(db_path)
+            return job_registry
 
     def get_session_capture_service() -> SessionCaptureService:
         nonlocal canonical_session_capture
@@ -1092,45 +1098,47 @@ def build_application(
 
     def get_job_service() -> JobRegistryService:
         nonlocal job_service, process_cleanup
-        if job_service is None:
-            logger.debug("lazy-init job registry service")
-            logger.info("job registry service initialized")
-            if process_cleanup is None:
-                process_cleanup = ProcessTreeSupervisor()
-            lifecycle = JobRegistryLifecycleAdapter(
-                JobSessionLifecycleRecorder(get_session_repository())
-            )
-            job_service = JobRegistryService(
-                get_job_registry(),
-                process_cleanup=process_cleanup,
-                lifecycle=lifecycle,
-            )
-        return job_service
+        with durable_lazy_lock:
+            if job_service is None:
+                logger.debug("lazy-init job registry service")
+                logger.info("job registry service initialized")
+                if process_cleanup is None:
+                    process_cleanup = ProcessTreeSupervisor()
+                lifecycle = JobRegistryLifecycleAdapter(
+                    JobSessionLifecycleRecorder(get_session_repository())
+                )
+                job_service = JobRegistryService(
+                    get_job_registry(),
+                    process_cleanup=process_cleanup,
+                    lifecycle=lifecycle,
+                )
+            return job_service
 
     def get_process_job_provider() -> ProcessJobProvider:
         nonlocal process_job_provider, process_cleanup, spill_output
-        if process_job_provider is None:
-            logger.debug("lazy-init subprocess job provider")
-            logger.info("subprocess job provider initialized")
-            from ..platform.paths import state_path
-            if process_cleanup is None:
-                process_cleanup = ProcessTreeSupervisor()
-            spill_output = DurableExecutionOutput(
-                SQLiteSpillStore(state_path("execution-spill.db", "SONDER_JOBS_DB"))
-            )
-            process_job_provider = SubprocessJobProvider(
-                get_job_registry(),
-                process_cleanup=process_cleanup,
-                lifecycle=get_job_service()._lifecycle,
-                output=spill_output,
-                max_concurrent_processes=effective_config.capacity.tool_processes,
-                effect_binding=worker_binding(
-                    family="process",
-                    scope="process-jobs",
-                    run_id="runtime:process-jobs",
-                ),
-            )
-        return process_job_provider
+        with durable_lazy_lock:
+            if process_job_provider is None:
+                logger.debug("lazy-init subprocess job provider")
+                logger.info("subprocess job provider initialized")
+                from ..platform.paths import state_path
+                if process_cleanup is None:
+                    process_cleanup = ProcessTreeSupervisor()
+                spill_output = DurableExecutionOutput(
+                    SQLiteSpillStore(state_path("execution-spill.db", "SONDER_SPILL_DB"))
+                )
+                process_job_provider = SubprocessJobProvider(
+                    get_job_registry(),
+                    process_cleanup=process_cleanup,
+                    lifecycle=get_job_service()._lifecycle,
+                    output=spill_output,
+                    max_concurrent_processes=effective_config.capacity.tool_processes,
+                    effect_binding=worker_binding(
+                        family="process",
+                        scope="process-jobs",
+                        run_id="runtime:process-jobs",
+                    ),
+                )
+            return process_job_provider
 
     @compute_component
     def get_compute_registry() -> ComputeNodeRegistry:

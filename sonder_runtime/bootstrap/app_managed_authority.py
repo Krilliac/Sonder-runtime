@@ -302,6 +302,15 @@ class AppManagedAuthority:
             self._issued_locked(self._retained[lease])
             del self._retained[lease]
 
+    def selection_issued(self, selection):
+        """Whether this authority still holds the exact issued selection."""
+        with self._lock:
+            try:
+                self._issued_locked(selection)
+            except PermissionError:
+                return False
+            return True
+
     def release_selection(self, selection):
         """Forget an unreferenced request selection without granting authority."""
         with self._lock:
