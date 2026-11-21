@@ -16,6 +16,13 @@ class HostFinalFacts:
     certificate_code: str = ''
     # None preserves legacy evidence as unknown, never as no delegated work.
     delegated_work: bool | None = None
+    # Only a host verifier may populate these fields; model output never does.
+    # The ordinary verifier receipt deliberately carries no fact text, so this
+    # is the explicit bridge required before semantic fact text can be
+    # promoted (ReceiptBoundFactPromotion).  Absent claims are not serialized
+    # into the final receipt, keeping existing receipt digests unchanged.
+    verified_fact_claim: str | None = None
+    verified_fact_claim_digest: str | None = None
 
     def __post_init__(self):
         if self.delegated_work is not None and type(self.delegated_work) is not bool:
@@ -38,5 +45,21 @@ class HostFinalFacts:
                                (self.certificate_id, 256), (self.certificate_code, 256)):
             if not isinstance(value, str) or len(value.encode()) > maximum:
                 raise ValueError('bounded host identity required')
+        if (self.verified_fact_claim is None) != (self.verified_fact_claim_digest is None):
+            raise ValueError('verified fact claim and digest must be supplied together')
+        if self.verified_fact_claim is not None:
+            # 512 matches LearningObservation.content: a longer claim could
+            # never be persisted as verifier learning evidence.
+            if (not isinstance(self.verified_fact_claim, str)
+                    or not self.verified_fact_claim.strip()
+                    or len(self.verified_fact_claim) > 512):
+                raise ValueError('verified fact claim must be bounded non-empty text')
+            if self.verified_fact_claim.startswith('verified-subject:'):
+                raise ValueError('verified fact claim cannot be a verifier subject token')
+            digest = self.verified_fact_claim_digest
+            if not isinstance(digest, str) or len(digest) != 64 or any(
+                char not in '0123456789abcdef' for char in digest
+            ):
+                raise ValueError('verified fact claim digest must be SHA-256')
         if type(self.certificate_generation) is not int or not 0 <= self.certificate_generation < 2**63:
             raise ValueError('bounded certificate generation required')
