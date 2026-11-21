@@ -28,12 +28,21 @@ class ContextSnapshot:
 
 
 def deduplicate(items: Iterable[ContextItem]) -> tuple[ContextItem, ...]:
+    """Drop unprotected exact duplicates; never drop a protected item.
+
+    A protected item is kept even when its text repeats, and it displaces any
+    unprotected copy of the same text wherever that copy appears, so input
+    order cannot remove protection.  Unprotected copies collapse to the first.
+    """
+    candidates = tuple(items)
+    protected_digests = {item.digest for item in candidates if item.protected}
     seen: set[str] = set()
     result = []
-    for item in items:
-        if item.digest in seen:
-            continue
-        seen.add(item.digest)
+    for item in candidates:
+        if not item.protected:
+            if item.digest in protected_digests or item.digest in seen:
+                continue
+            seen.add(item.digest)
         result.append(item)
     return tuple(result)
 
