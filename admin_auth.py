@@ -19,6 +19,9 @@ RATE_WINDOW_SECONDS = 60
 BOOTSTRAP_SECRET_MIN_LENGTH = 16
 MAX_USERNAME_CHARS = 128
 MAX_PASSWORD_CHARS = 1_024
+# The only role values an account row may hold.  ``require`` ranks exactly
+# these and the session lookup refuses any other stored value.
+ACCOUNT_ROLES = ("user", "developer", "admin")
 
 # Historical development default.  It is public, so it must never key real
 # session-token HMACs.  We keep the constant only to recognise and refuse it
@@ -479,6 +482,14 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
 
 @coordinated_account_mutation
 def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
+    # Refuse an unknown role before the schema or any row is touched, so a
+    # rejected call leaves the stored account (and its sessions) unchanged
+    # even when it also carries valid changes.  Exact match only: no case
+    # folding or trimming turns an unrecognised value into a privileged one.
+    if "role" in changes:
+        role = changes["role"]
+        if type(role) is not str or role not in ACCOUNT_ROLES:
+            raise ValueError("role must be one of: " + ", ".join(ACCOUNT_ROLES))
     init(conn)
     username = _username(username)
     allowed = {"role", "tier", "dev_flags", "banned"}

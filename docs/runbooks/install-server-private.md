@@ -33,7 +33,9 @@ sudo packaging/install_sonder.sh \
 
 The installer validates the version tag before constructing root-owned paths,
 verifies every manifest entry before copying it, ignores every unlisted file,
-and refuses to overwrite an existing release or staging directory. The
+and refuses to overwrite an existing release. The release is built at its final
+path and removed again if any step fails before the preflight passes;
+`/opt/sonder/current` and the systemd units are only changed after it does. The
 manifest verifier it runs is the one shipped beside `install_sonder.sh`
 (started with `python3 -I`), never code from `--package-source`, so a
 tampered package cannot execute anything as root before it is checked.
