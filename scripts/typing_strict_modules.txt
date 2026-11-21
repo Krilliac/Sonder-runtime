@@ -19,6 +19,8 @@ sonder_runtime/adapters/cli_options.py
 sonder_runtime/adapters/client_config.py
 sonder_runtime/adapters/client_endpoint.py
 sonder_runtime/adapters/cloud_fallback.py
+sonder_runtime/adapters/cloud_model_refresh.py
+sonder_runtime/adapters/cloud_model_refresh_schedule.py
 sonder_runtime/adapters/cluster/__init__.py
 sonder_runtime/adapters/command_completion.py
 sonder_runtime/adapters/command_parsing.py
@@ -78,6 +80,7 @@ sonder_runtime/adapters/inference/gpu_admission_store.py
 sonder_runtime/adapters/inference/log_safe.py
 sonder_runtime/adapters/inference/model_gateway_factory.py
 sonder_runtime/adapters/inference/ollama.py
+sonder_runtime/adapters/inference/ollama_cloud_metadata.py
 sonder_runtime/adapters/inference/openai_compat.py
 sonder_runtime/adapters/inference/openai_protocol_probe.py
 sonder_runtime/adapters/inference/overflow_availability.py
@@ -122,6 +125,7 @@ sonder_runtime/adapters/observability/work_narration_facts.py
 sonder_runtime/adapters/offload_schema_argument.py
 sonder_runtime/adapters/ollama/__init__.py
 sonder_runtime/adapters/ollama/gateway.py
+sonder_runtime/adapters/ollama_cloud_catalog.py
 sonder_runtime/adapters/openai_compat/__init__.py
 sonder_runtime/adapters/operator_attendance.py
 sonder_runtime/adapters/optional_slash_menu.py
@@ -429,6 +433,8 @@ sonder_runtime/bootstrap/batch_job_executor.py
 sonder_runtime/bootstrap/batch_job_tools.py
 sonder_runtime/bootstrap/capabilities.py
 sonder_runtime/bootstrap/claim_check_agent_tools.py
+sonder_runtime/bootstrap/cloud_models_agent_tools.py
+sonder_runtime/bootstrap/cloud_models_cli.py
 sonder_runtime/bootstrap/container.py
 sonder_runtime/bootstrap/control_state_rehearsal.py
 sonder_runtime/bootstrap/diagnostics.py
@@ -467,6 +473,7 @@ sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py
 sonder_runtime/domain/cloud_model_policy.py
+sonder_runtime/domain/cloud_model_refresh.py
 sonder_runtime/domain/cloud_tier_policy.py
 sonder_runtime/domain/cluster_ownership.py
 sonder_runtime/domain/common/__init__.py

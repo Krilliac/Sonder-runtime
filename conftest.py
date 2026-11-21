@@ -109,6 +109,8 @@ os.environ.update(
         "SONDER_EMBED_CACHE": "0",
         "SONDER_ALLOW_CLOUD": "0",
         "SONDER_WEB_TOOLS": "0",
+        # The daily cloud model refresh thread (serve/MCP) stays off in tests.
+        "SONDER_CLOUD_MODEL_REFRESH": "0",
         "SONDER_LIVE_RELOAD": "0",
         "SONDER_FALLBACK_LOCAL": "0",
         "SONDER_SERVER": "http://127.0.0.1:1",

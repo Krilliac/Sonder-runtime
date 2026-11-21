@@ -158,6 +158,7 @@ def test_legacy_mcp_forwards_typed_ollama_capacity_to_worker_pool(monkeypatch):
             raise AssertionError("legacy MCP must use detached default cleanup")
 
     application = Application()
+    monkeypatch.setattr(entrypoint, "_stamp_home_before_stores", lambda **_kw: True)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _args: config)
     monkeypatch.setattr(
         entrypoint, "_export_runtime_environment", lambda _config: None
@@ -202,6 +203,7 @@ def test_cmd_repl_uses_the_detached_default_graph_cleanup_once(monkeypatch):
             raise AssertionError("command must close the detached default owner")
 
     monkeypatch.setattr(entrypoint, "_load_config", lambda _args: config)
+    monkeypatch.setattr(entrypoint, "_stamp_home_before_stores", lambda **_kw: True)
     monkeypatch.setattr(entrypoint, "_configure_typed_home", lambda _config: None)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda _config: None)
     monkeypatch.setattr(migrations, "migrate_all", lambda **_kwargs: None)
@@ -235,6 +237,7 @@ def test_native_mcp_entrypoint_owns_the_full_graph_close(monkeypatch):
     monkeypatch.setattr(unsafe_lab, "require_startup", lambda: None)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _args: config)
     monkeypatch.setattr(entrypoint, "_configure_typed_home", lambda _config: None)
+    monkeypatch.setattr(entrypoint, "_stamp_home_before_stores", lambda **_kw: True)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(migrations, "migrate_all", lambda **_kwargs: None)
     monkeypatch.setattr(bootstrap_app, "build_application", lambda *, config: application)

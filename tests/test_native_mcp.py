@@ -727,6 +727,7 @@ def test_native_entrypoint_fences_safety_before_configuration(monkeypatch):
     import sonder_runtime.bootstrap.native_mcp as native_mcp
 
     calls = []
+    monkeypatch.setattr(entrypoint, "_stamp_home_before_stores", lambda **_kw: True)
     monkeypatch.setattr(unsafe_lab, "require_startup", lambda: calls.append("safety"))
     monkeypatch.setattr(
         entrypoint, "_load_config", lambda args: calls.append("config") or SonderConfig()
@@ -836,6 +837,7 @@ def test_native_entrypoint_exit_status_is_not_the_frame_count(monkeypatch):
 
     monkeypatch.setattr(unsafe_lab, "require_startup", lambda: None)
     monkeypatch.setattr(entrypoint, "_load_config", lambda _args: SonderConfig())
+    monkeypatch.setattr(entrypoint, "_stamp_home_before_stores", lambda **_kw: True)
     monkeypatch.setattr(entrypoint, "_configure_typed_home", lambda _config: None)
     monkeypatch.setattr(entrypoint, "_export_runtime_environment", lambda *_a, **_k: None)
     monkeypatch.setattr(migrations, "migrate_all", lambda **_kwargs: None)
