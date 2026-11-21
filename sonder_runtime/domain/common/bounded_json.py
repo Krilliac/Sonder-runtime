@@ -48,6 +48,8 @@ _STRUCTURAL = re.compile(r'[\[\]{}",:]')
 # at a time in Python.
 _CONTAINER_TOKEN = re.compile(r'[\[\]{}"]')
 _IN_STRING = re.compile(r'["\\]')
+# Characters of a top-level object key kept while looking for the target key.
+_MAX_KEY_CHARS = 512
 
 
 class JsonBoundsExceeded(InvalidInput):
@@ -389,6 +391,7 @@ class ArrayObjectScan:
         array_depth = 0          # depth *inside* the target array, 0 = not yet
         expect_key = False       # at depth 1 of the top object, before a key
         key_parts: list[str] | None = None
+        key_len = 0              # characters buffered in key_parts (capped)
         last_key = None
         after_colon = False
         element: list[str] | None = None
@@ -415,26 +418,26 @@ class ArrayObjectScan:
                     match = _IN_STRING.search(chunk, i)
                     if match is None:
                         if key_parts is not None:
-                            self._add_key(key_parts, chunk[i:])
+                            key_len = self._add_key(key_parts, key_len, chunk[i:])
                         i = n
                         break
                     if key_parts is not None:
-                        self._add_key(key_parts, chunk[i:match.start()])
+                        key_len = self._add_key(key_parts, key_len, chunk[i:match.start()])
                     if match.group() == "\\":
                         if key_parts is not None:
-                            key_parts.append("\\")
+                            key_len = self._add_key(key_parts, key_len, "\\")
                         if match.end() >= n:
                             escape = True
                             i = n
                         else:
                             if key_parts is not None:
-                                key_parts.append(chunk[match.end()])
+                                key_len = self._add_key(key_parts, key_len, chunk[match.end()])
                             i = match.end() + 1
                         continue
                     in_string = False
                     i = match.end()
                     if key_parts is not None:
-                        last_key = "".join(key_parts)[:512]
+                        last_key = "".join(key_parts)
                         key_parts = None
                         expect_key = False
                     continue
@@ -466,6 +469,7 @@ class ArrayObjectScan:
                     in_string = True
                     if depth == 1 and not array_depth and expect_key:
                         key_parts = []
+                        key_len = 0
                     continue
                 if ch in "[{":
                     depth += 1
@@ -537,9 +541,19 @@ class ArrayObjectScan:
                     element.append(piece)
 
     @staticmethod
-    def _add_key(parts: list[str], text: str) -> None:
-        if sum(len(part) for part in parts) < 512:
-            parts.append(text[:512])
+    def _add_key(parts: list[str], length: int, text: str) -> int:
+        """Buffer at most ``_MAX_KEY_CHARS`` of a top-level key; return the new length.
+
+        Every piece of the key, escape sequences included, goes through here,
+        and the running length makes each call O(1): a hostile key of millions
+        of escapes neither grows the buffer nor rescans it.
+        """
+        room = _MAX_KEY_CHARS - length
+        if room <= 0 or not text:
+            return length
+        piece = text[:room]
+        parts.append(piece)
+        return length + len(piece)
 
     def _decode(self, text: str, decoder: json.JSONDecoder):
         try:
