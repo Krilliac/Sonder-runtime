@@ -1496,6 +1496,43 @@ def test_distillation_contradiction_is_negative_evidence_not_weak_positive():
     assert good is True and contradiction is True
 
 
+def test_weak_positive_first_outcome_does_not_block_later_claim():
+    """A weak positive recorded before any good evidence must not insert a
+    terminal 'cancelled' row: the later grounded outcome still claims."""
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    weak = ms.record_outcome_and_claim_lesson_distillation(
+        conn, "job", "compiled", 0.7, claim_token="weak",
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+        source="caller",
+    )
+    assert weak["outcome_inserted"] is True
+    assert weak["claimed"] is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM lesson_distillations WHERE interaction_id='job'"
+    ).fetchone()[0] == 0
+
+    accepted = ms.record_outcome_and_claim_lesson_distillation(
+        conn, "job", "accepted", 0.8, claim_token="claim-1",
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+        source="caller",
+    )
+    assert accepted["claimed"] is True
+    assert accepted["distillation_state"] == ms.DISTILLATION_CLAIMED
+
+
+def test_negative_first_outcome_still_records_cancelled_row():
+    conn = _conn()
+    ms.log_interaction(conn, "job", "task", "", "response", "code")
+    failed = ms.record_outcome_and_claim_lesson_distillation(
+        conn, "job", "failed", -1.0, claim_token="unused",
+        owner_pid=101, owner_identity="owner-101", owner_probe=_owner_probe,
+        source="caller",
+    )
+    assert failed["claimed"] is False
+    assert failed["distillation_state"] == ms.DISTILLATION_CANCELLED
+
+
 def test_finalization_persists_the_reason_it_used_to_discard():
     """The ledger must record WHY a claim went terminal, not only that it did.
 

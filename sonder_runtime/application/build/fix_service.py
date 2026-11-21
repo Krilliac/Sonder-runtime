@@ -1235,7 +1235,16 @@ class BuildFixService:
             platform=request.platform, file=file, allow_network=request.allow_network,
         )
         self._check_live(run)
-        plan = self._jobs.plan(job_request, run.ctx, lease=run.lease)
+        # A refusal from the jobs port (capacity, conflict, dependency) is a
+        # build that did not run, not a crash: as a _Stop it still lets the
+        # loop revert an unjudged candidate and honour revert_after.
+        try:
+            plan = self._jobs.plan(job_request, run.ctx, lease=run.lease)
+        except (Cancelled, DeadlineExceeded):
+            raise
+        except SonderError as exc:
+            raise _Stop(FixStopReason.BUILD_DID_NOT_RUN, "the child build could not be planned: %s"
+                        % _clip(exc, 160)) from None
         compile_one = plan.template_id in COMPILE_ONE_TEMPLATES
         if action == ACTION_COMPILE_ONE and not compile_one:
             # The planner fell back to a target build (no per-file edge): that
@@ -1250,8 +1259,14 @@ class BuildFixService:
         if not decision.allowed:
             raise _Stop(FixStopReason.PERMISSION_DENIED, "child build outside the grant: %s"
                         % decision.reason)
-        child = self._jobs.start(job_request, run.ctx, plan=plan, lease=run.lease,
-                                 parent_job_id=run.job_id)
+        try:
+            child = self._jobs.start(job_request, run.ctx, plan=plan, lease=run.lease,
+                                     parent_job_id=run.job_id)
+        except (Cancelled, DeadlineExceeded):
+            raise
+        except SonderError as exc:
+            raise _Stop(FixStopReason.BUILD_DID_NOT_RUN, "the child build could not start: %s"
+                        % _clip(exc, 160)) from None
         run.child_job_id = child
         try:
             while True:
@@ -1261,7 +1276,11 @@ class BuildFixService:
                         self._jobs.cancel(child, cleanup, reason="build fix cancelled")
                     except SonderError as exc:
                         logger.debug("child cancel: %s", exc)
-                    result = self._jobs.result(child, cleanup, wait_seconds=_CHILD_CANCEL_GRACE)
+                    try:
+                        result = self._jobs.result(child, cleanup, wait_seconds=_CHILD_CANCEL_GRACE)
+                    except SonderError as exc:
+                        logger.debug("child result after cancel: %s", exc)
+                        result = None
                     if _is_report(result):
                         return result
                     raise _Stop(FixStopReason.CANCELLED if run.ctx.cancellation.cancelled
@@ -1269,7 +1288,22 @@ class BuildFixService:
                                 "the child build did not stop in time")
                 remaining = run.ctx.remaining_seconds
                 wait = _CHILD_WAIT_SLICE if remaining is None else max(0.0, min(_CHILD_WAIT_SLICE, remaining))
-                result = self._jobs.result(child, run.ctx, wait_seconds=wait)
+                try:
+                    result = self._jobs.result(child, run.ctx, wait_seconds=wait)
+                except (Cancelled, DeadlineExceeded):
+                    raise
+                except SonderError as exc:
+                    # A lost or refused child (e.g. JOB_NOT_FOUND) is a build
+                    # with no usable result, not a crash: stop the child if it
+                    # still runs, then let the loop revert and finish.
+                    try:
+                        self._jobs.cancel(child, self._cleanup_ctx(run),
+                                          reason="build fix lost the child build")
+                    except SonderError as cancel_exc:
+                        logger.debug("child cancel: %s", cancel_exc)
+                    raise _Stop(FixStopReason.BUILD_DID_NOT_RUN,
+                                "the child build's result could not be read: %s"
+                                % _clip(exc, 160)) from None
                 if _is_report(result):
                     return result
         finally:

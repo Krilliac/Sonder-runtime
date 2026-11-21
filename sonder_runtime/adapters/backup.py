@@ -72,6 +72,28 @@ def _utc_stamp() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
 
+# create_backup publishes ``<_utc_stamp()>-<version>-<backup_id>``.
+_PUBLISHED_NAME_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-.+-(?P<backup_id>[^-]+)")
+
+
+def _is_published_backup(name: str, manifest: dict) -> bool:
+    """True only for a directory create_backup could have published.
+
+    Retention deletes what listing returns, so a foreign folder that merely
+    holds a ``manifest.json`` (``webapp/manifest.json``) must not qualify:
+    the name must follow the published layout, the manifest must carry the
+    supported ``format_version``, and its ``backup_id`` must match the name.
+    """
+    match = _PUBLISHED_NAME_RE.fullmatch(name)
+    backup_id = manifest.get("backup_id")
+    return (
+        match is not None
+        and manifest.get("format_version") == MANIFEST_FORMAT_VERSION
+        and isinstance(backup_id, str)
+        and match.group("backup_id") == backup_id
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -679,6 +701,8 @@ def list_backups(target: str | os.PathLike) -> list[dict]:
         except (OSError, UnicodeError, ValueError):
             continue
         if not isinstance(manifest, dict):
+            continue
+        if not _is_published_backup(child.name, manifest):
             continue
         files = manifest.get("files")
         backup_id = manifest.get("backup_id")
