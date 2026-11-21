@@ -33,13 +33,23 @@ def _adopt(capsys):
     return json.loads(out)
 
 
+def _legacy_epoch1_state(home):
+    """Real pre-adoption state: stores created without the epoch marker."""
+    import sonder_runtime.adapters.persistence.migrations as sonder_migrations
+    from sonder_runtime.adapters.persistence.sqlite.bridge_migration import (
+        EPOCH2_DATABASES, check_epoch,
+    )
+
+    sonder_migrations.migrate_all()
+    assert all(check_epoch(home / n) is None for n in EPOCH2_DATABASES)
+
+
 def _pre_epoch2(home):
     return sorted((home / "backups").glob("pre-epoch2-*"))
 
 
 def test_readoption_is_a_verified_noop_without_a_new_backup(home, capsys):
-    assert main(["migrate", "--json"]) == 0  # pre-existing epoch-1 state
-    capsys.readouterr()
+    _legacy_epoch1_state(home)
     first = _adopt(capsys)
     assert first["already_adopted"] is False
     copies = _pre_epoch2(home)
