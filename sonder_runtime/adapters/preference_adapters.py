@@ -41,7 +41,7 @@ class LegacyPreferenceRepository:
         finally:
             connection.close()
 
-    def list(self, *, limit, include_disabled):
+    def list(self, *, limit, include_disabled, bound_project: str = ""):
         import sonder_runtime.adapters.memory_store as memory_store
 
         connection = self._connection_factory()
@@ -50,6 +50,7 @@ class LegacyPreferenceRepository:
                 connection,
                 limit=limit,
                 include_disabled=include_disabled,
+                bound_project=bound_project,
             )
         finally:
             connection.close()
@@ -72,3 +73,28 @@ LegacyPreferenceCodec = PreferenceCodecAdapter
 class NullPreferenceEventSink:
     def changed(self, operation, count):
         return None
+
+
+def preferences_status_scoped(
+    application,
+    *,
+    include_disabled: bool = False,
+    limit: int = 50,
+    bound_project: str = "",
+) -> str:
+    """Render preferences status, confined to ``bound_project`` when it is set.
+
+    ``bound_project`` is the host-selected root of a project-bound agent; an
+    empty value is the operator's unscoped view.
+    """
+    from ..application.preferences import render_preference_result
+
+    if bound_project:
+        return render_preference_result(
+            application.preferences.status(
+                include_disabled, limit, bound_project=bound_project,
+            )
+        )
+    return render_preference_result(
+        application.preferences.status(include_disabled, limit)
+    )
