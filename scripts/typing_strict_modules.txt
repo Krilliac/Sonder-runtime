@@ -282,6 +282,7 @@ sonder_runtime/application/lifecycle_hooks/registry.py
 sonder_runtime/application/loop/__init__.py
 sonder_runtime/application/loop/durable_control.py
 sonder_runtime/application/loop/process_cleanup.py
+sonder_runtime/application/loop/transport_retry.py
 sonder_runtime/application/loop_contract.py
 sonder_runtime/application/loop_event_classification.py
 sonder_runtime/application/loop_steering.py
@@ -289,6 +290,7 @@ sonder_runtime/application/memory/__init__.py
 sonder_runtime/application/memory/hybrid_retrieval.py
 sonder_runtime/application/memory/learning_ladder.py
 sonder_runtime/application/memory/procedural_learning.py
+sonder_runtime/application/memory/recall_service.py
 sonder_runtime/application/memory/retrieval_evaluation.py
 sonder_runtime/application/meshgen/__init__.py
 sonder_runtime/application/model_gateway/__init__.py
@@ -302,6 +304,7 @@ sonder_runtime/application/operations/startup_reconciliation.py
 sonder_runtime/application/operations/tracing_health.py
 sonder_runtime/application/output_stream/__init__.py
 sonder_runtime/application/persistence/cross_domain.py
+sonder_runtime/application/persistence/domain_ownership.py
 sonder_runtime/application/persistence/facade.py
 sonder_runtime/application/persistence/migration_safety.py
 sonder_runtime/application/persistence/outbox_cas.py
@@ -309,9 +312,11 @@ sonder_runtime/application/plugin_manifest.py
 sonder_runtime/application/ports/__init__.py
 sonder_runtime/application/ports/artifact_store.py
 sonder_runtime/application/ports/batch_jobs.py
+sonder_runtime/application/ports/child_migration.py
 sonder_runtime/application/ports/clock.py
 sonder_runtime/application/ports/command_catalog.py
 sonder_runtime/application/ports/compaction.py
+sonder_runtime/application/ports/compute_fabric.py
 sonder_runtime/application/ports/content_services.py
 sonder_runtime/application/ports/continuation_records.py
 sonder_runtime/application/ports/evaluation.py
@@ -324,10 +329,12 @@ sonder_runtime/application/ports/health_alerts.py
 sonder_runtime/application/ports/host_tools.py
 sonder_runtime/application/ports/inference_membership.py
 sonder_runtime/application/ports/jobs.py
+sonder_runtime/application/ports/memory.py
 sonder_runtime/application/ports/model_bootstrap.py
 sonder_runtime/application/ports/model_gateway_contract.py
 sonder_runtime/application/ports/permission_policy.py
 sonder_runtime/application/ports/preferences.py
+sonder_runtime/application/ports/preflight.py
 sonder_runtime/application/ports/process_probe.py
 sonder_runtime/application/ports/prompts.py
 sonder_runtime/application/ports/protocol.py
@@ -354,6 +361,7 @@ sonder_runtime/application/preflight/__init__.py
 sonder_runtime/application/preflight/use_cases.py
 sonder_runtime/application/promotion/__init__.py
 sonder_runtime/application/protocol/__init__.py
+sonder_runtime/application/protocol/client_schema.py
 sonder_runtime/application/protocol/editor_interop.py
 sonder_runtime/application/protocol/events.py
 sonder_runtime/application/protocol/mcp_compatibility.py
@@ -364,6 +372,7 @@ sonder_runtime/application/providers/lifecycle_registry.py
 sonder_runtime/application/providers/specialized_lifecycle.py
 sonder_runtime/application/recall/__init__.py
 sonder_runtime/application/repository_intelligence/index_map.py
+sonder_runtime/application/repository_intelligence/navigation.py
 sonder_runtime/application/routing/__init__.py
 sonder_runtime/application/routing/calibration.py
 sonder_runtime/application/runtime_policy/__init__.py

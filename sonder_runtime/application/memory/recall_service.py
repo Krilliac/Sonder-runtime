@@ -8,7 +8,13 @@ directly.
 from __future__ import annotations
 
 import logging
-from typing import Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol, TypedDict
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from typing import NotRequired, TypeAlias
+
+    SimilarityFn: TypeAlias = Callable[[Sequence[float], Sequence[float]], float]
 
 from ...domain.memory.rules import (
     DEFAULT_RECALL_MIN_SIM,
@@ -18,6 +24,16 @@ from ...domain.memory.rules import (
 from ..ports.recall import validate_recall_request
 
 logger = logging.getLogger(__name__)
+
+
+class LexicalHit(TypedDict):
+    text: str
+
+
+class SemanticCandidate(TypedDict):
+    id: str
+    text: str
+    embedding: NotRequired[Sequence[float] | None]
 
 
 class EmbeddingPort(Protocol):
@@ -30,14 +46,14 @@ class RecallStore(Protocol):
     def lexical_search(
         self, query: str, *, k: int, project: str | None,
         exclude_session: str | None,
-    ) -> list[dict]: ...
+    ) -> Sequence[LexicalHit]: ...
 
     def semantic_candidates(
         self, *, k: int, project: str | None,
         exclude_session: str | None,
         embedding_model: str | None,
         embedding_revision: str | None,
-    ) -> list[dict]: ...
+    ) -> Sequence[SemanticCandidate]: ...
 
 
 class RecallService:
@@ -51,11 +67,11 @@ class RecallService:
         self,
         store: RecallStore,
         embed: EmbeddingPort | None = None,
-        sim_fn=None,
-    ):
+        sim_fn: SimilarityFn | None = None,
+    ) -> None:
         self._store = store
         self._embed = embed
-        self._sim_fn = sim_fn or _cosine_similarity
+        self._sim_fn: SimilarityFn = sim_fn or _cosine_similarity
 
     def recall(
         self,
@@ -96,7 +112,7 @@ class RecallService:
             embedding_revision=embedding_revision,
         )
 
-        scored = []
+        scored: list[tuple[str, Sequence[float], float, str]] = []
         for c in candidates:
             vec = c.get("embedding")
             if vec is None:
@@ -124,8 +140,8 @@ class RecallService:
 
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
+    norm_a: float = sum(x * x for x in a) ** 0.5
+    norm_b: float = sum(x * x for x in b) ** 0.5
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     return dot / (norm_a * norm_b)
