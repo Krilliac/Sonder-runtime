@@ -502,3 +502,32 @@ def test_remote_model_permission_is_bound_and_rechecked(env):
     assert "command_id" not in seen[0]
     assert "permission changed" in result
     assert env[0].inspect(lane, env[-2])["lane"]["status"] == "queued"
+
+
+def test_unavailable_configured_root_does_not_break_approved_actions(request):
+    lanes = request.getfixturevalue("env")  # by name: an `env` binding re-trips F811
+    # run() drops a configured root that is not a directory; the post-approval
+    # recheck must derive the configured set the same way, or an unchanged
+    # configuration reads as "changed" and every approved mutation fails.
+    lane = child(lanes)
+    missing = lanes[-1] / "unplugged-drive"
+    app = app_for(lanes, (str(lanes[-1]), str(missing)))
+    result = facade(lanes, app=app).run("message " + lane + " still works")
+    assert "Recorded message" in result
+    assert lanes[0].inspect(lane, lanes[-2])["messages"][-1]["content"] == "still works"
+
+
+def test_approval_think_time_does_not_expire_the_request(request, monkeypatch):
+    import time
+
+    lanes = request.getfixturevalue("env")
+    lane = child(lanes)
+    real = time.monotonic
+
+    def slow_operator(command):
+        # The operator takes longer than the request budget to answer.
+        monkeypatch.setattr(time, "monotonic", lambda: real() + 3600)
+        return True, ""
+
+    result = facade(lanes, slow_operator).run("cancel " + lane)
+    assert "Recorded cancel" in result, result

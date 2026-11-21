@@ -339,7 +339,10 @@ _RULES = [
           r"(?P<arg>.+?)\s*[?!.]*$", _weather_action),
     _rule(r"^(?:weather|forecast)\s+(?:for|in)\s+(?P<arg>.+?)\s*[?!.]*$",
           _weather_action),
-    _rule(r"^(?:weather|forecast)\s+(?P<arg>[A-Z][\w\s,.-]+?)\s*[?!.]*$",
+    # The capital is the only evidence the remainder is a place name, so it is
+    # checked case-sensitively; under the rule's re.I "forecast revenue growth"
+    # would otherwise become a weather lookup.
+    _rule(r"^(?:weather|forecast)\s+(?P<arg>(?-i:[A-Z])[\w\s,.-]+?)\s*[?!.]*$",
           _weather_action),
     _rule(r"^(?:weather|forecast)\s*[?!.]*$", _weather_action),
 
