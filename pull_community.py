@@ -29,6 +29,8 @@ def merge_lessons(conn, lessons, embed_fn=None):
     }
     added = 0
     for lesson in lessons:
+        if not isinstance(lesson, dict):
+            continue
         text = lesson.get("text")
         if (
             not isinstance(text, str)
@@ -38,6 +40,10 @@ def merge_lessons(conn, lessons, embed_fn=None):
             continue
         key = text.strip().lower()
         if key in existing:
+            continue
+        # A tombstone is the owner's rejection of this value; a community
+        # pull must not reintroduce it (mirrors reflection.store_prepared_lesson).
+        if memory_store.lesson_text_tombstoned(conn, text):
             continue
         result = embed_fn(text) if embed_fn else None
         vector = None
@@ -58,6 +64,14 @@ def merge_lessons(conn, lessons, embed_fn=None):
             if vector is not None else {}
         )
         if vector is not None and reflection.is_duplicate(
+            vector,
+            conn,
+            embedding_model=provenance.get("model"),
+            embedding_revision=provenance.get("revision"),
+            embedding_dim=provenance.get("dimension"),
+        ):
+            continue
+        if vector is not None and reflection.is_tombstoned_duplicate(
             vector,
             conn,
             embedding_model=provenance.get("model"),
