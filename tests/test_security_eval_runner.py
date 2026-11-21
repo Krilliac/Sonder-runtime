@@ -415,3 +415,40 @@ def test_chunk_mode_with_an_unparseable_reply_is_a_failed_chunk(world):
     result = runner.run(world.records, plan(mode="chunk", arms=("none",), chunk_chars=100_000))
     chunk = result.report["chunk_scores"]["none"]
     assert chunk["failed_chunks"] == 1 and chunk["recall"] == 0.0 and chunk["precision_floor"] is None
+
+
+@pytest.mark.parametrize("out_dir", [
+    r"\\attacker-host\share\eval",
+    "//attacker-host/share/eval",
+    r"\\?\UNC\attacker-host\share\eval",
+    r"\\.\pipe\eval",
+])
+def test_a_network_output_dir_is_refused_before_any_filesystem_call(world, monkeypatch, out_dir):
+    touched = []
+
+    def recorder(name):
+        real = getattr(os.path, name) if name in ("lexists", "isdir", "realpath") else getattr(os, name)
+
+        def record(path, *args, **kwargs):
+            touched.append((name, str(path)))
+            return real(path, *args, **kwargs)
+        return record
+
+    for name in ("lexists", "isdir", "realpath"):
+        monkeypatch.setattr(os.path, name, recorder(name))
+    for name in ("lstat", "makedirs", "stat"):
+        monkeypatch.setattr(os, name, recorder(name))
+    with pytest.raises(OutputDirRefused, match="UNC, network or device"):
+        OutputStore(out_dir, protected_roots=[str(world.repo)], dataset_path=None)
+    assert not [entry for entry in touched if "attacker-host" in entry[1] or "pipe" in entry[1]]
+
+
+def test_the_output_dir_is_refused_inside_a_repo_root_reached_through_a_link(world):
+    from tests.test_security_eval_repo_reader import make_dir_link
+    make_dir_link(world.tmp / "repo-alias", world.repo)
+    # The protected root is spelled through a junction/symlink; out_dir names the real path,
+    # so a lexical comparison alone misses that out_dir lies inside the repo.
+    with pytest.raises(OutputDirRefused, match="inside a repo root"):
+        OutputStore(str(world.repo / "results"), protected_roots=[str(world.tmp / "repo-alias")],
+                    dataset_path=None)
+    assert not (world.repo / "results").exists()
