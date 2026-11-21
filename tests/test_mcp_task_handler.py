@@ -3,6 +3,10 @@ import json
 
 import pytest
 
+from sonder_runtime.adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
+from sonder_runtime.application.capabilities.jobs import JobRegistryService
+from sonder_runtime.application.jobs.durable_registry import DurableJobRegistry
+
 from sonder_runtime.application.ports.jobs import JobIdentity, JobRecord, JobStatus
 from sonder_runtime.application.protocol.mcp_tasks import McpTaskHandler
 from sonder_runtime.application.protocol.mcp_compatibility import McpCompatibility
@@ -113,3 +117,96 @@ def test_mcp_task_errors_are_mapped_to_bounded_json_rpc_errors(params, code):
     transport.serve()
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[1]["error"]["code"] == code
+
+
+def test_mcp_task_cancel_projects_requested_root_not_last_descendant():
+    def rec(job_id, status):
+        return JobRecord(
+            JobIdentity(job_id, "workflow", "op-" + job_id, "idem-" + job_id),
+            status, 4, "2026-08-21T10:00:00Z", "2026-08-21T10:01:00Z", None, "",
+        )
+
+    class _Cascade:
+        def __init__(self):
+            self.root = rec("root", JobStatus.CANCELLED)
+
+        def get(self, task_id):
+            return self.root
+
+        def cancel(self, task_id, *, reason):
+            return (
+                self.root,
+                rec("child-a", JobStatus.CANCELLED),
+                rec("child-done", JobStatus.SUCCEEDED),
+                rec("grandchild", JobStatus.CANCELLED),
+            )
+
+    view = McpTaskHandler(_Cascade())("tasks/cancel", {"taskId": "root"})
+    assert view["taskId"] == "root"
+    assert view["status"] == "cancelled"
+
+
+def test_mcp_task_cancel_falls_back_to_get_when_records_omit_requested_root():
+    def rec(job_id, status):
+        return JobRecord(
+            JobIdentity(job_id, "workflow", "op-" + job_id, "idem-" + job_id),
+            status, 4, "2026-08-21T10:00:00Z", "2026-08-21T10:01:00Z", None, "",
+        )
+
+    class _NoRoot:
+        def __init__(self):
+            self.gets = []
+
+        def get(self, task_id):
+            self.gets.append(task_id)
+            return rec("root", JobStatus.CANCELLED)
+
+        def cancel(self, task_id, *, reason):
+            return (rec("child-a", JobStatus.CANCELLED), rec("grandchild", JobStatus.CANCELLED))
+
+    jobs = _NoRoot()
+    view = McpTaskHandler(jobs)("tasks/cancel", {"taskId": "root"})
+    assert view["taskId"] == "root"
+    assert view["status"] == "cancelled"
+    assert jobs.gets == ["root"]
+
+
+def _memory_registry(tmp_path):
+    return DurableJobRegistry()
+
+
+def _sqlite_registry(tmp_path):
+    return SQLiteDurableJobRegistry(tmp_path / "jobs.db")
+
+
+@pytest.mark.parametrize("factory", [_memory_registry, _sqlite_registry], ids=["memory", "sqlite"])
+def test_mcp_task_cancel_cascade_contract_on_real_registries(factory, tmp_path):
+    registry = factory(tmp_path)
+    service = JobRegistryService(registry)
+
+    def ident(job_id):
+        return JobIdentity(job_id, "workflow", "op-" + job_id, "idem-" + job_id)
+
+    registry.start(ident("root"))
+    registry.start(ident("child-a"), parent_job_id="root")
+    registry.start(ident("child-b"), parent_job_id="root")
+    registry.start(ident("grandchild"), parent_job_id="child-b")
+    registry.transition("child-a", JobStatus.RUNNING)
+    registry.transition("child-a", JobStatus.SUCCEEDED, result={"ok": True})
+
+    handler = McpTaskHandler(service)
+    for _ in range(2):  # the second pass proves repeated cancellation is idempotent
+        view = handler("tasks/cancel", {"taskId": "root", "reason": "stop"})
+        assert view["taskId"] == "root"
+        assert view["status"] == "cancelled"
+
+    records = service.cancel("root", "stop")
+    ids = [r.identity.job_id for r in records]
+    assert sorted(ids) == ["child-a", "child-b", "grandchild", "root"]
+    assert len(ids) == len(set(ids))
+    status = {r.identity.job_id: r.status for r in records}
+    assert status["child-a"] is JobStatus.SUCCEEDED
+    assert status["root"] is JobStatus.CANCELLED
+    assert status["child-b"] is JobStatus.CANCELLED
+    assert status["grandchild"] is JobStatus.CANCELLED
+    assert registry.poll("child-a").status is JobStatus.SUCCEEDED
