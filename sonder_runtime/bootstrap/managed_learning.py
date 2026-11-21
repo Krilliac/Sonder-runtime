@@ -111,7 +111,16 @@ class ManagedLearningRecorder:
         )
 
     def _promote(self, observation):
-        """Run the verified-subject ladder only through the composed fact source."""
+        """Run the verified ladder only through the composed fact source.
+
+        A receipt carrying a host fact claim digest goes through the
+        receipt-bound claim ladder; every other receipt promotes only its
+        canonical verifier-subject token.
+        """
+        from ..application.memory.receipt_bound_fact_promotion import (
+            FactPromotionRequest,
+            ReceiptBoundFactPromotion,
+        )
         from ..application.memory.receipt_observation import (
             VerifiedSubjectFactPromotion,
         )
@@ -134,6 +143,17 @@ class ManagedLearningRecorder:
             if project != getattr(source, "project_scope", None):
                 # The fact source only owns its configured project scope.
                 return "out_of_scope", ""
+            if pair[0].claim_digest is not None:
+                promote_claim = getattr(memory, "promote_verified_claim", None)
+                if not callable(promote_claim):
+                    return "unconfigured", ""
+                result = promote_claim(FactPromotionRequest(
+                    project,
+                    ReceiptBoundFactPromotion.fact_id_for_claim(project, observation.content),
+                    observation.content,
+                    (observation.observation_id,),
+                ))
+                return result.status, ""
             status, _decision = memory.promote_verified_subject(
                 project,
                 VerifiedSubjectFactPromotion.fact_id_for_subject(observation.content),
