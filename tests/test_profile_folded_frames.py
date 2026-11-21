@@ -223,3 +223,35 @@ def test_fold_zones_budgets_the_closing_pass():
     assert folded.truncated
     assert "zone folding stopped at the time budget" in folded.notes
     assert len(folded.stacks) <= 1000
+
+
+def test_digest_zones_folds_parsed_zones_after_the_read_ran_out_of_time():
+    # The read latched the shared budget as exceeded.  The zones parsed so far
+    # must still be folded into a (truncated) partial digest; folding used to
+    # reuse the latched budget, fold nothing and raise "time budget ran out".
+    from sonder_runtime.domain.profiling.folded import digest_zones
+    from sonder_runtime.domain.profiling.model import CaptureMetadata, WorkBudget
+
+    now = [0.0]
+    budget = WorkBudget(1.0, lambda: now[0], every=1)
+    now[0] = 10.0
+    assert budget.tick() is False and budget.exceeded
+    zones = {"t1": [(0, 10 * MS, "Main"), (2 * MS, 3 * MS, "Child")]}
+    digest = digest_zones(zones, source_kind="chrome_trace", metadata=CaptureMetadata(),
+                          budget=budget, truncated=True)
+    assert digest.truncated
+    names = {item.name for item in digest.top_self}
+    assert {"Main", "Child"} <= names
+
+
+def test_work_budget_renewed_keeps_clock_and_length():
+    from sonder_runtime.domain.profiling.model import WorkBudget
+
+    now = [0.0]
+    budget = WorkBudget(2.0, lambda: now[0], every=1)
+    now[0] = 5.0
+    assert budget.tick() is False
+    fresh = budget.renewed()
+    assert fresh.tick() is True and not fresh.exceeded
+    now[0] = 7.5
+    assert fresh.tick() is False
