@@ -42,10 +42,11 @@ UNTRUSTED_OBSERVATION_HEADER = (
 UNTRUSTED_OBSERVATION_FOOTER = "\n=== END HOST TOOL OBSERVATIONS ==="
 
 # The envelope's marker phrase as untrusted text could spell it: any case, any
-# run of non-word separators (or none) between the words, never across a line
-# break. A body that carries it -- a fake footer followed by "ignore previous
-# instructions", or a fake header opening a second "trusted" block -- would
-# otherwise end the untrusted envelope early. Bodies are neutralized instead
+# run of non-word separators (or none) between the words, up to three between
+# two letters of a word, never across a line break. A body that carries it --
+# a fake footer followed by "ignore previous instructions", or a fake header
+# opening a second "trusted" block -- would otherwise end the untrusted
+# envelope early. Bodies are neutralized instead
 # of the envelope carrying a per-call nonce: the window is a pure function of
 # the host ledger, and its byte-stable append-only prefix is what the model
 # server's prompt cache reuses between steps.
@@ -57,16 +58,20 @@ UNTRUSTED_OBSERVATION_FOOTER = "\n=== END HOST TOOL OBSERVATIONS ==="
 # matched on a skeleton of the text (see ``_Skeleton``) and the match is mapped
 # back so the rewrite happens in the original text.
 #
-# The text is read twice, and a span either reading matches is rewritten. The
-# letter reading turns every look-alike into its letters. The separator
-# reading keeps each character that is a separator of the pattern (not a word
-# character, or an underscore) a separator, as the pattern does on plain text:
-# the look-alike data and the compatibility forms read some such symbols as
-# letters (U+2502 and U+FF5C as l, U+2205 as o, U+221E as oo, U+2122 as tm),
-# and a letter between the marker words would end the match. So every spelling
-# the pattern matches on the original text is still matched. A spelling that
-# needs both readings at once -- a symbol read as a letter and another symbol
-# read as a separator in the same marker -- is not caught.
+# Some characters play both roles. The look-alike data and the compatibility
+# forms read some separators of the pattern (not a word character, or an
+# underscore) as letters: U+2502 and U+FF5C as l, U+2205 as o, U+221E as oo,
+# U+2122 as t plus m. Read only as letters, such a symbol between the marker words
+# would end the match; read only as a separator, it could not stand for a
+# letter inside a word. So in the skeleton each word character of such a
+# symbol's reading becomes a sentinel (see ``_SENTINELS``) that the letter
+# classes holding that character and the separator class both accept. One
+# pass then matches a marker whatever mix of roles its symbols play. Between
+# the words, every spelling the pattern matches on the original text is still
+# matched. Inside a word the bound of three counts skeleton characters: a
+# separator with no marker letter in its reading counts once, but one read as
+# letters counts once per letter (U+221E twice), so a run of such symbols can
+# exceed the bound where the same run in ASCII would not.
 #
 # Look-alike coverage is the Unicode confusables data, not "every spelling":
 # a character counts when ``_CONFUSABLES``, the enclosed-letter ranges or the
@@ -275,18 +280,42 @@ _LETTER_CLASSES = {
     "t": "t7",
     "v": "v\u03bd",
 }
-# What separates the marker words: any character that is not a word character,
-# or an underscore, but never a line break.
+# What separates the marker words, and may sit between the letters of a word:
+# any character that is not a word character, or an underscore, but never a
+# line break. A sentinel is a private-use code point, not a word character, so
+# this class accepts every sentinel.
 _SEPARATOR = r"(?:[^\w\n]|_)"
+_SEPARATOR_RE = re.compile(_SEPARATOR)
+_WORD_RE = re.compile(r"\w")
+# One sentinel per word character a letter class holds. In the skeleton a
+# separator's reading carries the sentinel instead of the character, and the
+# pattern accepts it wherever it accepts that character and as a separator.
+# Supplementary private-use code points: the skeleton drops every private-use
+# character of the original text, so a sentinel only ever comes from here.
+_SENTINELS = {
+    char: chr(0xF0000 + index)
+    for index, char in enumerate(sorted({
+        char
+        for chars in _LETTER_CLASSES.values()
+        for char in chars
+        if _WORD_RE.match(char)
+    }))
+}
+_LETTER_CHARS = frozenset("".join(_LETTER_CLASSES.values()))
+_LETTER_PATTERNS = {
+    letter: "[%s%s]" % (
+        re.escape(chars),
+        "".join(_SENTINELS[char] for char in chars if char in _SENTINELS),
+    )
+    for letter, chars in _LETTER_CLASSES.items()
+}
 _ENVELOPE_MARKER_RE = re.compile(
     (_SEPARATOR + "*").join(
-        "".join("[%s]" % re.escape(_LETTER_CLASSES[letter]) for letter in word)
+        (_SEPARATOR + "{0,3}").join(_LETTER_PATTERNS[letter] for letter in word)
         for word in ("host", "tool", "observations")
     ),
     re.IGNORECASE,
 )
-_SEPARATOR_RE = re.compile(_SEPARATOR)
-_WORD_RE = re.compile(r"\w")
 _NEUTRALIZED_MARKER = "[quoted envelope marker]"
 
 # Characters that draw nothing are dropped from the skeleton: format
@@ -322,15 +351,14 @@ class _Skeleton(dict):
     ``_SKELETON_CACHE_LIMIT``, the only state, and each entry a pure function
     of its key.
 
-    With ``keep_separators`` (the separator reading) a character that is a
-    separator of the pattern stays one: each word character of its fold
-    becomes a space. A separator that draws nothing is still dropped, so it
-    neither splits a word nor ends a match.
+    A character that is a separator of the pattern stays one. Its reading
+    keeps only what a letter class holds, each word character as its sentinel
+    (a letter and a separator at once, see ``_SENTINELS``) and each sign
+    (| ! @ $) as itself, which the pattern also takes as a separator; with
+    none of those it becomes one space, so U+2026 counts as one separator, not
+    three. A separator that draws nothing is still dropped, so it neither
+    splits a word nor ends a match.
     """
-
-    def __init__(self, keep_separators=False):
-        super().__init__()
-        self.keep_separators = keep_separators
 
     def __missing__(self, codepoint):
         folded = _CONFUSABLE_FOLD.get(codepoint)
@@ -347,26 +375,29 @@ class _Skeleton(dict):
                     )
                 pieces.append(mapped)
             folded = "".join(pieces)
-        if self.keep_separators and _SEPARATOR_RE.match(chr(codepoint)):
-            folded = _WORD_RE.sub(" ", folded)
+        if _SEPARATOR_RE.match(chr(codepoint)):
+            letters = "".join(
+                _SENTINELS.get(char, "") if _WORD_RE.match(char)
+                else char if char in _LETTER_CHARS else ""
+                for char in folded
+            )
+            folded = letters or (" " if folded else "")
         if len(self) < _SKELETON_CACHE_LIMIT:
             self[codepoint] = folded
         return folded
 
 
-# The letter reading and the separator reading (see the comment above
-# ``_CONFUSABLES``).
-_SKELETONS = (_Skeleton(), _Skeleton(keep_separators=True))
+_SKELETON = _Skeleton()
 
 
-def _marker_spans(text, skeleton):
-    """``(start, end)`` spans of *text* whose *skeleton* reading is a marker."""
-    if not _ENVELOPE_MARKER_RE.search(text.translate(skeleton)):
+def _marker_spans(text):
+    """``(start, end)`` spans of *text* whose skeleton is a marker, in order."""
+    if not _ENVELOPE_MARKER_RE.search(text.translate(_SKELETON)):
         return []
     pieces = []
     origin = []
     for index, char in enumerate(text):
-        folded = skeleton[ord(char)]
+        folded = _SKELETON[ord(char)]
         pieces.append(folded)
         origin.extend([index] * len(folded))
     return [
@@ -378,11 +409,13 @@ def _marker_spans(text, skeleton):
 def neutralize_envelope_markers(text):
     """Defuse the envelope marker and its covered look-alike spellings.
 
-    Covered: any case, any run of separators between the words (a symbol the
-    look-alike data reads as a letter included), compatibility forms,
-    characters that draw nothing inserted between the letters, combining
-    marks, and the look-alike characters of ``_CONFUSABLE_FOLD`` (Unicode
-    confusables data, enclosed letters, a short supplement). Idempotent, and a
+    Covered: any case, any run of separators between the words and up to three
+    between two letters of a word (a symbol the look-alike data reads as a
+    letter, in either role, included; see the comment above ``_CONFUSABLES``
+    for how the bound counts such symbols), compatibility forms, characters
+    that draw nothing inserted between the letters, combining marks, and the
+    look-alike characters of ``_CONFUSABLE_FOLD`` (Unicode confusables data,
+    enclosed letters, a short supplement). Idempotent, and a
     pure rewrite within one line, so neutralizing a ledger entry by entry or
     the joined window gives the same bytes and an append-only window stays
     append-only. Only the matched spans change: every other character of the
@@ -390,20 +423,19 @@ def neutralize_envelope_markers(text):
     """
     text = str(text or "")
     if text.isascii() and not _ASCII_DROPPED_RE.search(text):
-        # Both readings of such text differ from it only in case, which the
-        # pattern ignores, and in underscores read as spaces, both separators.
+        # The skeleton of such text differs from it only in case, which the
+        # pattern ignores, and in separators read as one space each, which
+        # the pattern accepts wherever it accepts the separator.
         return _ENVELOPE_MARKER_RE.sub(_NEUTRALIZED_MARKER, text)
-    spans = sorted(
-        span for skeleton in _SKELETONS for span in _marker_spans(text, skeleton)
-    )
+    spans = _marker_spans(text)
     if not spans:
         return text
     rewritten = []
     cursor = 0
     for start, end in spans:
         if start < cursor:
-            # Overlaps the span just rewritten (most often the other reading's
-            # match of the same marker): widen that rewrite instead.
+            # Two matches can share one original character whose reading is
+            # several characters: widen the rewrite just made instead.
             cursor = max(cursor, end)
             continue
         rewritten.append(text[cursor:start])
