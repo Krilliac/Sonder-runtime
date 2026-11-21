@@ -130,10 +130,23 @@ def test_failed_process_is_journaled_and_never_mutates_policy():
     assert ("journal", "failed") in fakes.events
 
 
-def test_activation_failure_restores_policy_and_attempts_attended_rollback():
+def test_activation_failure_restores_policy_without_rolling_back_good_route():
     fakes = Fakes(deployment_error=RuntimeError("health gate"))
     with pytest.raises(RuntimeError, match="health gate"):
         fakes.service().execute(request(manifest()))
+    assert fakes.restored
+    assert not fakes.rolled_back
+    assert ("journal", "activation_rejected") in fakes.events
+    assert ("journal", "rolled_back") not in fakes.events
+
+
+def test_post_activation_failure_rolls_back_activated_route():
+    fakes = Fakes()
+    def boom(reservation): raise RuntimeError("commit failed")
+    service = fakes.service()
+    service._policy.commit = boom
+    with pytest.raises(RuntimeError, match="commit failed"):
+        service.execute(request(manifest()))
     assert fakes.restored
     assert fakes.rolled_back
     assert ("journal", "rolled_back") in fakes.events
