@@ -480,7 +480,13 @@ class AppManagedWorkDispatcher:
                     self.authority.release_retained(entry.lease)
                     entry.lease_released = True
                 if not entry.selection_released:
-                    self.authority.release_selection(entry.selection)
+                    try:
+                        self.authority.release_selection(entry.selection)
+                    except PermissionError:
+                        # No longer issued means the request owner already
+                        # released it; any other refusal keeps the slot.
+                        if self.authority.selection_issued(entry.selection):
+                            raise
                     entry.selection_released = True
             except BaseException:
                 return False
