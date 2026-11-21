@@ -147,7 +147,7 @@ SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY=<different-32-to-512-printable-ASC
 ```
 
 The peer bearer is the credential sent to fixed receivers. It must differ from
-the API key, artifact-transfer key, and auth secret. The state-integrity key
+the API key, artifact-transfer key, artifact-mobility key, and auth secret. The state-integrity key
 is local to each host, is never sent to a peer, and must differ from the peer
 bearer and all of those other secrets. `python -m sonder_runtime config --json`
 prints a redacted projection: origins are shown only as configured/unset and
