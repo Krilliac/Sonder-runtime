@@ -349,6 +349,11 @@ exact call:
   never a shorter prefix, and a body `digest` or `tool` that differs from the
   pending call is refused with `409 CALL_DIGEST_MISMATCH`. Changing any
   argument makes a new call that needs its own approval;
+- a call whose stored preview does not show everything the approval would
+  cover (part of it was redacted or cut; the preview starts with
+  `[approval covers text not shown: ...]`) is refused with
+  `409 PREVIEW_INCOMPLETE`; approve it at the console with
+  `/approve call <tool> <arguments json>`, which binds the arguments given;
 - a call has at most one open approval: a second POST answers
   `409 APPROVAL_ALREADY_OPEN` with the existing one. An `Idempotency-Key`
   retry replays the first response, with the refusal codes listed below;
