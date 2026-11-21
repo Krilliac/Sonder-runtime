@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
-from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.interfaces.http import served_dispatch_policy, web_app
 from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
@@ -3106,6 +3106,9 @@ def _loop_global_operation_refusal(actions_json, context=None):
         # Same default as server._loop_dispatch: an action with no type runs as "code".
         action_type = str(action.get("type") or action.get("action") or "code").strip().lower()
         action_tool = server._loop_action_tool(action_type)
+        # The global-memory account check ``/<tool>`` meets, for every role.
+        if memory_error := _account_global_memory_refusal(action_tool, context):
+            return "refused /loop: %s" % memory_error
         operation = _http_system_operation_for(action_tool)
         if not operation:
             role_error = _role_tool_refusal_reason(action_tool, context) if action_tool else ""
@@ -3820,26 +3823,18 @@ def _handle_feedback(content, state=None):
     return None
 
 
-def _handle_intent(content, messages=None, state=None):
-    """Return response text if `content` is a natural-language control intent, else None."""
+def _handle_intent(content, messages=None, state=None, context=None):
+    """Return response text if `content` is a natural-language control intent, else None.
+
+    Effects run as their slash spelling with the caller's ``context``, so they
+    meet every gate ``/run`` and ``/train`` meet (mode, rules, role, PowerShell).
+    """
     state = _state_or_legacy(state)
-    from sonder_runtime.adapters.security.powershell_gate import run_intent
     intent = intents.classify(content)
     if not intent:
         return None
-
-    replies = []
-    if "trace" in intent:
-        state.trace = intent["trace"]
-        replies.append("trace %s" % ("on" if state.trace else "off"))
-    if "strict" in intent:
-        state.strict = intent["strict"]
-        replies.append("strict %s" % ("on" if state.strict else "off"))
-    if intent.get("run"):
-        replies.append(run_intent(_do_run_from_messages, _handle_slash, _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block, messages=messages, state=state))
-    if "train" in intent:
-        replies.append(_do_train(intent["train"]))
-    return "\n".join(replies)
+    return "\n".join(_handle_slash(line, messages=messages, state=state, context=context)
+                     for line in served_dispatch_policy.intent_slash_lines(intent))
 
 
 def _work_project_for_request(project, storage_project, content="", auth=None):
@@ -5521,7 +5516,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_not_found()
 
     def _handle_ollama_pool_admin(self, method):
+        if self._auth_rate_limited():  # dispatched ahead of the general limiter
+            return
         context = self._request_auth_context()
+        if not context.get("authorized"):
+            return self._send_auth_error()
         if not _admin_authorized(context):
             self._send_json_payload({"error": "authorization"}, status=403,
                                     headers={"Cache-Control": "no-store"})
@@ -6583,14 +6582,16 @@ class Handler(BaseHTTPRequestHandler):
             reply({'ok': False, 'message': 'account session required'}, 401)
             return
         mode = _effective_auth_mode()
-        authorization = self.headers.get('Authorization', '')
-        api_key_ok = bool(API_KEY) and (
-            check_auth(authorization, API_KEY)
-            or sonder_secrets.previous_key_valid(_bearer_token(authorization))
-        )
-        if mode in ('api-key', 'both') and not api_key_ok:
-            reply({'ok': False, 'message': 'authentication required'}, 401)
-            return
+        if mode in ('api-key', 'both'):
+            if self._auth_reserve_refused():  # a credential check ahead of the general limiter
+                return
+            authorization = self.headers.get('Authorization', '')
+            if not (bool(API_KEY) and (check_auth(authorization, API_KEY)
+                    or sonder_secrets.previous_key_valid(_bearer_token(authorization)))):
+                sonder_lifecycle.get().record_auth_failure(self._client_ip(), 'invalid-credentials', charge=False)
+                reply({'ok': False, 'message': 'authentication required'}, 401)
+                return
+            sonder_lifecycle.get().refund_auth_attempt(self._client_ip())
         try:
             request = self._read_json(max_bytes=1024)
         except HTTPRequestError as error:
@@ -7142,11 +7143,10 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            content_lengths = self.headers.get_all("Content-Length") or ()
-            raw_length = content_lengths[0] if content_lengths else "0"
-            length = int(raw_length) if raw_length.strip().isdigit() else 0
-            raw_body = self.rfile.read(length) if length > 0 else b""
-            self._request_body_consumed = True
+            if thin_refusal := served_dispatch_policy.thin_handler_refusal(
+                    path, context, memory_refusal=_account_global_memory_refusal, admin_authorized=_admin_authorized):
+                return self._send_json_payload({"error": {"message": thin_refusal, "type": "forbidden", "code": "FORBIDDEN"}}, status=403)
+            raw_body = json.dumps(req).encode("utf-8")  # _read_json above consumed the bounded body
             class _Req:
                 method = "POST"
                 def __init__(self, p, b, h):
@@ -7499,7 +7499,7 @@ class Handler(BaseHTTPRequestHandler):
                             and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
-                            prompt, messages=messages, state=state
+                            prompt, messages=messages, state=state, context=context,
                         )
                     if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "fanout":
                         # Developer authority was established above from this
