@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def canonical_learn_tier(tier_label):
+if TYPE_CHECKING:
+    from collections.abc import Container
+
+
+def canonical_learn_tier(tier_label: str | None) -> str | None:
     """Map a recorded tier label to the learning tier that governs it."""
     return "code" if tier_label == "sonder" else tier_label
 
 
-def should_learn(tier, learn, learning_tiers) -> bool:
+def should_learn(
+    tier: str | None,
+    learn: bool,
+    learning_tiers: Container[str],
+) -> bool:
     """Return whether a caller should feed this tier into learning.
 
     The caller supplies the already-resolved tier set because environment

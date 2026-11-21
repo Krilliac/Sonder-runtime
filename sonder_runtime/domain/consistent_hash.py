@@ -17,15 +17,16 @@ from __future__ import annotations
 import hashlib
 import struct
 from bisect import bisect_right, insort
+from typing import cast
 
 
 def _ring_hash(key: str) -> int:
-    return struct.unpack(">I", hashlib.md5(key.encode("utf-8")).digest()[:4])[0]
+    return cast(int, struct.unpack(">I", hashlib.md5(key.encode("utf-8")).digest()[:4])[0])
 
 
 def _rendezvous_score(node: str, key: str) -> float:
     h = hashlib.sha256(f"{node}:{key}".encode("utf-8")).digest()
-    return struct.unpack(">Q", h[:8])[0]
+    return cast(int, struct.unpack(">Q", h[:8])[0])
 
 
 class HashRing:

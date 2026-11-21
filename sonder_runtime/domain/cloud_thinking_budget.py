@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def ensure_prediction_budget(payload, minimum: int = 4096) -> None:
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping
+
+
+def ensure_prediction_budget(
+    payload: MutableMapping[str, object], minimum: int = 4096,
+) -> None:
     """Ensure a request leaves room for thinking and its final answer.
 
     The policy only adjusts a positive, undersized integer ``num_predict``

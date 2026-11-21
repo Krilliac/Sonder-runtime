@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def resolve_identifier(value, default):
+def resolve_identifier(value: str | None, default: str | None) -> str | None:
     """Normalize an identifier: empty becomes *default*, ``"none"`` becomes None."""
     s = (value or "").strip()
     if s == "":

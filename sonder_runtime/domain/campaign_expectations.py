@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-_EXPECTED_OUTPUTS = {
+_EXPECTED_OUTPUTS: dict[str | None, str] = {
     "hello": "sonder-ok",
     "sum": "42",
     "loop": "1\n2\n3",
@@ -19,6 +19,6 @@ _EXPECTED_OUTPUTS = {
 }
 
 
-def campaign_expected(task_name):
+def campaign_expected(task_name: str | None) -> str:
     """Return the exact expected output for a known campaign task."""
     return _EXPECTED_OUTPUTS.get(task_name, "")

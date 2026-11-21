@@ -15,8 +15,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,7 @@ class Event:
     kind: str
     source_type: str
     source_id: str
-    data: dict = field(default_factory=dict)
+    data: Mapping[str, object] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
 
@@ -113,7 +117,7 @@ def emit(
     kind: str,
     source_type: str,
     source_id: str,
-    data: dict | None = None,
+    data: Mapping[str, object] | None = None,
 ) -> int:
     return _bus.publish(Event(
         kind=kind,

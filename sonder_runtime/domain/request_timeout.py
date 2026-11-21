@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
 
-def bound_request_timeout(value, ceiling: int) -> int:
+
+def bound_request_timeout(value: object, ceiling: int) -> int:
     """Return a positive timeout no greater than the configured ceiling.
 
     The caller owns the runtime default/ceiling lookup. Keeping that lookup
@@ -11,7 +13,7 @@ def bound_request_timeout(value, ceiling: int) -> int:
     adapters without importing the root server module.
     """
     try:
-        value = ceiling if value is None else int(value)
+        value = ceiling if value is None else int(cast(int, value))
     except (TypeError, ValueError):
         value = ceiling
     return max(1, min(value, ceiling))
