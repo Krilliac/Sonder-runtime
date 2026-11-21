@@ -217,8 +217,8 @@ def test_capture_accepts_stable_defaults_and_rejects_one_turn_constraints():
     assert preferences.extract_preferences("I prefer PowerShell commands") == [
         "User prefers PowerShell commands."
     ]
-    assert preferences.extract_preferences("Call me Nathan") == [
-        "User wants to be called Nathan."
+    assert preferences.extract_preferences("Call me Alex") == [
+        "User wants to be called Alex."
     ]
     assert preferences.extract_preferences("I prefer detailed code audits") == [
         "User prefers detailed code audits."
@@ -449,7 +449,7 @@ def test_legacy_rows_are_filtered_by_task_category_without_rewriting_storage():
     connection = server.memory_store.connect(":memory:")
     rows = {
         "style": "User prefers concise direct answers.",
-        "name": "User wants to be called Nathan.",
+        "name": "User wants to be called Alex.",
         "shell": "User prefers PowerShell commands.",
         "cpp": "User prefers MSVC for C++ examples.",
         "unsafe": "User wants Sonder to preserve AUDIT_MARKER_92 for this project.",

@@ -78,7 +78,15 @@ _CAPTURED_LIVE_ISOLATED_ENV = {
 # Test-harness controls, not runtime configuration: they survive the ambient
 # scrub so a developer can capture timings or rewrite REPL screen goldens.
 # SONDER_BLENDER lets the real-Blender integration tests (tests/test_meshgen_integration.py) run.
-_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS", "SONDER_BLENDER"})
+# SONDER_TEST_PRIVATE_OLLAMA_WORKER (host:port) enables the live check in tests/test_ollama_endpoint_tls.py.
+# SONDER_TEST_MESHGEN_KIT (path to a trusted kit .py) enables the real-kit meshgen tests.
+_HARNESS_VARIABLES = frozenset({
+    "SONDER_TEST_TIMINGS",
+    "SONDER_UPDATE_GOLDENS",
+    "SONDER_BLENDER",
+    "SONDER_TEST_PRIVATE_OLLAMA_WORKER",
+    "SONDER_TEST_MESHGEN_KIT",
+})
 
 
 def _clear_ambient_deployment_variables() -> None:

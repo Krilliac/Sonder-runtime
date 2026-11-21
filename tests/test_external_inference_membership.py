@@ -81,10 +81,10 @@ def credentials(tmp_path):
 def configuration(tmp_path):
     return MembershipConfig(mode="external", cluster_id="cluster", issuer_id="issuer", protocol_version=1,
         source_origin="https://registry.example:443", source_tls_server_name="registry.example",
-        source_allowed_cidrs=("10.77.0.0/24",), trust_anchor_file=str(tmp_path / "authority" / "ca.pem"),
+        source_allowed_cidrs=("192.0.2.0/24",), trust_anchor_file=str(tmp_path / "authority" / "ca.pem"),
         signature_public_key_file=str(tmp_path / "authority" / "signer.pem"), refresh_interval_seconds=30,
         snapshot_max_advertisements=16, snapshot_max_bytes=1048576, local_fallback=False,
-        member_policies=(MembershipEndpointPolicy("worker", ORIGIN, "worker.example", ("10.77.0.0/24",)),))
+        member_policies=(MembershipEndpointPolicy("worker", ORIGIN, "worker.example", ("192.0.2.0/24",)),))
 
 
 def envelope(key, **changes):
@@ -495,7 +495,7 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
     config = configuration(tmp_path)
     source = ExternalMembershipSource(config, credentials(tmp_path), clock=lambda: NOW)
     resolved, connected, identities = [], [], []
-    answers = ["10.77.0.2"]
+    answers = ["192.0.2.2"]
     if failure == "mixed_dns": answers += ["203.0.113.9"]
     if failure == "out_of_cidr": answers = ["203.0.113.9"]
     if failure == "empty_dns": answers = []
@@ -569,7 +569,7 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
             assert type(caught.value) is ModelCallError
             assert not OllamaWorkerPool._retryable(caught.value)
         assert len(resolved) <= 1
-        assert all(address[0] == "10.77.0.2" for address in connected)
+        assert all(address[0] == "192.0.2.2" for address in connected)
         assert all(name == "registry.example" for name in identities)
         if failure in ("mixed_dns", "out_of_cidr", "empty_dns"):
             assert connected == []
@@ -768,7 +768,7 @@ def test_external_configuration_rejects_hostile_subclasses_before_io(tmp_path, k
     else:
         policy = config.member_policies[0]
         policy = (hostile(policy) if kind == "policy" else replace(policy, origin=hostile(policy.origin))
-                  if kind == "origin" else replace(policy, allowed_cidrs=(hostile("10.77.0.0/24"),)))
+                  if kind == "origin" else replace(policy, allowed_cidrs=(hostile("192.0.2.0/24"),)))
         config = replace(config, member_policies=(policy,))
     with pytest.raises(ValueError): ExternalMembershipSource(config, secrets, clock=lambda: NOW)
 
@@ -812,7 +812,7 @@ def test_resolver_timeout_retains_one_owned_task_without_backlog(tmp_path, monke
         calls.append(1)
         entered.set()
         release.wait(2)
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.77.0.2", 443))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("192.0.2.2", 443))]
     monkeypatch.setattr(module.socket, "getaddrinfo", blocked)
     value = ExternalMembershipSource(configuration(tmp_path),
         credentials(tmp_path), clock=lambda: NOW)
@@ -837,7 +837,7 @@ def test_external_policy_ceiling_does_not_bypass_pool_admission_bound(tmp_path, 
     from sonder_runtime.adapters.inference import ollama_pool
     from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig, validate_membership_config
     policies = tuple(MembershipEndpointPolicy(f"w{i:04}", f"https://w{i:04}.example:11434",
-        f"w{i:04}.example", ("10.77.0.0/24",)) for i in range(4096))
+        f"w{i:04}.example", ("192.0.2.0/24",)) for i in range(4096))
     config = replace(configuration(tmp_path), snapshot_max_advertisements=4096, member_policies=policies)
     secrets = credentials(tmp_path)
     validate_membership_config(config, secrets)

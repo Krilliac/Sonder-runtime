@@ -65,7 +65,7 @@ def test_nightly_exports_toml_workers_when_env_blank(tmp_path, monkeypatch):
             "[ollama]",
             'url = "http://127.0.0.1:11434"',
             "allow_remote = true",
-            'workers = ["https://10.77.0.2:8443"]',
+            'workers = ["https://192.0.2.2:8443"]',
         ]) + "\n",
         encoding="utf-8",
     )
@@ -76,7 +76,7 @@ def test_nightly_exports_toml_workers_when_env_blank(tmp_path, monkeypatch):
     bound = nightly_self_improve._bind_ollama_pool_from_config(cfg)
 
     assert "SONDER_OLLAMA_WORKERS" in bound
-    assert nightly_self_improve.os.environ["SONDER_OLLAMA_WORKERS"] == "https://10.77.0.2:8443"
+    assert nightly_self_improve.os.environ["SONDER_OLLAMA_WORKERS"] == "https://192.0.2.2:8443"
     assert nightly_self_improve.os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] == "1"
 
 
@@ -84,7 +84,7 @@ def test_nightly_keeps_explicit_worker_env(tmp_path, monkeypatch):
     cfg = tmp_path / "sonder.toml"
     cfg.write_text(
         "schema_version = 1\n[ollama]\nallow_remote = true\n"
-        'workers = ["https://10.77.0.2:8443"]\n',
+        'workers = ["https://192.0.2.2:8443"]\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("SONDER_OLLAMA_WORKERS", "http://127.0.0.1:11435")
@@ -102,7 +102,7 @@ def test_nightly_binds_ca_from_toml_even_with_explicit_workers(tmp_path, monkeyp
     ca.write_text("certificate", encoding="ascii")
     cfg.write_text(
         "schema_version = 1\n[ollama]\n"
-        'workers = ["https://10.77.0.2:8443"]\n'
+        'workers = ["https://192.0.2.2:8443"]\n'
         'ca_bundle = "' + str(ca).replace("\\", "\\\\") + '"\n',
         encoding="utf-8",
     )
