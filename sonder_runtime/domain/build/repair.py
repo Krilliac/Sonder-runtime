@@ -847,6 +847,20 @@ def include_path_problem(path: str, *, quoted: bool) -> str:
         return "quoted include without a header suffix"
     if not quoted and ".." in text.split("/"):
         return "system include escaping upward"
+    # Every component, not just the basename: ``<.git/config>`` and ``<.aws/x>``
+    # reach credential stores through an ``-I`` root, and Windows aliases
+    # (``credentials ``, ``CREDEN~1``, streams, device names) open the same file
+    # under a name the checks below would not recognise (same rules as EditScope.allows).
+    for part in text.split("/"):
+        if part in ("", ".", ".."):
+            continue
+        # Trailing dots and any trailing whitespace (Win32 strips dots/spaces;
+        # tabs and form feeds have no legitimate use in a header name).
+        if ":" in part or part[-1] == "." or part[-1].isspace() or _SHORT_NAME_RE.search(part) \
+                or part.split(".", 1)[0].strip().upper() in _WINDOWS_DEVICE_NAMES:
+            return "include path uses a Windows name alias"
+        if part.startswith(".") or part.lower() in DENIED_DIRS:
+            return "include of a dotfile or credential file"
     base = posixpath.basename(text).lower()
     if base.startswith(".") or base in _SECRET_INCLUDE_NAMES \
             or base in {name.lower() for name in DENIED_NAMES}:

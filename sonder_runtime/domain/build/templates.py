@@ -28,17 +28,20 @@ from .model import (
     BuildSystem,
     BuildTarget,
     CompileUnit,
+    Generator,
     NetworkPolicy,
     PchMode,
     PresetInfo,
     BuildWorld,
+    TargetType,
+    VS_GENERATORS,
     is_absolute,
     loads_bounded_json,
     norm_path,
     rel_under,
     safe_rel,
 )
-from .tool_targets import BUILD_ALIASES, UTILITY_TARGET_NAMES, TargetSafety
+from .tool_targets import UTILITY_TARGET_NAMES, TargetSafety
 
 
 PLACEHOLDERS = frozenset({
@@ -422,6 +425,26 @@ def _field(request: object, name: str) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _build_aliases(model: BuildModel) -> frozenset[str]:
+    """The generator's own build-everything alias for ``model``'s system.
+
+    Only these names skip the model lookup; any other name (``Build`` in a CMake
+    tree, ``ALL_BUILD`` under Ninja or in a solution) may be a user-defined
+    custom target or project and is checked against the model and the utility
+    refusal like every target. For MSBuild only the plain solution target
+    ``Build`` is an alias: ``X:Build`` always names project ``X``.
+    """
+    if model.system is BuildSystem.MSBUILD:
+        return frozenset({"Build"})
+    if model.system is BuildSystem.CMAKE:
+        if model.generator in VS_GENERATORS or model.generator is Generator.XCODE:
+            return frozenset({"ALL_BUILD"})
+        return frozenset({"all"})
+    if model.system in (BuildSystem.NINJA, BuildSystem.MAKE):
+        return frozenset({"all"})
+    return frozenset()
+
+
 def validate_request_against_model(
     request: object,
     model: BuildModel,
@@ -447,14 +470,15 @@ def validate_request_against_model(
         bare = target[: -len(":Build")] if model.system is BuildSystem.MSBUILD \
             and target.endswith(":Build") else target
         allowed = operator_utility_allow
-        if bare in BUILD_ALIASES:
-            pass
-        else:
+        # Compare the full request name: under MSBuild "Build:Build" names a
+        # project called "Build", not the solution alias.
+        if target not in _build_aliases(model):
             target_info = model.target(bare)
             if target_info is None:
                 raise TemplateRejected("target is not in the build model", code="UNKNOWN_TARGET")
             refused = (bare in safety.utility or bare in UTILITY_TARGET_NAMES
-                       or target_info.utility)
+                       or target_info.utility
+                       or target_info.type in (TargetType.UTILITY, TargetType.MSBUILD_MAKEFILE))
             if refused and bare not in allowed:
                 raise TemplateRejected(
                     "target %s runs arbitrary commands; an operator must allowlist it in "
