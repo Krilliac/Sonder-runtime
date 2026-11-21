@@ -1277,7 +1277,10 @@ queue. `SONDER_POOL_ADMISSION_TIMEOUT_SECONDS` controls that wait (default
 deadline. A value of `0` disables the additional queue wait. The queue still
 requires every configured origin to be loopback or literal private/link-local LAN; remote Ollama
 consent and HTTPS rules are unchanged. Interactive chat and ordinary offload
-keep the existing one-second fail-fast admission behavior.
+keep the existing one-second fail-fast admission behavior. The same timeout
+caps how long a request waits to take its pool slot back after it queued in
+GPU admission (it returns the slot while it queues there). At the cap it is
+refused with backpressure and its GPU slot is released.
 
 Observatory live export (contract section 11; served by the runtime telemetry
 routes, which the chat-telemetry change adds): `SONDER_OBSERVATORY_EXPORT`
