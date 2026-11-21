@@ -14729,6 +14729,10 @@ def artifact_generate(
 def artifact_verify(path: str) -> str:
     """Verify every generated file against its manifest and format contract."""
     _maybe_live_reload()
+    try:
+        file_ops._reject_network_path(str(path or ""))
+    except PermissionError as exc:
+        return "ERROR: %s" % exc
     target = os.path.abspath(os.path.expanduser(str(path or "")))
     if not os.path.exists(target):
         return "ERROR: artifact path not found: %s" % target
