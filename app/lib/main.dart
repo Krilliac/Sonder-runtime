@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'local_manager.dart';
 import 'settings.dart';
 import 'shell/app_shell.dart';
+import 'shell/chat_link.dart';
 import 'shell/preferences.dart';
 import 'shell/splash.dart';
 import 'theme.dart';
@@ -117,6 +118,8 @@ class _SonderRuntimeAppState extends State<SonderRuntimeApp>
         'dark' => ThemeMode.dark,
         _ => ThemeMode.system,
       },
+      // `/app/#/c/<session id>` opens that chat (see chat_link.dart).
+      onGenerateRoute: chatLinkRoute,
       home: _Boot(
         child: settings == null
             ? const ShellSplash(key: ValueKey('splash'))

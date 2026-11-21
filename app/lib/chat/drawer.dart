@@ -1,8 +1,11 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
 import '../models.dart';
+import '../shell/chat_link.dart' show ChatShareKind;
 import '../theme.dart';
 import '../ui/kit.dart';
 import '../ui/status_vocab.dart';
@@ -149,6 +152,11 @@ class ThreadRow extends StatefulWidget {
   /// A touch layout (the navigation drawer) rather than a pointer one.
   final bool touch;
 
+  /// Copy this chat's link or code. When set, the row has a context menu
+  /// (right click, long press, or the "..." button shown on hover and focus)
+  /// with Copy link and Copy chat code; Delete chat joins it when allowed.
+  final ValueChanged<ChatShareKind>? onShare;
+
   const ThreadRow({
     super.key,
     required this.thread,
@@ -157,29 +165,112 @@ class ThreadRow extends StatefulWidget {
     required this.onDelete,
     this.running = false,
     this.touch = false,
+    this.onShare,
   });
 
   @override
   State<ThreadRow> createState() => _ThreadRowState();
 }
 
+enum _RowAction { copyLink, copyCode, delete }
+
 class _ThreadRowState extends State<ThreadRow> {
   bool _hover = false;
   bool _focused = false;
   bool _ring = false;
   bool _revealed = false;
+  bool _menuOpen = false;
 
   /// The row's hit area; the pill drawn inside it is inset by [_pillInset].
   static const double _rowHeight = SonderSpace.x5;
   static const double _pillInset = SonderSpace.xs;
+
+  List<PopupMenuEntry<_RowAction>> _menuEntries() => [
+        if (widget.onShare != null) ...const [
+          PopupMenuItem<_RowAction>(
+              key: Key('thread-menu-copy-link'),
+              value: _RowAction.copyLink,
+              child: Text('Copy link')),
+          PopupMenuItem<_RowAction>(
+              key: Key('thread-menu-copy-code'),
+              value: _RowAction.copyCode,
+              child: Text('Copy chat code')),
+        ],
+        if (widget.onDelete != null)
+          const PopupMenuItem<_RowAction>(
+              key: Key('thread-menu-delete'),
+              value: _RowAction.delete,
+              child: Text('Delete chat')),
+      ];
+
+  void _apply(_RowAction? action) {
+    switch (action) {
+      case _RowAction.copyLink:
+        widget.onShare?.call(ChatShareKind.link);
+      case _RowAction.copyCode:
+        widget.onShare?.call(ChatShareKind.code);
+      case _RowAction.delete:
+        widget.onDelete?.call();
+      case null:
+        break;
+    }
+  }
+
+  /// The context menu at [globalPosition] (the pointer, or the row's middle).
+  Future<void> _openMenuAt(Offset globalPosition) async {
+    if (widget.onShare == null || _menuOpen) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    // The row's actions stay drawn while its menu is open, so moving the
+    // pointer onto the menu cannot take the "..." button away.
+    setState(() => _menuOpen = true);
+    final action = await showMenu<_RowAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: _menuEntries(),
+      popUpAnimationStyle: SonderMotion.menu(context),
+    );
+    if (!mounted) return;
+    setState(() => _menuOpen = false);
+    _apply(action);
+  }
+
+  /// Screen-reader equivalents of the row's menu items.
+  Map<CustomSemanticsAction, VoidCallback>? actionsFor(
+      VoidCallback? onDelete, ValueChanged<ChatShareKind>? onShare) {
+    if (onDelete == null && onShare == null) return null;
+    return {
+      if (onShare != null) ...{
+        const CustomSemanticsAction(label: 'Copy link'): () =>
+            onShare(ChatShareKind.link),
+        const CustomSemanticsAction(label: 'Copy chat code'): () =>
+            onShare(ChatShareKind.code),
+      },
+      if (onDelete != null)
+        const CustomSemanticsAction(label: 'Delete chat'): onDelete,
+    };
+  }
+
+  void _openMenuAtRow() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached) return;
+    _openMenuAt(box.localToGlobal(box.size.center(Offset.zero)));
+  }
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
     final onDelete = widget.onDelete;
+    final onShare = widget.onShare;
     final showDelete = onDelete != null &&
         (_hover || _focused || _revealed || (widget.touch && widget.selected));
+    // Touch has no hover, so the menu button is always there.
+    final showMore = onShare != null &&
+        (_hover || _focused || _revealed || _menuOpen || widget.touch);
+    final actionCount = (showDelete ? 1 : 0) + (showMore ? 1 : 0);
     final title = widget.thread.displayTitle;
     final background = widget.selected
         ? tokens.raised
@@ -190,9 +281,7 @@ class _ThreadRowState extends State<ThreadRow> {
     return Semantics(
       container: true,
       selected: widget.selected,
-      customSemanticsActions: onDelete == null
-          ? null
-          : {const CustomSemanticsAction(label: 'Delete chat'): onDelete},
+      customSemanticsActions: actionsFor(onDelete, onShare),
       child: MouseRegion(
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
@@ -207,9 +296,14 @@ class _ThreadRowState extends State<ThreadRow> {
               type: MaterialType.transparency,
               child: InkWell(
                 onTap: widget.onTap,
-                onLongPress: widget.touch && onDelete != null
-                    ? () => setState(() => _revealed = true)
-                    : null,
+                onSecondaryTapDown: onShare == null
+                    ? null
+                    : (details) => _openMenuAt(details.globalPosition),
+                onLongPress: onShare != null
+                    ? _openMenuAtRow
+                    : widget.touch && onDelete != null
+                        ? () => setState(() => _revealed = true)
+                        : null,
                 borderRadius: radius,
                 // The pill is the hover, press and focus feedback.
                 overlayColor: const WidgetStatePropertyAll(Colors.transparent),
@@ -228,7 +322,10 @@ class _ThreadRowState extends State<ThreadRow> {
                         minHeight: _rowHeight - 2 * _pillInset),
                     padding: EdgeInsets.only(
                         left: SonderSpace.md,
-                        right: showDelete ? SonderSpace.x4 : SonderSpace.md),
+                        right: actionCount == 0
+                            ? SonderSpace.md
+                            : SonderSpace.x4 * actionCount +
+                                (showMore && showDelete ? SonderSpace.sm : 0)),
                     decoration:
                         BoxDecoration(color: background, borderRadius: radius),
                     foregroundDecoration: BoxDecoration(
@@ -275,19 +372,37 @@ class _ThreadRowState extends State<ThreadRow> {
                 ),
               ),
             ),
-            if (showDelete)
+            if (actionCount > 0)
               Positioned(
                 right: 0,
                 top: 0,
                 bottom: 0,
-                child: Center(
-                  child: IconButton(
-                    tooltip: 'Delete chat',
-                    onPressed: onDelete,
-                    iconSize: 16,
-                    icon: Icon(Icons.close, color: tokens.muted),
-                  ),
-                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (showMore)
+                    Builder(
+                      builder: (buttonContext) => IconButton(
+                        key: const Key('thread-menu-button'),
+                        tooltip: 'Chat actions',
+                        iconSize: 16,
+                        icon: Icon(Icons.more_horiz, color: tokens.muted),
+                        onPressed: () {
+                          final box =
+                              buttonContext.findRenderObject() as RenderBox;
+                          unawaited(_openMenuAt(box.localToGlobal(
+                              box.size.bottomLeft(Offset.zero))));
+                        },
+                      ),
+                    ),
+                  if (showMore && showDelete)
+                    const SizedBox(width: SonderSpace.sm),
+                  if (showDelete)
+                    IconButton(
+                      tooltip: 'Delete chat',
+                      onPressed: onDelete,
+                      iconSize: 16,
+                      icon: Icon(Icons.close, color: tokens.muted),
+                    ),
+                ]),
               ),
           ]),
         ),

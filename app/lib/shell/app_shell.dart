@@ -14,6 +14,7 @@ import '../system_screen.dart';
 import '../theme.dart';
 import '../ui/kit.dart';
 import '../workspace_ui.dart';
+import 'chat_link.dart';
 import 'page_navigator.dart';
 import 'preferences.dart';
 import 'shortcuts.dart';
@@ -63,6 +64,15 @@ class AppShell extends StatefulWidget {
   @visibleForTesting
   final DateTime Function()? clock;
 
+  /// Opens a chat from a `/c/<id>` route (see [chatLinkRoute]). Defaults to
+  /// the app-wide [ChatDeepLink.pending].
+  final ValueListenable<ChatLinkRequest?>? deepLink;
+
+  /// Tests: the origin shared links are built on, in place of the page
+  /// origin (browser) or the configured server (elsewhere).
+  @visibleForTesting
+  final String? shareOrigin;
+
   const AppShell({
     super.key,
     required this.settings,
@@ -72,6 +82,8 @@ class AppShell extends StatefulWidget {
     this.pageBuilder,
     this.approvals,
     this.clock,
+    this.deepLink,
+    this.shareOrigin,
   });
 
   @override
@@ -119,6 +131,13 @@ class _AppShellState extends State<AppShell>
 
   DateTime _now() => widget.clock?.call() ?? DateTime.now();
 
+  ValueListenable<ChatLinkRequest?> get _deepLink =>
+      widget.deepLink ?? ChatDeepLink.pending;
+
+  /// The last deep link acted on, so a rebuild or a chat change never
+  /// reopens it.
+  ChatLinkRequest? _handledLink;
+
   @override
   void initState() {
     super.initState();
@@ -148,6 +167,7 @@ class _AppShellState extends State<AppShell>
       connection: _session.chat.connection,
     );
     _approvals.waiting.addListener(_updateBadges);
+    _deepLink.addListener(_applyDeepLink);
     WidgetsBinding.instance.addObserver(this);
     _session.start();
     _approvals.start();
@@ -185,6 +205,7 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _deepLink.removeListener(_applyDeepLink);
     _session.chat.removeListener(_chatChanged);
     _session.chat.status.removeListener(_updateBadges);
     _approvals.waiting.removeListener(_updateBadges);
@@ -209,6 +230,7 @@ class _AppShellState extends State<AppShell>
       loading: chat.loadingThreads,
     );
     _updateBadges();
+    _applyDeepLink();
   }
 
   void _updateBadges() {
@@ -395,6 +417,72 @@ class _AppShellState extends State<AppShell>
     _session.chat.switchThread(thread);
   }
 
+  /// Open the chat a `/c/<id>` link names, once chats are loaded; an id that
+  /// is malformed (checked before any lookup) or not among this user's chats
+  /// shows the "Chat not found" state.
+  void _applyDeepLink() {
+    final request = _deepLink.value;
+    if (request == null ||
+        identical(request, _handledLink) ||
+        _session.chat.loadingThreads ||
+        !mounted) {
+      return;
+    }
+    _handledLink = request;
+    unawaited(_openChatLink(request.ref));
+  }
+
+  Future<void> _openChatLink(String ref) async {
+    final thread =
+        isValidChatRef(ref) ? _session.chat.threadForSession(ref) : null;
+    if (thread == null) {
+      await _navigate(WorkspaceDestination.chat);
+      if (!mounted) return;
+      await _showChatNotFound(ref);
+      return;
+    }
+    if (_projectFilter != null && thread.project != _projectFilter) {
+      setState(() => _projectFilter = null);
+    }
+    await _openThread(thread);
+  }
+
+  Future<void> _showChatNotFound(String ref) {
+    final shown = isValidChatRef(ref)
+        ? ref
+        : (ref.length > 40 ? '${ref.substring(0, 40)}...' : ref);
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('chat-not-found'),
+        title: const Text('Chat not found'),
+        content:
+            Text('There is no chat "$shown" here. It may belong to another '
+                'account or browser, or it was deleted.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The origin shared links are built on: the page origin in a browser, else
+  /// the configured server.
+  String? get _shareOrigin =>
+      widget.shareOrigin ?? Settings.pageOrigin ?? widget.settings.serverUrl;
+
+  Future<void> _shareThread(ChatThread thread, ChatShareKind kind) async {
+    await copyChatShare(
+      context,
+      kind,
+      _session.chat.sessionFor(thread.id),
+      origin: _shareOrigin,
+    );
+  }
+
   Future<void> _openSearch() async {
     _closeDrawer();
     final chat = _session.chat;
@@ -554,6 +642,7 @@ class _AppShellState extends State<AppShell>
         onDestination: (d) => unawaited(_navigate(d)),
         onOpenThread: (t) => unawaited(_openThread(t)),
         onDeleteThread: (t) => unawaited(_deleteThread(t)),
+        onShareThread: (t, kind) => unawaited(_shareThread(t, kind)),
         onConnection: _openConnection,
       );
 
