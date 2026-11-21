@@ -391,6 +391,7 @@ sonder_runtime/application/session/checkpoints.py
 sonder_runtime/application/session/continuity.py
 sonder_runtime/application/session/projections.py
 sonder_runtime/application/session/transcript_export.py
+sonder_runtime/application/session/transcript_view.py
 sonder_runtime/application/skill_discovery/__init__.py
 sonder_runtime/application/skill_discovery/registry.py
 sonder_runtime/application/skill_refresh.py
@@ -560,6 +561,7 @@ sonder_runtime/domain/security_eval/summary.py
 sonder_runtime/domain/security_eval/verdict.py
 sonder_runtime/domain/selfmod/__init__.py
 sonder_runtime/domain/session_privacy.py
+sonder_runtime/domain/session_ref.py
 sonder_runtime/domain/skills/__init__.py
 sonder_runtime/domain/speculation_policy.py
 sonder_runtime/domain/strategy/__init__.py

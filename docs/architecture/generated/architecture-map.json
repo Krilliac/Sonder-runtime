@@ -523,7 +523,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 426,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -887,6 +887,7 @@
         "sonder_runtime/application/session/replay.py",
         "sonder_runtime/application/session/trajectory.py",
         "sonder_runtime/application/session/transcript_export.py",
+        "sonder_runtime/application/session/transcript_view.py",
         "sonder_runtime/application/skill_discovery/__init__.py",
         "sonder_runtime/application/skill_discovery/registry.py",
         "sonder_runtime/application/skill_refresh.py",
@@ -1046,7 +1047,7 @@
       ]
     },
     {
-      "file_count": 323,
+      "file_count": 324,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1336,6 +1337,7 @@
         "sonder_runtime/domain/selfmod/models.py",
         "sonder_runtime/domain/serve_selection.py",
         "sonder_runtime/domain/session_privacy.py",
+        "sonder_runtime/domain/session_ref.py",
         "sonder_runtime/domain/skills/__init__.py",
         "sonder_runtime/domain/skills/registry.py",
         "sonder_runtime/domain/speculation_policy.py",
