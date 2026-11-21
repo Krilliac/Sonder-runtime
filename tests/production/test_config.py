@@ -397,7 +397,21 @@ def test_default_workspace_root_is_typed_and_must_be_absolute(tmp_path):
     )
 
 
-def test_historical_state_home_alias_is_supported_and_canonical_home_wins(tmp_path):
+def test_state_home_env_precedence_matches_paths_default_home(tmp_path, monkeypatch):
+    from sonder_runtime.platform import paths as sonder_paths
+
+    state = tmp_path / "state"
+    home = tmp_path / "home"
+    env = {"SONDER_HOME": str(home), "SONDER_STATE_HOME": str(state)}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sonder_paths, "_configured_home", lambda: None)
+
+    assert load_config(env=env).state.home == str(state)
+    assert sonder_paths.default_home() == state
+
+
+def test_historical_state_home_alias_is_supported_and_wins_over_home(tmp_path):
     historical = tmp_path / "historical"
     canonical = tmp_path / "canonical"
 
@@ -412,7 +426,7 @@ def test_historical_state_home_alias_is_supported_and_canonical_home_wins(tmp_pa
             "SONDER_STATE_HOME": str(historical),
         },
     )
-    assert config.state.home == str(canonical)
+    assert config.state.home == str(historical)
 
 
 def test_http_and_reasoning_options_are_typed_toml_settings(tmp_path):
