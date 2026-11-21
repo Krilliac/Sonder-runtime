@@ -1,0 +1,127 @@
+# Reference Caddy config: TLS front for ONE remote Ollama worker used by a
+# Sonder coordinator (static pool mode).
+#
+# VALIDATION STATUS (2026-11-20): `caddy adapt` and `caddy validate` passed
+# with Caddy v2.9.1 (placeholders replaced, `tls internal`, once with a DNS
+# name and once with an IP literal). No live request test of the proxy was
+# run. After substituting your values, run
+#   caddy validate --config Caddyfile.ollama-worker --adapter caddyfile
+# The Ollama Host-header behaviour that `header_up Host` works around WAS
+# tested (Ollama 0.40.16, loopback listener): a DNS-name Host header got
+# 403, IP-literal and 127.0.0.1:11434 Host headers got 200.
+#
+# Guide: docs/runbooks/remote-ollama-caddy.md (one home for the coordinator
+# side: URL shape, consent, CA trust).
+#
+# Replace before use:
+#   <worker-host>   DNS name or IP literal the coordinator will connect to.
+#                   The certificate SAN must contain exactly this name/IP.
+#   10.0.0.1/32     the coordinator's address as seen by this worker.
+#
+# Sonder sends NO credentials in static pool mode (no Authorization header, no
+# client certificate), so do NOT add basic_auth, bearer or forward_auth here:
+# the pool would get 401/403 and the worker would never leave probation.
+# Protection is: TLS + the source-IP allowlist below + a firewall that admits
+# the coordinator only.
+{
+	# Sonder never follows redirects (any 3xx is a hard error), and it only
+	# talks https. Do not create a port-80 http->https redirect listener.
+	auto_https disable_redirects
+
+	# Only with `tls internal` on a host that must not touch its OS trust
+	# store (the coordinator trusts the root through ca_bundle instead):
+	# skip_install_trust
+}
+
+https://<worker-host>:443 {
+	# --- TLS -----------------------------------------------------------------
+	# Pick ONE.
+	#
+	# (a) Private CA made by Caddy. Works for DNS names and IP literals. The
+	#     root certificate to copy to the coordinator is
+	#     <caddy data dir>/pki/authorities/local/root.crt (`caddy environ`
+	#     prints the data directory as caddy.AppDataDir).
+	tls internal
+	#
+	# (b) Publicly trusted name: supply your own pair:
+	# tls /etc/caddy/certs/worker.pem /etc/caddy/certs/worker.key
+	#
+	#     Do NOT just delete the `tls` line: default ACME needs port 80 (HTTP-01)
+	#     or port 443 (TLS-ALPN-01) reachable from the CA, but this config keeps
+	#     80 closed and 443 coordinator-only, so issuance would fail. For a
+	#     public ACME certificate use the DNS-01 challenge instead: a Caddy build
+	#     with a DNS provider module and `tls { dns <provider> ... }`.
+
+	log
+
+	# --- Request filter ----------------------------------------------------
+	# `route` evaluates its children strictly in the order written.
+	route {
+		# 1. Source-IP allowlist: the coordinator only. `remote_ip` matches
+		#    the direct TCP peer.
+		@not_coordinator {
+			not remote_ip 10.0.0.1/32
+		}
+		respond @not_coordinator "forbidden" 403
+
+		# 2. Sonder never sends an Origin header. Any request carrying one is a
+		#    browser (or a browser-driven attack): refuse it.
+		@has_origin {
+			header Origin *
+		}
+		respond @has_origin "forbidden" 403
+
+		# 3. Request body ceiling. Sonder's own inbound limit is at most 16 MiB
+		#    ([server].max_request_bytes), and it adds its own system prompt and
+		#    context before calling Ollama; vision requests carry base64 images.
+		#    32MB leaves headroom without leaving the worker unbounded.
+		request_body {
+			max_size 32MB
+		}
+
+		# 4. Exact method + path allowlist: the routes Sonder can send.
+		#    Never allowed: /api/pull /api/create /api/delete /api/copy
+		#    /api/push /api/embed (Sonder does not send them).
+		@ollama_read {
+			method GET
+			path /api/version /api/tags /api/ps
+		}
+		@ollama_write {
+			method POST
+			path /api/show /api/chat /api/generate /api/embeddings
+		}
+
+		# Ollama bound to loopback rejects a Host header it does not know
+		# (DNS names other than localhost-style ones got 403 in testing), and
+		# Caddy forwards the client's Host by default. Rewrite it to the
+		# upstream's own host:port. Keep this for IP-literal site addresses too.
+		# flush_interval -1 passes bytes through immediately. Sonder calls
+		# Ollama with stream:false, so the response headers only arrive after the
+		# whole generation: do NOT set response_header_timeout below
+		# SONDER_TIMEOUT (default 300 s); leaving it unset is correct.
+		reverse_proxy @ollama_read 127.0.0.1:11434 {
+			header_up Host {upstream_hostport}
+			flush_interval -1
+		}
+		reverse_proxy @ollama_write 127.0.0.1:11434 {
+			header_up Host {upstream_hostport}
+			flush_interval -1
+		}
+
+		# 5. Everything else (other methods, other paths) is refused.
+		respond "forbidden" 403
+	}
+}
+
+# --- Embedding-only host variant (see the runbook) ----------------------------
+# On a host that only serves Sonder's embeddings (SONDER_EMBED_BASE_URL),
+# replace the two matchers in step 4 with:
+#
+#   @ollama_read {
+#       method GET
+#       path /api/version /api/tags
+#   }
+#   @ollama_write {
+#       method POST
+#       path /api/embeddings
+#   }

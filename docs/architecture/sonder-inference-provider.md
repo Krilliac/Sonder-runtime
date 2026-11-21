@@ -4,7 +4,10 @@ Reference for the ModelGateway provider that sends generation to a
 `sonder-infer serve` process (Sonder Inference HTTP API v1). Decision record:
 [ADR-2026-09-26-sonder-inference-provider](../adr/ADR-2026-09-26-sonder-inference-provider.md).
 Operator procedure: [runbook](../runbooks/sonder-inference.md).
-Verified against the code on 2026-09-26.
+Verified against the code on 2026-09-26; on 2026-11-20 only these were
+re-verified and corrected: the configuration table (this is the one home of
+the `SONDER_INFERENCE_*` variables), the health probe budget, the label map
+and the private-worker example. Other sections carry the 2026-09-26 stamp.
 
 ## Code map
 
@@ -47,14 +50,14 @@ task does not switch thinking or sampling modes between decisions.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SONDER_INFERENCE_BASE_URL` | `http://127.0.0.1:11437` | Server origin (a path prefix is allowed for a proxy). `0.0.0.0`/`::` are rewritten to `127.0.0.1`/`::1`. |
-| `SONDER_INFERENCE_READY_FILE` | unset | Used only when the base URL is unset: the `url` field of a `serve --ready-file`. A missing file means the server is not listening yet and raises `SonderInferenceUnreachable`; a malformed file is a configuration error. |
+| `SONDER_INFERENCE_BASE_URL` | `http://127.0.0.1:11437` | Server origin: `http(s)://host[:port][/path]` with no credentials, query or fragment (otherwise `InvalidInput`). A path prefix is kept (the gateway requests `<prefix>/v1/...`, so the proxy must serve that prefix or strip it) and a trailing `/` is removed. `0.0.0.0`/`::` are rewritten to `127.0.0.1`/`::1`. Wins over the ready file, which wins over the default. |
+| `SONDER_INFERENCE_READY_FILE` | unset | Used only when the base URL is unset: the `url` field of a `serve --ready-file`. A missing file means the server is not listening yet and raises `SonderInferenceUnreachable`; a malformed file is a configuration error. The file is a JSON document with a `url` field, at most 65536 bytes (larger is `InvalidInput`). |
 | `SONDER_INFERENCE_MODEL` | `default` | Model id sent when no tier mapping applies. |
 | `SONDER_INFERENCE_TIER_MODELS` | unset | `fast=a,general=b`; keys must be provider tiers. |
-| `SONDER_INFERENCE_API_KEY` | unset | Sent as `Authorization: Bearer`; in the log redaction set. |
-| `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
+| `SONDER_INFERENCE_API_KEY` | unset | Sent as `Authorization: Bearer`; in the log redaction set. Required for any non-loopback base URL; set it to the server's `--token-file` value. |
+| `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). Accepted values are `0`, `1` and empty (treated as `0`) after stripping whitespace; anything else is `InvalidInput`. |
 | `SONDER_INFERENCE_MAX_INFLIGHT` | `1` | The primary's parallel capacity for private-worker placement (1-16); unused without workers. |
-| `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON array of approved private workers, `[{"url": "https://10.77.0.2:8443/sonder-inference", "ca_bundle": "C:/.../ca.pem", "token_env": "SONDER_INFERENCE_NODE1_TOKEN", "max_inflight": 2}]` (see Private workers). Requires `SONDER_ALLOW_REMOTE_INFERENCE=1`. |
+| `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON array of approved private workers, `[{"url": "https://10.0.0.2:8443", "ca_bundle": "<sonder-home>/certs/worker1-ca.pem", "token_env": "SONDER_INFERENCE_WORKER1_TOKEN", "max_inflight": 2}]` (1-8 workers, at most 16384 characters; see Private workers). Requires `SONDER_ALLOW_REMOTE_INFERENCE=1`. |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_STREAM_IDLE_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no bytes (keep-alive comments count) arrive for this long once the response has started; `0`-`86400`. Inside the total timeout above. Off by default because a long prefill can legitimately be silent. The error names the idle timeout and the elapsed seconds. |
 | `SONDER_INFERENCE_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no content, reasoning or tool-call delta has arrived this long after the request started (empty keep-alive deltas do not count); `0`-`86400`. Pair a long `SONDER_INFERENCE_TIMEOUT_SECONDS` with these for a slow large model that must still fail fast when it stalls. The `openai_compatible` provider reads `SONDER_OPENAI_STREAM_IDLE_TIMEOUT_SECONDS` and `SONDER_OPENAI_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` (same meaning); it streams only when the caller streams. The idle clock resets per complete line received, so one line trickling in for longer than the limit counts as idle. If the endpoint answers a stream request with a single JSON body, the idle limit bounds the whole body read after the headers, and the first-content limit then acts as a cap on time-to-headers. Streamed turns on `openai_compatible` tiers now send `"stream": true` and `stream_options: {"include_usage": true}`; an endpoint that rejects either field fails with "endpoint rejected request (HTTP 400)". |
@@ -205,7 +208,7 @@ mapping, but injects its own GET and POST transports:
   `DependencyUnavailable` (POST); the `Authorization` header is never re-sent
   to the `Location` host.
 - Each exchange (connect, headers and body) has one wall-clock budget: the
-  health probe's 2 s, or the send timeout capped by the operation deadline. A
+  health probe's budget (`SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS`, default 5 s), or the send timeout capped by the operation deadline. A
   watchdog shuts the socket down when the budget is spent, so a peer that
   trickles bytes cannot stretch a per-read timeout into minutes.
 - Bodies are read with bounds (1 MiB for GET, 16 MiB for a chat completion,
@@ -258,7 +261,8 @@ Headers per call:
 The capture label passed to `dispatch_provider` is `sonder-inference`.
 `provider_bindings.PROVIDER_LABEL_IDS` maps labels to provider ids
 (`ollama`→`ollama`, `openai-compatible`→`openai_compatible`,
-`sonder-inference`→`sonder_inference`); the existing labels are persisted
+`sonder-inference`→`sonder_inference`, `openrouter`→`openrouter`,
+`anthropic`→`anthropic`; `provider_bindings.py:53-59`); the existing labels are persisted
 capture evidence and do not change.
 
 ## Errors and "provably not executed"
@@ -283,7 +287,9 @@ and cancellation are checked before the health probe, before the send and
 after the response.
 
 Before each send the gateway consults cached health (`GET /v1/sonder/health`,
-at most 2 s of wall-clock time, reused for the TTL). Concurrent callers that
+`SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS`, default 5 s, of wall-clock
+time per probe; a generation retry of a timeout/overloaded probe may use up to
+twice that, capped at 6 s; reused for the TTL). Concurrent callers that
 find the cache stale share one probe (single flight). The API major version
 must be 1, read from the health document's `api_version` (or, for an error
 document, its `sonder.api_version`) and, when present, from the response

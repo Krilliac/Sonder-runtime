@@ -54,7 +54,8 @@ Website: <https://sondercore.si>
 
 ## Requirements
 
-- Python 3.11 or later (CI uses 3.14; 3.12 is still supported for one release).
+- Python 3.11 or later. CI on `main` runs 3.14; 3.12 runs in a non-required
+  compatibility job; 3.11 is the untested floor (checked 2026-11-20).
 - Ollama, installed and running.
 - One generative local model. `setup_alias.py` pulls a base model, exposes it
   as `sonder:latest`, and also tries to pull the `nomic-embed-text` embedding
@@ -64,36 +65,28 @@ Website: <https://sondercore.si>
   and the [model catalog](docs/wiki/18-model-catalog.md).
 
 Runtime Python dependencies are pinned in
-[`requirements-runtime.txt`](requirements-runtime.txt).
+[`requirements-runtime.txt`](requirements-runtime.txt), the only file the
+installers use. Other requirements files (dev, update, Postgres, Anthropic,
+training) are optional: see
+[optional dependency sets](docs/runbooks/install-workstation-local.md#optional-dependency-sets).
 
 ## Install
 
 ### From source
 
 ```bash
-# Linux/macOS
 git clone https://github.com/Krilliac/Sonder-runtime.git
 cd Sonder-runtime
-python3 -m venv venv
-./venv/bin/pip install -r requirements-runtime.txt
-./venv/bin/python setup_alias.py
 ```
 
-```powershell
-# Windows PowerShell
-git clone https://github.com/Krilliac/Sonder-runtime.git
-Set-Location Sonder-runtime
-python -m venv venv
-.\venv\Scripts\pip.exe install -r requirements-runtime.txt
-.\venv\Scripts\python.exe setup_alias.py
-```
-
-`setup_alias.py --no-embedding` skips the embedding model. On Windows,
-`packaging\install_workstation_local.ps1` performs the venv, install, and
-preflight steps in one command; see
-[install-workstation-local](docs/runbooks/install-workstation-local.md). For a
+Then follow
+[install-workstation-local](docs/runbooks/install-workstation-local.md): the
+Windows installer script, the manual Linux/macOS/Windows venv steps, the
+extracted local-system bundle, WSL2 and the optional dependency sets. For a
 self-hosted Linux server behind TLS, follow
-[install-server-private](docs/runbooks/install-server-private.md).
+[install-server-private](docs/runbooks/install-server-private.md). The ordered
+path through every setup page is
+[setup-start-here](docs/runbooks/setup-start-here.md).
 
 ### Prerelease app builds
 
@@ -108,34 +101,40 @@ it once to set up the local model.
 
 ## Quick start
 
-From a source checkout, run the venv interpreter created in the install step:
-
-```bash
-# Linux/macOS
-./venv/bin/python -m sonder_runtime doctor      # read-only health report
-./venv/bin/python -m sonder_runtime repl        # interactive terminal REPL
-```
-
-```powershell
-# Windows PowerShell
-.\venv\Scripts\python.exe -m sonder_runtime doctor
-.\venv\Scripts\python.exe -m sonder_runtime repl
-```
-
-On Windows, `sonder.cmd` in the checkout or bundle root also launches the REPL;
-it uses the checkout's `venv` when present. In the REPL, `/help` lists
-commands, `/model` lists and switches models, and `/runtime` shows the
-tier-to-model policy.
+From a source checkout, run the venv interpreter created by the install. On a
+fresh state home **start `serve` once first**: `migrate`, `repl` and `mcp` run
+before `serve` leave the home in a state `serve` then refuses; see
+[Fresh state home and the epoch-2 gate](docs/runbooks/install-workstation-local.md#fresh-state-home-and-the-epoch-2-gate).
 
 To serve the OpenAI-compatible API on loopback (Linux/macOS shown; on Windows
 use `.\venv\Scripts\python.exe`):
 
 ```bash
+./venv/bin/python -m sonder_runtime preflight --skip-ollama
 ./venv/bin/python -m sonder_runtime serve
 curl http://127.0.0.1:11435/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"sonder","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+Once `serve` has started, in another terminal:
+
+```bash
+./venv/bin/python -m sonder_runtime doctor      # read-only health report
+./venv/bin/python -m sonder_runtime repl        # interactive terminal REPL
+```
+
+```powershell
+.\venv\Scripts\python.exe -m sonder_runtime doctor
+.\venv\Scripts\python.exe -m sonder_runtime repl
+```
+
+In the REPL, `/help` lists commands, `/model` lists and switches models, and
+`/runtime` shows the tier-to-model policy. On Windows, `sonder.cmd` in the
+checkout or bundle root bootstraps the engine, starts the background API
+server and then opens the REPL (or acts as a thin client when `SONDER_SERVER`
+is set); see
+[launchers and setup scripts](docs/wiki/04-cli-and-entrypoint.md#launchers-and-setup-scripts).
 
 To run as an MCP server, use `./venv/bin/python -m sonder_runtime mcp`
 (Windows: `.\venv\Scripts\python.exe -m sonder_runtime mcp`). Client
@@ -149,8 +148,10 @@ More detail: [getting started](docs/wiki/02-getting-started.md),
 
 Configuration is read from `sonder.toml`, and secrets from `sonder.env`, in
 the per-user Sonder home, or from the paths given by `SONDER_CONFIG` and
-`SONDER_SECRETS`. `python -m sonder_runtime config` prints the effective,
-redacted configuration. Annotated examples are in
+`SONDER_SECRETS`. For the order in which sources override each other, see
+[Configuration: precedence](docs/wiki/03-configuration.md#precedence-production-config).
+`python -m sonder_runtime config` prints the effective, redacted
+configuration. Annotated examples are in
 [`packaging/sonder.toml.example`](packaging/sonder.toml.example) and
 [`packaging/sonder.env.example`](packaging/sonder.env.example); the full
 reference is [configuration](docs/wiki/03-configuration.md).
@@ -162,7 +163,9 @@ binding, and sends privacy-first routing preferences (no prompt logging,
 zero data retention) unless overridden. Claude models can likewise be bound
 through the [Anthropic provider](docs/integration/anthropic.md): the same
 opt-in, `SONDER_ANTHROPIC_API_KEY` (plus an optional second key), and a
-`SONDER_ANTHROPIC_DAILY_USD` spend cap.
+`SONDER_ANTHROPIC_DAILY_USD` spend cap. Any OpenAI-compatible server
+(llama.cpp server, vLLM, LM Studio) can serve a tier through the
+[OpenAI-compatible provider](docs/integration/openai-compatible.md).
 
 ## Security model
 
@@ -170,14 +173,14 @@ Sonder can execute code and modify files on the host, so access to a Sonder
 endpoint should be treated as shell access. Read [SECURITY.md](SECURITY.md)
 before enabling remote access. The runtime enforces the following:
 
-- **Loopback by default.** The server binds `127.0.0.1`. A non-loopback bind is
-  refused unless `tls_terminated_by_proxy=true` is set and `SONDER_API_KEY`
-  meets the minimum length. Remote access is supported only through the
-  server-private profile behind a TLS reverse proxy
-  ([secure remote access](docs/runbooks/secure-remote-access.md)).
-- **Cloud off by default.** Hosted/cloud tiers are refused until
-  `SONDER_ALLOW_CLOUD=1` is set. A non-loopback Ollama endpoint is refused
-  unless `SONDER_ALLOW_REMOTE_OLLAMA=1` is set. The two opt-ins are separate.
+- **Loopback by default.** The server binds `127.0.0.1`; remote access is
+  only through a TLS reverse proxy
+  ([secure remote access](docs/runbooks/secure-remote-access.md),
+  [security model](docs/wiki/09-security-model.md#network-posture)).
+- **Cloud off by default.** Hosted/cloud tiers and non-loopback Ollama each
+  need their own explicit opt-in (`SONDER_ALLOW_CLOUD`,
+  `SONDER_ALLOW_REMOTE_OLLAMA`); see
+  [security model](docs/wiki/09-security-model.md#network-posture).
 - **Approvals.** Permission modes `plan`, `manual` (default), `acceptEdits`,
   and `auto` control when tool calls need approval. Tools classed `dangerous`
   (for example `file_delete`, `sqlite_mutate`, `git_merge`) ask in every mode,

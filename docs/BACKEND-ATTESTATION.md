@@ -6,7 +6,10 @@ synthetic diagnostics**, even when the script calls a live endpoint. They do
 not qualify a model for identity-bound capability routing. The evidence file
 contains no provider response text or API key.
 
-Preview the request without a model call or state write:
+Preview the request without a model call or evidence write (startup can still
+create the private state directory, because the `--evidence` default calls
+`state_path`, `scripts/backend_attest.py:168`, `platform/paths.py:231-240`; point
+`SONDER_HOME` and `SONDER_BACKEND_EVIDENCE` at a scratch location to avoid it):
 
 ```powershell
 python scripts/backend_attest.py --base-url http://127.0.0.1:8080 --model my-model --dry-run
@@ -49,6 +52,30 @@ A non-loopback endpoint requires both HTTPS and `--allow-cloud`. The fixed
 probe prompts contain no project data. If the endpoint needs an API key, set
 `SONDER_OPENAI_API_KEY` in the process environment and keep it out of command
 arguments and logs.
+
+## Options
+
+Verified against `scripts/backend_attest.py` on 2026-11-20.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--backend` | `openai-compatible` | `openai-compatible`, `sonder-inference` or `openrouter` (`:47`, `:162-163`). |
+| `--base-url` | `openai-compatible`: `SONDER_OPENAI_BASE_URL`; `openrouter`: `https://openrouter.ai/api`; `sonder-inference`: `SONDER_INFERENCE_BASE_URL` or the ready file | Server root, no `/v1`. The `SONDER_OPENAI_*` defaults do not apply to `sonder-inference` (`:255-262`). |
+| `--model` | `openai-compatible`: `SONDER_OPENAI_MODEL`; `sonder-inference`: `SONDER_INFERENCE_MODEL` | Required for `openai-compatible` (flag or variable); `openrouter` requires `--model vendor/model` (`:183-192`). |
+| `--evidence` | `backend-capabilities.json` in the private state directory, or the path in `SONDER_BACKEND_EVIDENCE` | Where the record is stored. |
+| `--timeout` | `30` | Seconds; must be above 0 and at most `300`. |
+| `--allow-cloud` | off | Explicit consent for a non-loopback endpoint (which also needs HTTPS). |
+| `--dry-run` | off | Print the plan; no model call and no evidence write (the state directory may still be created, see above). |
+| `--identity-file` | none | Absolute host-owned identity JSON (below). Refused for `sonder-inference` (`:253-254`). |
+| `--protocol-probes` | off | Extra JSON-shape checks. For `openai-compatible` and `openrouter` it requires `--identity-file` unless `--dry-run` (`:195-196`). For `sonder-inference` no identity file is allowed; the identity comes from the server (see below). |
+
+The command prints one JSON object. Exit code 0 means a dry run, or no
+attempted case failed; 1 means at least one case failed; 2 is a refused
+argument (for example a non-loopback endpoint without `--allow-cloud`, an
+`http://` non-loopback URL, or `0.0.0.0` as the destination). `--backend
+openrouter` probes `https://openrouter.ai/api` with `OPENROUTER_API_KEY`, is
+a paid API, and always needs `--allow-cloud`; see
+[OpenRouter](integration/openrouter.md).
 
 ## Sonder Inference
 

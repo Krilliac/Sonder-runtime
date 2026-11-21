@@ -1,0 +1,56 @@
+# Reference Caddy TLS termination for the Sonder runtime HTTP API (SPEC-2).
+#
+# `caddy adapt` and `caddy validate` passed on Caddy 2.9.1 on 2026-11-20, both
+# as shipped (ACME) and with `tls internal` enabled. Request-level behaviour
+# was not live-tested. Run `caddy validate --config <this file> --adapter
+# caddyfile` after editing. Runbook: docs/runbooks/secure-remote-access.md
+# (Windows: change the log path below, e.g. to C:\ProgramData\Caddy\sonder-access.log.)
+#
+# Sonder itself binds loopback only (127.0.0.1:11435); this proxy is the sole
+# non-loopback surface. ONLY front a listener that requires credentials
+# (api-key / account / both / either, key >= 24 characters) with
+# [server].tls_terminated_by_proxy = true. Never front a local-open listener:
+# behind a loopback proxy every remote caller would be an admin.
+
+sonder.example.internal {
+	# Certificates: automatic (ACME) for a public name. For a private name,
+	# uncomment the next line; clients must then trust Caddy's local root CA.
+	# tls internal
+
+	# Request-layer limit, mirrors the 1 MiB default of
+	# [server].max_request_bytes. Raise both together (Sonder allows up to
+	# 16 MiB). An oversized body is answered 413.
+	request_body {
+		max_size 1MiB
+	}
+
+	# A single route {} keeps these directives in the order written. Without
+	# it Caddy's default directive order puts `respond` before
+	# `reverse_proxy`, so `respond 404` would answer every request.
+	route {
+		# Forward only the unauthenticated liveness probe and the API.
+		# /ready, /health, /version and the metrics path are deliberately
+		# NOT forwarded: a loopback proxy makes every caller a 127.0.0.1 peer.
+		# Add /app/* here only if [server].web_app_enabled is true.
+		@sonder path /live /v1/*
+
+		reverse_proxy @sonder 127.0.0.1:11435 {
+			# Stream SSE frames (": keep-alive" comments every 15 s) at once.
+			flush_interval -1
+
+			# The public Host is passed through unchanged; Sonder accepts it
+			# because credentials are configured, so no allowed_hosts entry
+			# is needed. Caddy sets X-Forwarded-For/-Proto itself and
+			# replaces any client-supplied value; drop the others.
+			header_up -Forwarded
+			header_up -X-Real-IP
+		}
+
+		# Everything else, matching the nginx reference.
+		respond 404
+	}
+
+	log {
+		output file /var/log/caddy/sonder-access.log
+	}
+}

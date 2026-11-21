@@ -55,13 +55,16 @@ Mitigations that are already in place and worth knowing about:
 - `file_delete` is **dry-run by default** and requires a confirmation string
   that matches one the tool returned; it also enforces root restrictions and
   a developer-authorization check.
-- File operations are constrained to configured roots; escaping them takes an
-  explicit `extra_roots` or a bypass token.
-- Credential stores (`.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`,
-  `.docker/config.json`, `.git/config`, `.netrc`, `.git-credentials`,
-  `.pgpass`, OpenSSH key files, `.env*`) are refused by the direct read tools
-  even inside an allowed root and even with a developer token or bypass,
-  unless an operator-configured file root names the store itself.
+- File operations are constrained to configured roots. The `SONDER_FILE_BYPASS`
+  environment flag (every caller) or a developer token turns that containment
+  off entirely (except in managed console work, where it only adds
+  `extra_roots`); a one-shot approval of an exact call can instead widen the roots
+  for that call alone, with containment still checked.
+- Credential stores (`.ssh`, `.aws`, `.env*`, OpenSSH key files and the rest
+  of the [full list](docs/wiki/09-security-model.md#workspace--tool-containment))
+  are refused by the direct read tools even inside an allowed root and even
+  with a developer token or bypass, unless an operator-configured file root
+  names the store itself.
 - `text_search` withholds the contents of every file `file_read` refuses as
   a secret or credential store (the same `file_ops` predicates), whatever
   `include_hidden`, the glob or a bypass say, and reports how many it
@@ -148,7 +151,10 @@ Mitigations that are already in place and worth knowing about:
   remote `OLLAMA_HOST` must be explicitly enabled. A separate opt-in,
   `SONDER_ALLOW_REMOTE_OLLAMA=1` with `SONDER_OLLAMA_WORKERS`, lets ordinary
   local-tier requests be pooled across multiple Ollama hosts (see
-  `docs/runbooks/multi-pc-ollama.md`); vision analysis and fanout synthesis
+  `docs/runbooks/multi-pc-ollama.md`). A remote Ollama origin must be
+  `https://`, name an explicit port and carry no path, userinfo, query or
+  fragment; the proxy setup is in
+  [remote-ollama-caddy](docs/runbooks/remote-ollama-caddy.md). Vision analysis and fanout synthesis
   carry a stricter never-leaves-this-machine contract and are pinned to the
   primary endpoint regardless of pool configuration.
 - Lessons are passed through a 20-rule privacy classifier before storage, so
@@ -204,8 +210,9 @@ Boolean/truthy, abbreviated, case-changed, or whitespace-modified values fail
 closed. Even with the exact acknowledgement, Sonder refuses activation when
 `SONDER_HOST` is not loopback or when the process is root/elevated. Activation
 appends and flushes a durable JSONL warning under
-`$SONDER_HOME/audit/unsafe-lab.jsonl` (override only with
-`SONDER_UNSAFE_LAB_AUDIT_PATH`), and status/diagnostics display the mode.
+`$SONDER_HOME/audit/unsafe-lab.jsonl` when `SONDER_HOME` is set (otherwise an
+OS state folder; override with `SONDER_UNSAFE_LAB_AUDIT_PATH`; see
+[unsafe-lab.md](docs/runbooks/unsafe-lab.md)), and status/diagnostics display the mode.
 All model-authored subprocess boundaries, including repair campaigns and
 self-modification validation/Git calls, receive a scrubbed environment that removes
 secret-, credential-, token-, session-, approval-, bypass-, and control-like
@@ -226,10 +233,21 @@ Nothing is exposed to the network. If you are evaluating Sonder, stay here.
 
 ### Local development service (`deploy_sonder.sh --serve`)
 
-This convenience mode installs a loopback-only systemd service. It generates a
-random `SONDER_API_KEY`, stores it in `/etc/sonder/sonder-local.env` with mode
-0600, and prints a `http://127.0.0.1:<port>/v1` URL for local clients. It does
-not provide a supported remote deployment and must not be port-forwarded.
+**Currently broken; use `packaging/install_sonder.sh` instead.** As of
+2026-11-20 `deploy_sonder.sh` fails at startup with `ModuleNotFoundError: No
+module named 'ollama_endpoint'`: it runs `import ollama_endpoint` from the repository
+root (in `deploy_sonder.sh`), but it now lives at
+`sonder_runtime/adapters/inference/ollama_endpoint.py`. The script must run as
+root on Ubuntu (apt) or dnf/yum hosts and writes systemd units.
+
+Its intended behavior is a loopback-only systemd service: it generates a random
+`SONDER_API_KEY`, stores it in `/etc/sonder/sonder-local.env` with mode 0600,
+and **prints the key to the terminal** at the end (the `API key:` line), so it
+lands in your scrollback and any captured log. `install_sonder.sh` never prints
+the key. The service is not a supported remote deployment and must not be
+port-forwarded. Use
+[install-server-private](docs/runbooks/install-server-private.md), which runs
+`packaging/install_sonder.sh`.
 
 Older revisions of this script bound `0.0.0.0` and advertised a plaintext
 public URL. Upgrade before using it, remove any firewall rule that exposed port
@@ -244,15 +262,17 @@ reference nginx configuration terminates TLS, limits requests, and forwards to
 the loopback listener. Never expose the runtime port directly: possession of a
 valid credential grants access to the runtime's powerful tool surface.
 
-The listener checks the `Host` header before routing (`421
-HOST_NOT_ALLOWED`). IP literals, loopback names, the machine's own names and
-`[server].allowed_hosts` are always accepted; any other name is accepted only
-when the listener requires credentials, and never earns the loopback-peer
-exemptions. This stops DNS-rebinding pages from reading the unauthenticated
-loopback surface, since rebinding needs an attacker-controlled name and a
-listener that answers without credentials. `X-Forwarded-For` is trusted only with
-`tls_terminated_by_proxy = true` and a peer inside `trusted_proxy_cidrs`.
-See [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md).
+A non-loopback bind is refused unless a TLS-terminating proxy is declared and
+strong credentials are set; keep the runtime on `127.0.0.1` regardless
+([secure remote access runbook](docs/runbooks/secure-remote-access.md)). The
+listener also checks the `Host` header before routing (`421
+HOST_NOT_ALLOWED`) so DNS-rebinding pages cannot reach the unauthenticated
+loopback surface, and trusts `X-Forwarded-For` only with
+`tls_terminated_by_proxy = true` and a peer inside `trusted_proxy_cidrs`; see
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
+
+For a first-time hardening checklist (permission mode, file roots, secrets file,
+consent gates) see [security-hardening](docs/runbooks/security-hardening.md).
 
 ### Sonder Inference provider
 
