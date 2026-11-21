@@ -117,3 +117,21 @@ def test_entrypoint_has_no_root_preflight_dependency():
     source = (ROOT / "sonder_runtime" / "__main__.py").read_text(encoding="utf-8")
     assert "import sonder_preflight" not in source
     assert "from sonder_preflight" not in source
+
+
+def test_service_logs_degraded_message_when_required_check_fails(caplog):
+    import logging
+
+    failing = PreflightReport((CheckResult("disk", False, True, "full"),))
+
+    class Executor:
+        def run(self, config, *, check_ollama=True, ollama_timeout=5.0):
+            return failing
+
+    with caplog.at_level(logging.DEBUG, logger="sonder_runtime.application.preflight.use_cases"):
+        result = PreflightService(Executor()).run(object())
+    assert result is failing
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "did not pass" in warnings[0].getMessage()
+    assert not any("passed=?" in r.getMessage() for r in caplog.records)

@@ -626,3 +626,22 @@ def test_migrate_refuses_a_payload_with_no_stores_at_all(env):
     result = _install_with_payload(manager, env, "4.5.0", "{}")
     assert result["status"] == "rolled_back"
     assert result["error_code"] == "MIGRATION_FAILED"
+
+
+def test_install_carries_the_active_venv_into_the_new_release(env):
+    """Bundles exclude venv/ but the units run <current>/venv/bin/python."""
+    bootstrap = env / "releases" / "installer-bootstrap"
+    (bootstrap / "venv" / "bin").mkdir(parents=True)
+    (bootstrap / "venv" / "bin" / "python").write_text("", encoding="utf-8")
+    sonder_updates.switch_active_pointer(env / "current", bootstrap)
+    manager = _manager(env)
+
+    plan = _import_ok(manager, env, version="1.1.0")
+    done = manager.install(
+        plan["update_id"], confirm=confirm_nonce_for(plan),
+        allow_unverified=True, skip_backup=True,
+    )
+    assert done["status"] == "committed"
+    new_release = Path(_pointer_text(env / "current"))
+    assert (new_release / "venv" / "bin" / "python").exists()
+    assert (new_release / "venv").resolve() == (bootstrap / "venv").resolve()

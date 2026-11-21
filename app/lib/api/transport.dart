@@ -309,7 +309,8 @@ SonderException describeServerError(SonderException error, Uri server,
     return error.copyWith(
       message: 'Creating the first administrator needs the bootstrap secret '
           'from the PC.',
-      remedy: 'Enter the bootstrap secret shown by the server on first run.',
+      remedy: 'Enter the value of SONDER_BOOTSTRAP_SECRET set in the server '
+          'environment (at least 16 characters). The server does not print it.',
     );
   }
   if (code == 'FORBIDDEN' || status == 403) {

@@ -724,8 +724,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _needsBootstrap = true;
         _accountOutcome = const ActionOutcome(
           StatusKind.warn,
-          'The first administrator needs the bootstrap secret Sonder printed '
-          'on the PC.',
+          'The first administrator needs the SONDER_BOOTSTRAP_SECRET value '
+          "set in the server's environment. The server does not display it.",
           detail: 'Enter it as the bootstrap secret and register again. It '
               'is used once and never saved.',
         );
