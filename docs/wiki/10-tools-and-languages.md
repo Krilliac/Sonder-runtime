@@ -96,8 +96,8 @@ available to both the expected type and the submitted proof without exposing
 the contract axiom to the submission. This field is a trust boundary and must
 never contain model-generated source.
 
-`lean_check` compiles model-authored source only inside a locally installed,
-digest-pinned Linux OCI container configured via `SONDER_ISOLATED_RUNTIME`,
+`lean_check` compiles model-authored source only inside a locally installed
+Linux OCI container (never pulled; checked by its immutable image ID) configured via `SONDER_ISOLATED_RUNTIME`,
 `SONDER_ISOLATED_ROOTS`, `SONDER_LEAN_SANDBOX_ROOT`,
 `SONDER_LEAN_SANDBOX_IMAGE`, and optional `SONDER_LEAN_SANDBOX_EXECUTABLE`.
 Host `SONDER_LEAN_EXE`, `SONDER_LAKE_EXE`, and `SONDER_LEAN_PROJECT` values are
