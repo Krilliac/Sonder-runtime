@@ -60,3 +60,24 @@ def test_outbox_idempotency_is_persistent_and_requires_reconciliation():
     assert len(repository.outbox()) == 3
     assert store.complete("key", "fingerprint", {"ok": False}).status == "reconciled"
     assert len(repository.outbox()) == 3
+
+
+def test_cancel_and_cleanup_only_selects_requested_subtree():
+    tree = CancellationTree()
+    tree.create_child(node_id="a")
+    tree.create_child(node_id="b")
+    control = DurableLoopControl(cancellation=tree)
+    calls = []
+
+    def make(name):
+        def cleanup(timeout):
+            calls.append(name)
+            return CleanupResult(name, True, True, "ok")
+        return cleanup
+
+    control.bind("a", "ta", cancel=lambda reason: True, cleanup=make("ta"))
+    control.bind("b", "tb", cancel=lambda reason: True, cleanup=make("tb"))
+    control.cancel_and_cleanup("a", reason="x")
+    reports = control.cancel_and_cleanup("b", reason="y")
+    assert [r.target_id for r in reports] == ["tb"]
+    assert calls == ["ta", "tb"]
