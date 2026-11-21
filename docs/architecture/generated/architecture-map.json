@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 479,
+      "file_count": 480,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -248,6 +248,7 @@
         "sonder_runtime/adapters/inference/production_tier_router.py",
         "sonder_runtime/adapters/inference/request_tuning.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
+        "sonder_runtime/adapters/inference/rpc_cluster.py",
         "sonder_runtime/adapters/inference/runner_footprint.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
@@ -1458,7 +1459,7 @@
       ]
     },
     {
-      "file_count": 58,
+      "file_count": 59,
       "name": "platform",
       "python_files": [
         "sonder_runtime/platform/__init__.py",
@@ -1504,6 +1505,7 @@
         "sonder_runtime/platform/process.py",
         "sonder_runtime/platform/reasoning_policy.py",
         "sonder_runtime/platform/reference_library_config.py",
+        "sonder_runtime/platform/rpc_sharding_config.py",
         "sonder_runtime/platform/runtime_summary.py",
         "sonder_runtime/platform/runtime_threads.py",
         "sonder_runtime/platform/secret_presence.py",

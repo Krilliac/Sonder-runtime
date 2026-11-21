@@ -22,6 +22,8 @@ _ALIASES = {
     "openai_compatible": "openai_compatible",
     "llamacpp": "openai_compatible",
     "vllm": "openai_compatible",
+    "distributed-rpc": "openai_compatible",
+    "rpc-sharded": "openai_compatible",
     "sonder-inference": "sonder_inference",
     "sonder_inference": "sonder_inference",
     "sonder-infer": "sonder_inference",
