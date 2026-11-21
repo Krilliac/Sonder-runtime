@@ -3,6 +3,18 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Hashable
+    from typing import Protocol
+
+    from sonder_runtime.domain.routing.backend_conformance import BackendIdentity
+
+    class _EvidenceSource(Protocol):
+        @property
+        def revision(self) -> object: ...
+
 
 IDENTITY_CACHE_TTL_SECONDS = 60.0
 _MAX_IDENTITY_CACHE_ENTRIES = 64
@@ -11,12 +23,18 @@ _MAX_IDENTITY_CACHE_ENTRIES = 64
 class IdentityObservationCache:
     """Cache successes and unavailable probes; evidence refreshes invalidate both."""
 
-    def __init__(self, *, clock=time.monotonic):
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._entries = {}
+        self._entries: dict[Hashable, tuple[float, object, BackendIdentity | None]] = {}
         self._lock = threading.Lock()
 
-    def observe(self, key, observer, *, evidence=None):
+    def observe(
+        self,
+        key: Hashable,
+        observer: Callable[[], BackendIdentity | None],
+        *,
+        evidence: _EvidenceSource | None = None,
+    ) -> BackendIdentity | None:
         try:
             # A production caller may change state homes without restarting.
             key = (getattr(evidence, "path", None), key)

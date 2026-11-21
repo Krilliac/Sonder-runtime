@@ -368,6 +368,8 @@ sonder_runtime/application/recall/__init__.py
 sonder_runtime/application/repository_intelligence/index_map.py
 sonder_runtime/application/routing/__init__.py
 sonder_runtime/application/routing/calibration.py
+sonder_runtime/application/routing/identity_cache.py
+sonder_runtime/application/routing/request_capabilities.py
 sonder_runtime/application/runtime_policy/__init__.py
 sonder_runtime/application/scenario_validation/__init__.py
 sonder_runtime/application/security/__init__.py
@@ -411,6 +413,7 @@ sonder_runtime/application/tools/audit.py
 sonder_runtime/application/tools/catalog_artifacts.py
 sonder_runtime/application/tools/receipt_digest.py
 sonder_runtime/application/tools/resource_policy.py
+sonder_runtime/application/tools/scheduling.py
 sonder_runtime/application/tools/settled_replay.py
 sonder_runtime/application/training/__init__.py
 sonder_runtime/application/training/adapter_catalog.py
@@ -437,12 +440,14 @@ sonder_runtime/bootstrap/capabilities.py
 sonder_runtime/bootstrap/claim_check_agent_tools.py
 sonder_runtime/bootstrap/cloud_models_agent_tools.py
 sonder_runtime/bootstrap/cloud_models_cli.py
+sonder_runtime/bootstrap/config_loading.py
 sonder_runtime/bootstrap/container.py
 sonder_runtime/bootstrap/control_state_rehearsal.py
 sonder_runtime/bootstrap/diagnostics.py
 sonder_runtime/bootstrap/doctor_checks.py
 sonder_runtime/bootstrap/doctor_formatting.py
 sonder_runtime/bootstrap/health_alerts.py
+sonder_runtime/bootstrap/legacy_model.py
 sonder_runtime/bootstrap/legacy_seams.py
 sonder_runtime/bootstrap/main.py
 sonder_runtime/bootstrap/managed_http.py

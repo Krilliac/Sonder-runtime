@@ -426,9 +426,7 @@ sonder_runtime/application/repository_intelligence/navigation.py
 sonder_runtime/application/routing/backend_conformance.py
 sonder_runtime/application/routing/capability_router.py
 sonder_runtime/application/routing/evidence_gateway.py
-sonder_runtime/application/routing/identity_cache.py
 sonder_runtime/application/routing/long_context_overflow.py
-sonder_runtime/application/routing/request_capabilities.py
 sonder_runtime/application/routing/tier_escalation.py
 sonder_runtime/application/runtime_policy/use_cases.py
 sonder_runtime/application/runtime_resources.py
@@ -468,7 +466,6 @@ sonder_runtime/application/tools/discovery.py
 sonder_runtime/application/tools/facade.py
 sonder_runtime/application/tools/gateway_contract.py
 sonder_runtime/application/tools/generated_catalogs.py
-sonder_runtime/application/tools/scheduling.py
 sonder_runtime/application/tools/typed_gateway.py
 sonder_runtime/application/training/hardware_planning.py
 sonder_runtime/application/training/route_activation.py
@@ -502,7 +499,6 @@ sonder_runtime/bootstrap/child_storage.py
 sonder_runtime/bootstrap/code_check_agent_tools.py
 sonder_runtime/bootstrap/computer_use_chat.py
 sonder_runtime/bootstrap/computer_use_tools.py
-sonder_runtime/bootstrap/config_loading.py
 sonder_runtime/bootstrap/debug_tools.py
 sonder_runtime/bootstrap/delegated_verification.py
 sonder_runtime/bootstrap/developer_tools.py
@@ -514,7 +510,6 @@ sonder_runtime/bootstrap/http_work_narration.py
 sonder_runtime/bootstrap/lane_tests.py
 sonder_runtime/bootstrap/legacy_interfaces.py
 sonder_runtime/bootstrap/legacy_mcp.py
-sonder_runtime/bootstrap/legacy_model.py
 sonder_runtime/bootstrap/legacy_root.py
 sonder_runtime/bootstrap/managed_app_work.py
 sonder_runtime/bootstrap/managed_configuration.py
