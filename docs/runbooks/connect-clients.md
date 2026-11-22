@@ -37,11 +37,11 @@ Symptoms/Diagnosis/Recovery/Aftermath shape; failure modes sit beside each step.
 ## MCP clients (stdio)
 
 The supported entry point is `python -m sonder_runtime mcp`
-(`sonder_runtime/__main__.py:2017`). It takes `--config`, `--secrets`,
+(`sonder_runtime/__main__.py:2076`). It takes `--config`, `--secrets`,
 `--set` and `--json` like the other subcommands. Configuration comes from
 `--config` / `--secrets`, else `SONDER_CONFIG` / `SONDER_SECRETS`, else
 `sonder.toml` / `sonder.env` in the state home if those files exist
-(`__main__.py:59-87`). The transport is stdio only (`server.py:26807`,
+(`__main__.py:60-88`). The transport is stdio only (repo-root `server.py:26820`,
 `reloadable_mcp.py:849`); there is no HTTP/SSE MCP server mode.
 
 **The checkout must be on the import path.** The repo has no `pyproject.toml`,
@@ -53,7 +53,7 @@ project directory, so every registration below sets `PYTHONPATH=<checkout>`
 in the server's environment. Without it the server fails at start with
 `No module named sonder_runtime`.
 
-The server reports itself as `sonder-runtime` (`server.py:4781`). The name you
+The server reports itself as `sonder-runtime` (`server.py:4784`). The name you
 register it under is your choice; this repo's docs use `sonder`. Clients show
 tools prefixed with the registered name, for example
 `mcp__sonder__<tool>` in Claude Code.
@@ -84,7 +84,7 @@ venv interpreter), `args = ['-m', 'sonder_runtime', 'mcp']`,
 `startup_timeout_sec = 120.0`, and a `[mcp_servers.sonder.env]` table whose
 `PYTHONPATH` is the checkout (required, see above). Write paths as TOML
 literal strings in single quotes, as the example does. In a double-quoted TOML
-string a backslash starts an escape, so `"D:\sonder\runtime"` makes Codex fail
+string a backslash starts an escape, so `"C:\path\to\checkout"` makes Codex fail
 to parse the whole `config.toml`; if you must use double quotes, use forward
 slashes or doubled backslashes.
 
@@ -120,7 +120,7 @@ escaped backslashes.
 - Legacy path: registering `server.py` directly still runs, but it reads the
   environment only, not `sonder.toml` / `sonder.env`. It exits 1 with
   `WorkerPoolUnavailable ... start with python -m sonder_runtime mcp`
-  (`server.py:26796-26805`) when the membership binding check fails: the pool
+  (`server.py:26809-26818`) when the membership binding check fails: the pool
   has configured remote workers, or the primary Ollama origin is not loopback
   (`bootstrap/legacy_root.py:118`; `ollama_pool.py:1088-1089`). A
   loopback-only worker list does not trigger it. Fix: change the registration
@@ -176,15 +176,15 @@ launcher token, and optionally sign in to an account.
 
 - The API key is sent over HTTPS, over loopback (including `localhost`), or to
   a host:port you explicitly allow as plain HTTP in Settings
-  (`app/lib/api/transport.dart:480-540`).
+  (`app/lib/api/transport.dart:481-541`).
 - Account sign-in needs HTTPS or a numeric loopback address; `localhost` is not
   accepted (`app/lib/account_session.dart:22-40`).
 - The app's local fallback is `http://127.0.0.1:11435` on native builds and
   empty on web builds (`kIsWeb ? '' : ...`, `app/lib/api.dart:910`).
 
 Failure: for a plain-HTTP, non-loopback URL the app silently leaves the key
-out (`app/lib/api/transport.dart:562-571`), so the server answers 401
-`UNAUTHENTICATED` (`serve.py:5005-5012`). Settings shows "The API key is not
+out (`app/lib/api/transport.dart:563-572`), so the server answers 401
+`UNAUTHENTICATED` (`serve.py:5006-5013`). Settings shows "The API key is not
 sent to <host>: this address uses unencrypted HTTP. Use HTTPS, or allow this
 host." (`app/lib/settings/page_connection.dart:198-199`). Account sign-in
 throws "Account traffic requires HTTPS or numeric loopback"
@@ -196,8 +196,8 @@ throws "Account traffic requires HTTPS or numeric loopback"
 The server can serve the app's web build at `/app/`. It is off by default:
 set `[server].web_app_enabled = true` or `SONDER_WEB_APP=1`; the bundle
 directory is `[server].web_app_dir` / `SONDER_WEB_APP_DIR` (must be an
-absolute path, enforced at `platform/config.py:1971-1973`; the env variable is
-read at `:1582`), default `<state home>/web_app` (`platform/config.py:2423-2425`). Build it with
+absolute path, enforced at `platform/config.py:1970-1972`; the env variable is
+read at `:1582`), default `<state home>/web_app` (`platform/config.py:2422-2424`). Build it with
 `python scripts/build_web_app.py`. Full procedure and the security model are in
 [wiki 03, "Serving the web app"](../wiki/03-configuration.md#serving-the-web-app).
 Enabled without a bundle, `/app/` answers 404 `WEB_APP_NOT_BUILT`.
