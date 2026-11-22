@@ -52,9 +52,96 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import threading
 from pathlib import Path
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+# ``\\?\C:\`` or ``//?/C:/`` (either separator after the drive): the only
+# prefixed spelling that names an ordinary local path.
+_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "conin$",
+    "conout$",
+    *(f"com{s}" for s in "0123456789¹²³"),
+    *(f"lpt{s}" for s in "0123456789¹²³"),
+})
+
+
+def _strip_extended_or_refuse_prefixed(text: str) -> str:
+    extended = _EXTENDED_LOCAL_RE.match(text)
+    if extended:
+        return text[extended.start(1):]
+    flat = text.replace("/", "\\")
+    if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
+        raise ValueError("a UNC, device or NT-namespace path is not allowed")
+    return text
+
+
+def _reject_windows_alias_components(path: Path) -> None:
+    if os.name != "nt":
+        return
+    if not _WINDOWS_DRIVE_RE.fullmatch(path.drive):
+        raise ValueError("path drive is not a local Windows drive")
+    parts = path.parts[1:] if path.anchor else path.parts
+    for part in parts:
+        if part in (".", ".."):
+            continue
+        if part.endswith((".", " ")) or ":" in part:
+            raise ValueError("path contains a Windows alias component")
+        stem = part.split(".", 1)[0].rstrip(" ").casefold()
+        if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+            raise ValueError("path contains a Windows reserved device name")
+
+
+def parse_local_root(raw: object, *, expand_user: bool = True) -> Path:
+    """Validate and normalize a local absolute non-root path purely lexically.
+
+    Zero-I/O: rejects UNC, device/NT-namespace spellings, ASCII control
+    characters, Windows alias components, relative paths, and drive/filesystem
+    roots BEFORE any filesystem or SMB call can happen. Strips a valid local
+    extended-length prefix (``\\\\?\\C:\\...`` or ``//?/C:/...``).
+    """
+    if not isinstance(raw, str):
+        raise ValueError("the path must be a string")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("the path contains a control character")
+    text = raw.strip()
+    if not text:
+        raise ValueError("the path is empty")
+    expanded = _strip_extended_or_refuse_prefixed(text)
+    if expand_user:
+        try:
+            expanded = str(Path(expanded).expanduser())
+        except RuntimeError:
+            raise ValueError("'~' cannot be expanded: no home directory is known") from None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in expanded):
+            raise ValueError("the expanded path contains a control character")
+        expanded = _strip_extended_or_refuse_prefixed(expanded)
+    candidate = Path(expanded)
+    if not candidate.is_absolute():
+        raise ValueError("the path is not absolute")
+    _reject_windows_alias_components(candidate)
+    normalized = Path(os.path.normpath(expanded))
+    if not normalized.is_absolute():
+        raise ValueError("the path is not absolute")
+    _reject_windows_alias_components(normalized)
+    if normalized.parent == normalized or not normalized.name:
+        raise ValueError("a drive root or the filesystem root is not allowed")
+    return normalized
+
+
+def try_parse_local_root(raw: object, *, expand_user: bool = True) -> Path | None:
+    """Return :func:`parse_local_root`, or ``None`` when refused."""
+    try:
+        return parse_local_root(raw, expand_user=expand_user)
+    except ValueError:
+        return None
 
 PRIVATE_DIR_MODE = 0o700
 TRAVERSE_DIR_MODE = 0o711
@@ -685,6 +772,7 @@ __all__ = [
     "ensure_private_dir",
     "low_integrity_readable",
     "low_integrity_readable_state_files",
+    "parse_local_root",
     "prepare_private_file",
     "protect_state_from_low_integrity",
     "prepare_private_sqlite",
@@ -692,4 +780,5 @@ __all__ = [
     "restrict_to_owner",
     "state_secret_files",
     "supported",
+    "try_parse_local_root",
 ]

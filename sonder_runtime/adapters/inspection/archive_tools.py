@@ -158,6 +158,14 @@ def _guarded_destination(
         extra_roots=extra_roots,
     )
     file_ops._require_mutation_access(destination, developer_authorized)
+    if not developer_authorized:
+        ws_root = file_ops._resolve_best_effort(file_ops.workspace_root())
+        for protected_dir in (*file_ops.FIRST_PARTY_CODE_DIRS, *file_ops.RUNTIME_PACKAGE_DIRS):
+            if file_ops._is_inside(destination, ws_root / protected_dir):
+                raise PermissionError(
+                    "modifying first-party runtime directory %s requires developer authorization"
+                    % destination
+                )
     # An extraction fills the destination directory, so a directory that would
     # hold a model tool policy file (a missing overlay) is refused too.
     holding = file_ops._policy_file_refusal(destination, holding=True)
@@ -626,40 +634,21 @@ def extract_archive(
         developer_authorized=developer_authorized,
     )
     plan = _plan(source, limits, deadline=deadline)
-    # The destination check sees only a directory name, which no module rule
-    # matches. Each member's final path gets the guard's code, interpreter-env,
-    # and G0648 sensitive-directory rules, so an extraction cannot plant what
-    # write_file refuses: a top-level package (``yaml/__init__.py``), collected
-    # tests/``conftest.py``, interpreter environment files, ``.gcloud/...``, or
-    # credential-store files directly under a profile directory such as
-    # ``.docker``/``.config``. Base-secret token-store files inside an ordinary
-    # project output folder keep the member policy of _portable_member_path.
-    if not developer_authorized:
-        for entry in plan["entries"]:
-            member_parts = entry["path"].split("/")
-            target = destination.joinpath(*member_parts)
-            if file_ops._is_runtime_code_path(target):
-                raise PermissionError(
-                    f"refusing to mutate protected Sonder control-plane path {target} "
-                    "without an authenticated developer token"
-                )
-            if file_ops._is_protected_interpreter_environment(target):
-                raise PermissionError(
-                    f"refusing to mutate the Python interpreter environment path {target} "
-                    "without an authenticated developer token"
-                )
-            sensitive_dir = file_ops._sensitive_dir_component(target)
-            if sensitive_dir:
-                raise PermissionError(
-                    f"refusing to mutate sensitive directory or credential store path {target} ({sensitive_dir}) "
-                    "without an authenticated developer token"
-                )
-            cred_component = file_ops.credential_read_component(target)
-            if cred_component and not file_ops.credential_part(member_parts):
-                raise PermissionError(
-                    f"refusing to mutate sensitive directory or credential store path {target} ({cred_component}) "
-                    "without an authenticated developer token"
-                )
+    # Each member's final path gets the full mutation guard (policy files, git
+    # metadata, runtime code/tools/tests/proposals/binary hooks, interpreter
+    # environment, sensitive directories, and profile credential stores), while
+    # base-secret token-store files (such as .npmrc) inside an ordinary project
+    # output folder keep the member policy of _portable_member_path.
+    for row in plan["entries"]:
+        parts = [part for part in str(row.get("path") or "").split("/") if part]
+        if not parts:
+            continue
+        file_ops._require_mutation_access(
+            destination.joinpath(*parts),
+            developer_authorized,
+            allow_added_token_stores=True,
+            member_parts=parts,
+        )
     stage = Path(tempfile.mkdtemp(prefix=".sonder-archive-", dir=destination.parent))
     promoted = False
     try:

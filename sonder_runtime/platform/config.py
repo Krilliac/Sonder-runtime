@@ -980,10 +980,14 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def _canonical_private_path(value: str) -> Path | None:
     """Resolve an already validated private path without surfacing its text."""
+    parsed = sonder_paths.try_parse_local_root(value, expand_user=True)
+    if parsed is None:
+        return None
     try:
-        return Path(value).expanduser().resolve(strict=False)
+        resolved = parsed.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
+    return sonder_paths.try_parse_local_root(str(resolved), expand_user=False)
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:
@@ -1021,7 +1025,12 @@ def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
             )
             break
 
-    receiver_path = _canonical_private_path(str(private_store_path(config)))
+    try:
+        receiver_raw = str(private_store_path(config))
+    except (OSError, RuntimeError, ValueError):
+        receiver_path = None
+    else:
+        receiver_path = _canonical_private_path(receiver_raw)
     if receiver_path is not None and _paths_overlap(source_path, receiver_path):
         errors.append(
             "[artifact_mobility_source].store_dir overlaps artifact transfer store"
@@ -1860,6 +1869,7 @@ def validate_deployment(config: SonderConfig) -> None:
 def _context_root_errors(config: SonderConfig) -> list[str]:
     errors: list[str] = []
     seen: set[tuple[str, str]] = set()
+    is_junction = getattr(os.path, "isjunction", None)
     for field_name in (
         "instruction_bundled_roots", "instruction_global_roots",
         "instruction_configured_roots", "skill_bundled_roots",
@@ -1873,11 +1883,16 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
                 errors.append(f"[context].{field_name} contains an empty root")
                 continue
             try:
-                path = Path(raw).expanduser()
-                if not path.is_absolute():
-                    raise ValueError
+                path = sonder_paths.parse_local_root(raw, expand_user=True)
+                for ancestor in (*reversed(path.parents), path):
+                    if ancestor.parent == ancestor:
+                        continue
+                    if ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    ):
+                        raise ValueError
                 resolved = path.resolve(strict=False)
-                if path.is_symlink():
+                if sonder_paths.try_parse_local_root(str(resolved), expand_user=False) is None:
                     raise ValueError
             except (OSError, RuntimeError, ValueError):
                 errors.append(f"[context].{field_name} root must be an absolute non-link path")
@@ -2076,6 +2091,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 "development auth secret; set SONDER_AUTH_SECRET to a private value"
             )
 
+    if config.state.home:
+        if sonder_paths.try_parse_local_root(config.state.home, expand_user=True) is None:
+            errors.append(
+                "[state].home must be a local absolute non-root path "
+                "(UNC, device/NT, relative, and drive-root spellings are not allowed)"
+            )
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
@@ -2108,7 +2129,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
             continue
         try:
-            resolved = raw_path.resolve(strict=False)
+            resolved = parsed_root.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
             continue
@@ -2163,11 +2184,42 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
 
     if config.ollama.ca_bundle:
-        ca_path = Path(config.ollama.ca_bundle).expanduser()
-        if not ca_path.is_absolute():
+        parsed_ca = sonder_paths.try_parse_local_root(
+            config.ollama.ca_bundle, expand_user=True
+        )
+        if parsed_ca is None:
             errors.append("[ollama].ca_bundle must be an absolute path")
-        elif not ca_path.is_file():
-            errors.append("[ollama].ca_bundle must name an existing regular file")
+        else:
+            is_junction = getattr(os.path, "isjunction", None)
+            ca_unsafe = False
+            for ancestor in (*reversed(parsed_ca.parents), parsed_ca):
+                if ancestor.parent == ancestor:
+                    continue
+                try:
+                    is_link = ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    )
+                except OSError:
+                    ca_unsafe = True
+                    break
+                if is_link:
+                    try:
+                        sonder_paths._strip_extended_or_refuse_prefixed(os.readlink(ancestor))
+                    except (OSError, ValueError):
+                        ca_unsafe = True
+                        break
+            if ca_unsafe:
+                errors.append("[ollama].ca_bundle must be an absolute local path")
+            else:
+                try:
+                    resolved_ca = parsed_ca.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    errors.append("[ollama].ca_bundle must be an absolute local path")
+                else:
+                    if sonder_paths.try_parse_local_root(str(resolved_ca), expand_user=False) is None:
+                        errors.append("[ollama].ca_bundle must be an absolute local path")
+                    elif not resolved_ca.is_file():
+                        errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
     canonical_workers: list[str] = []
@@ -2673,6 +2725,9 @@ def load_config(
         config = replace(
             config, state=replace(config.state, home=str(sonder_paths.default_home()))
         )
+    parsed_home = sonder_paths.try_parse_local_root(config.state.home, expand_user=True)
+    if parsed_home is not None:
+        config = replace(config, state=replace(config.state, home=str(parsed_home)))
 
     # A trailing '/' or an upper-case scheme/host is the same origin; spell
     # it the browser's way (with a WARNING) instead of refusing to start.

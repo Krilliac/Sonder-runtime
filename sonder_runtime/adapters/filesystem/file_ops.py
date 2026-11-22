@@ -155,8 +155,8 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # First-party code outside that package which the runtime imports or runs:
 # selfmod imports ``scripts.selfmod_linux_isolation``/``scripts.selfmod_oracle``
 # into its own process, the nightly jobs execute ``scripts/*.py`` and
-# ``scripts/run-nightly.ps1``, migrations run at store open, and the selfmod /
-# nightly gates run pytest, which imports ``tests/conftest.py``. Any of these
+# ``scripts/run-nightly.ps1``, migrations run at store open, the pytest gate
+# imports ``tools/tuf_repo.py`` and ``tests/conftest.py``. Any of these
 # written by an ordinary mutation-class call is code execution with runtime
 # privileges at the next run -- the same hole the root-level clause closes.
 #
@@ -179,7 +179,7 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # ``tests/pytest.ini`` before the root's. These names are protected beside the
 # root (matched case-insensitively), and every ``.ini``/``.cfg``/``.toml``
 # file is protected inside the first-party code trees.
-FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tests", "proposals")
+FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tools", "tests", "proposals")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
 PYTEST_COLLECTED_DIRS = ("tests", "proposals")
 PYTEST_CONFIG_FILES = (
@@ -192,6 +192,9 @@ PYTEST_CONFIG_FILES = (
     "setup.cfg",
 )
 FIRST_PARTY_CONFIG_SUFFIXES = frozenset({".ini", ".cfg", ".toml"})
+# Python binary/bytecode/import-hook extensions that shadow or load code when
+# placed inside first-party runtime or tool directories.
+FIRST_PARTY_BINARY_SUFFIXES = frozenset({".pyd", ".pyc", ".pyo", ".pyw", ".pth", ".so", ".dll"})
 # Installed-distribution metadata. ``importlib.metadata`` scans every
 # ``sys.path`` entry for children whose lower-cased name ends in one of these
 # (``Lookup`` in ``importlib/metadata/__init__.py``), and ``python -m pytest``
@@ -326,6 +329,19 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
+def _validated_state_home() -> Path | None:
+    """The validated local state home, or ``None`` when unsafe.
+
+    Refuses UNC, device/NT, relative, and drive-root spellings lexically BEFORE
+    any ``resolve()`` or filesystem call can open an SMB share; strips a valid
+    local extended-length prefix (``\\\\?\\C:\\...``).
+    """
+    try:
+        raw = runtime_paths.default_home()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return _parse_policy_root(os.fspath(raw), expand_user=True)
+
 
 def _split_roots(raw: str) -> list[Path]:
     roots: list[Path] = []
@@ -337,12 +353,22 @@ def _split_roots(raw: str) -> list[Path]:
 
 
 def roots_file_path() -> Path:
-    configured = os.environ.get("SONDER_FILE_ROOTS_FILE", "").strip()
-    return (
-        Path(configured).expanduser()
-        if configured
-        else Path(runtime_paths.default_home()) / DEFAULT_ROOTS_FILE
-    )
+    raw_configured = os.environ.get("SONDER_FILE_ROOTS_FILE", "")
+    if raw_configured.strip():
+        parsed = runtime_paths.try_parse_local_root(raw_configured, expand_user=True)
+        if parsed is None:
+            raise PermissionError(
+                "refusing unsafe SONDER_FILE_ROOTS_FILE path "
+                "(UNC, device/NT, relative, or drive-root spelling)"
+            )
+        return parsed
+    home = _validated_state_home()
+    if home is None:
+        raise PermissionError(
+            "refusing unsafe SONDER_HOME/SONDER_STATE_HOME path "
+            "(UNC, device/NT, relative, or drive-root spelling)"
+        )
+    return home / DEFAULT_ROOTS_FILE
 
 
 def _roots_from_file() -> list[Path]:
@@ -441,17 +467,23 @@ def _reach_roots() -> list[Path]:
 
 
 def allowed_roots(extra_roots: str = "") -> list[Path]:
-    roots = [workspace_root(), Path(runtime_paths.default_home())]
+    roots: list[Path] = [workspace_root()]
+    home = _validated_state_home()
+    if home is not None:
+        roots.append(home)
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
     roots.extend(_reach_roots())
-    out = []
+    out: list[Path] = []
     for root in roots:
+        parsed_pre = runtime_paths.try_parse_local_root(os.fspath(root), expand_user=True)
+        if parsed_pre is None:
+            continue
         try:
-            resolved = root.resolve()
+            resolved = parsed_pre.resolve()
         except OSError:
-            resolved = _normalized_absolute(root)
+            resolved = _normalized_absolute(parsed_pre)
         parsed = _parse_policy_root(str(resolved), expand_user=False)
         if parsed is None:
             continue
@@ -479,8 +511,12 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
     ``serve._http_workspace_roots`` hands an admin caller only the configured
     ``[state].workspace_roots`` (resolved) and anyone else ``()``.
     """
-    excluded = []
-    for root in (workspace_root(), Path(runtime_paths.default_home())):
+    excluded: list[Path] = []
+    excluded_candidates: list[Path] = [workspace_root()]
+    home = _validated_state_home()
+    if home is not None:
+        excluded_candidates.append(home)
+    for root in excluded_candidates:
         try:
             resolved_excluded = root.resolve()
         except OSError:
@@ -494,14 +530,14 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
         parsed = _parse_policy_root(str(item))
         if parsed is not None:
             explicit.append(parsed)
-    roots = []
+    roots: list[Path] = []
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     default_root = None
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         default_root = runtime_paths.default_workspace_root()
     if default_root is not None:
-        parsed_default = _parse_policy_root(str(default_root))
+        parsed_default = _parse_policy_root(os.fspath(default_root))
         if parsed_default is not None and parsed_default.is_dir():
             roots.append(parsed_default)
     out: list[str] = []
@@ -622,55 +658,113 @@ def _resolve_best_effort(path: Path) -> Path:
         return _normalized_absolute(path.expanduser())
 
 
+def _safe_env_path(raw: str, *, base: Path) -> Path | None:
+    """Resolve an env-supplied path override after refusing UNC/device/NT spellings."""
+    raw_text = str(raw or "")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_text):
+        return None
+    text = raw_text.strip()
+    if not text:
+        return None
+    try:
+        cleaned = runtime_paths._strip_extended_or_refuse_prefixed(text)
+        expanded = str(Path(cleaned).expanduser())
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in expanded):
+            return None
+        cleaned_expanded = runtime_paths._strip_extended_or_refuse_prefixed(expanded)
+    except (RuntimeError, ValueError):
+        return None
+    candidate = Path(cleaned_expanded)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    is_junction = getattr(os.path, "isjunction", None)
+    for ancestor in (*reversed(candidate.parents), candidate):
+        if ancestor.parent == ancestor:
+            continue
+        try:
+            is_link = ancestor.is_symlink() or (
+                is_junction is not None and is_junction(ancestor)
+            )
+        except OSError:
+            return None
+        if is_link:
+            try:
+                runtime_paths._strip_extended_or_refuse_prefixed(os.readlink(ancestor))
+            except (OSError, ValueError):
+                return None
+    resolved = _resolve_best_effort(candidate)
+    try:
+        cleaned_resolved = runtime_paths._strip_extended_or_refuse_prefixed(os.fspath(resolved))
+    except ValueError:
+        return None
+    return Path(cleaned_resolved)
+
+
 def _workspace_config_path(env_name: str, default_name: str) -> Path:
-    raw = os.environ.get(env_name, "").strip()
-    path = Path(raw).expanduser() if raw else workspace_root() / default_name
-    if not path.is_absolute():
-        path = workspace_root() / path
-    return _resolve_best_effort(path)
+    raw = os.environ.get(env_name, "")
+    if raw.strip():
+        resolved = _safe_env_path(raw, base=workspace_root())
+        if resolved is not None:
+            return resolved
+    return _resolve_best_effort(workspace_root() / default_name)
 
 
 def _control_plane_paths() -> set[Path]:
     root = _resolve_best_effort(workspace_root())
-    home = _resolve_best_effort(Path(runtime_paths.default_home()))
-    paths = {
-        _resolve_best_effort(roots_file_path()),
+    home_candidate = _validated_state_home()
+    home = _resolve_best_effort(home_candidate) if home_candidate is not None else None
+    paths: set[Path] = {
         root / DEFAULT_ROOTS_FILE,
         root / "permissions.json",
-        home / "permissions.json",
         _workspace_config_path("SONDER_WORKFLOWS", "workflows.json"),
         _workspace_config_path("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
         _workspace_config_path("SONDER_SYSTEM_PROFILE", "system_profile.md"),
     }
-    db_override = os.environ.get("SONDER_DB", "").strip()
-    if db_override:
-        db = Path(db_override).expanduser()
-        if not db.is_absolute():
-            db = Path.cwd() / db
-        db = _resolve_best_effort(db)
-    else:
+    try:
+        paths.add(_resolve_best_effort(roots_file_path()))
+    except PermissionError:
+        pass
+    if home is not None:
+        paths.add(home / "permissions.json")
+    db_override = os.environ.get("SONDER_DB", "")
+    if db_override.strip():
+        db = _safe_env_path(db_override, base=Path.cwd())
+        if db is not None:
+            paths.update({
+                db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
+            })
+    elif home is not None:
         db = home / "memory.db"
+        paths.update({
+            db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
+        })
     paths.update({
-        db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
         root / "memory.db", root / "memory.db-wal", root / "memory.db-shm", root / "memory.db-journal",
     })
     # Fanout receipts are executable runtime state: even a custom file name
     # must not turn them into an ordinary SQLite target.  Keep the override
     # resolution identical to SONDER_DB above so a relative override is also
     # protected at the process' actual working directory.
-    fanout_override = os.environ.get("SONDER_FANOUT_DB", "").strip()
-    if fanout_override:
-        fanout_db = Path(fanout_override).expanduser()
-        if not fanout_db.is_absolute():
-            fanout_db = Path.cwd() / fanout_db
-        fanout_db = _resolve_best_effort(fanout_db)
-    else:
+    fanout_override = os.environ.get("SONDER_FANOUT_DB", "")
+    if fanout_override.strip():
+        fanout_db = _safe_env_path(fanout_override, base=Path.cwd())
+        if fanout_db is not None:
+            paths.update({
+                fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
+            })
+    elif home is not None:
         fanout_db = home / "fanout.db"
+        paths.update({
+            fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
+        })
     paths.update({
-        fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
         root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm", root / "fanout.db-journal",
     })
-    paths.update(live_control_plane_inventory().exact_files)
+    if home_candidate is not None:
+        try:
+            paths.update(live_control_plane_inventory().exact_files)
+        except PermissionError:
+            pass
     return {_resolve_best_effort(path) for path in paths}
 
 
@@ -762,12 +856,13 @@ def _current_control_inventory():
     return snapshot[1] if snapshot is not None else live_control_plane_inventory()
 
 
-def _is_sensitive_control_path(path: Path) -> bool:
+def _is_sensitive_control_path(path: Path, *, allow_added_token_stores: bool = False) -> bool:
     try:
         path = _protection_spelling(path)
     except (OSError, ValueError):
         return True  # a namespace with no ordinary spelling cannot be judged by name
     name = path.name.lower()
+    secret_match = _is_base_secret_path(path) if allow_added_token_stores else _is_secret_path(path)
     return (
         path in _current_control_paths()
         or _current_control_inventory().protects(path)
@@ -778,7 +873,7 @@ def _is_sensitive_control_path(path: Path) -> bool:
             # are runtime control state, never user data for sqlite_mutate.
             "fanout.db", "fanout.db-wal", "fanout.db-shm",
         }
-        or _is_secret_path(path)
+        or secret_match
     )
 
 
@@ -799,7 +894,7 @@ def _identity_protected_files() -> set[Path]:
     return files
 
 
-def _is_protected_mutation_path(path: Path) -> bool:
+def _is_protected_mutation_path(path: Path, *, allow_added_token_stores: bool = False) -> bool:
     """Whether ``path`` is protected control-plane state, under any of its names.
 
     Decided by name first.  A path a name check can miss (a UNC spelling, or a
@@ -811,12 +906,14 @@ def _is_protected_mutation_path(path: Path) -> bool:
         path = _protection_spelling(path)
     except (OSError, ValueError):
         return True  # a namespace with no ordinary spelling cannot be judged by name
-    if _is_protected_by_name(path):
+    if _is_protected_by_name(path, allow_added_token_stores=allow_added_token_stores):
         return True
     if not _path_aliases.may_alias(path):
         return False
     local = _path_aliases.local_equivalent(path, _alias_anchor_directories())
-    if local is not None and local != path and _is_protected_by_name(local):
+    if local is not None and local != path and _is_protected_by_name(
+        local, allow_added_token_stores=allow_added_token_stores
+    ):
         return True
     return _path_aliases.same_file_as_any(path, _identity_protected_files())
 
@@ -1214,8 +1311,8 @@ def _is_protected_interpreter_environment(path: Path) -> bool:
     return _is_interpreter_environment_path(spelled)
 
 
-def _is_protected_by_name(path: Path) -> bool:
-    if _is_sensitive_control_path(path):
+def _is_protected_by_name(path: Path, *, allow_added_token_stores: bool = False) -> bool:
+    if _is_sensitive_control_path(path, allow_added_token_stores=allow_added_token_stores):
         return True
     if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
@@ -1261,19 +1358,44 @@ def _is_distribution_metadata_path(path: Path, root: Path) -> bool:
 
 
 def _is_runtime_code_by_name(path: Path, root: Path) -> bool:
-    if path.parent == root and path.name.lower() in PYTEST_CONFIG_FILES:
+    clean_name = path.name.split(":", 1)[0].rstrip(". ")
+    clean_path = Path(clean_name)
+    suffix = clean_path.suffix.lower()
+    stem = clean_path.stem.lower()
+    if path.parent == root and clean_name.lower() in PYTEST_CONFIG_FILES:
         return True
     if _is_distribution_metadata_path(path, root):
         return True
     if any(_is_inside(path, root / name) for name in PYTEST_COLLECTED_DIRS):
         return True
-    if path.suffix.lower() in FIRST_PARTY_CONFIG_SUFFIXES and any(
+    if suffix in FIRST_PARTY_CONFIG_SUFFIXES and any(
         _is_inside(path, root / name) for name in FIRST_PARTY_CODE_DIRS
+    ):
+        return True
+    if suffix in FIRST_PARTY_BINARY_SUFFIXES and (
+        path.parent == root
+        or any(
+            _is_inside(path, root / name)
+            for name in (*FIRST_PARTY_CODE_DIRS, *RUNTIME_PACKAGE_DIRS)
+        )
+        or any(
+            (
+                path.parent == root / parent
+                and (
+                    stem == Path(name).stem.lower()
+                    or clean_name.lower().startswith(Path(name).stem.lower() + ".")
+                )
+            )
+            or (
+                path.parent == root / parent / "__pycache__"
+                and clean_name.lower().startswith(Path(name).stem.lower() + ".")
+            )
+            for parent, name in FIRST_PARTY_CODE_FILES
+        )
     ):
         return True
     if _is_root_import_path(path, root):
         return True
-    suffix = path.suffix.lower()
     if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:
         return False
     # Sonder's own modules and launchers: directly in the install root, or
@@ -1372,7 +1494,13 @@ def _sensitive_mutation_component(path: Path) -> str:
     return credential_read_component(path)
 
 
-def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
+def _require_mutation_access(
+    path: Path,
+    developer_authorized: bool,
+    *,
+    allow_added_token_stores: bool = False,
+    member_parts: list[str] | tuple[str, ...] | None = None,
+) -> None:
     refusal = _policy_file_refusal(path, holding=False)
     if refusal is not None:
         raise refusal
@@ -1386,7 +1514,7 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
             "refusing to mutate git repository metadata %s "
             "without an authenticated developer token" % path
         )
-    if _is_protected_mutation_path(path):
+    if _is_protected_mutation_path(path, allow_added_token_stores=allow_added_token_stores):
         # The path goes before the phrase: "token: <path>" reads as a
         # credential to the output redactor, and this message is shown and
         # audited through it on every surface.
@@ -1405,7 +1533,14 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
             f"refusing to mutate the Python interpreter environment path {path} "
             "without an authenticated developer token"
         )
-    sensitive = _sensitive_mutation_component(path)
+    if allow_added_token_stores and member_parts is not None:
+        sensitive = _sensitive_dir_component(path)
+        if not sensitive:
+            cred = credential_read_component(path)
+            if cred and not credential_part(member_parts):
+                sensitive = cred
+    else:
+        sensitive = _sensitive_mutation_component(path)
     if sensitive:
         # The path goes before the phrase: "token: <path>" reads as a
         # credential to the output redactor.
