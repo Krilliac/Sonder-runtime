@@ -1900,8 +1900,22 @@ def _rpc_sharding_errors(env: dict[str, str]) -> list[str]:
     try:
         parsed = urlsplit(base_url)
         hostname = parsed.hostname
+        port = parsed.port
     except ValueError:
         return [f"{RPC_PEERS_ENV} is set, but SONDER_OPENAI_BASE_URL is not a valid URL"]
+    if port is not None and not 1 <= port <= 65535:
+        return [f"{RPC_PEERS_ENV} is set, but SONDER_OPENAI_BASE_URL has an invalid port"]
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(ch in base_url for ch in "@?#")
+    ):
+        return [
+            "SONDER_OPENAI_BASE_URL must not contain credentials, a query or a fragment "
+            f"when {RPC_PEERS_ENV} is set"
+        ]
     if parsed.scheme not in ("http", "https") or not _is_loopback_host(hostname):
         return [
             f"{RPC_PEERS_ENV} is set, so SONDER_OPENAI_BASE_URL must be an http(s) "

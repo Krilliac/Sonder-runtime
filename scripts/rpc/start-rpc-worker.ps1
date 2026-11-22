@@ -179,6 +179,7 @@ switch ($Action) {
             -WindowStyle Hidden -PassThru
         $launchedPid = [int]$proc.Id
         $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
+        $recordedExe = Get-RpcProcessPath -ProcessId $launchedPid
 
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
         $ready = $false
@@ -200,7 +201,7 @@ switch ($Action) {
             Start-Sleep -Milliseconds 250
         }
         if (-not $ready -or $null -eq $rpcPid) {
-            if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $exe -StartedUtc $startedUtc) {
+            if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $recordedExe -StartedUtc $startedUtc) {
                 Stop-Process -Id $launchedPid -Force -ErrorAction SilentlyContinue
             }
             throw "rpc-server did not start listening on ${bindHost}:${rpcPort} within 20s."
@@ -208,7 +209,7 @@ switch ($Action) {
 
         $stateObj = [ordered]@{
             pid        = $launchedPid
-            exe        = $exe
+            exe        = $recordedExe
             startedUtc = $startedUtc
             host       = $bindHost
             port       = $rpcPort

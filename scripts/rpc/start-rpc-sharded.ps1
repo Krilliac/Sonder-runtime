@@ -260,6 +260,7 @@ switch ($Action) {
                 -WindowStyle Hidden -PassThru
             $launchedPid = [int]$proc.Id
             $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
+            $recordedExe = Get-RpcProcessPath -ProcessId $launchedPid
 
             $deadline = [DateTime]::UtcNow.AddSeconds($ReadyWaitSeconds)
             $ready = $null
@@ -277,7 +278,7 @@ switch ($Action) {
                 Start-Sleep -Milliseconds 750
             }
             if ($null -eq $ready) {
-                if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $llamaExe -StartedUtc $startedUtc) {
+                if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $recordedExe -StartedUtc $startedUtc) {
                     Stop-Process -Id $launchedPid -Force -ErrorAction SilentlyContinue
                 }
                 throw "Sharded llama-server did not become healthy within ${ReadyWaitSeconds}s. See $stderr"
@@ -285,7 +286,7 @@ switch ($Action) {
 
             $stateObj = [ordered]@{
                 pid        = $launchedPid
-                exe        = $llamaExe
+                exe        = $recordedExe
                 startedUtc = $startedUtc
                 baseUrl    = $baseUrl
                 modelPath  = $ModelPath
