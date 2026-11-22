@@ -1526,9 +1526,9 @@ class OllamaWorkerPool:
         self._stream_admission_timeout = float(stream_admission_timeout_seconds)
         by_origin: dict[str, int] = {}
         for raw_origin, raw_slots in dict(max_inflight_by_origin or {}).items():
-            if isinstance(raw_slots, bool):
-                raise ValueError("max inflight for an origin must be an integer, not bool")
-            slots = int(raw_slots)
+            if isinstance(raw_slots, bool) or not isinstance(raw_slots, int):
+                raise ValueError("max inflight for an origin must be an integer")
+            slots = raw_slots
             if not 1 <= slots <= _MAX_INFLIGHT_PER_WORKER:
                 raise ValueError("max inflight for an origin must be within 1..64")
             key = ollama_policy.normalize(str(raw_origin)).rstrip("/")

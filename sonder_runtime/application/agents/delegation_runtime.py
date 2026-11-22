@@ -42,6 +42,7 @@ class DelegationExecutor(Protocol):
         parent_project: str,
         parent_read_only: bool,
         board: AgentProgressBoard,
+        parent_allow_web: bool = True,
     ) -> tuple[DelegationChildResult, ...]: ...
 
 
@@ -613,6 +614,7 @@ def run_delegated_specs(
     tool_name: str = "delegate_task",
     parent_project: str = "",
     parent_read_only: bool = False,
+    parent_allow_web: bool = True,
 ) -> tuple[DelegationChildResult, ...]:
     """Validate depth, bind board if absent, and invoke the host delegation executor."""
     if not can_delegate():
@@ -640,6 +642,7 @@ def run_delegated_specs(
         parent_project=parent_project,
         parent_read_only=parent_read_only,
         board=board,
+        parent_allow_web=parent_allow_web,
     )
 
 

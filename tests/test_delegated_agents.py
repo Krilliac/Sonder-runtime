@@ -883,3 +883,74 @@ def test_delegation_refused_when_parent_holds_gpu_ticket(monkeypatch, tmp_path):
         repository_extra_roots=str(tmp_path),
     )
     assert "GPU admission ticket" in out
+
+
+@pytest.mark.parametrize(
+    ("parent_allow_web", "parent_read_only", "expected_allow_web", "expected_read_only"),
+    [
+        (False, False, False, False),
+        (True, True, False, True),
+        (False, True, False, True),
+        (True, False, True, False),
+    ],
+)
+def test_delegated_child_inherits_parent_allow_web_without_escalation(
+    monkeypatch, tmp_path, parent_allow_web, parent_read_only, expected_allow_web, expected_read_only
+):
+    """D1: Offline parent (allow_web=False) must never escalate child to allow_web=True."""
+    pm.set_mode(pm.AUTO)
+    seen: list[dict] = []
+
+    def fake_agent_impl(_prompt, **kwargs):
+        seen.append(dict(kwargs))
+        return "child ok"
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent_impl)
+    if parent_read_only:
+        refused = server._agent_dispatch(
+            "delegate_task",
+            {"task": "check web flag"},
+            read_only=True,
+            allow_web=parent_allow_web,
+            repository_extra_roots=str(tmp_path),
+        )
+        assert "not allowed by the repository read-only policy" in refused
+        out = delegation_wiring.dispatch_delegation(
+            server,
+            "delegate_task",
+            {"task": "check web flag"},
+            read_only=True,
+            allow_web=parent_allow_web,
+            repository_extra_roots=str(tmp_path),
+        )
+        assert "child ok" in out
+        assert len(seen) == 1
+        assert seen[0]["allow_web"] is expected_allow_web
+        assert seen[0]["read_only"] is expected_read_only
+        return
+
+    out = server._agent_dispatch(
+        "delegate_task",
+        {"task": "check web flag"},
+        read_only=False,
+        allow_web=parent_allow_web,
+        repository_extra_roots=str(tmp_path),
+    )
+    assert "child ok" in out
+    assert len(seen) == 1
+    assert seen[0]["allow_web"] is expected_allow_web
+    assert seen[0]["read_only"] is expected_read_only
+
+    # Also verify spawn_agents multi-child path preserves allow_web=False.
+    seen.clear()
+    out_batch = server._agent_dispatch(
+        "spawn_agents",
+        {"tasks": [{"task": "t1"}, {"task": "t2"}]},
+        read_only=False,
+        allow_web=parent_allow_web,
+        repository_extra_roots=str(tmp_path),
+    )
+    assert "child ok" in out_batch
+    assert len(seen) == 2
+    assert all(call["allow_web"] is expected_allow_web for call in seen)
+    assert all(call["read_only"] is expected_read_only for call in seen)
