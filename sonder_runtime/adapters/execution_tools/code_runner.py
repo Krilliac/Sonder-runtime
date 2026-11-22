@@ -19,9 +19,19 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+from dataclasses import dataclass
 from sonder_runtime.platform import logging as sonder_logging
 from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.application.workflows import loop as workflow_loop
+
+try:  # POSIX only: RunLimits sets the child's rlimits through it
+    import resource as _resource
+except ImportError:
+    _resource = None
+
+_REAL_POPEN = subprocess.Popen
 
 
 SUPPORTED_LANGUAGES = {
@@ -121,11 +131,63 @@ SUPPORTED_LANGUAGES = {
 DEFAULT_TIMEOUT = 10
 MAX_TIMEOUT = 60
 MAX_OUTPUT_CHARS = 12000
+# Bytes of each child pipe _collect_output keeps: output up to this size is
+# returned exactly as communicate() did (whole, then _trim_output's tail
+# cut); past it a head and tail are kept and the middle is drained and
+# discarded. 5 x MAX_OUTPUT_CHARS leaves room for utf-8's 4 bytes per char.
+DEFAULT_CAPTURE_BYTES = 5 * MAX_OUTPUT_CHARS
+_READ_CHUNK_BYTES = 65536
+_CREATE_SUSPENDED = 0x00000004
+# How often a run with an output kill threshold checks it while waiting.
+_OUTPUT_POLL_SECONDS = 0.05
+
+
+@dataclass(frozen=True)
+class RunLimits:
+    """Opt-in hardening for one run_code call.
+
+    No production caller passes limits yet: the /run handlers in serve.py,
+    server.py and the REPL call ``run_code`` without them, so those runs
+    have no process, memory or output kill cap. Wiring a caller in is
+    follow-up work.
+
+    Immutable, so one instance may be shared across threads. Callers that
+    pass nothing keep today's behaviour exactly. With limits the child is
+    started suspended and placed in a Job Object capped at ``process_limit``
+    active processes and ``job_memory_bytes`` of committed memory before it
+    runs (Windows; the run is refused if the job cannot be configured), or
+    runs under RLIMIT_NPROC / RLIMIT_AS / RLIMIT_FSIZE (POSIX). Python runs
+    with -I when ``isolated_python``. Each output stream keeps at most
+    ``capture_bytes_per_stream`` bytes, and the tree is killed once the two
+    streams together pass ``kill_after_total_bytes``. This is not a sandbox:
+    there is no network or filesystem confinement beyond the temp cwd.
+    """
+
+    process_limit: int = 16
+    job_memory_bytes: int = 512 * 1024 * 1024
+    file_size_bytes: int = 64 * 1024 * 1024
+    isolated_python: bool = True
+    capture_bytes_per_stream: int = 64 * 1024
+    kill_after_total_bytes: int = 8 * 1024 * 1024
+
+    def __post_init__(self):
+        for name in (
+            "process_limit", "job_memory_bytes", "file_size_bytes",
+            "capture_bytes_per_stream", "kill_after_total_bytes",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError("RunLimits.%s must be a positive int" % name)
+        if type(self.isolated_python) is not bool:
+            raise ValueError("RunLimits.isolated_python must be a bool")
 DEFAULT_LOOP_ITERATIONS = 5
 MAX_LOOP_ITERATIONS = 50
 MAX_LOOP_DELAY_SECONDS = 10.0
 MAX_PROJECT_FILES = 80
 MAX_PROJECT_BYTES = 750000
+# Each run_project step gets the full timeout, so the step count bounds the
+# whole call: 16 x MAX_TIMEOUT.
+MAX_PROJECT_COMMANDS = 16
 RUN_WINDOW_DIR_ENV = "SONDER_RUN_WINDOW_DIR"
 # Lifecycle quota for detached /runwindow consoles.  ``timeout`` bounds only
 # the compile/launch step; these bound what keeps running afterwards: how
@@ -160,7 +222,18 @@ def _powershell_exe():
 
 
 def workspace_root():
-    return os.path.abspath(os.path.dirname(__file__))
+    """Sonder's checkout, the base for relative ``cwd`` values.
+
+    ``dirname(__file__)`` stopped naming the checkout when this module moved
+    into ``sonder_runtime/adapters/execution_tools``: ``resolve_cwd("tests")``
+    failed and ``cwd="."`` ran the child inside the runtime package. file_ops
+    owns the checkout-root rule (it fixed the same regression for itself), so
+    defer to it. Imported here, not at module level, to keep this module's
+    import light and free of cycles.
+    """
+    from sonder_runtime.adapters.filesystem import file_ops
+
+    return str(file_ops.workspace_root())
 
 
 def normalize_language(language):
@@ -254,6 +327,51 @@ def _timeout_result(language, cwd, timeout, exc):
     }
 
 
+_WIN_KERNEL32 = None
+
+
+def _win_kernel32():
+    """Isolated Win32 kernel32 handle with explicit argtypes/restype (never mutates shared windll)."""
+    global _WIN_KERNEL32
+    if _WIN_KERNEL32 is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.argtypes = [ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR]
+        k32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
+            ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD,
+        ]
+        k32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE,
+        ]
+        k32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
+        k32.TerminateJobObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+        k32.TerminateJobObject.restype = ctypes.wintypes.BOOL
+        k32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        k32.CloseHandle.restype = ctypes.wintypes.BOOL
+        k32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+        k32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+        k32.Process32FirstW.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Process32FirstW.restype = ctypes.wintypes.BOOL
+        k32.Process32NextW.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Process32NextW.restype = ctypes.wintypes.BOOL
+        k32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+        k32.OpenProcess.restype = ctypes.wintypes.HANDLE
+        k32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+        k32.TerminateProcess.restype = ctypes.wintypes.BOOL
+        k32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Thread32First.restype = ctypes.wintypes.BOOL
+        k32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Thread32Next.restype = ctypes.wintypes.BOOL
+        k32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+        k32.OpenThread.restype = ctypes.wintypes.HANDLE
+        k32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
+        k32.ResumeThread.restype = ctypes.wintypes.DWORD
+        _WIN_KERNEL32 = k32
+    return _WIN_KERNEL32
+
+
 def _terminate_process_tree(proc):
     """Best-effort teardown for a timed-out model-authored process tree.
 
@@ -268,7 +386,7 @@ def _terminate_process_tree(proc):
         job = getattr(proc, "_sonder_job_handle", None)
         if job:
             try:
-                ctypes.windll.kernel32.TerminateJobObject(job, 1)
+                _win_kernel32().TerminateJobObject(job, 1)
                 _close_windows_job(job)
                 proc._sonder_job_handle = None
                 return
@@ -308,7 +426,7 @@ def _terminate_process_tree(proc):
 
 def _terminate_windows_descendants(root_pid):
     """Terminate descendants by parent PID when Job Objects are unavailable."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _win_kernel32()
 
     class Entry(ctypes.Structure):
         _fields_ = [
@@ -324,16 +442,6 @@ def _terminate_windows_descendants(root_pid):
             ("szExeFile", ctypes.wintypes.WCHAR * 260),
         ]
 
-    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
-    kernel32.Process32FirstW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(Entry)]
-    kernel32.Process32FirstW.restype = ctypes.wintypes.BOOL
-    kernel32.Process32NextW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(Entry)]
-    kernel32.Process32NextW.restype = ctypes.wintypes.BOOL
-    kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
-    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
-    kernel32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
-    kernel32.TerminateProcess.restype = ctypes.wintypes.BOOL
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
     if not snapshot or snapshot == ctypes.wintypes.HANDLE(-1).value:
         return
@@ -363,11 +471,15 @@ def _terminate_windows_descendants(root_pid):
         kernel32.CloseHandle(snapshot)
 
 
-def _attach_windows_job(proc, *, active_process_limit=None):
+def _attach_windows_job(proc, *, active_process_limit=None, job_memory_bytes=None):
     """Put a runner process in a kill-on-close Windows Job Object.
 
     ``active_process_limit`` additionally caps how many processes the job
-    may hold at once (JOB_OBJECT_LIMIT_ACTIVE_PROCESS).
+    may hold at once (JOB_OBJECT_LIMIT_ACTIVE_PROCESS) and
+    ``job_memory_bytes`` the memory all of them may commit together
+    (JOB_OBJECT_LIMIT_JOB_MEMORY). Returns None when any of it cannot be
+    set (SetInformationJobObject's result is checked), so a caller that
+    needs the limits can refuse to run.
     """
     if os.name != "nt":
         return None
@@ -375,20 +487,7 @@ def _attach_windows_job(proc, *, active_process_limit=None):
     if process_handle is None:
         return None
     try:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
-        kernel32.CreateJobObjectW.argtypes = [ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR]
-        kernel32.SetInformationJobObject.argtypes = [
-            ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
-            ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD,
-        ]
-        kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [
-            ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE,
-        ]
-        kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+        kernel32 = _win_kernel32()
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             return None
@@ -428,8 +527,9 @@ def _attach_windows_job(proc, *, active_process_limit=None):
         if active_process_limit is not None:
             info.BasicLimitInformation.LimitFlags |= 0x0008  # ACTIVE_PROCESS
             info.BasicLimitInformation.ActiveProcessLimit = max(1, int(active_process_limit))
-        kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
+        if job_memory_bytes is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x0200  # JOB_MEMORY
+            info.JobMemoryLimit = max(1, int(job_memory_bytes))
         if not kernel32.SetInformationJobObject(
             job, 9, ctypes.byref(info), ctypes.sizeof(info)
         ):
@@ -446,7 +546,7 @@ def _attach_windows_job(proc, *, active_process_limit=None):
 def _close_windows_job(job):
     if job and os.name == "nt":
         try:
-            ctypes.windll.kernel32.CloseHandle(job)
+            _win_kernel32().CloseHandle(job)
         except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
             # ArgumentError: a handle ctypes cannot marshal (it is not an
             # OSError). Closing is best effort; never raise out of teardown,
@@ -456,7 +556,7 @@ def _close_windows_job(job):
 
 def _resume_windows_process(proc):
     """Resume the initial thread of a process started with CREATE_SUSPENDED."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _win_kernel32()
 
     class ThreadEntry(ctypes.Structure):
         _fields_ = [
@@ -469,19 +569,6 @@ def _resume_windows_process(proc):
             ("dwFlags", ctypes.wintypes.DWORD),
         ]
 
-    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
-    kernel32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel32.Thread32First.restype = ctypes.wintypes.BOOL
-    kernel32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel32.Thread32Next.restype = ctypes.wintypes.BOOL
-    kernel32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
-                                   ctypes.wintypes.DWORD]
-    kernel32.OpenThread.restype = ctypes.wintypes.HANDLE
-    kernel32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
-    kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
     if not snapshot or snapshot == ctypes.c_void_p(-1).value:
         raise OSError("could not enumerate suspended console threads")
@@ -532,9 +619,296 @@ def _decode_child_output(raw):
         return raw.decode(locale.getpreferredencoding(False), errors="replace")
 
 
-def _run_process(cmd, cwd, stdin, timeout, language):
+def _utf8_cut_end(data):
+    """Drop a utf-8 sequence the head capture cut in half (so it decodes)."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 == 0x80:
+            continue
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            if need > back:
+                return data[:-back]
+        break
+    return data
+
+
+def _utf8_cut_start(data):
+    """Drop continuation bytes left at the start of a rolled tail capture."""
+    skip = 0
+    while skip < min(3, len(data)) and data[skip] & 0xC0 == 0x80:
+        skip += 1
+    return data[skip:]
+
+
+class _StreamCapture:
+    """Bounded capture of one child pipe: the first and last bytes it wrote.
+
+    Fed by exactly one reader thread and read by the runner thread; the lock
+    covers both, because after a timeout the reader may still be draining a
+    pipe a surviving descendant holds while the runner builds its result.
+    Memory is bounded by ``capture_bytes`` plus one read chunk.
+    """
+
+    def __init__(self, capture_bytes):
+        self._lock = threading.Lock()
+        self._head_limit = capture_bytes // 5
+        self._tail_limit = capture_bytes - self._head_limit
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._total = 0
+
+    def feed(self, chunk):
+        with self._lock:
+            self._total += len(chunk)
+            room = self._head_limit - len(self._head)
+            if room > 0:
+                self._head += chunk[:room]
+                chunk = chunk[room:]
+            if chunk:
+                self._tail += chunk
+                excess = len(self._tail) - self._tail_limit
+                if excess > 0:
+                    del self._tail[:excess]
+
+    def text(self):
+        """Decoded output; past the capture, head + marker + tail in MAX_OUTPUT_CHARS."""
+        with self._lock:
+            head, tail, total = bytes(self._head), bytes(self._tail), self._total
+        if total == len(head) + len(tail):
+            return _decode_child_output(head + tail)
+        marker = (
+            "\n[... output truncated: %d bytes written, showing the start and end ...]\n"
+            % total
+        )
+        head_text = _decode_child_output(_utf8_cut_end(head))[:MAX_OUTPUT_CHARS // 4]
+        room = max(0, MAX_OUTPUT_CHARS - len(head_text) - len(marker))
+        tail_text = _decode_child_output(_utf8_cut_start(tail))
+        return head_text + marker + (tail_text[-room:] if room else "")
+
+
+class _OutputBudget:
+    """Total bytes both pipes of one run wrote, against a kill threshold.
+
+    Shared by the two reader threads (hence the lock); ``exceeded`` tells
+    the runner thread to kill the tree.
+    """
+
+    def __init__(self, limit):
+        self._lock = threading.Lock()
+        self._limit = limit
+        self._total = 0
+        self.exceeded = threading.Event()
+
+    def add(self, count):
+        with self._lock:
+            self._total += count
+            if self._total > self._limit:
+                self.exceeded.set()
+
+
+def _drain_into(stream, capture, budget=None):
+    read = getattr(stream, "read1", stream.read)
+    try:
+        while True:
+            chunk = read(_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            capture.feed(chunk)
+            if budget is not None:
+                budget.add(len(chunk))
+    except (OSError, ValueError):
+        return
+
+
+def _feed_stdin(stream, data):
+    try:
+        if data:
+            stream.write(data)
+    except (OSError, ValueError):
+        pass  # the child exited or closed stdin without reading it all
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _wait_watching_output(proc, deadline, budget):
+    """Wait for exit until ``deadline``; "output" once ``budget`` is exceeded."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if budget.exceeded.wait(max(0.0, min(_OUTPUT_POLL_SECONDS, remaining))):
+            return "output"
+        if proc.poll() is not None:
+            return None
+        if time.monotonic() >= deadline:
+            return "timeout"
+
+
+def _collect_output(
+    proc, input_bytes, timeout, *, capture_bytes=DEFAULT_CAPTURE_BYTES,
+    kill_after_bytes=None,
+):
+    """Feed stdin, wait for exit and collect output: (stdout, stderr, status).
+
+    ``status`` is None for a run that finished, "timeout", or "output" when
+    the streams together passed ``kill_after_bytes`` and the tree was killed
+    (only when a threshold is given; by default the excess is discarded).
+
+    Replaces ``communicate()``, which held every byte a child printed until it
+    exited: a snippet printing gigabytes exhausted host memory before
+    _trim_output ever ran. Each pipe is drained into a bounded
+    _StreamCapture, and the child keeps running to completion (the excess is
+    discarded rather than the child killed), so a chatty but correct program
+    still reports its real exit status; the timeout bounds how long it runs.
+
+    The deadline covers what communicate() covered: the child exiting *and*
+    both pipes closing, so a descendant still holding a pipe keeps the run
+    open until the deadline. On timeout the tree is torn down and the output
+    is what was printed in time.
+    """
+    deadline = time.monotonic() + timeout
+    captures = (_StreamCapture(capture_bytes), _StreamCapture(capture_bytes))
+    budget = None if kill_after_bytes is None else _OutputBudget(kill_after_bytes)
+    readers = []
+    for stream, capture in zip((proc.stdout, proc.stderr), captures, strict=True):
+        if stream is not None:
+            reader = owned_runtime_thread(
+                target=_drain_into, args=(stream, capture, budget),
+                name="sonder-code-runner-reader", daemon=True,
+            )
+            reader.start()
+            readers.append((reader, stream))
+    if proc.stdin is not None:
+        owned_runtime_thread(
+            target=_feed_stdin, args=(proc.stdin, input_bytes),
+            name="sonder-code-runner-stdin", daemon=True,
+        ).start()
+    status = None
+    if budget is not None:
+        status = _wait_watching_output(proc, deadline, budget)
+    else:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            status = "timeout"
+    if status is None:
+        for reader, _stream in readers:
+            reader.join(max(0.0, deadline - time.monotonic()))
+        if any(reader.is_alive() for reader, _stream in readers):
+            status = "timeout"
+    if status is not None:
+        _terminate_process_tree(proc)
+        # ``taskkill /T`` can report success before the process handle is
+        # signalled.  Waiting on the direct handle first prevents the
+        # TemporaryDirectory owner from racing a still-live interpreter that
+        # has inherited the snippet directory or pipe handles.
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        # Collect what is still in the pipes, as communicate(timeout=1) did.
+        late = time.monotonic() + 1
+        for reader, _stream in readers:
+            reader.join(max(0.0, late - time.monotonic()))
+    for reader, stream in readers:
+        if not reader.is_alive():  # a live reader still owns its pipe
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    return captures[0].text(), captures[1].text(), status
+
+
+def _abort_process(proc):
+    """Tear down and reap ``proc``'s tree after a failure past the spawn.
+
+    The pipes are left to the reader threads and garbage collection: closing
+    a buffered pipe blocks on the lock a reader holds while it waits in read.
+    """
+    try:
+        _terminate_process_tree(proc)
+    except Exception:  # noqa: BLE001 - keep going: the job close below still kills the tree
+        logging.getLogger(__name__).warning("runner teardown failed", exc_info=True)
+    try:
+        proc.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _release_job(proc):
+    """Close ``proc``'s Job Object exactly once (kill-on-close ends the tree)."""
+    _close_windows_job(getattr(proc, "_sonder_job_handle", None))
+    try:
+        proc._sonder_job_handle = None
+    except AttributeError:
+        pass
+
+
+def _limited_windows_job(proc, limits):
+    """The Job Object for a RunLimits run, or None if it cannot be configured."""
+    return _attach_windows_job(
+        proc, active_process_limit=limits.process_limit,
+        job_memory_bytes=limits.job_memory_bytes,
+    )
+
+
+def _posix_limit_preexec(limits, resource_module=None):
+    """Build the preexec_fn that applies RunLimits' rlimits in the child.
+
+    Everything that can fail is resolved here, in the parent: a missing
+    RLIMIT_* raises OSError and the run is refused. The returned function
+    only calls getrlimit/setrlimit (C calls, no Python locks), which keeps
+    it safe to run between fork and exec in this multi-threaded server. A
+    hard limit already below the requested one is kept, since an
+    unprivileged process cannot raise it. RLIMIT_NPROC counts every process
+    of the user, not only this tree, so it is stricter on a busy account.
+    """
+    module = _resource if resource_module is None else resource_module
+    if module is None:
+        raise OSError("resource limits are not available on this platform")
+    plan = []
+    for name, value in (
+        ("RLIMIT_NPROC", limits.process_limit),
+        ("RLIMIT_AS", limits.job_memory_bytes),
+        ("RLIMIT_FSIZE", limits.file_size_bytes),
+    ):
+        which = getattr(module, name, None)
+        if which is None:
+            raise OSError("%s is not available on this platform" % name)
+        plan.append((which, value))
+    infinity = module.RLIM_INFINITY
+    getrlimit, setrlimit = module.getrlimit, module.setrlimit
+
+    def apply_limits():
+        for which, value in plan:
+            _soft, hard = getrlimit(which)
+            if hard != infinity:
+                value = min(value, hard)
+            setrlimit(which, (value, value))
+
+    return apply_limits
+
+
+def _run_process(cmd, cwd, stdin, timeout, language, limits=None):
     if language == "bash" and not sonder_paths.bash_executable():
         return _error_result(language, cwd, timeout, SUPPORTED_LANGUAGES[language]["missing"])
+    # Encode before anything is spawned: a failure here (an unpaired surrogate
+    # cannot be utf-8) used to escape after the child and its job existed,
+    # leaving both live.
+    try:
+        input_bytes = (stdin or "").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return _error_result(
+            language, cwd, timeout, "stdin is not encodable as UTF-8: %s" % exc,
+        )
     try:
         popen_kwargs = {
             "cwd": cwd,
@@ -550,52 +924,84 @@ def _run_process(cmd, cwd, stdin, timeout, language):
             "close_fds": True,
         }
         if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            # Start suspended so the child cannot spawn descendants before the
+            # Job Object (and any RunLimits) is attached.
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | _CREATE_SUSPENDED
             )
         else:
             popen_kwargs["start_new_session"] = True
+            if limits is not None:
+                popen_kwargs["preexec_fn"] = _posix_limit_preexec(limits)
         proc = subprocess.Popen(
             cmd,
             **popen_kwargs,
         )
-        proc._sonder_job_handle = _attach_windows_job(proc)
     except FileNotFoundError:
         missing = SUPPORTED_LANGUAGES.get(language, {}).get(
             "missing", "executable not found: %s" % (cmd[0] if cmd else "(empty)")
         )
         return _error_result(language, cwd, timeout, missing)
-    try:
-        stdout, stderr = proc.communicate(
-            input=(stdin or "").encode("utf-8"), timeout=timeout,
+    except (OSError, subprocess.SubprocessError) as exc:
+        if limits is None:
+            raise
+        # Missing rlimit support, or the child's preexec_fn failed to set
+        # them: refuse rather than run without the limits.
+        return _error_result(
+            language, cwd, timeout, "could not apply run limits; refusing to run: %s" % exc,
         )
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(proc)
-        # ``taskkill /T`` can report success before the process handle is
-        # signalled.  Waiting on the direct handle first prevents the
-        # TemporaryDirectory owner from racing a still-live interpreter that
-        # has inherited the snippet directory or pipe handles.
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+    collect = {}
+    if limits is not None:
+        collect = {
+            "capture_bytes": limits.capture_bytes_per_stream,
+            "kill_after_bytes": limits.kill_after_total_bytes,
+        }
+    # Everything past the spawn owns a live child: any exception (including
+    # KeyboardInterrupt) tears the tree down and reaps it before propagating,
+    # and the job is closed exactly once on every path.
+    try:
+        proc._sonder_job_handle = None
+        if limits is not None and os.name == "nt":
+            proc._sonder_job_handle = _limited_windows_job(proc, limits)
+            if not proc._sonder_job_handle:
+                _abort_process(proc)
+                return _error_result(
+                    language, cwd, timeout,
+                    "could not apply run limits (Windows job object); refusing to run",
+                )
+            _resume_windows_process(proc)
+        else:
+            proc._sonder_job_handle = _attach_windows_job(proc)
+            if os.name == "nt" and isinstance(proc, _REAL_POPEN):
+                _resume_windows_process(proc)
+        stdout, stderr, status = _collect_output(proc, input_bytes, timeout, **collect)
+    except BaseException:
+        _abort_process(proc)
+        raise
+    finally:
+        if os.name != "nt" and isinstance(proc, _REAL_POPEN):
             try:
-                proc.kill()
-            except OSError:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
                 pass
-        try:
-            stdout, stderr = proc.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = exc.output, exc.stderr
+        _release_job(proc)
+    if status == "output":
+        return {
+            **_error_result(
+                language, cwd, timeout,
+                "output exceeded %d bytes; process killed" % limits.kill_after_total_bytes,
+            ),
+            "stdout": _trim_output(stdout),
+            "stderr": _trim_output(stderr),
+        }
+    if status == "timeout":
         timeout_exc = subprocess.TimeoutExpired(
             cmd, timeout,
             output=_decode_child_output(stdout),
             stderr=_decode_child_output(stderr),
         )
-        _close_windows_job(getattr(proc, "_sonder_job_handle", None))
         return _timeout_result(language, cwd, timeout, timeout_exc)
-    finally:
-        if getattr(proc, "poll", lambda: proc.returncode)() is not None:
-            _close_windows_job(getattr(proc, "_sonder_job_handle", None))
     completed = subprocess.CompletedProcess(
         cmd, proc.returncode,
         _decode_child_output(stdout), _decode_child_output(stderr),
@@ -696,6 +1102,12 @@ class _WindowRegistry:
             except Exception:  # noqa: BLE001 - teardown is best effort; the job still closes
                 logging.getLogger(__name__).warning(
                     "runwindow lifetime teardown failed", exc_info=True)
+            # The teardown closes the job it terminated and clears the proc's
+            # handle. Closing window["job"] again in the release would hit a
+            # handle value Windows may already have reused (another console's
+            # job, or any handle in this process), so drop it here.
+            if getattr(window["proc"], "_sonder_job_handle", window["job"]) is None:
+                window["job"] = None
             try:
                 self._release_locked(key)
             except Exception:  # noqa: BLE001 - never kill the timer thread
@@ -1055,8 +1467,15 @@ def _clamp_delay(delay_seconds):
     return workflow_loop.clamp_delay(delay_seconds)
 
 
-def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=None):
+def run_code(
+    code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=None, *,
+    limits=None,
+):
     """Run a snippet and return a result dict.
+
+    ``limits`` (a RunLimits) opts into the hardened host run; None keeps
+    the existing behaviour. No production caller passes limits yet (see
+    RunLimits).
 
     The caller receives:
       ok: process exited 0
@@ -1070,6 +1489,12 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
     language = normalize_language(language)
     timeout = _clamp_timeout(timeout)
     cfg = SUPPORTED_LANGUAGES[language]
+    if limits is not None and not isinstance(limits, RunLimits):
+        raise TypeError("limits must be a RunLimits")
+    if limits is not None and language in ("cpp", "csharp", "rust"):
+        # Their compile steps and launchers are not wired for limits; refuse
+        # rather than run a "limited" snippet without them.
+        raise ValueError("run limits are not supported for %s" % language)
 
     # Windows can retain a directory handle briefly after taskkill tears down
     # a timed-out descendant tree.  Cleanup must not turn a correctly reported
@@ -1091,7 +1516,13 @@ def run_code(code, language="python", stdin="", timeout=DEFAULT_TIMEOUT, cwd=Non
         if language == "rust":
             return _run_rust(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
-        return _run_process(cmd, cwd, stdin, timeout, language)
+        if limits is None:
+            return _run_process(cmd, cwd, stdin, timeout, language)
+        if limits.isolated_python and language == "python":
+            # -I implies -E (ignore PYTHONIOENCODING), which drops Windows
+            # children back to cp1252; -X utf8 keeps UTF-8 I/O enabled.
+            cmd = [cmd[0], "-I", "-X", "utf8", *cmd[1:]]
+        return _run_process(cmd, cwd, stdin, timeout, language, limits=limits)
 
 
 def run_code_window(code, language="python", timeout=DEFAULT_TIMEOUT, cwd=None):
@@ -1267,6 +1698,11 @@ def _commands_from_json(commands_json):
         parsed = parsed["commands"]
     if not isinstance(parsed, list) or not parsed:
         raise ValueError("commands_json must be a non-empty list")
+    if len(parsed) > MAX_PROJECT_COMMANDS:
+        raise ValueError(
+            "commands_json may list at most %d commands (got %d)"
+            % (MAX_PROJECT_COMMANDS, len(parsed))
+        )
     commands = []
     for item in parsed:
         if isinstance(item, list):

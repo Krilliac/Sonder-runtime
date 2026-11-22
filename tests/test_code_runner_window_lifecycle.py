@@ -238,3 +238,52 @@ def test_lifetime_expiry_survives_a_bad_job_handle():
     registry._windows[1] = {"proc": proc, "job": object(), "timer": _Timer(), "run_dir": None}
     registry._expire(1)
     assert registry._windows == {}
+
+
+def test_lifetime_expiry_closes_the_job_handle_exactly_once(monkeypatch):
+    """Teardown closes the job; the release must not close the same handle.
+
+    A second CloseHandle on a value Windows may already have reused could
+    close another console's job (or any other handle) in this process.
+    """
+    calls = []
+
+    class _Kernel32:
+        def TerminateJobObject(self, job, code):
+            calls.append(("terminate", job))
+            return 1
+
+        def CloseHandle(self, handle):
+            calls.append(("close", handle))
+            return 1
+
+    class _Timer:
+        def cancel(self):
+            pass
+
+    kernel32 = _Kernel32()
+    monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
+    monkeypatch.setattr(code_runner, "_win_kernel32", lambda: kernel32)
+    job = 0x1234
+    proc = _Proc()
+    proc._sonder_job_handle = job
+    registry = code_runner._WindowRegistry()
+    registry._windows[1] = {"proc": proc, "job": job, "timer": _Timer(), "run_dir": None}
+
+    registry._expire(1)
+
+    assert calls == [("terminate", job), ("close", job)]
+    assert registry._windows == {}
+
+
+@pytest.mark.skipif(code_runner.os.name != "nt", reason="Windows kernel32 ctypes signature check")
+def test_win_kernel32_is_isolated_with_explicit_job_argtypes():
+    k32 = code_runner._win_kernel32()
+    assert k32 is not code_runner.ctypes.windll.kernel32
+    assert k32.TerminateJobObject.argtypes == [
+        code_runner.ctypes.wintypes.HANDLE,
+        code_runner.ctypes.wintypes.UINT,
+    ]
+    assert k32.TerminateJobObject.restype == code_runner.ctypes.wintypes.BOOL
+    assert k32.CloseHandle.argtypes == [code_runner.ctypes.wintypes.HANDLE]
+    assert k32.CloseHandle.restype == code_runner.ctypes.wintypes.BOOL

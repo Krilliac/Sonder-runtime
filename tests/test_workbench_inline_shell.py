@@ -210,15 +210,15 @@ def test_run_program_refuses_glued_inline_code(monkeypatch, tmp_path, program, a
         workbench.run_program(program, args_json=[arg], timeout=10)
 
 
-def test_is_inline_code_arg_matches_exact_short_and_long_forms():
+def test_inline_code_refusal_matches_exact_short_and_long_forms():
     # Exact flag, glued short option, and long option with '=' all match;
     # unrelated args and a bare interpreter invocation do not.
-    assert workbench._is_inline_code_arg("-c", ("-c",))
-    assert workbench._is_inline_code_arg("-cprint(1)", ("-c",))
-    assert workbench._is_inline_code_arg("--eval=x", ("-e", "--eval"))
-    assert workbench._is_inline_code_arg("-ex", ("-e", "-E"))
-    assert not workbench._is_inline_code_arg("script.py", ("-c",))
-    assert not workbench._is_inline_code_arg("--evaluate", ("--eval",))
+    assert workbench._inline_code_refusal("python", ["-c", "x"])
+    assert workbench._inline_code_refusal("python", ["-cprint(1)"])
+    assert workbench._inline_code_refusal("node", ["--eval=x"])
+    assert workbench._inline_code_refusal("perl", ["-ex"])
+    assert not workbench._inline_code_refusal("python", ["script.py"])
+    assert not workbench._inline_code_refusal("node", ["--evaluate", "x.js"])
 
 
 def test_inline_interpreter_key_normalizes_names():

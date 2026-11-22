@@ -72,11 +72,11 @@ def test_run_process_closes_unrelated_inherited_handles(monkeypatch, tmp_path):
 
     class FakeProc:
         returncode = 0
+        stdin = stdout = stderr = None
 
-        def communicate(self, *, input, timeout):
-            seen["input"] = input
+        def wait(self, timeout=None):
             seen["timeout"] = timeout
-            return "", ""
+            return self.returncode
 
     def fake_popen(*args, **kwargs):
         seen.update(kwargs)
@@ -336,10 +336,11 @@ def test_timeout_is_clamped(monkeypatch):
 
     class Proc:
         returncode = 0
+        stdin = stdout = stderr = None
 
-        def communicate(self, *, input, timeout):
+        def wait(self, timeout=None):
             seen["timeout"] = timeout
-            return "", ""
+            return self.returncode
 
     monkeypatch.setattr(code_runner.subprocess, "Popen", lambda *args, **kwargs: Proc())
     out = code_runner.run_code("print(1)", timeout=999)
