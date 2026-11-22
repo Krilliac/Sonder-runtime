@@ -108,9 +108,9 @@ The same guards apply to the metadata commands: a `brew`, `xcodebuild` or
 `vswhere` inside a project file root is not run.
 
 The probe environment is the scrubbed child environment (secrets, control
-variables and `SONDER_*` removed), with these values pinned: `NO_COLOR=1`,
-`TERM=dumb`, `CI=1`, `CHECKPOINT_DISABLE=1`, the .NET/Homebrew/npm/pip/gh
-update-check and telemetry opt-outs, `GOTOOLCHAIN=local` (no toolchain
+variables, `SONDER_*` and values carrying URL userinfo removed), with these
+values pinned: `NO_COLOR=1`, `TERM=dumb`, `CI=1`, `CHECKPOINT_DISABLE=1`,
+the .NET/Homebrew/npm/pip/gh update-check and telemetry opt-outs, `GOTOOLCHAIN=local` (no toolchain
 download), `NoDefaultCurrentDirectoryInExePath=1` (no current-directory
 command search in `cmd.exe`), and the spec's own host-owned constants.
 For example, terraform gets `CHECKPOINT_DISABLE=1`.

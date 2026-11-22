@@ -210,7 +210,10 @@ Gradle and Maven report trees:
    2 MB: 64 KiB from the head plus the tail. It is redacted, then digested.
 
 The environment starts from the scrubbed child environment, which drops
-secret, control and `SONDER_*` names. These are then removed:
+secret, control and `SONDER_*` names (including `*_PAT_*`, `*APIKEY*` and
+`*_DSN` names), and any variable other than a search path (`PATH`,
+`PYTHONPATH`, ...) whose value holds a URL with userinfo
+(`scheme://user:pass@host`). These are then removed:
 
 - `PYTEST_ADDOPTS`, `PYTEST_PLUGINS`
 - `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`
