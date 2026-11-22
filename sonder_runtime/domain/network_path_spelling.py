@@ -28,6 +28,18 @@ _EXTENDED_LOCAL = re.compile(r"(?:\\\\\?\\|//\?/)[A-Za-z]:[\\/]")
 # (``-I\\host\share``, ``@\\.\pipe\x``); an embedded extended-length local
 # drive (``\\?\C:\``) is not one.
 _EMBEDDED = re.compile(r"\\\\(?!\?\\[A-Za-z]:\\)[^\\]+\\[^\\]+|\\\?\?\\")
+# A forward-slash (or mixed) UNC/device prefix glued to an option or after a
+# value or list separator (``-I//host/share``, ``/Fo//host/x``,
+# ``x=//host/share``, ``-Wl,//host/share``, ``@//host/rsp``,
+# ``a.jar;//host/share/b.jar``); Windows opens ``//host/share`` as
+# UNC exactly like ``\\host\share``. An extended-length local drive
+# (``//?/C:/``) is not one. A ``-`` option name excludes ``:`` so a URL glued
+# to an option (``-Dhttps://x``) is not mistaken for one; a ``/`` switch keeps
+# it for MSVC's ``/Fo:<path>`` form.
+_EMBEDDED_AFTER_OPTION = re.compile(
+    r"(?:^-[A-Za-z0-9_+\-]*|^/[A-Za-z0-9_+:\-]*|[=@,;])"
+    r"[\\/]{2}(?!\?[\\/][A-Za-z]:[\\/])[^\\/]+"
+)
 
 
 def is_network_spelling(text: str) -> bool:
@@ -41,8 +53,13 @@ def is_network_spelling(text: str) -> bool:
 def contains_network_spelling(token: str) -> bool:
     """Whether a command-line token is, or embeds, a UNC, device or NT-namespace spelling.
 
-    Forward-slash forms count only at the start of the token: ``a//b/c`` is
-    an ordinary relative path.
+    Forward-slash forms count at the start of the token, glued to an option
+    prefix (``-I//host/share``, ``/Fo//host/x``) or after ``=``, ``@``, ``,``
+    or ``;``; elsewhere ``a//b/c`` is an ordinary relative path.
     """
     text = str(token)
-    return is_network_spelling(text) or bool(_EMBEDDED.search(text))
+    return (
+        is_network_spelling(text)
+        or bool(_EMBEDDED.search(text))
+        or bool(_EMBEDDED_AFTER_OPTION.search(text))
+    )

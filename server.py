@@ -313,6 +313,7 @@ from sonder_runtime.domain.agents.verification_reach import (
     VERIFICATION_TOOLS as _AGENT_VERIFICATION_TOOLS,
     verifier_reachable as _verifier_reachable_policy,
 )
+from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.domain.agents.activity_command import (
     activity_argv as _activity_argv,
     activity_command as _agent_activity_command,
@@ -1089,7 +1090,13 @@ def served_work_project(project):
     text = str(project or "").strip()
     if not text:
         return ""
-    expanded = os.path.expanduser(text)
+    # realpath/isdir on a UNC or device spelling opens it (SMB, NTLM) before
+    # the root check can refuse it, so decide on the spelling first.
+    try:
+        text = file_ops._reject_network_path(text)
+        expanded = file_ops._reject_network_path(os.path.expanduser(text))
+    except PermissionError:
+        return ""
     path_like = (
         os.path.isabs(expanded)
         or bool(re.match(r"^[A-Za-z]:", expanded))
@@ -7991,14 +7998,14 @@ def campaign_generate_compile_execute_record(
             approval_required = isinstance(out, _powershell_gate.ApprovalRequired)
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
-                    record_msg = record_outcome(iid, "tests_passed")
+                    record_msg = record_self_graded_outcome(iid, "tests_passed")
             elif env_failure or approval_required:
                 # Toolchain or approval skip: the model was never judged, so no
                 # outcome and no pitfall are recorded against it.
                 pass
             elif attempt == repair_rounds and record_failures and iid:
                 with _CAMPAIGN_LEARN_LOCK:
-                    record_msg = record_outcome(iid, "failed")
+                    record_msg = record_self_graded_outcome(iid, "failed")
                     # A failure that teaches nothing recurs forever; distill
                     # the guard while the error is still in hand.
                     pitfall, pitfall_note = _record_failure_pitfall(
@@ -8199,12 +8206,12 @@ def campaign_repo_repair(
                     break
                 if ok and iid:
                     with _CAMPAIGN_LEARN_LOCK:
-                        record_msg = record_outcome(iid, "tests_passed")
+                        record_msg = record_self_graded_outcome(iid, "tests_passed")
                 elif (
                     attempt == repair_rounds and record_failures and iid
                 ):
                     with _CAMPAIGN_LEARN_LOCK:
-                        record_msg = record_outcome(iid, "failed")
+                        record_msg = record_self_graded_outcome(iid, "failed")
                         # infra failures already returned above, so this is
                         # an attributable model failure worth learning from.
                         pitfall, pitfall_note = _record_failure_pitfall(
@@ -17566,6 +17573,64 @@ def _repository_scope_path_error(tool_name, args, project_root):
     return ""
 
 
+_INLINE_INTERPRETER_REFUSAL = (
+    "ERROR: agent project execution rejected: inline interpreter "
+    "commands are outside the project path guard"
+)
+_STDIN_INTERPRETER_REFUSAL = (
+    "ERROR: agent project execution rejected: interpreter code via "
+    "stdin is outside the project path guard"
+)
+# %s is the parser's reason (quotes, carets, expansion, control characters,
+# non-ASCII whitespace, for loops) for a build_run command it cannot read.
+_BUILD_RUN_OPAQUE_REFUSAL = "ERROR: agent project execution rejected: %s"
+_COMMAND_STRING_LAUNCHER_REFUSAL = (
+    "ERROR: agent project execution rejected: %s is a command-string "
+    "launcher (it decodes and runs a command line of its own), which is "
+    "outside the project path guard"
+)
+
+
+def _argv_value_outside_root(raw, base, root):
+    """Whether one argv value names a path outside ``root``.
+
+    ``base`` is the directory relative values resolve against. A value that
+    does not look like a path (no separator, no leading dot or tilde, no
+    extension) is not a path and is never outside.
+    """
+    drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
+    if drive_match:
+        raw = raw[drive_match.start():]
+    # On Windows, /Zi, /W4 and /std:c++17 are compiler switches, not
+    # paths. Only that shape is skipped: a token with an extension
+    # (/evil.py) or naming an existing drive-root entry (/Users) is a
+    # path and stays confined. The existence probe is local -- a single
+    # leading slash cannot spell a UNC or device path.
+    if (
+        os.name == "nt"
+        and re.fullmatch(r"/[A-Za-z][A-Za-z0-9:+\-]*", raw)
+        and not os.path.lexists(str(base / raw))
+    ):
+        return False
+    path_like = (
+        os.path.isabs(raw)
+        or raw.startswith((".", "~"))
+        or "/" in raw
+        or "\\" in raw
+        or bool(os.path.splitext(raw)[1])
+    )
+    if not path_like:
+        return False
+    target = Path(raw).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
 def _agent_project_execution_argument_error(tool_name, args, project_root):
     """Reject explicit project-execution escape paths and inline interpreters.
 
@@ -17592,55 +17657,67 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     except (OSError, ValueError) as exc:
         refusal = "ERROR: agent project scope is invalid: %s" % exc
         return refusal
+    stdin_present = bool(str(args.get("stdin") or ""))
+    # The directly selected interpreter, then every interpreter reached
+    # through a launcher (`uv run bash -lc ...`, `npx pwsh -c ...`): each is
+    # checked against its own option grammar over the argv that follows it.
+    invocations = []
     if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
-        # harness_tools splits the command on whitespace and execs the result,
-        # so read the program and its argv exactly the way the child will.
-        command_argv = str(args.get("command") or "").split()
-        program = Path(command_argv[0]).name.casefold() if command_argv else ""
-        argv = command_argv[1:]
+        # harness_tools runs `command` via `cmd /d /s /c` on Windows and splits
+        # on whitespace on POSIX, so parse chained/piped segments, redirections,
+        # cmd caret escapes, verb delimiters and dynamic expansions.
+        #
+        # cmd.exe splits words on `,` `;` and whitespace, but the child's CRT
+        # re-splits its own arguments on space and tab only (`python -Wx,y`
+        # is one token to python). The command is judged under BOTH readings
+        # and refused if either one runs inline or stdin code.
+        command_text = str(args.get("command") or "")
+        command_argv = command_text.split()
+        readings = (
+            _interpreter_argv.parse_build_command(command_text),
+            _interpreter_argv.parse_build_command(command_text, child_tokens=True),
+        )
+        for parsed in readings:
+            if parsed.opaque:
+                return _BUILD_RUN_OPAQUE_REFUSAL % parsed.reason
+        argv = list(command_argv[1:])
+        argv.extend(readings[0].redir_targets)
+        launcher_tokens = []
+        for parsed in readings:
+            for seg_tokens, seg_receives_stdin in parsed.segments:
+                seg_stdin = stdin_present or seg_receives_stdin
+                seg_list = list(seg_tokens)
+                launcher_tokens.extend(seg_list)
+                # Path confinement reads both tokenisations too:
+                # `python,/../../x.py` is one whitespace word, but the child
+                # receives `,/../../x.py` as its script argument.
+                argv.extend(seg_list[1:])
+                # The program itself, then every interpreter a token names
+                # once cmd.exe re-reads it (`call =python`, `if exist x=py`).
+                for index, token in enumerate(seg_list):
+                    for name in _interpreter_argv.program_name_candidates(token):
+                        family = _interpreter_argv.interpreter_family(name)
+                        if family:
+                            invocations.append((family, seg_list[index + 1:], seg_stdin))
     else:
         argv = _agent_argv(args)
-        program = Path(str(args.get("program") or "")).name.casefold()
-    lowered = [item.casefold() for item in argv]
-    inline_flags = {
-        "python": {"-c"}, "python.exe": {"-c"},
-        "py": {"-c"}, "py.exe": {"-c"},
-        "node": {"-e", "--eval", "-p", "--print"},
-        "node.exe": {"-e", "--eval", "-p", "--print"},
-        "bash": {"-c"}, "bash.exe": {"-c"},
-        "sh": {"-c"}, "sh.exe": {"-c"},
-        "perl": {"-e"}, "perl.exe": {"-e"},
-        "ruby": {"-e"}, "ruby.exe": {"-e"},
-        "powershell": {"-command", "-c", "-encodedcommand", "-enc"},
-        "powershell.exe": {"-command", "-c", "-encodedcommand", "-enc"},
-        "pwsh": {"-command", "-c", "-encodedcommand", "-enc"},
-        "pwsh.exe": {"-command", "-c", "-encodedcommand", "-enc"},
-        "cmd": {"/c", "/k"}, "cmd.exe": {"/c", "/k"},
-    }
-    forbidden = inline_flags.get(program, set())
-    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
-        forbidden = {"-c"}
-    elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
-        forbidden = {"-e", "--eval", "-p", "--print"}
-    if forbidden.intersection(lowered):
-        return (
-            "ERROR: agent project execution rejected: inline interpreter "
-            "commands are outside the project path guard"
-        )
-    # Catch common launchers such as `uv run python3 -c ...` as well as a
-    # directly selected interpreter.
-    for index, token in enumerate(lowered[:-1]):
-        child = Path(token).name
-        child_flags = set()
-        if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
-            child_flags = {"-c"}
-        elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
-            child_flags = {"-e", "--eval", "-p", "--print"}
-        if any(item in child_flags for item in lowered[index + 1:]):
-            return (
-                "ERROR: agent project execution rejected: inline interpreter "
-                "commands are outside the project path guard"
-            )
+        program = _interpreter_argv.program_name(args.get("program") or "")
+        launcher_tokens = [args.get("program") or "", *argv]
+        family = _interpreter_argv.interpreter_family(program)
+        if family:
+            invocations.append((family, argv, stdin_present))
+        for index, token in enumerate(argv):
+            family = _interpreter_argv.interpreter_family(_interpreter_argv.program_name(token))
+            if family:
+                invocations.append((family, argv[index + 1:], stdin_present))
+    # forfiles, wmic, mshta, ... decode and run a command string of their own,
+    # which no argv grammar here can read: refused wherever they appear.
+    launcher = _interpreter_argv.command_string_launcher(launcher_tokens)
+    if launcher:
+        return _COMMAND_STRING_LAUNCHER_REFUSAL % launcher
+    for family, tokens, _ in invocations:
+        if _interpreter_argv.runs_inline_code(family, tokens):
+            return _INLINE_INTERPRETER_REFUSAL
     # An interpreter runs the program on its STDIN whenever argv names no
     # script to run. `-` says so explicitly, but it is not the only way and was
     # the only one checked here: `python`, `bash`, `sh` and `node` with EMPTY
@@ -17651,18 +17728,17 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     # The operand test is what keeps this from over-blocking. `python script.py`
     # with stdin attached is a program reading DATA, which is legitimate and
     # must stay allowed; only an invocation with no operand -- bare, or
-    # flags-only like `python -u`, or an explicit `-` -- makes stdin the code.
-    # A token starting with "-" is a flag (or the dash itself), never an
-    # operand.
-    if forbidden and str(args.get("stdin") or ""):
-        has_script_operand = any(
-            token and not token.startswith("-") for token in lowered
-        )
-        if not has_script_operand:
-            return (
-                "ERROR: agent project execution rejected: interpreter code via "
-                "stdin is outside the project path guard"
-            )
+    # flags-only like `python -u`, an option value like `python -W ignore`, or
+    # an explicit `-` -- makes stdin the code. Each interpreter's own option
+    # grammar decides what an operand is (stdin_runs_as_code), and an
+    # interpreter behind a launcher (`uv run python`) is checked the same way.
+    # For build_run, piped (`|`) or redirected (`<`) stdin counts the same as
+    # an explicit `stdin` payload.
+    if any(
+        has_stdin and _interpreter_argv.stdin_runs_as_code(family, tokens)
+        for family, tokens, has_stdin in invocations
+    ):
+        return _STDIN_INTERPRETER_REFUSAL
 
     if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
         # build_run runs the child with cwd=root, so relative argv entries
@@ -17686,46 +17762,52 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
         return refusal
     for raw_item in argv:
-        raw = str(raw_item or "").strip().strip('"\'')
-        if not raw:
+        token = str(raw_item or "").strip().strip('"\'')
+        if not token:
             continue
-        if "=" in raw and raw.startswith(("-", "/")):
-            raw = raw.split("=", 1)[1].strip().strip('"\'')
-        raw = raw.lstrip("@")
-        # A token naming or embedding a UNC/device path is refused whole;
-        # nothing of it is resolved.
-        if _network_spelling.contains_network_spelling(raw):
-            return network_refusal % "an argv path"
-        drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
-        if drive_match:
-            raw = raw[drive_match.start():]
-        # On Windows, /Zi and /W4 are compiler switches, not POSIX paths.
-        if (
-            os.name == "nt"
-            and raw.startswith("/")
-            and "\\" not in raw
-            and raw.count("/") == 1
-        ):
-            continue
-        path_like = (
-            os.path.isabs(raw)
-            or raw.startswith((".", "~"))
-            or "/" in raw
-            or "\\" in raw
-            or bool(os.path.splitext(raw)[1])
-        )
-        if not path_like:
-            continue
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            target = base / target
-        try:
-            target.resolve(strict=False).relative_to(root)
-        except (OSError, ValueError):
-            return (
-                "ERROR: agent project execution rejected: argv path is outside "
-                "the host-selected project root"
-            )
+        # `--out=../x` is read from after its `=`, but `gcc -o../../x=y` and
+        # `cl -I//host/share/x=y` are read as the whole value glued to the
+        # option, `=` included. Both readings are checked.
+        readings = [token]
+        if "=" in token and token.startswith(("-", "/")):
+            readings.append(token.split("=", 1)[1].strip().strip('"\''))
+        for reading in readings:
+            raw = reading.lstrip("@")
+            if not raw:
+                continue
+            # A token naming or embedding a UNC/device path is refused whole;
+            # nothing of it is resolved.
+            if _network_spelling.contains_network_spelling(raw):
+                return network_refusal % "an argv path"
+            # A path glued to an option (`tar -C../..`, `tar -xvC../..`,
+            # `cp -rt../..`, `gcc -MF../x.d`, `clang-cl -Fe../x.exe`, and the
+            # Windows switches `cl /Fe../x.exe`, `link /OUT:../x.exe`) is used
+            # by the tool from wherever its option letters end, which the
+            # guard cannot know. Confine every possible start of the value,
+            # from just after the prefix up to the first path-like character
+            # or `=` (option letters never include either; a value after `=`
+            # is the second reading): base / "-C../.." alone collapses back
+            # inside the root, and "/Fe../.." read as a drive-root path lets
+            # its "Fe.." segment absorb one "..". A Windows switch without a
+            # `=` value stays confined as a drive-root path too
+            # (`python /evil.py`).
+            candidates = [raw]
+            switch = os.name == "nt" and raw.startswith("/")
+            if raw.startswith("-") or switch:
+                stop = re.search(r"[.~/\\=]|[A-Za-z]:[\\/]", raw[1:])
+                if stop:
+                    glued = [raw[start:] for start in range(1, stop.start() + 2)]
+                    candidates = ([raw] if switch and "=" not in raw else []) + glued
+            # A start position can turn `-I$//host/share` into `//host/share`,
+            # which the whole-token check does not see; refuse it before
+            # resolve can open it.
+            if any(_network_spelling.is_network_spelling(value) for value in candidates):
+                return network_refusal % "an argv path"
+            if any(_argv_value_outside_root(value, base, root) for value in candidates):
+                return (
+                    "ERROR: agent project execution rejected: argv path is outside "
+                    "the host-selected project root"
+                )
     return ""
 
 
@@ -20222,8 +20304,13 @@ def _agent_batch_target_identity(raw):
     tools resolve them, and symlinks are followed, so ``src/a.py``, its
     absolute spelling and a symlink to it are one target.  When the
     filesystem cannot answer, the lexical absolute path is used instead.
+    A UNC or device spelling is never resolved (that would open it, SMB and
+    NTLM included, before file_ops refuses it): its lexical text is the
+    identity.
     """
     text = str(raw or "").strip()
+    if _is_network_spelling_raw(text):
+        return text
     try:
         candidate = Path(text).expanduser()
         if not candidate.is_absolute():
