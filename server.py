@@ -165,7 +165,7 @@ import sonder_runtime.adapters.model_tool_policy as _model_tool_policy
 from sonder_runtime.adapters import model_list_consumers as _model_list_consumers, model_lists_editor as _model_lists_editor
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
-from sonder_runtime.adapters import chat_observers as _chat_observers, chat_temperature as _chat_temperature, chat_tool_manifest as _chat_tool_manifest, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_effort as _chat_effort, chat_observers as _chat_observers, chat_temperature as _chat_temperature, chat_tool_manifest as _chat_tool_manifest, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -3799,6 +3799,8 @@ def control_command(prompt: str, history=None, session="", project="",
         return activity_status()
     if cmd == "/temp":
         return _chat_temperature.temp_command(arg, session, lane=temperature_lane)  # lane: the serve route's default
+    if cmd == "/effort":
+        return _chat_effort.effort_command(arg, session, lane=_chat_effort.lane_default_effort())
     if cmd in ("/autopilot", "/auto"):
         return _autopilot_command(arg, project=project, request_owner=autopilot_request_owner)
     if cmd in ("/runtime", "/models"):
@@ -5310,6 +5312,20 @@ def _chat_request(
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
+    active_effort = _chat_effort.active_turn_effort()
+    if active_effort is not None and isinstance(payload, dict):
+        opts = dict(payload.get("options") or {}) if isinstance(payload.get("options"), dict) else {}
+        if "reasoning_effort" not in opts:
+            payload = dict(payload)
+            opts["reasoning_effort"] = active_effort
+            payload["options"] = opts
+        if bridged_rung is None and not cloud and not single_send and "think" not in payload:
+            if active_effort == "off":
+                payload = dict(payload)
+                payload["think"] = False
+            elif _known_thinking_model(model) and _think_option_supported(model):
+                payload = dict(payload)
+                payload["think"] = True
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry

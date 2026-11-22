@@ -637,6 +637,8 @@ class _AppShellState extends State<AppShell>
         onProjectFilter: (p) => setState(() => _projectFilter = p),
         onNewChat: () => unawaited(_newChat()),
         onSearch: () => unawaited(_openSearch()),
+        onRefreshThreads: () =>
+            unawaited(_session.chat.syncServerSessions(force: true)),
         onToggleCollapsed: inDrawer ? null : _toggleSidebar,
         onShowShortcuts: () => unawaited(showShortcutGuide(context)),
         onDestination: (d) => unawaited(_navigate(d)),

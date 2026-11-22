@@ -914,6 +914,10 @@ class OpenAICompatibleGateway:
         except ChatTemplateOptionsError as exc:
             raise InvalidInput(str(exc)) from exc
         if template_kwargs:
+            effort = template_kwargs.get("reasoning_effort")
+            if effort == "off" and "enable_thinking" not in template_kwargs:
+                template_kwargs = dict(template_kwargs)
+                template_kwargs["enable_thinking"] = False
             payload["chat_template_kwargs"] = template_kwargs
         price = self._meter_chat_payload(cfg, payload, options.get("num_predict"))
 

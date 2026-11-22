@@ -15,6 +15,8 @@ import 'chat/permission_mode.dart';
 import 'chat/status_strip.dart';
 import 'chat/transcript.dart';
 import 'settings.dart';
+import 'settings/reasoning_effort.dart'
+    show effortDescription, effortLabel, effortOptions, effortShortLabel;
 import 'settings_screen.dart';
 import 'shell/chat_session.dart';
 import 'system_screen.dart';
@@ -313,7 +315,53 @@ class _ChatScreenState extends State<ChatScreen>
         } else {
           await _changeMode(target);
         }
+      case EffortIntercept(:final hasValue, :final target, :final invalidArg):
+        if (invalidArg != null) {
+          _snack("Unknown effort '$invalidArg'. Use: off, minimal, low, "
+              'medium, high, xhigh, or auto.');
+        } else if (hasValue) {
+          _selectReasoningEffort(target);
+          _snack('Reasoning effort set to ${effortLabel(target)}.');
+        } else {
+          await _openEffortPicker();
+        }
     }
+  }
+
+  void _selectReasoningEffort(String? effort) {
+    _chat.selectReasoningEffort(effort);
+    widget.settings.reasoningEffort = _chat.reasoningEffort;
+    widget.onSettingsChanged(widget.settings);
+  }
+
+  Future<void> _openEffortPicker() async {
+    final current = _chat.reasoningEffort;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Reasoning effort'),
+        children: [
+          for (final opt in effortOptions)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(opt ?? 'auto'),
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  opt == current ? Icons.check_circle : Icons.circle_outlined,
+                  size: 18,
+                ),
+                title: Text(effortShortLabel(opt)),
+                subtitle: Text(effortDescription(opt)),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final next = picked == 'auto' ? null : picked;
+    _selectReasoningEffort(next);
+    _snack('Reasoning effort set to ${effortLabel(next)}.');
   }
 
   void _cancelSend() {
@@ -752,6 +800,8 @@ class _ChatScreenState extends State<ChatScreen>
                 model: _chat.model,
                 routing: _chat.routing,
                 onModelChanged: _selectModel,
+                reasoningEffort: _chat.reasoningEffort,
+                onReasoningEffortChanged: _selectReasoningEffort,
                 status: _chat.status,
               ),
               ChatStatusStrip(

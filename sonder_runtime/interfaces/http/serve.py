@@ -86,6 +86,7 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_effort as _chat_effort
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
@@ -3600,6 +3601,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/temp":
         from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
         return _chat_temperature.slash_temp(arg, storage_session, context, _state_principal, serve_lane_temperature())
+    if cmd == "/effort":
+        return _chat_effort.slash_effort(arg, storage_session, context, _state_principal)
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -3876,22 +3879,52 @@ def _work_run_pending_text(run_id):
 
 
 def _bind_current_activity():
-    """Carry the request's activity span into the work-run thread."""
+    """Carry the request's activity span and reasoning effort into the work-run thread."""
     response_id = activity_tracker.current_response_id()
-    if not response_id:
+    effort = _chat_effort.active_turn_effort()
+    if not response_id and effort is None:
         return None
 
     def wrap(body):
         def bound():
-            with activity_tracker.bind_response(response_id):
+            with contextlib.ExitStack() as stack:
+                if response_id:
+                    stack.enter_context(activity_tracker.bind_response(response_id))
+                if effort is not None:
+                    stack.enter_context(_chat_effort.effort_scope(effort))
                 body()
         return bound
     return wrap
 
 
+def _append_session_transcript_event(session_id, event_type, content, *, turn_id, request_id="", extra=None):
+    """Best-effort redacted append to the durable session event log for UI/TUI sync."""
+    if not session_id or not isinstance(content, str) or not content.strip():
+        return
+    try:
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.domain.session_ref import is_valid_session_id
+        if not is_valid_session_id(session_id):
+            return
+        payload = {
+            "content": activity_tracker._redact_text(content),
+            "turn_id": turn_id,
+        }
+        if request_id:
+            payload["request_id"] = request_id
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if key not in payload and value is not None:
+                    payload[key] = value
+        default_app().session_repository().append(session_id, event_type, payload)
+    except Exception:
+        _serve_logger.debug("session transcript append skipped (%s)", event_type, exc_info=True)
+
+
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key="", session_id="", session_ref="",
-                        correlation_id="", with_receipt=False, tool_tier=""):
+                        correlation_id="", with_receipt=False, tool_tier="",
+                        record_transcript=False):
     """Route developer work through the bounded execution-mode chooser."""
     refusal = intents.containment_egress_refusal(content)
     if refusal:
@@ -3945,6 +3978,13 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 )
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
+            work_turn_id = uuid.uuid4().hex if record_transcript else ""
+            if record_transcript:
+                _append_session_transcript_event(
+                    session_id, "user.message", content,
+                    turn_id=work_turn_id, request_id=correlation_id,
+                    extra={"lane": decision.lane, "work_run_id": current_work_run_id()},
+                )
             try:
                 output = _run_work_scoped(current_work_run_id(), http_work_runs.link_run,
                     acknowledgement, activity_tracker.current_response_id() or "", lambda: server.route_work_request(
@@ -3963,6 +4003,12 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 terminal = receipts.finish(session_id, admission, status)
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
+            if record_transcript and isinstance(output, str) and output.strip():
+                _append_session_transcript_event(
+                    session_id, "model.response", output,
+                    turn_id=work_turn_id, request_id=correlation_id,
+                    extra={"lane": decision.lane, "work_run_id": current_work_run_id(), "status": status},
+                )
             return ChatWorkResult(
                 output if isinstance(output, str) else "", status,
                 decision.lane, session_ref, admission.event_id,
@@ -7311,6 +7357,19 @@ class Handler(BaseHTTPRequestHandler):
             record_early_chat_metric("invalid_session_temperature")
             self._send_json_payload({"error": {"message": "session_temperature: %s" % error, "type": "invalid_request"}}, status=400)
             return
+        try:
+            request_reasoning_effort = _chat_effort.check_effort(req.get("reasoning_effort")) if req.get("reasoning_effort") is not None else None
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_reasoning_effort")
+            self._send_json_payload({"error": {"message": "reasoning_effort: %s" % error, "type": "invalid_request"}}, status=400)
+            return
+        try:
+            apply_session_effort, session_reasoning_effort = _chat_effort.session_field(
+                req.get("session_reasoning_effort"), storage_session)
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_session_reasoning_effort")
+            self._send_json_payload({"error": {"message": "session_reasoning_effort: %s" % error, "type": "invalid_request"}}, status=400)
+            return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7402,6 +7461,11 @@ class Handler(BaseHTTPRequestHandler):
             ), state.lock, contextlib.ExitStack() as _early_scope:
                 _chat_temperature.store_session_field(
                     apply_session_temperature, session_temperature, storage_session, context, _state_principal)
+                _chat_effort.store_session_field(
+                    apply_session_effort, session_reasoning_effort, storage_session, context, _state_principal)
+                _resolved_effort = _chat_effort.resolve_turn_effort(
+                    request=request_reasoning_effort, session=storage_session)
+                _early_scope.enter_context(_chat_effort.effort_scope(_resolved_effort.value))
                 _record_chat("user", prompt, state=state)
                 from sonder_runtime.platform.spanda_http import resolve_spanda_policy as _resolve_spanda_policy_early
                 _spanda_early = _resolve_spanda_policy_early(_SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
@@ -7510,6 +7574,7 @@ class Handler(BaseHTTPRequestHandler):
                             correlation_id=self._correlation(),
                             with_receipt=True,
                             tool_tier="",
+                            record_transcript=bool(storage_session),
                         )
                         execution_routed = reply is not None
                     if isinstance(reply, ChatWorkResult):
@@ -7686,6 +7751,26 @@ class Handler(BaseHTTPRequestHandler):
                         provider_capture=turn.provider_capture,
                         selector=model_selector,
                         resolved_tier=response_tier,
+                    )
+                elif (
+                    storage_session
+                    and reply is not None
+                    and not execution_routed
+                    and not allow_slash_command
+                    and isinstance(content, str)
+                    and content.strip()
+                ):
+                    sync_turn_id = uuid.uuid4().hex
+                    sync_lane = "web" if web_routed else "chat"
+                    _append_session_transcript_event(
+                        storage_session, "user.message", prompt,
+                        turn_id=sync_turn_id, request_id=self._correlation(),
+                        extra={"lane": sync_lane},
+                    )
+                    _append_session_transcript_event(
+                        storage_session, "model.response", content,
+                        turn_id=sync_turn_id, request_id=self._correlation(),
+                        extra={"lane": sync_lane},
                     )
         except sonder_lifecycle.AdmissionRejected as rejection:
             _serve_logger.error(f"request admission rejected: code={rejection.code!r}, retryable={rejection.retryable}, correlation={self._correlation()!r}")

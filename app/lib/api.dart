@@ -1667,6 +1667,7 @@ class SonderApi implements SonderApiPort {
     required bool allowApproximateLocation,
     required bool stream,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
     String? history,
   }) async {
     if (history != null && history != 'client' && history != 'auto') {
@@ -1684,6 +1685,8 @@ class SonderApi implements SonderApiPort {
       // A number 0..2 sets the session's temperature, "auto" clears it; an
       // absent field leaves it alone (a typed /temp stays).
       if (sessionTemperature != null) 'session_temperature': sessionTemperature,
+      if (sessionReasoningEffort != null)
+        'session_reasoning_effort': sessionReasoningEffort,
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
       // Server S5: "client" means use only the messages sent, never inject
@@ -1728,6 +1731,7 @@ class SonderApi implements SonderApiPort {
     String project = '',
     bool allowApproximateLocation = false,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1743,6 +1747,7 @@ class SonderApi implements SonderApiPort {
         project: project,
         allowApproximateLocation: allowApproximateLocation,
         sessionTemperature: sessionTemperature,
+        sessionReasoningEffort: sessionReasoningEffort,
         history: history,
         clientExec: clientExec,
         cancel: token,
@@ -1763,6 +1768,7 @@ class SonderApi implements SonderApiPort {
     required CancelToken cancel,
     required bool allowFallback,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
     String? history,
     bool clientExec = true,
     Duration? timeout,
@@ -1775,6 +1781,7 @@ class SonderApi implements SonderApiPort {
       project: project,
       allowApproximateLocation: allowApproximateLocation,
       sessionTemperature: sessionTemperature,
+      sessionReasoningEffort: sessionReasoningEffort,
       history: history,
       stream: false,
     );
@@ -1867,6 +1874,7 @@ class SonderApi implements SonderApiPort {
     String project = '',
     bool allowApproximateLocation = false,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1882,6 +1890,7 @@ class SonderApi implements SonderApiPort {
         project: project,
         allowApproximateLocation: allowApproximateLocation,
         sessionTemperature: sessionTemperature,
+        sessionReasoningEffort: sessionReasoningEffort,
         history: history,
         stream: true,
       );

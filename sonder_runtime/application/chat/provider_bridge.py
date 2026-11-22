@@ -33,6 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from ...domain.reasoning_effort import check_effort
 from ...domain.request_temperature import validate_request_temperature
 from ...domain.thinking_controls import with_local_thinking_budget
 from ...domain.common.errors import (
@@ -373,6 +374,11 @@ def model_request_from_ollama_payload(
         profile = payload.get("sampling_profile", payload_options.get("sampling_profile"))
         if profile is not None:
             options["sampling_profile"] = profile
+    effort_raw = payload_options.get("reasoning_effort", payload.get("reasoning_effort"))
+    if effort_raw is not None:
+        effort = check_effort(effort_raw)
+        if effort is not None:
+            options["reasoning_effort"] = effort
     if carry_think:
         options["think"] = think
     return ModelRequest(

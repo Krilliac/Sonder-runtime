@@ -2125,6 +2125,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         timeout = self._call_timeout(settings, context)
         options = dict(request.options or {})
         think = options.pop("think", None)  # decided after readiness (request_tuning)
+        raw_effort = options.pop("reasoning_effort", None)
+        from ...domain.reasoning_effort import check_effort as _check_effort
+        reasoning_effort = _check_effort(raw_effort) if raw_effort is not None else None
         options.pop("cancel_token", None)  # folded into ``context`` above, never sent
         options.pop("cancel_event", None)
         model = self.select_model(request, settings)
@@ -2144,7 +2147,20 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         with _cancellation_scope(context.cancellation):
             snap = self._require_ready(settings, timeout)
         self._check_liveness(context, phase="before model call")
+        if reasoning_effort is not None and think is None:
+            from .request_tuning import thinking_supported as _thinking_supported
+            if reasoning_effort == "off":
+                think = False
+            elif _thinking_supported(snap.document, self._env):
+                think = True
         tune_request(payload, think, snap.document, self._env)
+        if reasoning_effort is not None:
+            from .request_tuning import thinking_supported as _thinking_supported
+            if _thinking_supported(snap.document, self._env):
+                kwargs = payload.get("chat_template_kwargs")
+                merged = dict(kwargs) if isinstance(kwargs, Mapping) else {}
+                merged["reasoning_effort"] = reasoning_effort
+                payload["chat_template_kwargs"] = merged
         started = time.monotonic()
         data = self._post_with_busy_retry(payload, cfg, settings, context, live)
         self._check_liveness(context, phase="during model call")
