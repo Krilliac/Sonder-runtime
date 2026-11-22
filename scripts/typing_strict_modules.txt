@@ -144,6 +144,7 @@ sonder_runtime/adapters/persistence/sqlite/updates.py
 sonder_runtime/adapters/playbook_search.py
 sonder_runtime/adapters/preflight_executor.py
 sonder_runtime/adapters/process_probe.py
+sonder_runtime/adapters/process_tree.py
 sonder_runtime/adapters/protected_write_scope.py
 sonder_runtime/adapters/provider_bindings.py
 sonder_runtime/adapters/provider_dispatch/__init__.py

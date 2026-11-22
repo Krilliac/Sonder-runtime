@@ -6,6 +6,7 @@ import signal
 import subprocess
 
 from .process_liveness import PROCESS_ALIVE, PROCESS_DEAD, probe_process
+from .process_tree import is_real_popen, terminate_tree
 
 from ..application.jobs.durable_registry import (
     ProcessTreeCleanupReceipt,
@@ -189,6 +190,15 @@ def terminate_process_tree(
     coupling this adapter to the legacy module's imports.
     """
     if proc.poll() is not None:
+        return
+    if (
+        os_module is os
+        and subprocess_module is subprocess
+        and is_real_popen(proc)
+    ):
+        # A real child under the real OS: the tree adapter also reaps the root
+        # and escalates; the branches below serve injected test doubles.
+        terminate_tree(proc, grace_seconds=0.2, kill_wait_seconds=2.0)
         return
     pid = getattr(proc, "pid", None)
     if os_module.name == "nt" and pid:
