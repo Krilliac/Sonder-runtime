@@ -158,6 +158,14 @@ def _guarded_destination(
         extra_roots=extra_roots,
     )
     file_ops._require_mutation_access(destination, developer_authorized)
+    if not developer_authorized:
+        ws_root = file_ops._resolve_best_effort(file_ops.workspace_root())
+        for protected_dir in (*file_ops.FIRST_PARTY_CODE_DIRS, *file_ops.RUNTIME_PACKAGE_DIRS):
+            if file_ops._is_inside(destination, ws_root / protected_dir):
+                raise PermissionError(
+                    "modifying first-party runtime directory %s requires developer authorization"
+                    % destination
+                )
     # An extraction fills the destination directory, so a directory that would
     # hold a model tool policy file (a missing overlay) is refused too.
     holding = file_ops._policy_file_refusal(destination, holding=True)
@@ -626,6 +634,15 @@ def extract_archive(
         developer_authorized=developer_authorized,
     )
     plan = _plan(source, limits, deadline=deadline)
+    for row in plan["entries"]:
+        parts = [part for part in str(row.get("path") or "").split("/") if part]
+        if not parts:
+            continue
+        file_ops._require_mutation_access(
+            destination.joinpath(*parts),
+            developer_authorized,
+            allow_added_token_stores=True,
+        )
     stage = Path(tempfile.mkdtemp(prefix=".sonder-archive-", dir=destination.parent))
     promoted = False
     try:

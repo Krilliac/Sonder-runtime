@@ -1867,8 +1867,13 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
                 continue
             try:
                 path = sonder_paths.parse_local_root(raw, expand_user=True)
-                if path.is_symlink() or (is_junction is not None and is_junction(path)):
-                    raise ValueError
+                for ancestor in (path, *path.parents):
+                    if ancestor.parent == ancestor:
+                        break
+                    if ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    ):
+                        raise ValueError
                 resolved = path.resolve(strict=False)
                 if sonder_paths.try_parse_local_root(str(resolved), expand_user=False) is None:
                     raise ValueError
@@ -2033,11 +2038,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
     if config.state.default_workspace_root.strip():
-        try:
-            absolute = Path(config.state.default_workspace_root.strip()).expanduser().is_absolute()
-        except RuntimeError:  # "~" with no user home
-            absolute = False
-        if not absolute:
+        if (
+            sonder_paths.try_parse_local_root(
+                config.state.default_workspace_root, expand_user=True
+            )
+            is None
+        ):
             errors.append(
                 "[state].default_workspace_root must be an absolute path: "
                 f"{config.state.default_workspace_root!r}"
@@ -2045,14 +2051,25 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     local_workspace_mappings = {"default"}
     effective_workspace_roots: dict[str, Path] = {}
     for index, root in enumerate(config.state.workspace_roots):
-        raw_path = Path(root)
-        if not raw_path.is_absolute():
-            errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
+        parsed_root = sonder_paths.try_parse_local_root(root, expand_user=True)
+        if parsed_root is None:
+            raw_text = root.strip() if isinstance(root, str) else ""
+            if raw_text and not Path(raw_text).is_absolute():
+                errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
+            else:
+                errors.append(
+                    f"[state].workspace_roots entry must be a local absolute non-root path: {root!r}"
+                )
             continue
         try:
-            resolved = raw_path.resolve(strict=False)
+            resolved = parsed_root.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        if sonder_paths.try_parse_local_root(str(resolved), expand_user=False) is None:
+            errors.append(
+                f"[state].workspace_roots entry must be a local absolute non-root path: {root!r}"
+            )
             continue
         mapping = resolved.name
         if not mapping:
@@ -2102,10 +2119,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
 
     if config.ollama.ca_bundle:
-        ca_path = Path(config.ollama.ca_bundle).expanduser()
-        if not ca_path.is_absolute():
+        parsed_ca = sonder_paths.try_parse_local_root(
+            config.ollama.ca_bundle, expand_user=True
+        )
+        if parsed_ca is None:
             errors.append("[ollama].ca_bundle must be an absolute path")
-        elif not ca_path.is_file():
+        elif not parsed_ca.is_file():
             errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
@@ -2586,10 +2605,9 @@ def load_config(
         config = replace(
             config, state=replace(config.state, home=str(sonder_paths.default_home()))
         )
-    if sonder_paths._EXTENDED_LOCAL_RE.match(config.state.home.strip()):
-        parsed_home = sonder_paths.try_parse_local_root(config.state.home, expand_user=True)
-        if parsed_home is not None:
-            config = replace(config, state=replace(config.state, home=str(parsed_home)))
+    parsed_home = sonder_paths.try_parse_local_root(config.state.home, expand_user=True)
+    if parsed_home is not None:
+        config = replace(config, state=replace(config.state, home=str(parsed_home)))
 
     # A trailing '/' or an upper-case scheme/host is the same origin; spell
     # it the browser's way (with a WARNING) instead of refusing to start.
