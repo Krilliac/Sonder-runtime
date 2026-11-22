@@ -1346,10 +1346,19 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _hostAdminAllowed && (_updateStatus != null || _extensionRegistry != null);
 
   bool get _hostAdminAllowed {
-    final features = _info?.allowedFeatures;
+    final features =
+        _info?.allowedFeatures ?? _info?.capabilities?.allowedFeatures;
     if (features != null) return features.hostAdmin;
     if (_info?.role == 'user') return false;
     return true;
+  }
+
+  bool get _hostBypassAllowed {
+    final bypass = _info?.hostBypassAllowed ?? _info?.capabilities?.hostBypassAllowed;
+    if (bypass != null) return bypass;
+    final features = _info?.allowedFeatures;
+    if (features != null) return features.hostBypass;
+    return _mode?.canBypass ?? false;
   }
 
   // -- Layout --------------------------------------------------------------
@@ -1458,7 +1467,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         icon: Icons.shield_outlined,
         description: _hostAdminAllowed
             ? 'Approvals, the permission mode, and the tools agents can reach.'
-            : 'The permission mode for this session.',
+            : 'Client PC execution, local permission mode and access policy.',
         badge: _hostAdminAllowed && waiting > 0
             ? Semantics(
                 label: '$waiting approval${waiting == 1 ? '' : 's'} waiting',
@@ -1473,6 +1482,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'approve',
           'revoke',
           'permission mode',
+          'client pc',
           'host tools',
           'developer tools',
           'mcp',

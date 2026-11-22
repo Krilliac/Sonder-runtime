@@ -73,6 +73,8 @@ ChatResponseMetadata chatMetadataFrom(
     'overflow': receipt['overflow'],
     'agent_lane': receipt['agent_lane'],
     'orchestration': receipt['orchestration'],
+    if (receipt['client_tool_handoff'] != null)
+      'client_tool_handoff': receipt['client_tool_handoff'],
     if (refusalJson != null) 'refusal': refusalJson,
   });
 }

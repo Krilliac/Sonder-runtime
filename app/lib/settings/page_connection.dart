@@ -72,9 +72,12 @@ extension _ConnectionPage on _SettingsScreenState {
             ),
             SettingsFieldRow(
               label: 'API key (optional)',
-              description: Settings.memoryOnlyCredentials
-                  ? 'Kept in memory only in the browser.'
-                  : 'Leave blank if the server has auth disabled.',
+              description: _isAccountAuthMode
+                  ? 'Not needed in account auth mode — sign in on the Account '
+                      'page.'
+                  : Settings.memoryOnlyCredentials
+                      ? 'Kept in memory only in the browser.'
+                      : 'Leave blank if the server has auth disabled.',
               modified: _keyChanged,
               field: LabeledTextField(
                 fieldKey: const Key('settings-api-key'),
@@ -123,9 +126,10 @@ extension _ConnectionPage on _SettingsScreenState {
                 ),
             ],
           ),
-        SettingsSection(
-          title: 'Host launcher',
-          description: 'Start, stop and restart Sonder on another device.',
+        if (!_isHostAdminFalse)
+          SettingsSection(
+            title: 'Host launcher',
+            description: 'Start, stop and restart Sonder on another device.',
           trailing: runtimeLink,
           children: [
             SettingsFieldRow(
