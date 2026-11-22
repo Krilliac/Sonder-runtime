@@ -25,7 +25,7 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/work-runs`, `GET /v1/work-runs/<id>` | developer/admin (own runs only) | Routed-work runs started by this principal: status (`running`, `returned`, `unknown`, `refused`, `cancelled`, `budget_exceeded`, `interrupted`, `failed`) and, for one run, its persisted answer. |
 | `POST /v1/work-runs/<id>/cancel` | developer/admin (own runs only) | Cancel a routed-work run: its effect fence stops holding, so every further file change, host program, or destructive tool is refused. |
 | `GET /v1/approvals` | developer/admin | Calls refused unattended that can be approved once (`pending`: call id, tool, redacted preview, count) and open approvals (`approvals`); `?limit=1..200`, `?include_spent=1` adds spent, revoked and expired ones. |
-| `POST /v1/approvals/<call_id>` | developer/admin | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
+| `POST /v1/approvals/<call_id>` | authenticated developer/admin (refused under local-open) | Approve exactly one refused, still-pending call once (body `{}` or `{"ttl_seconds": 60..86400}`, default 900; optional `tool`/`digest` must match). `201` with the approval. See [One-shot approvals over HTTP](#one-shot-approvals-over-http). |
 | `POST /v1/approvals/revoke/<nonce>` | developer/admin | Withdraw one open approval (body `{}`). |
 | `GET /v1/sessions` | admin | Durable sessions, newest activity first: `id`, redacted `title` (first user message, one line, at most 80 characters), `turns`, `events`, `created`, `updated`; `?limit=1..100` (default 20) and `?after=<next_cursor>`. Ids are storage ids, the same ones `/v1/sessions/<id>/{events,export,replay}` take. |
 | `GET /v1/sessions/<id>/transcript?format=md\|json` | admin | The whole chat from the durable event log (not the live history window): every `user.message` and `model.response` in sequence order, with the requested `tier` (`model.requested`), the answering `model` (`provider.responded`) and `model.failed` `error_code` per turn, redacted like `/export`. Same admin authorization as the other session routes; an id outside `[A-Za-z0-9_.-]{1,128}` is `400 invalid_session_id`, an unknown session `404 session_not_found`. The body is JSON (`sonder.http-session-transcript.v1`) with `markdown` (default) or `messages` (`format=json`), `message_count`, `truncated` and `truncated_reason` (`bytes` at 2 MiB of JSON-escaped text, or `events` after 50000 events scanned). The web app's "Copy link" (`<origin>/app/#/c/<id>`) and "Copy chat code" (`sonder:chat/<id>`) name the id this route takes. |
@@ -311,6 +311,17 @@ carries it as data, in `sonder_receipt.refusal`:
     {"kind": "console", "detail": "run it from the console and answer the prompt"} ] }
 ```
 
+Under `local-open` (below) neither HTTP grant works for the caller, so the
+receipt does not offer them: `approve_once` carries no `method`/`path`, only
+`console`, plus `"http_available": false` and `"http_refusal":
+"APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"`; a `switch_mode` to a mode that
+would raise the current one carries `console` (`/mode <mode>`),
+`"http_available": false` and `"http_refusal":
+"PERMISSION_MODE_ESCALATION_REFUSED"` (a mode change that is not a raise
+keeps the plain form); and a last `{"kind": "authenticate", "detail": ...}`
+names the restart (`SONDER_API_KEY`, or `SONDER_REQUIRE_ACCOUNT=1` with an
+administrator account token) that restores both.
+
 The text is unchanged. `/write`, `/append` and `/edit` typed in chat name
 their call the same way the catalogued `/file_write path=… content=… mode=…`
 spelling does, so either spelling is approved by the same id. When a turn
@@ -320,7 +331,18 @@ them.
 `POST /v1/approvals/<call_id>` is the attended answer to that ask. The
 security decision: an authenticated developer or administrator POST is an
 attended approval surface, the same precedent as `POST /v1/permission-mode`.
-The person holding the credential approves one exact call:
+Under `local-open` (no `SONDER_API_KEY` and no `SONDER_REQUIRE_ACCOUNT=1`,
+including `api-key` with no key on a loopback bind) no credential stands
+behind the POST, so it refuses to approve with
+`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN`, whatever account token is sent;
+approve at the console with `/approve <call_id>` instead. Listing and
+revoking stay allowed there. `POST /v1/permission-mode` holds such a caller
+to lowering the mode the same way: a raise above both the current mode and
+`manual` answers `403 PERMISSION_MODE_ESCALATION_REFUSED`, with `mode` (the
+mode still in force) beside the error; run `/mode <mode>` at the console
+instead. Lowering the mode, or returning from `plan` to `manual`, stays
+allowed. The person holding the credential approves one
+exact call:
 
 - only a call that was refused and is still pending can be approved; there is
   no approve-in-advance over HTTP (the console's `/approve call` keeps that);
@@ -328,16 +350,24 @@ The person holding the credential approves one exact call:
   never a shorter prefix, and a body `digest` or `tool` that differs from the
   pending call is refused with `409 CALL_DIGEST_MISMATCH`. Changing any
   argument makes a new call that needs its own approval;
+- a call whose stored preview does not show everything the approval would
+  cover (part of it was redacted or cut; the preview starts with
+  `[approval covers text not shown: ...]`) is refused with
+  `409 PREVIEW_INCOMPLETE`; approve it at the console with
+  `/approve call <tool> <arguments json>`, which binds the arguments given;
 - a call has at most one open approval: a second POST answers
   `409 APPROVAL_ALREADY_OPEN` with the existing one. An `Idempotency-Key`
   retry replays the first response, with the refusal codes listed below;
 - the ledger spends the approval atomically on the next unchanged call from
   any surface and it expires after `ttl_seconds`; the mode is not changed;
-- the approver is recorded as `developer:<username>`, `admin-key` (the
-  deployment API key) or `local-open`, with surface `http`, and the action is
-  audited on the direct-tool path as `permission_approve`.
+- the approver is recorded as `developer:<username>` or `admin-key` (the
+  deployment API key), with surface `http`, and the action is audited on the
+  direct-tool path as `permission_approve`.
 
 Errors: `401` without credentials, `403 FORBIDDEN` for an ordinary account,
+`403 APPROVAL_REQUIRES_AUTHENTICATED_ADMIN` for an approval under `local-open`
+(and `403 PERMISSION_MODE_ESCALATION_REFUSED` from `POST /v1/permission-mode`
+for a mode raise under `local-open`),
 `400 INVALID_CALL_ID` / `INVALID_TTL` / `INVALID_REQUEST`,
 `404 CALL_NOT_PENDING` (already approved and run, aged out, or never refused),
 `404 APPROVAL_NOT_OPEN` on revoke, and `503 APPROVALS_UNAVAILABLE`.

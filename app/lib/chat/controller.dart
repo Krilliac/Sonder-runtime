@@ -471,6 +471,11 @@ class ChatController extends ChangeNotifier {
         return (ModeChangeOutcome.changed, '');
       }
       final err = normalizeModeError(e);
+      if (localOpenRefusalCodes.contains(err.code)) {
+        // Nothing changed on the server and lowering is still allowed, so
+        // the chip stays writable and shows the mode it already had.
+        return (ModeChangeOutcome.failed, err.message);
+      }
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
         return (ModeChangeOutcome.readOnly, modeReadOnlyText);
@@ -710,11 +715,9 @@ class ChatController extends ChangeNotifier {
         s.contains('disable') ||
         s.contains('hide') ||
         s.contains('turn off');
-    final isVerboseTopic = t.startsWith('/verbose') ||
-        t.startsWith('/errors') ||
-        (RegExp(r'\b(raw|verbose|full|detailed)\b').hasMatch(t) &&
-            RegExp(r'\b(error|errors|exception|exceptions|traceback)\b')
-                .hasMatch(t));
+    // Only the explicit slash commands are local: ordinary prose that merely
+    // mentions errors or tracebacks must reach the server.
+    final isVerboseTopic = RegExp(r'^/(?:verbose|errors)(?:\s|$)').hasMatch(t);
     if (!isVerboseTopic) return null;
     if (wantsOff(t)) {
       verboseErrors = false;
@@ -724,11 +727,10 @@ class ChatController extends ChangeNotifier {
     if (wantsOn(t) || t == '/verbose' || t == '/errors') {
       verboseErrors = true;
       return 'Verbose errors are **on**. Failures will show the original '
-          'exception under the explanation.\n\nTurn it off with `/verbose off` '
-          '(or just ask).';
+          'exception under the explanation.\n\nTurn it off with `/verbose off`.';
     }
     return 'Verbose errors are currently **${verboseErrors ? "on" : "off"}**. '
-        'Say `/verbose on` or `/verbose off` — plain English works too.';
+        'Say `/verbose on` or `/verbose off`.';
   }
 
   // -- Send / cancel -------------------------------------------------------

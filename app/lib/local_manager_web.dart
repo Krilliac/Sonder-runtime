@@ -54,6 +54,7 @@ class LocalManager {
   }) async =>
       const LocalActionResult(false, unavailableMessage);
   static void stopManagedServerNow() {}
+  static void trackManagedServerForTest(Object process) {}
   static Future<LocalActionResult> stopServers() async =>
       const LocalActionResult(false, unavailableMessage);
   static Future<LocalActionResult> startEndlessTraining() async =>

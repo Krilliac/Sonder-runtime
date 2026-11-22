@@ -127,7 +127,7 @@ from sonder_runtime.domain.launcher_health import token_is_configured
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
-from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades import HealthStatusFacade, permission_mode_post as _mode_post
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades import client_protocol as _client_protocol
 from sonder_runtime.interfaces.http.facades.client_protocol import (
@@ -139,7 +139,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
-from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
+from sonder_runtime.interfaces.http.facades.approvals import turn_refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -3049,28 +3049,6 @@ def _ensure_refusal_observer():
         permission_policy.add_decision_observer(_capture_unattended_refusal)
     except Exception:
         _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
-
-
-def _modes_allowing_risk(risk):
-    try:
-        return list(permission_policy._modes_allowing(risk))
-    except Exception:
-        return []
-
-
-def _turn_refusal_receipt(refusals):
-    """The structured refusal for the last nameable refusal of a turn, or None."""
-    if not refusals:
-        return None
-    decision = refusals[-1]
-    try:
-        label = permission_policy.mode_label(decision.mode)
-    except Exception:
-        label = str(decision.mode or "")
-    return refusal_receipt(
-        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
-        count=len(refusals),
-    )
 
 
 def _loop_global_operation_refusal(actions_json, context=None):
@@ -6383,7 +6361,7 @@ class Handler(BaseHTTPRequestHandler):
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
-                lambda: permission_policy.set_mode(wanted),
+                _mode_post.mode_applier(permission_policy, context, wanted),
             )
         except ValueError as exc:
             self._send_json_payload(
@@ -6392,6 +6370,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if _send_idempotency_refusal(self, result):
+            return
+        if _mode_post.send_escalation_refusal(
+                self, permission_policy, result, sonder_lifecycle.error_envelope):
             return
         _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
@@ -7879,7 +7860,7 @@ class Handler(BaseHTTPRequestHandler):
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
         if overflow_receipt is not None:
             receipt["overflow"] = overflow_receipt
-        refusal = _turn_refusal_receipt(turn_refusals)
+        refusal = turn_refusal_receipt(turn_refusals, context, permission_policy)
         if refusal is not None:
             receipt["refusal"] = refusal
         # A lookup turn's Sources block and receipt entry, added after the turn
