@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -91,7 +92,15 @@ def test_public_remote_examples_require_https_and_never_promote_direct_bind():
     assert "http://your-vps" not in combined
     assert "SONDER_HOST=0.0.0.0" not in readme
     assert "SONDER_HOST=0.0.0.0" not in client
-    assert "https://sonder.example.com" in client
+    server_examples = [
+        line.split("=", 1)[1] for line in client.splitlines()
+        if line.startswith(("export SONDER_SERVER=", "set SONDER_SERVER="))
+    ]
+    assert server_examples
+    assert all(
+        urlsplit(url).scheme == "https" and urlsplit(url).hostname == "sonder.example.com"
+        for url in server_examples
+    )
     assert "secure-remote-access.md" in combined
 
 

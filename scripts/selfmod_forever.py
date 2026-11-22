@@ -33,6 +33,7 @@ for candidate in (str(REPO), str(REPO / "scripts")):
 
 import nightly_selfmod  # noqa: E402
 import selfmod  # noqa: E402
+from sonder_runtime.domain.security.redaction import redact_text  # noqa: E402
 
 # Stop after this many consecutive passes that produced no commit. Distinguishes
 # "nothing left to improve" and "the backend died" from a healthy loop, without
@@ -65,7 +66,7 @@ def main() -> int:
     # remainder in system RAM and converted 6 of 12 bodies the 7B could not
     # in a separate measurement.
     def log(message):
-        print("%s %s" % (time.strftime("%H:%M:%S"), message), flush=True)
+        print("%s %s" % (time.strftime("%H:%M:%S"), redact_text(message)), flush=True)
 
     deadline = time.time() + args.hours * 3600.0
     committed, barren, passes = [], 0, 0

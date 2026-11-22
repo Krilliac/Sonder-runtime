@@ -15,6 +15,7 @@ from pathlib import Path
 import random
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -697,7 +698,12 @@ def test_wrap_hanging_indent_and_long_tokens():
     lines = S.wrap("see https://example.com/" + "a" * 60 + " now", 30, indent="- ", hanging="  ")
     assert lines[0].startswith("- ") and all(line.startswith("  ") for line in lines[1:])
     assert all(S.cell_width(line) <= 30 for line in lines)
-    assert "".join(line[2:] for line in lines).replace(" ", "").startswith("seehttps://example.com/")
+    wrapped = "".join(line[2:] for line in lines).replace(" ", "")
+    assert wrapped.startswith("see")
+    parsed = urlsplit(wrapped.removeprefix("see"))
+    assert parsed.scheme == "https"
+    assert parsed.hostname == "example.com"
+    assert parsed.path == "/" + "a" * 60 + "now"
 
 
 def test_wrap_leaves_code_tables_and_indented_lines():
