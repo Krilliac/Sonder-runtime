@@ -249,9 +249,41 @@ def test_argv_programs_that_are_not_powershell_stay_unselected(program):
 @pytest.mark.parametrize("command", [
     "if " * 3000, "cmd/" * 5000, "a/" * 10000, "if x/" * 2000, '"a/' * 7000, "start /" * 3000,
     "pwsh\\" + "." * 50000 + "x", "pwsh\\." * 10000,
-])
+], ids=[f"linear_{i}" for i in range(8)])
 def test_build_run_launcher_scan_is_linear(command):
     import time
     started = time.perf_counter()
     gate.inspect_tool_call("build_run", {"command": command})
     assert time.perf_counter() - started < 2.0
+
+
+def test_build_run_backtick_quoting_around_powershell_is_opaque(monkeypatch):
+    def unexpected(source):
+        pytest.fail("backtick-escaped cmd.exe launcher must not be tokenized as PowerShell")
+    monkeypatch.setattr(gate, "inspect_powershell", unexpected)
+    command = 'pwsh -Command "Write-Output `"1 ; iex (Get-Date)`""'
+    assert gate.powershell_arguments("build_run", {"command": command}) is not None
+    result = gate.inspect_tool_call("build_run", {"command": command})
+    assert result is not None and not result.inspectable
+
+
+@pytest.mark.parametrize("tool", ["script_run", "run_script"])
+@pytest.mark.parametrize("path", ["evil.ps1/", "evil.ps1.", r"evil.ps1\.", "evil.ps1 "])
+def test_script_tools_normalize_ps1_paths_before_selection(tool, path):
+    arguments = {"path": path}
+    assert gate.powershell_arguments(tool, arguments) is not None
+    result = gate.inspect_tool_call(tool, arguments)
+    assert result is not None and not result.inspectable
+
+
+@pytest.mark.parametrize("script_arg", ["evil.ps1.", "evil.ps1 ", r"C:\work\evil.ps1."])
+def test_argv_normalized_positional_ps1_cannot_hide_behind_benign_stdin(monkeypatch, script_arg):
+    def inspect(source):
+        if source == "Get-Date":
+            return SimpleNamespace(inspectable=True, reason="ast fully inspectable")
+        return SimpleNamespace(inspectable=False, reason="external PowerShell script needs inspection")
+    monkeypatch.setattr(gate, "inspect_powershell", inspect)
+    args = {"program": "pwsh", "args_json": json.dumps([script_arg]), "stdin": "Get-Date"}
+    result = gate.inspect_tool_call("workspace_run", args)
+    assert result is not None and not result.inspectable
+

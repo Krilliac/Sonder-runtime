@@ -67,25 +67,25 @@ try {
   $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
   if ($null -eq $request.source -or $request.source -isnot [string]) { throw 'bad request' }
   $tokens = $null; $errors = $null
-  $ast = [System.Management.Automation.Language.Parser]::ParseInput($request.source, [ref]$tokens, [ref]$errors)
+  $tParser = [System.Management.Automation.Language.Parser]
+  function L([string]$n) { $tParser.Assembly.GetType("System.Management.Automation.Language.$n") }
+  $ast = $tParser::ParseInput($request.source, [ref]$tokens, [ref]$errors)
   if ($errors -and $errors.Count) { throw 'parse error' }
   if ($request.source.Length -gt 262144) { throw 'input too large' }
-  $tStr = [System.Management.Automation.Language.StringConstantExpressionAst]
-  $tParam = [System.Management.Automation.Language.CommandParameterAst]
-  $tSb = [System.Management.Automation.Language.ScriptBlockExpressionAst]
-  $tVar = [System.Management.Automation.Language.VariableExpressionAst]
-  $tPipe = [System.Management.Automation.Language.PipelineAst]
-  $tType = [System.Management.Automation.Language.TypeExpressionAst]
-
-  function Literal([object] $node) {
-    return ($node -is $tStr -or
-      $node -is [System.Management.Automation.Language.ConstantExpressionAst] -or
-      $node -is $tSb)
+  $tStr = L StringConstantExpressionAst; $tParam = L CommandParameterAst; $tSb = L ScriptBlockExpressionAst
+  $tVar = L VariableExpressionAst; $tPipe = L PipelineAst; $tType = L TypeExpressionAst
+  $tArr = L ArrayLiteralAst; $tMem = L MemberExpressionAst; $tInvMem = L InvokeMemberExpressionAst
+  $tCmdExpr = L CommandExpressionAst; $tConst = L ConstantExpressionAst; $tTok = L TokenKind
+  $tWild = [System.Management.Automation.WildcardPattern]; $ord = [StringComparison]::Ordinal
+  function Find([object]$r, [type]$t, [bool]$d = $true) { ,@($r.FindAll({ param($n) $n -is $t }, $d)) }
+  function PN($p) { $p.ParameterName.ToLowerInvariant() }
+  function Pre([string]$p, [string[]]$xs, [int]$m = 1) {
+    if ($p.Length -lt $m) { return $false }
+    foreach ($x in $xs) { if ($x.StartsWith($p, $ord)) { return $true } }
+    return $false
   }
-  function Text([object] $node) {
-    if (Literal $node) { return [string]$node.Value }
-    return $null
-  }
+  function Literal([object]$node) { $node -is $tStr -or $node -is $tConst -or $node -is $tSb }
+  function Text([object]$node) { if (Literal $node) { [string]$node.Value } else { $null } }
   # Parameter tables mirror Get-Command metadata for Windows PowerShell 5.1
   # and PowerShell 7 separately: the inspecting host need not be the host
   # that runs the command, and a token can bind differently on each (5.1
@@ -120,62 +120,51 @@ try {
   # Item writers: 'path' fills the positional Path slot, 'filter' narrows it,
   # 'dest' is a same-provider destination, 'data' is the item content.
   $pathParams = 'path:path,literalpath,pspath;filter:filter,include,exclude;value:credential'
+  $contentSpec = Specs ($pathParams + ';data:value;value:encoding,stream;switch:passthru,force,nonewline' + $should) $tx ';path:lp;switch:asbytestream'
   $writerParams = @{
     'set-item' = (Specs ($pathParams + ';data:value;switch:force,passthru' + $should) $tx ';path:lp')
     'new-item' = (Specs ('path:path;filter:name;data:value,target;value:itemtype,type,credential;switch:force' + $should) $tx '')
-    'set-content' = (Specs ($pathParams + ';data:value;value:encoding,stream;switch:passthru,force,nonewline' + $should) $tx ';path:lp;switch:asbytestream')
+    'set-content' = $contentSpec; 'add-content' = $contentSpec
     'copy-item' = (Specs ($pathParams + ';dest:destination;value:fromsession,tosession;switch:container,force,recurse,passthru' + $should) $tx ';path:lp')
     'move-item' = (Specs ($pathParams + ';dest:destination;switch:force,passthru' + $should) $tx ';path:lp')
     'rename-item' = (Specs ('path:path,literalpath,pspath;dest:newname;value:credential;switch:force,passthru' + $should) $tx ';path:lp')
   }
   # Positional slots in binding order; named binding removes a slot.
-  $writerSlots = @{ 'set-item' = @('path','data'); 'new-item' = @('path'); 'set-content' = @('path','data');
+  $writerSlots = @{ 'set-item' = @('path','data'); 'new-item' = @('path'); 'set-content' = @('path','data'); 'add-content' = @('path','data');
     'copy-item' = @('path','dest'); 'move-item' = @('path','dest'); 'rename-item' = @('path','dest') }
-  # mkdir (alias md) is the built-in function that forwards its Path, Name
-  # and Value to New-Item, so it writes function: items the same way.
-  $writerNames = @{ 'set-item' = 'set-item'; 'si' = 'set-item'; 'new-item' = 'new-item'; 'ni' = 'new-item';
-    'mkdir' = 'new-item'; 'md' = 'new-item';
-    'set-content' = 'set-content'; 'sc' = 'set-content'; 'copy-item' = 'copy-item'; 'copy' = 'copy-item'; 'cp' = 'copy-item'; 'cpi' = 'copy-item';
-    'move-item' = 'move-item'; 'move' = 'move-item'; 'mv' = 'move-item'; 'mi' = 'move-item';
-    'rename-item' = 'rename-item'; 'ren' = 'rename-item'; 'rni' = 'rename-item' }
-  # Member-type and type-name operands of the cmdlets that can rename
-  # members or construct a named type.
+  function AliasMap([string]$s) {
+    $m = @{}
+    foreach ($g in $s.Split(';')) { $k, $vs = $g.Split(':'); $m[$k] = $k; foreach ($v in $vs.Split(',')) { if ($v) { $m[$v] = $k } } }
+    $m
+  }
+  $writerNames = AliasMap 'set-item:si;new-item:ni,mkdir,md;set-content:sc;add-content:ac;copy-item:copy,cp,cpi;move-item:move,mv,mi;rename-item:ren,rni'
   $addMemberParams = Specs ('type:membertype,type;value:name,value,secondvalue,inputobject,typename;' +
       'note:notepropertyname,notepropertyvalue,notepropertymembers;switch:force,passthru') '' ''
   $newObjectParams = Specs 'type:typename;com:comobject;value:argumentlist,args,property;switch:strict' '' ''
-  # Name and Include/Exclude operands of the *-Variable cmdlets, which can
-  # read $ExecutionContext or write $PSDefaultParameterValues by name.
+  $vf = 'name:name;filter:include,exclude'; $vt = ';data:value;value:description,option,visibility,scope;switch:force,passthru' + $should
   $variableParams = @{
-    'get-variable' = (Specs 'name:name;filter:include,exclude;value:scope;switch:valueonly' '' '')
-    'set-variable' = (Specs ('name:name;filter:include,exclude;data:value;value:description,option,visibility,scope;switch:force,passthru' + $should) '' ';switch:append')
-    'new-variable' = (Specs ('name:name;data:value;value:description,option,visibility,scope;switch:force,passthru' + $should) '' '')
-    'clear-variable' = (Specs ('name:name;filter:include,exclude;value:scope;switch:force,passthru' + $should) '' '')
-    'remove-variable' = (Specs ('name:name;filter:include,exclude;value:scope;switch:force' + $should) '' '')
+    'get-variable' = (Specs ($vf + ';value:scope;switch:valueonly') '' '')
+    'set-variable' = (Specs ($vf + $vt) '' ';switch:append')
+    'new-variable' = (Specs ('name:name' + $vt) '' '')
+    'clear-variable' = (Specs ($vf + ';value:scope;switch:force,passthru' + $should) '' '')
+    'remove-variable' = (Specs ($vf + ';value:scope;switch:force' + $should) '' '')
   }
-  $variableSlots = @{ 'get-variable' = @('name'); 'set-variable' = @('name','data'); 'new-variable' = @('name','data');
-    'clear-variable' = @('name'); 'remove-variable' = @('name') }
-  $variableNames = @{ 'get-variable' = 'get-variable'; 'gv' = 'get-variable'; 'set-variable' = 'set-variable'; 'set' = 'set-variable';
-    'sv' = 'set-variable'; 'new-variable' = 'new-variable'; 'nv' = 'new-variable'; 'clear-variable' = 'clear-variable';
-    'clv' = 'clear-variable'; 'remove-variable' = 'remove-variable'; 'rv' = 'remove-variable' }
+  $variableSlots = @{ 'get-variable'=@('name');'set-variable'=@('name','data');'new-variable'=@('name','data');'clear-variable'=@('name');'remove-variable'=@('name') }
+  $variableNames = AliasMap 'get-variable:gv;set-variable:set,sv;new-variable:nv;clear-variable:clv;remove-variable:rv'
   $teeParams = Specs 'var:variable;value:filepath,literalpath,pspath,inputobject;switch:append' '' ';value:encoding'
   $compareParams = Specs 'prop:property;value:referenceobject,differenceobject,syncwindow,culture;switch:casesensitive,excludedifferent,includeequal,passthru' '' ''
-  # Relative item paths resolve against the current location: the path
-  # operands of item writers and of Get-Item/Get-ChildItem/Get-Content
-  # (which read the current location when given no path).  A non-literal,
-  # home-relative or missing Set-Location/Push-Location operand may move the
-  # location onto the function, alias or variable drive, so the two together
-  # are opaque; a literal move onto those drives throws.  A writer whose Path
-  # operand the text does not show throws instead of counting as relative.
-  # Using-namespace prefixes widen the names a short type name can resolve
-  # to; defined holds the class and enum names of the script being checked.
+  $icmParams = Specs ('sb:scriptblock,command;file:filepath;' +
+      'switch:nonewscope,asjob,indisconnectedsession,enablenetworkaccess,hidecomputername,usessl,allowredirection,disconnected,usesharedprocess,runasadministrator;' +
+      'value:computername,session,argumentlist,args,inputobject,credential,configurationname,port,throttlelimit,' +
+      'sessionoption,applicationname,connectionuri,authentication,certificatethumbprint,jobname,sessionname,includeparametername,' +
+      'vmid,vmname,containerid,hostname,username,keyfilepath,subsystem,sshconnection,sshtransport,connectionname') '' ''
   $state = @{ relativeItem = $false; dynamicLocation = $false; namespaces = @(); defined = @() }
-  function ParamKind([string] $pn, [object[]] $tables, [string] $label) {
+  function ParamKind([string]$pn, [object[]]$tables, [string]$label) {
     $result = $null
     foreach ($table in $tables) {
       if ($table.ContainsKey($pn)) { $kind = $table[$pn] }
       else {
-        $kinds = @(@($table.Keys) | Where-Object { $_.StartsWith($pn, [StringComparison]::Ordinal) } |
-          ForEach-Object { $table[$_] } | Sort-Object -Unique)
+        $kinds = @(@($table.Keys) | Where-Object { $_.StartsWith($pn, $ord) } | ForEach-Object { $table[$_] } | Sort-Object -Unique)
         if ($kinds.Count -ne 1) { throw "unknown $label parameter" }
         $kind = $kinds[0]
       }
@@ -211,8 +200,8 @@ try {
   # name containing Invoke is included.
   $engineMember = '(?i)^(get_|set_)?(executioncontext|sessionstate|sessionstateproxy|psvariable|drive|runspace|' +
       'setlocation|pushcurrentlocation|addscript|addcommand|createpipeline|createnestedpipeline|newscriptblock|' +
-      'expandstring|getvariablevalue|valuefrompipelinebypropertyname|parameters|parametersets|resolveparameter|' +
-      'parametermetadata|\w*invoke\w*)$'
+      'newboundscriptblock|getsteppablepipeline|expandstring|getvariablevalue|valuefrompipelinebypropertyname|' +
+      'parameters|parametersets|resolveparameter|parametermetadata|\w*invoke\w*)$'
   # Reflection reaches those members without naming them: get*/find* names
   # that mention a member, property, field, method, constructor, event,
   # interface or type (GetType included), Declared*/Defined* collections,
@@ -245,7 +234,7 @@ try {
   # CryptoConfig.CreateFromName constructs a type named by a string.
   $deniedType = '(?i)^System\.(Type|RuntimeType|Activator|AppDomain|Delegate|MulticastDelegate|RuntimeTypeHandle|' +
       'RuntimeMethodHandle|RuntimeFieldHandle|ModuleHandle|TypedReference|ArgIterator|Security\.Cryptography\.CryptoConfig)$'
-  $exemptType = '(?i)^(System\.Management\.Automation\.(PSCredential|PSObject|PSCustomObject|PSReference|ScriptBlock|' +
+  $exemptType = '(?i)^(System\.Management\.Automation\.(PSCredential|PSObject|PSCustomObject|PSReference|' +
       'SwitchParameter|WildcardPattern|ErrorRecord|SemanticVersion|Language\.NullString|Host\.\w+)|' +
       'System\.ComponentModel\.Win32Exception|System\.Runtime\.InteropServices\.(RuntimeInformation|OSPlatform|Architecture))$'
   # PowerShell 7 has type accelerators that 5.1 lacks ([pspropertyexpression]
@@ -255,13 +244,13 @@ try {
   # ordered dictionary, SemanticVersion and integer types.
   $knownShort = '(?i)^(ordered|semver|short|uint|ulong|ushort)$'
   function CheckTypeName([object] $tn, [bool] $open = $false) {
-    if ($tn -is [System.Management.Automation.Language.GenericTypeName]) {
+    if ($tn -is (L GenericTypeName)) {
       # The open name (List in List[int]) resolves only with its arity.
       CheckTypeName $tn.TypeName $true
       foreach ($argument in $tn.GenericArguments) { CheckTypeName $argument }
       return
     }
-    if ($tn -is [System.Management.Automation.Language.ArrayTypeName]) { CheckTypeName $tn.ElementType; return }
+    if ($tn -is (L ArrayTypeName)) { CheckTypeName $tn.ElementType; return }
     # Resolving an assembly-qualified name loads the named assembly.
     if ($tn.AssemblyName) { throw 'assembly-qualified type name' }
     $name = [string]$tn.FullName
@@ -289,7 +278,7 @@ try {
   function CheckTypeText([string] $text) {
     # New-Object type names use type-literal syntax; parse one and check it.
     $t = $null; $e = $null
-    $parsed = [System.Management.Automation.Language.Parser]::ParseInput('[' + $text + ']', [ref]$t, [ref]$e)
+    $parsed = $tParser::ParseInput('[' + $text + ']', [ref]$t, [ref]$e)
     $types = @($parsed.FindAll({ param($n) $n -is $tType }, $true))
     if (($e -and $e.Count) -or $types.Count -ne 1 -or $types[0].Extent.Text -ne ('[' + $text + ']')) { throw 'opaque type name' }
     CheckTypeName $types[0].TypeName
@@ -310,432 +299,319 @@ try {
     # Member-name operands must be literal so the names above stay visible.
     # A wildcard member name binds whichever member it matches, so any
     # wildcard is opaque.
-    if ($node -is [System.Management.Automation.Language.ArrayLiteralAst]) {
+    if ($node -is $tArr) {
       foreach ($item in $node.Elements) { StaticName $item }
       return
     }
-    if ($node -is [System.Management.Automation.Language.HashtableAst]) {
+    if ($node -is (L HashtableAst)) {
       foreach ($pair in $node.KeyValuePairs) {
         $v = $pair.Item2
         if ($v -isnot $tPipe -or $v.PipelineElements.Count -ne 1 -or
-            $v.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { throw 'opaque member name' }
+            $v.PipelineElements[0] -isnot $tCmdExpr) { throw 'opaque member name' }
         StaticName $v.PipelineElements[0].Expression
       }
       return
     }
+    if ($node -is $tVar -and !$node.Splatted -and $node.IsConstantVariable()) { return }
     if (!(Literal $node)) { throw 'opaque member name' }
     if ($node -is $tSb) { return }
     $text = Text $node
     $reason = MemberReason $text
     if ($reason) { throw $reason }
-    if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($text)) { throw 'opaque member name' }
+    if ($tWild::ContainsWildcardCharacters($text)) { throw 'opaque member name' }
   }
-  function CheckAddMember([object[]] $elements) {
-    # An AliasProperty reaches whatever member its (possibly computed) string
-    # names; CodeProperty and CodeMethod bind reflected methods; PropertySet
-    # and MemberSet group members by name.  Only note properties and script
-    # members (whose literal script blocks are inspected like any other)
-    # stay inspectable.
-    $type = $null; $note = $false; $positionals = @()
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  function CheckAddMember([object[]]$e) {
+    $type = $null; $note = $false; $pos = @()
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tVar -and $p.Splatted) { throw 'opaque extended type data' }
       if ($p -is $tParam) {
-        $kind = ParamKind $p.ParameterName.ToLowerInvariant() $addMemberParams 'Add-Member'
-        if ($kind -eq 'switch') { continue }
-        if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-        if ($kind -eq 'type') { $type = $value } elseif ($kind -eq 'note') { $note = $true }
-      } else { $positionals += ,$p }
+        $k = ParamKind (PN $p) $addMemberParams 'Add-Member'
+        if ($k -eq 'switch') { continue }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        if ($k -eq 'type') { $type = $v } elseif ($k -eq 'note') { $note = $true }
+      } else { $pos += ,$p }
     }
-    # The first positional operand is the member type unless a note-property
-    # set is chosen; a literal that converts to a member type is one.
-    if ($null -eq $type -and !$note -and $positionals.Count -and
-        $positionals[0] -isnot [System.Management.Automation.Language.HashtableAst]) {
-      $first = $positionals[0]
-      if (!(Literal $first) -or $first -is $tSb -or
-          $null -ne ((Text $first) -as [System.Management.Automation.PSMemberTypes])) { $type = $first }
+    if ($null -eq $type -and !$note -and $pos.Count -and $pos[0] -isnot (L HashtableAst)) {
+      $f = $pos[0]
+      if (!(Literal $f) -or $f -is $tSb -or $null -ne ((Text $f) -as [System.Management.Automation.PSMemberTypes])) { $type = $f }
     }
     if ($null -eq $type) { return }
-    $kindValue = $null
-    if ((Literal $type) -and $type -isnot $tSb) {
-      $kindValue = (Text $type) -as [System.Management.Automation.PSMemberTypes]
-    }
-    if ($null -eq $kindValue -or @('NoteProperty','ScriptProperty','ScriptMethod') -notcontains [string]$kindValue) {
-      throw 'opaque extended type data'
-    }
+    $kv = if ((Literal $type) -and $type -isnot $tSb) { (Text $type) -as [System.Management.Automation.PSMemberTypes] } else { $null }
+    if ($null -eq $kv -or @('NoteProperty','ScriptProperty','ScriptMethod') -notcontains [string]$kv) { throw 'opaque extended type data' }
   }
-  function CheckVariable([object] $node, [object[]] $elements, [string] $command) {
-    # A computed, wildcard, piped or missing name can read $ExecutionContext
-    # or write $PSDefaultParameterValues, so Name and Include/Exclude must be
-    # literals without wildcards; literal names are checked with the other
-    # string literals.  Surplus positionals (reported as paths) count as names.
+  function CheckVariable([object]$n, [object[]]$e, [string]$cmd) {
     $named = $false
-    foreach ($pair in @(Operands $node $elements $variableParams[$command] $variableSlots[$command] $command 'opaque variable name')) {
+    foreach ($pair in @(Operands $n $e $variableParams[$cmd] $variableSlots[$cmd] $cmd 'opaque variable name')) {
       if (@('name','filter','path') -notcontains $pair[0]) { continue }
       if ($pair[0] -ne 'filter') { $named = $true }
-      foreach ($text in @(StringValues $pair[1] 'opaque variable name')) {
-        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($text)) { throw 'opaque variable name' }
-      }
+      foreach ($t in @(StringValues $pair[1] 'opaque variable name')) { if ($tWild::ContainsWildcardCharacters($t)) { throw 'opaque variable name' } }
     }
     if (!$named) { throw 'opaque variable name' }
   }
-  function CheckNewObject([object[]] $elements) {
-    # COM objects are external programs; .NET type names are checked like type literals.
-    $type = $null; $positionals = @()
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  function CheckNewObject([object[]]$e) {
+    $type = $null; $pos = @()
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tVar -and $p.Splatted) { throw 'dynamic New-Object type' }
       if ($p -is $tParam) {
-        $kind = ParamKind $p.ParameterName.ToLowerInvariant() $newObjectParams 'New-Object'
-        if ($kind -eq 'switch') { continue }
-        if ($kind -eq 'com') { return }
-        if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-        if ($kind -eq 'type') { $type = $value }
-      } else { $positionals += ,$p }
+        $k = ParamKind (PN $p) $newObjectParams 'New-Object'
+        if ($k -eq 'switch') { continue }
+        if ($k -eq 'com') { return }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        if ($k -eq 'type') { $type = $v }
+      } else { $pos += ,$p }
     }
-    if ($null -eq $type) {
-      if (!$positionals.Count) { return }
-      $type = $positionals[0]
-    }
+    if ($null -eq $type) { if (!$pos.Count) { return }; $type = $pos[0] }
     if (!(Literal $type) -or $type -is $tSb) { throw 'dynamic New-Object type' }
     CheckTypeText (Text $type)
   }
-  function MemberOperands([object[]] $elements) {
-    # Every operand except -InputObject's may be a member name or its
-    # arguments; parameter tables are unnecessary because all are checked.
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  function MemberOperands([object[]]$e) {
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tParam) {
-        $pn = $p.ParameterName.ToLowerInvariant()
-        $isInput = $pn.Length -ge 2 -and 'inputobject'.StartsWith($pn, [StringComparison]::Ordinal)
-        if ($p.Argument) { if (!$isInput) { StaticName $p.Argument } }
-        elseif ($isInput) { $i++ }
+        $in = Pre (PN $p) @('inputobject') 2
+        if ($p.Argument) { if (!$in) { StaticName $p.Argument } } elseif ($in) { $i++ }
         continue
       }
       StaticName $p
     }
   }
-  function CheckParam([object[]] $elements, [object[]] $tables, [string] $label, [string] $want, [string] $reason) {
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  function CheckParam([object[]]$e, [object[]]$tables, [string]$label, [string]$want, [string]$reason) {
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tVar -and $p.Splatted) { throw $reason }
       if ($p -is $tParam) {
-        $kind = ParamKind $p.ParameterName.ToLowerInvariant() $tables $label
-        if ($kind -eq 'switch') { continue }
-        if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-        if ($kind -eq $want) {
-          if ($want -eq 'prop') { StaticName $value } else { $null = StringValues $value $reason }
-        }
+        $k = ParamKind (PN $p) $tables $label
+        if ($k -eq 'switch') { continue }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        if ($k -eq $want) { if ($want -eq 'prop') { StaticName $v } else { $null = StringValues $v $reason } }
       }
     }
   }
-  function ProviderPath([string] $text) {
-    # Returns whether a literal path is on the variable: drive.  Such a path
-    # must name one variable: a drive listing, wildcards or extra components
-    # can reach any variable, $ExecutionContext included.  A home-relative
-    # path can be on any drive.
-    if (HomePath $text) { throw 'opaque home-relative path' }
-    if (VariablePath $text) {
-      if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($text) -or
-          $text -notmatch '(?i)^\s*(\w[\w.]*\\)?variable::?[\\/]?(?<name>[^\\/:]+)$' -or $Matches['name'] -match '^[.\s]*$') {
-        throw 'opaque variable path'
-      }
+  function ProviderPath([string]$t) {
+    if (HomePath $t) { throw 'opaque home-relative path' }
+    if (VariablePath $t) {
+      if ($tWild::ContainsWildcardCharacters($t) -or $t -notmatch '^\s*(\w[\w.]*\\)?variable::?[\\/]?(?<name>[^\\/:]+)$' -or $Matches['name'] -match '^[.\s]*$') { throw 'opaque variable path' }
       return $true
     }
-    # Drive- or provider-qualified and UNC paths do not depend on the location.
-    if ($text -notmatch '^[^\\/:]+:' -and $text -notmatch '^(\\\\|//)') { $state.relativeItem = $true }
+    if ($t -notmatch '^[^\\/:]+:' -and $t -notmatch '^(\\\\|//)') { $state.relativeItem = $true }
     return $false
   }
-  function ItemPath([object] $node) {
-    # Returns whether the writer's path is on the variable: drive.
-    if (!(Literal $node) -or $node -is $tSb) { throw 'opaque command rebinding' }
-    $text = Text $node
-    if (RebindingText $text) { throw 'opaque command rebinding' }
-    return (ProviderPath $text)
+  function ItemPath([object]$n) {
+    if (!(Literal $n) -or $n -is $tSb) { throw 'opaque command rebinding' }
+    $t = Text $n; if (RebindingText $t) { throw 'opaque command rebinding' }; ProviderPath $t
   }
-  function NamePath([object] $node) {
-    # Copy/Move/Rename cannot cross providers and filters only narrow the
-    # Path parameter, so the Path operand carries the provider; only a
-    # literal rebinding spelling is decisive here (see VariableName for
-    # variable: paths).
-    if ((Literal $node) -and (RebindingText (Text $node))) { throw 'opaque command rebinding' }
+  function NamePath([object]$n) { if ((Literal $n) -and (RebindingText (Text $n))) { throw 'opaque command rebinding' } }
+  function VariableName([object]$n) {
+    if (!(Literal $n) -or $n -is $tSb) { throw 'opaque variable path' }
+    $t = Text $n; if ($tWild::ContainsWildcardCharacters($t)) { throw 'opaque variable path' }; $null = ProviderPath $t
   }
-  function VariableName([object] $node) {
-    # Under a variable: path, a destination, name or filter operand selects
-    # the variable that is written (Copy-Item variable:x <name> creates it).
-    if (!(Literal $node) -or $node -is $tSb) { throw 'opaque variable path' }
-    $text = Text $node
-    if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($text)) { throw 'opaque variable path' }
-    $null = ProviderPath $text
-  }
-  function Operands([object] $node, [object[]] $elements, [object[]] $tables, [object[]] $slots, [string] $label,
-      [string] $reason = 'opaque command rebinding') {
-    # Yields @(kind, node) pairs for every operand of a provider command.
-    $pipeline = $node.Parent
-    if ($pipeline -is $tPipe -and
-        !([object]::ReferenceEquals($pipeline.PipelineElements[0], $node))) { throw $reason }
-    $positionals = @(); $open = [System.Collections.ArrayList]@($slots)
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  function Operands([object]$n, [object[]]$e, [object[]]$tables, [object[]]$slots, [string]$label, [string]$reason = 'opaque command rebinding') {
+    $pl = $n.Parent
+    if ($pl -is $tPipe -and !([object]::ReferenceEquals($pl.PipelineElements[0], $n))) { throw $reason }
+    $pos = @(); $open = [System.Collections.ArrayList]@($slots)
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tVar -and $p.Splatted) { throw $reason }
       if ($p -is $tParam) {
-        $kind = ParamKind $p.ParameterName.ToLowerInvariant() $tables $label
-        if ($kind -eq 'switch') { continue }
-        if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-        $open.Remove($kind)
-        ,@($kind, $value)
-      } else { $positionals += ,$p }
+        $k = ParamKind (PN $p) $tables $label
+        if ($k -eq 'switch') { continue }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        $open.Remove($k); ,@($k, $v)
+      } else { $pos += ,$p }
     }
-    for ($k=0; $k -lt $positionals.Count; $k++) {
-      # Surplus positionals are checked as paths.
-      if ($k -lt $open.Count) { $kind = $open[$k] } else { $kind = 'path' }
-      ,@($kind, $positionals[$k])
-    }
+    for ($k=0; $k -lt $pos.Count; $k++) { $kind = if ($k -lt $open.Count) { $open[$k] } else { 'path' }; ,@($kind, $pos[$k]) }
   }
-  function CheckItem([object] $node, [object[]] $elements, [string] $command) {
-    $hasPath = $false; $variable = $false; $names = @()
-    foreach ($pair in @(Operands $node $elements $writerParams[$command] $writerSlots[$command] $command)) {
-      if ($pair[0] -eq 'path') { $hasPath = $true; if (ItemPath $pair[1]) { $variable = $true } }
+  function CheckItem([object]$n, [object[]]$e, [string]$cmd) {
+    $hasPath = $false; $var = $false; $names = @()
+    foreach ($pair in @(Operands $n $e $writerParams[$cmd] $writerSlots[$cmd] $cmd)) {
+      if ($pair[0] -eq 'path') { $hasPath = $true; if (ItemPath $pair[1]) { $var = $true } }
       elseif ($pair[0] -eq 'filter' -or $pair[0] -eq 'dest') { NamePath $pair[1]; $names += ,$pair[1] }
     }
-    # A Path operand the text does not show (pipeline input, default
-    # parameter values) can name any drive, so it is not treated as relative.
     if (!$hasPath) { throw 'opaque item path' }
-    if ($variable) { foreach ($name in $names) { VariableName $name } }
+    if ($var) { foreach ($nm in $names) { VariableName $nm } }
   }
-  function CheckReader([object] $node, [object[]] $elements) {
-    # Get-Item, Get-ChildItem and Get-Content return variables or their
-    # values from the variable: drive.  Provider dynamic parameters differ by
-    # drive, so every operand counts as a possible path: each must be a
-    # literal (or $true/$false/$null), and pipeline input is opaque.
-    $pipeline = $node.Parent
-    if ($pipeline -is $tPipe -and
-        !([object]::ReferenceEquals($pipeline.PipelineElements[0], $node))) { throw 'opaque provider path' }
-    $paths = 0
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+  $readerSw = 'recurse,force,name,file,directory,hidden,readonly,system,raw,wait,asbytestream,followsymlink,verbose,vb,debug,db,whatif,wi,confirm,cf,usetransaction,usetx'.Split(',')
+  function CheckReader([object]$n, [object[]]$e) {
+    $pl = $n.Parent
+    if ($pl -is $tPipe -and !([object]::ReferenceEquals($pl.PipelineElements[0], $n))) { throw 'opaque provider path' }
+    $hasPath = $false; $pk = ''
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tParam) {
-        if ($null -eq $p.Argument) { continue }
-        $p = $p.Argument
-      }
+        $pn = PN $p
+        $ip = ($pn -in @('p','lp') -or (Pre $pn @('path','literalpath','pspath') 2))
+        $sw = !$ip -and (Pre $pn $readerSw)
+        if ($null -eq $p.Argument) { $pk = if ($ip) { 'path' } elseif ($sw) { '' } else { 'other' }; continue }
+        $p = $p.Argument; $isPath = $ip
+      } else { $isPath = ($pk -ne 'other'); $pk = '' }
       if ($p -is $tVar -and !$p.Splatted -and $p.IsConstantVariable()) { continue }
-      foreach ($text in @(StringValues $p 'opaque provider path')) { $paths++; $null = ProviderPath $text }
-    }
-    # With no path operand the current location is read.
-    if (!$paths) { $state.relativeItem = $true }
-  }
-  function CheckLocation([object] $node, [object[]] $elements) {
-    # Any literal function/alias/variable drive spelling throws; every other
-    # operand that is not a literal (splatting, pipeline input, expressions)
-    # makes the location unknown, which matters for relative item paths.  So
-    # does a home-relative operand, and no operand at all, which PowerShell 7
-    # documents as a move to the home directory.
-    $pipeline = $node.Parent
-    if ($pipeline -is $tPipe -and
-        !([object]::ReferenceEquals($pipeline.PipelineElements[0], $node))) { $state.dynamicLocation = $true }
-    $operands = 0
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
-      if ($p -is $tParam) {
-        if ($null -eq $p.Argument) { continue }
-        $p = $p.Argument
+      foreach ($t in @(StringValues $p 'opaque provider path')) {
+        if ($isPath) { $hasPath = $true; $null = ProviderPath $t }
+        else { if (HomePath $t) { throw 'opaque home-relative path' }; if (VariablePath $t) { $null = ProviderPath $t } }
       }
-      $operands++
+    }
+    if (!$hasPath) { $state.relativeItem = $true }
+  }
+  function CheckIcm([object[]]$e) {
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
+      if ($p -is $tVar -and $p.Splatted) { throw 'dynamic Invoke-Command scriptblock' }
+      if ($p -is $tParam) {
+        $k = ParamKind (PN $p) $icmParams 'Invoke-Command'
+        if ($k -eq 'switch') { continue }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        if ($k -eq 'sb') { if ($v -isnot $tSb) { throw 'dynamic Invoke-Command scriptblock' } }
+        elseif ($k -eq 'file') { if (!(Literal $v)) { throw 'dynamic Invoke-Command file' }; throw 'external PowerShell script needs inspection' }
+      } elseif ($p -isnot $tSb) { throw 'dynamic Invoke-Command scriptblock' }
+    }
+  }
+  function CheckSbCmd([object[]]$e, [string]$ll) {
+    $pos = 0
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
+      if ($p -is $tVar -and $p.Splatted) { throw 'dynamic scriptblock command' }
+      if ($p -is $tParam) {
+        $pn = PN $p
+        $sb = Pre $pn @('scriptblock','expression','action','filterscript','initializationscript') 2
+        $fl = Pre $pn @('filepath') 2
+        $pr = ($ll -match '^(where-object|\?|where)$' -and (Pre $pn @('property') 2))
+        if ($sb -or $fl -or $pr) {
+          $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+          if ($fl) { throw 'external PowerShell script needs inspection' }
+          if ($pr) { StaticName $v } elseif ($v -isnot $tSb) { throw 'dynamic scriptblock command' }
+        } elseif ($null -eq $p.Argument -and $pn -notmatch '^(ascustomobject|returnresult|pass\w*|verbose|vb|debug|db|whatif|wi|confirm|cf|runas32|supportevent|forward)$') { $i++ }
+        continue
+      }
+      if ($pos -eq 0) {
+        if ($ll -match '^(where-object|\?|where)$') { if ($p -is $tStr) { StaticName $p } elseif ($p -isnot $tSb) { throw 'dynamic scriptblock command' } }
+        elseif ($ll -match '^(new-module|nmo|measure-command|start-job|sajb|start-threadjob)$' -and $p -isnot $tSb) { throw 'dynamic scriptblock command' }
+      }
+      $pos++
+    }
+  }
+  function CheckLocation([object]$n, [object[]]$e) {
+    $pl = $n.Parent
+    if ($pl -is $tPipe -and !([object]::ReferenceEquals($pl.PipelineElements[0], $n))) { $state.dynamicLocation = $true }
+    $ops = 0
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
+      if ($p -is $tParam) { if ($null -eq $p.Argument) { continue }; $p = $p.Argument }
+      $ops++
       if (!(Literal $p) -or $p -is $tSb) { $state.dynamicLocation = $true }
       elseif (RebindingText (Text $p)) { throw 'opaque command rebinding' }
       elseif (VariablePath (Text $p)) { throw 'opaque variable path' }
       elseif (HomePath (Text $p)) { $state.dynamicLocation = $true }
     }
-    if (!$operands) { $state.dynamicLocation = $true }
+    if (!$ops) { $state.dynamicLocation = $true }
   }
-  function ParseNested([string] $text, [int] $depth) {
-    if ($depth -gt 16 -or $text.Length -gt 65536) { throw 'opaque nested command' }
-    $t = $null; $e = $null
-    $nested = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$t, [ref]$e)
-    if ($e -and $e.Count) { throw 'nested parse error' }
-    CheckAst $nested ($depth + 1)
+  function ParseNested([string]$t, [int]$d) {
+    if ($d -gt 16 -or $t.Length -gt 65536) { throw 'opaque nested command' }
+    $tk = $null; $er = $null
+    $ne = $tParser::ParseInput($t, [ref]$tk, [ref]$er)
+    if ($er -and $er.Count) { throw 'nested parse error' }
+    CheckAst $ne ($d + 1)
   }
-  function CheckAst([object] $root, [int] $depth) {
-    # Classes and enums defined at the top level of a script shadow type
-    # accelerators of the same name throughout that script, and only there.
-    $outerDefined = $state.defined
-    $state.defined = @(@($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.TypeDefinitionAst] }, $false)) |
-      ForEach-Object { [string]$_.Name })
-    if ($root -is [System.Management.Automation.Language.ScriptBlockAst]) {
-      foreach ($usingStatement in @($root.UsingStatements)) {
-        $kind = [string]$usingStatement.UsingStatementKind
-        if ($kind -eq 'Namespace') { $state.namespaces += [string]$usingStatement.Name.Value }
-        elseif ($kind -ne 'Module') { throw 'using statement loads an assembly' }
+  function CheckAst([object]$root, [int]$depth) {
+    $outerDef = $state.defined
+    $state.defined = @(Find $root (L TypeDefinitionAst) $false | ForEach-Object { [string]$_.Name })
+    if ($root -is (L ScriptBlockAst)) {
+      foreach ($u in @($root.UsingStatements)) {
+        $k = [string]$u.UsingStatementKind
+        if ($k -eq 'Namespace') { $state.namespaces += [string]$u.Name.Value }
+        elseif ($k -ne 'Module') { throw 'using statement loads an assembly' }
       }
       if ($root.ScriptRequirements -and @($root.ScriptRequirements.RequiredAssemblies).Count) { throw '#requires loads an assembly' }
     }
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
-      $elements = @($node.CommandElements)
-      if (!$elements.Count) { continue }
-      # Escaped command-name spellings are not a canonical command identity.
-      # Inspect arguments normally; uncertain command heads require approval.
-      if ($elements[0] -is $tStr -and
-          $elements[0].Extent.Text.Contains([char]96)) { throw 'escaped command name requires inspection' }
-      $name = Text $elements[0]
+    foreach ($n in (Find $root (L CommandAst))) {
+      $e = @($n.CommandElements); if (!$e.Count) { continue }
+      if ($e[0] -is $tStr -and $e[0].Extent.Text.Contains([char]96)) { throw 'escaped command name requires inspection' }
+      $name = Text $e[0]
       if ($null -eq $name) {
-        if ($node.InvocationOperator -match 'Ampersand|Dot' -and
-            $elements[0] -is $tSb) { continue }
+        if ($n.InvocationOperator -match 'Ampersand|Dot' -and $e[0] -is $tSb) { continue }
         throw 'dynamic command name'
       }
-      $leaf = Leaf $name
-      if ($leaf -match '(?i)\.ps1$') { throw 'external PowerShell script needs inspection' }
-      if ($node.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown -and
-          $node.InvocationOperator -ne 0 -and !(Literal $elements[0])) { throw 'dynamic invocation' }
-      if ($leaf -match '(?i)^(iex|invoke-expression)$' -or $leaf -match '(?i)^(add-type)$') { throw "blocked command: $leaf" }
-      # Custom drives can expose the Function/Alias providers under any name.
-      if ($leaf -match '(?i)^(set-alias|new-alias|sal|nal|import-alias|ipal|new-psdrive|ndr|mount)$') { throw 'opaque command rebinding' }
-      $writer = $writerNames[$leaf.ToLowerInvariant()]
-      if ($writer) { CheckItem $node $elements $writer }
-      if ($leaf -match '(?i)^(get-item|gi|get-childitem|gci|dir|ls|get-content|gc|cat|type)$') { CheckReader $node $elements }
-      $variableCommand = $variableNames[$leaf.ToLowerInvariant()]
-      if ($variableCommand) { CheckVariable $node $elements $variableCommand }
-      if ($leaf -match '(?i)^(tee-object|tee)$') { CheckParam $elements $teeParams 'Tee-Object' 'var' 'opaque variable name' }
-      if ($leaf -match '(?i)^(foreach-object|%|foreach|select-object|select|group-object|group|measure-object|measure)$') { MemberOperands $elements }
-      if ($leaf -match '(?i)^(compare-object|compare|diff)$') { CheckParam $elements $compareParams 'Compare-Object' 'prop' 'opaque member name' }
-      if ($leaf -match '(?i)^(set-location|push-location|sl|cd|chdir|pushd)$') { CheckLocation $node $elements }
-      # Extended type data can alias or redefine any member, from computed
-      # strings or from type and format files that are not inspected.
-      if ($leaf -match '(?i)^(update-typedata|update-formatdata)$') { throw 'opaque extended type data' }
-      if ($leaf -match '(?i)^add-member$') { CheckAddMember $elements }
-      if ($leaf -match '(?i)^new-object$') { CheckNewObject $elements }
-      $isPs = IsPsName $name
-      $isStart = $leaf -match '(?i)^(start-process|start|saps)$'
-      if ($isPs) { CheckLauncher $elements $depth }
-      if ($isStart) { CheckStart $elements $depth }
-      if ($leaf -match '(?i)^(invoke-command|icm)$') {
-        for ($i=1; $i -lt $elements.Count; $i++) {
-          $p = $elements[$i]
-          if ($p -is $tParam) {
-            $pn = $p.ParameterName.ToLowerInvariant()
-            if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-            if ('scriptblock'.StartsWith($pn) -or $pn -eq 'command') {
-              if ($value -isnot $tSb) { throw 'dynamic Invoke-Command scriptblock' }
-            } elseif ('filepath'.StartsWith($pn)) {
-              if (!(Literal $value)) { throw 'dynamic Invoke-Command file' }
-            }
-          } elseif ($p -isnot $tSb) {
-            throw 'dynamic Invoke-Command scriptblock'
+      $leaf = Leaf $name; $ll = $leaf.ToLowerInvariant()
+      if ($leaf -match '\.ps1$') { throw 'external PowerShell script needs inspection' }
+      if ($n.InvocationOperator -ne $tTok::Unknown -and $n.InvocationOperator -ne 0 -and !(Literal $e[0])) { throw 'dynamic invocation' }
+      if ($ll -match '^(iex|invoke-expression|add-type)$') { throw "blocked command: $leaf" }
+      if ($ll -match '^(set-alias|new-alias|sal|nal|import-alias|ipal|new-psdrive|ndr|mount)$') { throw 'opaque command rebinding' }
+      $w = $writerNames[$ll]; if ($w) { CheckItem $n $e $w }
+      if ($ll -match '^(get-item|gi|get-childitem|gci|dir|ls|get-content|gc|cat|type)$') { CheckReader $n $e }
+      $vc = $variableNames[$ll]; if ($vc) { CheckVariable $n $e $vc }
+      if ($ll -match '^(tee-object|tee)$') { CheckParam $e $teeParams 'Tee-Object' 'var' 'opaque variable name' }
+      if ($ll -match '^(foreach-object|%|foreach|select-object|select|group-object|group|measure-object|measure|sort-object|sort|format-(table|list|custom|wide)|ft|fl|fc|fw)$') { MemberOperands $e }
+      if ($ll -match '^(compare-object|compare|diff)$') { CheckParam $e $compareParams 'Compare-Object' 'prop' 'opaque member name' }
+      if ($ll -match '^(set-location|push-location|sl|cd|chdir|pushd)$') { CheckLocation $n $e }
+      if ($ll -match '^(update-typedata|update-formatdata)$') { throw 'opaque extended type data' }
+      if ($ll -eq 'add-member') { CheckAddMember $e }
+      if ($ll -eq 'new-object') { CheckNewObject $e }
+      if (IsPsName $name) { CheckLauncher $e $depth }
+      if ($ll -match '^(start-process|start|saps)$') { CheckStart $e $depth }
+      if ($ll -match '^(invoke-command|icm)$') { CheckIcm $e }
+      if ($ll -match '^(new-module|nmo|measure-command|start-job|sajb|start-threadjob|trace-command|where-object|\?|where|register-(engine|object)event|set-psbreakpoint|sbp)$') { CheckSbCmd $e $ll }
+      for ($i=1; $i -lt $e.Count; $i++) {
+        $p = $e[$i]
+        if ($p -is $tVar -and $p.Splatted) { throw 'opaque splatted parameters' }
+        if ($p -is $tParam) {
+          $pn = PN $p
+          if ($pn -in @('pv','ov','ev','wv','iv') -or (Pre $pn @('pipelinevariable') 2) -or (Pre $pn @('outvariable') 4) -or
+              (Pre $pn @('errorvariable') 6) -or (Pre $pn @('warningvariable') 8) -or (Pre $pn @('informationvariable') 12)) {
+            $v = if ($p.Argument) { $p.Argument } elseif ($i + 1 -lt $e.Count) { $e[$i + 1] } else { throw 'opaque variable name' }
+            $null = StringValues $v 'opaque variable name'
           }
         }
       }
     }
-    # Function/alias drive variables are writable from assignments, foreach
-    # loop variables and other binding positions; reject them anywhere.
-    foreach ($node in @($root.FindAll({ param($n) $n -is $tVar }, $true))) {
-      $path = [string]$node.VariablePath.UserPath
-      if (RebindingText $path) { throw 'opaque command rebinding' }
-      # $ExecutionContext and $PSCmdlet in any scope or provider spelling.
-      if ($path -match '(?i)(^|:)(executioncontext|pscmdlet)$') { throw 'opaque engine intrinsics' }
-      # Default parameter values add operands the text does not show (a
-      # Set-Item path, a Select-Object member name), in any spelling.
-      if ($path -match '(?i)(^|:)psdefaultparametervalues$') { throw 'opaque default parameter values' }
+    foreach ($n in (Find $root $tVar)) {
+      $p = [string]$n.VariablePath.UserPath
+      if (RebindingText $p) { throw 'opaque command rebinding' }
+      if ($p -match '(^|[:\\/])(executioncontext|pscmdlet)$') { throw 'opaque engine intrinsics' }
+      if ($p -match '(^|[:\\/])psdefaultparametervalues$') { throw 'opaque default parameter values' }
+      if (VariablePath $p) { $null = ProviderPath $p }
     }
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
-      if (!($node.Member -is $tStr)) { throw 'dynamic member name' }
-      $member = [string]$node.Member.Value
-      if ($member -match '(?i)^(invoke|invokereturnasis|invokecommand|addscript)$') { throw 'dynamic member invocation' }
-      if ($node.Static -and $member -match '(?i)^create$' -and [string]$node.Expression.TypeName.FullName -match '(?i)scriptblock') { throw 'dynamic scriptblock creation' }
-      # .ForEach('Name', args) reaches members by string name.
-      if ($member -match '(?i)^foreach$') { foreach ($a in @($node.Arguments)) { StaticName $a } }
-      # Generic method type arguments ($x.M[T](), PowerShell 7 syntax) name
-      # types outside any type expression; 5.1 does not have the property.
-      foreach ($g in @($node.GenericTypeArguments)) { if ($null -ne $g) { CheckTypeName $g } }
+    foreach ($n in (Find $root $tMem)) {
+      if (!($n.Member -is $tStr)) { throw 'dynamic member name' }
+      $m = [string]$n.Member.Value
+      if ($n -is $tInvMem) {
+        if ($m -match '^(invoke|invokereturnasis|invokecommand|addscript)$') { throw 'dynamic member invocation' }
+        if ($n.Static -and $m -eq 'create' -and [string]$n.Expression.TypeName.FullName -match 'scriptblock') { throw 'dynamic scriptblock creation' }
+        if ($m -eq 'foreach') { foreach ($a in @($n.Arguments)) { StaticName $a } }
+        if ($m -eq 'where') { $wa = @($n.Arguments); if ($wa.Count -and $wa[0] -isnot $tSb) { throw 'dynamic Where scriptblock' } }
+        foreach ($g in @($n.GenericTypeArguments)) { if ($null -ne $g) { CheckTypeName $g } }
+      }
+      if ($m -eq 'invokecommand') { throw 'dynamic InvokeCommand access' }
+      $r = MemberReason $m; if ($r) { throw $r }
+      if ($n.Static -and $n.Expression -isnot $tType) { throw 'dynamic static member access' }
     }
-    # InvokeMemberExpressionAst derives from MemberExpressionAst, so method
-    # calls are matched here as well.
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] }, $true))) {
-      if (!($node.Member -is $tStr)) { throw 'dynamic member name' }
-      $member = [string]$node.Member.Value
-      if ($member -match '(?i)^invokecommand$') { throw 'dynamic InvokeCommand access' }
-      $reason = MemberReason $member
-      if ($reason) { throw $reason }
-      # A static member of a computed type ($t::X) hides which type it is.
-      if ($node.Static -and $node.Expression -isnot $tType) { throw 'dynamic static member access' }
+    foreach ($n in (Find $root (L ConvertExpressionAst))) {
+      if ([string]$n.Type.TypeName.FullName -match '(^|\.)scriptblock(\[\])*$') { throw 'string-built scriptblock' }
     }
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.ConvertExpressionAst] }, $true))) {
-      if ([string]$node.Type.TypeName.FullName -match '(?i)(^|\.)scriptblock$') { throw 'string-built scriptblock' }
+    foreach ($n in (Find $root (L BinaryExpressionAst))) {
+      if ($n.Operator -eq $tTok::As -and $n.Right -isnot $tType) { throw 'dynamic type conversion' }
     }
-    # -as converts to the type its right operand names at run time.
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.BinaryExpressionAst] -and
-        $n.Operator -eq [System.Management.Automation.Language.TokenKind]::As }, $true))) {
-      if ($node.Right -isnot $tType) { throw 'dynamic type conversion' }
+    foreach ($n in ((Find $root $tType) + (Find $root (L TypeConstraintAst)))) { CheckTypeName $n.TypeName }
+    foreach ($n in (Find $root (L AttributeAst))) {
+      if ($n.TypeName.AssemblyName) { throw 'assembly-qualified type name' }
+      foreach ($a in @($n.NamedArguments)) { if ($a.ArgumentName -eq 'valuefrompipelinebypropertyname') { throw 'opaque property-name parameter binding' } }
     }
-    # Every type literal and type constraint; PSDriveInfo (the drive
-    # registration argument) is in the engine namespace.
-    foreach ($node in @($root.FindAll({ param($n) $n -is $tType -or
-        $n -is [System.Management.Automation.Language.TypeConstraintAst] }, $true))) {
-      CheckTypeName $node.TypeName
-    }
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.AttributeAst] }, $true))) {
-      if ($node.TypeName.AssemblyName) { throw 'assembly-qualified type name' }
-      # ValueFromPipelineByPropertyName reads a member named by a parameter or
-      # its [Alias()] without a member-access AST.
-      foreach ($arg in @($node.NamedArguments)) {
-        if ($arg.ArgumentName -match '(?i)^valuefrompipelinebypropertyname$') { throw 'opaque property-name parameter binding' }
+    foreach ($n in (Find $root (L AssignmentStatementAst))) {
+      foreach ($m in (Find $n.Left $tMem)) {
+        if ($m.Member -is $tStr -and [string]$m.Member.Value -match '^(get_|set_)?(parameters|attributes)$') { throw 'opaque command metadata mutation' }
       }
     }
-    # Command metadata (Get-Command results) is live: assigning through a
-    # .Parameters[...] or .Attributes[...] chain can turn on property-name
-    # binding or add aliases after this check.  Reading Parameters,
-    # ParameterSets, ResolveParameter and ParameterMetadata is already refused
-    # by MemberReason, which is the primary defence; this walk is a second
-    # layer for the member Attributes, whose target type is not known here
-    # (FileSystemInfo.Attributes is legitimate to read).  Any assignment whose
-    # left side passes through a member named Parameters or Attributes is
-    # refused, including each element of a multi-assignment left side.
-    foreach ($node in @($root.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))) {
-      $pending = [System.Collections.Generic.Stack[object]]::new()
-      $pending.Push($node.Left)
-      while ($pending.Count -gt 0) {
-        $left = $pending.Pop()
-        while ($null -ne $left) {
-          if ($left -is [System.Management.Automation.Language.ArrayLiteralAst]) {
-            foreach ($element in @($left.Elements)) { $pending.Push($element) }
-            $left = $null
-          } elseif ($left -is [System.Management.Automation.Language.MemberExpressionAst]) {
-            if ($left.Member -is $tStr -and [string]$left.Member.Value -match '(?i)^(get_|set_)?(parameters|attributes)$') {
-              throw 'opaque command metadata mutation'
-            }
-            $left = $left.Expression
-          } elseif ($left -is [System.Management.Automation.Language.IndexExpressionAst]) {
-            $left = $left.Target
-          } elseif ($left -is [System.Management.Automation.Language.ConvertExpressionAst] -or
-              $left -is [System.Management.Automation.Language.ParenExpressionAst]) {
-            $left = if ($left -is [System.Management.Automation.Language.ConvertExpressionAst]) { $left.Child } else { $left.Pipeline }
-            if ($left -is [System.Management.Automation.Language.PipelineAst] -and $left.PipelineElements.Count -eq 1 -and
-                $left.PipelineElements[0] -is [System.Management.Automation.Language.CommandExpressionAst]) {
-              $left = $left.PipelineElements[0].Expression
-            } elseif ($left -is [System.Management.Automation.Language.PipelineAst]) { $left = $null }
-          } else { $left = $null }
-        }
+    foreach ($n in ((Find $root $tStr) + (Find $root (L ExpandableStringExpressionAst)))) {
+      $t = [string]$n.Value
+      if ((RebindingText $t) -or $t -match 'psdriveinfo') { throw 'opaque command rebinding' }
+      if ($t -match 'executioncontext|pscmdlet') { throw 'opaque engine intrinsics' }
+      if ($t -match 'psdefaultparametervalues') { throw 'opaque default parameter values' }
+      if ($t.Length -le 256 -and $t -match '^\s*\w+\s*$') {
+        $w = $t.Trim(); $r = MemberReason $w; if ($r -and $w -ne 'psobject') { throw $r }
       }
+      if ($t -match ',\s*(version|culture|publickeytoken)\s*=') { throw 'assembly-qualified type name' }
     }
-    # String literals, whatever consumes them: rebinding paths, PSDriveInfo,
-    # ExecutionContext, PSCmdlet and PSDefaultParameterValues (the *-Variable
-    # cmdlets, Tee-Object -Variable, the variable: drive), a single word that
-    # is an engine or reflection member name, and assembly-qualified type
-    # names (method arguments convert them to types, loading the assembly).
-    foreach ($node in @($root.FindAll({ param($n) $n -is $tStr -or
-        $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true))) {
-      $text = [string]$node.Value
-      if ((RebindingText $text) -or $text -match '(?i)psdriveinfo') { throw 'opaque command rebinding' }
-      if ($text -match '(?i)(executioncontext|pscmdlet)') { throw 'opaque engine intrinsics' }
-      if ($text -match '(?i)psdefaultparametervalues') { throw 'opaque default parameter values' }
-      if ($text.Length -le 256 -and $text -match '^\s*\w+\s*$') {
-        # PSObject is also the usual New-Object type name; as a member name
-        # it is still checked wherever a member is named.
-        $word = $text.Trim()
-        $reason = MemberReason $word
-        if ($reason -and $word -ne 'psobject') { throw $reason }
-      }
-      if ($text -match '(?i),\s*(version|culture|publickeytoken)\s*=') { throw 'assembly-qualified type name' }
-    }
-    $state.defined = $outerDefined
+    $state.defined = $outerDef
   }
   function SwitchName([object] $node) {
     if ($node -is $tParam) { return $node.ParameterName.ToLowerInvariant() }
@@ -743,92 +619,77 @@ try {
         $node.Value -match '^[-/\u2013\u2014\u2015](.+)$') { return $Matches[1].ToLowerInvariant() }
     return ''
   }
-  function CheckLauncher([object[]] $elements, [int] $depth) {
+  function CheckLauncher([object[]]$e, [int]$depth) {
     $hostInfo = $false
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]; $pn = SwitchName $p
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]; $pn = SwitchName $p
       if ($pn -in @('help','h','?','-help')) { $hostInfo = $true; continue }
-      if ((Text $elements[0]) -match '(?i)(^|[\\/])pwsh(\.exe)?$' -and $pn -in @('v','version','-version')) { $hostInfo = $true; continue }
+      if ((Text $e[0]) -match '(?i)(^|[\\/])pwsh(\.exe)?$' -and $pn -in @('v','version','-version')) { $hostInfo = $true; continue }
       if ($pn -eq '-%' -or $pn -eq '-') { throw 'opaque native argument parsing' }
-      if ($pn -and ('encodedcommand'.StartsWith($pn) -or 'encodedarguments'.StartsWith($pn) -or $pn -in @('ec','ea'))) { throw 'encoded PowerShell command' }
-      if ($pn -and ('command'.StartsWith($pn) -or 'commandwithargs'.StartsWith($pn) -or $pn -eq 'cwa')) {
+      if ($pn -and ((Pre $pn @('encodedcommand','encodedarguments')) -or $pn -in @('ec','ea'))) { throw 'encoded PowerShell command' }
+      if ($pn -and ((Pre $pn @('command','commandwithargs')) -or $pn -eq 'cwa')) {
         if ($p -is $tParam -and $p.Argument) { throw 'opaque attached command operand' }
-        $i++; if ($i -ge $elements.Count) { throw 'missing PowerShell command' }
-        if ($elements[$i] -is $tSb) { return }
+        $i++; if ($i -ge $e.Count) { throw 'missing PowerShell command' }
+        if ($e[$i] -is $tSb) { return }
         $body = @()
-        for (; $i -lt $elements.Count; $i++) {
-          if ($elements[$i] -is $tParam -and !$elements[$i].Argument) {
-            $body += $elements[$i].Extent.Text; continue
-          }
-          if (!(Literal $elements[$i])) { throw 'opaque PowerShell command operand' }
-          $body += [string]$elements[$i].Value
+        for (; $i -lt $e.Count; $i++) {
+          if ($e[$i] -is $tParam -and !$e[$i].Argument) { $body += $e[$i].Extent.Text; continue }
+          if (!(Literal $e[$i])) { throw 'opaque PowerShell command operand' }
+          if ($e[$i] -is $tStr -and $e[$i].Extent.Text.Contains([char]96)) { throw 'opaque PowerShell command quoting' }
+          $body += [string]$e[$i].Value
         }
         if (($body -join ' ') -eq '-') { throw 'PowerShell command reads unseen stdin' }
-        ParseNested ($body -join ' ') $depth
-        return
+        ParseNested ($body -join ' ') $depth; return
       }
-      if ($pn -and 'file'.StartsWith($pn)) {
-        $i++
-        if ($i -ge $elements.Count -or !(Literal $elements[$i])) { throw 'dynamic PowerShell file' }
+      if ($pn -and (Pre $pn @('file'))) {
+        $i++; if ($i -ge $e.Count -or !(Literal $e[$i])) { throw 'dynamic PowerShell file' }
         throw 'external PowerShell script needs inspection'
       }
-      if ($pn -and (@('nologo','noprofile','noexit','noninteractive','sta','mta','login') | Where-Object { $_.StartsWith($pn) })) { continue }
-      if ($pn -and (@('executionpolicy','inputformat','outputformat','version','windowstyle','workingdirectory') | Where-Object { $_.StartsWith($pn) })) {
-        $i++
-        if ($i -ge $elements.Count -or !(Literal $elements[$i])) { throw 'opaque PowerShell host option' }
+      if ($pn -and (Pre $pn @('nologo','noprofile','noexit','noninteractive','sta','mta','login'))) { continue }
+      if ($pn -and (Pre $pn @('executionpolicy','inputformat','outputformat','version','windowstyle','workingdirectory'))) {
+        $i++; if ($i -ge $e.Count -or !(Literal $e[$i])) { throw 'opaque PowerShell host option' }
         continue
       }
       if ($pn) { throw 'unknown PowerShell host option' }
       if (!(Literal $p)) { throw 'dynamic PowerShell argument' }
-      # powershell.exe accepts positional command text, pwsh accepts a script
-      # path. Literal paths remain ordinary external program calls.
-      if ([string]$p.Value -match '(?i)\.ps1$') { throw 'external PowerShell script needs inspection' }
+      if ((Leaf ([string]$p.Value)) -match '(?i)\.ps1$') { throw 'external PowerShell script needs inspection' }
       $body = @()
-      for (; $i -lt $elements.Count; $i++) {
-        if (!(Literal $elements[$i])) { throw 'dynamic PowerShell argument' }
-        $body += [string]$elements[$i].Value
+      for (; $i -lt $e.Count; $i++) {
+        if (!(Literal $e[$i])) { throw 'dynamic PowerShell argument' }
+        if ($e[$i] -is $tStr -and $e[$i].Extent.Text.Contains([char]96)) { throw 'opaque PowerShell command quoting' }
+        $body += [string]$e[$i].Value
       }
-      ParseNested ($body -join ' ') $depth
-      return
+      ParseNested ($body -join ' ') $depth; return
     }
     if (!$hostInfo) { throw 'PowerShell command reads unseen stdin' }
   }
-  function StringValues([object] $node, [string] $reason = 'opaque Start-Process arguments') {
-    if ($node -is [System.Management.Automation.Language.ArrayLiteralAst]) {
-      foreach ($item in $node.Elements) { StringValues $item $reason }
-    } elseif ($node -is [System.Management.Automation.Language.ArrayExpressionAst]) {
-      foreach ($statement in $node.SubExpression.Statements) {
-        if ($statement -isnot $tPipe -or
-            $statement.PipelineElements.Count -ne 1 -or
-            $statement.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { throw $reason }
-        StringValues $statement.PipelineElements[0].Expression $reason
+  function StringValues([object]$n, [string]$reason = 'opaque Start-Process arguments') {
+    if ($n -is $tArr) { foreach ($x in $n.Elements) { StringValues $x $reason } }
+    elseif ($n -is (L ArrayExpressionAst)) {
+      foreach ($s in $n.SubExpression.Statements) {
+        if ($s -isnot $tPipe -or $s.PipelineElements.Count -ne 1 -or $s.PipelineElements[0] -isnot $tCmdExpr) { throw $reason }
+        StringValues $s.PipelineElements[0].Expression $reason
       }
-    } elseif ($node -is $tStr -or
-              $node -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-      [string]$node.Value
-    } else { throw $reason }
+    } elseif ($n -is $tStr -or $n -is $tConst) { [string]$n.Value }
+    else { throw $reason }
   }
-  function CheckStart([object[]] $elements, [int] $depth) {
+  function CheckStart([object[]]$e, [int]$depth) {
     $file = $null; $argsNode = $null
-    foreach ($p in $elements) {
-      if ($p -is $tVar -and $p.Splatted) { throw 'splatting executable operands' }
-    }
-    for ($i=1; $i -lt $elements.Count; $i++) {
-      $p = $elements[$i]
+    foreach ($p in $e) { if ($p -is $tVar -and $p.Splatted) { throw 'splatting executable operands' } }
+    for ($i=1; $i -lt $e.Count; $i++) {
+      $p = $e[$i]
       if ($p -is $tParam) {
-        # Only known value-taking parameters consume the next element.
-        $kind = ParamKind $p.ParameterName.ToLowerInvariant() $startParams 'Start-Process'
-        if ($kind -eq 'switch') { continue }
-        if ($p.Argument) { $value = $p.Argument } else { $i++; $value = $elements[$i] }
-        if ($kind -eq 'file') { $file = $value }
-        elseif ($kind -eq 'args') { $argsNode = $value }
-      } elseif ($null -eq $file) { $file = $p }
-      elseif ($null -eq $argsNode) { $argsNode = $p }
+        $k = ParamKind $p.ParameterName.ToLowerInvariant() $startParams 'Start-Process'
+        if ($k -eq 'switch') { continue }
+        $v = if ($p.Argument) { $p.Argument } else { $i++; $e[$i] }
+        if ($k -eq 'file') { $file = $v } elseif ($k -eq 'args') { $argsNode = $v }
+      } elseif ($null -eq $file) { $file = $p } elseif ($null -eq $argsNode) { $argsNode = $p }
     }
     if ($file -isnot $tStr) { throw 'dynamic Start-Process file' }
     if (IsPsName ([string]$file.Value)) {
       if ($null -eq $argsNode) { throw 'unseen PowerShell process input' }
       $joined = (StringValues $argsNode) -join ' '
+      if ($joined.Contains([char]96)) { throw 'opaque Start-Process quoting' }
       ParseNested ("& '" + $file.Value.Replace("'", "''") + "' " + $joined) $depth
     }
   }
