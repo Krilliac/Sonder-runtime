@@ -1,7 +1,7 @@
 # Update Manager
 
 Signed engine distribution and staged, rollback-capable installation
-(`sonder_updates.py`, `sonder_update_engine.py`). A compromised mirror
+(`sonder_runtime/adapters/updates/service.py` and `engine.py`). A compromised mirror
 cannot forge, downgrade, or substitute a release; the active release is
 never modified in place.
 
@@ -44,36 +44,30 @@ enforced by a partial unique index), trusted-root history, and channels.
   hardlinks, device/fifo members, truncated members, and expansion beyond
   a byte budget.
 
-## Install (staged, gated)
+## Install and rollback
 
-```
-sonder update import <bundle> [--channel stable]
-sonder update install <update-id> --confirm <nonce>
-```
+The commands, the operator conventions (`update` takes no `--config`, it
+resolves its home from the environment), the identity that can run install and
+rollback on the packaged layout, the install step order, the drain behaviour of
+the command-line install and rollback are in one place: the
+[upgrade and rollback runbook](../runbooks/upgrade-rollback.md). Concepts
+that matter here:
 
-The install runs, in order: admin auth + confirmation nonce → maintenance
-lock → trust revalidation → staged extraction with manifest verification
-(never in place) → compatibility preflight → **verified SPEC-2 backup** →
-drain → atomic publish into a versioned release dir → migrations run by
-the *target* release → manifest health checks → **atomic pointer switch**
-→ commit. Every step is journaled.
-
-The active-release pointer switch is portable: an atomic symlink swap on
-POSIX, and an atomic pointer-file fallback where directory symlinks are
-unprivileged (Windows).
-
-## Rollback
-
-```
-sonder update rollback --confirm <last-8-of-previous-release-id>
-```
-
-Migration or health failure during install rolls back automatically with
-the previous release still active and the failed release retained as
-evidence. Operator rollback switches to the previous release; it is
-**refused** when the previous release directory is missing (a state
-restore from the pre-update backup is required instead). See
-[upgrade-rollback](../runbooks/upgrade-rollback.md).
+- Installation is staged and gated by an admin confirmation nonce, a
+  maintenance lock, trust revalidation and a verified backup taken before
+  anything changes. Every step is journaled in `updates.db`.
+- The active release is never modified in place. A new release is published
+  into a versioned directory and activated by an atomic pointer switch,
+  portable as a symlink swap on POSIX and an atomic pointer-file fallback
+  where directory symlinks are unprivileged (Windows).
+- A migration or health failure rolls back automatically with the previous
+  release still active and the failed release retained as evidence.
+  Operator rollback is **refused** when the previous release directory is
+  missing; a state restore from the pre-update backup is required instead.
+- Draining: the command-line install runs against a stopped service and
+  records its drain step as skipped (`no running service attached`); stop
+  the service first, or use `drain`
+  ([start-stop-drain](../runbooks/start-stop-drain.md)).
 
 ## Offline updates
 

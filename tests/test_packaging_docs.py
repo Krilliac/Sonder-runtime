@@ -30,11 +30,10 @@ def test_workstation_local_runbook_documents_the_windows_installer_and_smoke_che
     assert "-SkipModelAlias" in runbook
     assert "-Force" in runbook
     assert "release-smoke-check.md" in runbook
-    # Steps 1, 3 and 4 each have one bash block (3 total) plus a PowerShell
-    # counterpart; the one-shot installer and managed profile examples are
-    # PowerShell-only, giving 3 + 2 = 5 PowerShell blocks.
-    assert runbook.count("```bash") == 3
-    assert runbook.count("```powershell") == 5
+    # Every numbered step's bash block has a documented PowerShell counterpart
+    # The one-shot installer and managed profile examples are PowerShell-only.
+    assert runbook.count("```bash") == 5
+    assert runbook.count("```powershell") == 6
     assert "-ManagedRuntime" in runbook
 
 

@@ -64,10 +64,15 @@ max_batch_records = 256
 [ollama]
 url = "http://127.0.0.1:11434"
 allow_remote = false
-# Remote workers must use HTTPS through an authenticated TLS proxy in front
-# of the worker's Ollama; never point a worker at a raw :11434 port.  Use
-# ca_bundle for a private CA.  See docs/runbooks/multi-node-ollama.md.
-# workers = ["https://10.0.0.2:8443"]
+# Every url and worker must be an origin with an explicit port and no path
+# (loopback included). A non-loopback one additionally needs allow_remote = true
+# and https. Remote workers must use HTTPS through a
+# TLS proxy in front of the worker's Ollama, restricted by firewall/source IP
+# to this server: Sonder sends no credentials to Ollama, so the proxy cannot
+# authenticate it. Never point a worker at a raw :11434 port.  Use ca_bundle
+# for a private CA.  See docs/runbooks/remote-ollama-caddy.md (Caddy recipe)
+# and docs/runbooks/multi-node-ollama.md.
+# workers = ["https://<worker-host>:443"]
 # ca_bundle = "/etc/sonder/ollama-ca.pem"
 # trusted_origins is legacy CIDR metadata kept for compatibility; it never
 # permits plain-HTTP workers or relaxes TLS validation.

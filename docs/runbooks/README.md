@@ -4,6 +4,9 @@ Contractor-executable operational procedures. Each runbook assumes the
 server-private reference deployment (systemd, loopback bind, reverse
 proxy for remote access) unless it says otherwise.
 
+- [setup-start-here.md](setup-start-here.md) — ordered path through every setup runbook
+- [configure-authentication.md](configure-authentication.md) — first-time API key, accounts and first admin
+- [connect-clients.md](connect-clients.md) — connect MCP agents, console, app, web app, HTTP and the SDK to a Sonder Runtime
 - [install-server-private.md](install-server-private.md)
 - [install-workstation-local.md](install-workstation-local.md)
 - [use-facts-model.md](use-facts-model.md) — import a portable GGUF (facts. USB)
@@ -30,9 +33,27 @@ proxy for remote access) unless it says otherwise.
 - [suspected-secret-exposure.md](suspected-secret-exposure.md)
 - [unsafe-lab.md](unsafe-lab.md) — disposable isolated-host testing with model tool policy deliberately removed
 - [multi-pc-ollama.md](multi-pc-ollama.md) — pool independent Ollama hosts over HTTPS
+- [remote-ollama-caddy.md](remote-ollama-caddy.md) — TLS-fronted remote Ollama behind Caddy, coordinator settings
+- [security-hardening.md](security-hardening.md) — setup-time security hardening checklist
 - [multi-node-windows-private-link.md](multi-node-windows-private-link.md) — prepare and validate Windows workers over a dedicated private link
 - [rpc-sharding.md](rpc-sharding.md) — opt-in: split one model across two machines with llama.cpp RPC
 - [mesh-generation.md](mesh-generation.md) — model-driven 3D asset generation in headless Blender (`mesh_generate`)
+- [multi-node-ollama.md](multi-node-ollama.md) — worker host OS setup and external membership
+- [compute-fabric.md](compute-fabric.md) — remote compute workers and controller
+- [deployment-topology.md](deployment-topology.md) — deployment topology and capability status
+- [client-surface-contracts.md](client-surface-contracts.md) — client surface contracts
+- [release-smoke-check.md](release-smoke-check.md) — pre-tag release smoke check
+- [nightly-selfmod-windows.md](nightly-selfmod-windows.md) — Windows nightly selfmod deployment
+- [artifact-cache-retention.md](artifact-cache-retention.md) — artifact cache retention
+- [compute-indexed-inventory.md](compute-indexed-inventory.md) — reference, not setup: indexed compute inventory and refresh
+- [takeover-readiness.md](takeover-readiness.md) — reference, not setup: takeover readiness
+- [formal-reasoning.md](formal-reasoning.md) — formal reasoning setup
+- [inference-membership-acceptance.md](inference-membership-acceptance.md) — disposable private inference membership acceptance
+- [partition-routing.md](partition-routing.md) — partition routing and synthetic cluster acceptance
+- [performance.md](performance.md) — performance measurement and safe acceleration
+- [reconnect-reconciliation.md](reconnect-reconciliation.md) — client reconnect and worker receipt reconciliation
+- [replication-acknowledgement.md](replication-acknowledgement.md) — replication acknowledgement
+- [worker-epoch-fence.md](worker-epoch-fence.md) — worker owner epoch effect fence
 
 For conceptual, in-depth documentation of each subsystem, see the
 [Wiki](../wiki/README.md).
