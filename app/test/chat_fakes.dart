@@ -97,6 +97,7 @@ class FakeChatBackend implements ChatBackend {
   PendingCallLookup? lookupOverride;
   final List<String> lookups = [];
   int statusCalls = 0;
+  final List<String?> statusSessionIds = [];
   int activeStatusCalls = 0;
   int maxConcurrentStatus = 0;
 
@@ -107,6 +108,7 @@ class FakeChatBackend implements ChatBackend {
   Object? statusError;
   Duration statusDelay = Duration.zero;
   SystemInfo statusInfo = SystemInfo.fromJson(const {});
+  SystemInfo Function(String? sessionId, String? project)? statusBuilder;
   PermissionMode? mode;
   Object? modeReadError;
   Object? modeWriteError;
@@ -159,8 +161,9 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
-  Future<SystemInfo> systemInfo() async {
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
     statusCalls++;
+    statusSessionIds.add(sessionId);
     activeStatusCalls++;
     if (activeStatusCalls > maxConcurrentStatus) {
       maxConcurrentStatus = activeStatusCalls;
@@ -169,7 +172,8 @@ class FakeChatBackend implements ChatBackend {
       if (statusDelay > Duration.zero) await Future.delayed(statusDelay);
       final err = statusError;
       if (err != null) throw err;
-      return statusInfo;
+      final builder = statusBuilder;
+      return builder != null ? builder(sessionId, project) : statusInfo;
     } finally {
       activeStatusCalls--;
     }

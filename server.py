@@ -8526,6 +8526,34 @@ def context_health_data(session: str = "", project: str = "") -> dict:
                     memory_store.session_turns_for_project(conn, session_id, project_id)
                     if session_id else []
                 )
+                if not scoped_turns and session_id and session_id != "default":
+                    # HTTP/GUI/TUI conversations synced via sessions.db may not
+                    # yet have rows in memory_store.interactions (or may be
+                    # project-agnostic); fall back to the synced session replay
+                    # so context meters reflect real live session token usage.
+                    try:
+                        from sonder_runtime.bootstrap.app import default_app as _ctx_app
+                        _repo = getattr(_ctx_app(), "session_repository", None)
+                        if _repo is not None:
+                            _events = _repo.events(session_id)
+                            _pairs: list[dict[str, str]] = []
+                            _pending_user = ""
+                            for _ev in _events:
+                                _kind = getattr(_ev, "kind", "")
+                                _payload = getattr(_ev, "payload", None) or {}
+                                _text = str(_payload.get("content") or _payload.get("text") or "")
+                                if _kind == "user.message":
+                                    if _pending_user:
+                                        _pairs.append({"task": _pending_user, "response": ""})
+                                    _pending_user = _text
+                                elif _kind == "assistant.message":
+                                    _pairs.append({"task": _pending_user, "response": _text})
+                                    _pending_user = ""
+                            if _pending_user:
+                                _pairs.append({"task": _pending_user, "response": ""})
+                            scoped_turns = _pairs
+                    except Exception:
+                        pass
                 selected = scoped_turns[-limit:] if limit else []
                 turns = tuple(
                     (row["task"], row["response"])

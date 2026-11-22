@@ -1211,11 +1211,21 @@ class SonderApi implements SonderApiPort {
   }
 
   @override
-  Future<SystemInfo> systemInfo() async {
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
     // Status must stay bound to the configured host; otherwise polling can
     // silently replace a remote machine's diagnostics with this laptop's.
-    final resp =
-        await _get(_uri('/v1/sonder/status'), const Duration(seconds: 20));
+    final query = <String, String>{};
+    final sess = sessionId?.trim() ?? '';
+    final proj = project?.trim() ?? '';
+    if (sess.isNotEmpty) query['session'] = sess;
+    if (proj.isNotEmpty) query['project'] = proj;
+    final baseUri = _uri('/v1/sonder/status');
+    final uri =
+        query.isEmpty ? baseUri : baseUri.replace(queryParameters: query);
+    final resp = await _get(
+      uri,
+      const Duration(seconds: 20),
+    );
     if (resp.statusCode != 200) {
       throw _failure(
         resp,
@@ -2116,6 +2126,34 @@ class SystemInfo {
     this.allowedFeatures,
     this.capabilities,
   });
+
+  SystemInfo withContext(ContextHealth? nextContext) => SystemInfo(
+        status: status,
+        stats: stats,
+        learnTiers: learnTiers,
+        improvements: improvements,
+        dbPath: dbPath,
+        stateHome: stateHome,
+        deployment: deployment,
+        operationalCapabilities: operationalCapabilities,
+        context: nextContext,
+        agents: agents,
+        autopilot: autopilot,
+        runtimePolicy: runtimePolicy,
+        selfmod: selfmod,
+        mcpRuntime: mcpRuntime,
+        learningHealth: learningHealth,
+        activity: activity,
+        execution: execution,
+        executionFeed: executionFeed,
+        models: models,
+        role: role,
+        publicHosting: publicHosting,
+        clientExecSupported: clientExecSupported,
+        hostBypassAllowed: hostBypassAllowed,
+        allowedFeatures: allowedFeatures,
+        capabilities: capabilities,
+      );
 
   factory SystemInfo.fromJson(Map<String, dynamic> json) {
     final models = (json['models'] as List? ?? const [])
@@ -3875,6 +3913,49 @@ class ContextHealth {
     required this.dbPath,
     required this.stateHome,
   });
+
+  ContextHealth copyWithUsage({
+    String? session,
+    String? project,
+    int? estimatedTokens,
+    int? liveTurns,
+    int? totalTurns,
+  }) {
+    final nextTokens = estimatedTokens ?? this.estimatedTokens;
+    final limit = contextLimit > 0 ? contextLimit : nativeContextLimit;
+    final pct = limit > 0 ? (nextTokens * 100.0 / limit) : 0.0;
+    return ContextHealth(
+      session: session ?? this.session,
+      project: project ?? this.project,
+      title: title,
+      status: status,
+      contextLimit: contextLimit,
+      nativeContextLimit: nativeContextLimit,
+      contextMode: contextMode,
+      estimatedTokens: nextTokens,
+      contextPercent: pct,
+      contextBar: contextBar,
+      liveTurns: liveTurns ?? this.liveTurns,
+      maxLiveTurns: maxLiveTurns,
+      totalTurns: totalTurns ?? this.totalTurns,
+      turnPercent: turnPercent,
+      turnBar: turnBar,
+      summaryTokens: summaryTokens,
+      liveTokens: nextTokens,
+      summaryChars: summaryChars,
+      summarizedThrough: summarizedThrough,
+      updatedTs: updatedTs,
+      sessions: sessions,
+      lessons: lessons,
+      facts: facts,
+      interactions: interactions,
+      outcomes: outcomes,
+      memoryPercent: memoryPercent,
+      memoryBar: memoryBar,
+      dbPath: dbPath,
+      stateHome: stateHome,
+    );
+  }
 
   factory ContextHealth.fromJson(Map<String, dynamic> json) {
     return ContextHealth(
