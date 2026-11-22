@@ -34,6 +34,10 @@ from sonder_runtime.application.security.secrets_and_fuzz import CredentialScann
         "https://user:hunter2-not-real@example.invalid/repo.git",
         "redis://:onlypass-not-real@cache.invalid:6379",
         "https://user:" + "p" * 200 + "@db.invalid/app",
+        "postgresql+psycopg2://appuser:supersecret@db.internal:5432/prod",
+        "postgresql+asyncpg://appuser:supersecret@db.internal:5432/prod",
+        "cockroachdb+psycopg2://appuser:supersecret@db.internal:26257/prod",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123",
     ),
 )
 def test_scanner_flags_common_secret_shapes(line):
@@ -191,3 +195,11 @@ def test_scanner_stays_linear_at_10_20_50_kb(unit):
     # A linear scan grows ~5x from 10 to 50 KB, a quadratic one ~25x.
     t10, t20, t50 = (_best_of_three(payload(kb * 1000)) for kb in (10, 20, 50))
     assert t50 <= max(0.005, 12 * t10), (unit, t10, t20, t50)
+
+
+def test_scanner_checks_raw_byte_bound_before_utf8_replacement_expansion():
+    payload = b"\xff" * 350_000 + b"\nghp_123456789012345678901234567890123456\n"
+    findings = CredentialScanner(max_bytes=1_000_000).scan(payload)
+    assert any(item.kind == "github_token" for item in findings)
+    with pytest.raises(ValueError, match="exceeds scan bound"):
+        CredentialScanner(max_bytes=1_000_000).scan(b"x" * 1_000_001)

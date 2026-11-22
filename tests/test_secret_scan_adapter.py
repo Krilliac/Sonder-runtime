@@ -191,3 +191,60 @@ def test_adapter_does_not_count_unreadable_files_as_scanned(monkeypatch, tmp_pat
     result = _scan_tree(monkeypatch, tmp_path)
     assert result["files_scanned"] == 1
     assert result["findings"] == []
+
+
+def test_adapter_scans_non_utf8_files_between_334kb_and_1mb(monkeypatch, tmp_path):
+    blob = tmp_path / "binary_mixed.dat"
+    blob.write_bytes(b"\xff" * 350_000 + b"\nghp_123456789012345678901234567890123456\n")
+    result = _scan_tree(monkeypatch, tmp_path)
+    assert result["files_scanned"] == 1
+    assert any(
+        f["file"] == "binary_mixed.dat" and f["type"] == "github_token"
+        for f in result["findings"]
+    )
+
+
+def test_harness_secret_scan_parity_skips_cred_stores_scans_workflows_and_blocks_junctions(
+    monkeypatch, tmp_path
+):
+    import os
+    import harness_tools
+
+    root = tmp_path / "proj"
+    outside = tmp_path / "outside"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".aws").mkdir(parents=True)
+    outside.mkdir()
+    (root / ".env").write_text("DB_PASSWORD=hunter2-not-real\n", encoding="utf-8")
+    (root / ".aws" / "credentials").write_text(
+        "aws_secret_access_key = FAKEFAKEFAKEFAKE\n", encoding="utf-8",
+    )
+    (root / ".github" / "workflows" / "ci.yml").write_text(
+        "token: ghp_123456789012345678901234567890123456\n", encoding="utf-8",
+    )
+    (outside / "canary.txt").write_text(
+        "DB_PASSWORD=outside-leak-not-real\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        secret_scan.file_ops, "allowed_roots", lambda extra_roots="": [root.resolve()],
+    )
+    opened = []
+    real_read_bytes = Path.read_bytes
+
+    def spy_read(self):
+        opened.append(self.name)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(secret_scan.Path, "read_bytes", spy_read)
+    if os.name == "nt":
+        _make_junction(root / "linked_dir", outside)
+    result = harness_tools.secret_scan(root=str(root))
+    assert result["ok"] is True
+    assert ".env" not in opened and "credentials" not in opened
+    assert result["credential_files_skipped"] == 2
+    files = {f["file"].replace("\\", "/") for f in result["findings"]}
+    assert ".github/workflows/ci.yml" in files
+    assert not any("canary.txt" in f for f in files)
+    assert all(f["match"] == "[REDACTED CREDENTIAL]" for f in result["findings"])
+    if os.name == "nt":
+        assert result["links_skipped"] >= 1

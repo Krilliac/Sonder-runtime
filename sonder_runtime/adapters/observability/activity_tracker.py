@@ -154,21 +154,22 @@ _SECRET_NAME_CHAR = r"(?:[a-z0-9_]|(?<=[a-z0-9_])-(?=key))"
 
 
 def _secret_assignment_re(unterminated_quote_tail):
-    # The truncated-input variant also lets a quoted value run to the end of
-    # the text: a cut inside "correct horse battery" must not leave `horse`
-    # behind the first-word fallback.
-    end = r"|\Z)" if unterminated_quote_tail else r")"
+    # Single-line unterminated quoted values also redact to EOL/EOF even on
+    # inputs <= MAX_REDACT_CHARS (e.g. pre-sliced head output), while properly
+    # closed multi-line quoted values still match the first possessive branch.
+    del unterminated_quote_tail
     return re.compile(
         r"(?i)(?<![a-z0-9_])(?!(?<=[a-z0-9_]-)key)"
         r"((?:(?!" + _SECRET_KEYWORD + r")" + _SECRET_NAME_CHAR + r")*+"
         + _SECRET_KEYWORD + _SECRET_NAME_CHAR + r"*+)"
         r"(?:[\"']?[ \t]*[:=][ \t]*|[ \t]+)"
-        r"(?:\"[^\"]*(?:\"" + end + r"|'[^']*(?:'" + end + r"|[^\s,;]+)"
+        r"(?:\"[^\"]*+\"|\"[^\"\r\n]*+(?=\r|\n|\Z)"
+        r"|'[^']*+'|'[^'\r\n]*+(?=\r|\n|\Z)|[^\s,;]+)"
     )
 
 
 _SECRET_ASSIGNMENT_RE = _secret_assignment_re(False)
-_SECRET_ASSIGNMENT_TAIL_RE = _secret_assignment_re(True)
+_SECRET_ASSIGNMENT_TAIL_RE = _SECRET_ASSIGNMENT_RE
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*")
 _KEY_SHAPE_RE = re.compile(
     r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
@@ -177,7 +178,13 @@ _KEY_SHAPE_RE = re.compile(
     r"xox[abpr]-[A-Za-z0-9-]{10,}|"
     r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
 )
-_JWT_RE = re.compile(r"\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b")
+# Linear on hostile "-ey" runs: anchored at the start of the base64url run so
+# hyphen boundaries inside "-ey-ey-..." cannot trigger quadratic rescans.
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?=[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{4,}+)"
+    r"([A-Za-z0-9_-]*?-)?ey[A-Za-z0-9_-]{6,}+\.[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]{4,}+(?![A-Za-z0-9_-])"
+)
 # Anchored at the start of the whole scheme-character run (not ``\b``): a word
 # boundary also admits starts after every ``-``/``.`` inside a run, which made
 # long runs like ``a-a-a-...`` quadratic. Leading non-letters stay in group 1,
@@ -240,7 +247,7 @@ def _redact_details(value):
         text = _URI_CREDENTIAL_RE.sub(r"\1<redacted>@", text)
         assignment = _SECRET_ASSIGNMENT_TAIL_RE if truncated else _SECRET_ASSIGNMENT_RE
         text = assignment.sub(lambda match: "%s=<redacted>" % match.group(1), text)
-        text = _JWT_RE.sub("<redacted-token>", text)
+        text = _JWT_RE.sub(lambda match: (match.group(1) or "") + "<redacted-token>", text)
         text = _CONTROL_RE.sub("?", _KEY_SHAPE_RE.sub("<redacted-key>", text))
         return (text + _TRUNCATION_MARKER if truncated else text), text != original, truncated
     except Exception:

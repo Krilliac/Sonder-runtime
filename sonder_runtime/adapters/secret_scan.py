@@ -18,7 +18,7 @@ MAX_FINDINGS = 100
 MAX_HIGH_CONFIDENCE_FINDINGS = 100
 HIGH_CONFIDENCE_KINDS = frozenset({
     "private_key", "aws_access_key", "github_token", "api_token",
-    "url_credential", "jwt",
+    "bearer_token", "url_credential", "jwt",
 })
 MAX_TIMEOUT_SECONDS = 120.0
 SKIP_SUFFIXES = frozenset({
@@ -61,12 +61,10 @@ def _confined(path, root):
 confined_path = _confined
 
 
-def scan(root=".", *, timeout=30, extra_roots=""):
-    """Scan an authorized tree without returning credential material."""
-    resolved = file_ops.resolve_path(root, extra_roots=extra_roots)
-    if not resolved.is_dir():
-        raise NotADirectoryError(str(resolved))
-    deadline = time.monotonic() + max(1.0, min(float(timeout), MAX_TIMEOUT_SECONDS))
+def _scan_resolved(resolved: Path, *, timeout=30):
+    """Scan an already-authorized, resolved directory without returning secrets."""
+    bounded_timeout = max(1.0, min(float(timeout), MAX_TIMEOUT_SECONDS))
+    deadline = time.monotonic() + bounded_timeout
     scanner = CredentialScanner(max_bytes=MAX_FILE_BYTES)
     findings = []
     counts = {True: 0, False: 0}
@@ -139,19 +137,26 @@ def scan(root=".", *, timeout=30, extra_roots=""):
             if all(counts[kind] >= caps[kind] for kind in caps):
                 truncated = True
                 break
-        if (
-            timed_out
-            or all(counts[kind] >= caps[kind] for kind in caps)
-            or time.monotonic() >= deadline
-        ):
+        if not timed_out and time.monotonic() >= deadline:
+            timed_out = True
+        if timed_out or all(counts[kind] >= caps[kind] for kind in caps):
             truncated = True
             break
     return {
         "ok": True, "root": str(resolved), "findings": findings,
         "files_scanned": files_scanned, "truncated": truncated,
+        "timed_out": timed_out, "timeout": timeout,
         "credential_files_skipped": credential_files_skipped,
         "links_skipped": links_skipped,
     }
+
+
+def scan(root=".", *, timeout=30, extra_roots=""):
+    """Scan an authorized tree without returning credential material."""
+    resolved = file_ops.resolve_path(root, extra_roots=extra_roots)
+    if not resolved.is_dir():
+        raise NotADirectoryError(str(resolved))
+    return _scan_resolved(resolved, timeout=timeout)
 
 
 def format_result(result):

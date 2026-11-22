@@ -5,10 +5,10 @@ from __future__ import annotations
 
 _UNSAFE_CHILD_SECRET_MARKERS = (
     "ACCESS_KEY", "API_KEY", "APIKEY", "AUTH", "BEARER", "CONNECTION_STRING",
-    "COOKIE", "CREDENTIAL", "DATABASE_URL", "PASSWORD", "PASSWD",
+    "COOKIE", "CREDENTIAL", "DATABASE_URL", "PASSPHRASE", "PASSWORD", "PASSWD",
     "PRIVATE_KEY", "SECRET", "SESSION", "TOKEN",
 )
-_UNSAFE_CHILD_SECRET_SUFFIXES = ("_KEY", "_KEY_ID")
+_UNSAFE_CHILD_SECRET_SUFFIXES = ("_KEY", "_KEY_ID", "_PWD")
 # Matched against whole "_"-separated segments, never as substrings: PAT must
 # hit GITHUB_PAT and MY_PAT_VALUE but not PATH, PATHEXT or PATTERN.
 _UNSAFE_CHILD_SECRET_SEGMENTS = frozenset({"PAT", "DSN"})
