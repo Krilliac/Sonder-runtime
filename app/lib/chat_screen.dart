@@ -508,6 +508,8 @@ class _ChatScreenState extends State<ChatScreen>
         onLookupApproval: (callId) => _chat.backend.lookupPendingCall(callId),
         onApprove: (callId, ttl, tool, digest) => _chat.backend
             .approveCall(callId, ttl: ttl, tool: tool, digest: digest),
+        onDeny: (callId, tool, digest) =>
+            _chat.backend.denyCall(callId, tool: tool, digest: digest),
         fetchWorkRun: (id) => _chat.backend.getWorkRun(id),
         cancelWorkRun: (id) => _chat.backend.cancelWorkRun(id),
         listWorkRuns: () => _chat.backend.listWorkRuns(),

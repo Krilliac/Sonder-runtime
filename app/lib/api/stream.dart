@@ -129,6 +129,345 @@ class ChatStreamDone extends ChatStreamEvent {
   const ChatStreamDone(this.reply);
 }
 
+String _boundedRawText(Object? value, int limit) {
+  if (value == null) return '';
+  final text = value is String ? value : value.toString();
+  if (text.length <= limit) return text;
+  return '${text.substring(0, limit)}...';
+}
+
+/// Bounded execution outcome carried on a completed `sonder_tool` SSE event.
+class ToolRunResult {
+  final bool ok;
+  final int? returncode;
+  final bool timedOut;
+  final int? elapsedMs;
+  final String stdoutTail;
+  final String stderrTail;
+  final String output;
+  final bool truncated;
+
+  const ToolRunResult({
+    this.ok = false,
+    this.returncode,
+    this.timedOut = false,
+    this.elapsedMs,
+    this.stdoutTail = '',
+    this.stderrTail = '',
+    this.output = '',
+    this.truncated = false,
+  });
+
+  factory ToolRunResult.fromJson(Map<String, dynamic> json) {
+    final rawRc = json['returncode'];
+    final rawElapsed = json['elapsed_ms'];
+    return ToolRunResult(
+      ok: json['ok'] == true,
+      returncode: rawRc is num ? rawRc.toInt() : int.tryParse('$rawRc'),
+      timedOut: json['timed_out'] == true,
+      elapsedMs:
+          rawElapsed is num ? rawElapsed.toInt() : int.tryParse('$rawElapsed'),
+      stdoutTail: _boundedRawText(json['stdout_tail'], 12000),
+      stderrTail: _boundedRawText(json['stderr_tail'], 12000),
+      output: _boundedRawText(json['output'], 12000),
+      truncated: json['truncated'] == true,
+    );
+  }
+}
+
+/// Live tool execution / approval event (`sonder_tool` on a chat chunk).
+class ChatStreamToolEvent extends ChatStreamEvent {
+  final String id;
+  final String callId;
+  final String digest;
+  final String tool;
+  final String language;
+  final String code;
+  final Map<String, String> args;
+  final Map<String, dynamic> rawArgs;
+  final String preview;
+
+  /// The server's bounded text of what will run (`detail`): the code of a
+  /// `run_code` call, the JSON arguments of a file or workspace call.
+  final String detail;
+  final bool detailTruncated;
+  final int detailChars;
+
+  /// The frame carried an `arguments`/`args` object, even an empty one.
+  final bool argumentsReported;
+  final int? timeout;
+  final String backend;
+  final String executionTarget;
+  final String phase;
+  final String risk;
+  final String session;
+  final bool? ok;
+  final bool denied;
+  final bool bidiWarning;
+  final List<String> bidiChars;
+  final String state;
+  final String? error;
+  final ToolRunResult? result;
+
+  const ChatStreamToolEvent({
+    required this.id,
+    this.callId = '',
+    this.digest = '',
+    required this.tool,
+    this.language = '',
+    this.code = '',
+    this.args = const {},
+    this.rawArgs = const {},
+    this.preview = '',
+    this.detail = '',
+    this.detailTruncated = false,
+    this.detailChars = 0,
+    this.argumentsReported = false,
+    this.timeout,
+    this.backend = '',
+    this.executionTarget = '',
+    this.phase = '',
+    this.risk = '',
+    this.session = '',
+    this.ok,
+    this.denied = false,
+    this.bidiWarning = false,
+    this.bidiChars = const [],
+    required this.state,
+    this.error,
+    this.result,
+  });
+
+  bool get isClientTarget => executionTarget == 'client' || backend == 'client';
+
+  /// Whether the event says what the call would do. An approval card must
+  /// not offer Approve without it: the person would approve blind.
+  bool get hasPayload =>
+      code.isNotEmpty ||
+      detail.isNotEmpty ||
+      args.isNotEmpty ||
+      preview.isNotEmpty ||
+      argumentsReported;
+
+  bool get isAwaitingApproval => state == 'awaiting_approval';
+
+  bool get isAwaitingClientApproval =>
+      isClientTarget && state == 'awaiting_client_approval';
+
+  bool get isAwaitingClientResult =>
+      isClientTarget && phase == 'awaiting_client_result';
+
+  ChatStreamToolEvent copyWith({
+    String? state,
+    String? phase,
+    bool? ok,
+    bool? denied,
+    String? error,
+    bool clearError = false,
+    ToolRunResult? result,
+  }) =>
+      ChatStreamToolEvent(
+        id: id,
+        callId: callId,
+        digest: digest,
+        tool: tool,
+        language: language,
+        code: code,
+        args: args,
+        rawArgs: rawArgs,
+        preview: preview,
+        detail: detail,
+        detailTruncated: detailTruncated,
+        detailChars: detailChars,
+        argumentsReported: argumentsReported,
+        timeout: timeout,
+        backend: backend,
+        executionTarget: executionTarget,
+        phase: phase ?? this.phase,
+        risk: risk,
+        session: session,
+        ok: ok ?? this.ok,
+        denied: denied ?? this.denied,
+        bidiWarning: bidiWarning,
+        bidiChars: bidiChars,
+        state: state ?? this.state,
+        error: clearError ? null : (error ?? this.error),
+        result: result ?? this.result,
+      );
+
+  /// This frame laid over the [previous] frame of the same call: what this
+  /// frame states wins, and what it leaves out (the arguments, the code, the
+  /// risk) is kept from [previous] instead of being lost. The risk is never
+  /// lowered by a later frame: the stricter of the two stays. A terminal
+  /// outcome (`ok`, `error`, `result`) is the one this frame states, so a
+  /// later `ok: true` frame does not keep an earlier error.
+  ChatStreamToolEvent mergedOnto(ChatStreamToolEvent previous) {
+    String pick(String now, String before) => now.isNotEmpty ? now : before;
+    final hasArgs = args.isNotEmpty || argumentsReported;
+    return ChatStreamToolEvent(
+      id: pick(id, previous.id),
+      callId: pick(callId, previous.callId),
+      digest: pick(digest, previous.digest),
+      tool: pick(tool, previous.tool),
+      language: pick(language, previous.language),
+      code: pick(code, previous.code),
+      args: hasArgs ? args : previous.args,
+      rawArgs: hasArgs ? rawArgs : previous.rawArgs,
+      preview: pick(preview, previous.preview),
+      detail: detail.isNotEmpty ? detail : previous.detail,
+      detailTruncated: detail.isNotEmpty ? detailTruncated : previous.detailTruncated,
+      detailChars: detail.isNotEmpty ? detailChars : previous.detailChars,
+      argumentsReported: argumentsReported || previous.argumentsReported,
+      timeout: timeout ?? previous.timeout,
+      backend: pick(backend, previous.backend),
+      executionTarget: pick(executionTarget, previous.executionTarget),
+      phase: pick(phase, previous.phase),
+      risk: _stricterRisk(previous.risk, risk),
+      session: pick(session, previous.session),
+      ok: ok ?? previous.ok,
+      denied: ok != null ? denied : (denied || previous.denied),
+      bidiWarning: bidiWarning || previous.bidiWarning,
+      bidiChars: bidiChars.isNotEmpty ? bidiChars : previous.bidiChars,
+      state: pick(state, previous.state),
+      error: ok != null ? error : (error ?? previous.error),
+      result: result ?? previous.result,
+    );
+  }
+
+  static int _riskRank(String risk) {
+    switch (risk.trim()) {
+      case '':
+        return -1;
+      case 'read_only':
+        return 0;
+      case 'write':
+      case 'workspace_write':
+        return 1;
+      case 'execute':
+      case 'host_exec':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  static String _stricterRisk(String before, String now) =>
+      _riskRank(now) > _riskRank(before) ? now : before;
+
+  factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
+    final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';
+    final callId =
+        RegExp(r'^[0-9a-f]{8,64}$').hasMatch(rawCallId) ? rawCallId : '';
+    final rawDigest = json['digest']?.toString().trim().toLowerCase() ?? '';
+    final digest =
+        RegExp(r'^[0-9a-f]{64}$').hasMatch(rawDigest) ? rawDigest : '';
+    // The server's tool loop sends `arguments`; the client-tool broker sends
+    // `args`.
+    final rawArgsIn = json['arguments'] ?? json['args'];
+    final args = <String, String>{};
+    final rawArgs = <String, dynamic>{};
+    if (rawArgsIn is Map) {
+      for (final entry in rawArgsIn.entries.take(24)) {
+        final k = boundedResponseMetadata(entry.key, 64);
+        if (k.isNotEmpty) {
+          rawArgs[k] = entry.value;
+          args[k] = boundedResponseMetadata(entry.value, 4096);
+        }
+      }
+    }
+    final rawBidi = json['bidi_chars'];
+    final bidiChars = rawBidi is List
+        ? rawBidi
+            .map((e) => boundedResponseMetadata(e, 16))
+            .where((e) => e.isNotEmpty)
+            .take(16)
+            .toList(growable: false)
+        : const <String>[];
+    final rawTimeout = json['timeout'] ?? json['timeout_seconds'];
+    final timeout =
+        rawTimeout is num ? rawTimeout.toInt() : int.tryParse('$rawTimeout');
+    final rawError = json['error'];
+    final errorText =
+        rawError == null ? null : boundedResponseMetadata(rawError, 2000);
+    final rawDetail = json['detail'];
+    final detail = rawDetail is String
+        ? (rawDetail.length <= 16384
+            ? rawDetail
+            : rawDetail.substring(0, 16384))
+        : '';
+    final tool = boundedResponseMetadata(json['tool'], 128);
+    // For run_code the server's `detail` is the code itself. Its `arguments`
+    // copy is clipped to 512 characters, so it is only the last resort.
+    final rawCode = json['code'] ??
+        (tool == 'run_code' && detail.isNotEmpty ? detail : null) ??
+        rawArgs['code'];
+    final code = rawCode is String
+        ? (rawCode.length <= 16384 ? rawCode : rawCode.substring(0, 16384))
+        : '';
+    final rawLang = json['language'] ?? rawArgs['language'];
+    final executionTarget =
+        boundedResponseMetadata(json['execution_target'], 32);
+    final backend = boundedResponseMetadata(json['backend'], 32);
+    final phase = boundedResponseMetadata(json['phase'], 48);
+    final rawState = boundedResponseMetadata(json['state'], 32);
+    final okVal = json['ok'] is bool ? json['ok'] as bool : null;
+    final effectiveState = rawState.isNotEmpty
+        ? rawState
+        : switch (phase) {
+            'finished' => okVal == false ? 'error' : 'done',
+            'started' || 'awaiting_client_result' => 'running',
+            _ => phase,
+          };
+    final deniedVal = json['denied'] == true || phase == 'denied';
+    final rawId = boundedResponseMetadata(json['id'], 64);
+    final effectiveId = rawId.isNotEmpty ? rawId : callId;
+    ToolRunResult? parsedResult = json['result'] is Map
+        ? ToolRunResult.fromJson(
+            Map<String, dynamic>.from(json['result'] as Map),
+          )
+        : null;
+    if (parsedResult == null && okVal != null && phase == 'finished') {
+      final rawRc = json['exit_code'];
+      final rawMs = json['duration_ms'];
+      parsedResult = ToolRunResult(
+        ok: okVal,
+        returncode: rawRc is num ? rawRc.toInt() : null,
+        timedOut: json['status'] == 'timeout',
+        elapsedMs: rawMs is num ? rawMs.toInt() : null,
+      );
+    }
+    final rawDetailChars = json['detail_chars'];
+    return ChatStreamToolEvent(
+      id: effectiveId,
+      callId: callId,
+      digest: digest,
+      tool: tool,
+      language: boundedResponseMetadata(rawLang, 32),
+      code: code,
+      args: Map.unmodifiable(args),
+      rawArgs: Map.unmodifiable(rawArgs),
+      preview: boundedResponseMetadata(json['preview'], 4096),
+      detail: detail,
+      detailTruncated: json['detail_truncated'] == true,
+      detailChars: rawDetailChars is num ? rawDetailChars.toInt() : 0,
+      argumentsReported: rawArgsIn is Map,
+      timeout: timeout != null && timeout > 0 ? timeout : null,
+      backend: backend.isNotEmpty ? backend : executionTarget,
+      executionTarget: executionTarget,
+      phase: phase,
+      risk: boundedResponseMetadata(json['risk'], 32),
+      session: boundedResponseMetadata(json['session'], 128),
+      ok: okVal,
+      denied: deniedVal,
+      bidiWarning: json['bidi_warning'] == true || bidiChars.isNotEmpty,
+      bidiChars: bidiChars,
+      state: effectiveState,
+      error: errorText == null || errorText.isEmpty ? null : errorText,
+      result: parsedResult,
+    );
+  }
+}
+
 /// One parsed SSE frame: either a comment (keep-alive) or a data payload.
 class SseFrame {
   final bool comment;
@@ -214,11 +553,15 @@ class ChatStreamAccumulator {
   final Map<String, dynamic> completion = {};
   String finishReason = '';
 
+  /// Tool event parsed from the most recent [apply] call, if any.
+  ChatStreamToolEvent? lastToolEvent;
+
   String get text => _text.toString();
 
   /// Apply one decoded chunk. Returns the new content fragment (may be
   /// empty). Throws [SonderException] for an `object: error` frame.
   String apply(Map<String, dynamic> chunk) {
+    lastToolEvent = null;
     if (chunk['object'] == 'error') {
       final error = chunk['error'] is Map
           ? Map<String, dynamic>.from(chunk['error'] as Map)
@@ -245,6 +588,14 @@ class ChatStreamAccumulator {
       'usage',
     ]) {
       if (chunk[key] != null) completion[key] = chunk[key];
+    }
+    if (chunk['sonder_tool'] is Map) {
+      final parsed = ChatStreamToolEvent.fromJson(
+        Map<String, dynamic>.from(chunk['sonder_tool'] as Map),
+      );
+      if (parsed.tool.isNotEmpty || parsed.id.isNotEmpty) {
+        lastToolEvent = parsed;
+      }
     }
     var fragment = '';
     final choices = chunk['choices'];
@@ -461,6 +812,10 @@ Stream<ChatStreamEvent> openChatStream(
       if (decoded is! Map) return;
       try {
         final fragment = acc.apply(Map<String, dynamic>.from(decoded));
+        final toolEvent = acc.lastToolEvent;
+        if (toolEvent != null) {
+          controller.add(toolEvent);
+        }
         if (fragment.isNotEmpty) {
           controller.add(ChatStreamDelta(fragment, acc.text));
         }

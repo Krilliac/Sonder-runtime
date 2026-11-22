@@ -2,6 +2,7 @@
 ///
 /// * `GET  /v1/approvals`                 pending refused calls + open approvals
 /// * `POST /v1/approvals/<call_id>`       `{ttl_seconds}` approve one call once
+/// * `POST /v1/approvals/deny/<call_id>`  decline one pending call
 /// * `POST /v1/approvals/revoke/<nonce>`  revoke an open approval
 ///
 /// A server without S2 answers 404. [ApprovalsApi.list] then returns null and
@@ -45,6 +46,12 @@ class PendingApproval {
   final String preview;
   final String mode;
   final DateTime? refusedAt;
+  final String detail;
+  final bool detailHidden;
+  final bool detailTruncated;
+  final int detailChars;
+  final bool denied;
+  final bool bidiWarning;
 
   const PendingApproval({
     required this.callId,
@@ -53,17 +60,33 @@ class PendingApproval {
     this.preview = '',
     this.mode = '',
     this.refusedAt,
+    this.detail = '',
+    this.detailHidden = false,
+    this.detailTruncated = false,
+    this.detailChars = 0,
+    this.denied = false,
+    this.bidiWarning = false,
   });
 
-  factory PendingApproval.fromJson(Map<String, dynamic> json) =>
-      PendingApproval(
-        callId: boundedResponseMetadata(json['call_id'], 64),
-        digest: _digestOrEmpty(json['digest']),
-        tool: boundedResponseMetadata(json['tool'], 128),
-        preview: boundedResponseMetadata(json['preview'], 2048),
-        mode: boundedResponseMetadata(json['mode'], 32),
-        refusedAt: _ts(json['refused_at'] ?? json['created_at']),
-      );
+  factory PendingApproval.fromJson(Map<String, dynamic> json) {
+    final rawChars = json['detail_chars'];
+    final detailChars =
+        rawChars is num ? rawChars.toInt() : int.tryParse('$rawChars') ?? 0;
+    return PendingApproval(
+      callId: boundedResponseMetadata(json['call_id'], 64),
+      digest: _digestOrEmpty(json['digest']),
+      tool: boundedResponseMetadata(json['tool'], 128),
+      preview: boundedResponseMetadata(json['preview'], 2048),
+      mode: boundedResponseMetadata(json['mode'], 32),
+      refusedAt: _ts(json['refused_at'] ?? json['created_at']),
+      detail: boundedResponseMetadata(json['detail'], 4096),
+      detailHidden: json['detail_hidden'] == true,
+      detailTruncated: json['detail_truncated'] == true,
+      detailChars: detailChars < 0 ? 0 : detailChars,
+      denied: json['denied'] == true,
+      bidiWarning: json['bidi_warning'] == true,
+    );
+  }
 }
 
 /// An approval issued for one exact call, spendable once until [expiresAt].
@@ -214,6 +237,33 @@ class ApprovalsApi {
           code: unavailableCode, httpStatus: 404);
     }
     return IssuedApproval.fromJson(body);
+  }
+
+  /// Decline [callId] without approving or running anything (`POST
+  /// /v1/approvals/deny/<call_id>`). Lets an in-flight waiting turn see the
+  /// refusal immediately.
+  Future<void> deny(String callId,
+      {String tool = '', String digest = ''}) async {
+    if (!_callId.hasMatch(callId)) {
+      throw SonderException('That is not a call id.', code: 'INVALID_ID');
+    }
+    final body = await _call(
+      'POST',
+      '/v1/approvals/deny/$callId',
+      extraHeaders: {'Idempotency-Key': newIdempotencyKey('deny')},
+      body: jsonEncode({
+        if (tool.isNotEmpty) 'tool': tool,
+        if (_digest.hasMatch(digest)) 'digest': digest,
+      }),
+    );
+    if (body == null) {
+      throw SonderException(
+        'This server does not support HTTP denials; let the request time out '
+        'or cancel at the console.',
+        code: unavailableCode,
+        httpStatus: 404,
+      );
+    }
   }
 
   /// Revoke an open approval by its nonce.

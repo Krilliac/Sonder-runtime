@@ -8,6 +8,7 @@
 /// started them and need a developer or admin account (403 otherwise).
 library;
 
+import '../models.dart';
 import 'transport.dart';
 
 /// Server statuses (adapters/persistence/http_work_runs.py).
@@ -74,6 +75,7 @@ class WorkRun {
   final List<WorkRunProgress> progress;
   final bool progressComplete;
   final String finalSummary;
+  final ChatRefusal? pendingRefusal;
 
   const WorkRun({
     required this.id,
@@ -87,6 +89,7 @@ class WorkRun {
     this.progress = const [],
     this.progressComplete = true,
     this.finalSummary = '',
+    this.pendingRefusal,
   });
 
   bool get isRunning => status == 'running';
@@ -156,6 +159,11 @@ class WorkRun {
           ? json['progress_complete'] == true
           : true,
       finalSummary: boundedResponseMetadata(json['final_summary'], 4000),
+      pendingRefusal: json['pending_refusal'] is Map
+          ? ChatRefusal.fromJson(
+              Map<String, dynamic>.from(json['pending_refusal'] as Map),
+            )
+          : null,
     );
   }
 }
