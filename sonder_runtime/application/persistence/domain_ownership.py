@@ -13,14 +13,19 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 
 class DomainOwnershipError(ValueError):
     """Raised when a persistence ownership declaration is unsafe or ambiguous."""
 
 
-def _canonical_sqlite_path(path: str | Path, *, root: str | Path | None = None) -> Path:
+def _canonical_sqlite_path(
+    path: str | Path, *, root: str | os.PathLike[str] | None = None
+) -> Path:
     """Return a stable path identity without opening, creating, or modifying it.
 
     ``resolve(strict=False)`` collapses ``..`` and existing symlink aliases, while
@@ -75,7 +80,7 @@ class DomainStoreRegistry:
         self,
         bindings: Iterable[DomainStoreBinding],
         *,
-        root: str | Path | None = None,
+        root: str | os.PathLike[str] | None = None,
     ) -> None:
         by_domain: dict[str, DomainStoreBinding] = {}
         by_path: dict[Path, str] = {}
@@ -104,8 +109,8 @@ class DomainStoreRegistry:
         paths: Mapping[str, str | Path],
         *,
         repositories: Mapping[str, str] | None = None,
-        root: str | Path | None = None,
-    ) -> "DomainStoreRegistry":
+        root: str | os.PathLike[str] | None = None,
+    ) -> DomainStoreRegistry:
         repo_map = repositories or {}
         return cls(
             (DomainStoreBinding(domain, path, repo_map.get(domain, f"sqlite.{domain}"))
@@ -120,7 +125,9 @@ class DomainStoreRegistry:
         except KeyError as exc:
             raise DomainOwnershipError(f"unknown persistent domain: {name}") from exc
 
-    def owner_for(self, path: str | Path, *, root: str | Path | None = None) -> str:
+    def owner_for(
+        self, path: str | Path, *, root: str | os.PathLike[str] | None = None
+    ) -> str:
         canonical = _canonical_sqlite_path(path, root=root)
         try:
             return self._by_path[canonical]
@@ -129,14 +136,16 @@ class DomainStoreRegistry:
 
     @property
     def domain_to_path(self) -> Mapping[str, Path]:
-        return MappingProxyType({domain: binding.path for domain, binding in self._by_domain.items()})
+        return MappingProxyType({
+            domain: cast(Path, binding.path) for domain, binding in self._by_domain.items()
+        })
 
     @property
     def path_to_domain(self) -> Mapping[Path, str]:
         return self._by_path
 
     def validate_ownership(
-        self, declarations: Mapping[str, "DomainDatabaseOwnership"]
+        self, declarations: Mapping[str, DomainDatabaseOwnership]
     ) -> None:
         """Prove every registered store agrees with its domain declaration."""
         if set(declarations) != set(self._by_domain):
@@ -145,12 +154,12 @@ class DomainStoreRegistry:
             binding = self.binding_for(domain)
             if binding.repository != declaration.repository:
                 raise DomainOwnershipError(f"repository owner mismatch for domain: {domain}")
-            if Path(declaration.database).name != binding.path.name:
+            if Path(declaration.database).name != cast(Path, binding.path).name:
                 raise DomainOwnershipError(f"database filename mismatch for domain: {domain}")
 
 
 def default_domain_store_registry(
-    root: str | Path,
+    root: str | os.PathLike[str],
 ) -> DomainStoreRegistry:
     """Build the canonical six-domain registry below *root* without I/O."""
     return DomainStoreRegistry.from_paths(

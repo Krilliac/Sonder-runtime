@@ -1,11 +1,22 @@
 """Offline canonical aggregate transfer; no runner or owner takeover API."""
+from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 T = TypeVar("T")
 Record = dict[str, object]
 Manifest = dict[str, object]
+
+
+class ChildMigrationBackupBundle(Protocol):
+    path: Path
+
+    def has_sealed_backup(self) -> bool: ...
+    def seal_backup(self, source_files: list[list[int] | None]) -> None: ...
 
 
 class ChildMigrationSnapshot(Protocol):
@@ -17,7 +28,10 @@ class ChildMigrationStore(Protocol):
     identity: str
 
     def read_snapshot(
-        self, function: Callable[[ChildMigrationSnapshot], T], *, bundle=None
+        self,
+        function: Callable[[ChildMigrationSnapshot], T],
+        *,
+        bundle: ChildMigrationBackupBundle | None = None,
     ) -> T: ...
     def prepare(self, manifest: Manifest) -> None: ...
     def status(self, manifest: Manifest) -> dict[str, object]: ...

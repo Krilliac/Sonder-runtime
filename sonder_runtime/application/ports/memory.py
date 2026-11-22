@@ -9,14 +9,14 @@ from ...domain.common.events import DomainEvent
 class MemoryConnectionScope(Protocol):
     """The connection owned by one memory unit of work."""
 
-    memory: "MemoryRepositoryPort"
+    memory: MemoryRepositoryPort
     connection: object
 
 
 class MemoryRepositoryPort(Protocol):
     """Write/read operations used by the memory application facade."""
 
-    def get_interaction(self, interaction_id: str) -> dict | None: ...
+    def get_interaction(self, interaction_id: str) -> dict[str, object] | None: ...
 
     def record_outcome(
         self, interaction_id: str, signal: str, reward_value: float, *, source: str,

@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -12,7 +15,7 @@ class CheckResult:
     required: bool
     detail: str
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
             "ok": self.ok,
@@ -33,7 +36,7 @@ class PreflightReport:
     def degraded(self) -> bool:
         return self.ok and any(not check.ok for check in self.checks)
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "degraded": self.degraded,
