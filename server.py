@@ -8533,20 +8533,30 @@ def context_health_data(session: str = "", project: str = "") -> dict:
                     # so context meters reflect real live session token usage.
                     try:
                         from sonder_runtime.bootstrap.app import default_app as _ctx_app
-                        _repo = getattr(_ctx_app(), "session_repository", None)
+                        _repo_attr = getattr(_ctx_app(), "session_repository", None)
+                        _repo = _repo_attr() if callable(_repo_attr) else _repo_attr
                         if _repo is not None:
-                            _events = _repo.events(session_id)
+                            _tail_limit = max(int(limit or 20) * 8, 128)
+                            if hasattr(_repo, "read_tail"):
+                                _events = _repo.read_tail(session_id, limit=_tail_limit)
+                            elif hasattr(_repo, "events"):
+                                _events = _repo.events(session_id)
+                            else:
+                                _events = ()
                             _pairs: list[dict[str, str]] = []
                             _pending_user = ""
                             for _ev in _events:
-                                _kind = getattr(_ev, "kind", "")
+                                _kind = str(
+                                    getattr(_ev, "event_type", "")
+                                    or getattr(_ev, "kind", "")
+                                )
                                 _payload = getattr(_ev, "payload", None) or {}
                                 _text = str(_payload.get("content") or _payload.get("text") or "")
                                 if _kind == "user.message":
                                     if _pending_user:
                                         _pairs.append({"task": _pending_user, "response": ""})
                                     _pending_user = _text
-                                elif _kind == "assistant.message":
+                                elif _kind in ("model.response", "assistant.message"):
                                     _pairs.append({"task": _pending_user, "response": _text})
                                     _pending_user = ""
                             if _pending_user:
