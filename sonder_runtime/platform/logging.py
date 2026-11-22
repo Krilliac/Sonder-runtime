@@ -12,6 +12,7 @@ import time
 from typing import Iterable
 
 from sonder_runtime.platform.child_environment_policy import (
+    unsafe_child_environment_entry,
     unsafe_child_secret_name,
 )
 # Exact reviewed exception (scripts/check_architecture.py): the pure shared
@@ -62,7 +63,9 @@ def child_environment(base=None):
     # Child tools must never receive a secret merely because the unsafe-lab
     # policy is inactive.  The shared classifier deliberately covers both
     # typed Sonder names and common provider/authority names.
-    secret.update(key for key in source if _unsafe_child_secret_name(key))
+    secret.update(
+        key for key, value in source.items() if unsafe_child_environment_entry(key, value)
+    )
     return {key: value for key, value in source.items() if key not in secret}
 
 
