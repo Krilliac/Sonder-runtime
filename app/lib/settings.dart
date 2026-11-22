@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager_models.dart';
+import 'settings/temperature.dart'
+    show normalizeTemperature, parseTemperature;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -77,6 +79,7 @@ class Settings {
   static const _kModel = 'sonder_model';
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
+  static const _kTemperature = 'sonder_temperature';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -133,6 +136,10 @@ class Settings {
   String model;
   bool allowHosted;
   String contextSize;
+
+  /// Sampling temperature for new chat requests, 0 to 2 in steps of 0.05;
+  /// null is Auto (the model's own preset applies).
+  double? temperature;
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -161,6 +168,7 @@ class Settings {
     this.model = defaultModel,
     this.allowHosted = false,
     this.contextSize = '8192',
+    double? temperature,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -168,7 +176,8 @@ class Settings {
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
     this.cleartextKeyHosts = const [],
-  }) : serverUrl = serverUrl ?? defaultServerUrl;
+  })  : temperature = normalizeTemperature(temperature),
+        serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
 
@@ -183,6 +192,8 @@ class Settings {
     String? model,
     bool? allowHosted,
     String? contextSize,
+    double? temperature,
+    bool autoTemperature = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -201,6 +212,8 @@ class Settings {
         model: model ?? this.model,
         allowHosted: allowHosted ?? this.allowHosted,
         contextSize: contextSize ?? this.contextSize,
+        temperature:
+            autoTemperature ? null : temperature ?? this.temperature,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -299,6 +312,7 @@ class Settings {
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
+      temperature: _temperatureFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
@@ -306,6 +320,15 @@ class Settings {
       observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
       observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
     );
+  }
+
+  /// The stored temperature; a missing or garbled value is Auto (null).
+  static double? _temperatureFrom(SharedPreferences p) {
+    try {
+      return parseTemperature(p.getString(_kTemperature));
+    } catch (_) {
+      return null;
+    }
   }
 
   /// The stored preference, falling back to the boolean older builds wrote
@@ -402,6 +425,12 @@ class Settings {
       _kContextSize,
       contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
     );
+    final stagedTemperature = temperature;
+    if (stagedTemperature == null) {
+      await p.remove(_kTemperature);
+    } else {
+      await p.setString(_kTemperature, '$stagedTemperature');
+    }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
     await p.setString(_kLauncherUrl, launcherUrl.trim());
