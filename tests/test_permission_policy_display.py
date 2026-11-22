@@ -325,15 +325,17 @@ def test_format_policy_without_a_decide_is_byte_identical(tmp_path):
     The effective verdict needs a mode and a rule snapshot that only the server
     surface has; a renderer called without them must not invent one.
     """
+    # An operator's own deny (not the legacy shipped row, which a load
+    # migrates to the shipped "ask").
     _write_policy(tmp_path, [{"pattern": "file_delete", "action": "deny",
-                              "note": "destructive by default"}])
+                              "note": "owner wants no deletes"}])
 
     single = permission_rules.format_policy(tmp_path, "file_delete")
     assert single == "\n".join([
         "permission check: file_delete",
         "  action: deny",
         "  matched: file_delete",
-        "  note: destructive by default",
+        "  note: owner wants no deletes",
     ])
 
     listing = permission_rules.format_policy(tmp_path)
@@ -341,7 +343,7 @@ def test_format_policy_without_a_decide_is_byte_identical(tmp_path):
         "sonder permission rules",
         "  path: %s" % (tmp_path / "permissions.json"),
         "  " + "deny".ljust(5) + " " + "file_delete".ljust(32) + " "
-        + "destructive by default",
+        + "owner wants no deletes",
     ])
 
 
@@ -478,8 +480,9 @@ def test_an_ask_row_shows_both_callers_answers(tmp_path):
 
 def test_only_ask_rows_are_qualified(tmp_path):
     """A deny or an allow means the same thing to both callers; say it plainly."""
+    # An operator's own deny (a legacy shipped row would migrate to "ask").
     _write_policy(tmp_path, [{"pattern": "file_delete", "action": "deny",
-                              "note": "destructive by default"}])
+                              "note": "owner wants no deletes"}])
     pm.set_mode(pm.MANUAL)
 
     out = server.permission_policy("file_delete")

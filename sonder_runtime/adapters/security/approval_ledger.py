@@ -6,8 +6,11 @@ programs, destructive tools -- when nobody is present to answer a mode's
 that allows the class, and the console prompt: an operator approves *exactly
 one call* (one tool, one argument digest) and the next unchanged call from
 any surface runs once. Nothing here widens a rule, nothing survives one use
-or its expiry, and the ledger never stores bulk payloads: the digest and a
-bounded, redacted preview of the rest are what an operator sees and approves.
+or its expiry, and the ledger never stores bulk payloads with one exception: a
+``run_code`` pending call carries a bounded, redacted copy of its code
+(``detail``) so the operator can read what they approve. Otherwise the digest
+and a bounded, redacted preview of the rest are what an operator sees and
+approves.
 
 Two tables in one SQLite file (``approvals.db`` under the Sonder home;
 ``SONDER_APPROVALS_DB`` relocates it):
@@ -35,6 +38,22 @@ are escaped. When redaction or truncation changed what is stored, the preview
 starts with ``[approval covers text not shown: ...]`` and ``/approvals`` shows
 it so; such a call is not approvable by its call id (``preview_complete``),
 only by giving its full arguments.
+
+Two additions serve a chat turn that waits inside its request for an operator
+to answer one specific call. ``open_for`` and ``denied_for`` are read-only
+queries (they never spend, restore, revoke or write); ``deny`` records that an
+operator refused a pending call. A pending call may also carry a ``detail``:
+a bounded, redacted copy of the exact code a ``run_code`` call would run, so
+the operator approves what they can read (the preview shows a bulk payload
+only by its length). The digest never depends on any of this.
+
+A denial is sticky: for ``DENIAL_TTL_SECONDS`` after ``deny`` the pending call
+stays denied. A fresh refusal (``record_pending``) does not clear it, and
+``issue`` refuses to approve it (``ApprovalDeniedError``) inside the same
+transaction that reads the denial, so a concurrent approve and deny cannot both
+succeed. Only ``issue(..., override_denial=True)`` -- used by the console
+``/approve`` command alone -- clears it, and it does so in the issuing
+transaction. After the TTL a denial lapses and a fresh refusal starts again.
 """
 from __future__ import annotations
 
@@ -61,6 +80,8 @@ MIN_CALL_ID_CHARS = 8
 # Large enough for a full command line: an operator approving by call id must
 # be able to read what the call binds (``permission_modes.PREVIEW_CHARS``).
 MAX_PREVIEW_CHARS = 2000
+MAX_DETAIL_CHARS = 4000
+DENIAL_TTL_SECONDS = 900
 PREVIEW_TRUNCATED = " ...[preview truncated]"
 # Leads a stored preview that does not show everything the approval covers
 # (the redactor rewrote part of it, it was cut, or the redactor failed). The
@@ -93,7 +114,10 @@ _SCHEMA = (
         preview TEXT NOT NULL DEFAULT '',
         first_ts REAL NOT NULL,
         last_ts REAL NOT NULL,
-        count INTEGER NOT NULL DEFAULT 1
+        count INTEGER NOT NULL DEFAULT 1,
+        detail TEXT NOT NULL DEFAULT '',
+        denied_ts REAL,
+        detail_chars INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -114,9 +138,35 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS approvals_call ON approvals (tool, digest)",
 )
 
+# Columns added after the first release: a database created by an older build
+# lacks them, so ``_connect`` adds each one that is missing (nullable or
+# defaulted, so existing rows stay valid).
+_PENDING_COLUMNS = (
+    ("detail", "TEXT NOT NULL DEFAULT ''"),
+    ("denied_ts", "REAL"),
+    ("detail_chars", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+# One definition of "spendable" shared by ``open_for`` and ``consume``, so the
+# query and the spend can only disagree by a race: not consumed, not revoked,
+# not expired, and the pending call has not been denied within the denial TTL.
+# Parameters: tool, digest, now, now - DENIAL_TTL_SECONDS.
+_SPENDABLE = (
+    "tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL "
+    "AND expires_ts > ? "
+    "AND NOT EXISTS (SELECT 1 FROM pending_calls p "
+    "WHERE p.digest=approvals.digest AND p.denied_ts IS NOT NULL AND p.denied_ts > ?)"
+)
+
 
 class ApprovalLedgerError(ValueError):
     """A call id that resolves to nothing or to more than one call, or a bad TTL."""
+
+
+class ApprovalDeniedError(ApprovalLedgerError):
+    """``issue`` refused: an operator denied this call and the denial still stands."""
+
+    denied = True
 
 
 def call_id(digest: str) -> str:
@@ -229,6 +279,9 @@ class PendingCall:
     first_ts: float
     last_ts: float
     count: int
+    detail: str = ""
+    denied_ts: float | None = None
+    detail_chars: int = 0
 
     @property
     def call_id(self) -> str:
@@ -238,6 +291,15 @@ class PendingCall:
     def complete(self) -> bool:
         """The preview shows everything an approval of this call covers."""
         return preview_complete(self.preview)
+
+    @property
+    def denied(self) -> bool:
+        """Denied and still within ``DENIAL_TTL_SECONDS``."""
+        return self.denied_ts is not None and self.denied_ts > time.time() - DENIAL_TTL_SECONDS
+
+    @property
+    def detail_truncated(self) -> bool:
+        return self.detail_chars > MAX_DETAIL_CHARS
 
 
 @dataclass(frozen=True)
@@ -335,6 +397,16 @@ class ApprovalLedger:
         conn.row_factory = sqlite3.Row
         for statement in _SCHEMA:
             conn.execute(statement)
+        existing = {str(r["name"]) for r in conn.execute("PRAGMA table_info(pending_calls)")}
+        for name, ddl in _PENDING_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                conn.execute("ALTER TABLE pending_calls ADD COLUMN %s %s" % (name, ddl))
+            except sqlite3.OperationalError as exc:
+                # A concurrent connection added it first.
+                if "duplicate column" not in str(exc).lower():
+                    raise
         return conn
 
     @contextlib.contextmanager
@@ -384,6 +456,25 @@ class ApprovalLedger:
             reasons = []  # already led by the mark
         return _finish_preview(text, reasons, MAX_PREVIEW_CHARS)
 
+    def _clean_detail(self, detail: str) -> tuple[str, int]:
+        """Redact, then bound, the exact text an operator reads before approving.
+
+        Returns the stored text and the length of the original (unredacted) text.
+        """
+        text = str(detail or "")
+        original = len(text)
+        if not text:
+            return "", 0
+        if self._redact is not None:
+            try:
+                text = str(self._redact(text))
+            except Exception:
+                return "", original
+        if len(text) > MAX_DETAIL_CHARS:
+            text = "%s\n...[truncated: first %d of %d chars shown]" % (
+                text[:MAX_DETAIL_CHARS], MAX_DETAIL_CHARS, original)
+        return text, original
+
     @staticmethod
     def _prune(conn: sqlite3.Connection, now: float) -> None:
         conn.execute(
@@ -399,27 +490,40 @@ class ApprovalLedger:
     # -- pending calls -----------------------------------------------------
 
     def record_pending(self, tool: str, digest: str, *, surface: str = "",
-                       preview: Preview = "") -> PendingCall:
-        """Note one refused effect-class call so an operator can approve it."""
+                       preview: Preview = "", detail: str = "") -> PendingCall:
+        """Note one refused effect-class call so an operator can approve it.
+
+        A denial of the same digest within ``DENIAL_TTL_SECONDS`` is kept, so a
+        retry or a concurrent refusal can neither erase it before a waiting turn
+        reads it nor reopen the call; once the TTL has passed it is cleared.
+        """
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
         if not tool or len(digest) != 64:
             raise ApprovalLedgerError("a pending call needs a tool and a full digest")
         now = time.time()
         clean = self._clean_preview(preview)
+        clean_detail, detail_chars = self._clean_detail(detail)
         with self._write() as conn:
             self._prune(conn, now)
             conn.execute(
                 """
-                INSERT INTO pending_calls (digest, tool, surface, preview, first_ts, last_ts, count)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO pending_calls (digest, tool, surface, preview, first_ts, last_ts,
+                                           count, detail, detail_chars)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(digest) DO UPDATE SET
                     last_ts=excluded.last_ts,
                     surface=excluded.surface,
                     preview=CASE WHEN excluded.preview != '' THEN excluded.preview ELSE preview END,
+                    detail=CASE WHEN excluded.detail != '' THEN excluded.detail ELSE detail END,
+                    detail_chars=CASE WHEN excluded.detail != '' THEN excluded.detail_chars
+                                      ELSE detail_chars END,
+                    denied_ts=CASE WHEN denied_ts IS NOT NULL AND denied_ts > ?
+                                   THEN denied_ts ELSE NULL END,
                     count=count+1
                 """,
-                (digest, tool, str(surface or ""), clean, now, now),
+                (digest, tool, str(surface or ""), clean, now, now, clean_detail,
+                 detail_chars, now - DENIAL_TTL_SECONDS),
             )
             row = conn.execute(
                 "SELECT * FROM pending_calls WHERE digest=?", (digest,)
@@ -455,8 +559,16 @@ class ApprovalLedger:
     # -- approvals ---------------------------------------------------------
 
     def issue(self, tool: str, digest: str, *, approver: str, surface: str = "",
-              ttl_seconds: int = DEFAULT_TTL_SECONDS, preview: Preview = "") -> Approval:
-        """Approve exactly one future call of ``tool`` with argument ``digest``."""
+              ttl_seconds: int = DEFAULT_TTL_SECONDS, preview: Preview = "",
+              override_denial: bool = False) -> Approval:
+        """Approve exactly one future call of ``tool`` with argument ``digest``.
+
+        Raises ``ApprovalDeniedError`` while an operator's denial of this call
+        stands (``DENIAL_TTL_SECONDS``); the check runs in the issuing
+        transaction, so it serialises with ``deny``. ``override_denial=True``
+        clears the denial and issues in that same transaction; only the
+        console ``/approve`` command passes it.
+        """
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
         approver = str(approver or "").strip()
@@ -471,8 +583,17 @@ class ApprovalLedger:
         with self._write() as conn:
             self._prune(conn, now)
             row = conn.execute(
-                "SELECT preview FROM pending_calls WHERE digest=?", (digest,)
+                "SELECT preview, denied_ts FROM pending_calls WHERE digest=?", (digest,)
             ).fetchone()
+            if (row is not None and row["denied_ts"] is not None
+                    and float(row["denied_ts"]) > now - DENIAL_TTL_SECONDS):
+                if not override_denial:
+                    raise ApprovalDeniedError(
+                        "call %s was denied; it must be refused again after %d minutes, "
+                        "or approved at the console, before it can be approved"
+                        % (call_id(digest), DENIAL_TTL_SECONDS // 60)
+                    )
+                conn.execute("UPDATE pending_calls SET denied_ts=NULL WHERE digest=?", (digest,))
             stored = str(row["preview"]) if row is not None else ""
             # The pending call's own preview (``/approve <call id>``) is
             # already clean; running the redactor over it again could eat
@@ -499,13 +620,9 @@ class ApprovalLedger:
         now = time.time()
         with self._write() as conn:
             row = conn.execute(
-                """
-                SELECT nonce FROM approvals
-                WHERE tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL
-                      AND expires_ts > ?
-                ORDER BY issued_ts LIMIT 1
-                """,
-                (tool, digest, now),
+                "SELECT nonce FROM approvals WHERE " + _SPENDABLE
+                + " ORDER BY issued_ts LIMIT 1",
+                (tool, digest, now, now - DENIAL_TTL_SECONDS),
             ).fetchone()
             if row is None:
                 return None
@@ -524,6 +641,78 @@ class ApprovalLedger:
                 "SELECT * FROM approvals WHERE nonce=?", (row["nonce"],)
             ).fetchone()
         return self._approval(spent)
+
+    def open_for(self, tool: str, digest: str) -> bool:
+        """Whether an approval for exactly this call could be spent right now.
+
+        Read-only: it never spends, restores, revokes or writes anything, so a
+        waiting turn may poll it as often as it likes. It applies the same
+        rules ``consume`` does (exact tool and digest, unspent, unrevoked,
+        unexpired, call not denied). It is a hint, not an authority: an
+        approval can be spent, revoked, denied or expire between this answer
+        and the caller's next step, so ``consume`` (through the permission
+        gate) stays the only thing that decides whether the call runs.
+        """
+        tool = str(tool or "").strip().lstrip("/")
+        digest = str(digest or "").strip().lower()
+        if not tool or len(digest) != 64 or not Path(self.path).exists():
+            return False
+        now = time.time()
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM approvals WHERE " + _SPENDABLE + " LIMIT 1",
+                (tool, digest, now, now - DENIAL_TTL_SECONDS),
+            ).fetchone()
+        return row is not None
+
+    def deny(self, call_id_or_digest: str) -> PendingCall:
+        """Record that an operator declined one pending call.
+
+        The pending call stays listed, marked denied, so a waiting turn sees it
+        through ``denied_for``. Any open approval for that call is revoked, and
+        while the denial stands ``consume``, ``open_for`` and ``issue`` refuse
+        the call. A denial authorises nothing and is scoped to one digest. It
+        lasts ``DENIAL_TTL_SECONDS``; a refusal inside that window does not
+        clear it.
+        """
+        pending = self.resolve_call(call_id_or_digest)
+        now = time.time()
+        with self._write() as conn:
+            cursor = conn.execute(
+                "UPDATE pending_calls SET denied_ts=? WHERE digest=?", (now, pending.digest),
+            )
+            if cursor.rowcount != 1:
+                raise ApprovalLedgerError("call %s is no longer pending" % pending.call_id)
+            conn.execute(
+                """
+                UPDATE approvals SET revoked_ts=?
+                WHERE tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL
+                      AND expires_ts > ?
+                """,
+                (now, pending.tool, pending.digest, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM pending_calls WHERE digest=?", (pending.digest,)
+            ).fetchone()
+        return self._pending(row)
+
+    def denied_for(self, tool: str, digest: str) -> bool:
+        """Read-only: whether an operator declined this exact pending call.
+
+        True for ``DENIAL_TTL_SECONDS`` after the denial. Like ``open_for`` it
+        neither creates nor migrates a missing database.
+        """
+        tool = str(tool or "").strip().lstrip("/")
+        digest = str(digest or "").strip().lower()
+        if not tool or len(digest) != 64 or not Path(self.path).exists():
+            return False
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pending_calls WHERE tool=? AND digest=? "
+                "AND denied_ts IS NOT NULL AND denied_ts > ?",
+                (tool, digest, time.time() - DENIAL_TTL_SECONDS),
+            ).fetchone()
+        return row is not None
 
     def restore(self, nonce: str, digest: str) -> Approval | None:
         """Give back an approval spent on a call that did not take effect.
@@ -634,6 +823,9 @@ class ApprovalLedger:
             digest=str(row["digest"]), tool=str(row["tool"]), surface=str(row["surface"]),
             preview=str(row["preview"]), first_ts=float(row["first_ts"]),
             last_ts=float(row["last_ts"]), count=int(row["count"]),
+            detail=str(row["detail"] or ""),
+            denied_ts=None if row["denied_ts"] is None else float(row["denied_ts"]),
+            detail_chars=int(row["detail_chars"] or 0),
         )
 
     @staticmethod
@@ -657,7 +849,8 @@ def default_ledger() -> ApprovalLedger:
 
 
 __all__ = [
-    "Approval", "ApprovalLedger", "ApprovalLedgerError", "DEFAULT_TTL_SECONDS",
+    "Approval", "ApprovalDeniedError", "ApprovalLedger", "ApprovalLedgerError",
+    "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS", "MAX_DETAIL_CHARS",
     "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PREVIEW_INCOMPLETE", "PendingCall",
     "Preview", "PreviewField", "call_id", "clamp_ttl", "default_ledger",
     "escape_preview", "preview_complete", "preview_token", "render_preview",

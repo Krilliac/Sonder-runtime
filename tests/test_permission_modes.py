@@ -708,10 +708,15 @@ def test_default_rule_lookup_reads_the_real_on_disk_policy(tmp_path, monkeypatch
     monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
 
     # No permissions.json yet: permission_rules falls back to its built-in
-    # defaults, which include an explicit file_delete deny.
-    rule = pm._default_rule_lookup("file_delete")
+    # defaults, which include an explicit deny (the private chain of thought)
+    # and the file_delete row, which asks (deletes always ask).
+    rule = pm._default_rule_lookup("admin_private_chain_of_thought")
     assert rule is not None
     assert rule["action"] == "deny"
+    rule = pm._default_rule_lookup("file_delete")
+    assert rule is not None
+    # NO_MATCH_RULE is "ask" too: the pattern proves the shipped row matched.
+    assert rule["action"] == "ask" and rule["pattern"] == "file_delete"
 
     # A tool nothing matches must come back as None ("no rule"), not the
     # permissive NO_MATCH_RULE dict -- decide() only special-cases allow/deny,

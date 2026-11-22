@@ -21,18 +21,28 @@ def _write(home, payload):
     return path
 
 
+# The only shipped deny rule. (file_delete's row asks since decision 23, so a
+# broken file_delete row falls through to NO_MATCH_RULE's "ask" and proves
+# nothing about a lost deny.)
+_SHIPPED_DENY = "admin_private_chain_of_thought"
+
+
 def _defaults_with_broken_deny():
-    """The eleven built-in rules, with the file_delete DENY rule typo'd invalid."""
+    """The built-in rules, with the shipped DENY rule typo'd invalid."""
     rules = [dict(rule) for rule in _policy.DEFAULT_RULES]
     for rule in rules:
-        if rule["pattern"] == "file_delete":
+        if rule["pattern"] == _SHIPPED_DENY:
+            assert rule["action"] == "deny"
             rule["action"] = "DENY!"
     return rules
 
 
 def test_permission_rules_default_match(tmp_path):
-    rule = permission_rules.check(tmp_path, "file_delete")
+    rule = permission_rules.check(tmp_path, _SHIPPED_DENY)
     assert rule["action"] == "deny"
+    # Deletes always ask: the shipped row, not the no-match fall-through.
+    rule = permission_rules.check(tmp_path, "file_delete")
+    assert rule["action"] == "ask" and rule["pattern"] == "file_delete"
 
 
 def test_permission_rules_add_rule_takes_precedence(tmp_path):
@@ -79,15 +89,15 @@ def test_partial_load_reports_the_dropped_rule(tmp_path):
     assert report.rules_dropped == 1
     assert len(rules) == expected_rules - 1
     # The dropped rule is identified specifically enough to find it on disk.
-    assert any("file_delete" in entry for entry in report.dropped)
+    assert any(_SHIPPED_DENY in entry for entry in report.dropped)
     assert any("DENY!" in entry for entry in report.dropped)
 
 
 def test_partial_load_states_the_deny_to_ask_consequence(tmp_path):
     """The report must say what a dropped rule costs, not just that one dropped.
 
-    The concrete failure is a downgrade: with file_delete's rule discarded no
-    rule matches "file_delete" at all, so evaluate() falls through to
+    The concrete failure is a downgrade: with the shipped deny rule discarded no
+    rule matches that tool at all, so evaluate() falls through to
     NO_MATCH_RULE, whose action is "ask". A bare count would not tell an operator
     that a deny became a prompt.
     """
@@ -96,11 +106,12 @@ def test_partial_load_states_the_deny_to_ask_consequence(tmp_path):
     rules, report = permission_rules.load_report(tmp_path)
 
     # Behavior is unchanged -- still the permissive fall-through.
-    assert _policy.evaluate(rules, "file_delete")["action"] == "ask"
+    fallen = _policy.evaluate(rules, _SHIPPED_DENY)
+    assert fallen["action"] == "ask" and fallen["pattern"] == "*"
     # ...but it is now stated.
     message = report.describe()
     assert "dropped 1 malformed rule(s) of %d" % len(_policy.DEFAULT_RULES) in message
-    assert "file_delete" in message
+    assert _SHIPPED_DENY in message
     assert "falls through to 'ask'" in message
 
 
@@ -111,7 +122,7 @@ def test_partial_load_surfaces_warning_in_format_policy(tmp_path):
     rule printed 12 lines that looked entirely healthy -- verified: the string
     contained neither "drop" nor "warn". Both the listing and the single-tool
     check must carry the warning, because the single-tool form is exactly where
-    someone asks "is file_delete denied?" and gets "ask".
+    someone asks "is this tool denied?" and gets "ask".
     """
     _write(tmp_path, json.dumps(_defaults_with_broken_deny()))
 
@@ -119,8 +130,9 @@ def test_partial_load_surfaces_warning_in_format_policy(tmp_path):
     assert "WARNING:" in listing
     assert "dropped 1 malformed rule(s) of %d" % len(_policy.DEFAULT_RULES) in listing
 
-    single = permission_rules.format_policy(tmp_path, "file_delete")
+    single = permission_rules.format_policy(tmp_path, _SHIPPED_DENY)
     assert "action: ask" in single
+    assert "matched: *" in single
     assert "WARNING:" in single
 
 
@@ -208,7 +220,9 @@ def test_unreadable_policy_file_degrades_without_raising(tmp_path):
     assert report.status == permission_rules.LOAD_UNREADABLE
     assert report.error
     assert rules == _policy.default_rules()
-    assert permission_rules.check(tmp_path, "file_delete")["action"] == "deny"
+    assert permission_rules.check(tmp_path, _SHIPPED_DENY)["action"] == "deny"
+    fallback = permission_rules.check(tmp_path, "file_delete")
+    assert fallback["action"] == "ask" and fallback["pattern"] == "file_delete"
 
 
 def test_load_is_total_even_for_an_unusable_home():
@@ -242,12 +256,12 @@ def test_degraded_load_logs_once_not_once_per_check(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING, logger="permission_rules"):
         for _ in range(5):
-            permission_rules.check(tmp_path, "file_delete")
+            permission_rules.check(tmp_path, _SHIPPED_DENY)
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "permission policy degraded" in warnings[0].getMessage()
-    assert "file_delete" in warnings[0].getMessage()
+    assert _SHIPPED_DENY in warnings[0].getMessage()
 
     # Repair the file, then break it again: the warning must re-arm.
     caplog.clear()
@@ -255,7 +269,7 @@ def test_degraded_load_logs_once_not_once_per_check(tmp_path, caplog):
         _write(tmp_path, json.dumps([{"pattern": "status", "action": "allow"}]))
         permission_rules.check(tmp_path, "status")
         _write(tmp_path, json.dumps(_defaults_with_broken_deny()))
-        permission_rules.check(tmp_path, "file_delete")
+        permission_rules.check(tmp_path, _SHIPPED_DENY)
 
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 

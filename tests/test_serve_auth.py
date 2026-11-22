@@ -3807,7 +3807,8 @@ def test_thin_handlers_apply_per_tool_account_checks(monkeypatch, path):
         status, _, payload = _request(port, "POST", path, body='{"task":"x"}',
                                       headers={"Content-Type": "application/json"})
     assert status == 403, payload
-    assert json.loads(payload)["error"]["code"] == "FORBIDDEN"
+    err = json.loads(payload)["error"]
+    assert (err["code"] if isinstance(err, dict) else err) == "FORBIDDEN"
     assert spy.bodies == []
 
 
