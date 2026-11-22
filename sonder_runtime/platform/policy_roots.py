@@ -13,19 +13,26 @@ instead of each keeping a copy.
 
 Rules, applied in order:
 
-1. Empty entries and entries holding a NUL byte are refused.
+1. Non-string entries, empty entries, and entries holding a NUL byte or ASCII
+   control character are refused.
 2. An extended-length local path (``\\\\?\\C:\\x`` or ``//?/C:/x``) has its
    prefix stripped, so containment agrees with ``resolve_path`` whatever a given
    Python version's ``resolve()`` does with the prefix. Every other prefixed or
    network form (``\\\\?\\UNC\\...``, ``\\\\.\\...``, ``\\??\\...``,
    ``GLOBALROOT``, ``Volume{...}``, plain UNC ``\\\\host\\share``, in either
    slash flavour) is refused.
-3. ``~`` is expanded and rule 2 runs again on the result, so a UNC or prefixed
-   home directory cannot turn ``~`` into a network or device root. The
-   configuration loader turns this rule off (``expand_user=False``), so a
-   ``~`` workspace root there stays relative and is refused by rule 4.
+3. ``~`` is expanded and rules 1 (control characters) and 2 run again on the
+   result, so a UNC or prefixed home directory cannot turn ``~`` into a network
+   or device root. The configuration loader turns this rule off
+   (``expand_user=False``), so a ``~`` workspace root there stays relative and
+   is refused by rule 4.
 4. The result must be absolute. ``C:``, ``C:x``, ``\\x``, a bare ``/`` on
    Windows, and an unexpanded ``%VAR%`` / ``$VAR`` are all relative and refused.
+   On Windows, the drive must be an ASCII letter (``[A-Za-z]:``) and no path
+   component (outside ``.`` and ``..``) may end in ``.`` or space or hold ``:``
+   (trailing dot/space aliases like ``C:\\...`` or ``C:\\ \\`` collapse to
+   ``C:\\`` under Win32 normalization, and ADS spellings like ``C:\\a:b`` break
+   ``Path.resolve``).
 5. ``.`` and ``..`` are collapsed lexically, and a drive root or the filesystem
    root is refused, so ``\\\\?\\C:\\x\\..\\..`` cannot become ``C:\\``.
 
@@ -41,10 +48,19 @@ from pathlib import Path
 # ``\\?\C:\`` or ``//?/C:/`` (either separator after the drive): the only
 # prefixed spelling that names an ordinary local path.
 EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 
 
 class PolicyRootError(ValueError):
     """A policy-root entry was refused; the message says why, without its text."""
+
+
+def _check_no_control_chars(text: str, *, expanded: bool = False) -> None:
+    prefix = "the expanded entry" if expanded else "the entry"
+    if "\0" in text:
+        raise PolicyRootError(f"{prefix} contains a NUL byte")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise PolicyRootError(f"{prefix} contains a control character")
 
 
 def _strip_extended_or_refuse_prefixed(text: str) -> str:
@@ -57,7 +73,22 @@ def _strip_extended_or_refuse_prefixed(text: str) -> str:
     return text
 
 
-def parse_policy_root(raw: str, *, expand_user: bool = True) -> Path:
+def _check_windows_components(path: Path) -> None:
+    if os.name != "nt":
+        return
+    if not _WINDOWS_DRIVE_RE.fullmatch(path.drive):
+        raise PolicyRootError("the entry does not name a local drive letter")
+    parts = path.parts[1:] if path.anchor else path.parts
+    for part in parts:
+        if part in (".", ".."):
+            continue
+        if part.endswith((".", " ")) or ":" in part:
+            raise PolicyRootError(
+                "a Windows alias or alternate-data-stream component is not allowed"
+            )
+
+
+def parse_policy_root(raw: object, *, expand_user: bool = True) -> Path:
     """Return the absolute, local, normalised root *raw* names, or raise ``PolicyRootError``.
 
     ``expand_user=False`` skips rule 3, so a ``~`` entry stays relative and is
@@ -67,31 +98,34 @@ def parse_policy_root(raw: str, *, expand_user: bool = True) -> Path:
     Pure and thread-safe: it reads only the home-directory environment variables
     ``Path.expanduser`` consults, and makes no filesystem or network call.
     """
-    text = (raw or "").strip()
+    if not isinstance(raw, str):
+        raise PolicyRootError("the entry must be a string")
+    text = raw.strip()
     if not text:
         raise PolicyRootError("the entry is empty")
-    if "\0" in text:
-        raise PolicyRootError("the entry contains a NUL byte")
+    _check_no_control_chars(text)
     expanded = _strip_extended_or_refuse_prefixed(text)
     if expand_user:
         try:
             expanded = str(Path(expanded).expanduser())
         except RuntimeError:
             raise PolicyRootError("'~' cannot be expanded: no home directory is known") from None
-        if "\0" in expanded:
-            raise PolicyRootError("the expanded entry contains a NUL byte")
+        _check_no_control_chars(expanded, expanded=True)
         expanded = _strip_extended_or_refuse_prefixed(expanded)
-    if not Path(expanded).is_absolute():
+    raw_path = Path(expanded)
+    if not raw_path.is_absolute():
         raise PolicyRootError("the entry is not absolute")
+    _check_windows_components(raw_path)
     normalized = Path(os.path.normpath(expanded))
     if not normalized.is_absolute():
         raise PolicyRootError("the entry is not absolute")
+    _check_windows_components(normalized)
     if normalized.parent == normalized or not normalized.name:
         raise PolicyRootError("a drive root or the filesystem root is not allowed")
     return normalized
 
 
-def try_parse_policy_root(raw: str, *, expand_user: bool = True) -> Path | None:
+def try_parse_policy_root(raw: object, *, expand_user: bool = True) -> Path | None:
     """:func:`parse_policy_root`, returning ``None`` for a refused entry."""
     try:
         return parse_policy_root(raw, expand_user=expand_user)

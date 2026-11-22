@@ -505,3 +505,135 @@ def test_http_workspace_roots_strips_extended_local_and_drops_disallowed_and_unc
     roots = http_serve._http_workspace_roots(True)
     assert roots == (str(plain.resolve()),)
     assert all(not root.startswith(("\\\\", "//", "\\??")) for root in roots)
+
+
+WINDOWS_ALIAS_BYPASS_FORMS = [
+    pytest.param("C:\\...", id="triple-dot"),
+    pytest.param("C:\\....", id="quad-dot"),
+    pytest.param("C:\\ .", id="space-dot"),
+    pytest.param("C:\\ \\", id="space-component"),
+    pytest.param("C:\\. \\", id="dot-space-component"),
+    pytest.param("C:\\...\\", id="triple-dot-trailing-sep"),
+    pytest.param("C:\\a\\..\\...", id="dotdot-to-triple-dot"),
+    pytest.param("C:\\a\\..\\ \\", id="dotdot-to-space-component"),
+    pytest.param("\\\\?\\C:\\...", id="extended-triple-dot"),
+    pytest.param("\\\\?\\C:\\ \\", id="extended-space-component"),
+    pytest.param("//?/C:/...", id="extended-slash-triple-dot"),
+    pytest.param("//?/C:/ /", id="extended-slash-space-component"),
+    pytest.param("C:\\a:b", id="ads-colon"),
+    pytest.param("C:\\::$DATA", id="ads-root-data"),
+    pytest.param("C:\\.:$DATA", id="ads-dot-data"),
+    pytest.param("C:\\foo::$DATA", id="ads-file-data"),
+    pytest.param("C:\\foo.", id="trailing-dot-component"),
+    pytest.param("C:\\foo \\bar", id="trailing-space-parent-component"),
+    pytest.param("1:\\foo", id="digit-drive"),
+    pytest.param("@:\\foo", id="symbol-drive"),
+]
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("raw", WINDOWS_ALIAS_BYPASS_FORMS)
+def test_windows_alias_ads_and_nonletter_drive_roots_refused_everywhere(
+    isolated_root_policy, monkeypatch, raw,
+):
+    from sonder_runtime.platform import policy_roots
+
+    assert policy_roots.try_parse_policy_root(raw) is None
+    with pytest.raises(policy_roots.PolicyRootError):
+        policy_roots.parse_policy_root(raw)
+    assert file_ops._split_roots(raw) == []
+
+    isolated_root_policy.write_text(raw + "\n", encoding="utf-8")
+    assert file_ops._roots_from_file() == []
+    isolated_root_policy.unlink()
+
+    baseline_allowed = file_ops.allowed_roots()
+    baseline_grants = file_ops.lane_grant_roots(())
+    monkeypatch.setenv("SONDER_FILE_ROOTS", raw)
+    assert file_ops.allowed_roots() == baseline_allowed
+    assert file_ops.lane_grant_roots(()) == baseline_grants
+    assert Path("C:\\") not in file_ops.allowed_roots()
+    assert "C:\\" not in file_ops.lane_grant_roots(())
+
+
+@WINDOWS_ONLY
+def test_triple_dot_env_root_cannot_grant_windows_system_file(isolated_root_policy, monkeypatch):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", "C:\\...")
+    with pytest.raises(PermissionError, match="outside allowed roots"):
+        file_ops.resolve_path("C:\\Windows\\System32\\drivers\\etc\\hosts")
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [None, 123, ["C:\\foo"], Path("C:\\foo"), True, b"C:\\foo"],
+    ids=["none", "int", "list", "path", "bool", "bytes"],
+)
+def test_non_string_policy_root_returns_none_and_raises_policy_root_error(bad_value):
+    from sonder_runtime.platform import policy_roots
+
+    assert policy_roots.try_parse_policy_root(bad_value) is None
+    with pytest.raises(policy_roots.PolicyRootError):
+        policy_roots.parse_policy_root(bad_value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("C:\\foo\nbar", id="newline"),
+        pytest.param("C:\\foo\rbar", id="carriage-return"),
+        pytest.param("C:\\foo\x01bar", id="control-soh"),
+        pytest.param("C:\\foo\x7fbar", id="control-del"),
+    ],
+)
+def test_control_character_policy_root_is_refused(raw):
+    from sonder_runtime.platform import policy_roots
+
+    assert policy_roots.try_parse_policy_root(raw) is None
+    with pytest.raises(policy_roots.PolicyRootError):
+        policy_roots.parse_policy_root(raw)
+
+
+def test_http_workspace_roots_does_not_expand_tilde_and_drops_aliases_and_non_strings(
+    isolated_root_policy, monkeypatch, tmp_path,
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(http_serve, "_admin_authorized", lambda auth: bool(auth))
+
+    fake_app = SimpleNamespace(
+        config=SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_roots=(
+                    "~",
+                    "~/proj",
+                    "~\\proj",
+                    "C:\\...",
+                    "C:\\ \\",
+                    123,
+                    None,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(runtime_app, "default_app", lambda: fake_app)
+
+    assert http_serve._http_workspace_roots(True) == ()
+
+
+@WINDOWS_ONLY
+def test_http_workspace_roots_drops_root_whose_resolution_becomes_drive_or_unc(
+    isolated_root_policy, monkeypatch, tmp_path,
+):
+    link_like = tmp_path / "linkproj"
+    link_like.mkdir()
+    monkeypatch.setattr(http_serve, "_admin_authorized", lambda auth: bool(auth))
+    fake_app = SimpleNamespace(
+        config=SimpleNamespace(state=SimpleNamespace(workspace_roots=(str(link_like),))),
+    )
+    monkeypatch.setattr(runtime_app, "default_app", lambda: fake_app)
+
+    for resolved_target in (Path("C:\\"), Path("\\\\nohost.invalid\\share\\proj")):
+        monkeypatch.setattr(Path, "resolve", lambda self, _t=resolved_target: _t)
+        assert http_serve._http_workspace_roots(True) == ()

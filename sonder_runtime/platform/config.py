@@ -1619,8 +1619,9 @@ def _apply_environment(
             for part in env["SONDER_FILE_ROOTS"].split(os.pathsep)
             if part.strip()
         )
-        if roots:
-            state = replace(state, workspace_roots=roots)
+        # Separator-only values (e.g. ";" / " ; ; ") must fail closed instead of
+        # falling back to TOML workspace_roots.
+        state = replace(state, workspace_roots=roots if roots else ("",))
     # Empty keeps the configured value, as env_bool_from_env reads it later.
     if env.get("SONDER_AUTO_WORKSPACE", "").strip():
         state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
@@ -2079,14 +2080,14 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
-    if config.state.default_workspace_root.strip():
+    if not isinstance(config.state.default_workspace_root, str):
+        errors.append("[state].default_workspace_root must be a string")
+    elif config.state.default_workspace_root.strip():
         try:
-            absolute = Path(config.state.default_workspace_root.strip()).expanduser().is_absolute()
-        except RuntimeError:  # "~" with no user home
-            absolute = False
-        if not absolute:
+            parse_policy_root(config.state.default_workspace_root, expand_user=True)
+        except PolicyRootError as exc:
             errors.append(
-                "[state].default_workspace_root must be an absolute path: "
+                f"[state].default_workspace_root must be an absolute path ({exc}): "
                 f"{config.state.default_workspace_root!r}"
             )
     local_workspace_mappings = {"default"}
@@ -2094,10 +2095,15 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     for index, root in enumerate(config.state.workspace_roots):
         # load_config has already parsed these; this guard keeps a direct
         # _validate caller from resolving (and so connecting to) a UNC root.
-        if not isinstance(root, str) or try_parse_policy_root(root, expand_user=False) is None:
+        parsed_root = (
+            try_parse_policy_root(root, expand_user=False)
+            if isinstance(root, str)
+            else None
+        )
+        if parsed_root is None:
             errors.append(f"[state].workspace_roots entry refused: {root!r}")
             continue
-        raw_path = Path(root)
+        raw_path = parsed_root
         if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
             continue
@@ -2105,6 +2111,9 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             resolved = raw_path.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        if try_parse_policy_root(str(resolved), expand_user=False) is None:
+            errors.append(f"[state].workspace_roots entry refused after resolution: {root!r}")
             continue
         mapping = resolved.name
         if not mapping:
