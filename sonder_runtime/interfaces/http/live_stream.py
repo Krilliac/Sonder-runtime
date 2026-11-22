@@ -34,13 +34,19 @@ CODE_FENCE = "```"
 
 
 def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None:
-    """A live stream bound to ``handler``'s early SSE response, or ``None``."""
+    """A live stream bound to ``handler``'s early SSE response, or ``None``.
+
+    The deltas carry a completion id minted here, before the turn has an
+    interaction id; the early stream keeps it (``completion_id``) so the rest
+    of the same SSE response (remainder, terminal, usage and error frames)
+    reuses it.
+    """
     handler._live_stream = None
     early = getattr(handler, "_early_stream", None)
     if early is None or early.client_gone:
         return None
     model = getattr(handler, "_stream_model", None) or "sonder"
-    iid = uuid.uuid4().hex[:12]
+    iid = early.completion_id = getattr(early, "completion_id", None) or uuid.uuid4().hex[:12]
     first = [True]
 
     def write(text: str) -> bool:
@@ -110,6 +116,37 @@ def armed_for(handler, chunk, *, hold_code: bool):
         yield live
 
 
+def response_id(handler, iid):
+    """The ``chatcmpl-`` id every frame of ``handler``'s streamed response uses.
+
+    Once live deltas went out on the early SSE response they fixed the id
+    (minted in :func:`arm`, before the turn had an interaction id), so the
+    remainder, terminal, usage and any error frame continue under it.  A
+    response that forwarded nothing live uses ``iid``.  Read-only; called on
+    the handler's own thread after the keep-alive writer has stopped.
+    """
+    early = getattr(handler, "_early_stream", None)
+    live = getattr(handler, "_live_stream", None)
+    if early is not None and live is not None and live.forwarded:
+        return getattr(early, "completion_id", None) or iid
+    return iid
+
+
+def frame_id_and_receipt(handler, interaction_id, iid, receipt):
+    """``(frame_id, receipt)`` for one streamed response of ``handler``.
+
+    ``frame_id`` is :func:`response_id`. When live deltas fixed a different
+    id before the turn had an interaction id (``interaction_id``), the
+    returned receipt is a copy that names the interaction, so a client can
+    still ``POST /v1/outcome`` for it; otherwise ``receipt`` is returned
+    unchanged. Never mutates ``receipt``.
+    """
+    frame_id = response_id(handler, iid)
+    if interaction_id and frame_id != interaction_id:
+        receipt = {**(receipt or {}), "interaction_id": interaction_id}
+    return frame_id, receipt
+
+
 def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
                       usage, activity, lock=None):
     """Write the answer and terminal frames of a streamed turn; ``True`` when sent."""
@@ -118,6 +155,8 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
         if live is None or not live.forwarded:
             handler.wfile.write(chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
         else:
+            # One completion, one id: continue under the id the deltas used.
+            iid = response_id(handler, iid)
             rest, revised = live.reconcile(content)
             if revised:
                 _logger.warning("streamed answer was revised after generation; sent the final version")
@@ -140,6 +179,6 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
 
 
 __all__ = [
-    "CODE_FENCE", "arm", "arm_wait_status", "armed_for", "wait_status_frame",
-    "write_stream_body",
+    "CODE_FENCE", "arm", "arm_wait_status", "armed_for", "frame_id_and_receipt",
+    "response_id", "wait_status_frame", "write_stream_body",
 ]

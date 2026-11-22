@@ -131,6 +131,11 @@ class ApprovalsApi {
 
   static const unavailableCode = 'APPROVALS_UNAVAILABLE';
 
+  /// The message for a 403 on approve or revoke.
+  static const forbiddenToIssue =
+      'Approving or revoking needs an administrator account or the '
+      'deployment API key.';
+
   /// The console instruction for [callId] when the server has no S2 route.
   static String consoleFallback(String callId) =>
       'Approve from the console: `/approve $callId`';
@@ -154,10 +159,19 @@ class ApprovalsApi {
       final error =
           responseException(response, httpStatusFallback(response.statusCode));
       if (response.statusCode == 403) {
-        throw error.copyWith(
-          message: 'Approvals need a developer or admin account.',
-          remedy: 'Sign in with a developer or admin account.',
-        );
+        // Listing is open to developers; approving and revoking are not:
+        // the server issues and revokes approvals for an administrator or
+        // the deployment API key only.
+        throw method == 'GET'
+            ? error.copyWith(
+                message: 'Approvals need a developer or admin account.',
+                remedy: 'Sign in with a developer or admin account.',
+              )
+            : error.copyWith(
+                message: forbiddenToIssue,
+                remedy: 'Sign in with an administrator account, or use the '
+                    "deployment's API key.",
+              );
       }
       throw describeServerError(error, endpoint.serverUri);
     }

@@ -125,12 +125,15 @@ for proxies that keep the `Host` name.
 In `manual` mode a file change or host program asked for over HTTP is refused,
 because nobody is at the console to answer the prompt. The chat reply keeps
 its text, and `sonder_receipt.refusal` names the refused call (`tool`,
-`call_id`, `reason`, `remedies`). A developer or administrator can approve
-exactly that call once with `POST /v1/approvals/<call_id>` (body `{}` or
-`{"ttl_seconds": 900}`); then send the same request again. The approval runs
-the unchanged call once, expires, and leaves the mode as it was. Changing any
-argument needs a new approval. `GET /v1/approvals` lists what is waiting,
-and `POST /v1/approvals/revoke/<nonce>` withdraws an approval. See
+`call_id`, `reason`, `remedies`). An administrator account, the deployment
+API key or the local-open listener can approve exactly that call once with
+`POST /v1/approvals/<call_id>` (body `{}` or `{"ttl_seconds": 900}`); then
+send the same request again. The approval runs the unchanged call once,
+expires, and leaves the mode as it was. Changing any argument needs a new
+approval. `GET /v1/approvals` lists what is waiting, and
+`POST /v1/approvals/revoke/<nonce>` withdraws an approval; revoking needs the
+same authority as approving. A developer account can only list
+(`GET /v1/approvals`); it gets `403` on approve and revoke. See
 [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
 
 Save, open **System**, and verify that **Host Launcher** says `ready`. The
