@@ -2,9 +2,10 @@
 
 Treat any plausible exposure (key in a pasted log, screen share, stolen
 laptop, world-readable secrets file) as real until proven otherwise. Terminal
-scrollback and shell logs count: `deploy_sonder.sh --serve` prints the API key to
-the terminal (`deploy_sonder.sh:186`), so rotate if that output was captured, recorded or
-shared.
+scrollback and shell logs count: `deploy_sonder.sh --serve` no longer prints the
+API key (it points at `/etc/sonder/sonder-local.env`, `deploy_sonder.sh:186-189`),
+but an older copy of the script did, so rotate if that output was captured,
+recorded or shared.
 
 ## 1. Contain — rotate with minimal overlap
 

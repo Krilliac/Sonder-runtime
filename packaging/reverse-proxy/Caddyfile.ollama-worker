@@ -13,6 +13,11 @@
 # Guide: docs/runbooks/remote-ollama-caddy.md (one home for the coordinator
 # side: URL shape, consent, CA trust).
 #
+# The scheduled cloud-model refresh sends /api/pull to the PRIMARY
+# (adapters/inference/ollama_cloud_metadata.py ~152), so a remote PRIMARY
+# behind this Caddyfile will answer 403 to that refresh (/api/pull is denied
+# below). Keep the primary on loopback and use this Caddyfile for workers.
+#
 # Replace before use:
 #   <worker-host>   DNS name or IP literal the coordinator will connect to.
 #                   The certificate SAN must contain exactly this name/IP.

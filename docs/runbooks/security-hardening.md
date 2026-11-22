@@ -8,10 +8,11 @@ can reach Sonder. The concepts and the full threat-model scope are in the
 
 Treat access to a Sonder endpoint as shell access to the host
 ([SECURITY.md](../../SECURITY.md)). `<sonder-home>` below is the state home of
-the running server. After the config loads the order is: `SONDER_HOME`, then
-`SONDER_STATE_HOME`, then `[state].home` from the TOML file, then the platform
-default (`sonder_runtime/platform/config.py` fills `state.home` in that order;
-`serve`, the console and the managed/owned runtimes then call
+the running server. The order is the same for every command: `SONDER_STATE_HOME`,
+then `SONDER_HOME`, then `[state].home` from the TOML file, then the platform
+default (`env_home_override`, `sonder_runtime/platform/paths.py:157-167`, is
+used by both `default_home()` and the config loader, `platform/config.py:1597`;
+the environment overrides the TOML; `serve`, the console and the managed/owned runtimes then call
 `configure_home(config.state.home)`: `__main__.py` `_configure_typed_home`,
 `bootstrap/app.py`, `managed_http_runtime.py`, `owned_http_runtime.py`), and
 `paths.py` `default_home` honours that override first. The platform default is
@@ -40,7 +41,7 @@ sonder`, using the service account named in the unit).
    fanout. Any process or logged-in user on the machine can use all of it.
    Separately, in every auth mode (not only `local-open`) the browser log page
    at `/` and `/v1/local/server-log` are served without credentials to
-   loopback peers with an accepted `Host`, unless `tls_terminated_by_proxy` is
+   loopback peers with a trusted `Host`, unless `tls_terminated_by_proxy` is
    on (`_local_log_dashboard_allowed`, `_host_trusted`). A published web app
    is matched first (`web_app.handle_web_app` runs before the log-page
    branch) and may answer `/` instead.
@@ -147,7 +148,7 @@ match asks (`sonder_runtime/domain/execution/policy.py`; the file is
 `admin_private_chain_of_thought` is `deny`. A `deny` rule beats any mode.
 
 Editing rules with the `permission_rule_set` tool needs a developer token or
-`SONDER_ALLOW_PERMISSION_EDITS=1` (`server.py` `permission_rule_set`).
+`SONDER_ALLOW_PERMISSION_EDITS=1` (repo-root `server.py` `permission_rule_set`).
 Leave that variable unset on a shared or served host: while it is set, policy
 edits and approvals need no token.
 

@@ -192,21 +192,18 @@ One place decides where Sonder keeps its databases, sessions, `sonder.toml`,
 
 Caveats:
 
-- **With a loaded configuration (`serve`, the console, `rotate-key`) the order
-  is the reverse of the list above for the environment.** The loader fills
-  `state.home` from `SONDER_HOME`, else `SONDER_STATE_HOME`
-  (`platform/config.py`, `_apply_environment`, 1598-1600). The merged
-  environment is applied after the TOML (2540-2542), so either variable
+- **One order everywhere.** The configuration loader and `default_home()` both
+  resolve the environment through `env_home_override`
+  (`platform/paths.py:157-167`): `SONDER_STATE_HOME` first, then `SONDER_HOME`,
+  blank values counting as unset (the loader calls it at `platform/config.py:1597`).
+  With a loaded configuration (`serve`, the console, `rotate-key`) the merged
+  environment is applied after the TOML (`config.py:2543`), so either variable
   **overrides `[state].home`**; only then does `_configure_typed_home` call
-  `configure_home` (`__main__.py:1165-1168`). Strongest first:
-  `SONDER_HOME`, `SONDER_STATE_HOME`, `[state].home`, per-OS default. The
-  list above is `default_home()` as used by commands that load no
-  configuration (for example `update`).
-- **`SONDER_HOME` and `SONDER_STATE_HOME` disagree on order.** `default_home()`
-  prefers `SONDER_STATE_HOME`, while the configuration loader, when it derives
-  `[state].home` from the environment, prefers `SONDER_HOME` (`config.py`,
-  `_apply_environment`). If both are set to different values, different
-  components may use different homes. Set only one, and use `SONDER_HOME`.
+  `configure_home` (`__main__.py:1176-1177`). Strongest first:
+  `SONDER_STATE_HOME`, `SONDER_HOME`, `[state].home`, per-OS default. Commands
+  that load no configuration (for example `update`) use the same order through
+  `default_home()`. If both variables are set to different values the first
+  wins everywhere; set only one to avoid confusion.
 - **The config files are found before the TOML loads.** `sonder.toml` and
   `sonder.env` are looked up in `default_home()` as resolved from the process
   and environment alone. So `[state].home` in the TOML moves the state but not

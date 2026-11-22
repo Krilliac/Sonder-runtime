@@ -18,21 +18,21 @@ Caddy. To front a remote **Ollama worker** with Caddy, see
   (`sonder_runtime/platform/config.py`) does not read the environment variable
   `SONDER_TLS_TERMINATED_BY_PROXY`: `python -m sonder_runtime serve` takes the
   TOML or `--set` value and exports it to the variable
-  (`sonder_runtime/__main__.py:1078`). The direct `serve.py` entrypoint does
-  read the variable (`serve.py:865`, `:2338-2339`) and its bind refusal asks
-  for `SONDER_TLS_TERMINATED_BY_PROXY=1` (`serve.py:2368-2370`). The setting disables the
+  (`sonder_runtime/__main__.py:1087`). The direct `serve.py` entrypoint does
+  read the variable (`serve.py:866`, `:2339-2340`) and its bind refusal asks
+  for `SONDER_TLS_TERMINATED_BY_PROXY=1` (`serve.py:2369-2371`). The setting disables the
   unauthenticated loopback log dashboard and `/v1/local/server-log` (so the
   proxy cannot publish them) and turns on `X-Forwarded-For` handling for the
   peers in `[server].trusted_proxy_cidrs`.
 - **This is the one home of the non-loopback bind rule.** The configuration
   loader rejects a non-loopback `[server].host` unless
   `tls_terminated_by_proxy = true` **and** the API key is at least 24
-  characters (`config.py:128`, `:1975-1990`), whatever the auth mode. The
+  characters (`config.py:128`, `:1974-1989`), whatever the auth mode. The
   direct entrypoint additionally requires, at bind time, an API key of 24+
   characters for `api-key`, an account secret of 32+ (`MIN_ACCOUNT_SECRET_LENGTH`)
-  for `account`, and both for `both`/`either` (`serve.py:2377-2385`). Even then the reference topology
+  for `account`, and both for `both`/`either` (`serve.py:2378-2386`). Even then the reference topology
   keeps loopback. The direct entrypoint also refuses `local-open` on a
-  non-loopback address (`sonder_runtime/interfaces/http/serve.py:2341-2392`).
+  non-loopback address (`sonder_runtime/interfaces/http/serve.py:2342-2393`).
   Sonder serves no TLS itself.
 - The proxy terminates TLS 1.2+, enforces body limits, forwards only approved
   paths, and replaces inbound forwarding headers.
@@ -43,7 +43,7 @@ Caddy. To front a remote **Ollama worker** with Caddy, see
   are throttled. `/live` returns only `{"status":"alive"}`. `/ready`,
   `/health`, `/version` and the metrics path are open without a key only to a
   **loopback peer that also sends a trusted `Host`**
-  (`serve.py:5043-5046`, `:5060`). With **no** key and no account requirement
+  (`serve.py:5044-5047`, `:5061`). With **no** key and no account requirement
   (`local-open`) there is no authentication at all: every caller is admin and
   developer.
 - The API key must be at least 24 characters (`MIN_API_KEY_LENGTH`,
@@ -56,7 +56,7 @@ Caddy. To front a remote **Ollama worker** with Caddy, see
 
 **Never front a `local-open` listener.** Behind a loopback proxy every remote
 caller is a loopback peer, and `local-open` treats every caller as admin and
-developer (`serve.py:2033-2034`, `:2054-2062`, `:2460-2466`), including
+developer (`serve.py:2034-2035`, `:2055-2063`, `:2461-2467`), including
 `POST /v1/permission-mode` (`:6370-6402`) and drain (`:5084-5100`). Adding the
 public name to `[server].allowed_hosts` to silence a `421` under `local-open`
 would publish an unauthenticated admin API.
@@ -64,7 +64,7 @@ would publish an unauthenticated admin API.
 Before pointing a proxy at Sonder, confirm all of these:
 
 1. `[server].auth_mode` is `api-key`, `account`, `both` or `either`
-   (`config.py:1923`), with an API key of at least 24 characters in the
+   (`config.py:1922`), with an API key of at least 24 characters in the
    secrets file (`SONDER_API_KEY`), or for the account modes a private
    `SONDER_AUTH_SECRET`. Procedure:
    [configure-authentication.md](configure-authentication.md).
@@ -75,7 +75,7 @@ Before pointing a proxy at Sonder, confirm all of these:
    prints `401`. A `200` means the listener is open: stop and fix auth first.
 
 Note: `api-key` mode with no key configured on a loopback bind is downgraded
-to `local-open` with a warning (`serve.py:1226-1229`), so check step 4
+to `local-open` with a warning (`serve.py:1227-1230`), so check step 4
 rather than trusting the config alone.
 
 ## Setup with nginx
@@ -133,15 +133,18 @@ How the Caddy recipe interacts with Sonder:
   the public name is not one of the machine's own names, meaning
   `gethostname`, `getfqdn` or `<host>.local`, and not in `allowed_hosts`
   (`host_policy.py:228-229`). Using the machine's FQDN as the public name makes
-  the `Host` trusted; the impact is limited because those paths are not
-  forwarded.) This is also why fronting
+  the `Host` trusted; the impact is limited because the reference configs do
+  not forward `/ready`, `/health`, `/version` or metrics. `/v1/*` is forwarded
+  and includes `/v1/local/server-log`; that path stays disabled only because
+  `tls_terminated_by_proxy = true` (`serve.py:680-687`, `:5582-5584`), so never
+  front Sonder without that setting.) This is also why fronting
   `local-open` fails with `421 HOST_NOT_ALLOWED`; do not "fix" that by
   adding the name (see above). Full rules:
   [Host names and `421 HOST_NOT_ALLOWED`](../wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
 - **Client address.** With `tls_terminated_by_proxy = true` and the peer in
   `[server].trusted_proxy_cidrs` (default `127.0.0.1/32`, `::1/128`; TOML
   only, `config.py:167`), Sonder reads `X-Forwarded-For` right to left,
-  skipping trusted hops (`host_policy.py:244-276`; `serve.py:4987-4998`).
+  skipping trusted hops (`host_policy.py:244-276`; `serve.py:4988-4999`).
   Caddy replaces an untrusted client's `X-Forwarded-For` with the real peer
   address, so the authentication-failure limiter sees the real client. If
   Caddy runs on a **different** host it cannot reach a loopback listener; that
@@ -150,7 +153,7 @@ How the Caddy recipe interacts with Sonder:
   proxy) and the proxy's address in `[server].trusted_proxy_cidrs`.
 - **Limits and streaming.** The Caddyfile mirrors the 1 MiB request body
   default; raise both together if you raise `[server].max_request_bytes`
-  (valid 1 byte to 16 MiB, `config.py:1930`). Streamed chat sends an SSE
+  (valid 1 byte to 16 MiB, `config.py:1929`). Streamed chat sends an SSE
   comment every `[server].stream_heartbeat_seconds` (default 15), so the
   recipe sets `flush_interval -1` to pass frames through at once. Requests may
   take up to `request_timeout_seconds` (300).
@@ -286,7 +289,7 @@ Failure symptoms:
 | Symptom | Likely cause |
 |---|---|
 | `421 HOST_NOT_ALLOWED` | The listener is `local-open` (no key). Configure authentication; do not add the name. |
-| `401` with the right key | Wrong header for the mode. The API key goes in `Authorization: Bearer <key>`; an account token goes in `X-Sonder-Account-Token` (or `Authorization` when no API key is configured). `both` mode needs both headers (`serve.py:2006`, `:2016`). Check the credentials reached the proxy untouched. |
+| `401` with the right key | Wrong header for the mode. The API key goes in `Authorization: Bearer <key>`; an account token goes in `X-Sonder-Account-Token` (or `Authorization` when no API key is configured). `both` mode needs both headers (`serve.py:2007`, `:2017`). Check the credentials reached the proxy untouched. |
 | `413` | Body over the proxy limit (nginx `client_max_body_size`, Caddy `request_body max_size`) or over `[server].max_request_bytes`. |
 | Chat arrives all at once, or drops after about a minute | Proxy buffering or idle timeout shorter than the 15 s heartbeat. nginx needs `proxy_buffering off`; Caddy needs `flush_interval -1`. |
 | `/health` returns 200 without a key through the proxy | The proxy forwards more than `/live` and `/v1/*`. Remove the extra path immediately. |

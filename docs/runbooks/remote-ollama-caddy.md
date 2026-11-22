@@ -31,7 +31,7 @@ non-loopback Ollama over plain HTTP, so a remote worker needs an HTTPS front.
 What the proxy **cannot** do: authenticate the coordinator with a password or
 token. In static pool mode Sonder sends no credentials at all: no
 `Authorization` header, no cookies, no client certificate
-(`server.py:5533-5536`, `sonder_runtime/adapters/embeddings.py:550-554`). So
+(repo-root `server.py:5536-5539`, `sonder_runtime/adapters/embeddings.py:550-554`). So
 `basic_auth`, bearer-token checks and `forward_auth` on the proxy would answer
 401/403 to every probe and the worker would never leave probation. Do not add
 them.
@@ -107,7 +107,7 @@ What each block of the file does:
 | `route { ... }` | Children run strictly in the written order, so the denials come before the proxy. |
 | 1. `not remote_ip 10.0.0.1/32` -> 403 | Only the coordinator's address is served. |
 | 2. `header Origin *` -> 403 | Sonder never sends `Origin`; a request with one is browser traffic. |
-| 3. `request_body max_size 32MB` | Sonder's own inbound limit is at most 16 MiB (`[server].max_request_bytes`, default 1 MiB, `sonder_runtime/platform/config.py:1930`), but Sonder adds its own system prompt and context before calling Ollama, and vision requests carry base64 images. 32 MB is a ceiling with headroom, not a measured need; lower it if you never send images. |
+| 3. `request_body max_size 32MB` | Sonder's own inbound limit is at most 16 MiB (`[server].max_request_bytes`, default 1 MiB, `sonder_runtime/platform/config.py:1929`), but Sonder adds its own system prompt and context before calling Ollama, and vision requests carry base64 images. 32 MB is a ceiling with headroom, not a measured need; lower it if you never send images. |
 | 4. method + path allowlist -> `reverse_proxy 127.0.0.1:11434` | Only the exact routes below. `header_up Host {upstream_hostport}` and `flush_interval -1` are explained after the table. |
 | 5. final `respond 403` | Everything else, including `/api/pull`, `/api/create`, `/api/delete`, `/api/copy`, `/api/push`, `/api/embed` and every other method. |
 
@@ -116,10 +116,10 @@ The allowlist is the set of routes Sonder can send to a worker (as of
 
 | Method and path | Used for | Where |
 |---|---|---|
-| `GET /api/version`, `GET /api/tags` | capability probe at admission (one body, at most 1 MiB), preflight and doctor, model catalog | `sonder_runtime/adapters/inference/ollama_pool.py:631-651`, `sonder_runtime/adapters/preflight.py:114`, `server.py:23328` |
-| `GET /api/ps` | resident-model check | `server.py:24170` |
-| `POST /api/show` | model metadata (body `{"model":..., "name":...}`) | `server.py:1674`, `server.py:23382` |
-| `POST /api/chat`, `POST /api/generate` | `/api/chat` is inference; `/api/generate` is model load, unload (`keep_alive: 0`) and prewarm only | `server.py:5278`, `server.py:24572`, `sonder_runtime/application/prefix_cache_report.py:254` |
+| `GET /api/version`, `GET /api/tags` | capability probe at admission (one body, at most 1 MiB), preflight and doctor, model catalog | `sonder_runtime/adapters/inference/ollama_pool.py:631-651`, `sonder_runtime/adapters/preflight.py:114`, `server.py:23341` |
+| `GET /api/ps` | resident-model check | `server.py:24183` |
+| `POST /api/show` | model metadata (body `{"model":..., "name":...}`) | `server.py:1676`, `server.py:23395` |
+| `POST /api/chat`, `POST /api/generate` | `/api/chat` is inference; `/api/generate` is model load, unload (`keep_alive: 0`) and prewarm only | `server.py:5281`, `server.py:24585`, `sonder_runtime/application/prefix_cache_report.py:254` |
 | `POST /api/embeddings` | embeddings (see the embedding-only variant) | `sonder_runtime/adapters/embeddings.py:548-552` |
 
 Not every deployment sends every route (for example, some residency checks are
@@ -141,11 +141,11 @@ Why the two non-obvious proxy settings:
   never hurts. This Ollama behaviour
   is external and version-dependent; re-test after an Ollama upgrade.
 - **No `response_header_timeout`.** Sonder calls Ollama with `stream:false`
-  (`server.py:5872`, `:1871`, `:14233`, `:24414`),
+  (`server.py:5876`, `:1874`, `:14246`, `:24427`),
   so response headers arrive only after the whole generation. Leave the Caddy
   timeout unset, or keep it at least as long as `SONDER_TIMEOUT` (default 300 s,
-  `server.py:629`). Responses up to 16 MiB are read for chat and generate
-  (`server.py:4795`).
+  `server.py:631`). Responses up to 16 MiB are read for chat and generate
+  (`server.py:4798`).
 
 ### Public ACME certificates
 
@@ -337,11 +337,11 @@ quoted message):
 
 | Rule | Detail | Error text | Code |
 |---|---|---|---|
-| Consent | Any non-loopback endpoint needs `[ollama].allow_remote = true` or `SONDER_ALLOW_REMOTE_OLLAMA` set to `1`, `true`, `yes` or `on`. | `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine; set SONDER_ALLOW_REMOTE_OLLAMA=1 to opt in explicitly`; for workers `remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1`, or `[ollama].workers remote entries require the remote-Ollama consent gate`; for a TOML `[ollama].url`, `[ollama].url host '...' is not loopback and allow_remote is false (remote-Ollama consent gate)` | `sonder_runtime/domain/ollama_policy.py:17-22, :162-169`; `sonder_runtime/adapters/inference/ollama_pool.py:358-360`; `sonder_runtime/platform/config.py:2125-2128`; `config.py:2075-2081` |
-| `https` | Remote endpoints must use `https`. | `non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit`; `remote worker endpoints must use https`; `[ollama].workers remote entries must use https`; for a TOML `[ollama].url`, `[ollama].url remote Ollama must use https so prompts and embeddings are protected in transit` | `ollama_policy.py:170-174`; `ollama_pool.py:361-363`; `config.py:2129-2130`; `config.py:2082-2087` |
-| Explicit port | Always write the port, even `:443`. | `OLLAMA_HOST must include an explicit port`; `[ollama].url must include an explicit port`; `[ollama].workers entry '...' must include a host and explicit port` | `ollama_policy.py:156-157`; `config.py:2071-2072, :2113-2117` |
-| Origin only | `scheme://host:port`: no path, query, fragment or `user:pass@`. | `[ollama].workers entries must be origins without paths, queries, or fragments`; `[ollama].workers entries must not contain inline credentials` | `config.py:2109-2122` |
-| Unique roster | A worker equal to the primary after normalisation is rejected, as is a repeat. The primary plus workers may not exceed `worker_pool_max_workers` (default 16). | `[ollama].workers contains a worker that duplicates primary after canonical normalization` | `config.py:2138-2158` |
+| Consent | Any non-loopback endpoint needs `[ollama].allow_remote = true` or `SONDER_ALLOW_REMOTE_OLLAMA` set to `1`, `true`, `yes` or `on`. | `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine; set SONDER_ALLOW_REMOTE_OLLAMA=1 to opt in explicitly`; for workers `remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1`, or `[ollama].workers remote entries require the remote-Ollama consent gate`; for a TOML `[ollama].url`, `[ollama].url host '...' is not loopback and allow_remote is false (remote-Ollama consent gate)` | `sonder_runtime/domain/ollama_policy.py:17-22, :162-169`; `sonder_runtime/adapters/inference/ollama_pool.py:358-360`; `sonder_runtime/platform/config.py:2124-2127`; `config.py:2074-2080` |
+| `https` | Remote endpoints must use `https`. | `non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit`; `remote worker endpoints must use https`; `[ollama].workers remote entries must use https`; for a TOML `[ollama].url`, `[ollama].url remote Ollama must use https so prompts and embeddings are protected in transit` | `ollama_policy.py:170-174`; `ollama_pool.py:361-363`; `config.py:2128-2129`; `config.py:2081-2086` |
+| Explicit port | Always write the port, even `:443`. | `OLLAMA_HOST must include an explicit port`; `[ollama].url must include an explicit port`; `[ollama].workers entry '...' must include a host and explicit port` | `ollama_policy.py:156-157`; `config.py:2070-2071, :2112-2116` |
+| Origin only | `scheme://host:port`: no path, query, fragment or `user:pass@`. | `[ollama].workers entries must be origins without paths, queries, or fragments`; `[ollama].workers entries must not contain inline credentials` | `config.py:2108-2121` |
+| Unique roster | A worker equal to the primary after normalisation is rejected, as is a repeat. The primary plus workers may not exceed `worker_pool_max_workers` (default 16). | `[ollama].workers contains a worker that duplicates primary after canonical normalization` | `config.py:2137-2157` |
 
 `0.0.0.0` and `::` are rewritten to loopback, not treated as remote
 (`ollama_policy.py:92-99`).
@@ -350,7 +350,7 @@ quoted message):
 
 `SONDER_OLLAMA_WORKERS` is split on `,` or `;`, and an entry **without `://`
 gets `http://` prepended**. Likewise a bare `OLLAMA_HOST=host:443` becomes
-`http://host:443` (`sonder_runtime/platform/config.py:1616-1628`). A bare
+`http://host:443` (`sonder_runtime/platform/config.py:1615-1627`). A bare
 `<worker-host>:443` therefore fails the https rule above even though you meant
 TLS. Always write `https://` explicitly in both variables.
 
@@ -358,7 +358,7 @@ TLS. Always write `https://` explicitly in both variables.
 
 The coordinator verifies the proxy's certificate and its hostname on every
 request; there is no insecure-skip-verify option. Trust anchors, first match
-wins (`sonder_runtime/platform/config.py:1478-1496, :1642-1645`;
+wins (`sonder_runtime/platform/config.py:1478-1496, :1641-1644`;
 `sonder_runtime/adapters/inference/ollama_endpoint.py:141-158`):
 
 1. `[ollama].ca_bundle` or `SONDER_OLLAMA_CA_BUNDLE` (the environment wins).
@@ -386,7 +386,7 @@ never a key.
 
 The bundle path must be absolute and name an existing file, or startup fails
 (`[ollama].ca_bundle must be an absolute path`, `... must name an existing
-regular file`, `sonder_runtime/platform/config.py:2089-2095`; the transport
+regular file`, `sonder_runtime/platform/config.py:2088-2094`; the transport
 error is `Ollama CA bundle must be an existing absolute file`,
 `ollama_endpoint.py:136, :149`). The bundle is re-read on every request, so
 replacing the file with a rotated root takes effect without a restart
@@ -405,7 +405,7 @@ one lane does not trust it for the other:
 
 | Lane | Trust source | Where |
 |---|---|---|
-| Ollama pool | the Ollama bundle: `SONDER_OLLAMA_CA_BUNDLE` or `[ollama].ca_bundle`; if neither is set, the first absolute existing file named by `SSL_CERT_FILE`, then `REQUESTS_CA_BUNDLE`; else the OS store. A bundle **replaces** the OS store for this lane. | `platform/config.py:1478-1496`, `:1642-1645`; `adapters/tls_contexts.py:96-103` |
+| Ollama pool | the Ollama bundle: `SONDER_OLLAMA_CA_BUNDLE` or `[ollama].ca_bundle`; if neither is set, the first absolute existing file named by `SSL_CERT_FILE`, then `REQUESTS_CA_BUNDLE`; else the OS store. A bundle **replaces** the OS store for this lane. | `platform/config.py:1478-1496`, `:1641-1644`; `adapters/tls_contexts.py:96-103` |
 | Compute | the default context: the OS store plus `SSL_CERT_FILE` / `SSL_CERT_DIR` read from the **process environment**. There is no compute CA setting. | `adapters/tls_contexts.py:51-90`; [compute-fabric.md](compute-fabric.md#tls-trust-on-the-controller) |
 
 For one private root (the combined worker, or several workers behind one Caddy
@@ -454,14 +454,21 @@ and `POST /v1/compute/nodes/refresh` (admin credential) then
 - Vision analysis and fanout synthesis refuse a non-loopback primary
   (`vision analysis requires a loopback Ollama endpoint`,
   `sonder_runtime/adapters/inference/ollama_vision.py:88-89`;
-  `fanout synthesis requires a loopback Ollama endpoint`, `server.py:24349-24350`).
+  `fanout synthesis requires a loopback Ollama endpoint`, `server.py:24362-24363`).
   This is another reason to prefer a loopback primary plus a remote worker
   entry.
 - Training promotion evaluation requires a loopback Ollama (`promotion_eval.py:356-363`);
   a remote primary blocks it. See
   [TRAINING.md](../../TRAINING.md#remote-or-caddy-fronted-ollama).
-- `/ready` can report the primary unavailable although chat works: see
-  "Known limitation: `/ready` with a remote primary" under Troubleshooting.
+- `/ready` probes the primary through `ollama_endpoint.open_url`
+  (`sonder_runtime/adapters/web/lifecycle.py:660-672`), the transport chat uses:
+  the configured CA bundle, no environment proxies, no redirects. A private-CA
+  primary is probed correctly.
+- The scheduled cloud-model refresh sends `/api/pull` to the PRIMARY
+  (`sonder_runtime/adapters/inference/ollama_cloud_metadata.py:152`), so a
+  remote primary behind the worker Caddyfile (which answers 403 to every
+  `/api/pull`) fails that refresh. See
+  [cloud model refresh](../integration/cloud-model-refresh.md).
 
 ## Verify
 
@@ -509,7 +516,7 @@ python -m sonder_runtime doctor
 
 (Both commands accept `--config <path-to-sonder.toml>` if your file is not in
 the default place, plus `--secrets`, `--set`, `--json` and `--skip-ollama`;
-`sonder_runtime/__main__.py:1849-1861, :1872-1880`.) Expected:
+`sonder_runtime/__main__.py:1905-1917, :1931-1939`.) Expected:
 
 - `preflight` lists `ollama` for the primary and one `ollama_worker_<n>` per
   worker, each `<host>: <n> models`
@@ -518,7 +525,7 @@ the default place, plus `--secrets`, `--set`, `--json` and `--skip-ollama`;
   (`preflight.py:300-304`).
 - `doctor` reports `ollama` and `ollama_workers`; a failure shows the transport
   reason, and a bad bundle shows `[ollama].ca_bundle: ...` inside those lines
-  (`sonder_doctor.py:453-464, :524-565`). There is no separate `ollama_ca_bundle`
+  (`sonder_doctor.py:454-465, :525-566`). There is no separate `ollama_ca_bundle`
   line in `doctor`.
 - After `serve`, `repl` or `mcp` starts, the log shows
   `inference membership: members=N active=N probation=N unhealthy=N expired=N`
@@ -528,7 +535,7 @@ the default place, plus `--secrets`, `--set`, `--json` and `--skip-ollama`;
   worker_capability_ttl_seconds / 2)` seconds, minimum 1;
   `sonder_runtime/bootstrap/app.py:2330-2348`, `:602`). A roster with no active
   member logs at warning level.
-- The pool admin status (MCP tool `ollama_pool_admin_status`, `server.py:23943`,
+- The pool admin status (MCP tool `ollama_pool_admin_status`, `server.py:23956`,
   which needs the admin token) reports `tls_verification` as
   `configured-ca-bundle` or `system-trust-store`; also `invalid-ca-bundle` when
   the configured bundle is unusable (`ollama_endpoint.py:157-158`),
@@ -568,20 +575,6 @@ generation can make Sonder resend the same request to another member while the
 first Ollama is still generating, so two workers may do the work. **401, 403, 404 and any 3xx** are hard
 errors: no failover, no retry. For embeddings, 502-504 open the embed cooldown
 instead.
-
-### Known limitation: `/ready` with a remote primary
-
-Code reading only, **not runtime-tested** (2026-11-20). The `/ready`
-dependency probe (`sonder_runtime/adapters/web/lifecycle.py:658-669`, URL from
-`_ollama_url()` at `:1269-1271`) calls `urllib.request.urlopen` on `OLLAMA_HOST`
-directly, not through the Ollama transport. It therefore (a) uses the system
-trust store, ignoring `ca_bundle`, and (b) honours `HTTP_PROXY`. With a remote
-HTTPS **primary** whose certificate comes from a private CA, the probe fails and
-`/ready` can answer `required dependency ollama is unavailable` while chat works
-(`sonder_runtime/platform/service_state.py:240`). A loopback primary with remote
-**workers** is not affected, because only the primary is probed. Workaround:
-keep the primary on loopback, or use a certificate the system store trusts. This
-should be fixed in code; it is reported as a defect.
 
 ## Rollback
 

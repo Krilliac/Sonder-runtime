@@ -32,6 +32,10 @@ sonder.example.internal {
 		# /ready, /health, /version and the metrics path are deliberately
 		# NOT forwarded: a loopback proxy makes every caller a 127.0.0.1 peer.
 		# Add /app/* here only if [server].web_app_enabled is true.
+		# NOTE: /v1/* also matches /v1/local/server-log (the unauthenticated
+		# loopback log tail). It is disabled only because
+		# [server].tls_terminated_by_proxy = true (serve.py ~680-687); this
+		# matcher does not exclude it, so that setting is mandatory here.
 		@sonder path /live /v1/*
 
 		reverse_proxy @sonder 127.0.0.1:11435 {

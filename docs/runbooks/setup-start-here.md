@@ -13,12 +13,14 @@ home. Volatile facts on the linked pages are date-stamped there.
 
 ## 1. Install
 
-Pick one. On a fresh state home the first command must be `serve`
-(`preflight` is safe before it). `serve` stamps a new home at epoch 2
-(`__main__.py:1245-1246`, `stamp_fresh_home` in `bridge_migration.py:98-110`).
-Running `migrate`, `repl`, `mcp` or `smoke` first creates stores without that
-stamp, and the next `serve` then refuses the home
-(`migration required before serve`, `__main__.py:1248-1252`).
+Pick one. `serve`, `migrate`, `repl` and `mcp` each stamp a fresh state home
+at epoch 2 before they create any store (`serve` at `__main__.py:1276-1283`; the
+others through `_stamp_home_before_stores`, `__main__.py:1180-1206`, called at
+`:650`, `:1431`, `:1501` and `:1539`; `stamp_fresh_home` in
+`bridge_migration.py:98`), so any of them may run first, as may `preflight`.
+Only `smoke` (`cmd_smoke`, `__main__.py:975`) skips the stamp: it creates the
+operations store on a fresh home, and the next `serve` then refuses that home
+(`migration required before serve`, `__main__.py:1287`).
 
 - From source on Windows, Linux or macOS:
   [install-workstation-local.md](install-workstation-local.md). See

@@ -131,7 +131,7 @@ server has no embeddings route, set `SONDER_EMBEDDING_PROVIDER=ollama`.
    for `--base-url`). Expect one JSON line containing `"dry_run": true`,
    exit code 0. Startup can still create the private state directory
    (the `--evidence` default calls `state_path`, `scripts/backend_attest.py:168`,
-   `platform/paths.py:231-240`); set `SONDER_HOME` to a scratch directory to
+   `platform/paths.py:239-248`); set `SONDER_HOME` to a scratch directory to
    avoid that.
 2. Run it for real (drop `--dry-run`). Expect JSON with `passed`, `failed`,
    `unknown` lists; exit 0 when nothing failed, 1 otherwise. Details and
@@ -225,23 +225,31 @@ upstream). The minimal shape is:
 
 ```text
 # Caddyfile on the server host (Caddy syntax is external to this repo).
-# NOTE: this snippet does no authentication and no source restriction.
+# NOTE: this snippet does no authentication. 10.0.0.1/32 is the Sonder
+# machine's address as this host sees it; replace it.
 llm.example.com {
-    reverse_proxy 127.0.0.1:8080
+    route {
+        @not_coordinator {
+            not remote_ip 10.0.0.1/32
+        }
+        respond @not_coordinator "forbidden" 403
+
+        reverse_proxy 127.0.0.1:8080
+    }
 }
 ```
 
-**Security: this snippet alone publishes the model server to anyone who can
-reach port 443.** Before using it, do both of these:
+**Security: the `remote_ip` matcher is the only thing in this snippet that
+restricts access, and there is no authentication.** Without it the model server
+would be published to anyone who can reach port 443. Also do both of these:
 
 1. Make something enforce the key. Either start the upstream with its own key
    check (for example the server's API-key option), or add authentication in
    Caddy. Sonder only *sends* `SONDER_OPENAI_API_KEY`; nothing in this snippet
    or in Sonder checks it.
-2. Limit the proxy to the coordinator: a `remote_ip` matcher in Caddy that
-   returns 403 for every other source, plus a host firewall rule for the same
-   address. The `remote_ip` pattern and firewall commands are in the runbook
-   above.
+2. Keep the `remote_ip` matcher shown above (403 for every other source) and
+   add a host firewall rule for the same address. The firewall commands and
+   the full hardened Caddyfile are in the runbook above.
 
 A public name such as `llm.example.com` makes Caddy obtain an ACME certificate,
 which fails once 443 is limited to the coordinator and port 80 is closed; see
@@ -327,7 +335,7 @@ Ollama (the default).
 Removing `SONDER_ALLOW_CLOUD` revokes process-wide hosted consent again
 (`domain/cloud_access.py:6-11`) only if `[features].cloud` is not set to true in
 `sonder.toml`: `serve` rewrites the variable from typed config
-(`sonder_runtime/__main__.py:1130`). A leftover `1` keeps it on for every hosted
+(`sonder_runtime/__main__.py:1139`). A leftover `1` keeps it on for every hosted
 provider. A user-level variable set with
 `[Environment]::SetEnvironmentVariable(..., 'User')` must be cleared the same
 way with a `$null` value, and entries in `/etc/sonder/sonder.env` or a service
