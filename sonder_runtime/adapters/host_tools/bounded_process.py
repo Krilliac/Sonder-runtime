@@ -153,6 +153,7 @@ def run_bounded(
         )
 
     readers = []
+    started_readers = []
     for stream in (proc.stdout, proc.stderr):
         if stream is None:
             continue
@@ -160,11 +161,12 @@ def run_bounded(
             target=drain, args=(stream,), daemon=True, name="sonder-bounded-probe-drain",
         )
         readers.append(reader)
-    for reader in readers:
-        reader.start()
     deadline = started + timeout_seconds
     outcome = "ok"
     try:
+        for reader in readers:
+            reader.start()
+            started_readers.append(reader)
         while proc.poll() is None:
             if overflow.is_set():
                 outcome = "output_limit"
@@ -191,7 +193,7 @@ def run_bounded(
         # also keep the pipes open, stalling the readers); remove them first.
         if tree is not None and proc.poll() is not None and tree.has_survivors():
             terminate()
-        for reader in readers:
+        for reader in started_readers:
             reader.join(timeout=1)
         if tree is not None:
             tree.close()

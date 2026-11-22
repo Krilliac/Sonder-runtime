@@ -668,14 +668,20 @@ class ProcessTree:
         # No job (not created, or terminate failed): best effort only.
         if self._proc.poll() is None:
             try:
+                run_kwargs: dict[str, Any] = {
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                    "timeout": 5,
+                    "check": False,
+                    "shell": False,
+                }
+                no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if no_window:
+                    run_kwargs["creationflags"] = no_window
                 subprocess.run(
                     ["taskkill", "/PID", str(self._proc.pid), "/T", "/F"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                    shell=False,
+                    **run_kwargs,
                 )
             except (OSError, subprocess.SubprocessError):
                 pass

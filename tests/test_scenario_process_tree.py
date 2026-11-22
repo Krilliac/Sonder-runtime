@@ -69,3 +69,69 @@ def test_grandchild_of_a_command_that_timed_out_is_removed(tmp_path):
         assert _gone(grandchild), "grandchild outlived the validation command"
     finally:
         _force_kill(grandchild)
+
+
+def test_reader_start_failure_kills_reaps_child_and_closes_tree(monkeypatch, tmp_path):
+    import pytest
+    import sonder_runtime.adapters.scenario_validation.process as sv_process
+
+    events = []
+
+    class FakeStream:
+        def read(self, *_args):
+            return b""
+
+    class FakeProc:
+        pid = 5678
+        returncode = None
+
+        def __init__(self):
+            self.stdout = FakeStream()
+            self.stderr = FakeStream()
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            events.append("kill")
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    class FakeTree:
+        def terminate(self, **_kwargs):
+            events.append("terminate")
+
+        def has_survivors(self):
+            return False
+
+        def close(self):
+            events.append("close_tree")
+
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread cap reached")
+
+        def join(self, timeout=None):
+            events.append("join_unstarted")
+
+    monkeypatch.setattr(sv_process.subprocess, "Popen", lambda *_a, **_kw: FakeProc())
+    monkeypatch.setattr(sv_process.process_tree, "is_real_popen", lambda _p: True)
+    monkeypatch.setattr(
+        sv_process.process_tree.ProcessTree, "owning", staticmethod(lambda _p: FakeTree()),
+    )
+    monkeypatch.setattr(sv_process, "owned_runtime_thread", FailingThread)
+
+    with pytest.raises(RuntimeError, match="thread cap reached"):
+        ProcessAdapter().run(("fake",), cwd=tmp_path, timeout_seconds=5)
+
+    assert "terminate" in events
+    assert "wait" in events
+    assert "close_tree" in events
+    assert "join_unstarted" not in events

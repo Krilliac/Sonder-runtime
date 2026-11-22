@@ -257,15 +257,13 @@ def test_lifetime_expiry_closes_the_job_handle_exactly_once(monkeypatch):
             calls.append(("close", handle))
             return 1
 
-    class _WinDLL:
-        kernel32 = _Kernel32()
-
     class _Timer:
         def cancel(self):
             pass
 
+    kernel32 = _Kernel32()
     monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
-    monkeypatch.setattr(code_runner.ctypes, "windll", _WinDLL(), raising=False)
+    monkeypatch.setattr(code_runner, "_win_kernel32", lambda: kernel32)
     job = 0x1234
     proc = _Proc()
     proc._sonder_job_handle = job
@@ -276,3 +274,16 @@ def test_lifetime_expiry_closes_the_job_handle_exactly_once(monkeypatch):
 
     assert calls == [("terminate", job), ("close", job)]
     assert registry._windows == {}
+
+
+@pytest.mark.skipif(code_runner.os.name != "nt", reason="Windows kernel32 ctypes signature check")
+def test_win_kernel32_is_isolated_with_explicit_job_argtypes():
+    k32 = code_runner._win_kernel32()
+    assert k32 is not code_runner.ctypes.windll.kernel32
+    assert k32.TerminateJobObject.argtypes == [
+        code_runner.ctypes.wintypes.HANDLE,
+        code_runner.ctypes.wintypes.UINT,
+    ]
+    assert k32.TerminateJobObject.restype == code_runner.ctypes.wintypes.BOOL
+    assert k32.CloseHandle.argtypes == [code_runner.ctypes.wintypes.HANDLE]
+    assert k32.CloseHandle.restype == code_runner.ctypes.wintypes.BOOL
