@@ -73,14 +73,6 @@ def runnable_arguments(sources, extract):
     return None
 
 
-def run_intent(run, gated, sources, extract, **kwargs):
-    """Gate legacy natural PowerShell runs without changing other languages."""
-    block = runnable_arguments(sources, extract)
-    if block and str(block["language"]).lower() in _LANGUAGES:
-        return gated("/run", **kwargs)
-    return run(**kwargs)
-
-
 def _is_powershell(value):
     return isinstance(value, str) and ntpath.basename(value).lower() in {
         "powershell", "powershell.exe", "pwsh", "pwsh.exe",
