@@ -50,8 +50,10 @@ _KEYWORD_LEFT_BOUNDARY = _PDF_WHITESPACE | (_PDF_DELIMITERS - frozenset(b"/%"))
 _KEYWORD_RIGHT_BOUNDARY = _PDF_WHITESPACE | _PDF_DELIMITERS
 _DICTIONARY_WINDOW = 8192
 _NAME_ESCAPE_RE = re.compile(br"#([0-9A-Fa-f]{2})")
-_FILTER_RE = re.compile(br"/Filter\s*(\[[^\]]*\]|/[A-Za-z0-9#]+)", re.S)
+_FILTER_RE = re.compile(br"/Filter[\x00\t\n\x0c\r ]*(\[[^\]]*\]|/[A-Za-z0-9#]+)", re.S)
+_FILTER_KEY_RE = re.compile(br"/Filter(?![A-Za-z0-9#])")
 _NAME_RE = re.compile(br"/[A-Za-z0-9#]+")
+_ARRAY_OF_NAMES_RE = re.compile(br"\[(?:[\x00\t\n\x0c\r ]|/[A-Za-z0-9#]+)*\]")
 
 
 class PdfRiskError(ValueError):
@@ -209,6 +211,23 @@ def _filters(dictionary):
     return [name[1:].decode("ascii", errors="replace") for name in _NAME_RE.findall(match.group(1))]
 
 
+def _inner_stream_keyword(region, start, end):
+    """Return the index of a standalone ``stream`` keyword inside ``region[start:end]``, or -1."""
+    position = start
+    while True:
+        index = region.find(_STREAM_KEYWORD, position, end)
+        if index < 0:
+            return -1
+        after = index + len(_STREAM_KEYWORD)
+        if (
+            index > 0
+            and region[index - 1] in _KEYWORD_LEFT_BOUNDARY
+            and (after >= len(region) or region[after] in _KEYWORD_RIGHT_BOUNDARY)
+        ):
+            return index
+        position = after
+
+
 def _skip_whitespace_back(region, index, floor):
     while index > floor and region[index - 1] in _PDF_WHITESPACE:
         index -= 1
@@ -264,7 +283,11 @@ def _stream_spans(region, deadline):
             yield keyword, data_start, -1
             return
         yield keyword, data_start, data_end
-        position = data_end + len(_ENDSTREAM_KEYWORD)
+        # A standalone ``stream`` inside the data means the keyword just matched
+        # may sit in a literal string; resume at the inner one so the real stream
+        # is still examined (the caller flags the outer span as ambiguous).
+        inner = _inner_stream_keyword(region, data_start, data_end)
+        position = inner if inner >= 0 else data_end + len(_ENDSTREAM_KEYWORD)
 
 
 def _is_escaped(region, index, floor):
@@ -430,11 +453,29 @@ def inspect_pdf(
             incomplete_reasons.append("ambiguous_stream_dictionary")
             continue
         normalized_dictionary = _normalize_names(dictionary)
-        if len(_FILTER_RE.findall(normalized_dictionary)) > 1:
+        filter_matches = _FILTER_RE.findall(normalized_dictionary)
+        filter_keys = len(_FILTER_KEY_RE.findall(normalized_dictionary))
+        if len(filter_matches) > 1 or filter_keys > 1:
             incomplete_reasons.append("ambiguous_stream_dictionary")
             continue
-        filters = _filters(normalized_dictionary)
+        if filter_keys != len(filter_matches) or (
+            filter_matches and filter_matches[0][:1] == b"[" and not _ARRAY_OF_NAMES_RE.fullmatch(filter_matches[0])
+        ):
+            # /Filter key whose value is not a plain name or an array holding
+            # only names (indirect reference, nested dictionary key): fail closed.
+            unsupported_filter_count += 1
+            incomplete_reasons.append("unsupported_stream_filter")
+            continue
         stream_data = region[data_start:data_end]
+        if _inner_stream_keyword(region, data_start, data_end) >= 0:
+            incomplete_reasons.append("ambiguous_stream_boundary")
+        filters = _filters(normalized_dictionary)
+        if not filters and _FILTER_KEY_RE.search(normalized_dictionary):
+            # /Filter present but its value is not a name or array (e.g. an
+            # indirect reference): the data may be compressed, never call it plain.
+            unsupported_filter_count += 1
+            incomplete_reasons.append("unsupported_stream_filter")
+            continue
         if not filters:
             decoded = stream_data
             decoded_ok = True
