@@ -118,6 +118,16 @@ def runnable_arguments(sources, extract):
     return None
 
 
+def _leaf_name(value):
+    """Return the final path component after Win32 trailing dot/space normalization."""
+    if not isinstance(value, str):
+        return ""
+    parts = re.split(r"[\\/]", value.strip())
+    while len(parts) > 1 and re.fullmatch(r"[. ]*", parts[-1]):
+        parts.pop()
+    return parts[-1].rstrip(". ")
+
+
 def _is_powershell(value):
     """True when the program path *value* names a PowerShell executable.
 
@@ -127,12 +137,12 @@ def _is_powershell(value):
     (``POWERS~1.EXE``) names the same file.  Renamed copies and links are not
     recognised.
     """
-    if not isinstance(value, str):
-        return False
-    parts = re.split(r"[\\/]", value.strip())
-    while len(parts) > 1 and re.fullmatch(r"[. ]*", parts[-1]):
-        parts.pop()
-    return bool(re.fullmatch(r"(?i)(?:powershell|pwsh|powers~\d+)(?:\.exe)?", parts[-1].rstrip(". ")))
+    return bool(re.fullmatch(r"(?i)(?:powershell|pwsh|powers~\d+)(?:\.exe)?", _leaf_name(value)))
+
+
+def _is_ps1_path(value):
+    """True when *value* names a ``.ps1`` script after Win32 path normalization."""
+    return _leaf_name(value).lower().endswith(".ps1")
 
 
 def _array(value):
@@ -193,7 +203,7 @@ def _argv(argv, stdin="", *, local=True, script_reader=None):
                 return inspect_powershell(stdin)
             return result
     # No command switch: PowerShell reads stdin or a positional script path.
-    positional = next((item for item in argv[1:] if item.lower().endswith(".ps1")), "")
+    positional = next((item for item in argv[1:] if _is_ps1_path(item)), "")
     if positional:
         if script_reader is not None:
             return script_reader(positional)
@@ -235,8 +245,7 @@ def _selects_powershell(name, arguments):
         commands = code_runner._commands_from_json(arguments.get("commands_json") or arguments.get("commands"))
         return any(_is_powershell(command["cmd"][0]) for command in commands or ())
     if name in _SCRIPT_TOOLS:
-        path = arguments.get("path", "")
-        return isinstance(path, str) and path.lower().endswith(".ps1")
+        return _is_ps1_path(arguments.get("path", ""))
     if name == "isolated_run":
         argv = _array(arguments.get("argv_json", []))
         return bool(argv) and _is_powershell(argv[0])
@@ -319,7 +328,7 @@ def inspect_tool_call(tool_name, arguments):
             return _project(arguments)
         elif name in _SCRIPT_TOOLS:
             path = arguments.get("path", "")
-            if isinstance(path, str) and path.lower().endswith(".ps1"):
+            if _is_ps1_path(path):
                 return _script(path)
         elif name in _ARGV_TOOLS:
             if name == "isolated_run":
@@ -362,7 +371,7 @@ def inspect_tool_call(tool_name, arguments):
                         or not re.match(r'''["']?(?:\s|\Z)''', rest)
                         or _PS_WORD.search(_CMD_NOISE.sub("", rest))):
                     return _opaque("PowerShell launcher outside command start")
-                if any(char in command for char in ("%", "!", "^")):
+                if any(char in command for char in ("%", "!", "^", "`")):
                     return _opaque("shell expansion around PowerShell")
                 if re.match(r"\s*(?:cmd|call|start)\b", command, re.I):
                     return _opaque("nested shell around PowerShell")
