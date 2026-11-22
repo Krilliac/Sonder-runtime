@@ -34,6 +34,20 @@ _DEFAULTED_GET = re.compile(r"\.get\(\s*[^,()]+,\s*[^)]+\)")
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
 
+_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+")
+
+
+def _split_lines(text: str) -> list:
+    """Split keeping line endings, using only the separators `ast` counts.
+
+    `str.splitlines` also breaks at form feed, vertical tab, the file/group/
+    record separators (0x1c-0x1e), NEL, U+2028 and U+2029, so one form feed
+    before a function shifted every index against `ast` line numbers and the
+    splice cut the wrong lines.
+    """
+    return _LINE_RE.findall(text)
+
+
 def list_functions(source: str) -> list[str]:
     """Top-level (column-0) function names in source order."""
     try:
@@ -65,7 +79,7 @@ def _block_bounds(lines: list, name: str):
 
 def extract_function(source: str, name: str) -> str | None:
     """The full text of one top-level function, or None if it is not defined."""
-    lines = source.splitlines(keepends=True)
+    lines = _split_lines(source)
     bounds = _block_bounds(lines, name)
     if bounds is None:
         return None
@@ -102,7 +116,7 @@ def splice_function(original: str, reply: str) -> str | None:
     replacement = reply_tree.body[0]
     name = replacement.name
 
-    lines = original.splitlines(keepends=True)
+    lines = _split_lines(original)
     bounds = _block_bounds(lines, name)
     if bounds is None:
         return None
@@ -127,8 +141,14 @@ def splice_function(original: str, reply: str) -> str | None:
     ]:
         return None
     newline = "\r\n" if "\r\n" in original else "\n"
-    body = text.rstrip().replace("\r\n", "\n").replace("\n", newline) + newline
-    candidate = "".join(lines[:first]) + body + newline + "".join(lines[last:])
+    # The spliced block ends the way the block it replaces did (including "no
+    # terminator" for a function that ends the file), and the lines after it,
+    # blank separators included, are kept as they were -- so an unchanged reply
+    # reproduces the source byte for byte instead of gaining a blank line.
+    last_line = lines[last - 1]
+    ending = last_line[len(last_line.rstrip("\r\n")):]
+    body = text.rstrip().replace("\r\n", "\n").replace("\n", newline) + ending
+    candidate = "".join(lines[:first]) + body + "".join(lines[last:])
     try:
         ast.parse(candidate)
     except SyntaxError:

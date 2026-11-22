@@ -9,6 +9,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Longest turn classify_file_intent will route to file tools (the legacy chat limit).
+# Longer text gets no file tools, which fails closed.  suppresses_file_tools has no
+# such cap: a negation must be honoured however long the prompt is.
+_MAX_ROUTED_CHARS = 12_000
 
 # Path-like token runs are bounded ({1,255}) so each start offset does bounded
 # work: an unbounded ``[\w.-]+`` backtracks over every '.' of a long dotted run
@@ -16,8 +20,8 @@ from typing import Any
 _LOCAL_TARGET = re.compile(
     r"(?:\b(?:workspace|work\s+space|repo(?:sitory)?|codebase|project|"
     r"folder|directory|file|files|scripts?|path|tree|module|package|README|LICENSE|Dockerfile|Makefile)\b|"
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]{1,255}\.(?:[A-Za-z]{2,10}|[ch])\b|"
-    r"\b(?:[\w.-]{1,255}[\\/])+[\w.-]{1,255}|\b[a-zA-Z_][\w.-]{0,255}_[\w.-]{1,255}\b))", re.IGNORECASE,
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b[\w.-]{1,128}\.(?:[A-Za-z]{2,10}|[ch])\b|"
+    r"\b(?:[\w.-]{1,128}[\\/]){1,32}[\w.-]{1,128}|\b[a-zA-Z_][\w.-]{0,127}_[\w.-]{1,128}\b))", re.IGNORECASE,
 )
 
 # Explicit mutation verbs.  These are intentionally separate from the broad
@@ -28,9 +32,12 @@ _MUTATION = re.compile(
     r"delete|remove|run|execute|deploy|compile|test|fix|patch)\b(?![./\\])",
     re.IGNORECASE,
 )
+# A run of "then/also" needs no group of its own: each of those words is itself a
+# connector start, so the last one before the verb already matches.  Repeating the
+# group made every start rescan the whole run (quadratic on "then then then ...").
 _MUTATION_REQUEST = re.compile(
     r"(?:^(?:/delegate\s+)?(?:(?:please|can\s+you|could\s+you|would\s+you|will\s+you)\s+)*"
-    r"|(?:\b(?:and|then|also)\b|[,;])\s+(?:(?:then|also|please)\s+)*)" + _MUTATION.pattern,
+    r"|(?:\b(?:and|then|also)\b|[,;])\s+(?:please\s+)*)" + _MUTATION.pattern,
     re.IGNORECASE,
 )
 _MUTATION_TARGET = re.compile(
@@ -41,8 +48,8 @@ _MUTATION_TARGET = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_FILE = re.compile(
-    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]{1,255}[\\/])+[\w.-]{1,255}|"
-    r"\b[\w.-]{1,255}\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
+    r"(?:[A-Za-z]:[\\/]|[./~][\\/]|\b(?:[\w.-]{1,128}[\\/]){1,32}[\w.-]{1,128}|"
+    r"\b[\w.-]{1,128}\.(?:[A-Za-z]{2,10}|[ch])\b|\b(?:README|LICENSE|Dockerfile|Makefile)\b)",
     re.IGNORECASE,
 )
 _INSPECTION = re.compile(
@@ -129,7 +136,7 @@ def classify_file_intent(text: str) -> dict[str, Any] | None:
     if not isinstance(text, str):
         return None
     value = text.strip()
-    if not value or len(value) > 12_000 or _NO_TOOLS_OR_NEGATION.search(value):
+    if not value or len(value) > _MAX_ROUTED_CHARS or _NO_TOOLS_OR_NEGATION.search(value):
         return None
 
     local_fact = bool(_LOCAL_FACT_QUESTION.match(value) and _LOCAL_TARGET.search(value))

@@ -116,6 +116,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+import code_improve
 import selfmod
 from scripts import selfmod_host_grader
 from scripts import selfmod_linux_isolation
@@ -557,7 +558,8 @@ def terminate_tree(pid):
             pass
 try:
     process = subprocess.Popen(
-        [sys.executable, "-m", "pytest", "-q", "-s", "--rootdir", str(suite_root),
+        [sys.executable, "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider",
+         "--rootdir", str(suite_root),
          *[item["path"] for item in payload["suites"]]],
         cwd=candidate, env=environment, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -1174,7 +1176,7 @@ def _splice_function(original: str, reply: str, expected_name: str | None = None
 
     if signature(candidate) != signature(original_function):
         return None
-    candidate_lines = cleaned.splitlines(keepends=True)
+    candidate_lines = code_improve._split_lines(cleaned)
     candidate_first = min(
         [candidate.lineno]
         + [decorator.lineno for decorator in candidate.decorator_list]
@@ -1184,7 +1186,10 @@ def _splice_function(original: str, reply: str, expected_name: str | None = None
         return None
     body = "".join(candidate_lines[candidate_first - 1:candidate_last])
 
-    lines = original.splitlines(keepends=True)
+    # Split the way `ast` counts lines (form feed and U+2028 are not line
+    # breaks to it), and end the spliced block the way the block it replaces
+    # ended, so an unchanged reply reproduces the source byte for byte.
+    lines = code_improve._split_lines(original)
     first = min(
         [original_function.lineno]
         + [decorator.lineno for decorator in original_function.decorator_list]
@@ -1192,7 +1197,16 @@ def _splice_function(original: str, reply: str, expected_name: str | None = None
     last = original_function.end_lineno
     if last is None or first < 0 or last > len(lines):
         return None
-    return "".join(lines[:first]) + body.rstrip() + "\n" + "".join(lines[last:])
+    newline = "\r\n" if "\r\n" in original else "\n"
+    last_line = lines[last - 1]
+    ending = last_line[len(last_line.rstrip("\r\n")):]
+    new_body = body.rstrip().replace("\r\n", "\n").replace("\n", newline) + ending
+    spliced = "".join(lines[:first]) + new_body + "".join(lines[last:])
+    try:
+        ast.parse(spliced)
+    except SyntaxError:
+        return None
+    return spliced
 
 
 def _rewrite_reply_objection(reply: str) -> str | None:
