@@ -23,7 +23,12 @@ def _legacy_format(session_id, sess, turns):
 
 
 def _seed(monkeypatch, tmp_path, turns, *, title="demo", project="proj"):
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+
     monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    monkeypatch.setattr(server, "_application", lambda: SimpleNamespace(session_repository=lambda: repo))
     conn = server._open_db()
     try:
         memory_store.touch_session(conn, "S1", project)

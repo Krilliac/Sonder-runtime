@@ -39,13 +39,15 @@ _TYPE_EXPR = r"[A-Za-z_][A-Za-z0-9_.]{0,64}+(?:\[[^\]\r\n=]{0,128}+\]{1,3}+)?"
 # and its first 256 characters: long values, triple quotes and values
 # continued on the next line are still findings.
 _ASSIGNMENT = re.compile(
-    r"(?i)(?<![a-z0-9_-])(?P<name>[a-z0-9_-]++)(?=(?P<quote>[\"']?)"
+    r"(?i)(?<![a-z0-9_-])(?P<name>[a-z0-9_-]++)(?=(?P<quote>(?:\\?[\"'])?)"
     r"(?P<ann>[^\S\r\n]{0,16}+:[^\S\r\n]{0,16}+" + _TYPE_EXPR
     + r"(?:[^\S\r\n]{0,16}+\|[^\S\r\n]{0,16}+" + _TYPE_EXPR + r")?)?"
     r"(?P<pre>" + _WS + r")(?P<sep>(?(ann)=(?!=)|(?:=>|:=|:|=(?!=))))(?P<post>" + _WS + r")"
     r"(?:[rbuf]{0,2}(?P<triple>\"\"\"|''')"
     r"|[rbuf]{0,2}\"(?P<dq>[^\"\r\n]{1,256}+)"
     r"|[rbuf]{0,2}'(?P<sq>[^'\r\n]{1,256}+)"
+    r"|\\\"(?P<edq>[^\"\\\r\n]{1,256}+)"
+    r"|\\'(?P<esq>[^'\\\r\n]{1,256}+)"
     r"|(?P<bare>(?![<\"'])[^\s,;\"']{1,256}+)))"
 )
 _LITERAL_NAMES = frozenset({"none", "null", "nil", "true", "false", "undefined"})
@@ -154,7 +156,7 @@ def _assignment_is_credential(match: re.Match[str]) -> bool:
         return False
     if match.group("triple"):
         return True
-    body = match.group("dq") or match.group("sq")
+    body = match.group("dq") or match.group("sq") or match.group("edq") or match.group("esq")
     if body:
         return _quoted_is_literal(body)
     return not _bare_is_code(match.group("bare"), match)

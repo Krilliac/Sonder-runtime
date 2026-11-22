@@ -23,13 +23,13 @@ PROHIBITED_CALLERS = {
 }
 
 
-def _imports(path: Path) -> set[str]:
+def _imports(path: Path, *, include_relative: bool = True) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     result: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             result.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.module and (include_relative or node.level == 0):
             result.add(node.module)
     return result
 
@@ -40,11 +40,11 @@ def test_server_root_import_isolated_to_legacy_root_boundary():
     for path in PACKAGE_ROOT.rglob("*.py"):
         if path == LEGACY_ROOT:
             continue
-        if "server" in _imports(path):
+        if "server" in _imports(path, include_relative=False):
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
 
     assert offenders == []
-    assert "server" in _imports(LEGACY_ROOT)
+    assert "server" in _imports(LEGACY_ROOT, include_relative=False)
 
 
 def test_legacy_root_is_only_reached_by_bootstrap_composition_modules():

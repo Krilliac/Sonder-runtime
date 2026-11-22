@@ -112,7 +112,7 @@ def execute_typed_call(tools_getter: Callable[[], Any], tool: str, arguments: Ma
                        codes: GatewayErrorCodes, *, principal_id: str,
                        workspace_roots: tuple[str, ...] = (), auth_level: str = "user",
                        deadline_monotonic: float | None = None,
-                       gate: str = "") -> tuple[int, dict]:
+                       gate: str = "gateway") -> tuple[int, dict]:
     """Run one typed tool call through the gateway; ``(status, body)``.
 
     A success body carries ``ok`` and the gateway receipt; the caller picks
@@ -132,7 +132,7 @@ def execute_typed_call(tools_getter: Callable[[], Any], tool: str, arguments: Ma
             arguments=dict(arguments),
             scope=ToolScope(principal_id=str(principal_id), workspace_roots=tuple(
                 str(root) for root in workspace_roots), allowed_effects=effects,
-                source="http", auth_level=auth_level, gate=gate),
+                source="http", auth_level=auth_level, gate=gate or "gateway"),
             permission=ToolPermission(effects),
             deadline_monotonic=deadline_monotonic,
             execution_world="local",

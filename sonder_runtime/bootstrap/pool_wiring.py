@@ -89,9 +89,14 @@ def pool_unified_status(pool: Any, gateway: object) -> dict[str, Any]:
     return out
 
 
-def merge_pool_unified_status(page: Any, pool: Any, gateway: object) -> Any:
-    """Merge ``pool_unified_status`` onto ``page`` and refresh ``serialized_bytes``."""
+def merge_pool_unified_status(
+    page: Any, pool: Any, gateway: object, *, max_bytes: int = 65_536,
+) -> Any:
+    """Merge ``pool_unified_status`` onto a complete ``page`` within ``max_bytes``."""
     if not isinstance(page, dict):
+        return page
+    # Partial pages must never materialize unrequested workers or exceed the page cap.
+    if page.get("complete") is False:
         return page
     extra = pool_unified_status(pool, gateway)
     if not extra:
@@ -100,6 +105,8 @@ def merge_pool_unified_status(page: Any, pool: Any, gateway: object) -> Any:
     if "serialized_bytes" in merged:
         for _ in range(3):
             merged["serialized_bytes"] = len(json.dumps(merged).encode("utf-8"))
+        if merged["serialized_bytes"] > max_bytes:
+            return page
     return merged
 
 
@@ -337,7 +344,7 @@ def execute_ensemble_poll(
         try:
             with pin:
                 target_num_ctx = lookup.num_ctx(tier, model)
-                gen = make_tier_generate_fn(tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx, text_only=True)
+                gen = make_tier_generate_fn(tier, model, "", 0.2, max(64, int(num_predict)), target_num_ctx)
                 text = (lookup.ask(tier, gen, question) or "").strip()
         except Exception as error:
             if isinstance(error, model_call_error_cls) and getattr(error, "kind", None) == "cancelled":
@@ -374,6 +381,7 @@ __all__ = [
     "execute_ensemble_poll",
     "fetch_ps_for_origin",
     "group_ensemble_targets",
+    "merge_pool_unified_status",
     "pool_context_hints",
     "pool_unified_status",
     "register_pool_worker",

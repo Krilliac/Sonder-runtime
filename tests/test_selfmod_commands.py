@@ -127,15 +127,15 @@ def _allow_selfmod_rule(monkeypatch):
     """Simulate operator opt-in allow rules for selfmod/update/stash (G1452 precondition)."""
     import permission_modes
 
-    orig = permission_modes._rule_action_for
+    orig = permission_modes._rule_lookup
     allowed = {"selfmod", "runtime_source_update", "runtime_source_stash"}
 
-    def _rule(tool, args=None):
+    def _lookup(tool):
         if tool in allowed:
-            return permission_modes.ALLOW, "test allow rule"
-        return orig(tool, args)
+            return {"pattern": tool, "action": permission_modes.ALLOW}
+        return orig(tool) if callable(orig) else None
 
-    monkeypatch.setattr(permission_modes, "_rule_action_for", _rule)
+    monkeypatch.setattr(permission_modes, "_rule_lookup", _lookup)
 
 
 def test_nested_sonder_selfmod_and_admin_commands_refused_for_developer(monkeypatch):

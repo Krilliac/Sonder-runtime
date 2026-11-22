@@ -1030,12 +1030,25 @@ def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
             )
             break
 
-    try:
-        receiver_raw = str(private_store_path(config))
-    except (OSError, RuntimeError, ValueError):
+    receiver_source = (
+        config.artifact_transfer.store_dir
+        if isinstance(config.artifact_transfer.store_dir, str)
+        and config.artifact_transfer.store_dir.strip()
+        else config.state.home
+    )
+    if (
+        isinstance(receiver_source, str)
+        and receiver_source.strip()
+        and sonder_paths.try_parse_local_root(receiver_source, expand_user=True) is None
+    ):
         receiver_path = None
     else:
-        receiver_path = _canonical_private_path(receiver_raw)
+        try:
+            receiver_raw = str(private_store_path(config))
+        except (OSError, RuntimeError, ValueError):
+            receiver_path = None
+        else:
+            receiver_path = _canonical_private_path(receiver_raw)
     if receiver_path is not None and _paths_overlap(source_path, receiver_path):
         errors.append(
             "[artifact_mobility_source].store_dir overlaps artifact transfer store"

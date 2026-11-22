@@ -1148,7 +1148,8 @@ def test_try_reserve_refuses_a_call_whose_worst_case_would_pass_the_cap(ledger):
     assert ledger._inflight == {}
     token, spent, inflight = ledger.try_reserve(Decimal("0.01"), Decimal(5))  # exact fit
     assert token is not None and spent == Decimal("4.99")
-    assert ledger._inflight == {token: Decimal("0.01")}
+    assert set(ledger._inflight) == {token}
+    assert ledger._inflight[token][2] == Decimal("0.01")
     # In-flight reservations count too: nothing more fits once the cap is exactly full.
     assert ledger.try_reserve(Decimal("0.0001"), Decimal(5))[0] is None
     ledger.release(token)

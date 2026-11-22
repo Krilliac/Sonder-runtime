@@ -219,8 +219,11 @@ def parse_cmake_presets(
     # acyclic nodes (`name not in in_cycle`) cannot reach any ancestor on `stack`,
     # so their results stay memoised even above a cyclic descendant; only nodes
     # inside a cycle skip memoisation when a cycle cut occurs. A per-root step
-    # budget caps dense cyclic cliques (e.g. K_16) to milliseconds.
+    # A per-root step budget caps dense cyclic cliques (e.g. K_16) to
+    # milliseconds: acyclic nodes are memoised and bounded by _MAX_RESOLVE_STEPS,
+    # while cyclic SCC exploration is additionally capped by _MAX_CYCLE_STEPS.
     _MAX_RESOLVE_STEPS = 4096
+    _MAX_CYCLE_STEPS = 256
     resolved_memo: dict[tuple[int, str, str, int], object] = {}
     merged_memo: dict[tuple[int, str, int], dict[str, str]] = {}
     cycle_sets: dict[int, frozenset[str]] = {}
@@ -302,9 +305,12 @@ def parse_cmake_presets(
         key = (id(pool), name, field, depth)
         if key in resolved_memo:
             return resolved_memo[key], False, False
-        if budget[0] <= 0:
+        is_cyclic = name in in_cycle
+        if budget[0] <= 0 or (is_cyclic and budget[1] <= 0):
             return None, True, True
         budget[0] -= 1
+        if is_cyclic:
+            budget[1] -= 1
         preset = entry[0]
         if field in preset:
             return preset[field], False, False
@@ -328,7 +334,7 @@ def parse_cmake_presets(
 
     def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
         value, _, _ = _resolved(
-            pool, name, field, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS],
+            pool, name, field, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS, _MAX_CYCLE_STEPS],
         )
         return value
 
@@ -345,9 +351,12 @@ def parse_cmake_presets(
         cached = merged_memo.get(memo_key)
         if cached is not None:
             return dict(cached), False, False
-        if budget[0] <= 0:
+        is_cyclic = name in in_cycle
+        if budget[0] <= 0 or (is_cyclic and budget[1] <= 0):
             return {}, True, True
         budget[0] -= 1
+        if is_cyclic:
+            budget[1] -= 1
         preset = entry[0]
         out: dict[str, str] = {}
         cycle_cut = False
@@ -378,7 +387,7 @@ def parse_cmake_presets(
 
     def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
         out, _, _ = _merged_cache(
-            pool, name, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS],
+            pool, name, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS, _MAX_CYCLE_STEPS],
         )
         return out
 

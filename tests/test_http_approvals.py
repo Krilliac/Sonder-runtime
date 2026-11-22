@@ -599,6 +599,7 @@ def test_unknown_or_missing_auth_context_cannot_approve(ledger):
         handler = recording_handler(sent)
         ports = approval_routes.HttpApprovalPorts(
             developer_authorized=lambda _c: True,
+            approve_authority_error=lambda _c: "",
             error_envelope=lambda code, message, corr, retryable=False: {
                 "error": {"code": code, "message": message, "retryable": retryable}},
             ledger=lambda: ledger,

@@ -103,7 +103,7 @@ def test_ollama_gateway_preserves_target_system_and_generation_shape():
     assert response.text == "ollama response"
     assert response.model == "provider-model"
     assert response.tokens_in == 3 and response.tokens_out == 2
-    assert calls[0][0:5] == ("provider-model", "provider system", 0.2, 12, 4096)
+    assert calls[0][0:5] == ("provider-model", "provider system", None, 12, 4096)
     assert gateway.embed(["x"], _CONTEXT)[0].vector == (0.25,)
 
 

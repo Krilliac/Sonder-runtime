@@ -5346,8 +5346,29 @@ class Handler(BaseHTTPRequestHandler):
         # The declared body is off the socket, whatever it decodes to below.
         self._request_body_consumed = True
         try:
+            text = raw.decode("utf-8")
+            # Python 3.14's iterative _json parser accepts arbitrarily nested
+            # documents; cap nesting explicitly before decoding.
+            depth = 0
+            in_str = escaped = False
+            for ch in text:
+                if in_str:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_str = False
+                elif ch == '"':
+                    in_str = True
+                elif ch in "{[":
+                    depth += 1
+                    if depth > 128:
+                        raise RecursionError("JSON nesting depth exceeded")
+                elif ch in "}]":
+                    depth = max(0, depth - 1)
             payload = json.loads(
-                raw.decode("utf-8"),
+                text,
                 object_pairs_hook=_reject_duplicate_json_object_key,
                 parse_constant=_reject_nonfinite_json_number,
             )

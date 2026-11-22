@@ -357,16 +357,18 @@ def _flood(unit, size, head="", tail=""):
 
 
 def _timed(classify, limit):
-    """The verdict and the best of up to three timings, stopping once one is under ``limit``.
+    """The verdict and the best of up to three CPU timings, stopping once one is under ``limit``.
 
-    A quadratic shape takes many times the limit on every try; a retry only
-    keeps another process's load on this machine from failing a linear one.
+    The classifier is purely static (no I/O, no sleeps, no subprocesses), so
+    ``process_time`` measures 100% of its work without false failures when
+    sibling xdist workers preempt the process on a shared CI runner.  A
+    quadratic shape takes many times the limit on every try.
     """
     best = float("inf")
     for _attempt in range(3):
-        started = time.perf_counter()
+        started = time.process_time()
         verdict = classify()
-        best = min(best, time.perf_counter() - started)
+        best = min(best, time.process_time() - started)
         if best < limit:
             break
     return verdict, best

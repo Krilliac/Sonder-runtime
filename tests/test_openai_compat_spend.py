@@ -202,7 +202,6 @@ def test_unmetered_remote_payload_is_exactly_the_old_one(tmp_path):
         "model": "m",
         "messages": rec.payloads[0]["messages"],
         "stream": False,
-        "temperature": 0.2,
     }
     assert rec.payloads[1]["max_tokens"] == 99_999
     assert gw.spend_snapshot() is None

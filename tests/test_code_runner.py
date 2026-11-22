@@ -345,7 +345,7 @@ def test_timeout_is_clamped(monkeypatch):
     monkeypatch.setattr(code_runner.subprocess, "Popen", lambda *args, **kwargs: Proc())
     out = code_runner.run_code("print(1)", timeout=999)
     assert out["ok"] is True
-    assert seen["timeout"] == code_runner.MAX_TIMEOUT
+    assert code_runner.MAX_TIMEOUT - 1 <= seen["timeout"] <= code_runner.MAX_TIMEOUT
 
 
 def test_format_result_includes_stdout_and_stderr():

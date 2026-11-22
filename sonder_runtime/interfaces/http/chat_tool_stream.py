@@ -183,9 +183,8 @@ def handle_permission_mode_post(
     principal = principal_of(context)
     scoped = resolved == getattr(permission_policy, "BYPASS", "bypass")
     local_open = is_local_open_context(context)
+    refused_type = getattr(permission_policy, "ModeEscalationRefused", None) or permission_policy.mode_escalation_refused()
     if local_open:
-        refused_type = permission_policy.mode_escalation_refused()
-
         def apply_mode() -> Any:
             try:
                 return permission_policy.set_mode_without_escalation(resolved)
@@ -220,7 +219,7 @@ def handle_permission_mode_post(
     if send_escalation_refusal is not None:
         if send_escalation_refusal(handler, permission_policy, result, error_envelope):
             return
-    elif isinstance(result, permission_policy.mode_escalation_refused()):
+    elif isinstance(result, refused_type):
         current = str(getattr(result, "current", ""))
         target = str(getattr(result, "target", resolved))
         payload = error_envelope(
@@ -237,9 +236,15 @@ def handle_permission_mode_post(
             previous, resolved, surface="http", actor=approver_of(context),
             confirmed=confirm_bypass,
         )
-    with permission_policy.mode_scope(principal, session_id, local_open=local_open):
+    if scoped:
+        with permission_policy.mode_scope(principal, session_id, local_open=local_open):
+            observe_state()
+            payload = dict(mode_data())
+    else:
         observe_state()
         payload = dict(mode_data())
+        if isinstance(result, str) and result:
+            payload["mode"] = result
     payload["can_bypass"] = not bypass_http_refusal(context)
     handler._send_json_payload(payload)
 

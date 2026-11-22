@@ -99,6 +99,7 @@ def test_http_slash_both_spellings_use_parser(monkeypatch, command, arguments, c
         master_orchestrator=SimpleNamespace(capacity=lambda: {"worker_slots": 1}),
         master_orchestrate=lambda **kw: calls.append(kw) or "started",
         served_project_refusal=lambda project: "",
+        _http_chat_tools=lambda: SimpleNamespace(slash_run_arguments=lambda *a, **kw: None),
     ))
     assert serve._handle_slash(f"{command} {arguments}", project="project") == "started"
     assert calls == [{"task": "task", "mode": "fleet", "agents": count, "project": "project"}]

@@ -50,8 +50,17 @@ def test_initial_decision_matches_origin_main(
     monkeypatch.setattr(gate, "inspect_powershell", unexpected_parser)
     kwargs = dict(arguments=arguments, mode=mode, interactive=interactive, record=False,
                   rule_lookup=lambda name: {"action": rule} if rule else None)
-    before = origin_permission_modes.decide(tool, **kwargs)
     after = pm.decide(tool, **kwargs)
+    if mode not in origin_permission_modes.MODES:
+        # BYPASS was added after origin/main; verify its rule/mode semantics
+        # directly (deny rules still refuse; bypass allows non-dangerous tools
+        # without invoking inspect_powershell on nonexistent source).
+        if rule == "deny":
+            assert after.action == pm.DENY and after.source == "rule"
+        else:
+            assert after.action == pm.ALLOW and after.source == "mode"
+        return
+    before = origin_permission_modes.decide(tool, **kwargs)
     assert asdict(after) == asdict(before)
 
 

@@ -95,7 +95,7 @@ def test_configure_typed_config_maps_prewarm_on_start(monkeypatch):
 
 @pytest.mark.parametrize("raw, expected", [
     ("1", True), ("true", True), ("yes", True), ("on", True),
-    ("0", False), ("false", False), ("off", False), ("garbage", False),
+    ("0", False), ("false", False), ("off", False),
 ])
 def test_serve_fallback_env_parse_agrees_with_the_typed_config(raw, expected):
     from sonder_runtime.platform.config_environment import env_bool
@@ -103,6 +103,14 @@ def test_serve_fallback_env_parse_agrees_with_the_typed_config(raw, expected):
     assert env_bool(raw) is expected
     typed = sonder_config.load_config(env={"SONDER_PREWARM_ON_START": raw})
     assert typed.server.prewarm_on_start is expected
+
+
+def test_serve_fallback_env_parse_fails_closed_while_typed_config_rejects_garbage():
+    from sonder_runtime.platform.config_environment import env_bool
+
+    assert env_bool("garbage") is False
+    with pytest.raises(sonder_config.ConfigError, match="SONDER_PREWARM_ON_START"):
+        sonder_config.load_config(env={"SONDER_PREWARM_ON_START": "garbage"})
 
 
 def _run_serve_main(monkeypatch, setting, recorded):

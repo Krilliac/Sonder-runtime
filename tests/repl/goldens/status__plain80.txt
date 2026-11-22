@@ -6,6 +6,8 @@
   agents    0 running, 0 lanes
   project   default
   endpoint  http://127.0.0.1:1 not listening
-  pool      Ollama: 1 worker (0 ready), idle
+  pool      Ollama: 1 worker (0 ready), idle; fast (sonder:latest): no worker
+            advertises it yet; code (sonder:latest): no worker advertises it
+            yet; general (sonder:latest): no worker advertises it yet
   /status pool for worker detail | /about for provenance
 >

@@ -307,11 +307,18 @@ def chat_request(
         error.provider_display_url = _provider_display_url(gateway, rung.provider)
         raise error from exc
     require_served(rung, response.model, text_only=text_only)
-    origin = _provider_display_url(gateway, rung.provider)
-    from sonder_runtime.application.agents.delegation_runtime import note_agent_execution
+    from sonder_runtime.application.agents.delegation_runtime import (
+        current_board,
+        current_depth,
+        note_agent_execution,
+    )
+    origin = ""
+    if current_depth() >= 1 or current_board() is not None:
+        resolved = _provider_display_url(gateway, rung.provider)
+        origin = "" if resolved == "(endpoint unavailable)" else resolved
     note_agent_execution(
         model=str(getattr(response, "model", "") or ""),
-        origin="" if origin == "(endpoint unavailable)" else origin,
+        origin=origin,
     )
     return out, response.text
 
