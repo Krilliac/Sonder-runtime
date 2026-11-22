@@ -28,7 +28,7 @@ abstract class ChatBackend {
   /// own request and is never cancelled by Stop.
   Future<void> recordFeedback(String command, TurnRequest context);
 
-  Future<SystemInfo> systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project});
   Future<ServerCapabilities?> fetchCapabilities();
   Future<WhoamiInfo?> fetchWhoami();
   Future<List<String>> listModels();
@@ -280,8 +280,8 @@ class SonderApiChatBackend implements ChatBackend {
       );
 
   @override
-  Future<SystemInfo> systemInfo() async {
-    final info = await api.systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
+    final info = await api.systemInfo(sessionId: sessionId, project: project);
     final activity = info.activity;
     if (_open.isEmpty) {
       _runningBefore = {

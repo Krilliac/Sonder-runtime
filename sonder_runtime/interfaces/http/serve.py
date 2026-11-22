@@ -6129,6 +6129,13 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
+            status_query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            status_session = str(
+                (status_query.get("session") or [""])[0]
+                or self.headers.get("X-Sonder-Session", "")
+                or ""
+            ).strip()
+            status_project = str((status_query.get("project") or [""])[0] or "").strip()
             self._send_json_payload(server._http_chat_tools().sonder_status_payload(
                 server=server, context=context, caps=_capabilities_payload(context),
                 public_hosting=bool(PUBLIC_HOSTING), admin_authorized=_admin_authorized(context),
@@ -6137,6 +6144,7 @@ class Handler(BaseHTTPRequestHandler):
                 app_control_binding=_APP_CONTROL_BINDING, state_home=str(runtime_paths.default_home()),
                 deployment_payload=sonder_lifecycle.get().deployment_payload(),
                 build_operational_capabilities=build_operational_capabilities, narrate=_narrated_status,
+                session=status_session, project=status_project,
             ))
             return
         if path == _CLIENT_SCHEMA_ROUTE:

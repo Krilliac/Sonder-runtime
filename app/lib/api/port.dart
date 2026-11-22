@@ -23,7 +23,7 @@ abstract interface class SonderApiPort {
   Future<List<String>> listModels();
   Future<ModelCatalog> modelCatalog();
   Future<EcosystemReading> ecosystemStatus();
-  Future<SystemInfo> systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project});
   Future<ServerCapabilities?> fetchCapabilities();
   Future<WhoamiInfo?> fetchWhoami();
   Future<CommandCatalog> fetchCommands();

@@ -535,6 +535,8 @@ def sonder_status_payload(
     deployment_payload: Any,
     build_operational_capabilities: Callable[..., Any],
     narrate: Callable[[dict[str, Any]], Any],
+    session: str = "",
+    project: str = "",
 ) -> Any:
     """Build the ``GET /v1/sonder/status`` payload for restricted or admin callers."""
     account = context.get("account") or {}
@@ -593,7 +595,11 @@ def sonder_status_payload(
         "stats": server.sonder_stats(),
         "learn_tiers": server.learn_tiers(),
         "improvements": server.system_improvement_report(),
-        "context": server.context_health_data(),
+        "context": (
+            server.context_health_data(session=session, project=project)
+            if (session or project)
+            else server.context_health_data()
+        ),
         "context_policy": server.context_policy.policy(server.SESSION_NUM_CTX),
         "agents": agents,
         "execution": server.execution_status_data(

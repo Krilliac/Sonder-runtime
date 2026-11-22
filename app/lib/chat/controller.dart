@@ -319,9 +319,9 @@ class ChatController extends ChangeNotifier {
     unawaited(refreshWhoami());
     unawaited(refreshModels());
     unawaited(refreshCommands());
-    unawaited(pollStatus());
     unawaited(refreshPermissionMode());
     await loadThreads();
+    unawaited(pollStatus());
   }
 
   /// Cancel and discard any in-flight streamed turn so switching servers or
@@ -412,6 +412,52 @@ class ChatController extends ChangeNotifier {
     _modeTimer = Timer(modePollInterval, () => refreshPermissionMode());
   }
 
+  /// Estimate tokens for the active thread locally (approx 1 token per 4 chars)
+  /// so the context ring updates immediately on new threads, switches, and turns.
+  int _localThreadTokens(List<ChatMessage> messages) {
+    if (messages.isEmpty) return 0;
+    var chars = 0;
+    for (final m in messages) {
+      chars += m.content.length + 16;
+    }
+    return (chars + 3) ~/ 4;
+  }
+
+  SystemInfo _withThreadContext(SystemInfo info) {
+    final serverCtx = info.context;
+    if (serverCtx == null) return info;
+    final currentSession = sessionFor(_currentThreadId);
+    final localMsgs = currentThread.messages;
+    final localTokens = _localThreadTokens(localMsgs);
+    final sameSession = serverCtx.session == currentSession;
+    // Never show another session's stale usage (e.g. "default" at 27%) on a
+    // brand-new or switched thread. When on the same session, take the higher
+    // of the server's tracked count and the live local message estimate.
+    final effectiveTokens = sameSession
+        ? (serverCtx.estimatedTokens > localTokens
+            ? serverCtx.estimatedTokens
+            : localTokens)
+        : localTokens;
+    final turns = (localMsgs.length + 1) ~/ 2;
+    return info.withContext(serverCtx.copyWithUsage(
+      session: currentSession,
+      project: _project,
+      estimatedTokens: effectiveTokens,
+      liveTurns: sameSession
+          ? (serverCtx.liveTurns > turns ? serverCtx.liveTurns : turns)
+          : turns,
+      totalTurns: sameSession
+          ? (serverCtx.totalTurns > turns ? serverCtx.totalTurns : turns)
+          : turns,
+    ));
+  }
+
+  void _refreshLocalContextMeter() {
+    final current = status.value;
+    if (current == null) return;
+    status.value = _withThreadContext(current);
+  }
+
   /// One status read. Never overlaps another; only notifies when something
   /// visible changed.
   Future<void> pollStatus() async {
@@ -421,10 +467,15 @@ class ChatController extends ChangeNotifier {
     statusRequests++;
     final generation = _backendGeneration;
     final backend = _backend;
+    final requestedSession = sessionFor(_currentThreadId);
+    final requestedProject = _project;
     try {
-      final info = await backend.systemInfo();
+      final info = await backend.systemInfo(
+        sessionId: requestedSession,
+        project: requestedProject,
+      );
       if (_disposed || generation != _backendGeneration) return;
-      status.value = info;
+      status.value = _withThreadContext(info);
       _setConnection(ConnectionStatus(
           ConnState.connected, ConnectionStatus.hostOf(backend.serverUrl)));
       if (!_loadingThreads &&
@@ -885,6 +936,7 @@ class ChatController extends ChangeNotifier {
       _threads = nextThreads;
       if (threadId == _currentThreadId) {
         _setEntries(replayed);
+        _refreshLocalContextMeter();
       }
       _notify();
       unawaited(ChatStore.save(_threads));
@@ -951,6 +1003,7 @@ class ChatController extends ChangeNotifier {
     if (isCurrent && nextProject != null && nextProject.isNotEmpty) {
       _project = nextProject;
     }
+    if (isCurrent) _refreshLocalContextMeter();
     _notify();
     await ChatStore.save(_threads);
   }
@@ -961,8 +1014,10 @@ class ChatController extends ChangeNotifier {
     _currentThreadId = fresh.id;
     _project = fresh.project;
     _entries.clear();
+    _refreshLocalContextMeter();
     _notify();
     unawaited(ChatStore.save(_threads));
+    unawaited(pollStatus());
   }
 
   void switchThread(ChatThread thread) {
@@ -973,8 +1028,10 @@ class ChatController extends ChangeNotifier {
         _threads.firstWhere((t) => t.id == thread.id, orElse: () => thread);
     _setEntries(latest.messages);
     if (sending && _turnThreadId == thread.id) _restorePendingRow();
+    _refreshLocalContextMeter();
     _notify();
     unawaited(syncThreadFromServer(thread.id));
+    unawaited(pollStatus());
   }
 
   /// Delete [thread]. The result is what [restoreThread] needs to undo it.
@@ -1183,6 +1240,7 @@ class ChatController extends ChangeNotifier {
     _notify();
     // The user's words are durable before the reply exists.
     unawaited(_saveThread(_turnThreadId, history));
+    _refreshLocalContextMeter();
     // The status poll runs at 1 Hz while a turn is live.
     _schedulePoll();
 
