@@ -230,8 +230,8 @@ switch ($Action) {
             }
 
             $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-            $stdout = Join-Path $logDir "llama-rpc-$stamp.stdout.log"
-            $stderr = Join-Path $logDir "llama-rpc-$stamp.stderr.log"
+            $stdout = $null
+            $stderr = Join-Path $logDir "llama-rpc-$stamp.log"
             $rpcArg = ($validatedPeers | ForEach-Object { $_.Address }) -join ','
 
             $serverArgs = @(
@@ -247,18 +247,16 @@ switch ($Action) {
                 '--cache-type-v', $CacheTypeV,
                 '--parallel', [string]$Parallel,
                 '-lv', [string]$LogVerbosity,
-                '--no-webui'
+                '--no-webui',
+                '--log-file', $stderr
             )
             if ($TensorSplit.Trim()) {
                 $serverArgs += @('--tensor-split', $TensorSplit.Trim())
             }
 
-            $proc = Start-Process -FilePath $llamaExe `
-                -ArgumentList (ConvertTo-RpcArgumentString $serverArgs) `
-                -WorkingDirectory $InstallDir `
-                -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-                -WindowStyle Hidden -PassThru
-            $launchedPid = [int]$proc.Id
+            $launchedPid = Start-RpcDetached -ExePath $llamaExe `
+                -ArgumentString (ConvertTo-RpcArgumentString $serverArgs) `
+                -WorkingDirectory $InstallDir
             $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
             $recordedExe = Get-RpcProcessPath -ProcessId $launchedPid
 

@@ -165,12 +165,11 @@ def test_launchers_record_canonical_exe_path(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ["start-rpc-worker.ps1", "start-rpc-sharded.ps1"])
-def test_launchers_use_start_process_not_encoded_wrapper(name: str) -> None:
+def test_launchers_use_detached_cim_launch_not_encoded_wrapper(name: str) -> None:
     text = (SCRIPTS / name).read_text(encoding="utf-8")
     assert "EncodedCommand" not in text
-    assert "Win32_Process" not in text
-    assert "Start-Process" in text
-    assert "-ArgumentList" in text
+    assert "Start-Process" not in text
+    assert "Start-RpcDetached" in text
     assert "Test-RpcOwnedProcess" in text
 
 
@@ -181,3 +180,30 @@ def test_sharded_launcher_hardening_markers() -> None:
     assert "NoProxy" in text
     assert "ConvertTo-RpcBaseUrl" in text
     assert os.path.basename(str(SCRIPTS)) == "rpc"
+
+def test_detached_launch_does_not_inherit_caller_pipes(shell: str, tmp_path: Path) -> None:
+    # A caller that pipes output (one-shot ssh, CI, agent wrappers) must get
+    # control back immediately, not when the launched server exits.
+    import time
+
+    body = f"""
+$exe = (Get-Process -Id $PID).Path
+$argv = ConvertTo-RpcArgumentString @('-NoProfile', '-Command', 'Start-Sleep -Seconds 25')
+$childPid = Start-RpcDetached -ExePath $exe -ArgumentString $argv -WorkingDirectory '{tmp_path}'
+Write-Output "PID=$childPid"
+"""
+    start = time.monotonic()
+    result = _run(shell, tmp_path, body)
+    elapsed = time.monotonic() - start
+    child = None
+    for line in result.stdout.splitlines():
+        if line.startswith("PID="):
+            child = int(line[4:])
+    try:
+        assert result.returncode == 0, result.stderr
+        assert child is not None
+        assert elapsed < 15, f"launcher blocked for {elapsed:.1f}s on inherited pipes"
+    finally:
+        if child:
+            subprocess.run(["taskkill", "/F", "/PID", str(child)], capture_output=True, check=False)
+
