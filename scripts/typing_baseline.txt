@@ -337,12 +337,10 @@ sonder_runtime/application/jobs/durable_registry.py
 sonder_runtime/application/lifecycle.py
 sonder_runtime/application/live_context.py
 sonder_runtime/application/loop/facade.py
-sonder_runtime/application/loop/transport_retry.py
 sonder_runtime/application/memory/facade.py
 sonder_runtime/application/memory/memory_policy.py
 sonder_runtime/application/memory/outcome_service.py
 sonder_runtime/application/memory/playbook_context.py
-sonder_runtime/application/memory/recall_service.py
 sonder_runtime/application/memory/receipt_observation.py
 sonder_runtime/application/memory/replication.py
 sonder_runtime/application/memory/strategy_memory.py
@@ -356,7 +354,6 @@ sonder_runtime/application/observability/trace_context.py
 sonder_runtime/application/observability/trace_projection.py
 sonder_runtime/application/output_stream/accumulator.py
 sonder_runtime/application/owner_process.py
-sonder_runtime/application/persistence/domain_ownership.py
 sonder_runtime/application/ports/account_auth.py
 sonder_runtime/application/ports/app_control.py
 sonder_runtime/application/ports/app_control_http.py
@@ -366,8 +363,6 @@ sonder_runtime/application/ports/archive_create_limits.py
 sonder_runtime/application/ports/artifact_mobility.py
 sonder_runtime/application/ports/artifact_transfer.py
 sonder_runtime/application/ports/backup.py
-sonder_runtime/application/ports/child_migration.py
-sonder_runtime/application/ports/compute_fabric.py
 sonder_runtime/application/ports/continuation_mutations.py
 sonder_runtime/application/ports/delegated_verification.py
 sonder_runtime/application/ports/event_sink.py
@@ -376,10 +371,8 @@ sonder_runtime/application/ports/host_turn_links.py
 sonder_runtime/application/ports/lane_continuation.py
 sonder_runtime/application/ports/managed_authority.py
 sonder_runtime/application/ports/managed_runtime_owner.py
-sonder_runtime/application/ports/memory.py
 sonder_runtime/application/ports/model_gateway.py
 sonder_runtime/application/ports/model_target.py
-sonder_runtime/application/ports/preflight.py
 sonder_runtime/application/ports/repositories.py
 sonder_runtime/application/ports/runtime_owner.py
 sonder_runtime/application/ports/runtime_threads.py
@@ -394,7 +387,6 @@ sonder_runtime/application/preferences/use_cases.py
 sonder_runtime/application/prefix_cache_report.py
 sonder_runtime/application/promotion/gates.py
 sonder_runtime/application/protocol/a2a.py
-sonder_runtime/application/protocol/client_schema.py
 sonder_runtime/application/protocol/facade.py
 sonder_runtime/application/protocol/mcp_tasks.py
 sonder_runtime/application/protocol/openai_compatibility.py
@@ -403,7 +395,6 @@ sonder_runtime/application/recall/use_cases.py
 sonder_runtime/application/repository_intelligence/__init__.py
 sonder_runtime/application/repository_intelligence/facade.py
 sonder_runtime/application/repository_intelligence/lsp_multiroot.py
-sonder_runtime/application/repository_intelligence/navigation.py
 sonder_runtime/application/routing/backend_conformance.py
 sonder_runtime/application/routing/capability_router.py
 sonder_runtime/application/routing/evidence_gateway.py

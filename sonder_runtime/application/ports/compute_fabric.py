@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ...domain.compute_fabric import ComputeNode, NodeSnapshot
 
 if TYPE_CHECKING:
-    from ..compute_fabric.jobs import RemoteJobEnvelope, RemoteJobReceipt
+    from ..compute_fabric.jobs import (
+        RemoteArtifactPayload,
+        RemoteArtifactReceipt,
+        RemoteJobEnvelope,
+        RemoteJobReceipt,
+    )
 
 
 class ComputeSnapshotSource(Protocol):
@@ -23,21 +28,21 @@ class ComputeNodeRegistryPort(Protocol):
 
 
 class ComputeRemoteJobTransport(Protocol):
-    def submit(self, node: ComputeNode, envelope: "RemoteJobEnvelope") -> "RemoteJobReceipt": ...
+    def submit(self, node: ComputeNode, envelope: RemoteJobEnvelope) -> RemoteJobReceipt: ...
 
-    def status(self, node: ComputeNode, remote_job_id: str) -> "RemoteJobReceipt": ...
+    def status(self, node: ComputeNode, remote_job_id: str) -> RemoteJobReceipt: ...
 
     def by_idempotency(
         self, node: ComputeNode, idempotency_key: str
-    ) -> "RemoteJobReceipt | None": ...
+    ) -> RemoteJobReceipt | None: ...
 
     def cancel(
         self, node: ComputeNode, remote_job_id: str, *, reason: str
-    ) -> "RemoteJobReceipt": ...
+    ) -> RemoteJobReceipt: ...
 
     def fetch_artifact(
-        self, node: ComputeNode, remote_job_id: str, expected
-    ): ...
+        self, node: ComputeNode, remote_job_id: str, expected: RemoteArtifactReceipt
+    ) -> RemoteArtifactPayload: ...
 
 
 __all__ = [
