@@ -119,6 +119,10 @@ class FakeChatBackend implements ChatBackend {
 
   WorkRun Function(String id)? workRun;
   WorkRun Function(String id)? cancelWorkRunResult;
+  SessionPage? serverSessions;
+  Map<String, SessionReplay> serverReplays = <String, SessionReplay>{};
+  int listServerSessionsCalls = 0;
+  final List<String> replayServerSessionCalls = <String>[];
   ApprovalOutcome approvalOutcome =
       const ApprovalOutcome(ApprovalStatus.approved, nonce: 'n_c41a');
   ApprovalOutcome denialOutcome =
@@ -140,6 +144,18 @@ class FakeChatBackend implements ChatBackend {
   @override
   Future<void> recordFeedback(String command, TurnRequest context) async {
     feedback.add(command);
+  }
+
+  @override
+  Future<SessionPage?> listServerSessions({int limit = 50}) async {
+    listServerSessionsCalls++;
+    return serverSessions;
+  }
+
+  @override
+  Future<SessionReplay?> replayServerSession(String sessionId) async {
+    replayServerSessionCalls.add(sessionId);
+    return serverReplays[sessionId];
   }
 
   @override

@@ -81,6 +81,18 @@ extension _GeneralPage on _SettingsScreenState {
                 onChanged: _setTemperature,
               ),
             ),
+            SettingRow(
+              label: 'Reasoning effort',
+              description:
+                  'Controls thinking depth per session (also via /effort or the '
+                  'chat bar). Off is fastest for tool loops; Auto follows the '
+                  'server default.',
+              modified: _effortChanged,
+              below: EffortSelector(
+                value: _reasoningEffort,
+                onChanged: _setReasoningEffort,
+              ),
+            ),
           ]),
         _clientExecSection(context),
       ],

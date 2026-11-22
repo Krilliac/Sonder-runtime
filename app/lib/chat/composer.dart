@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../runtime/model_routing.dart';
 import '../safety_colors.dart';
+import '../settings/reasoning_effort.dart'
+    show EffortPickerButton, parseEffortInput;
 import '../theme.dart';
 import '../ui/kit.dart' show QuietAction, RingMeter;
 import '../workspace_ui.dart' show conversationWidth;
@@ -36,6 +38,15 @@ class ModeIntercept extends ComposerIntercept {
   /// The mode asked for, or null to open the picker.
   final String? target;
   const ModeIntercept(this.target);
+}
+
+/// `/effort [off|minimal|low|medium|high|xhigh|auto]`: updates the UI pill,
+/// persists the choice, and queues `session_reasoning_effort` for the session.
+class EffortIntercept extends ComposerIntercept {
+  final bool hasValue;
+  final String? target;
+  final String? invalidArg;
+  const EffortIntercept({this.hasValue = false, this.target, this.invalidArg});
 }
 
 const _accountCommands = {'/login', '/register', '/admin_login'};
@@ -76,6 +87,12 @@ ComposerIntercept? classifyIntercept(String text) {
     if (mode != null) return ModeIntercept(mode);
   }
   if (command == '/elevate') return const ModeIntercept(null);
+  if (command == '/effort') {
+    if (args.isEmpty) return const EffortIntercept();
+    final (ok, parsed) = parseEffortInput(args.first);
+    if (!ok) return EffortIntercept(invalidArg: args.first);
+    return EffortIntercept(hasValue: true, target: parsed);
+  }
   return null;
 }
 
@@ -84,6 +101,7 @@ String? interceptLabel(String commandName) {
   final name = commandName.split(' ').first.toLowerCase();
   if (_accountCommands.contains(name)) return 'opens Settings';
   if (_modeCommands.contains(name) || name == '/elevate') return 'opens mode';
+  if (name == '/effort') return 'sets effort';
   return null;
 }
 
@@ -136,6 +154,11 @@ class ChatComposer extends StatelessWidget {
   final ModelRouting routing;
   final ValueChanged<String>? onModelChanged;
 
+  /// Reasoning effort (`off`..`xhigh`, or null for Auto). Shown beside the
+  /// model picker when [onReasoningEffortChanged] is set.
+  final String? reasoningEffort;
+  final ValueChanged<String?>? onReasoningEffortChanged;
+
   /// The status poll, for the context ring; null leaves the ring out.
   final ValueListenable<SystemInfo?>? status;
 
@@ -160,6 +183,8 @@ class ChatComposer extends StatelessWidget {
     this.model = '',
     this.routing = const ModelRouting(),
     this.onModelChanged,
+    this.reasoningEffort,
+    this.onReasoningEffortChanged,
     this.status,
   });
 
@@ -350,6 +375,15 @@ class _ControlStrip extends StatelessWidget {
                   dense: !c.desktop,
                 ),
               ),
+            if (c.onReasoningEffortChanged != null && constraints.maxWidth >= 380)
+              LayoutId(
+                id: _StripSlot.effort,
+                child: EffortPickerButton(
+                  value: c.reasoningEffort,
+                  onSelected: c.onReasoningEffortChanged!,
+                  dense: !c.desktop,
+                ),
+              ),
             if (status != null)
               LayoutId(
                 id: _StripSlot.ring,
@@ -373,16 +407,17 @@ class _ControlStrip extends StatelessWidget {
   }
 }
 
-enum _StripSlot { actions, mode, model, ring, hint, send }
+enum _StripSlot { actions, mode, model, effort, ring, hint, send }
 
 /// Lays the strip out in priority order: Send at the end and the "+" menu
 /// at the start; the mode chip at its natural width (it is the contract,
 /// and its label ellipsizes only when it must); the model picker in what
-/// the chip leaves; the ring when there is still room; the hint in whatever
-/// is left between them.
+/// the chip leaves; the effort picker beside it; the ring when there is
+/// still room; the hint in whatever is left between them.
 class _StripLayout extends MultiChildLayoutDelegate {
   static const _gap = SonderSpace.xs;
   static const _pickerMin = 96.0;
+  static const _effortMin = 68.0;
   static const _chipMin = 72.0;
 
   @override
@@ -408,11 +443,13 @@ class _StripLayout extends MultiChildLayoutDelegate {
 
     final hasRing = hasChild(_StripSlot.ring);
     final hasModel = hasChild(_StripSlot.model);
+    final hasEffort = hasChild(_StripSlot.effort);
     final ring = hasRing ? layout(_StripSlot.ring, room) : Size.zero;
     final ringWidth = ring.width;
 
     if (hasChild(_StripSlot.mode)) {
-      final reserve = hasModel ? _pickerMin + _gap : 0.0;
+      final reserve = (hasModel ? _pickerMin + _gap : 0.0) +
+          (hasEffort ? _effortMin + _gap : 0.0);
       final max = (room - ringWidth - reserve).clamp(_chipMin, 260.0);
       final chip = layout(_StripSlot.mode, max);
       positionChild(_StripSlot.mode, Offset(left, centre(chip)));
@@ -420,11 +457,19 @@ class _StripLayout extends MultiChildLayoutDelegate {
       room -= chip.width + _gap;
     }
     if (hasModel) {
-      final max = (room - ringWidth).clamp(0.0, 300.0);
+      final reserveEffort = hasEffort ? _effortMin + _gap : 0.0;
+      final max = (room - ringWidth - reserveEffort).clamp(0.0, 260.0);
       final picker = layout(_StripSlot.model, max);
       positionChild(_StripSlot.model, Offset(left, centre(picker)));
-      left += picker.width;
-      room -= picker.width;
+      left += picker.width + (hasEffort ? _gap : 0.0);
+      room -= picker.width + (hasEffort ? _gap : 0.0);
+    }
+    if (hasEffort) {
+      final max = (room - ringWidth).clamp(0.0, 180.0);
+      final effort = layout(_StripSlot.effort, max);
+      positionChild(_StripSlot.effort, Offset(left, centre(effort)));
+      left += effort.width + _gap;
+      room -= effort.width + _gap;
     }
     if (hasRing) {
       positionChild(_StripSlot.ring, Offset(left, centre(ring)));

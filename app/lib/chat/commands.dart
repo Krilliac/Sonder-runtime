@@ -10,6 +10,7 @@ const quickCommands = <String, String>{
   '/stats': 'Show learning stats',
   '/context': 'Show context health',
   '/temp': "Show or set this session's temperature (0-2, or auto)",
+  '/effort': "Show or set this session's reasoning effort (off|minimal|low|medium|high|xhigh|auto)",
   '/compact': 'Preview context compaction',
   '/commands': 'List command registry',
   '/activity': 'Show live tool/file activity',

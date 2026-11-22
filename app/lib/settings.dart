@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager_models.dart';
+import 'settings/reasoning_effort.dart' show normalizeEffort, parseEffort;
 import 'settings/temperature.dart'
     show normalizeTemperature, parseTemperature;
 import 'package:flutter/foundation.dart';
@@ -80,6 +81,7 @@ class Settings {
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
   static const _kTemperature = 'sonder_temperature';
+  static const _kReasoningEffort = 'sonder_reasoning_effort';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -145,6 +147,10 @@ class Settings {
   /// Sampling temperature for new chat requests, 0 to 2 in steps of 0.05;
   /// null is Auto (the model's own preset applies).
   double? temperature;
+
+  /// Reasoning effort for chat requests (`off`, `minimal`, `low`, `medium`,
+  /// `high`, `xhigh`); null is Auto (the server/model default applies).
+  String? reasoningEffort;
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -191,6 +197,7 @@ class Settings {
     this.allowHosted = false,
     this.contextSize = '8192',
     double? temperature,
+    String? reasoningEffort,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -204,6 +211,7 @@ class Settings {
     this.clientAgentUrl = defaultClientAgentUrl,
     this.clientAgentToken = '',
   })  : temperature = normalizeTemperature(temperature),
+        reasoningEffort = normalizeEffort(reasoningEffort),
         serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -221,6 +229,8 @@ class Settings {
     String? contextSize,
     double? temperature,
     bool autoTemperature = false,
+    String? reasoningEffort,
+    bool autoReasoningEffort = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -246,6 +256,9 @@ class Settings {
         contextSize: contextSize ?? this.contextSize,
         temperature:
             autoTemperature ? null : temperature ?? this.temperature,
+        reasoningEffort: autoReasoningEffort
+            ? null
+            : reasoningEffort ?? this.reasoningEffort,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -355,6 +368,7 @@ class Settings {
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
       temperature: _temperatureFrom(p),
+      reasoningEffort: _reasoningEffortFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
@@ -375,6 +389,15 @@ class Settings {
   static double? _temperatureFrom(SharedPreferences p) {
     try {
       return parseTemperature(p.getString(_kTemperature));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The stored reasoning effort; a missing or garbled value is Auto (null).
+  static String? _reasoningEffortFrom(SharedPreferences p) {
+    try {
+      return parseEffort(p.getString(_kReasoningEffort));
     } catch (_) {
       return null;
     }
@@ -491,6 +514,12 @@ class Settings {
       await p.remove(_kTemperature);
     } else {
       await p.setString(_kTemperature, '$stagedTemperature');
+    }
+    final stagedEffort = reasoningEffort;
+    if (stagedEffort == null) {
+      await p.remove(_kReasoningEffort);
+    } else {
+      await p.setString(_kReasoningEffort, stagedEffort);
     }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
