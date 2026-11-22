@@ -20,10 +20,55 @@ _SCRIPT_TOOLS = frozenset({"script_run", "run_script"})
 _TOOLS = _CODE_TOOLS | _ARGV_TOOLS | _SCRIPT_TOOLS | {
     "parallel_run_code", "build_run", "run_project",
 }
-_PS_LAUNCH = re.compile(
-    r'''(?ix)(?:^|[&|]|\b(?:call|start|cmd\s+(?:/\w+\s+)*))\s*["']?
-    (?:[^\r\n"'|&]*[\\/])?(?:powershell|pwsh)(?:\.exe)?(?=[\s"']|$)'''
-)
+# An optionally quoted, optionally path-qualified PowerShell name at the very
+# start of a command.  Unquoted paths start at a token boundary so matching
+# stays linear in the input.
+_PS_LEADING = re.compile(r'''(?ix)\A\s*
+    (?:"[^"\r\n]*[\\/]
+      |'[^'\r\n]*[\\/]
+      |["']?(?<![^\s"'|&()<>@;,=])[^\s"'|&()<>@;,=]*[\\/]
+      |["']?(?<![\w.$\\/-])
+    )(?:powershell|pwsh|powers~\d+)(?:\.exe)?(?![\w.-])''')
+# A word-bounded literal PowerShell name anywhere in a cmd.exe command line,
+# on any line, in any position (after redirections, groups, if/for/start/cmd,
+# quotes).  ``/c`` style switches end at the name (``cmd/cpwsh``).  Trailing
+# dots and ``\.`` components count because Win32 path normalization (which
+# ``start`` applies) drops them (``powershell.exe.``, ``powershell.exe\.``),
+# and an 8.3 short name (``POWERS~1``) names the same file.  A directory
+# component followed by a backslash and a name (``\PowerShell\7\pwsh.exe``)
+# cannot be run as a command.  Names produced by ``%``/``!`` expansion are
+# covered by ``_cmd_may_expand``; renamed copies and links are not recognised.
+_PS_WORD = re.compile(
+    r'''(?i)(?:(?<![\w.$-])|(?<=/[a-z]))(?:powershell|pwsh|powers~\d+)(?:\.exe)?'''
+    r'''(?![\w-]|\.\w|\\(?!\.+(?:[\s"'&|<>()\\/]|\Z)))''')
+# Carets and quotes can split a command word for cmd.exe (p^wsh, "pw"sh);
+# names that appear once they are removed are counted too (fail closed).
+_CMD_NOISE = re.compile(r'[\^"]')
+
+
+def _cmd_may_expand(command):
+    """True when cmd.exe expansion could rewrite any word of *command*.
+
+    A pair of ``%`` signs can expand a variable, a substring of one or a
+    ``for`` variable anywhere in the line, including inside a command word
+    (``pw%PATHEXT:~0,0%sh``, ``set X=pw&call %X%sh``, ``for %a in (pw) do
+    %ash``); a pair of ``!`` signs does the same under delayed expansion
+    (``cmd /v:on``).  The result can be any text, so no name check rules
+    PowerShell out.  A lone ``%`` or ``!`` is left as typed.
+    """
+    return command.count("%") >= 2 or command.count("!") >= 2
+
+
+def _launch_ends(command):
+    """End offsets of PowerShell names in a cmd.exe command line.
+
+    Returns one entry per occurrence in the raw text, plus a sentinel ``-1``
+    for each extra occurrence that only appears once cmd.exe strips carets and
+    quotes, so callers can count every possible launcher.
+    """
+    ends = [match.end() for match in _PS_WORD.finditer(command)]
+    hidden = len(_PS_WORD.findall(_CMD_NOISE.sub("", command)))
+    return ends + [-1] * max(0, hidden - len(ends))
 
 
 def _opaque(reason):
@@ -74,9 +119,20 @@ def runnable_arguments(sources, extract):
 
 
 def _is_powershell(value):
-    return isinstance(value, str) and ntpath.basename(value).lower() in {
-        "powershell", "powershell.exe", "pwsh", "pwsh.exe",
-    }
+    """True when the program path *value* names a PowerShell executable.
+
+    CreateProcess normalizes the path before running it, which drops
+    trailing ``.`` components and trailing dots and spaces
+    (``powershell.exe\\.``, ``pwsh.exe.``); an 8.3 short name
+    (``POWERS~1.EXE``) names the same file.  Renamed copies and links are not
+    recognised.
+    """
+    if not isinstance(value, str):
+        return False
+    parts = re.split(r"[\\/]", value.strip())
+    while len(parts) > 1 and re.fullmatch(r"[. ]*", parts[-1]):
+        parts.pop()
+    return bool(re.fullmatch(r"(?i)(?:powershell|pwsh|powers~\d+)(?:\.exe)?", parts[-1].rstrip(". ")))
 
 
 def _array(value):
@@ -194,18 +250,19 @@ def _selects_powershell(name, arguments):
         )
     if name == "build_run":
         command = arguments.get("command", "")
-        return isinstance(command, str) and bool(_PS_LAUNCH.search(command))
+        return isinstance(command, str) and (bool(_launch_ends(command)) or _cmd_may_expand(command))
     return False
 
 
 def powershell_arguments(tool_name, arguments):
-    """Return ``arguments`` only when the call would launch PowerShell.
+    """Return ``arguments`` only when the call would or could launch PowerShell.
 
     Surfaces that historically decided without arguments (console catalogue,
     loop actions, ``/run`` aliases) bind arguments for PowerShell calls only, so
     every other call keeps its original argument-free digest and decision.
     Selection never launches the parser; malformed PowerShell-looking inputs
-    are forwarded so the decider fails closed on them.
+    and build commands whose cmd.exe expansions could produce a launcher are
+    forwarded so the decider fails closed on them.
     """
     name = str(tool_name or "").strip().lstrip("/")
     if name not in _TOOLS or not isinstance(arguments, Mapping):
@@ -291,8 +348,20 @@ def inspect_tool_call(tool_name, arguments):
             command = arguments.get("command", "")
             # Custom Windows builds run under cmd.exe; only explicit PS
             # launchers need PS inspection. Cmd expansions cannot be proven
-            # equivalent to PowerShell AST tokenization, so they are opaque.
-            if isinstance(command, str) and _PS_LAUNCH.search(command):
+            # equivalent to PowerShell AST tokenization, so they are opaque,
+            # and checked before any name match because they can build one.
+            if isinstance(command, str) and _cmd_may_expand(command):
+                return _opaque("cmd.exe expansion may produce a PowerShell launcher")
+            ends = _launch_ends(command) if isinstance(command, str) else []
+            if ends:
+                # Only a single launcher at the start of the command is
+                # tokenized as PowerShell; any other occurrence is opaque.
+                leading = _PS_LEADING.match(command)
+                rest = command[leading.end():] if leading is not None else ""
+                if (len(ends) != 1 or leading is None or leading.end() != ends[0]
+                        or not re.match(r'''["']?(?:\s|\Z)''', rest)
+                        or _PS_WORD.search(_CMD_NOISE.sub("", rest))):
+                    return _opaque("PowerShell launcher outside command start")
                 if any(char in command for char in ("%", "!", "^")):
                     return _opaque("shell expansion around PowerShell")
                 if re.match(r"\s*(?:cmd|call|start)\b", command, re.I):

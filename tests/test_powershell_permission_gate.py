@@ -36,8 +36,9 @@ def test_opaque_calls_raise_per_call_risk(monkeypatch, tool, args, mode, interac
     ("isolated_run", {"argv_json": '["python", "-V"]'}),
     ("sonder", {"prompt": "explain Invoke-Expression"}),
     ("file_write", {"content": "iex $code"}),
-    ("build_run", {"command": 'git commit -m "pwsh support"'}),
-    ("build_run", {"command": 'echo powershell'}),
+    ("build_run", {"command": 'dotnet build pwsh.sln'}),
+    ("build_run", {"command": r'type C:\PowerShell\notes.txt'}),
+    ("build_run", {"command": 'npm run x -- --pwsh'}),
 ])
 def test_unrelated_calls_never_start_parser(monkeypatch, tool, args):
     def unexpected(source):
@@ -134,3 +135,123 @@ def test_loop_project_alias_precedence_matches_execution():
     normalized = gate.loop_arguments(original)
     assert normalized["files_json"] == original["files"]
     assert normalized["commands_json"] == original["commands"]
+
+
+@pytest.mark.parametrize("command", [
+    "cmd.exe /c powershell -enc AA==", "if 1==1 powershell -enc AA==", "(powershell -enc AA==)",
+    "@powershell -enc AA==", "echo hi\npowershell -enc AA==", 'echo hi\r\npwsh "iex $x"',
+    "start /b powershell -enc AA==", 'start "" powershell -enc AA==', 'if exist x pwsh "iex $x"',
+    "for %f in (a) do pwsh x", "conhost powershell -enc AA==", "cmd/cpwsh x",
+    "powershell -c Get-Date & cmd /c powershell -enc AA==",
+    # G0896 cycle 2: any non-leading occurrence is opaque, including cmd.exe
+    # spellings with redirection prefixes, quoted /c bodies and start options.
+    '>nul powershell "[Environment]::Exit(7)"', '2>nul powershell "[Environment]::Exit(7)"',
+    'cmd /c " powershell "[Environment]::Exit(7)""',
+    r'start /d C:\Windows /wait powershell "[Environment]::Exit(7)"',
+    'p^owershell -enc AA==', '"power"shell -enc AA==', 'powershell.exe. -enc AA==',
+    'powershell -c Get-Date & "pw"sh -enc AA==', 'pwsh"x & y',
+    # Mentions are opaque too; opaque only means approval is required.
+    'echo powershell', 'git commit -m "pwsh support"',
+])
+def test_build_run_launchers_outside_command_start_are_opaque(monkeypatch, command):
+    def unexpected(source):
+        pytest.fail("non-leading launcher must not be tokenized as PowerShell")
+    monkeypatch.setattr(gate, "inspect_powershell", unexpected)
+    assert gate.powershell_arguments("build_run", {"command": command}) is not None
+    result = gate.inspect_tool_call("build_run", {"command": command})
+    assert result is not None and not result.inspectable
+
+
+@pytest.mark.parametrize("command", [
+    "powershell -NoProfile -Command Get-Date", 'pwsh.exe -File build.ps1',
+    r'"C:\Program Files\PowerShell\7\pwsh.exe" -c Get-Date',
+])
+def test_build_run_leading_launcher_is_inspected(monkeypatch, command):
+    seen = []
+    monkeypatch.setattr(gate, "inspect_powershell", lambda source: (
+        seen.append(source) or SimpleNamespace(inspectable=True, reason="")))
+    assert gate.inspect_tool_call("build_run", {"command": command}).inspectable
+    assert seen == [command]
+
+
+@pytest.mark.parametrize("command", [
+    # Review repro: cmd.exe splices the expansion into the command word and
+    # runs pwsh (G0896).
+    "pw%PATHEXT:~0,0%sh -NoProfile -c echo viaexpansion", "pw%PATHEXT:~0,0%sh -enc AA==",
+    "set X=pw&call %X%sh -enc AA==", "for %a in (pw) do @%ash -enc AA==",
+    'cmd /v:on /c "set X=pw&& !X!sh -enc AA=="', "%COMSPEC% /c echo x", "echo %X%",
+    "%ProgramFiles%\\PowerShell\\7\\pwsh.exe -enc AA==",
+])
+def test_build_run_cmd_expansion_is_opaque_before_name_matching(monkeypatch, command):
+    def unexpected(source):
+        pytest.fail("a command cmd.exe may rewrite must not be tokenized as PowerShell")
+    monkeypatch.setattr(gate, "inspect_powershell", unexpected)
+    assert gate.powershell_arguments("build_run", {"command": command}) is not None
+    result = gate.inspect_tool_call("build_run", {"command": command})
+    assert result is not None and not result.inspectable
+    assert "expansion" in result.reason
+
+
+@pytest.mark.parametrize("command", ["echo 100%", 'git commit -m "done!"', "make -j4 CFLAGS=-O2"])
+def test_build_run_lone_percent_or_bang_is_not_an_expansion(monkeypatch, command):
+    def unexpected(source):
+        pytest.fail("unrelated build command must not start the parser")
+    monkeypatch.setattr(gate, "inspect_powershell", unexpected)
+    assert gate.powershell_arguments("build_run", {"command": command}) is None
+    assert gate.inspect_tool_call("build_run", {"command": command}) is None
+
+
+@pytest.mark.parametrize("command", [
+    # start resolves the path through Win32 normalization, which drops the
+    # trailing "." component; 8.3 short names name the same file.
+    r"start /b /wait C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\. -enc AA==",
+    "start /b powers~1 -enc AA==", "echo x & POWERS~1.EXE -enc AA==",
+])
+def test_build_run_normalized_launcher_names_are_selected(monkeypatch, command):
+    def unexpected(source):
+        pytest.fail("non-leading launcher must not be tokenized as PowerShell")
+    monkeypatch.setattr(gate, "inspect_powershell", unexpected)
+    assert gate.powershell_arguments("build_run", {"command": command}) is not None
+    result = gate.inspect_tool_call("build_run", {"command": command})
+    assert result is not None and not result.inspectable
+
+
+def test_build_run_leading_short_name_launcher_is_inspected(monkeypatch):
+    seen = []
+    monkeypatch.setattr(gate, "inspect_powershell", lambda source: (
+        seen.append(source) or SimpleNamespace(inspectable=False, reason="encoded PowerShell command")))
+    assert not gate.inspect_tool_call("build_run", {"command": "POWERS~1 -enc AA=="}).inspectable
+    assert seen == ["POWERS~1 -enc AA=="]
+
+
+@pytest.mark.parametrize("program", [
+    "powershell.exe.", "powershell.exe ", " pwsh", "PWSH.EXE. ", "POWERS~1.EXE",
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\.",
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe\. ", "C:/tools/pwsh.exe/.",
+])
+def test_argv_program_paths_are_normalized_before_matching(monkeypatch, program):
+    seen = []
+    monkeypatch.setattr(gate, "inspect_powershell", lambda source: (
+        seen.append(source) or SimpleNamespace(inspectable=False, reason="encoded PowerShell command")))
+    arguments = {"program": program, "args_json": json.dumps(["-enc", "AA=="])}
+    assert gate.powershell_arguments("workspace_run", arguments) is not None
+    assert not gate.inspect_tool_call("workspace_run", arguments).inspectable
+    assert len(seen) == 1
+    project = {"commands_json": json.dumps([{"cmd": [program, "-enc", "AA=="]}])}
+    assert gate.powershell_arguments("run_project", project) is not None
+
+
+@pytest.mark.parametrize("program", ["pwsh.sln", "python", "powershell_ise.exe", r"C:\PowerShell\notes.txt", "pwsh-x"])
+def test_argv_programs_that_are_not_powershell_stay_unselected(program):
+    assert gate.powershell_arguments("workspace_run", {"program": program, "args_json": "[]"}) is None
+
+
+@pytest.mark.parametrize("command", [
+    "if " * 3000, "cmd/" * 5000, "a/" * 10000, "if x/" * 2000, '"a/' * 7000, "start /" * 3000,
+    "pwsh\\" + "." * 50000 + "x", "pwsh\\." * 10000,
+])
+def test_build_run_launcher_scan_is_linear(command):
+    import time
+    started = time.perf_counter()
+    gate.inspect_tool_call("build_run", {"command": command})
+    assert time.perf_counter() - started < 2.0
