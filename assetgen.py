@@ -20,6 +20,7 @@ import re
 import struct
 import wave
 import zlib
+from pathlib import Path
 
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
 from sonder_runtime.adapters.filesystem.file_ops import _reject_network_path
@@ -176,7 +177,7 @@ def resolve_pack_dir(name: str, output_dir: str = "") -> str:
     """
     slug = _safe_slug(name)
     if output_dir:
-        _reject_network_path(output_dir)
+        output_dir = _reject_network_path(output_dir)
     base = output_dir.strip() if output_dir else default_asset_root()
     if not os.path.isabs(base):
         base = os.path.join(workspace_root(), base)
@@ -945,15 +946,12 @@ def generate_pack(name: str, dimension: str = "2d", theme: str = "arcane",
 def _manifest_row_name_is_safe(filename) -> bool:
     """Lexical check of a manifest row filename; no filesystem call is made.
 
-    Refuses anything that is not a plain relative name: UNC, device and NT
-    prefixes, absolute or drive-qualified paths, parent-directory components
-    and NUL.  Joining such a value onto the pack root returns it unchanged, and
-    resolving it would make Windows authenticate to the named host.
+    Refuses anything that is not a plain single-segment relative filename:
+    non-strings, whitespace-padded names, control characters/NUL, UNC/device/NT
+    prefixes, absolute or drive-qualified paths, colons (ADS), traversal/dot
+    segments, trailing dots/spaces, and Windows reserved device names.
     """
-    if not isinstance(filename, str) or not filename or chr(0) in filename:
-        return False
-    flat = filename.replace("/", "\\")
-    if flat.startswith("\\"):
+    if artifact_grounding._safe_relative_parts(filename, allow_subdirs=False) is None:
         return False
     try:
         _reject_network_path(filename)
@@ -961,9 +959,7 @@ def _manifest_row_name_is_safe(filename) -> bool:
         return False
     if os.path.isabs(filename) or os.path.splitdrive(filename)[0]:
         return False
-    if len(flat) > 1 and flat[1] == ":":
-        return False
-    return ".." not in flat.split("\\")
+    return True
 
 
 def _lexically_directly_inside(root: str, candidate: str) -> bool:
@@ -977,6 +973,18 @@ def _lexically_directly_inside(root: str, candidate: str) -> bool:
         return False
 
 
+def _inside_pack_root(real_root: str, candidate: str) -> bool:
+    """True when ``candidate`` resolves to a direct child of ``real_root``."""
+    try:
+        real_candidate = os.path.realpath(candidate)
+        return (
+            os.path.commonpath([real_root, real_candidate]) == real_root
+            and os.path.dirname(real_candidate) == real_root
+        )
+    except ValueError:
+        return False
+
+
 def verify_pack(path: str) -> dict:
     path = _reject_network_path(path)
     if not os.path.isabs(path):
@@ -984,7 +992,11 @@ def verify_pack(path: str) -> dict:
     root = os.path.abspath(path)
     if not _inside_workspace(root):
         raise ValueError("asset pack must stay inside workspace")
+    if artifact_grounding._is_reparse_point(Path(root)):
+        raise ValueError("asset pack root may not be a symlink or reparse point")
     manifest_path = os.path.join(root, "manifest.json")
+    if artifact_grounding._is_reparse_point(Path(manifest_path)):
+        raise ValueError("asset manifest may not be a symlink or reparse point")
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     failures = []
@@ -994,6 +1006,7 @@ def verify_pack(path: str) -> dict:
     if not isinstance(manifest_files, list):
         failures.append("manifest files must be a list")
         manifest_files = []
+    real_root = os.path.realpath(root)
     seen = set()
     for row in manifest_files:
         if not isinstance(row, dict):
@@ -1003,10 +1016,16 @@ def verify_pack(path: str) -> dict:
         if not _manifest_row_name_is_safe(filename):
             failures.append("unsafe manifest path: %r" % (filename,))
             continue
+        dedup_key = os.path.normcase(filename)
         candidate = os.path.abspath(os.path.join(root, filename))
-        if filename in seen:
+        if dedup_key in seen:
             failures.append("duplicate manifest path: %r" % filename)
-        elif not _lexically_directly_inside(root, candidate) or not _inside_workspace(candidate):
+        elif (
+            not _lexically_directly_inside(root, candidate)
+            or artifact_grounding._is_reparse_point(Path(candidate))
+            or not _inside_workspace(candidate)
+            or not _inside_pack_root(real_root, candidate)
+        ):
             failures.append("unsafe manifest path: %r" % filename)
         elif not os.path.isfile(candidate):
             failures.append("missing: %s" % filename)
@@ -1015,7 +1034,7 @@ def verify_pack(path: str) -> dict:
                 failures.append("size mismatch: %s" % filename)
             if _hash_file(candidate) != row.get("sha256"):
                 failures.append("hash mismatch: %s" % filename)
-        seen.add(filename)
+        seen.add(dedup_key)
     grounding = artifact_grounding.validate(
         root,
         "bundle",
