@@ -93,7 +93,11 @@ def _resolve_root(root, extra_roots=""):
     fix closed in this module. An authorized root may still report "not a
     directory" with its path: the caller is entitled to that one.
     """
-    p = Path(root or ".").resolve()
+    raw = str(root or ".")
+    raw = file_ops._reject_network_path(raw)
+    if raw.strip().replace("/", "\\") == "\\??":
+        raise PermissionError("refusing a UNC or network path spelling")
+    p = Path(raw).resolve()
     _require_authorized_root(p, extra_roots)
     if not p.is_dir():
         raise ValueError("not a directory: %s" % p)
