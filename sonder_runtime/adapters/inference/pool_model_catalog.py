@@ -9,6 +9,7 @@ fetch, non-chat check) so this module performs no network I/O itself.
 from __future__ import annotations
 
 import http.client
+import logging
 import threading
 import time
 from collections.abc import Callable, Hashable, Mapping
@@ -21,6 +22,8 @@ from ...domain.model_catalog import catalog_records, resolve_record
 # Transport-shaped failures of a per-member tag read (URLError is an OSError;
 # a bad JSON body is a ValueError).  Programming errors are deliberately absent.
 _TRANSPORT_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+logger = logging.getLogger(__name__)
 
 
 class PinStatus(str, Enum):
@@ -95,6 +98,41 @@ class PoolCatalogCache:
             self._entries.clear()
 
 
+def discovery_tags(
+    pool: Any,
+    get_tags: Callable[[], object],
+    fetch_member_tags: Callable[[str], object],
+    *,
+    host_origin: str | None = None,
+) -> object:
+    """The ``/api/tags`` payload that decides which models are *known*.
+
+    A pooled ``get_tags`` read describes whichever single member the scheduler
+    picked, so a busy member's models would flicker out of the catalog.  With
+    the pool enabled, read the union over every member the scheduler could
+    route to now (an open-circuit member is skipped rather than waited on);
+    the primary wins a name several members hold.  Without a pool, ``get_tags``.
+
+    ``host_origin`` narrows a pooled read to that one member (this host), which
+    keeps lanes that must not gain a worker-only name deterministic.  When that
+    member is not an admissible pool member (e.g. an external roster without
+    ``local_fallback``), or its read fails with a transport or admission error,
+    the pooled ``get_tags`` read is used instead: the failover that existed
+    before the host-only read, never a wider catalog than it.
+    """
+    if pool is not None and pool.enabled:
+        if host_origin is None:
+            return pool.catalog_union(fetch_member_tags, routable_only=True)
+        if pool.catalog_member(host_origin):
+            try:
+                return fetch_member_tags(host_origin)
+            except _TRANSPORT_ERRORS as error:
+                logger.warning(
+                    "host catalog read failed (%s); using the pooled read",
+                    type(error).__name__)
+    return get_tags()
+
+
 def resolve_model_pin(
     selector: object,
     *,
@@ -148,3 +186,55 @@ def resolve_model_pin(
             return PinResolution(PinStatus.CATALOG_UNAVAILABLE)
         return PinResolution(endpoint_verdict)
     return verdict
+
+
+def pool_model_capabilities(pool: Any) -> dict[str, dict[str, Any]]:
+    """Aggregate per-model capability metadata from cached pool snapshots.
+
+    Collects known origins, currently resident origins, highest advertised
+    context window, tool-calling support, and MoE active-parameter counts
+    without triggering synchronous probes.
+    """
+    if pool is None or not callable(getattr(pool, "snapshots", None)):
+        return {}
+    aggregated: dict[str, dict[str, Any]] = {}
+    for snap in pool.snapshots():
+        if not getattr(snap, "healthy", False):
+            continue
+        models = getattr(snap, "models", ()) or ()
+        loaded_keys = {
+            str(m).strip().casefold()
+            for m in (getattr(snap, "loaded_models", ()) or ())
+            if str(m).strip()
+        }
+        contexts = getattr(snap, "model_contexts", {}) or {}
+        tools_map = getattr(snap, "supports_tools", {}) or {}
+        active_map = getattr(snap, "model_active_billions", {}) or {}
+        for model_name in models:
+            entry = aggregated.setdefault(
+                model_name,
+                {
+                    "origins": [],
+                    "resident_origins": [],
+                    "max_context": None,
+                    "supports_tools": None,
+                    "active_billions": None,
+                },
+            )
+            if snap.origin not in entry["origins"]:
+                entry["origins"].append(snap.origin)
+            if model_name.strip().casefold() in loaded_keys and snap.origin not in entry["resident_origins"]:
+                entry["resident_origins"].append(snap.origin)
+            ctx = contexts.get(model_name)
+            if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+                if entry["max_context"] is None or ctx > entry["max_context"]:
+                    entry["max_context"] = ctx
+            if model_name in tools_map and isinstance(tools_map[model_name], bool):
+                entry["supports_tools"] = (
+                    True if entry["supports_tools"] is True or tools_map[model_name] else False
+                )
+            active_val = active_map.get(model_name)
+            if isinstance(active_val, (int, float)) and not isinstance(active_val, bool) and active_val > 0:
+                if entry["active_billions"] is None:
+                    entry["active_billions"] = float(active_val)
+    return aggregated

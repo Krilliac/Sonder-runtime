@@ -50,6 +50,48 @@ When a chat request prewarms its model, the real request for that model waits
 (within its own deadline) for the prewarm to finish before it asks the pool for
 admission, so the prewarm cannot hold the worker's only slot and turn the real
 request into `timed out waiting for Ollama worker capacity`.
+
+Every admitted request holds its worker slot through a lease that names the
+caller, model and phase (`dispatching`, `gpu_admission`, `transport`). Every
+exit path closes the lease, including a `BaseException` such as `KeyboardInterrupt`.
+A lease whose thread died without closing it is reclaimed the next time the
+pool summary, the status page or an admission timeout looks at the pool. A
+lease held longer than two minutes is logged once by the same checks. An admission timeout names
+the oldest lease holding the saturated worker. The summary reports `leases`
+(held, oldest age and phase, reclaimed count). A request that has to queue in
+GPU admission returns its pool slot while it waits, so work that needs no GPU
+(a cloud call through the same primary, say) is not starved behind it. Once
+admitted it takes a slot back ahead of fresh requests. That wait is capped at
+`SONDER_POOL_ADMISSION_TIMEOUT_SECONDS` (or the request deadline, if sooner)
+and then refuses with backpressure, releasing the GPU slot. A request that
+comes back to a worker that tripped its circuit in the meantime is refused
+without sending. Only the request that holds a worker's half-open trial can
+end it (or a success, since the worker answered), so another request finishing
+on the same worker does not reopen it early. Pool refusals reach chat as
+`ERROR contacting Sonder's model pool: ...` with a retry hint, not as "is the
+Ollama server running?". Worker ranking keeps two latency averages that are
+never compared with each other: control-plane round-trips (capability probes
+and model-less reads) and model-pinned inference time, which excludes time
+spent in GPU admission. Inference requests rank by inference time once every
+candidate worker has one.
+
+A capability probe reads `/api/version`, `/api/tags` and, best effort,
+`/api/ps` (which models are loaded now and at what context window). Per-model
+metadata from `POST /api/show` (trained context length, tool support, MoE
+active parameters) is never fetched inside the probe: the probe reports what
+is cached and starts at most one background fill per worker for up to eight
+uncached models, so a slow or hanging `/api/show` cannot fail the probe and a
+large inventory fills in over successive probes. The cache is keyed by worker,
+model and digest (a re-pulled model is read again), and a failed `/api/show`
+is retried with exponential backoff (30 s doubling to 10 min). For a loaded
+model the `/api/ps` window wins over the trained maximum. Stock Ollama reports
+no host VRAM, RAM or KV-cache type, so the probe never invents them. A
+model-pinned request then ranks candidate workers in this order: workers whose
+inventory lists the model, then workers that have it loaded, then workers whose
+known window covers the request's `options.num_ctx`, then in-flight work times
+latency. If a TLS proxy filters paths, let `GET /api/ps` and `POST /api/show`
+through; without them routing still works, only less informed.
+
 Idempotent control reads may fail over; model POSTs never do. A transport timeout
 cannot prove that a remote worker did not receive a request body, so Sonder
 surfaces ambiguous failures instead of replaying the POST. Administrative status

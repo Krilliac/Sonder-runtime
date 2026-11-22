@@ -31,14 +31,26 @@ from typing import Callable, Iterator
 
 @dataclass(frozen=True)
 class Fence:
-    """``check()`` returns "" while the fence holds, else why it no longer does."""
+    """``check()`` returns "" while the fence holds, else why it no longer does.
+
+    ``fleet_agent_id`` names the fleet agent a ``fleet_fence`` guards ("" for
+    every other fence).
+    """
 
     label: str
     check: Callable[[], str]
+    fleet_agent_id: str = ""
 
 
 _FENCE: contextvars.ContextVar[Fence | None] = contextvars.ContextVar(
     "sonder_effect_fence", default=None,
+)
+
+
+# Every fence installed on this context, outermost first.  ``_FENCE`` is the
+# innermost; this stack lets a lookup see an outer fence a nested one hides.
+_STACK: contextvars.ContextVar[tuple[Fence, ...]] = contextvars.ContextVar(
+    "sonder_effect_fence_stack", default=(),
 )
 
 
@@ -47,13 +59,31 @@ def current() -> Fence | None:
     return _FENCE.get()
 
 
+def current_fleet_agent_id() -> str:
+    """The fleet agent of the innermost fleet fence on the stack, or "".
+
+    A fleet fence under a nested non-fleet fence (an autopilot or selfmod fence
+    installed by a task the fleet worker runs) is still found.
+
+    Being a context variable, it is also visible to a helper thread started in
+    a copy of the worker's context (the inference gateway's cancel watcher),
+    where the worker's thread-local binding is not.
+    """
+    for fence in reversed(_STACK.get()):
+        if fence.fleet_agent_id:
+            return fence.fleet_agent_id
+    return ""
+
+
 @contextlib.contextmanager
 def held(fence: Fence) -> Iterator[Fence]:
     """Install ``fence`` for the body; the previous fence (if any) is restored."""
     token = _FENCE.set(fence)
+    stack_token = _STACK.set(_STACK.get() + (fence,))
     try:
         yield fence
     finally:
+        _STACK.reset(stack_token)
         _FENCE.reset(token)
 
 
@@ -108,7 +138,7 @@ def fleet_fence(agent_id: str, owner_id: str) -> Fence:
             return "fleet agent %s is %s" % (agent_id, row.get("status"))
         return ""
 
-    return Fence("fleet:%s" % agent_id, check)
+    return Fence("fleet:%s" % agent_id, check, fleet_agent_id=agent_id)
 
 
 def selfmod_fence(run_id: str, owner_id: str) -> Fence:

@@ -24,7 +24,13 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
-from sonder_runtime.domain.common.errors import DependencyUnavailable, Forbidden, InvalidInput
+from sonder_runtime.domain.common.errors import (
+    Cancelled,
+    CapacityExceeded,
+    DependencyUnavailable,
+    Forbidden,
+    InvalidInput,
+)
 
 PRIMARY = "http://127.0.0.1:11437"
 WORKER = "https://192.0.2.2:8443/sonder-inference"
@@ -443,3 +449,231 @@ def test_trust_scope_pins_the_worker_bundle(ca_bundle, monkeypatch):
         assert seen == [ca_bundle, None, ca_bundle]
     finally:
         tls_contexts.reset_https_contexts()
+
+
+# -- inflight slots: queueing, saturation and cancellation -------------------
+
+
+def test_host_queue_enforces_per_endpoint_max_inflight_across_16_callers(ca_bundle):
+    """16 concurrent callers queue on the host without exceeding any endpoint's max_inflight."""
+    import time as _time
+
+    active = {PRIMARY: 0, WORKER: 0}
+    peaks = {PRIMARY: 0, WORKER: 0}
+    counter_lock = threading.Lock()
+
+    def make_handler(base):
+        def handle(payload):
+            with counter_lock:
+                active[base] += 1
+                peaks[base] = max(peaks[base], active[base])
+            _time.sleep(0.03)
+            with counter_lock:
+                active[base] -= 1
+            return _chat(payload["model"])
+        return handle
+
+    hosts = Hosts(chat={PRIMARY: make_handler(PRIMARY), WORKER: make_handler(WORKER)})
+    gateway = _gateway(hosts, _env(ca_bundle))  # primary=1, worker=1
+    results, errors = [], []
+
+    def run(i):
+        try:
+            results.append(gateway.generate(ModelRequest(prompt=f"p{i}", tier="fast"), _ctx()))
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+
+    assert errors == []
+    assert len(results) == 16
+    assert peaks[PRIMARY] <= 1 and peaks[WORKER] <= 1
+    assert len(hosts.posts) == 16
+    assert gateway._inflight == {}
+
+
+def test_host_queue_honors_higher_worker_max_inflight(ca_bundle):
+    import time as _time
+
+    active = {PRIMARY: 0, WORKER: 0}
+    peaks = {PRIMARY: 0, WORKER: 0}
+    counter_lock = threading.Lock()
+
+    def make_handler(base):
+        def handle(payload):
+            with counter_lock:
+                active[base] += 1
+                peaks[base] = max(peaks[base], active[base])
+            _time.sleep(0.04)
+            with counter_lock:
+                active[base] -= 1
+            return _chat(payload["model"])
+        return handle
+
+    hosts = Hosts(chat={PRIMARY: make_handler(PRIMARY), WORKER: make_handler(WORKER)})
+    gateway = _gateway(hosts, _env(ca_bundle, **{ENV_PRIVATE_WORKERS: _workers(ca_bundle, max_inflight=2)}))
+    errors = []
+
+    def run(i):
+        try:
+            gateway.generate(ModelRequest(prompt=f"p{i}", tier="fast"), _ctx())
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    assert errors == []
+    assert peaks[PRIMARY] <= 1
+    assert peaks[WORKER] == 2
+    assert len(hosts.posts) == 8
+    assert gateway._inflight == {}
+
+
+def test_overload_does_not_fail_over_onto_a_saturated_endpoint(ca_bundle):
+    """With the other endpoint full, a 503 overloaded is raised, not queued behind it."""
+    import io
+    from urllib.error import HTTPError
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    def block_worker(payload):
+        worker_entered.set()
+        release_worker.wait(5)
+        return _chat(payload["model"])
+
+    def overloaded_primary(payload):
+        return HTTPError(PRIMARY, 503, "overloaded", {}, io.BytesIO(b'{"error":{"code":"overloaded"}}'))
+
+    hosts = Hosts(chat={WORKER: block_worker, PRIMARY: overloaded_primary})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    gateway.provider_status()  # warm both health caches
+
+    first_done = []
+    t1 = threading.Thread(
+        target=lambda: first_done.append(
+            gateway.generate(ModelRequest(prompt="occupy", tier="fast"), _ctx())
+        )
+    )
+    t1.start()
+    try:
+        assert worker_entered.wait(5)
+        with pytest.raises(CapacityExceeded):
+            gateway.generate(ModelRequest(prompt="second", tier="fast"), _ctx())
+    finally:
+        release_worker.set()
+        t1.join(5)
+    assert len(first_done) == 1
+    assert [b for b, _h, _ca in hosts.posts].count(WORKER) == 1
+
+
+def test_timed_out_readiness_does_not_fail_over_onto_a_saturated_endpoint(ca_bundle):
+    """A probe timeout (maybe just saturation) is raised at once when the peer is full."""
+    import time as _time
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    def block_worker(payload):
+        worker_entered.set()
+        release_worker.wait(5)
+        return _chat(payload["model"])
+
+    hosts = Hosts(chat={WORKER: block_worker})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    gateway.provider_status()  # warm both health caches
+    settings = gateway.settings()
+
+    def primary_probe_times_out(request, context):
+        raise gateway.unreachable_error(settings, "health probe timed out after 5.0s", timed_out=True)
+
+    gateway._generate_here = primary_probe_times_out  # the primary only; workers are child gateways
+    t1 = threading.Thread(
+        target=lambda: gateway.generate(ModelRequest(prompt="occupy", tier="fast"), _ctx()),
+    )
+    t1.start()
+    try:
+        assert worker_entered.wait(5)
+        started = _time.monotonic()
+        with pytest.raises(gateway_module.SonderInferenceUnreachable) as caught:
+            gateway.generate(ModelRequest(prompt="second", tier="fast"), _ctx())
+        assert caught.value.timed_out is True
+        assert _time.monotonic() - started < 2.0  # raised, not queued behind the worker
+    finally:
+        release_worker.set()
+        t1.join(5)
+    assert [b for b, _h, _ca in hosts.posts].count(WORKER) == 1
+
+
+def test_post_read_timeout_does_not_fail_over_onto_peer(ca_bundle):
+    from sonder_runtime.domain.common.errors import DeadlineExceeded
+
+    hosts = Hosts(chat={PRIMARY: TimeoutError("read timed out"), WORKER: TimeoutError("read timed out")})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    with pytest.raises(DeadlineExceeded):
+        gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert len(hosts.posts) == 1
+
+
+def test_overloaded_endpoint_fails_over_when_peer_has_free_capacity(ca_bundle):
+    import io
+    from urllib.error import HTTPError
+
+    def overloaded(payload):
+        return HTTPError(PRIMARY, 503, "overloaded", {}, io.BytesIO(b'{"error":{"code":"overloaded"}}'))
+
+    hosts = Hosts(chat={PRIMARY: overloaded})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    response = gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert response.text == "ok"
+    assert response.endpoint == WORKER.rsplit("/", 1)[0]
+
+
+def test_cancelled_caller_exits_host_slot_queue_cleanly(ca_bundle):
+    entered = threading.Event()
+    release = threading.Event()
+    cancel_event = threading.Event()
+
+    def hold_slot(payload):
+        entered.set()
+        release.wait(5)
+        return _chat(payload["model"])
+
+    hosts = Hosts(chat={PRIMARY: hold_slot, WORKER: hold_slot})
+    gateway = _gateway(hosts, _env(ca_bundle))
+    gateway.provider_status()
+
+    holders = [
+        threading.Thread(target=lambda idx=i: gateway.generate(ModelRequest(prompt=f"h{idx}", tier="fast"), _ctx()))
+        for i in range(2)
+    ]
+    for h in holders:
+        h.start()
+    try:
+        pause = threading.Event()
+        for _ in range(250):
+            with gateway._lock:
+                if sum(gateway._inflight.values()) == 2:
+                    break
+            pause.wait(0.02)
+        assert sum(gateway._inflight.values()) == 2
+
+        threading.Timer(0.05, cancel_event.set).start()
+        with pytest.raises(Cancelled):
+            gateway.generate(
+                ModelRequest(prompt="queued", tier="fast", options={"cancel_token": cancel_event}),
+                _ctx(),
+            )
+        assert len(hosts.posts) == 2  # the queued caller was never dispatched
+    finally:
+        release.set()
+        for h in holders:
+            h.join(5)
+    assert gateway._inflight == {}
