@@ -1512,6 +1512,7 @@
         "sonder_runtime/platform/npu_policy.py",
         "sonder_runtime/platform/paths.py",
         "sonder_runtime/platform/playbooks_config.py",
+        "sonder_runtime/platform/policy_roots.py",
         "sonder_runtime/platform/private_cot_policy.py",
         "sonder_runtime/platform/private_files.py",
         "sonder_runtime/platform/process.py",
