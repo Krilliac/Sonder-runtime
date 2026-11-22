@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 480,
+      "file_count": 481,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -177,6 +177,7 @@
         "sonder_runtime/adapters/filesystem/json_patch.py",
         "sonder_runtime/adapters/filesystem/operator_only_paths.py",
         "sonder_runtime/adapters/filesystem/path_aliases.py",
+        "sonder_runtime/adapters/filesystem/read_only_root_gate.py",
         "sonder_runtime/adapters/filesystem/sealed_python_main.py",
         "sonder_runtime/adapters/filesystem/text_patch.py",
         "sonder_runtime/adapters/filesystem/typed.py",
@@ -1047,7 +1048,7 @@
       ]
     },
     {
-      "file_count": 324,
+      "file_count": 325,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1325,6 +1326,7 @@
         "sonder_runtime/domain/security/__init__.py",
         "sonder_runtime/domain/security/credential_egress.py",
         "sonder_runtime/domain/security/credential_formats.py",
+        "sonder_runtime/domain/security/delete_calls.py",
         "sonder_runtime/domain/security/redaction.py",
         "sonder_runtime/domain/security_eval/__init__.py",
         "sonder_runtime/domain/security_eval/context_select.py",
@@ -1377,7 +1379,7 @@
       ]
     },
     {
-      "file_count": 77,
+      "file_count": 78,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1434,6 +1436,7 @@
         "sonder_runtime/interfaces/http/serve.py",
         "sonder_runtime/interfaces/http/serve_policy.py",
         "sonder_runtime/interfaces/http/sse.py",
+        "sonder_runtime/interfaces/http/thin_routes.py",
         "sonder_runtime/interfaces/http/web_app.py",
         "sonder_runtime/interfaces/http/work_runs.py",
         "sonder_runtime/interfaces/mcp/__init__.py",

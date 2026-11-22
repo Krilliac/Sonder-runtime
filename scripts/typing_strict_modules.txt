@@ -595,6 +595,7 @@ sonder_runtime/interfaces/http/facades/health_status.py
 sonder_runtime/interfaces/http/facades/model_request.py
 sonder_runtime/interfaces/http/facades/observability_stream.py
 sonder_runtime/interfaces/http/memory_replication.py
+sonder_runtime/interfaces/http/thin_routes.py
 sonder_runtime/interfaces/http/web_app.py
 sonder_runtime/interfaces/mcp/__init__.py
 sonder_runtime/interfaces/repl/__init__.py
