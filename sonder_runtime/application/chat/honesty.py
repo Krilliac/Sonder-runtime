@@ -157,13 +157,16 @@ def guard_unsaved_file_claim(
 
 
 _NO_TOOLS_GUIDANCE = (
-    "If this request needs local workspace facts or file contents, Sonder can "
-    "use its scoped read-only tools: workspace_inventory, directory_tree, "
-    "file_find, text_search, file_read/file_read_range, and "
-    "repository_symbol_index. If asked to create or edit files, Sonder can use "
-    "the gated workbench/agent lane. Without a tool result, do not claim that "
-    "a file was written, run, or verified. Ask directly in chat so the runtime "
-    "can choose the appropriate scoped lane."
+    "If this request needs local workspace facts or file contents, you cannot "
+    "read or change them in this turn: none of Sonder's tools is callable by "
+    "you here. The host, not you, may route such a request to a scoped lane: "
+    "read-only workspace tools (workspace_inventory, directory_tree, "
+    "file_find, text_search, file_read/file_read_range, "
+    "repository_symbol_index), or the gated workbench/agent lane for creating "
+    "or editing files. Without a tool result in this conversation, do not "
+    "claim that a file was read, written, run, or verified. Suggest that the "
+    "user ask for it directly in chat so the host can choose the appropriate "
+    "scoped lane."
 )
 
 

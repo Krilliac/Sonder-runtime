@@ -170,7 +170,7 @@ from sonder_runtime.adapters import model_list_consumers as _model_list_consumer
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
-from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_observers as _chat_observers, chat_tool_manifest as _chat_tool_manifest, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -4165,9 +4165,9 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
-    effective_system, playbook_selection = playbook_context.augment(
+    effective_system, playbook_selection = _chat_tool_manifest.manifest_last(effective_system, playbook_context.augment(  # the turn's own tools block stays last
         effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
-    )
+    ))
     gen = _reference_lookup_lanes.chat_generate(  # passages frame the user turn; the stored task stays raw
         _make_generate, prompt, model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback, text_only=True,
@@ -7153,12 +7153,13 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            from sonder_runtime.application.chat.honesty import no_tools_system, no_verification_claims_system
-            # A served chat turn calls no tools, on every route and model.
-            effective_system = _reference_lookup_lanes.system_for(model, no_verification_claims_system(_build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))))
-            if not cloud and not _explicit_serve_selection(tier, ""):
-                effective_system = _reference_lookup_lanes.system_for(model, no_tools_system(effective_system, prompt))
+            from sonder_runtime.application.chat.honesty import no_verification_claims_system
+            # A served chat turn calls no tools, on every route and model; one tools block stays last.
+            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(
+                no_verification_claims_system(_build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                    _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))),
+                prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, ""),
+            ))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -7446,8 +7447,8 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
-        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+    system = _chat_tool_manifest.chat_system(_build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(  # served chat too: one tools block, last
+        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))), prompt, file_guidance=False)
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
