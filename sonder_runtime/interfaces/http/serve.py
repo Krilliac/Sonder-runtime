@@ -2188,7 +2188,7 @@ _http_approver = _approval_routes.approver_label  # who issued an HTTP approval
 
 
 def _audit_http_approval(action, approval, started):
-    """Record an HTTP approve/revoke on the existing direct-tool audit path."""
+    """Record an HTTP approve/deny/revoke on the existing direct-tool audit path."""
     record = getattr(server, "_record_direct_tool", None)
     if not callable(record):
         return
@@ -2199,6 +2199,17 @@ def _audit_http_approval(action, approval, started):
                 started=started,
                 summary="revoked %s call %s via http" % (
                     approval.get("tool", ""), approval.get("call_id", "")),
+            )
+        elif action == "deny":
+            record(
+                "permission_approve",
+                {"deny": approval.get("call_id", ""), "tool": approval.get("tool", ""),
+                 "actor": approval.get("actor", "")},
+                ok=True,
+                started=started,
+                summary="denied %s call %s via http by %s" % (
+                    approval.get("tool", ""), approval.get("call_id", ""),
+                    approval.get("actor", "")),
             )
         else:
             record(
