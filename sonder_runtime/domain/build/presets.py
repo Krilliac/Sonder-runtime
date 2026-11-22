@@ -215,48 +215,66 @@ def parse_cmake_presets(
 
     # Memoised per (pool, name, field, depth): diamond inheritance in an untrusted
     # presets file would otherwise be walked once per path (exponential in depth).
+    # Any result cut short by an inheritance cycle (`name in stack`) is never
+    # memoised so the resolved values stay independent of preset declaration order.
     resolved_memo: dict[tuple[int, str, str, int], object] = {}
     merged_memo: dict[tuple[int, str, int], dict[str, str]] = {}
 
-    def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
+    def _resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> tuple[object, bool]:
         entry = pool.get(name)
-        if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
-            return None
+        if name in stack:
+            return None, True
+        if entry is None or depth > MAX_INHERIT_DEPTH:
+            return None, False
         key = (id(pool), name, field, depth)
         if key in resolved_memo:
-            return resolved_memo[key]
+            return resolved_memo[key], False
         preset = entry[0]
         if field in preset:
-            return preset[field]
+            return preset[field], False
         parents = preset.get("inherits")
         if isinstance(parents, str):
             parents = [parents]
         found: object = None
+        cycle_cut = False
         for parent in (parents or ())[:16]:
             if isinstance(parent, str):
-                value = resolved(pool, parent, field, depth + 1, stack + (name,))
+                value, child_cut = _resolved(pool, parent, field, depth + 1, stack + (name,))
+                if child_cut:
+                    cycle_cut = True
                 if value is not None:
                     found = value
                     break
-        resolved_memo[key] = found
-        return found
+        if not cycle_cut:
+            resolved_memo[key] = found
+        return found, cycle_cut
 
-    def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
+    def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
+        value, _ = _resolved(pool, name, field, depth, stack)
+        return value
+
+    def _merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> tuple[dict[str, str], bool]:
         entry = pool.get(name)
-        if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
-            return {}
+        if name in stack:
+            return {}, True
+        if entry is None or depth > MAX_INHERIT_DEPTH:
+            return {}, False
         memo_key = (id(pool), name, depth)
         cached = merged_memo.get(memo_key)
         if cached is not None:
-            return cached
+            return dict(cached), False
         preset = entry[0]
         out: dict[str, str] = {}
         parents = preset.get("inherits")
         if isinstance(parents, str):
             parents = [parents]
+        cycle_cut = False
         for parent in reversed(list(parents or ())[:16]):
             if isinstance(parent, str):
-                out.update(merged_cache(pool, parent, depth + 1, stack + (name,)))
+                parent_cache, child_cut = _merged_cache(pool, parent, depth + 1, stack + (name,))
+                if child_cut:
+                    cycle_cut = True
+                out.update(parent_cache)
         own = preset.get("cacheVariables")
         if isinstance(own, dict):
             for key, value in list(own.items())[:256]:
@@ -268,7 +286,12 @@ def parse_cmake_presets(
                     value = "ON" if value else "OFF"
                 if isinstance(value, str):
                     out[key] = clip(value, 1024)
-        merged_memo[memo_key] = out
+        if not cycle_cut:
+            merged_memo[memo_key] = dict(out)
+        return out, cycle_cut
+
+    def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
+        out, _ = _merged_cache(pool, name, depth, stack)
         return out
 
     configure: list[PresetInfo] = []

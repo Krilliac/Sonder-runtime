@@ -148,3 +148,58 @@ def test_main_exits_3_and_reports_when_the_hotkey_cannot_be_registered(tmp_path,
     assert code == 3
     payload = json.loads(ready.read_text(encoding="utf-8"))
     assert payload["ok"] is False and indicator.HOTKEY_TEXT in payload["error"]
+
+
+def test_wm_hotkey_writes_stop_file_directly_without_tk_poll(tmp_path):
+    user32, kernel32 = indicator._load_win32()
+    stop_file = tmp_path / "stop.json"
+    stop_lock = threading.Lock()
+    listener = indicator._HotkeyListener(
+        user32, kernel32, _MODS, _VK_F24, hotkey_id=_TEST_ID,
+        stop_file=stop_file, stop_lock=stop_lock,
+    )
+    try:
+        assert listener.start()
+        assert not stop_file.exists()
+        assert user32.PostThreadMessageW(listener.thread_id, indicator._WM_HOTKEY, _TEST_ID, 0)
+        assert listener.fired.wait(2.0)
+        # Written immediately on the hotkey thread before any Tk poll runs.
+        assert stop_file.exists()
+        data = json.loads(stop_file.read_text(encoding="utf-8"))
+        assert data["reason"] == "kill hotkey"
+    finally:
+        listener.stop()
+
+
+def test_unexpected_listener_exit_writes_stop_file_directly(tmp_path):
+    stop_file = tmp_path / "stop.json"
+
+    class _User32:
+        def PeekMessageW(self, *a):
+            return 0
+
+        def RegisterHotKey(self, *a):
+            return 1
+
+        def GetMessageW(self, *a):
+            return -1
+
+        def UnregisterHotKey(self, *a):
+            return 1
+
+        def PostThreadMessageW(self, *a):
+            return 1
+
+    class _Kernel32:
+        def GetCurrentThreadId(self):
+            return 1234
+
+    listener = indicator._HotkeyListener(
+        _User32(), _Kernel32(), _MODS, _VK_F24, hotkey_id=_TEST_ID,
+        stop_file=stop_file,
+    )
+    assert listener.start()
+    listener._thread.join(2.0)
+    assert stop_file.exists()
+    data = json.loads(stop_file.read_text(encoding="utf-8"))
+    assert data["reason"] == "the kill hotkey stopped working"
