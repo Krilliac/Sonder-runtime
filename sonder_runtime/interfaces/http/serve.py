@@ -4958,6 +4958,13 @@ class Handler(BaseHTTPRequestHandler):
         _bind_request_build_principal(context)
         role_tool_policy.bind_caller_role(_restricted_tool_role(context))
         permission_policy.bind_unauthenticated_caller(_chat_tool_stream.is_local_open_context(context))
+        turn_stack = getattr(self, "_turn_stack", None)
+        if turn_stack is not None and not getattr(self, "_mode_scope_bound", False):
+            session_hdr = str(self.headers.get("X-Sonder-Session", "") or "").strip()
+            turn_stack.enter_context(_chat_tool_stream.request_mode_scope(
+                permission_policy, context, _state_principal(context), session_hdr,
+            ))
+            self._mode_scope_bound = True
         return context
 
     def _peer(self):
@@ -5480,6 +5487,16 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_PUT(self):
+        with contextlib.ExitStack() as stack:
+            self._turn_stack = stack
+            self._mode_scope_bound = False
+            try:
+                self._handle_put_request()
+            finally:
+                self._turn_stack = None
+                self._mode_scope_bound = False
+
+    def _handle_put_request(self):
         self._correlation_id = ""
         _bind_request_build_principal(None)
         self._request_started = time.monotonic()
@@ -5527,6 +5544,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json_payload(result, status=status, headers={"Cache-Control": "no-store"})
 
     def do_GET(self):
+        with contextlib.ExitStack() as stack:
+            self._turn_stack = stack
+            self._mode_scope_bound = False
+            try:
+                self._handle_get_request()
+            finally:
+                self._turn_stack = None
+                self._mode_scope_bound = False
+
+    def _handle_get_request(self):
         # Keep-alive reuses Handler instances; see do_OPTIONS for why this is
         # reset before every externally visible request.
         self._correlation_id = ""
@@ -6585,10 +6612,12 @@ class Handler(BaseHTTPRequestHandler):
         observatory_routes.reset_chat_turn(self)
         with contextlib.ExitStack() as stack:
             self._turn_stack = stack
+            self._mode_scope_bound = False
             try:
                 self._handle_post_request()
             finally:
                 self._turn_stack = None
+                self._mode_scope_bound = False
                 self._finish_chat_turn_telemetry()
 
     def _handle_post_request(self):

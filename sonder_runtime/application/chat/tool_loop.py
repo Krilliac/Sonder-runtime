@@ -32,7 +32,14 @@ _EXECUTION_CAP_TOOLS = frozenset({
     "run_code", "run_project", "workspace_run", "script_run",
     "test_run", "lint_run", "format_code", "typecheck_run", "build_run",
 })
-_CREDENTIAL_KEYS = frozenset({"token", "approval", "extra_roots"})
+_CREDENTIAL_KEYS = frozenset({"token", "approval", "extra_roots", "bypass", "developer_authorized"})
+
+
+def _has_credential_argument(args: Mapping[str, Any]) -> bool:
+    return any(
+        key in args and args.get(key) not in (None, "", False, (), [], {})
+        for key in _CREDENTIAL_KEYS
+    )
 
 
 @dataclass(frozen=True)
@@ -92,7 +99,7 @@ class ChatToolTurn:
             msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
-        if any(isinstance(args.get(key), str) and args.get(key) for key in _CREDENTIAL_KEYS):
+        if _has_credential_argument(args):
             msg = f"ERROR: HOST POLICY: tool '{name}' cannot receive caller credential arguments."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
@@ -221,6 +228,7 @@ class ChatToolTurn:
 
         started = time.monotonic()
         run_count = 0
+        tool_calls_total = 0
         calls = 0
         total_in = 0
         total_out = 0
@@ -255,10 +263,29 @@ class ChatToolTurn:
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
             assistant_msg["tool_calls"] = list(tool_calls)
             messages.append(assistant_msg)
+            stopped_early = False
             for raw_call in tool_calls:
-                obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
+                if self.is_aborted is not None and self.is_aborted():
+                    stopped_early = True
+                    break
+                if (time.monotonic() - started) >= self.budget.wall_seconds:
+                    stopped_early = True
+                    break
                 tool_name = str(((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or "")
+                if tool_calls_total >= self.budget.max_tool_calls:
+                    msg = (
+                        f"ERROR: HOST POLICY: chat turn tool-call budget reached "
+                        f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
+                    )
+                    backend = self.backend.backend_for(tool_name) if tool_name else "host"
+                    self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
+                    messages.append({"role": "tool", "name": tool_name, "content": msg})
+                    break
+                tool_calls_total += 1
+                obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
                 messages.append({"role": "tool", "name": tool_name, "content": obs})
+            if stopped_early:
+                break
         else:
             final_content = final_content or "Reached the per-turn tool-call limit before completing a final reply."
 

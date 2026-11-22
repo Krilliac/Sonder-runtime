@@ -236,3 +236,158 @@ def test_gate_answer_code_skips_active_tool_turn_and_slash_call_arguments():
     assert developer_chat.slash_call_arguments("/run", "print(1)") == {"code": "print(1)", "language": "python"}
     assert developer_chat.slash_call_arguments("/delete", "old.txt")["path"] == "old.txt"
     assert json.loads(json.dumps(developer_chat.slash_call_arguments("/test", "pytest")))
+
+
+def test_tool_loop_enforces_abort_wall_and_max_tool_calls_inside_batch(monkeypatch):
+    from sonder_runtime.domain.chat_tools import ChatToolBudget
+
+    manifest = build_tool_turn_manifest(admitted_tools=["file_read"], user_run_command=False, mode="manual")
+    batch = [
+        {"function": {"name": "file_read", "arguments": {"path": f"f{i}.txt"}}}
+        for i in range(25)
+    ]
+
+    # 1) is_aborted() checked inside the batch stops execution at 3 instead of running all 25.
+    executed_abort: list[str] = []
+    backend_abort = ChatRunBackend(
+        dispatch_agent_tool=lambda name, args, **_k: executed_abort.append(args["path"]) or "ok",
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn_abort = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=[],
+        backend=backend_abort,
+        permission_policy=pm,
+        is_aborted=lambda: len(executed_abort) >= 3,
+    )
+    turn_abort.run(
+        lambda _m, _t: {"message": {"role": "assistant", "content": "", "tool_calls": batch}},
+        system="sys", prompt="read", history=None,
+    )
+    assert len(executed_abort) == 3
+
+    # 2) max_tool_calls caps total calls inside a single batch and records budget_exceeded.
+    executed_cap: list[str] = []
+    backend_cap = ChatRunBackend(
+        dispatch_agent_tool=lambda name, args, **_k: executed_cap.append(args["path"]) or "ok",
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn_cap = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=[],
+        backend=backend_cap,
+        permission_policy=pm,
+        budget=ChatToolBudget(max_tool_calls=5, max_model_calls=2),
+    )
+    steps_cap = iter([
+        {"message": {"role": "assistant", "content": "", "tool_calls": batch}},
+        {"message": {"role": "assistant", "content": "Done after cap."}},
+    ])
+    outcome_cap = turn_cap.run(lambda _m, _t: next(steps_cap), system="sys", prompt="read", history=None)
+    assert len(executed_cap) == 5
+    assert any(r.status == "budget_exceeded" for r in outcome_cap.records)
+    assert outcome_cap.content == "Done after cap."
+
+    # 3) wall_seconds timeout checked inside the batch stops mid-batch.
+    executed_wall: list[str] = []
+    clock = [100.0]
+
+    def _tick_dispatch(name, args, **_k):
+        executed_wall.append(args["path"])
+        clock[0] += 6.0
+        return "ok"
+
+    monkeypatch.setattr("sonder_runtime.application.chat.tool_loop.time.monotonic", lambda: clock[0])
+    backend_wall = ChatRunBackend(
+        dispatch_agent_tool=_tick_dispatch,
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn_wall = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=[],
+        backend=backend_wall,
+        permission_policy=pm,
+        budget=ChatToolBudget(wall_seconds=10.0, max_tool_calls=24),
+    )
+    turn_wall.run(
+        lambda _m, _t: {"message": {"role": "assistant", "content": "", "tool_calls": batch}},
+        system="sys", prompt="read", history=None,
+    )
+    assert len(executed_wall) == 2
+
+
+def test_tool_loop_rejects_non_string_and_privilege_credential_args():
+    manifest = build_tool_turn_manifest(admitted_tools=["file_read"], user_run_command=False, mode="manual")
+    dispatched: list[dict] = []
+    backend = ChatRunBackend(
+        dispatch_agent_tool=lambda name, args, **_k: dispatched.append(args) or "ok",
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=[],
+        backend=backend,
+        permission_policy=pm,
+    )
+    bad_payloads = [
+        {"path": "a.txt", "bypass": True},
+        {"path": "a.txt", "bypass": 1},
+        {"path": "a.txt", "developer_authorized": True},
+        {"path": "a.txt", "extra_roots": ["/etc"]},
+        {"path": "a.txt", "token": 12345},
+        {"path": "a.txt", "approval": {"once": True}},
+    ]
+    for bad in bad_payloads:
+        obs, _ = turn._run_tool_call(
+            {"function": {"name": "file_read", "arguments": bad}}, run_count=0,
+        )
+        assert "credential arguments" in obs, (bad, obs)
+    assert dispatched == []
+
+
+def test_resolve_agent_project_scope_refuses_network_device_and_control_paths_before_realpath(
+    monkeypatch, tmp_path,
+):
+    import os
+    from sonder_runtime.adapters import chat_run_backend
+
+    real_realpath = os.path.realpath
+    realpath_calls: list[str] = []
+
+    def _spy_realpath(p, *args, **kwargs):
+        realpath_calls.append(str(p))
+        return real_realpath(p, *args, **kwargs)
+
+    monkeypatch.setattr(chat_run_backend.os.path, "realpath", _spy_realpath)
+
+    bad_inputs = [
+        r"\\nohost.invalid\share",
+        r"\\?\UNC\nohost.invalid\share",
+        r"\\.\pipe\test",
+        r"\\.\NUL",
+        r"\\?\GLOBALROOT\Device\Null",
+        "//nohost.invalid/share",
+        r"\??\C:\Windows",
+        "bad\x00root",
+        "bad\nroot",
+    ]
+    for raw in bad_inputs:
+        scope, err = chat_run_backend.resolve_agent_project_scope(raw)
+        assert scope == "", (raw, scope, err)
+        assert err.startswith("ERROR: invalid agent project root:"), (raw, err)
+    assert realpath_calls == [], f"os.path.realpath touched forbidden paths: {realpath_calls}"
+
+    # Positive control: an existing local directory still resolves cleanly.
+    local_dir = tmp_path / "proj"
+    local_dir.mkdir()
+    scope, err = chat_run_backend.resolve_agent_project_scope(str(local_dir))
+    assert err == ""
+    assert scope == real_realpath(str(local_dir))

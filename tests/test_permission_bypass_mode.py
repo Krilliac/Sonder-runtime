@@ -611,3 +611,61 @@ def test_policy_explain_cloud_opt_in_reports_the_status_form(monkeypatch, tmp_pa
     assert "gate result: deny" in server.policy_explain("cloud_opt_in")
     # Other tools are unchanged: no arguments line.
     assert "arguments:" not in server.policy_explain("file_write")
+
+
+def test_console_global_bypass_never_leaks_to_other_http_routes(monkeypatch, tmp_path):
+    """Console global bypass must never leak into non-chat HTTP routes (e.g. POST /v1/build/jobs)."""
+    monkeypatch.setattr(pm, "_state_path", lambda: str(tmp_path / "permission_mode.json"))
+    pm._reset_for_tests()
+    with pm.attended_mode_change(), pm.attended_bypass_confirm():
+        pm.set_mode(pm.BYPASS)
+    assert pm.current_mode() == pm.BYPASS
+
+    _serve_with_accounts(monkeypatch, mode="account")
+    observed = {}
+
+    def _capture_build(self, method, path, req=None):
+        if method != "POST" or path != "/v1/build/jobs":
+            return False
+        observed["post"] = {
+            "mode": pm.current_mode(),
+            "bypass_root": pm.bypass_root_containment_active(),
+            "file_ops_bypass": file_ops.bypass_enabled(),
+        }
+        self._send_json_payload(observed["post"], status=200)
+        return True
+
+    def _capture_commands(context=None):
+        observed["get"] = {
+            "mode": pm.current_mode(),
+            "bypass_root": pm.bypass_root_containment_active(),
+            "file_ops_bypass": file_ops.bypass_enabled(),
+        }
+        return observed["get"]
+
+    monkeypatch.setattr(ts.Handler, "_handle_build_request", _capture_build)
+    monkeypatch.setattr(ts, "_commands_index_payload", _capture_commands)
+
+    dev_headers = {"Content-Type": "application/json", "Authorization": "Bearer dev-token"}
+    with _http_server(monkeypatch) as port:
+        post_status, _, post_body = _request(
+            port, "POST", "/v1/build/jobs", body="{}", headers=dev_headers,
+        )
+        get_status, _, get_body = _request(
+            port, "GET", "/v1/commands", headers={"Authorization": "Bearer dev-token"},
+        )
+
+    assert post_status == 200, post_body
+    assert json.loads(post_body) == {
+        "mode": pm.MANUAL,
+        "bypass_root": False,
+        "file_ops_bypass": False,
+    }
+    assert get_status == 200, get_body
+    assert json.loads(get_body) == {
+        "mode": pm.MANUAL,
+        "bypass_root": False,
+        "file_ops_bypass": False,
+    }
+    # Console global bypass remains intact outside the HTTP request scopes.
+    assert pm.current_mode() == pm.BYPASS
