@@ -32,9 +32,8 @@ class PreflightExecutor:
             check_ollama=check_ollama,
             ollama_timeout=ollama_timeout,
         )
-        if not getattr(report, 'passed', True):
-            logger.error(f"preflight check did not pass, runtime may start in a degraded state")
+        if not getattr(report, 'ok', True):
             logger.warning(f"preflight check did not pass, runtime may be in a degraded state")
-        logger.info(f"preflight check completed, passed={getattr(report, 'passed', '?')}")
-        logger.debug(f"preflight complete: passed={getattr(report, 'passed', '?')}")
+        logger.info(f"preflight check completed, ok={getattr(report, 'ok', '?')}")
+        logger.debug(f"preflight complete: ok={getattr(report, 'ok', '?')}")
         return report

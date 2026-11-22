@@ -50,7 +50,9 @@ def command(arg: str | None, *, operator_attended: bool) -> str:
             model_lists.merge(shipped, document)
             atomic_json.write_json_atomic(path, document)
         return (
-            "%s %s in overlay %s. Defaults apply on the next consumer load; restart for startup bindings."
+            "%s %s in overlay %s. Cloud tier defaults and the retired list reach running"
+            " Sonder processes on their next tier read; other startup bindings (local"
+            " tiers seeded at import) still need a restart."
             % (action, key, path)
         )
     except (OSError, ValueError, TypeError, RuntimeError, RecursionError) as exc:
