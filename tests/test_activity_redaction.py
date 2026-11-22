@@ -7,6 +7,8 @@ same shapes; these pin the shapes that were measured passing through it.
 """
 import json
 
+import pytest
+
 import sonder_runtime.adapters.observability.activity_tracker as at
 import server
 
@@ -427,3 +429,196 @@ def test_uri_credential_redaction_is_linear_on_long_scheme_runs():
         at._redact_text(run)
         # Quadratic scanning took seconds here; a linear scan takes milliseconds.
         assert time.perf_counter() - started < 1.0
+
+
+def test_redaction_is_linear_on_repeated_keywords():
+    import time
+
+    for payload in ("token" * 10_000, "password_" * 5_600, "secret=" * 7_200,
+                    "api_key" * 7_200, "token " * 8_400):
+        assert len(payload) >= 50_000
+        started = time.perf_counter()
+        at._redact_text(payload)
+        assert time.perf_counter() - started < 0.5
+
+
+def test_redaction_caps_input_and_never_returns_the_dropped_tail():
+    tail = "AWS_SECRET_ACCESS_KEY=hunter2-not-real"
+    out = at._redact_text("x" * (at.MAX_REDACT_CHARS + 10) + tail)
+    assert len(out) < at.MAX_REDACT_CHARS + 100
+    assert "hunter2" not in out
+
+
+def test_redaction_output_unchanged_for_prefixed_names():
+    assert at._redact_text("MY_DB_PASSWORD=hunter2-not-real ok") == "MY_DB_PASSWORD=<redacted> ok"
+
+
+def test_record_tool_result_redacts_outside_the_lock(monkeypatch):
+    held = []
+    real = at._redact_text
+
+    def spy(value):
+        held.append(at._LOCK._is_owned())
+        return real(value)
+
+    monkeypatch.setattr(at, "_redact_text", spy)
+    monkeypatch.setattr(at, "_current", lambda: {"tool_calls": 0, "events": []})
+    monkeypatch.setattr(at, "_event", lambda *a, **k: None)
+    at.record_tool_result("file_read", {"p": "x"}, command="c", output="o", summary="s")
+    assert held and not any(held)
+
+
+def test_long_key_name_after_keyword_is_still_redacted():
+    name = "my_service_access_key" + "_" + "x" * 100
+    out = at._redact_text(name + "=hunter2-not-real")
+    assert "hunter2" not in out
+    assert out == name + "=<redacted>"
+    long_prefix = "a" * 100 + "_password"
+    assert at._redact_text(long_prefix + "=hunter2-not-real") == long_prefix + "=<redacted>"
+
+
+def test_cap_boundary_never_leaks_part_of_a_credential():
+    cap = at.MAX_REDACT_CHARS
+    secrets = ("sk-proj-FAKEFAKEFAKEFAKEFAKEFAKE", "password=hunter2-not-real",
+               "AWS_SECRET_ACCESS_KEY=hunter2-not-real")
+    for secret in secrets:
+        for offset in range(1, len(secret) + 1):
+            for sep in (" ", "\n"):
+                text = "x" * (cap - offset - len(sep)) + sep + secret
+                out = at._redact_text(text)
+                tail = out.split("... (truncated")[0].rstrip("x")
+                for fragment in ("sk-", "hunter", "not-real", "FAKE"):
+                    assert fragment not in tail, (secret, offset, sep, fragment)
+
+
+def _best_of_three(func, payload):
+    import time
+
+    best = None
+    for _ in range(3):
+        started = time.perf_counter()
+        func(payload)
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+def _assert_linear(func, make_payload):
+    # Best of three at 10/20/50 KB. A linear scan grows ~5x from 10 to 50 KB, a
+    # quadratic one ~25x; the 5 ms floor absorbs timer noise on tiny inputs.
+    t10, t20, t50 = (_best_of_three(func, make_payload(kb * 1000)) for kb in (10, 20, 50))
+    assert t50 <= max(0.005, 12 * t10), (t10, t20, t50)
+
+
+def _repeat(unit, size):
+    return (unit * (size // len(unit) + 1))[:size]
+
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    (
+        ("tokenapi-key=S3CR3T-not-real", "tokenapi-key"),
+        ("secret_access-key=S3CR3T-not-real", "secret_access-key"),
+        ("aws_secret_access-key: S3CR3T-not-real", "aws_secret_access-key"),
+        ("my_token_api-key = S3CR3T-not-real", "my_token_api-key"),
+        ("tokentoken_api-key=S3CR3T-not-real", "tokentoken_api-key"),
+        ("x-api-key: S3CR3T-not-real", "x-api-key"),
+        ("credential-api-key: S3CR3T-not-real", "credential-api-key"),
+    ),
+)
+def test_hyphenated_keyword_joins_are_redacted(text, name):
+    # The old \b-anchored rule redacted these; a tempered prefix that stops at
+    # the first keyword plus a suffix that stopped at '-' leaked them.
+    assert at._redact_text(text) == name + "=<redacted>"
+
+
+@pytest.mark.parametrize("unit", ("api-", "-key", "a-key", "access-", "token-key-", "x-api-key-"))
+def test_hyphen_join_redaction_is_linear(unit):
+    _assert_linear(at._redact_text, lambda size: _repeat(unit, size))
+
+
+def _no_whitespace_filler(size):
+    # Ends in a non-secret JSON pair so the URL that follows is not swallowed
+    # by the preceding password value.
+    unit = "password=" + "Q" * 990 + ","
+    return _repeat(unit, size - 8) + ',"k":"x"'
+
+
+def test_cap_cut_inside_url_userinfo_without_whitespace_never_leaks():
+    # No whitespace anywhere: the old window fallback kept a password fragment
+    # with no '@', and once the earlier values shrank to "<redacted>" that
+    # fragment landed inside the visible 4000-char block.
+    floor = at.MAX_REDACT_CHARS - 256
+    text = (_no_whitespace_filler(floor - 53) + "https://user:" + "PASSWORDPART"
+            + "P" * 600 + "@host/" + "Z" * 100)
+    out = at._redact_text(text)
+    assert "PASSWORDPART" not in out
+    assert "PASSWORDPART" not in at._block(out, at.MAX_EVENT_BLOCK)
+    assert "PASSWORDPART" not in at._preview_descriptor(text)["text"]
+
+
+@pytest.mark.parametrize("offset", (5, 40, 300, 700))
+def test_cap_cut_after_shrinking_values_never_leaks_a_url_fragment(offset):
+    cap = at.MAX_REDACT_CHARS
+    url = "https://user:" + "SECRETPART" + "S" * 1000 + "@host/"
+    text = _no_whitespace_filler(cap - offset - 13) + url + "Z" * 100
+    out = at._redact_text(text)
+    assert len(out) < 4000
+    assert "SECRETPART" not in out and "SSSS" not in out
+
+
+@pytest.mark.parametrize(
+    "value", ('"correct horse battery staple"', "'correct horse battery staple'"),
+)
+def test_cap_cut_inside_a_quoted_value_never_leaks_a_word(value):
+    cap = at.MAX_REDACT_CHARS
+    secret = "password = " + value
+    for cut_after in ("correct", "correct ", "correct horse", "correct horse ",
+                      "correct horse battery "):
+        keep = secret.index(cut_after) + len(cut_after)
+        text = "x " * ((cap - keep) // 2) + "x" * ((cap - keep) % 2) + secret + " tail"
+        assert text[:cap].endswith(cut_after), cut_after
+        out = at._redact_text(text)
+        for word in ("correct", "horse", "battery", "staple"):
+            assert word not in out, (cut_after, word)
+
+
+def test_truncation_alone_is_not_reported_as_redaction():
+    text = "plain output line\n" * (at.MAX_REDACT_CHARS // 10)
+    preview = at._preview_descriptor(text)
+    assert preview["truncated"] is True
+    assert preview["redacted"] is False
+    descriptor = at._safe_value_descriptor(text, at._block(at._redact_text(text), at.MAX_EVENT_BLOCK))
+    assert descriptor["truncated"] is True
+    assert descriptor["redacted"] is False
+
+
+def test_truncated_input_with_a_secret_is_still_reported_as_redacted():
+    text = "password=hunter2-not-real\n" + "plain output line\n" * (at.MAX_REDACT_CHARS // 10)
+    preview = at._preview_descriptor(text)
+    assert preview["truncated"] is True
+    assert preview["redacted"] is True
+    assert "hunter2" not in preview["text"]
+
+
+@pytest.mark.parametrize(
+    "secret",
+    (
+        "github_pat_FAKEFAKEFAKEFAKEFAKEFAKE",
+        "AIzaFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+        "xoxb-FAKE0000000000",
+    ),
+)
+def test_activity_redacts_provider_key_shapes_and_empty_user_uri(secret):
+    out = at._redact_text("found " + secret + " in output")
+    assert secret not in out
+    assert "<redacted-key>" in out
+    uri_out = at._redact_text("redis://:onlypass-not-real@cache.invalid:6379")
+    assert "onlypass-not-real" not in uri_out
+    assert uri_out == "redis://<redacted>@cache.invalid:6379"
+
+
+def test_uri_empty_user_redaction_stays_linear():
+    _assert_linear(at._redact_text, lambda size: "a://:" + "b" * size)
+    _assert_linear(at._redact_text, lambda size: "a://u:" + ":" * size)
