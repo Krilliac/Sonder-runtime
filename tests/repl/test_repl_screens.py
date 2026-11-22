@@ -118,6 +118,10 @@ def _masked(name, lines):
         # Command and group counts move whenever a tool is added; the
         # layout is what this golden pins.
         lines = [re.sub(r"\d", "#", line) for line in lines]
+    elif name == "error_panel":
+        # FakeOllama binds an ephemeral loopback port; mask the port so
+        # the golden pins the error wording and wrap layout deterministically.
+        lines = [re.sub(r"(http://127\.0\.0\.1:)\d+", r"\1<port>", line) for line in lines]
     return lines
 
 

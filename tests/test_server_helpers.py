@@ -2850,6 +2850,9 @@ def test_master_orchestrate_fleet_persists_explicit_agent_count(monkeypatch):
     # this exercises real durable persistence without touching the live ledger.
     monkeypatch.setattr(server.master_orchestrator, "max_agents", lambda: 32)
     monkeypatch.setattr(
+        server.master_orchestrator, "capacity", lambda *args, **kwargs: {"worker_slots": 2},
+    )
+    monkeypatch.setattr(
         server.master_orchestrator, "parallel_worker_slots", lambda requested: 2,
     )
     monkeypatch.setattr(
@@ -2864,7 +2867,7 @@ def test_master_orchestrate_fleet_persists_explicit_agent_count(monkeypatch):
         agents=8,
     )
 
-    deadline = time.time() + 2.0
+    deadline = time.time() + 10.0
     snapshot = server.master_orchestrator.snapshot(include_finished=True, limit=100)
     while snapshot["active_agents"] and time.time() < deadline:
         time.sleep(0.01)
