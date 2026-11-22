@@ -475,3 +475,86 @@ def test_startup_probe_never_raises_on_bad_configuration() -> None:
         {"SONDER_RPC_PEERS": WORKER, "SONDER_OPENAI_BASE_URL": "http://127.0.0.1:11438"},
         get_fn=_fake_get,
     ) is not None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["demo:a/../../x", "demo:a/b", "\\\\srv\\share\\x:latest", "C:\\x:latest", "demo:la test", "-demo:latest", "demo:.hidden"],
+)
+def test_ollama_model_ref_rejects_unsafe_segments(tmp_path: Path, name: str) -> None:
+    with pytest.raises(RpcClusterConfigError):
+        resolve_ollama_gguf_blob(name, models_dir=tmp_path)
+
+
+def test_ollama_manifest_symlink_escape_is_refused(tmp_path: Path) -> None:
+    models_dir = tmp_path / "m"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    hex_part = "a" * 64
+    (outside / "latest").write_text(
+        json.dumps(
+            {
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.ollama.image.model",
+                        "digest": f"sha256:{hex_part}",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    blobs = models_dir / "blobs"
+    blobs.mkdir(parents=True)
+    (blobs / f"sha256-{hex_part}").write_bytes(b"GGUF")
+    ns = models_dir / "manifests" / "registry.ollama.ai" / "library"
+    ns.mkdir(parents=True)
+    try:
+        (ns / "demo").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert resolve_ollama_gguf_blob("demo:latest", models_dir=models_dir) is None
+
+
+def test_default_http_get_does_not_follow_redirects() -> None:
+    import http.server
+    import threading
+
+    from sonder_runtime.adapters.inference import rpc_cluster as rc
+
+    hits: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            hits.append(self.path)
+            if self.path == "/health":
+                self.send_response(302)
+                self.send_header("Location", "/r/health")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _ = rc._default_http_get(f"http://127.0.0.1:{server.server_port}/health", 2.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert status == 302
+    assert hits == ["/health"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://user:pw@127.0.0.1:11438", "http://127.0.0.1:11438/?x=1", "http://127.0.0.1:11438/#f"],
+)
+def test_sharded_server_url_rejects_userinfo_query_fragment(url: str) -> None:
+    with pytest.raises(RpcClusterConfigError):
+        probe_sharded_server(url, get_fn=_fake_get)

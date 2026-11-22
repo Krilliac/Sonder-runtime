@@ -105,3 +105,171 @@ function Test-RpcTcpReachable([string]$TargetHost, [int]$TargetPort, [int]$Timeo
         $client.Close()
     }
 }
+
+function ConvertTo-RpcArgumentString([string[]]$Arguments) {
+    # Quote per the CommandLineToArgvW rules so a Win32_Process command line
+    # reaches the child as exactly these argv entries on Windows PowerShell 5.1
+    # and PowerShell 7 (5.1 joins an array with spaces and does not quote).
+    $parts = foreach ($arg in $Arguments) {
+        $text = [string]$arg
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
+            $text
+        }
+        else {
+            $escaped = [regex]::Replace($text, '(\\*)"', '$1$1\"')
+            $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+            '"' + $escaped + '"'
+        }
+    }
+    return ($parts -join ' ')
+}
+
+function Start-RpcDetached([string]$ExePath, [string]$ArgumentString, [string]$WorkingDirectory) {
+    # Launch detached through Win32_Process.Create. Unlike Start-Process with
+    # redirected output, the child inherits none of the caller's pipe handles and
+    # is not in the caller's job object, so a one-shot `ssh host powershell -File`
+    # or a piped CI/agent wrapper returns at once and the server outlives the
+    # session. Returns the new process id. No PowerShell source string is built.
+    $commandLine = '"' + $ExePath + '"'
+    if ($ArgumentString) { $commandLine += ' ' + $ArgumentString }
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine      = $commandLine
+        CurrentDirectory = $WorkingDirectory
+    }
+    if ($created.ReturnValue -ne 0) {
+        throw "Win32_Process Create failed with return code $($created.ReturnValue)."
+    }
+    return [int]$created.ProcessId
+}
+
+function ConvertTo-RpcBaseUrl([string]$HostAddress, [int]$Port) {
+    $hostText = ([string]$HostAddress).Trim()
+    if ($hostText.Contains(':') -and -not $hostText.StartsWith('[')) { $hostText = "[$hostText]" }
+    return "http://${hostText}:$Port"
+}
+
+function Assert-RpcBaseUrl([string]$BaseUrl) {
+    $text = ([string]$BaseUrl).Trim()
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($text, [System.UriKind]::Absolute, [ref]$uri) -or
+        ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https')) {
+        throw "Invalid base URL '$BaseUrl'."
+    }
+    if ($uri.UserInfo -or $text.Contains('@')) { throw 'Base URL must not contain credentials.' }
+    if ($uri.Query -or $uri.Fragment -or $text.Contains('?') -or $text.Contains('#')) {
+        throw 'Base URL must not contain a query or fragment.'
+    }
+    return $text.TrimEnd('/')
+}
+
+function Assert-RpcFirewallDisplayName([string]$DisplayName) {
+    $prefix = 'Sonder llama-rpc '
+    if ($DisplayName -match '[*?\[\]]') {
+        throw "Firewall rule display name must not contain wildcard characters, got '$DisplayName'."
+    }
+    if (-not $DisplayName.StartsWith($prefix, [System.StringComparison]::Ordinal) -or $DisplayName.Length -le $prefix.Length) {
+        throw "Firewall rule display name must start with '$prefix', got '$DisplayName'."
+    }
+    return $DisplayName
+}
+
+function Resolve-OllamaBlob([string]$Tag, [string]$ModelsRoot) {
+    if (-not $ModelsRoot) {
+        $ModelsRoot = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } else { Join-Path $env:USERPROFILE '.ollama\models' }
+    }
+    $segmentPattern = '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    if ($Tag -match ':') {
+        $idx = $Tag.LastIndexOf(':')
+        $repo = $Tag.Substring(0, $idx)
+        $ver = $Tag.Substring($idx + 1)
+    }
+    else {
+        $repo = $Tag
+        $ver = 'latest'
+    }
+    $segs = @($repo.Split('/') | Where-Object { $_ })
+    if ($segs.Count -eq 0 -or -not $ver) { throw "Invalid Ollama model name '$Tag'." }
+    foreach ($seg in @($segs) + @($ver)) {
+        if ($seg -notmatch $segmentPattern) { throw "Invalid Ollama model name '$Tag'." }
+    }
+    if ($segs.Count -eq 1) {
+        $relative = "registry.ollama.ai\library\$($segs[0])\$ver"
+    }
+    elseif ($segs.Count -eq 2) {
+        $relative = "registry.ollama.ai\$($segs[0])\$($segs[1])\$ver"
+    }
+    else {
+        $relative = "$($segs[0])\$(($segs[1..($segs.Count - 1)]) -join '\')\$ver"
+    }
+    $manifestsRoot = [System.IO.Path]::GetFullPath((Join-Path $ModelsRoot 'manifests')).TrimEnd('\') + '\'
+    $manifest = [System.IO.Path]::GetFullPath((Join-Path $manifestsRoot $relative))
+    if (-not $manifest.StartsWith($manifestsRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Invalid Ollama model name '$Tag': manifest path escapes the manifests directory."
+    }
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Ollama manifest not found for '$Tag' at '$manifest'."
+    }
+    $doc = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $modelLayer = @($doc.layers | Where-Object { $_.mediaType -eq 'application/vnd.ollama.image.model' }) | Select-Object -First 1
+    if (-not $modelLayer -or -not $modelLayer.digest) {
+        throw "No model layer digest found in Ollama manifest '$manifest'."
+    }
+    $digest = [string]$modelLayer.digest
+    if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Ollama manifest '$manifest' has an invalid model layer digest."
+    }
+    $blobPath = Join-Path $ModelsRoot ('blobs\' + $digest.Replace(':', '-'))
+    if (-not (Test-Path -LiteralPath $blobPath)) {
+        throw "Resolved Ollama blob missing at '$blobPath'."
+    }
+    return $blobPath
+}
+
+function ConvertTo-RpcFullPath([string]$Path) {
+    # Canonical absolute form (relative to the PowerShell location, not the
+    # process working directory), with forward slashes and dot segments folded.
+    $unresolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    return [System.IO.Path]::GetFullPath($unresolved)
+}
+
+function Get-RpcProcessPath([int]$ProcessId) {
+    # Canonical executable path of a live process, as the OS reports it.
+    $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+    $path = [string]$proc.Path
+    if (-not $path) { throw "Cannot read the executable path of process $ProcessId." }
+    return $path
+}
+
+function Test-RpcOwnedProcess([int]$ProcessId, [string]$ExePath, [string]$StartedUtc) {
+    # True only when the live process still is the one we launched: same
+    # executable and same start time (guards against PID reuse).
+    if ($ProcessId -le 0 -or -not $ExePath -or -not $StartedUtc) { return $false }
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { return $false }
+    try {
+        $actualPath = [string]$proc.Path
+        $actualStart = $proc.StartTime.ToUniversalTime()
+    }
+    catch { return $false }
+    if (-not $actualPath) { return $false }
+    try {
+        $expectedFull = ConvertTo-RpcFullPath $ExePath
+        $actualFull = ConvertTo-RpcFullPath $actualPath
+    }
+    catch { return $false }
+    if (-not [string]::Equals($actualFull, $expectedFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $recorded = [datetime]::MinValue
+    if (-not [datetime]::TryParse($StartedUtc, [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+            [ref]$recorded)) {
+        return $false
+    }
+    return ([math]::Abs(($actualStart - $recorded).TotalSeconds) -lt 2)
+}
+
+function Get-RpcProcessStartUtc([int]$ProcessId) {
+    $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+    return $proc.StartTime.ToUniversalTime().ToString('o')
+}

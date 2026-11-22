@@ -66,3 +66,30 @@ def test_configured_peers_require_a_loopback_openai_base_url(base_url: str) -> N
         env["SONDER_OPENAI_BASE_URL"] = base_url
     errors = _errors(env)
     assert any("SONDER_OPENAI_BASE_URL" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://u:p@127.0.0.1:11438",
+        "http://u@127.0.0.1:11438",
+        "http://127.0.0.1:11438/?a=1",
+        "http://127.0.0.1:11438#x",
+        "http://127.0.0.1:99999",
+        "http://127.0.0.1:0",
+    ],
+)
+def test_configured_peers_reject_credentials_query_fragment_and_bad_port(base_url: str) -> None:
+    errors = _errors({"SONDER_RPC_PEERS": WORKER, "SONDER_OPENAI_BASE_URL": base_url})
+    assert any("SONDER_OPENAI_BASE_URL" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("base_url", ["http://127.0.0.1:99999", "http://127.0.0.1:abc"])
+def test_runtime_loopback_validator_rejects_bad_port(base_url: str) -> None:
+    from sonder_runtime.adapters.inference.rpc_cluster import (
+        RpcClusterConfigError,
+        _validate_loopback_base_url,
+    )
+
+    with pytest.raises(RpcClusterConfigError):
+        _validate_loopback_base_url(base_url)
