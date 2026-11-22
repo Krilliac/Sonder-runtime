@@ -157,6 +157,14 @@ def _isolate_deployment_posture():
             os.environ[name] = value
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_workspace_dir():
+    default_ws = _TEST_WORKSPACE_PARENT / "workspaces"
+    yield
+    if default_ws.exists():
+        shutil.rmtree(default_ws, ignore_errors=True)
+
+
 # The shared system TLS context is process-global. A test that patches
 # ``ssl.create_default_context`` and reaches it would otherwise leave its fake in
 # the slot for whichever test runs next, so the slot is emptied around every test.

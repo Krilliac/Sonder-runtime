@@ -2058,7 +2058,7 @@ def test_exchange_watcher_sees_a_fleet_worker_cancel_bound_on_the_caller_thread(
     import time as _time
 
     import master_orchestrator as mo
-    from sonder_runtime.adapters.legacy_chat_bridge import BridgeCancellation
+    from sonder_runtime.adapters import legacy_chat_bridge
 
     cancelled = threading.Event()
     monkeypatch.setattr(mo, "cancel_requested",
@@ -2066,7 +2066,7 @@ def test_exchange_watcher_sees_a_fleet_worker_cancel_bound_on_the_caller_thread(
     left, right = socket.socketpair()
     try:
         with mo._bind_worker_agent("agent-under-test"):
-            token = BridgeCancellation(mo.current_worker_cancel_requested)
+            token = legacy_chat_bridge.BridgeCancellation(mo.current_worker_cancel_requested)
             with gateway_module._cancellation_scope(token), \
                     gateway_module._ExchangeBudget(30.0) as budget:
                 budget.attach(left)

@@ -3166,7 +3166,7 @@ def _http_workspace_roots(auth):
     from sonder_runtime.bootstrap.app import default_app
     from sonder_runtime.platform.policy_roots import try_parse_policy_root
     state = getattr(getattr(default_app(), "config", None), "state", None)
-    resolved = (p.resolve() for r in getattr(state, "workspace_roots", ()) if (p := try_parse_policy_root(r, expand_user=False)) is not None)
+    resolved = (p.resolve() for r in getattr(state, "workspace_roots", ()) if (p := try_parse_policy_root(str(r) if isinstance(r, os.PathLike) else r, expand_user=False)) is not None)
     return tuple(dict.fromkeys(str(q) for q in resolved if try_parse_policy_root(str(q), expand_user=False) is not None))
 
 
