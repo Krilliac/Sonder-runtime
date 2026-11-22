@@ -248,3 +248,55 @@ def test_harness_secret_scan_parity_skips_cred_stores_scans_workflows_and_blocks
     assert all(f["match"] == "[REDACTED CREDENTIAL]" for f in result["findings"])
     if os.name == "nt":
         assert result["links_skipped"] >= 1
+
+
+@pytest.mark.parametrize(
+    "hostile_root",
+    (
+        r"\\nohost.invalid\share",
+        "//nohost.invalid/share",
+        "\\\\.\\C:\\",
+        "\\??\\C:\\",
+        r"\??",
+        "/??",
+        r"\\?\UNC\nohost.invalid\share",
+    ),
+)
+def test_harness_secret_scan_refuses_unc_and_device_roots_before_resolve(
+    monkeypatch, hostile_root
+):
+    import harness_tools
+
+    real_resolve = Path.resolve
+
+    def guarded_resolve(self, *args, **kwargs):
+        flat = str(self).strip().replace("/", "\\")
+        if flat.startswith(("\\\\", "\\??")):
+            pytest.fail("Path.resolve touched hostile network/device root: %r" % (self,))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+    with pytest.raises(PermissionError, match="UNC or network path"):
+        harness_tools.secret_scan(root=hostile_root)
+
+
+def test_harness_secret_scan_accepts_extended_local_prefix_for_authorized_root(
+    monkeypatch, tmp_path
+):
+    import os
+    import harness_tools
+
+    if os.name != "nt":
+        pytest.skip("Windows extended-local prefix test")
+    root = tmp_path / "ext_proj"
+    root.mkdir()
+    (root / "clean.txt").write_text("hello\n", encoding="utf-8")
+    resolved = root.resolve()
+    monkeypatch.setattr(
+        secret_scan.file_ops, "allowed_roots", lambda extra_roots="": [resolved],
+    )
+    extended = "\\\\?\\" + str(resolved)
+    result = harness_tools.secret_scan(root=extended)
+    assert result["ok"] is True
+    assert result["files_scanned"] == 1
+    assert result["findings"] == []
