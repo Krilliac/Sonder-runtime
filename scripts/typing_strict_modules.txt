@@ -14,6 +14,7 @@ sonder_runtime/adapters/build/__init__.py
 sonder_runtime/adapters/build/candidates.py
 sonder_runtime/adapters/build/fix_effect_verifier.py
 sonder_runtime/adapters/chat_observers.py
+sonder_runtime/adapters/chat_tool_manifest.py
 sonder_runtime/adapters/claim_checker.py
 sonder_runtime/adapters/cli_options.py
 sonder_runtime/adapters/client_config.py
@@ -222,6 +223,7 @@ sonder_runtime/application/chat/model_fitness.py
 sonder_runtime/application/chat/reference_lookup.py
 sonder_runtime/application/chat/stream_sink.py
 sonder_runtime/application/chat/tool_intent.py
+sonder_runtime/application/chat/tool_manifest.py
 sonder_runtime/application/command_surface/__init__.py
 sonder_runtime/application/command_surface/command_text.py
 sonder_runtime/application/command_surface/mcp.py
