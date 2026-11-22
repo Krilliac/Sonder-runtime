@@ -839,3 +839,122 @@ def test_the_new_delete_rules_leave_ordinary_calls_alone():
         {"stdin": "start example.com"},
     ):
         assert not delete_calls.deletes_files("workspace_run", args), args
+
+
+# --- review round 8 (A1, A2, read_only_root_gate hardening) -----------------
+
+@pytest.mark.parametrize(
+    "tool_name, args",
+    [
+        ("run_project", {"commands_json": json.dumps(["rm -rf a.txt"])}),
+        ("run_project", {"commands": ["del /f a.txt"]}),
+        ("isolated_run", {"command": ["rm", "-rf", "a.txt"]}),
+        ("run_script", {"path": "clean.sh", "stdin": "rm -f a.txt"}),
+        ("runwindow", {"language": "powershell", "code": "Remove-Item a.txt"}),
+    ],
+)
+def test_all_host_execution_tools_enforce_delete_always_ask_in_auto(
+    shipped_rules, tool_name, args
+):
+    assert tool_name in delete_calls.HOST_PROGRAM_TOOLS
+    assert delete_calls.deletes_files(tool_name, args), (tool_name, args)
+    allow = lambda _name: {"pattern": "*", "action": "allow", "note": ""}  # noqa: E731
+    decision = pm.decide(
+        tool_name, interactive=False, mode=pm.AUTO, rule_lookup=allow,
+        arguments=args, surface="http",
+    )
+    assert decision.action == pm.DENY and decision.source == "unattended", decision
+    asked = pm.decide(
+        tool_name, interactive=True, mode=pm.AUTO, rule_lookup=allow, arguments=args,
+    )
+    assert asked.action == pm.ASK, asked
+
+
+@pytest.mark.parametrize(
+    "tool_name, args",
+    [
+        ("workspace_run", {"command": ["powershell", "-Command", "Re`move-Item a.txt"]}),
+        ("workspace_run", {"command": ["powershell", "-Command", "r`m a.txt"]}),
+        ("workspace_run", {"command": ["powershell", "-Command", "d`el a.txt"]}),
+        ("workspace_run", {"command": ["pwsh", "-Command", "r`i a.txt"]}),
+        ("run_code", {"language": "powershell", "code": "Re`move-Item a.txt"}),
+        ("run_code", {"language": "pwsh", "code": "r`m a.txt"}),
+        ("run_code", {"language": "ps1", "code": "d`el a.txt"}),
+    ],
+)
+def test_powershell_backtick_escapes_always_ask_in_auto(shipped_rules, tool_name, args):
+    assert delete_calls.deletes_files(tool_name, args), (tool_name, args)
+    allow = lambda _name: {"pattern": "*", "action": "allow", "note": ""}  # noqa: E731
+    decision = pm.decide(
+        tool_name, interactive=False, mode=pm.AUTO, rule_lookup=allow,
+        arguments=args, surface="http",
+    )
+    assert decision.action == pm.DENY and decision.source == "unattended", decision
+
+
+def test_backticks_in_non_powershell_non_delete_code_stay_allowed():
+    assert not delete_calls.deletes_files(
+        "run_code", {"language": "javascript", "code": "console.log(`hello ${1 + 1}`)"}
+    )
+
+
+def test_diff_files_confines_left_and_right_to_resolved_root_not_sibling_allowed_root(
+    monkeypatch, tmp_path
+):
+    parent = tmp_path / "workspace"
+    root = parent / "proj"
+    sibling = parent / "sibling"
+    root.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+    (root / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (sibling / "other.py").write_text("b = 2\n", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "allowed_roots", lambda extra_roots="": [parent.resolve()])
+
+    with pytest.raises(ValueError, match="diff_files left path must stay inside the root"):
+        read_only_root_gate.check_root_confined_read(
+            "diff_files", {"root": str(root), "left": "../sibling/other.py", "right": "a.py"},
+        )
+    with pytest.raises(ValueError, match="diff_files right path must stay inside the root"):
+        read_only_root_gate.check_root_confined_read(
+            "diff_files", {"root": str(root), "left": "a.py", "right": str(sibling / "other.py")},
+        )
+    # Control: both sides inside root still pass.
+    read_only_root_gate.check_root_confined_read(
+        "diff_files", {"root": str(root), "left": "a.py", "right": "a.py"},
+    )
+
+
+def test_refuse_secret_glob_prunes_reparse_point_dir_pointing_at_unc_without_smb_touch(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "proj"
+    junc = root / "junc_unc"
+    junc.mkdir(parents=True)
+    (root / "ok.py").write_text("x = 1\n", encoding="utf-8")
+    real_realpath = os.path.realpath
+    real_readlink = os.readlink
+    real_reparse = file_ops._is_reparse_point
+
+    def fake_reparse(path):
+        if os.path.normcase(str(path)) == os.path.normcase(str(junc)):
+            return True
+        return real_reparse(path)
+
+    def fake_readlink(path):
+        if os.path.normcase(str(path)) == os.path.normcase(str(junc)):
+            return r"\\nohost.invalid\share"
+        return real_readlink(path)
+
+    def guarded_realpath(path, *args, **kwargs):
+        if os.path.normcase(str(path)) == os.path.normcase(str(junc)):
+            pytest.fail("os.path.realpath touched UNC-targeted junction: %r" % (path,))
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(file_ops, "_is_reparse_point", fake_reparse)
+    monkeypatch.setattr(os, "readlink", fake_readlink)
+    monkeypatch.setattr(os.path, "realpath", guarded_realpath)
+
+    with pytest.raises(ValueError, match=r"glob match junc_unc resolves outside the root"):
+        read_only_root_gate._refuse_secret_glob(root, "**/*.py")
+    # Control: unrelated glob does not descend into or trip on the pruned dir.
+    read_only_root_gate._refuse_secret_glob(root, "ok.py")

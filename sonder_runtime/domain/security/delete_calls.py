@@ -46,6 +46,7 @@ DELETE_TOOLS = frozenset({"file_delete"})
 #: without ``file_delete``.
 HOST_PROGRAM_TOOLS = frozenset({
     "workspace_run", "run_program", "script_run", "run_code", "parallel_run_code", "build_run",
+    "run_project", "run_script", "runwindow", "isolated_run",
 })
 
 #: Nesting the leaf walk follows (containers and JSON-encoded strings alike).
@@ -63,6 +64,8 @@ _PROGRAM_SUFFIXES = (
 )
 #: Words that name PowerShell (``WindowsPowerShell``, ``pwsh-preview`` included).
 _POWERSHELL_NAMES = ("powershell", "pwsh")
+#: ``language`` argument values that invoke PowerShell (``run_code``, etc.).
+_POWERSHELL_LANGUAGES = frozenset({"powershell", "pwsh", "ps1"})
 #: ``-EncodedCommand``, its ``-ec`` alias and every prefix of it, with the
 #: dashes taken off (``/enc`` and an en-dash leave no dash after the split).
 _ENCODED_COMMAND_FLAGS = frozenset(
@@ -107,9 +110,10 @@ def _is_delete_verb(word: str) -> bool:
 
 def _scan(tool_name: str, arguments: Mapping[str, Any]) -> bool:
     texts = [text.lower() for text in _leaves(arguments)]
-    # cmd drops a ``^`` and keeps the character after it, so ``de^l`` runs
-    # ``del``: each text is also scanned with its carets taken out.
+    # cmd drops ``^`` and PowerShell drops `` ` `` while keeping the next
+    # character (``de^l``, ``Re`move-Item``): scan with those escapes removed.
     texts += [text.replace("^", "") for text in texts if "^" in text]
+    texts += [text.replace("`", "") for text in texts if "`" in text]
     words = [
         _program_name(word)
         for text in texts
@@ -118,10 +122,16 @@ def _scan(tool_name: str, arguments: Mapping[str, Any]) -> bool:
     ]
     if any(_is_delete_verb(word) for word in words):
         return True
-    # A command the word scan cannot read is assumed to delete: an encoded
-    # PowerShell command, or any ``^`` in a call that reaches cmd.exe.
-    if any(name in word for word in words for name in _POWERSHELL_NAMES) and any(
-            word.lstrip("-") in _ENCODED_COMMAND_FLAGS for word in words):
+    # A command the word scan cannot read is assumed to delete: an encoded or
+    # backtick-escaped PowerShell command, or any ``^`` reaching cmd.exe.
+    is_powershell = (
+        any(name in word for word in words for name in _POWERSHELL_NAMES)
+        or str(arguments.get("language") or "").strip().lower() in _POWERSHELL_LANGUAGES
+    )
+    if is_powershell and (
+        any(word.lstrip("-") in _ENCODED_COMMAND_FLAGS for word in words)
+        or any("`" in text for text in texts)
+    ):
         return True
     if any("^" in text for text in texts) and (
             tool_name in _CMD_STRING_TOOLS or not _CMD_NAMES.isdisjoint(words)):
