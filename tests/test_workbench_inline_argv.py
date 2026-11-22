@@ -471,14 +471,70 @@ REFUSED_ADVERSARIAL = [
     ("C:/Windows/System32/pcalua.exe", ["-a", "calc.exe"], ""),
     ("C:/uv/uv.exe", ["run", "python", "-c", "print(1)"], ""),
     ("C:/node/npx.exe", ["node", "-e", "1"], ""),
+    # L7-1: npx / pnpx -c / --call inline shell execution
+    ("C:/node/npx.exe", ["-c", "echo 1"], ""),
+    ("C:/node/npx.exe", ["--call", "echo 1"], ""),
+    ("C:/node/npx.exe", ["--call=echo 1"], ""),
+    ("C:/node/npx.exe", ["-p", "cowsay", "-c", "echo 1"], ""),
+    ("C:/node/pnpx.exe", ["-c", "echo 1"], ""),
+    ("C:/node/pnpx.exe", ["--call", "echo 1"], ""),
+    # L7-2: sudo -p / -h value handling and -s / -i shell execution
+    ("/usr/bin/sudo", ["-p", "prompt", "sh", "-c", "id"], ""),
+    ("/usr/bin/sudo", ["-h", "host", "sh", "-c", "id"], ""),
+    ("/usr/bin/sudo", ["-s", "echo 1"], ""),
+    ("/usr/bin/sudo", ["-i", "echo 1"], ""),
+    ("/usr/bin/sudo", ["--shell", "echo 1"], ""),
+    ("/usr/bin/sudo", ["--login", "echo 1"], ""),
+    ("/usr/bin/sudo", ["-u", "root", "-s", "id"], ""),
+    # L7-3: awk / gawk -F -f, -v -f, stdin -f/-i, --sour, -Pe, -Wsource=
+    ("/usr/bin/awk", ["-F", "-f", "BEGIN{print 1}"], ""),
+    ("/usr/bin/awk", ["-v", "-f", "BEGIN{print 1}"], ""),
+    ("/usr/bin/gawk", ["-f", "-"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["-f-"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["--file=-"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["--file", "-"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["-f", "/dev/stdin"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["-f", "/proc/self/fd/0"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["-i", "/dev/stdin", "-f", "/dev/null"], "BEGIN{print 1}"),
+    ("/usr/bin/gawk", ["-f", "a.awk", "--sour", "BEGIN{print 1}"], ""),
+    ("/usr/bin/gawk", ["-f", "a.awk", "-Pe", "BEGIN{print 1}"], ""),
+    ("/usr/bin/gawk", ["-f", "a.awk", "-Wsource=BEGIN{print 1}"], ""),
+    ("/usr/bin/gawk", ["-f", "a.awk", "-W", "source=BEGIN{print 1}"], ""),
+    # L7-4: bun x launcher alias
+    ("C:/bun/bun.exe", ["x", "sh", "-c", "id"], ""),
+    ("C:/bun/bun.exe", ["x", "--bun", "sh", "-c", "id"], ""),
+    # L7-5: uv run - / --script -, uv tool run, uvx
+    ("C:/uv/uv.exe", ["run", "-"], "print(1)"),
+    ("C:/uv/uv.exe", ["run", "--script", "-"], "print(1)"),
+    ("C:/uv/uv.exe", ["run", "--python", "3.12", "-"], "print(1)"),
+    ("C:/uv/uv.exe", ["tool", "run", "python", "-c", "1"], ""),
+    ("C:/uv/uvx.exe", ["python", "-c", "1"], ""),
+    # L7-6: php -d / --define auto_prepend_file / auto_append_file stream wrappers
+    ("C:/php/php.exe", ["-d", "auto_prepend_file=data://text/plain,<?php echo 1;", "script.php"], ""),
+    ("C:/php/php.exe", ["-d", "auto_prepend_file=php://input", "script.php"], "<?php echo 1;"),
+    ("C:/php/php.exe", ["-dauto_prepend_file=php://input", "script.php"], "<?php echo 1;"),
+    ("C:/php/php.exe", ["--define", "auto_prepend_file=data://text/plain,<?php echo 1;", "script.php"], ""),
+    ("C:/php/php.exe", ["--define=auto_append_file=php://filter/resource=x", "script.php"], ""),
+    # L7-7: git-bash and pypy / pypy3 aliases
+    ("C:/Program Files/Git/git-bash.exe", ["-c", "id"], ""),
+    ("/usr/bin/git-bash", ["-c", "id"], ""),
+    ("/usr/bin/pypy3", ["-c", "1"], ""),
+    ("/usr/bin/pypy", ["-c", "1"], ""),
+    # Hardening: bash --rcfile / --init-file reading stdin
+    ("/usr/bin/bash", ["--rcfile", "/dev/stdin", "script.sh"], "id"),
+    ("/usr/bin/bash", ["--init-file", "-", "script.sh"], "id"),
 ]
 
 ALLOWED_ADVERSARIAL = [
     ("C:/uv/uv.exe", ["run", "python", "script.py"], ""),
+    ("C:/uv/uv.exe", ["run", "pytest"], ""),
     ("C:/uv/uv.exe", ["--version"], ""),
     ("C:/node/npx.exe", ["eslint", "src/"], ""),
+    ("/usr/bin/sudo", ["-u", "root", "ls"], ""),
+    ("C:/bun/bun.exe", ["run", "build"], ""),
     ("/usr/bin/lua", ["script.lua"], ""),
     ("/usr/bin/awk", ["-f", "prog.awk", "data.txt"], ""),
+    ("/usr/bin/gawk", ["-F", ",", "-f", "script.awk", "in.txt"], ""),
 ]
 
 
@@ -502,3 +558,65 @@ def test_resolve_program_refuses_network_path_before_realpath(monkeypatch):
     with pytest.raises(PermissionError):
         workbench._resolve_program(r"\\attacker\share\evil.exe")
     assert hits == []
+
+
+def test_run_program_abandons_child_and_closes_tree_on_keyboard_interrupt(monkeypatch, tmp_path):
+    events = []
+
+    class FakePipe:
+        def read(self, *_args):
+            return b""
+
+        def write(self, *_args):
+            return 0
+
+        def close(self):
+            events.append("close_pipe")
+
+    class FakeProc:
+        pid = 9999
+        returncode = None
+
+        def __init__(self):
+            self.stdin = FakePipe()
+            self.stdout = FakePipe()
+            self.stderr = FakePipe()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if not events or "interrupt" not in events:
+                events.append("interrupt")
+                raise KeyboardInterrupt()
+            self.returncode = -9
+            events.append("reaped")
+            return self.returncode
+
+        def kill(self):
+            events.append("kill")
+            self.returncode = -9
+
+    class FakeTree:
+        def terminate(self, **_kwargs):
+            events.append("tree_terminate")
+
+        def close(self):
+            events.append("tree_close")
+
+        def release(self):
+            events.append("tree_release")
+
+    monkeypatch.setattr(workbench, "_resolve_program", lambda *_a, **_kw: "fake-prog")
+    monkeypatch.setattr(workbench, "_check_program_guards", lambda *_a, **_kw: None)
+    monkeypatch.setattr(workbench, "_resolve", lambda *_a, **_kw: tmp_path)
+    monkeypatch.setattr(workbench.subprocess, "Popen", lambda *_a, **_kw: FakeProc())
+    monkeypatch.setattr(workbench.process_tree, "is_real_popen", lambda _p: True)
+    monkeypatch.setattr(workbench.process_tree.ProcessTree, "owning", staticmethod(lambda _p: FakeTree()))
+
+    with pytest.raises(KeyboardInterrupt):
+        workbench.run_program("fake-prog", cwd=str(tmp_path), timeout=5)
+
+    assert "tree_terminate" in events
+    assert "tree_close" in events
+    assert "tree_release" not in events

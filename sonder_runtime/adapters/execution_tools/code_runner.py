@@ -327,6 +327,51 @@ def _timeout_result(language, cwd, timeout, exc):
     }
 
 
+_WIN_KERNEL32 = None
+
+
+def _win_kernel32():
+    """Isolated Win32 kernel32 handle with explicit argtypes/restype (never mutates shared windll)."""
+    global _WIN_KERNEL32
+    if _WIN_KERNEL32 is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.argtypes = [ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR]
+        k32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
+            ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD,
+        ]
+        k32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [
+            ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE,
+        ]
+        k32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
+        k32.TerminateJobObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+        k32.TerminateJobObject.restype = ctypes.wintypes.BOOL
+        k32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        k32.CloseHandle.restype = ctypes.wintypes.BOOL
+        k32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
+        k32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
+        k32.Process32FirstW.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Process32FirstW.restype = ctypes.wintypes.BOOL
+        k32.Process32NextW.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Process32NextW.restype = ctypes.wintypes.BOOL
+        k32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+        k32.OpenProcess.restype = ctypes.wintypes.HANDLE
+        k32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+        k32.TerminateProcess.restype = ctypes.wintypes.BOOL
+        k32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Thread32First.restype = ctypes.wintypes.BOOL
+        k32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LPVOID]
+        k32.Thread32Next.restype = ctypes.wintypes.BOOL
+        k32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+        k32.OpenThread.restype = ctypes.wintypes.HANDLE
+        k32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
+        k32.ResumeThread.restype = ctypes.wintypes.DWORD
+        _WIN_KERNEL32 = k32
+    return _WIN_KERNEL32
+
+
 def _terminate_process_tree(proc):
     """Best-effort teardown for a timed-out model-authored process tree.
 
@@ -341,7 +386,7 @@ def _terminate_process_tree(proc):
         job = getattr(proc, "_sonder_job_handle", None)
         if job:
             try:
-                ctypes.windll.kernel32.TerminateJobObject(job, 1)
+                _win_kernel32().TerminateJobObject(job, 1)
                 _close_windows_job(job)
                 proc._sonder_job_handle = None
                 return
@@ -381,7 +426,7 @@ def _terminate_process_tree(proc):
 
 def _terminate_windows_descendants(root_pid):
     """Terminate descendants by parent PID when Job Objects are unavailable."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _win_kernel32()
 
     class Entry(ctypes.Structure):
         _fields_ = [
@@ -397,16 +442,6 @@ def _terminate_windows_descendants(root_pid):
             ("szExeFile", ctypes.wintypes.WCHAR * 260),
         ]
 
-    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
-    kernel32.Process32FirstW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(Entry)]
-    kernel32.Process32FirstW.restype = ctypes.wintypes.BOOL
-    kernel32.Process32NextW.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(Entry)]
-    kernel32.Process32NextW.restype = ctypes.wintypes.BOOL
-    kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
-    kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
-    kernel32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
-    kernel32.TerminateProcess.restype = ctypes.wintypes.BOOL
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
     if not snapshot or snapshot == ctypes.wintypes.HANDLE(-1).value:
         return
@@ -452,20 +487,7 @@ def _attach_windows_job(proc, *, active_process_limit=None, job_memory_bytes=Non
     if process_handle is None:
         return None
     try:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
-        kernel32.CreateJobObjectW.argtypes = [ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR]
-        kernel32.SetInformationJobObject.argtypes = [
-            ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
-            ctypes.wintypes.LPVOID, ctypes.wintypes.DWORD,
-        ]
-        kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [
-            ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE,
-        ]
-        kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+        kernel32 = _win_kernel32()
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             return None
@@ -508,8 +530,6 @@ def _attach_windows_job(proc, *, active_process_limit=None, job_memory_bytes=Non
         if job_memory_bytes is not None:
             info.BasicLimitInformation.LimitFlags |= 0x0200  # JOB_MEMORY
             info.JobMemoryLimit = max(1, int(job_memory_bytes))
-        kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
-        kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
         if not kernel32.SetInformationJobObject(
             job, 9, ctypes.byref(info), ctypes.sizeof(info)
         ):
@@ -526,7 +546,7 @@ def _attach_windows_job(proc, *, active_process_limit=None, job_memory_bytes=Non
 def _close_windows_job(job):
     if job and os.name == "nt":
         try:
-            ctypes.windll.kernel32.CloseHandle(job)
+            _win_kernel32().CloseHandle(job)
         except (AttributeError, OSError, TypeError, ctypes.ArgumentError):
             # ArgumentError: a handle ctypes cannot marshal (it is not an
             # OSError). Closing is best effort; never raise out of teardown,
@@ -536,7 +556,7 @@ def _close_windows_job(job):
 
 def _resume_windows_process(proc):
     """Resume the initial thread of a process started with CREATE_SUSPENDED."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _win_kernel32()
 
     class ThreadEntry(ctypes.Structure):
         _fields_ = [
@@ -549,19 +569,6 @@ def _resume_windows_process(proc):
             ("dwFlags", ctypes.wintypes.DWORD),
         ]
 
-    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = ctypes.wintypes.HANDLE
-    kernel32.Thread32First.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel32.Thread32First.restype = ctypes.wintypes.BOOL
-    kernel32.Thread32Next.argtypes = [ctypes.wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
-    kernel32.Thread32Next.restype = ctypes.wintypes.BOOL
-    kernel32.OpenThread.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL,
-                                   ctypes.wintypes.DWORD]
-    kernel32.OpenThread.restype = ctypes.wintypes.HANDLE
-    kernel32.ResumeThread.argtypes = [ctypes.wintypes.HANDLE]
-    kernel32.ResumeThread.restype = ctypes.wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
     if not snapshot or snapshot == ctypes.c_void_p(-1).value:
         raise OSError("could not enumerate suspended console threads")
@@ -783,9 +790,7 @@ def _collect_output(
         status = _wait_watching_output(proc, deadline, budget)
     else:
         try:
-            # The child gets the whole timeout; only the pipe joins use the
-            # deadline, which starting the threads moved by microseconds.
-            proc.wait(timeout=timeout)
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             status = "timeout"
     if status is None:
@@ -919,12 +924,12 @@ def _run_process(cmd, cwd, stdin, timeout, language, limits=None):
             "close_fds": True,
         }
         if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            # Start suspended so the child cannot spawn descendants before the
+            # Job Object (and any RunLimits) is attached.
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | _CREATE_SUSPENDED
             )
-            if limits is not None:
-                # Nothing runs until the job and its limits are in place.
-                popen_kwargs["creationflags"] |= _CREATE_SUSPENDED
         else:
             popen_kwargs["start_new_session"] = True
             if limits is not None:
@@ -968,6 +973,8 @@ def _run_process(cmd, cwd, stdin, timeout, language, limits=None):
             _resume_windows_process(proc)
         else:
             proc._sonder_job_handle = _attach_windows_job(proc)
+            if os.name == "nt" and isinstance(proc, _REAL_POPEN):
+                _resume_windows_process(proc)
         stdout, stderr, status = _collect_output(proc, input_bytes, timeout, **collect)
     except BaseException:
         _abort_process(proc)

@@ -985,18 +985,21 @@ def _terminate_process_tree(proc, tree=None):
 # that); an interpreter that does not fold rejects the spelling outright.
 def _inline_grammar(
     inline="", flags="", value="", after="", program="", stdin="", glued="",
-    checks=None, inline_long=(), value_long=(), flags_long=(), data_long=(),
-    stdin_long=(), plus=False, ends_at_program=False, commands=(),
+    checks=None, checks_long=None, inline_long=(), value_long=(), flags_long=(),
+    data_long=(), stdin_long=(), plus=False, ends_at_program=False, commands=(),
     inline_commands=(), stdin_commands=(), remote_operands=False,
 ):
     checks = dict(checks or {})
+    checks_long = dict(checks_long or {})
     return {
         "inline": frozenset(inline), "flags": frozenset(flags),
         "value": frozenset(value + program + glued + "".join(checks)),
         "after": frozenset(after), "program": frozenset(program),
         "glued": frozenset(glued), "checks": checks,
+        "checks_long": checks_long,
         "stdin": frozenset(stdin), "inline_long": frozenset(inline_long),
-        "value_long": frozenset(value_long), "flags_long": frozenset(flags_long),
+        "value_long": frozenset(value_long) | frozenset(checks_long),
+        "flags_long": frozenset(flags_long),
         "data_long": frozenset(data_long), "stdin_long": frozenset(stdin_long),
         "plus": plus, "ends_at_program": ends_at_program,
         "commands": frozenset(commands),
@@ -1087,6 +1090,26 @@ def _python_module_verdict(value):
     return "refuse" if top in _PYTHON_CODE_MODULES else None
 
 
+def _stdin_file_verdict(value):
+    return "stdin" if _is_stdin_operand(value) else None
+
+
+def _php_define_verdict(value):
+    """Refuse php -d/--define auto_prepend_file/auto_append_file stream injections."""
+    setting, sep, target = str(value or "").partition("=")
+    if not sep:
+        return None
+    if setting.strip().lower() not in ("auto_prepend_file", "auto_append_file"):
+        return None
+    cleaned = target.strip().strip("\"'")
+    lowered = cleaned.lower()
+    if lowered in ("php://input", "php://stdin") or _is_stdin_operand(cleaned):
+        return "stdin"
+    if lowered.startswith(("data:", "php://")) or re.match(r"^[a-z][a-z0-9+.-]*://", lowered):
+        return "refuse"
+    return None
+
+
 _PYTHON_GRAMMAR = _inline_grammar(
     inline="c", flags="bBdEhiIOPqRsSuvVx?", value="WX", program="m", stdin="i",
     checks={"m": _python_module_verdict},
@@ -1100,7 +1123,9 @@ _SH_GRAMMAR = _inline_grammar(
         "dump-po-strings", "verbose", "version", "help", "restricted",
         "noediting", "pretty-print",
     ),
-    value_long=("rcfile", "init-file"), plus=True,
+    value_long=("rcfile", "init-file"),
+    checks_long={"rcfile": _stdin_file_verdict, "init-file": _stdin_file_verdict},
+    plus=True,
 )
 _CSH_GRAMMAR = _inline_grammar(
     inline="c", flags="bdefimnqsStvVxX", stdin="st",
@@ -1117,6 +1142,7 @@ _INLINE_GRAMMARS = {
     "python": _PYTHON_GRAMMAR,
     "py": _PYTHON_GRAMMAR,
     "bash": _SH_GRAMMAR,
+    "git-bash": _SH_GRAMMAR,
     "sh": _SH_GRAMMAR,
     "zsh": _SH_GRAMMAR,
     "dash": _SH_GRAMMAR,
@@ -1151,7 +1177,9 @@ _INLINE_GRAMMARS = {
     ),
     "ruby": _inline_grammar(inline="e", value="CEIr"),
     "php": _inline_grammar(
-        inline="rRBE", value="cdtzS", program="fF",
+        inline="rRBE", value="ctzS", program="fF",
+        checks={"d": _php_define_verdict},
+        checks_long={"define": _php_define_verdict},
         inline_long=("run", "process-begin", "process-code", "process-end"),
     ),
     "node": _inline_grammar(
@@ -1260,24 +1288,91 @@ def _inline_interpreter_key(basename):
     name = _strip_win_exec_ext(_normalized_program_basename(basename))
     if name in ("py", "pyw"):
         return "py"
-    if name.startswith("python"):
+    if name.startswith(("python", "pypy")):
         return "python"
     name = name.rstrip("0123456789.")
     return name if name in _INLINE_GRAMMARS else None
 
 
-def _awk_inline_refusal(key, args):
-    """Refuse awk invocations that supply an inline program (no -f/--file or uses -e)."""
+_AWK_SHORT_VALUE = frozenset("FvfilEW")
+_AWK_LONG_VALUE = frozenset({
+    "--field-separator", "--assign", "--file", "--include", "--load", "--exec",
+})
+
+
+def _awk_inline_refusal(key, args, stdin=""):
+    """Refuse awk invocations that supply inline or stdin program text."""
+    inline_refusal = "inline %s code is disabled; use script_run" % key
     has_file = False
-    for arg in args:
+    reads_stdin = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
         if arg == "--":
             break
-        if arg in ("-e", "--source") or arg.startswith(("-e", "--source=")):
-            return "inline %s code is disabled; use script_run" % key
-        if arg in ("-f", "--file") or arg.startswith(("-f", "--file=")):
-            has_file = True
+        if arg.startswith("--"):
+            head, has_eq, val = arg.partition("=")
+            head_l = head.lower()
+            if len(head_l) >= 4 and "--source".startswith(head_l):
+                return inline_refusal
+            if head_l in _AWK_LONG_VALUE:
+                if not has_eq:
+                    val = args[index] if index < len(args) else ""
+                    index += 1
+                if head_l in ("--file", "--include", "--exec"):
+                    if _is_stdin_operand(val):
+                        reads_stdin = True
+                    if head_l in ("--file", "--exec"):
+                        has_file = True
+                    if head_l == "--exec":
+                        break
+            continue
+        if arg.startswith("-") and len(arg) > 1:
+            letters = arg[1:]
+            stop_options = False
+            for pos, ch in enumerate(letters):
+                if ch == "e":
+                    return inline_refusal
+                if ch in _AWK_SHORT_VALUE:
+                    rest = letters[pos + 1:]
+                    if rest:
+                        val = rest
+                    else:
+                        val = args[index] if index < len(args) else ""
+                        index += 1
+                    if ch in ("f", "i", "E"):
+                        if _is_stdin_operand(val):
+                            reads_stdin = True
+                        if ch in ("f", "E"):
+                            has_file = True
+                        if ch == "E":
+                            stop_options = True
+                    elif ch == "W":
+                        w_head, w_has_eq, w_val = val.partition("=")
+                        w_name = w_head.strip().lower()
+                        if len(w_name) >= 2 and "source".startswith(w_name):
+                            return inline_refusal
+                        if w_name in ("file", "include", "exec"):
+                            if not w_has_eq and index < len(args):
+                                w_val = args[index]
+                                index += 1
+                            if _is_stdin_operand(w_val):
+                                reads_stdin = True
+                            if w_name in ("file", "exec"):
+                                has_file = True
+                            if w_name == "exec":
+                                stop_options = True
+                    break
+            if stop_options:
+                break
+            continue
+        # First non-option operand ends option scanning.
+        break
+    if reads_stdin and str(stdin or "").strip():
+        return "%s program text on stdin is disabled; use script_run" % key
     if not has_file:
-        return "inline %s code is disabled; use script_run" % key
+        return inline_refusal
     return None
 
 
@@ -1330,6 +1425,13 @@ def _inline_code_refusal(key, args, stdin=""):
                     value = args[index] if index < len(args) else ""
                 if _is_data_url(value):
                     return refusal
+            check_long = grammar["checks_long"].get(name)
+            if check_long is not None:
+                check_val = value if has_value else (args[index] if index < len(args) else "")
+                verdict = check_long(check_val)
+                if verdict == "refuse":
+                    return refusal
+                reads_stdin = reads_stdin or verdict == "stdin"
             if name in grammar["value_long"] or name in grammar["data_long"]:
                 pending += 0 if has_value else 1
             elif name not in grammar["flags_long"]:
@@ -1552,28 +1654,38 @@ _LAUNCHER_SPECS = {
     "busybox": {"flags": frozenset(), "value": frozenset()},
     "toybox": {"flags": frozenset(), "value": frozenset()},
     "sudo": {
-        "flags": frozenset({"-b", "-e", "-h", "-i", "-k", "-n", "-p", "-s", "-v", "--background", "--preserve-env", "--set-home", "--login", "--non-interactive", "--shell", "--stdin", "--version", "--help"}),
-        "value": frozenset({"-u", "-g", "-c", "-d", "-r", "-t", "--user", "--group", "--chdir", "--prompt", "--role", "--type"}),
+        "flags": frozenset({"-b", "-e", "-i", "-k", "-n", "-s", "-v", "--background", "--preserve-env", "--set-home", "--login", "--non-interactive", "--shell", "--stdin", "--version", "--help"}),
+        "value": frozenset({"-u", "-g", "-c", "-d", "-p", "-r", "-t", "--user", "--group", "--chdir", "--prompt", "--role", "--type"}),
         "stdin_flags": frozenset({"-s", "--shell", "-i", "--login"}),
+        "shell_flags": frozenset({"-s", "--shell", "-i", "--login"}),
     },
     "doas": {"flags": frozenset({"-l", "-n", "-s"}), "value": frozenset({"-u", "-c"}), "stdin_flags": frozenset({"-s"})},
     "xargs": {"flags": frozenset(), "value": frozenset(), "refuse_any": True},
     "npx": {
         "flags": frozenset({"-y", "--yes", "-q", "--quiet", "--no", "--no-install", "--prefer-online", "--prefer-offline", "--offline", "--help", "--version"}),
-        "value": frozenset({"-p", "--package", "-c", "--call", "--cache", "--userconfig", "--prefix", "--workspace"}),
+        "value": frozenset({"-p", "--package", "--cache", "--userconfig", "--prefix", "--workspace"}),
+        "refuse_flags": frozenset({"-c", "--call"}),
     },
     "pnpx": {
         "flags": frozenset({"-y", "--yes", "--help", "--version"}),
-        "value": frozenset({"--package", "-c"}),
+        "value": frozenset({"--package"}),
+        "refuse_flags": frozenset({"-c", "--call"}),
     },
     "bunx": {
         "flags": frozenset({"--bun", "-y", "--help", "--version"}),
         "value": frozenset({"--cwd"}),
     },
     "uv": {
-        "flags": frozenset({"-q", "--quiet", "-v", "--verbose", "--no-cache", "--offline", "--frozen", "--locked", "--isolated", "--no-project", "--no-sync", "--help", "--version"}),
-        "value": frozenset({"--python", "-p", "--directory", "--project", "--with", "--with-editable", "--from", "--index-url", "--extra-index-url", "--cache-dir"}),
+        "flags": frozenset({"-q", "--quiet", "-v", "--verbose", "--no-cache", "--offline", "--frozen", "--locked", "--isolated", "--no-project", "--no-sync", "--refresh", "--help", "--version"}),
+        "value": frozenset({"--python", "-p", "--directory", "--project", "--with", "--with-editable", "--with-requirements", "--from", "--index-url", "--extra-index-url", "--default-index", "--index", "--cache-dir", "--script"}),
+        "stdin_value": frozenset({"--script"}),
         "subcommands": frozenset({"run"}),
+        "subcommand_sequences": (("tool", "run"),),
+        "stdin_operand": True,
+    },
+    "uvx": {
+        "flags": frozenset({"-q", "--quiet", "-v", "--verbose", "--no-cache", "--offline", "--isolated", "--refresh", "--help", "--version"}),
+        "value": frozenset({"--from", "--python", "-p", "--with", "--with-editable", "--with-requirements", "--index-url", "--extra-index-url", "--default-index", "--index", "--cache-dir", "--directory", "--project"}),
     },
 }
 _LAUNCHER_SPECS["wslg"] = _LAUNCHER_SPECS["wsl"]
@@ -1785,9 +1897,18 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
     uncertain = False
     reads_stdin = False
     exec_seen = False
+    shell_flag_seen = False
     skip_operands = spec.get("leading_operands", 0)
     subcommands = spec.get("subcommands", ())
-    subcommand_seen = not bool(subcommands)
+    subcommand_sequences = spec.get("subcommand_sequences", ())
+    subcommand_seen = not bool(subcommands or subcommand_sequences)
+    refuse_flags = spec.get("refuse_flags", ())
+    shell_flags = spec.get("shell_flags", ())
+    stdin_value = spec.get("stdin_value", ())
+    short_flags = frozenset(f[1] for f in spec["flags"] if len(f) == 2 and f.startswith("-"))
+    short_value = frozenset(f[1] for f in spec["value"] if len(f) == 2 and f.startswith("-"))
+    short_refuse = frozenset(f[1] for f in refuse_flags if len(f) == 2 and f.startswith("-"))
+    short_shell = frozenset(f[1] for f in shell_flags if len(f) == 2 and f.startswith("-"))
     index = 0
     if args and args[0] in spec.get("leading_skip", ()):
         index = 1
@@ -1803,23 +1924,65 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
             exec_seen = True
             index += 1
             break
+        head, has_eq, eq_val = lowered.partition("=")
+        if head in refuse_flags:
+            raise PermissionError(
+                "%s %s executes an inline shell command; use script_run" % (key, head)
+            )
+        if lowered in shell_flags:
+            shell_flag_seen = True
+            reads_stdin = True
         if lowered in spec.get("stdin_flags", ()):
             reads_stdin = True
         if lowered in spec["flags"]:
             index += 1
             continue
-        head, has_eq, _eq_val = lowered.partition("=")
         if head in spec["value"]:
+            if head in stdin_value:
+                val = eq_val if has_eq else (args[index + 1] if index + 1 < len(args) else "")
+                if _is_stdin_operand(val):
+                    reads_stdin = True
             index += 1 if has_eq else 2
             continue
+        if (
+            len(lowered) > 2 and lowered.startswith("-") and not lowered.startswith("--")
+            and (short_refuse or short_shell)
+        ):
+            for ch in lowered[1:]:
+                if ch in short_refuse:
+                    raise PermissionError(
+                        "%s -%s executes an inline shell command; use script_run" % (key, ch)
+                    )
+                if ch in short_shell:
+                    shell_flag_seen = True
+                    reads_stdin = True
+                if ch in short_value:
+                    break
+                if ch not in short_flags:
+                    break
         if spec.get("numeric_dash") and re.fullmatch(r"-\d+", lowered):
             index += 1
             continue
+        if subcommand_seen and spec.get("stdin_operand") and _is_stdin_operand(arg):
+            reads_stdin = True
+            return [], uncertain, True
         if arg.startswith("-") or (spec.get("slash_as_dash") and arg.startswith("/")):
             uncertain = True
             index += 1
             continue
         if not subcommand_seen:
+            matched_seq = False
+            for seq in subcommand_sequences:
+                if (
+                    index + len(seq) <= len(args)
+                    and tuple(a.lower() for a in args[index:index + len(seq)]) == seq
+                ):
+                    subcommand_seen = True
+                    index += len(seq)
+                    matched_seq = True
+                    break
+            if matched_seq:
+                continue
             if lowered in subcommands:
                 subcommand_seen = True
                 index += 1
@@ -1834,11 +1997,17 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
         if spec.get("stdin_if_no_inner") or reads_stdin:
             reads_stdin = True
         return [], uncertain, reads_stdin
+    if shell_flag_seen:
+        raise PermissionError(
+            "%s shell mode executes its arguments through a shell; use script_run" % key
+        )
     if spec.get("shell_unless_exec") and not exec_seen:
         raise PermissionError(
             "%s command line without -e/--exec runs through the default shell; "
             "use script_run" % key
         )
+    if subcommand_seen and spec.get("stdin_operand") and _is_stdin_operand(args[index]):
+        return [], uncertain, True
     if (spec.get("stdin_if_no_inner") or reads_stdin) and uncertain:
         reads_stdin = True
     if not uncertain:
@@ -1848,6 +2017,45 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
         if not args[pos].startswith("-"):
             candidates.append((args[pos], args[pos + 1:]))
     return candidates, True, reads_stdin
+
+
+def _bun_x_remainder(args):
+    """Return the argv after ``bun [flags...] x``, or None when not ``bun x``."""
+    grammar = _INLINE_GRAMMARS["bun"]
+    uncertain = False
+    pending = 0
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if pending:
+            pending -= 1
+            if not arg.startswith("-"):
+                continue
+        if arg == "--":
+            return None
+        if arg.startswith("--"):
+            name, has_val, _val = arg[2:].partition("=")
+            name = name.replace("_", "-")
+            if name in grammar["value_long"] or name in grammar["data_long"]:
+                pending += 0 if has_val else 1
+            elif name not in grammar["flags_long"]:
+                uncertain = True
+            continue
+        if len(arg) > 1 and arg.startswith("-"):
+            for pos, ch in enumerate(arg[1:]):
+                if ch in grammar["value"]:
+                    if not arg[1:][pos + 1:]:
+                        pending += 1
+                    break
+                if ch not in grammar["flags"]:
+                    uncertain = True
+            continue
+        if arg.lower() == "x":
+            return args[index:]
+        if not uncertain:
+            return None
+    return None
 
 
 def _check_program_guards(
@@ -1887,7 +2095,7 @@ def _check_program_guards(
     if Path(basename).suffix.lower() in (".bat", ".cmd") and not _allow_cmd_script:
         raise PermissionError("batch files must be executed with script_run")
     if stem.rstrip("0123456789.") in _AWK_NAMES:
-        refusal = _awk_inline_refusal(stem, args)
+        refusal = _awk_inline_refusal(stem, args, stdin)
         if refusal:
             raise PermissionError(refusal)
         return
@@ -1895,6 +2103,21 @@ def _check_program_guards(
     refusal = interp_key and _inline_code_refusal(interp_key, args, stdin)
     if refusal:
         raise PermissionError(refusal)
+    if interp_key == "bun":
+        bun_x_args = _bun_x_remainder(args)
+        if bun_x_args is not None:
+            candidates, _uncertain, reads_stdin = _unwrap_launcher(
+                "bunx", bun_x_args, stdin, executable=executable,
+            )
+            if reads_stdin and str(stdin or "").strip():
+                raise PermissionError(
+                    "bun x program text on stdin is disabled; use script_run"
+                )
+            for inner_prog, inner_args in candidates:
+                _check_program_guards(
+                    inner_prog, inner_args, stdin,
+                    _allow_cmd_script=False, _depth=_depth + 1,
+                )
 
 
 def run_program(
@@ -1979,18 +2202,22 @@ def run_program(
         _abandon_child(proc, started_threads, tree)
         raise
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _terminate_process_tree(proc, tree)
-        proc.wait(timeout=10)
-    writer.join(timeout=2)
-    for thread in readers:
-        thread.join(timeout=2)
-    if tree is not None:
-        # A timeout already removed the tree; after a normal exit anything the
-        # program left running keeps running, as it always has.
-        tree.release()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process_tree(proc, tree)
+            proc.wait(timeout=10)
+        writer.join(timeout=2)
+        for thread in readers:
+            thread.join(timeout=2)
+        if tree is not None:
+            # A timeout already removed the tree; after a normal exit anything the
+            # program left running keeps running, as it always has.
+            tree.release()
+    except BaseException:
+        _abandon_child(proc, [*readers, writer], tree)
+        raise
     stdout_truncated = stdout_state["bytes"] > output_limit
     stderr_truncated = stderr_state["bytes"] > output_limit
     stdout = bytes(stdout_bytes).decode("utf-8", errors="replace")

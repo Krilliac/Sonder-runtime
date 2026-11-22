@@ -72,3 +72,64 @@ def _kill_if_alive(pid):
             os.kill(pid, signal.SIGKILL)
     except OSError:
         pytest.fail("could not clean up leaked grandchild %d" % pid)
+
+
+def test_reader_start_failure_terminates_child_and_closes_tree(monkeypatch):
+    events = []
+
+    class FakeStream:
+        def read(self, *_args):
+            return b""
+
+        def close(self):
+            events.append("close_stream")
+
+    class FakeProc:
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.stdout = FakeStream()
+            self.stderr = FakeStream()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    class FakeTree:
+        def terminate(self, **_kwargs):
+            events.append("terminate")
+
+        def has_survivors(self):
+            return False
+
+        def close(self):
+            events.append("close_tree")
+
+    class FailingThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread cap reached")
+
+        def join(self, timeout=None):
+            events.append("join_unstarted")
+
+    monkeypatch.setattr(bounded_process.subprocess, "Popen", lambda *_a, **_kw: FakeProc())
+    monkeypatch.setattr(bounded_process.process_tree, "is_real_popen", lambda _p: True)
+    monkeypatch.setattr(
+        bounded_process.process_tree.ProcessTree, "owning", staticmethod(lambda _p: FakeTree()),
+    )
+    monkeypatch.setattr(bounded_process.runtime_threads, "Thread", FailingThread)
+
+    with pytest.raises(RuntimeError, match="thread cap reached"):
+        bounded_process.run_bounded(["fake"], timeout_seconds=5)
+
+    assert "terminate" in events
+    assert "close_tree" in events
+    assert "join_unstarted" not in events
