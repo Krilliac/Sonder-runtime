@@ -620,3 +620,65 @@ def test_run_program_abandons_child_and_closes_tree_on_keyboard_interrupt(monkey
     assert "tree_terminate" in events
     assert "tree_close" in events
     assert "tree_release" not in events
+
+
+# --- E1-E4 residual L7 guard regression tests (#100 review) ------------------
+
+
+@pytest.mark.parametrize(
+    ("program", "args"),
+    [
+        ("sudo", ["-Hs", "echo pwn"]),
+        ("sudo", ["-Hi", "echo pwn"]),
+        ("sudo", ["-As", "echo pwn"]),
+        ("sudo", ["-Ps", "echo pwn"]),
+        ("sudo", ["-nHs", "echo pwn"]),
+        ("sudo", ["FOO=bar", "sh", "-c", "id"]),
+        ("sudo", ["-u", "root", "FOO=bar", "sh", "-c", "id"]),
+        ("sudo", ["--", "FOO=bar", "sh", "-c", "id"]),
+        ("uv", ["run", "-m", "timeit", "1"]),
+        ("uv", ["run", "--module", "timeit", "1"]),
+        ("uv", ["run", "--module=timeit", "1"]),
+        ("uv", ["run", "-mtimeit", "1"]),
+        ("uv", ["run", "-m", "code"]),
+        ("uv", ["run", "-m", "pdb", "s.py"]),
+        ("uv", ["run", "-m", "runpy", "s"]),
+        ("uv", ["tool", "-q", "run", "python", "-c", "1"]),
+        ("uv", ["tool", "--offline", "run", "python", "-c", "1"]),
+        ("php", ["-d", 'auto_prepend_file=" data://text/plain,<?php echo 1;"', "s.php"]),
+        ("php", ["--define", 'auto_append_file=" data://text/plain,<?php echo 1;"', "s.php"]),
+    ],
+)
+def test_e1_to_e3_residual_bypasses_are_refused(program, args):
+    with pytest.raises(PermissionError):
+        workbench._check_program_guards(program, args)
+
+
+@pytest.mark.parametrize(
+    ("program", "args", "stdin"),
+    [
+        ("php", ["-d", 'auto_prepend_file=" php://input "', "s.php"], "<?php echo 1;\n"),
+        ("gawk", ["-f", "a.awk", "--inc=-"], "BEGIN{print 1}\n"),
+        ("gawk", ["-f", "a.awk", "--fi=-"], "BEGIN{print 1}\n"),
+        ("gawk", ["-f", "a.awk", "--ex=-"], "BEGIN{print 1}\n"),
+        ("gawk", ["-f", "a.awk", "-W", "inc=-"], "BEGIN{print 1}\n"),
+        ("gawk", ["-f", "a.awk", "-W", "fi=-"], "BEGIN{print 1}\n"),
+        ("gawk", ["-f", "a.awk", "-W", "ex=-"], "BEGIN{print 1}\n"),
+    ],
+)
+def test_e3_e4_stdin_bypasses_are_refused(program, args, stdin):
+    with pytest.raises(PermissionError):
+        workbench._check_program_guards(program, args, stdin=stdin)
+
+
+@pytest.mark.parametrize(
+    ("program", "args"),
+    [
+        ("sudo", ["-S", "ls"]),
+        ("uv", ["run", "-m", "pytest"]),
+        ("uv", ["run", "--module", "pytest", "-q"]),
+        ("gawk", ["--field-separator", ",", "-f", "a.awk"]),
+    ],
+)
+def test_e1_to_e4_benign_controls_remain_allowed(program, args):
+    workbench._check_program_guards(program, args)

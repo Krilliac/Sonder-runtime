@@ -1101,7 +1101,9 @@ def _php_define_verdict(value):
         return None
     if setting.strip().lower() not in ("auto_prepend_file", "auto_append_file"):
         return None
-    cleaned = target.strip().strip("\"'")
+    cleaned = target.strip()
+    while cleaned and (cleaned[0] in ("'", '"') or cleaned[-1] in ("'", '"')):
+        cleaned = cleaned.strip("\"'").strip()
     lowered = cleaned.lower()
     if lowered in ("php://input", "php://stdin") or _is_stdin_operand(cleaned):
         return "stdin"
@@ -1316,16 +1318,19 @@ def _awk_inline_refusal(key, args, stdin=""):
             head_l = head.lower()
             if len(head_l) >= 4 and "--source".startswith(head_l):
                 return inline_refusal
-            if head_l in _AWK_LONG_VALUE:
+            matched_file = len(head_l) >= 4 and "--file".startswith(head_l)
+            matched_include = len(head_l) >= 4 and "--include".startswith(head_l)
+            matched_exec = len(head_l) >= 4 and "--exec".startswith(head_l)
+            if matched_file or matched_include or matched_exec or head_l in _AWK_LONG_VALUE:
                 if not has_eq:
                     val = args[index] if index < len(args) else ""
                     index += 1
-                if head_l in ("--file", "--include", "--exec"):
+                if matched_file or matched_include or matched_exec:
                     if _is_stdin_operand(val):
                         reads_stdin = True
-                    if head_l in ("--file", "--exec"):
+                    if matched_file or matched_exec:
                         has_file = True
-                    if head_l == "--exec":
+                    if matched_exec:
                         break
             continue
         if arg.startswith("-") and len(arg) > 1:
@@ -1353,15 +1358,18 @@ def _awk_inline_refusal(key, args, stdin=""):
                         w_name = w_head.strip().lower()
                         if len(w_name) >= 2 and "source".startswith(w_name):
                             return inline_refusal
-                        if w_name in ("file", "include", "exec"):
+                        w_file = len(w_name) >= 2 and "file".startswith(w_name)
+                        w_include = len(w_name) >= 2 and "include".startswith(w_name)
+                        w_exec = len(w_name) >= 2 and "exec".startswith(w_name)
+                        if w_file or w_include or w_exec:
                             if not w_has_eq and index < len(args):
                                 w_val = args[index]
                                 index += 1
                             if _is_stdin_operand(w_val):
                                 reads_stdin = True
-                            if w_name in ("file", "exec"):
+                            if w_file or w_exec:
                                 has_file = True
-                            if w_name == "exec":
+                            if w_exec:
                                 stop_options = True
                     break
             if stop_options:
@@ -1654,10 +1662,21 @@ _LAUNCHER_SPECS = {
     "busybox": {"flags": frozenset(), "value": frozenset()},
     "toybox": {"flags": frozenset(), "value": frozenset()},
     "sudo": {
-        "flags": frozenset({"-b", "-e", "-i", "-k", "-n", "-s", "-v", "--background", "--preserve-env", "--set-home", "--login", "--non-interactive", "--shell", "--stdin", "--version", "--help"}),
-        "value": frozenset({"-u", "-g", "-c", "-d", "-p", "-r", "-t", "--user", "--group", "--chdir", "--prompt", "--role", "--type"}),
+        "flags": frozenset({
+            "-A", "-b", "-E", "-e", "-H", "-i", "-K", "-k", "-n", "-P", "-S", "-s", "-v",
+            "--askpass", "--background", "--preserve-env", "--edit", "--set-home",
+            "--login", "--remove-timestamp", "--reset-timestamp", "--non-interactive",
+            "--preserve-groups", "--stdin", "--shell", "--validate", "--version", "--help",
+        }),
+        "value": frozenset({
+            "-u", "-g", "-c", "-C", "-d", "-D", "-p", "-r", "-t", "-T", "-U",
+            "--user", "--group", "--close-from", "--chdir", "--prompt",
+            "--role", "--type", "--command-timeout", "--other-user",
+        }),
         "stdin_flags": frozenset({"-s", "--shell", "-i", "--login"}),
         "shell_flags": frozenset({"-s", "--shell", "-i", "--login"}),
+        "case_sensitive_short": True,
+        "skip_env_assignments": True,
     },
     "doas": {"flags": frozenset({"-l", "-n", "-s"}), "value": frozenset({"-u", "-c"}), "stdin_flags": frozenset({"-s"})},
     "xargs": {"flags": frozenset(), "value": frozenset(), "refuse_any": True},
@@ -1679,6 +1698,7 @@ _LAUNCHER_SPECS = {
         "flags": frozenset({"-q", "--quiet", "-v", "--verbose", "--no-cache", "--offline", "--frozen", "--locked", "--isolated", "--no-project", "--no-sync", "--refresh", "--help", "--version"}),
         "value": frozenset({"--python", "-p", "--directory", "--project", "--with", "--with-editable", "--with-requirements", "--from", "--index-url", "--extra-index-url", "--default-index", "--index", "--cache-dir", "--script"}),
         "stdin_value": frozenset({"--script"}),
+        "python_module_value": frozenset({"-m", "--module"}),
         "subcommands": frozenset({"run"}),
         "subcommand_sequences": (("tool", "run"),),
         "stdin_operand": True,
@@ -1902,9 +1922,13 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
     subcommands = spec.get("subcommands", ())
     subcommand_sequences = spec.get("subcommand_sequences", ())
     subcommand_seen = not bool(subcommands or subcommand_sequences)
+    pending_seq = None
     refuse_flags = spec.get("refuse_flags", ())
     shell_flags = spec.get("shell_flags", ())
     stdin_value = spec.get("stdin_value", ())
+    python_module_value = spec.get("python_module_value", ())
+    case_sensitive_short = bool(spec.get("case_sensitive_short"))
+    skip_env_assignments = bool(spec.get("skip_env_assignments"))
     short_flags = frozenset(f[1] for f in spec["flags"] if len(f) == 2 and f.startswith("-"))
     short_value = frozenset(f[1] for f in spec["value"] if len(f) == 2 and f.startswith("-"))
     short_refuse = frozenset(f[1] for f in refuse_flags if len(f) == 2 and f.startswith("-"))
@@ -1917,38 +1941,70 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
         lowered = arg.lower()
         if spec.get("slash_as_dash") and lowered.startswith("/"):
             lowered = "-" + lowered[1:]
+        is_short_arg = arg.startswith("-") and not arg.startswith("--")
+        match_arg = arg if (case_sensitive_short and is_short_arg) else lowered
         if arg == "--":
             index += 1 + skip_operands
             break
-        if lowered in spec.get("exec_flags", ()):
+        if match_arg in spec.get("exec_flags", ()):
             exec_seen = True
             index += 1
             break
-        head, has_eq, eq_val = lowered.partition("=")
+        head, has_eq, eq_val = match_arg.partition("=")
         if head in refuse_flags:
             raise PermissionError(
                 "%s %s executes an inline shell command; use script_run" % (key, head)
             )
-        if lowered in shell_flags:
+        if subcommand_seen and python_module_value:
+            if head in python_module_value:
+                mod_val = (
+                    arg.partition("=")[2]
+                    if has_eq
+                    else (args[index + 1] if index + 1 < len(args) else "")
+                )
+                if _python_module_verdict(mod_val) == "refuse":
+                    raise PermissionError(
+                        "inline %s -m %s code is disabled; use script_run" % (key, mod_val)
+                    )
+                if not mod_val:
+                    uncertain = True
+                    index += 1
+                    continue
+                return [], uncertain, reads_stdin
+            if is_short_arg and len(arg) > 2 and arg.startswith("-m") and "-m" in python_module_value:
+                mod_val = arg[2:]
+                if _python_module_verdict(mod_val) == "refuse":
+                    raise PermissionError(
+                        "inline %s -m %s code is disabled; use script_run" % (key, mod_val)
+                    )
+                return [], uncertain, reads_stdin
+        if match_arg in shell_flags:
             shell_flag_seen = True
             reads_stdin = True
-        if lowered in spec.get("stdin_flags", ()):
+        if match_arg in spec.get("stdin_flags", ()):
             reads_stdin = True
-        if lowered in spec["flags"]:
+        if match_arg in spec["flags"]:
             index += 1
             continue
         if head in spec["value"]:
             if head in stdin_value:
-                val = eq_val if has_eq else (args[index + 1] if index + 1 < len(args) else "")
+                val = (
+                    arg.partition("=")[2]
+                    if has_eq
+                    else (args[index + 1] if index + 1 < len(args) else "")
+                )
                 if _is_stdin_operand(val):
                     reads_stdin = True
             index += 1 if has_eq else 2
             continue
         if (
-            len(lowered) > 2 and lowered.startswith("-") and not lowered.startswith("--")
+            len(match_arg) > 2 and match_arg.startswith("-") and not match_arg.startswith("--")
             and (short_refuse or short_shell)
         ):
-            for ch in lowered[1:]:
+            bundle = match_arg[1:]
+            all_known = True
+            consumed_next = False
+            for pos, ch in enumerate(bundle):
                 if ch in short_refuse:
                     raise PermissionError(
                         "%s -%s executes an inline shell command; use script_run" % (key, ch)
@@ -1957,9 +2013,15 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
                     shell_flag_seen = True
                     reads_stdin = True
                 if ch in short_value:
+                    if pos + 1 == len(bundle):
+                        consumed_next = True
                     break
                 if ch not in short_flags:
+                    all_known = False
                     break
+            if all_known:
+                index += 2 if consumed_next else 1
+                continue
         if spec.get("numeric_dash") and re.fullmatch(r"-\d+", lowered):
             index += 1
             continue
@@ -1971,20 +2033,24 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
             index += 1
             continue
         if not subcommand_seen:
-            matched_seq = False
-            for seq in subcommand_sequences:
-                if (
-                    index + len(seq) <= len(args)
-                    and tuple(a.lower() for a in args[index:index + len(seq)]) == seq
-                ):
-                    subcommand_seen = True
-                    index += len(seq)
-                    matched_seq = True
-                    break
-            if matched_seq:
-                continue
+            if pending_seq is not None:
+                if lowered == pending_seq[0]:
+                    pending_seq = pending_seq[1:] or None
+                    if pending_seq is None:
+                        subcommand_seen = True
+                    index += 1
+                    continue
+                return [], False, False
             if lowered in subcommands:
                 subcommand_seen = True
+                index += 1
+                continue
+            matched_prefix = next((seq for seq in subcommand_sequences if seq and seq[0] == lowered), None)
+            if matched_prefix is not None:
+                if len(matched_prefix) == 1:
+                    subcommand_seen = True
+                else:
+                    pending_seq = matched_prefix[1:]
                 index += 1
                 continue
             return [], False, False
@@ -1992,7 +2058,13 @@ def _unwrap_launcher(key, args, stdin="", executable=""):
             skip_operands -= 1
             index += 1
             continue
+        if skip_env_assignments and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", arg):
+            index += 1
+            continue
         break
+    if skip_env_assignments:
+        while index < len(args) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", args[index]):
+            index += 1
     if index >= len(args):
         if spec.get("stdin_if_no_inner") or reads_stdin:
             reads_stdin = True
