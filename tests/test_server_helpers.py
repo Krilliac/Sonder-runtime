@@ -192,9 +192,14 @@ def test_answer_with_history_explicit_model_bypasses_control_routing(monkeypatch
     assert server._answer_with_history_impl(
         "please inspect the project", [], tier=tier
     ) == "answer"
+    from sonder_runtime.application.chat.honesty import no_verification_claims_system
     assert seen == {
         "model": "selected-answer:latest",
-        "system": "system",
+        "system": server._chat_tool_manifest.chat_system(
+            no_verification_claims_system("system"),
+            "please inspect the project",
+            file_guidance=False,
+        ),
         "cloud": cloud,
     }
 
@@ -225,11 +230,16 @@ def test_answer_with_history_guidance_only_for_unrouted_local_file_turns(
 
     monkeypatch.setattr(server, "_make_generate", generate)
     assert server._answer_with_history_impl(prompt, [], tier=tier, context_size="4k") == "answer"
+    from sonder_runtime.application.chat.honesty import no_verification_claims_system
+    expected_base = no_verification_claims_system("system\nexact bytes")
     if guidance:
-        assert seen["system"].startswith("system\nexact bytes\n\n")
+        assert seen["system"].startswith(expected_base + "\n\n")
         assert "workspace_inventory" in seen["system"]
     else:
-        assert seen["system"] == "system\nexact bytes"
+        assert seen["system"] == server._chat_tool_manifest.chat_system(
+            expected_base, prompt, file_guidance=False,
+        )
+        assert "workspace_inventory" not in seen["system"]
 
 
 def test_answer_with_history_routed_file_turn_skips_guidance_and_generation(monkeypatch):

@@ -9196,10 +9196,10 @@ def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
     """``/approve <call id> [ttl]`` | ``/approve revoke <nonce>`` | ``/approve call <tool> <json>``."""
     from sonder_runtime.adapters.security import approval_tool_ops
 
-    return approval_tool_ops.dispatch_approve_command(
-        arg, operator_approved=operator_approved,
-        operator_attended=_OPERATOR_ATTENDED, approve_fn=permission_approve,
+    usage, kwargs = approval_tool_ops.parse_approve_command(
+        arg, operator_approved=operator_approved, operator_attended=_OPERATOR_ATTENDED,
     )
+    return usage if usage is not None else permission_approve(**kwargs)
 
 
 @mcp.tool()
@@ -20759,7 +20759,7 @@ def _agent_turn(
             allow_web=allow_web,
             allow_location=allow_location,
             allowlist=allowed_tools, kind=tool_help_kind,
-            num_ctx=agent_num_ctx or (0 if cloud else _auto_model_context(model)),
+            num_ctx=agent_num_ctx or (0 if cloud or provider is not None else _auto_model_context(model)),
         ),
     )
     if unsafe:
@@ -24005,10 +24005,7 @@ def _ollama_pool_admin_status_data(*, principal: str, refresh=False, cursor="", 
             OLLAMA_POOL.refresh_capabilities()
         page = OLLAMA_POOL.status(cursor=cursor, page_size=page_size, principal=principal)
         gw = _APP_GRAPH.model_gateway if _APP_GRAPH is not None else None
-        extra = _pool_wiring.pool_unified_status(OLLAMA_POOL, gw)
-        if isinstance(page, dict) and extra:
-            page = {**page, **extra}
-        return page
+        return _pool_wiring.merge_pool_unified_status(page, OLLAMA_POOL, gw)
     except ValueError:
         return {"error": "invalid_request"}
     except Exception:
@@ -25154,7 +25151,7 @@ def ensemble_answer(
     answers, failures = _pool_wiring.execute_ensemble_poll(
         targets=targets, pool=OLLAMA_POOL, default_origin=BASE, is_cloud_fn=_is_cloud_tier,
         bridge_provider_fn=_bridge_provider_for_tier, pin_origin_fn=_pinned_ollama_origin, lookup=lookup,
-        make_tier_generate_fn=_make_tier_generate, num_predict=num_predict, question=question,
+        make_tier_generate_fn=functools.partial(_make_tier_generate, text_only=True), num_predict=num_predict, question=question,
         render_model_error_fn=render_model_error, model_call_error_cls=ModelCallError,
         post_fn=_post, pool_factory=owned_runtime_pool, max_workers=ENSEMBLE_MAX_MODELS,
     )

@@ -183,6 +183,7 @@ _UNATTENDED_DELETE = {
     pm.MANUAL: (pm.DENY, "unattended"),
     pm.ACCEPT_EDITS: (pm.DENY, "unattended"),
     pm.AUTO: (pm.DENY, "unattended"),
+    pm.BYPASS: (pm.DENY, "unattended"),
 }
 
 

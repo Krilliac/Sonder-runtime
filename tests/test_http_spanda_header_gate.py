@@ -38,6 +38,7 @@ def test_spanda_header_is_honoured_only_for_developer_callers(monkeypatch, role,
 
     monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(ts.admin_auth, "rate_limit", lambda conn, account: (True, ""))
+    monkeypatch.setattr(ts.admin_auth, "meter_usage", lambda conn, account, tokens=0: (True, ""))
     monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
     calls = []
     monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history",

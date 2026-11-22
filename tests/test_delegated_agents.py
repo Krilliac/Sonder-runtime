@@ -439,6 +439,9 @@ def test_78_node1_direct_model_pin_and_cluster_capacity(monkeypatch):
     assert pin.ok and pin.model == "qwen3.6:35b"
 
     monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "1")
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(master_orchestrator, "physical_memory_bytes", lambda: (32 * 1024**3, 16 * 1024**3))
+    monkeypatch.setattr(master_orchestrator, "gpu_worker_slots", lambda: 0)
     cap = master_orchestrator.capacity()
     assert cap["ollama_num_parallel"] >= 3
     assert cap["automatic_worker_slots"] >= 3
@@ -475,6 +478,9 @@ def test_92_provider_dispatch_and_fallback_gateway_pin_and_capacity(monkeypatch)
     pin = server._resolve_model_pin("astra-cyber-35b-a3b:latest")
     assert pin.ok and pin.model == "astra-cyber-35b-a3b:latest"
     monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "1")
+    monkeypatch.setattr(master_orchestrator.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(master_orchestrator, "physical_memory_bytes", lambda: (32 * 1024**3, 16 * 1024**3))
+    monkeypatch.setattr(master_orchestrator, "gpu_worker_slots", lambda: 0)
     assert delegation_wiring.remote_cluster_parallel_slots(server) >= 2
     cap = master_orchestrator.capacity()
     assert cap["ollama_num_parallel"] >= 3

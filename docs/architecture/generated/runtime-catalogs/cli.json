@@ -129,7 +129,7 @@
     {
       "category": "security",
       "name": "/approve",
-      "risk": "safe",
+      "risk": "dangerous",
       "summary": "approve exactly one refused call once (/approve revoke <nonce>)"
     },
     {

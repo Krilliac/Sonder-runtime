@@ -911,6 +911,7 @@ def test_mesh_vision_critique_is_refused_for_a_denied_vision_tier(catalog, monke
 
     monkeypatch.setattr(mesh_agent_tools, "run_loop", run_loop)
     monkeypatch.setattr(server.assetgen, "workspace_root", lambda: str(tmp_path))
+    monkeypatch.setattr(server.assetgen, "default_asset_root", lambda: str(tmp_path))
     report = mesh_agent_tools.generate_mesh("a crate", tiers="general", output_dir=str(tmp_path),
                                             rt=server, runner=_MeshRunner)
     if vision_model == DENIED:

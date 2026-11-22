@@ -1505,6 +1505,11 @@ class ModeEscalationRefused(ValueError):
         self.target = target
 
 
+def mode_escalation_refused() -> type[ValueError]:
+    """The exception type ``set_mode_without_escalation`` raises."""
+    return ModeEscalationRefused
+
+
 def set_mode_without_escalation(name: str) -> str:
     """``set_mode`` for a caller that may never raise autonomy.
 

@@ -191,7 +191,8 @@ def test_message_code_is_bound_at_every_surface(monkeypatch, surface, inspectabl
 
 
 def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkeypatch):
-    """A python "run it" is graded like ``/run``: same gate, argument-free digest."""
+    """A python "run it" is graded like ``/run`` and never invokes the PowerShell AST."""
+    from sonder_runtime.adapters.security import powershell_gate
     import sonder_runtime.interfaces.http.serve as serve
 
     monkeypatch.setattr(serve, "_LEGACY_RUNTIME", server)
@@ -206,13 +207,14 @@ def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkey
         )
 
     monkeypatch.setattr(serve.permission_policy, "decide_for_caller", decide)
+    monkeypatch.setattr(powershell_gate, "inspect_powershell", lambda _src: pytest.fail("PowerShell AST ran on Python"))
     monkeypatch.setattr(serve.code_runner, "run_code", lambda *a, **k: pytest.fail("refused run executed"))
     monkeypatch.setattr(serve.intents, "classify", lambda value: {"run": True})
 
     output = serve._handle_intent("run it", messages=messages)
 
     assert output.startswith("refused /run:")
-    assert seen and all(arguments is None for _tool, arguments in seen)
+    assert seen == [("run_code", {"code": "print(1)", "language": "python"})]
 
 
 # --- non-PowerShell calls keep origin/main's argument-free decisions --------

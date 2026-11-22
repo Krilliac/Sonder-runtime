@@ -9,7 +9,7 @@ from scripts import nightly_selfmod, selfmod_forever
 
 
 def test_curriculum_outcome_redacts_secret_without_changing_lesson_count(monkeypatch, capsys):
-    monkeypatch.setattr(curriculum_run.server, "sonder", lambda _prompt: "answer")
+    monkeypatch.setattr(curriculum_run.server, "sonder", lambda _prompt, **_kwargs: "answer")
     monkeypatch.setattr(curriculum_run.server, "parse_interaction_id", lambda _resp: "iid")
     monkeypatch.setattr(curriculum_run.grounding, "extract_code_block", lambda _resp: None)
     monkeypatch.setattr(

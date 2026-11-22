@@ -59,6 +59,41 @@ def approval_view(
     return approval_ledger_module.operator_scope() if admin else contextlib.nullcontext()
 
 
+def parse_approve_command(
+    arg: str,
+    *,
+    operator_approved: bool,
+    operator_attended: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    """Parse ``/approve`` syntax into ``(usage_or_none, permission_approve_kwargs)``."""
+    usage = (
+        "usage: /approve <call id> [ttl seconds]   approve one pending call once (see /approvals)\n"
+        "       /approve revoke <nonce>            withdraw an open approval\n"
+        "       /approve call <tool> <json>        approve one exact call before it is made"
+    )
+    text = str(arg or "").strip()
+    if not text:
+        return usage, {}
+    token: Any = operator_attended if operator_approved else ""
+    parts = text.split(None, 2)
+    head = parts[0].lower()
+    if head == "revoke":
+        if len(parts) != 2:
+            return usage, {}
+        return None, {"revoke": parts[1], "token": token}
+    if head == "call":
+        if len(parts) != 3:
+            return usage, {}
+        return None, {"tool": parts[1], "arguments_json": parts[2], "token": token}
+    ttl = approval_ledger_module.DEFAULT_TTL_SECONDS
+    if len(parts) >= 2:
+        try:
+            ttl = int(parts[1])
+        except ValueError:
+            return usage, {}
+    return None, {"call_id": head, "ttl_seconds": ttl, "token": token}
+
+
 def dispatch_approve_command(
     arg: str,
     *,
@@ -67,32 +102,12 @@ def dispatch_approve_command(
     approve_fn: Callable[..., str],
 ) -> str:
     """Parse ``/approve`` syntax and delegate to ``permission_approve``."""
-    usage = (
-        "usage: /approve <call id> [ttl seconds]   approve one pending call once (see /approvals)\n"
-        "       /approve revoke <nonce>            withdraw an open approval\n"
-        "       /approve call <tool> <json>        approve one exact call before it is made"
+    usage, kwargs = parse_approve_command(
+        arg, operator_approved=operator_approved, operator_attended=operator_attended,
     )
-    text = str(arg or "").strip()
-    if not text:
+    if usage is not None:
         return usage
-    token: Any = operator_attended if operator_approved else ""
-    parts = text.split(None, 2)
-    head = parts[0].lower()
-    if head == "revoke":
-        if len(parts) != 2:
-            return usage
-        return approve_fn(revoke=parts[1], token=token)
-    if head == "call":
-        if len(parts) != 3:
-            return usage
-        return approve_fn(tool=parts[1], arguments_json=parts[2], token=token)
-    ttl = approval_ledger_module.DEFAULT_TTL_SECONDS
-    if len(parts) >= 2:
-        try:
-            ttl = int(parts[1])
-        except ValueError:
-            return usage
-    return approve_fn(call_id=head, ttl_seconds=ttl, token=token)
+    return approve_fn(**kwargs)
 
 
 def execute_permission_approve(
@@ -229,4 +244,5 @@ __all__ = [
     "approval_view",
     "dispatch_approve_command",
     "execute_permission_approve",
+    "parse_approve_command",
 ]

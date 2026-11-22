@@ -235,6 +235,7 @@ _RUN_FLAGS: Mapping[str, tuple[tuple[str, ...], str]] = MappingProxyType({
 # word (``_escaped_flag``, ``_Command.runs``).
 _FLAG_STARTS = ("-", "+")
 _ESCAPE_MARKS = "\\^`'\""
+_FLAG_OR_ESCAPE = "-+\\^`'\""
 _UNESCAPED = str.maketrans("", "", _ESCAPE_MARKS)
 # The pieces of a word that may name a command: ``X=rm``, ``--pager=rm``,
 # ``--pretty=format:rm``, less's ``+!rm``, ack's ``+rm``.
@@ -681,7 +682,12 @@ def _finder_targets(words: list[str]) -> list[str]:
     return targets
 
 
-def _argv_blocked(argv: list[str], cwd: tuple[_Place, ...]) -> bool:
+def _argv_blocked(
+    argv: list[str],
+    cwd: tuple[_Place, ...],
+    root_cache: dict[str, bool] | None = None,
+    relatives: dict[str, _Place] | None = None,
+) -> bool:
     """Whether an argv (no shell: no comment, separator or quote) deletes a root.
 
     Every element is one word and may be the program (``sudo rm``,
@@ -694,9 +700,20 @@ def _argv_blocked(argv: list[str], cwd: tuple[_Place, ...]) -> bool:
     and one over its operands: linear.
     """
     words = [word.casefold() for word in argv]
+    cache = root_cache if root_cache is not None else {}
+
+    def _is_root(target: str) -> bool:
+        cached = cache.get(target)
+        if cached is None:
+            cached = cache[target] = any(
+                _is_root_reading(drive, path)
+                for drive, path in _against(_normalize_targets(target), cwd, relatives)
+            )
+        return cached
+
     # Every finder's name has an ``f``: an argv without one names none (a cheap first check).
     if any("f" in word for word in words) and (finder_at := _finder_at(words)) >= 0 and any(
-            _is_root_target(target, cwd) for target in _finder_targets(words[finder_at + 1:])):
+            _is_root(target) for target in _finder_targets(words[finder_at + 1:])):
         return True
     delete_at, switches, everywhere = -1, False, False
     runners: frozenset[str] = frozenset()
@@ -717,7 +734,7 @@ def _argv_blocked(argv: list[str], cwd: tuple[_Place, ...]) -> bool:
     if delete_at < 0:
         return False
     operands = words[1:] if everywhere else words[delete_at + 1:]
-    return any(_is_root_target(_flag_value(operand) if _is_operand_flag(operand, switches) else operand, cwd)
+    return any(_is_root(_flag_value(operand) if _is_operand_flag(operand, switches) else operand)
                for operand in operands)
 
 
@@ -1044,18 +1061,24 @@ def _runs_delete(word: str, glued: bool = False) -> str:
     it one), so a word glued from many quotes is read in linear time.
     """
     tail = word[-_VERB_TAIL:]
-    for piece in (tail, *_COMMAND_PIECES.split(tail)):
-        name = _program_name(piece)
-        if piece and _is_delete_verb(name):
-            return name
+    name = _program_name(tail)
+    if tail and _is_delete_verb(name):
+        return name
+    if "=" in tail or ":" in tail or "+" in tail or "!" in tail:
+        for piece in _COMMAND_PIECES.split(tail):
+            if piece:
+                pname = _program_name(piece)
+                if _is_delete_verb(pname):
+                    return pname
     if glued and len(word) > 2 and word[0] == "-" and word[1] != "-":
         # Any flag of a bundle may take the rest as its value (``-nOrm``: ``-O rm``; ``-w5Orm``):
         # every suffix of the tail past the flag's ``-x``.  A suffix's name is a suffix of the
         # last one's name (``_program_name``), so the longest delete verb it ends in is the one.
-        name = _program_name(tail[2 if len(word) <= _VERB_TAIL else 0:])
-        if name.endswith(".rmtree"):
-            return name
-        return next((verb for verb in _SUFFIX_VERBS if name.endswith(verb)), "")
+        bname = name if len(word) > _VERB_TAIL else _program_name(tail[2:])
+        if bname.endswith(".rmtree"):
+            return bname
+        if bname.endswith(_SUFFIX_VERBS):
+            return next(verb for verb in _SUFFIX_VERBS if bname.endswith(verb))
     return ""
 
 
@@ -1071,6 +1094,8 @@ def _flag_like(word: str) -> bool:
     read once per piece): a longer word that starts with that many escape
     characters is a flag, fail closed.
     """
+    if not word or word[0] not in _FLAG_OR_ESCAPE:
+        return False
     head = word[:_VERB_TAIL].lstrip(_ESCAPE_MARKS)
     return head[:1] in _FLAG_STARTS or (not head and len(word) > _VERB_TAIL)
 
@@ -1105,8 +1130,12 @@ def _flag_value(flag: str) -> str:
 
 
 def _program_name(program: str) -> str:
-    name = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name.removesuffix(".exe")
+    if "\\" in program:
+        program = program.replace("\\", "/")
+    if "/" in program:
+        program = program.rsplit("/", 1)[-1]
+    name = program.lower()
+    return name[:-4] if name.endswith(".exe") else name
 
 
 def _file_name(path: str) -> str:
@@ -1215,12 +1244,18 @@ class _Command:
     """One command's words, and what the scan has learned about them so far."""
 
     __slots__ = ("after_download", "after_git", "candidate_at", "carry", "comment_at", "comment_parens",
-                 "delete_at", "downloads", "flag_delete", "interpreter_at", "parens", "piped", "prefixed",
+                 "delete_at", "downloads", "flag_delete", "glue_head", "glue_len", "glue_tail", "gluing",
+                 "has_f", "interpreter_at", "parens", "piped", "prefixed",
                  "program_at", "quote", "quote_from", "redirect_target", "runners", "runs", "saves_urls",
                  "settled", "switches", "unsettled", "words")
 
     def __init__(self, piped: bool = False, after_download: bool = False) -> None:
         self.words: list[str] = []
+        self.gluing: list[str] | None = None  # buffered pieces for words[-1] while gluing (O(N) join)
+        self.glue_head = ""
+        self.glue_tail = ""
+        self.glue_len = 0
+        self.has_f = False  # whether any word in this command contains ``f`` (every finder name does)
         self.piped = piped  # it reads a pipe
         self.after_download = after_download  # a download ran earlier on its line
         self.settled = False  # its program is known
@@ -1248,6 +1283,12 @@ class _Command:
     def reopen(self) -> None:
         """A ``(``, ``{`` or a new command: the next word is not a redirection's target."""
         self.redirect_target = False
+
+    def flush_glued(self) -> None:
+        """Materialise buffered glued pieces into ``words[-1]`` once the word ends."""
+        if self.gluing is not None:
+            self.words[-1] = "".join(self.gluing)
+            self.gluing = None
 
 
 class _Context:
@@ -1306,7 +1347,10 @@ class _Scan:
             before = text[start - 1] if start else ""
             if kind == "word":
                 comment_ok = not before or before in _COMMENT_AFTER
-                if self._words(context, token, start == glue, comment_ok):
+                if "{" in token:
+                    if self._words(context, token, start == glue, comment_ok):
+                        return True
+                elif self._word(context, token, start == glue, comment_ok):
                     return True
                 word_end = match.end()
             elif kind == "nl":
@@ -1323,6 +1367,7 @@ class _Scan:
                     # A newline ends a comment whatever stands before it: after a
                     # pipe or ``&&`` the command goes on without the comment...
                     if joins:
+                        command.flush_glued()
                         del command.words[command.comment_at:]
                         command.comment_at, command.comment_parens = -1, 0
                         continue
@@ -1367,7 +1412,8 @@ class _Scan:
                     # An escape character.  Next to a flag word (``--o`p=x``, ``-`-pre``,
                     # ``` `--pre ```) it may assemble any flag: a run flag (``_escaped_flag``).
                     command = context.command
-                    if ((start in (word_end, glue) and command.words and _flag_like(command.words[-1]))
+                    if ((start in (word_end, glue) and command.words and _flag_like(
+                            command.glue_head if command.gluing is not None else command.words[-1]))
                             or _flag_like(text[match.end():match.end() + _VERB_TAIL])):
                         command.runs = True
                 elif context.kind == "tick":
@@ -1389,6 +1435,7 @@ class _Scan:
                 # closing quote (``_quote``) keeps it: ``"C:\\Program Files (x86)"``.
                 command = context.command
                 if self.shell and command.quote and command.comment_at < 0:
+                    command.flush_glued()
                     if command.words and start == word_end and len(command.words[-1]) < _PAREN_GLUE:
                         command.words[-1] += token
                         command.unsettled = command.unsettled or context.operands
@@ -1484,7 +1531,11 @@ class _Scan:
         if (not expanded and self.shell and command.comment_at < 0
                 and (command.delete_at >= 0 or command.carry or context.operands)):
             return True
-        prefix = command.words[-1] if expanded and glued and command.words else ""
+        if expanded and glued and command.words:
+            command.flush_glued()
+            prefix = command.words[-1]
+        else:
+            prefix = ""
         # A ``#`` that brace expansion yields is an argument (``{#,}`` is ``#``), not a comment.
         comment_ok = comment_ok and token[0] == "#"
         for index, word in enumerate(words):
@@ -1494,13 +1545,16 @@ class _Scan:
         return False
 
     def _word(self, context: _Context, word: str, glued: bool, comment_ok: bool = False) -> bool:
-        name = _program_name(word)
-        if word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs") or _MKFS.fullmatch(name):
+        name = _program_name(word) if ("/" in word or "\\" in word or word.endswith(".exe")) else word
+        if (word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs")
+                or (name.startswith("mkfs") and _MKFS.fullmatch(name))):
             return True
         if self.previous == "format" and _is_drive_root(word):
             return True
         self.previous = word
         command = context.command
+        if self.finders and not command.has_f and "f" in word:
+            command.has_f = True
         if name in _DOWNLOADERS:
             command.downloads = context.downloaded = self.downloaded = self.line_download = True
             command.saves_urls = command.saves_urls or name in _URL_SAVERS
@@ -1510,27 +1564,60 @@ class _Scan:
             command.saves_urls = True
         if glued and command.words:
             # ``"$HOME"/``, ``$(pwd)/c``: one shell word with what it follows.
-            before, piece = command.words[-1], word
-            word = command.words[-1] = before + piece
+            piece = word
+            if command.gluing is None:
+                base = command.words[-1]
+                command.gluing = [base, piece]
+                command.glue_len = len(base) + len(piece)
+                command.glue_head = (base + piece)[:_VERB_TAIL + 1] if len(base) <= _VERB_TAIL else base[:_VERB_TAIL + 1]
+                command.glue_tail = (base[-_VERB_TAIL:] + piece)[-_VERB_TAIL:]
+            else:
+                command.gluing.append(piece)
+                command.glue_len += len(piece)
+                if len(command.glue_head) <= _VERB_TAIL:
+                    command.glue_head = (command.glue_head + piece)[:_VERB_TAIL + 1]
+                command.glue_tail = (command.glue_tail + piece)[-_VERB_TAIL:]
             at = len(command.words) - 1
+            tail = command.glue_tail
             # ``"g"it grep -nOrm``; a name is short, so its tail is enough (and stays linear).
-            self._note_program(command, _program_name(word[-_VERB_TAIL:]))
-            if _flag_like(word):
+            tail_name = _program_name(tail) if ("/" in tail or "\\" in tail or tail.endswith(".exe")) else tail
+            self._note_program(command, tail_name)
+            is_flag = _flag_like(command.glue_head)
+            if is_flag:
                 # A flag word the shell assembles from quoted pieces (``-""O'x'``, ``-n"O"'x'``,
                 # ``--"pager"=x``) may be any flag: a run flag, whose value may be a command.
                 command.runs = True
             if (self.shell and command.comment_at < 0 and command.delete_at < 0
-                    and (command.candidate_at == at or command.runs)
-                    and (verb := _runs_delete(word, True) or _runs_delete(piece)
-                         or ((tail := word[-_VERB_TAIL:]) != (plain := _unescaped(tail)) and _runs_delete(plain, True)))):
-                # ``"r"m -rf /``, ``r"m" -rf /``, ``X='rm -rf /'``, ``--pager='rm -rf /'``, ``-O'rm -rf /'``;
-                # the word as the shell passes it (``--pre=r\m``), and the piece alone, as the
-                # pre-lane scan read it (PowerShell's ``-`O'rd ...'`` is ``-Ord ...``, read here
-                # as ``-``, then ``o`` with ``rd`` glued to it).
-                command.delete_at = at
-                command.switches = verb in _SWITCH_VERBS
-                command.flag_delete = _flag_like(word)
-                return False
+                    and (command.candidate_at == at or command.runs)):
+                verb = ""
+                if tail and _is_delete_verb(tail_name):
+                    verb = tail_name
+                elif "=" in tail or ":" in tail or "+" in tail or "!" in tail:
+                    verb = _runs_delete(tail, False)
+                if not verb and command.glue_len > 2 and command.glue_head[0] == "-" and command.glue_head[1] != "-":
+                    bname = tail_name if command.glue_len > _VERB_TAIL else _program_name(tail[2:])
+                    if bname.endswith(".rmtree"):
+                        verb = bname
+                    elif bname.endswith(_SUFFIX_VERBS):
+                        verb = next(v for v in _SUFFIX_VERBS if bname.endswith(v))
+                if not verb:
+                    if _is_delete_verb(name):
+                        verb = name
+                    elif "=" in piece or ":" in piece or "+" in piece or "!" in piece:
+                        verb = _runs_delete(piece)
+                if not verb and ("\\" in tail or "^" in tail):
+                    plain = _unescaped(tail)
+                    if plain != tail:
+                        verb = _runs_delete(plain, True)
+                if verb:
+                    # ``"r"m -rf /``, ``r"m" -rf /``, ``X='rm -rf /'``, ``--pager='rm -rf /'``, ``-O'rm -rf /'``;
+                    # the word as the shell passes it (``--pre=r\m``), and the piece alone, as the
+                    # pre-lane scan read it (PowerShell's ``-`O'rd ...'`` is ``-Ord ...``, read here
+                    # as ``-``, then ``o`` with ``rd`` glued to it).
+                    command.delete_at = at
+                    command.switches = verb in _SWITCH_VERBS
+                    command.flag_delete = is_flag
+                    return False
             if self.shell and context.operands and command.comment_at < 0:
                 # An operand of a delete (``rm -rf $(echo a"/")``): read whole once it ends
                 # (``_settle``), not at every quote glued to it, which would be quadratic.
@@ -1552,7 +1639,13 @@ class _Scan:
         if command.delete_at < 0:
             # Every word may be the command word: ``valgrind rm``, ``grep rm -rf /``.
             command.candidate_at = len(command.words)
-            verb = _runs_delete(word, _bundle_runs(word, command.runners)) if self.shell else ""
+            if not self.shell:
+                verb = ""
+            elif (len(word) <= _VERB_TAIL and not (command.runners and _bundle_runs(word, command.runners))
+                  and "=" not in word and ":" not in word and "+" not in word and "!" not in word):
+                verb = name if _is_delete_verb(name) else ""
+            else:
+                verb = _runs_delete(word, bool(command.runners) and _bundle_runs(word, command.runners))
             if verb:
                 # ``rm``, an assignment's or a flag's value (``X=rm``, ``alias x=rm``, ``--pre=rm``),
                 # PowerShell's ``$r=Remove-Item``, a run flag's bundle (``git grep -nOrm``), the
@@ -1561,7 +1654,7 @@ class _Scan:
                 command.switches = verb in _SWITCH_VERBS
                 previous = command.words[-1] if command.words else ""
                 command.flag_delete = _flag_like(word) or (
-                    "=" not in previous and _is_run_flag(previous, command.runners))
+                    bool(command.runners) and "=" not in previous and _is_run_flag(previous, command.runners))
             elif self.shell and context.operands and not _is_flag(word) and self._root(word):
                 return True
         elif self.shell and context.operands and not _is_flag(word) and self._root(word):
@@ -1583,20 +1676,20 @@ class _Scan:
         and a pipe) is read fail-closed: past its target the next word may be
         the program again.
         """
-        if name in _EXEC_WORDS or _escaped_flag(word):
+        if name in _EXEC_WORDS or (word[0] in _FLAG_OR_ESCAPE and _escaped_flag(word)):
             command.runs = True
-        self._note_program(command, name)
-        if _NOCLOBBER.match(word):
+        if name in _RUN_FLAGS or name == "git" or (command.after_git and name == "grep"):
+            self._note_program(command, name)
+        if ">|" in word and _NOCLOBBER.match(word):
             command.redirect_target = _NOCLOBBER.fullmatch(word) is not None
             return
         if command.redirect_target:
             command.redirect_target = False
             return
-        redirect = _REDIRECT.match(word)
-        if redirect:
+        if (">" in word or "<" in word) and (redirect := _REDIRECT.match(word)):
             command.redirect_target = redirect.end() == len(word)  # ``> out``, not ``>out``
             return
-        if name in _PIPE_SHELLS or name.rstrip("0123456789.") in _PIPE_SHELLS:
+        if name in _PIPE_SHELLS or (name and name[-1] in "0123456789." and name.rstrip("0123456789.") in _PIPE_SHELLS):
             command.runs = True
 
     @staticmethod
@@ -1611,10 +1704,14 @@ class _Scan:
         """Append ``word``, tracking the program it may be (``_command_programs`` as a stream)."""
         index = len(command.words)
         command.words.append(word)
-        if command.settled or _is_flag(word) or "=" in word or command.redirect_target or _REDIRECT.match(word):
+        if (command.settled or _is_flag(word) or "=" in word or command.redirect_target
+                or ((">" in word or "<" in word) and _REDIRECT.match(word))):
             return  # ``2>/dev/null sh``, ``> out sh``: the redirection is not the program
-        unversioned = name.rstrip("0123456789.")
-        interpreter = unversioned if unversioned in _PIPE_SHELLS else name
+        if name and name[-1] in "0123456789.":
+            unversioned = name.rstrip("0123456789.")
+            interpreter = unversioned if unversioned in _PIPE_SHELLS else name
+        else:
+            interpreter = name
         if interpreter in _KEYWORDS and command.program_at < 0:
             return  # ``then cd /``: the command word comes after it
         if interpreter in _PIPE_PREFIXES:
@@ -1643,6 +1740,7 @@ class _Scan:
         start = command.quote_from
         if not self.shell or len(command.words) - start < 2:
             return False
+        command.flush_glued()
         if start <= command.delete_at and self._spaced_root(command.words[command.delete_at + 1:], command.switches):
             return True
         if 0 <= command.delete_at < start or command.carry:
@@ -1687,6 +1785,7 @@ class _Scan:
 
     def _settle(self, command: _Command) -> bool:
         """Whether the last word, an operand of a delete grown by gluing (``unsettled``), is a root."""
+        command.flush_glued()
         if not command.unsettled:
             return False
         command.unsettled = False
@@ -1753,7 +1852,7 @@ class _Scan:
                 first = command.program_at + 1 if 0 <= command.program_at < command.delete_at else 0
             if self._names_a_root(words[first:end], command.switches):
                 return True
-        if self.shell and self.finders:
+        if self.shell and self.finders and command.has_f:
             # ``find / -delete``, ``find / -exec rm {} +``, ``fd . / -x rm``: a finder deletes
             # under every path it searches, wherever the path stands (``_finder_at``), and
             # under the cd-tracked working directory with none (``cd / && find -delete``).
@@ -1836,7 +1935,12 @@ class _Scan:
             self._move(tuple(_place(drive, path) for drive, path in readings))
         else:
             # Each step is bounded (``_Place``), so a ``cd`` flood stays linear.
-            relatives = [_place("", path) for _drive, path in readings]
+            relatives = []
+            for _drive, path in readings:
+                rel = self.relatives.get(path)
+                if rel is None:
+                    rel = self.relatives[path] = _place("", path)
+                relatives.append(rel)
             self._move(tuple(_descend(place, relative) for place in self.cwd or (_place("", ""),)
                              for relative in relatives))
 
@@ -1925,7 +2029,9 @@ def _blocks(tool_name: str, arguments: Any) -> bool:
     places = _places(cwd)
     if (dart_cwd := cwd.strip(_DART_BLANKS)) != cwd:
         places += _places(dart_cwd)  # the desktop client trims ``cwd`` with Dart's ``String.trim``
-    if any(_argv_blocked(argv, places) for argv in _argv_readings(name, arguments)):
+    root_cache: dict[str, bool] = {}
+    relatives: dict[str, _Place] = {}
+    if any(_argv_blocked(argv, places, root_cache, relatives) for argv in _argv_readings(name, arguments)):
         return True
     return name in _DELETE_TOOLS and _delete_target_blocked(arguments, cwd)
 
