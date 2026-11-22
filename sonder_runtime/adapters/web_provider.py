@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib
+import time
 import urllib.parse
 import urllib.request
 
@@ -49,6 +50,7 @@ class LegacyWebProvider:
 
         current_url = request.url
         redirects = 0
+        deadline = time.monotonic() + self._timeout(context)
         while True:
             if not policy.allows(current_url, context):
                 raise WebPolicyError("redirect target is outside the egress policy")
@@ -79,9 +81,12 @@ class LegacyWebProvider:
                 outbound = urllib.request.Request(
                     current_url, data=request.body or None, headers=headers, method=request.method,
                 )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("web request exceeded its total timeout")
                 outbound._sonder_addresses = addresses
-                timeout = self._timeout(context)
-                with self._transport._urlopen(outbound, timeout=timeout) as response:
+                outbound._sonder_deadline = deadline
+                with self._transport._urlopen(outbound, timeout=remaining) as response:
                     status = getattr(response, "status", None)
                     if status is None:
                         status = getattr(response, "code", 200)

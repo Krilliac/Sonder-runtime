@@ -64,13 +64,42 @@ class SessionContinuityService:
         self._checkpoint_privacy = checkpoint_privacy or SessionCheckpointPrivacyService(repository)
         self._max_events = max_events
 
-    def _snapshot(self, session_id: str) -> tuple[SessionEvent, ...]:
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise InvalidInput("session_id must be non-empty")
+    def _read_limit(self) -> int:
         adapter_limit = getattr(self._repository, "_max_read_limit", self._max_events)
         if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
             adapter_limit = self._max_events
-        limit = min(self._max_events, adapter_limit)
+        return min(self._max_events, adapter_limit)
+
+    def _retention_markers(self, session_id: str) -> tuple[SessionEvent, ...]:
+        """Load every retention marker of the session via search + keyset fallback."""
+        limit = self._read_limit()
+        markers = self._repository.search(
+            session_id=session_id, event_type=self.RETENTION_MARKER_EVENT, limit=limit,
+        )
+        if len(markers) < limit:
+            return tuple(markers)
+        found: list[SessionEvent] = []
+        start, scanned = 1, 0
+        max_scan = max(self._max_events, 100_000)
+        while True:
+            page = self._repository.read_range(session_id, start_sequence=start, limit=limit)
+            if not page:
+                break
+            scanned += len(page)
+            if scanned > max_scan:
+                raise IntegrityFailure("session history exceeds retention marker scan bound")
+            if page[-1].sequence < start:
+                raise IntegrityFailure("session read did not advance past its start sequence")
+            found.extend(event for event in page if event.event_type == self.RETENTION_MARKER_EVENT)
+            if len(page) < limit:
+                break
+            start = page[-1].sequence + 1
+        return tuple(found)
+
+    def _snapshot(self, session_id: str) -> tuple[SessionEvent, ...]:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise InvalidInput("session_id must be non-empty")
+        limit = self._read_limit()
         events = self._repository.read_range(session_id, limit=limit)
         report = self._repository.inspect_integrity(session_id, limit=limit)
         if not report.valid or report.checked_events != len(events):
@@ -142,11 +171,8 @@ class SessionContinuityService:
         if context is None or context.principal_id != LOCAL_OWNER or context.expired:
             raise PermissionError("local owner authority is required for retention execution")
         candidates = self.retention_candidates(session_id, now_utc=now_utc, limit=limit)
-        marker_limit = min(self._max_events, getattr(self._repository, "_max_read_limit", self._max_events))
         applied_ids: set[tuple[object, object]] = set()
-        for event in self._repository.search(
-            session_id=session_id, event_type=self.RETENTION_MARKER_EVENT, limit=marker_limit
-        ):
+        for event in self._retention_markers(session_id):
             targets = event.payload.get("targets")
             if not isinstance(targets, list):
                 raise IntegrityFailure("retention marker envelope is invalid")
