@@ -126,6 +126,7 @@ def handle_permission_mode_post(
     approver_of: Callable[[Any], str],
     audit_transition: Callable[..., None] | None = None,
     error_envelope: Callable[..., dict[str, Any]] | None = None,
+    send_escalation_refusal: Callable[..., bool] | None = None,
 ) -> None:
     """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit.
 
@@ -136,8 +137,6 @@ def handle_permission_mode_post(
     (clearing per-session scopes as a safety stop) and bypass scoped to
     principal/session behind ``confirm_bypass: true``.
     """
-    from sonder_runtime.interfaces.http.facades import permission_mode_post as _mode_post
-
     wanted = ""
     confirm_bypass = False
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
@@ -216,10 +215,22 @@ def handle_permission_mode_post(
     if send_idempotency_refusal(handler, result):
         return
     if error_envelope is None:
-        from sonder_runtime.adapters.web import lifecycle as _lifecycle
-        error_envelope = _lifecycle.error_envelope
-    if _mode_post.send_escalation_refusal(
-            handler, permission_policy, result, error_envelope):
+        def error_envelope(code: str, message: str, correlation_id: str, *, retryable: bool = False) -> dict[str, Any]:
+            return {"error": {"code": code, "message": message, "correlation_id": correlation_id, "retryable": retryable}}
+    if send_escalation_refusal is not None:
+        if send_escalation_refusal(handler, permission_policy, result, error_envelope):
+            return
+    elif isinstance(result, permission_policy.mode_escalation_refused()):
+        current = str(getattr(result, "current", ""))
+        target = str(getattr(result, "target", resolved))
+        payload = error_envelope(
+            "PERMISSION_MODE_ESCALATION_REFUSED",
+            ESCALATION_HTTP_LOCAL_OPEN_REFUSAL % (target, target),
+            handler._correlation(),
+            retryable=False,
+        )
+        payload["mode"] = current
+        handler._send_json_payload(payload, status=403)
         return
     if audit_transition is not None and previous != resolved and (previous == "bypass" or resolved == "bypass"):
         audit_transition(

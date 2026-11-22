@@ -1503,6 +1503,13 @@ def _strip_win_exec_ext(name):
 # colon. Interpreters not listed treat every later letter as an option,
 # which can only over-refuse.
 _INLINE_CLUSTER_VALUE_STOPS = {"python": "wm:"}
+_INLINE_CODE_FLAGS = {
+    key: (
+        frozenset(f"-{ch.lower()}" for ch in grammar["inline"])
+        | frozenset(f"--{name.lower()}" for name in grammar["inline_long"])
+    )
+    for key, grammar in _INLINE_GRAMMARS.items()
+}
 
 # Wrappers whose purpose is to launch another program named in their own
 # argv (``env python -c ...``, ``nice bash -c ...``). Every check here keys on
@@ -1639,7 +1646,28 @@ def _awk_inline_refusal(key, args, stdin=""):
     return None
 
 
-def _inline_code_refusal(key, args, stdin=""):
+def _is_stdin_operand_in_working(operand, working):
+    """True when *operand* names stdin lexically or via a symlink/non-regular entry in *working*."""
+    if _is_stdin_operand(operand):
+        return True
+    if working is None or not operand or operand[:1] in ("-", "+"):
+        return False
+    posix_collapsed = posixpath.normpath("/" + operand.replace("\\", "/"))
+    if _under_stdin_alias_root(posix_collapsed):
+        return True
+    base = str(working)
+    if not os.path.isabs(base):
+        base = os.path.join(os.getcwd(), base)
+    joined = os.path.join(base, operand)
+    try:
+        os.lstat(joined)
+    except (OSError, ValueError):
+        if os.name == "nt" or not _under_stdin_alias_root(os.path.normpath(joined)):
+            return False
+    return _stdin_program_operand([operand], working)
+
+
+def _inline_code_refusal(key, args, stdin="", *, working=None):
     """Why interpreter ``key`` run with ``args`` would run inline program text.
 
     Returns the refusal message, or None when the argv names a program file
@@ -1668,7 +1696,7 @@ def _inline_code_refusal(key, args, stdin=""):
             if index < len(args):
                 operand = args[index]
                 operand_seen = True
-                reads_stdin = reads_stdin or _is_stdin_operand(operand)
+                reads_stdin = reads_stdin or _is_stdin_operand_in_working(operand, working)
                 if grammar["remote_operands"] and _is_remote_operand(operand):
                     return refusal
                 if first_operand and operand in grammar["inline_commands"]:
@@ -1745,7 +1773,7 @@ def _inline_code_refusal(key, args, stdin=""):
             continue
         first_operand = False
         operand_seen = True
-        reads_stdin = reads_stdin or _is_stdin_operand(arg)
+        reads_stdin = reads_stdin or _is_stdin_operand_in_working(arg, working)
         if grammar["remote_operands"] and _is_remote_operand(arg):
             return refusal
         if not uncertain:
@@ -2007,9 +2035,14 @@ def _refuse_inline_code(
     if interp_key is None:
         return
     flags_key = "python" if interp_key == "py" else interp_key
+    grammar = _INLINE_GRAMMARS.get(interp_key) or _INLINE_GRAMMARS.get(flags_key)
     value_stops = _INLINE_CLUSTER_VALUE_STOPS.get(flags_key, "")
-    if flags_key in _INLINE_CODE_FLAGS and any(
-        _is_inline_code_arg(arg, _INLINE_CODE_FLAGS[flags_key], value_stops)
+    inline_flags = (
+        frozenset(f"-{ch.lower()}" for ch in grammar["inline"])
+        | frozenset(f"--{name.lower()}" for name in grammar["inline_long"])
+    ) if grammar else frozenset()
+    if inline_flags and any(
+        _is_inline_code_arg(arg, inline_flags, value_stops)
         for arg in lowered_args
     ):
         raise PermissionError(
@@ -2610,7 +2643,7 @@ def _bun_x_remainder(args):
 
 
 def _check_program_guards(
-    executable, args, stdin="", *, _allow_cmd_script=False, _depth=0,
+    executable, args, stdin="", *, _allow_cmd_script=False, _depth=0, _working=None,
 ):
     """Refuse inline code, cmd/batch escapes, and launcher-wrapped payloads."""
     if _depth >= 8:
@@ -2633,7 +2666,7 @@ def _check_program_guards(
         for inner_prog, inner_args in candidates:
             _check_program_guards(
                 inner_prog, inner_args, stdin,
-                _allow_cmd_script=False, _depth=_depth + 1,
+                _allow_cmd_script=False, _depth=_depth + 1, _working=_working,
             )
         return
     if stem in ("powershell", "powershell_ise", "pwsh"):
@@ -2651,7 +2684,7 @@ def _check_program_guards(
             raise PermissionError(refusal)
         return
     interp_key = _inline_interpreter_key(basename)
-    refusal = interp_key and _inline_code_refusal(interp_key, args, stdin)
+    refusal = interp_key and _inline_code_refusal(interp_key, args, stdin, working=_working)
     if refusal:
         raise PermissionError(refusal)
     if interp_key == "bun":
@@ -2667,7 +2700,7 @@ def _check_program_guards(
             for inner_prog, inner_args in candidates:
                 _check_program_guards(
                     inner_prog, inner_args, stdin,
-                    _allow_cmd_script=False, _depth=_depth + 1,
+                    _allow_cmd_script=False, _depth=_depth + 1, _working=_working,
                 )
 
 
@@ -2701,14 +2734,13 @@ def _run_program(
         executable = _resolve_program(program, extra_roots=extra_roots, bypass=bypass)
     args = _json_args(args_json)
     input_bytes = str(stdin or "").encode("utf-8")
-    _check_program_guards(
-        executable, args, stdin, _allow_cmd_script=_allow_cmd_script,
-    )
     working = _resolve(cwd, extra_roots=extra_roots, bypass=bypass)
-    _refuse_inline_code(
-        executable, args, has_stdin=bool(input_bytes),
-        allow_cmd_script=allow_cmd_script, script_args_start=script_args_start,
-        working=working,
+    _check_program_guards(
+        executable,
+        args if script_args_start is None else args[:script_args_start],
+        stdin if script_args_start is None else "",
+        _allow_cmd_script=allow_cmd_script,
+        _working=working,
     )
     if not working.is_dir():
         raise ValueError("working directory is not a directory: %s" % working)

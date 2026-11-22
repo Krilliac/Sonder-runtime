@@ -158,9 +158,8 @@ _PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"(?:\\?[\"'])?\s*[:=]\s*)"
-        r"(\\?\"[^\"\r\n]*\"|\\?'[^'\r\n]*'|\[REDACTED\](?=[\s,;}\])]|$)|"
-        r"\\?[\"']?[^\s\"']+[\"']?)"
+        r"[\"']?\s*[:=]\s*)"
+        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
     _URL_USERINFO,
     re.compile(
@@ -194,13 +193,26 @@ _MAX_PASSES = 8
 _CREDENTIAL_VALUE = re.compile(
     r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
     r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-    r"[\"']?\s*[:=]\s*)"
-    r'''("(?:[^\s"\\]|\\(?!")){4,}"|'(?:[^\s'\\]|\\(?!')){4,}'|\\"(?:[^\s"\\]|\\(?!")){4,}\\"|\\'(?:[^\s'\\]|\\(?!')){4,}\\'|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*)'''
+    r"(?:\\?[\"'])?\s*[:=]\s*)"
+    r'''("(?:[^"\\\r\n]++|\\[^\r\n])++"|'(?:[^'\\\r\n]++|\\[^\r\n])++'|\\"(?:[^"\\\r\n]++|\\(?!"))++\\"|\\'(?:[^'\\\r\n]++|\\(?!'))++\\'|\[REDACTED\](?=[\s,;}\])]|$)|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*|[^\s"'}{,;]++(?:[,;]++[^\s"'}{,;]++)++)'''
+)
+
+_SPLIT_QUOTED_CREDENTIAL = re.compile(
+    r"(?i)((?:(?<![\"'])(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"|\"(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))\""
+    r"|'(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))')"
+    r"\s*[:=]\s*)"
+    r"(\[REDACTED\][ \t]++[^\"'\r\n:={}\[\],;]++[\"'])"
 )
 
 
 def _sub_credential_values(text):
     """The second stage over settled text, repeated until stable (bounded)."""
+    if REDACTED in text:
+        text = _SPLIT_QUOTED_CREDENTIAL.sub(lambda m: m.group(1) + REDACTED, text)
     for _ in range(_MAX_PASSES):
         after = _CREDENTIAL_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
         if after == text:
@@ -304,6 +316,12 @@ class Redactor:
             for value in self._values:
                 if value in text:
                     text = text.replace(value, REDACTED)
+            # Replace private path prefixes before the pattern passes so a
+            # greedy credential value cannot eat the start of a spaced path
+            # and leave its tail behind unredacted (mirrors domain layer).
+            for prefix in self._path_prefixes:
+                if prefix in text:
+                    text = text.replace(prefix, "[WORKSPACE]")
             # A substitution can create a new word boundary, so repeat the
             # pattern passes until stable (see _MAX_PASSES; mirrors the
             # domain layer).
@@ -312,9 +330,6 @@ class Redactor:
                 text = _apply_patterns(text)
                 if text == before:
                     break
-            for prefix in self._path_prefixes:
-                if prefix in text:
-                    text = text.replace(prefix, "[WORKSPACE]")
             text = _sub_credential_values(text)
             return text
         except Exception:

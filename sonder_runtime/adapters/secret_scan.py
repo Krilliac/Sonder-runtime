@@ -151,30 +151,6 @@ def _scan_resolved(resolved: Path, *, timeout=30):
     }
 
 
-def _confined(path, root):
-    """The real location of *path* when the scan may open or enter it, else None.
-
-    A symlink or junction is refused outright, whatever it points at: followed,
-    it reaches a credential store under a harmless name or a tree outside the
-    allowed roots. The entry is then resolved and its real location must still
-    lie inside the resolved scan root, so a link the attribute check cannot see
-    does not carry the walk out either. Fails closed on any metadata error.
-    """
-    try:
-        if file_ops.is_reparse_point(path):
-            return None
-        real = path.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    if real != root and root not in real.parents:
-        return None
-    return real
-
-
-# Public name for the other secret_scan entry point (harness_tools.secret_scan).
-confined_path = _confined
-
-
 def scan(root=".", *, timeout=30, extra_roots=""):
     """Scan an authorized tree without returning credential material."""
     resolved = file_ops.resolve_path(root, extra_roots=extra_roots)
