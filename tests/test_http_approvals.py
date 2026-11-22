@@ -96,6 +96,106 @@ def test_refusal_receipt_names_the_call_and_every_route_out(ledger):
     assert "hello" not in json.dumps(receipt)
 
 
+def test_local_open_refusal_receipt_offers_no_http_grant(ledger):
+    """Neither the approve POST nor a mode raise works without a credential."""
+    from sonder_runtime.interfaces.http.facades import approval_routes, permission_mode_post
+    from sonder_runtime.interfaces.http.facades.local_open_authority import (
+        AUTHENTICATED_ADMIN_REMEDY)
+
+    decision = _refuse_write(ledger)
+    receipt = facade.refusal_receipt(
+        decision, mode_label="manual", modes_allowing=["acceptEdits", "auto"],
+        credential_less=True, raises=["acceptEdits", "auto"])
+    call = decision.call_id
+    assert receipt["call_id"] == call
+    assert receipt["remedies"] == [
+        {"kind": "approve_once", "call_id": call, "console": "/approve %s" % call,
+         "http_available": False, "http_refusal": approval_routes.GRANT_REFUSED_CODE},
+        {"kind": "switch_mode", "modes": ["acceptEdits", "auto"],
+         "console": "/mode acceptEdits", "http_available": False,
+         "http_refusal": permission_mode_post.ESCALATION_CODE},
+        {"kind": "allow_rule", "console": "/permissions"},
+        {"kind": "console", "detail": "run it from the console and answer the prompt"},
+        {"kind": "authenticate", "detail": AUTHENTICATED_ADMIN_REMEDY},
+    ]
+    # No remedy points at a route that would answer 403.
+    assert "/v1/approvals" not in json.dumps(receipt["remedies"])
+    assert not any("method" in item or "path" in item for item in receipt["remedies"])
+
+
+def test_local_open_refusal_receipt_keeps_a_mode_change_that_is_not_a_raise(ledger):
+    decision = _refuse_write(ledger)
+    receipt = facade.refusal_receipt(
+        decision, modes_allowing=["acceptEdits", "auto"],
+        credential_less=True, raises=["auto"])
+    switches = [item for item in receipt["remedies"] if item["kind"] == "switch_mode"]
+    assert switches == [
+        {"kind": "switch_mode", "modes": ["acceptEdits"]},
+        {"kind": "switch_mode", "modes": ["auto"], "console": "/mode auto",
+         "http_available": False, "http_refusal": "PERMISSION_MODE_ESCALATION_REFUSED"},
+    ]
+
+
+def test_turn_receipt_counts_only_a_real_raise_as_refused(monkeypatch):
+    """The ``raises`` the turn receipt computes match the POST's own rule."""
+    from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+    def raising(current, modes):
+        return facade.modes_raising_from(permission_policy, current, modes)
+
+    assert raising(pm.MANUAL, [pm.ACCEPT_EDITS, pm.AUTO]) == [pm.ACCEPT_EDITS, pm.AUTO]
+    assert raising(pm.AUTO, [pm.ACCEPT_EDITS]) == []
+    assert raising(pm.PLAN, [pm.MANUAL, pm.AUTO]) == [pm.AUTO]
+
+    def broken(current, target):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(pm, "is_unattended_escalation", broken)
+    # Fails closed: when the policy cannot say, every mode is a raise.
+    assert raising(pm.AUTO, [pm.ACCEPT_EDITS]) == [pm.ACCEPT_EDITS]
+
+
+def test_chat_refusal_receipt_follows_the_auth_mode(ledger, monkeypatch):
+    """Over the wire: local-open marks the grants unavailable; an API key keeps them."""
+    monkeypatch.setattr(server, "file_write", lambda **kwargs: "wrote it")
+    _local_open(monkeypatch)
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/write notes.txt hello")
+        assert status == 200, reply
+        refusal = reply["sonder_receipt"]["refusal"]
+    by_kind = {}
+    for item in refusal["remedies"]:
+        by_kind.setdefault(item["kind"], []).append(item)
+    (approve,) = by_kind["approve_once"]
+    assert approve == {
+        "kind": "approve_once", "call_id": refusal["call_id"],
+        "console": "/approve %s" % refusal["call_id"],
+        "http_available": False, "http_refusal": GRANT_REFUSED}
+    # From manual every mode that allows a file change is a raise.
+    assert by_kind["switch_mode"] == [
+        {"kind": "switch_mode", "modes": [pm.ACCEPT_EDITS, pm.AUTO],
+         "console": "/mode %s" % pm.ACCEPT_EDITS, "http_available": False,
+         "http_refusal": "PERMISSION_MODE_ESCALATION_REFUSED"}]
+    (authenticate,) = by_kind["authenticate"]
+    assert "SONDER_API_KEY" in authenticate["detail"]
+    assert "SONDER_REQUIRE_ACCOUNT=1" in authenticate["detail"]
+
+    _serve_with_accounts(monkeypatch, mode="api-key")
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/write notes.txt hello",
+                              {"Authorization": "Bearer " + API_KEY})
+        assert status == 200, reply
+        refusal = reply["sonder_receipt"]["refusal"]
+    assert refusal["remedies"][:2] == [
+        {"kind": "approve_once", "call_id": refusal["call_id"], "method": "POST",
+         "path": "/v1/approvals/%s" % refusal["call_id"],
+         "console": "/approve %s" % refusal["call_id"]},
+        {"kind": "switch_mode", "modes": [pm.ACCEPT_EDITS, pm.AUTO]},
+    ]
+    assert [item["kind"] for item in refusal["remedies"]] == [
+        "approve_once", "switch_mode", "allow_rule", "console"]
+
+
 def test_refusal_receipt_ignores_decisions_that_name_no_call(ledger):
     allowed = pm.decide("file_read", interactive=False, surface="http")
     unnamed = pm.decide("file_write", interactive=False, surface="http")
@@ -111,11 +211,15 @@ def _chat(port, content, headers=None):
 
 
 def test_chat_write_refusal_carries_the_pending_call_id_and_approval_runs_it_once(ledger, monkeypatch):
-    _local_open(monkeypatch)
+    # Was driven under local-open, which may no longer approve (see
+    # test_local_open_cannot_approve_a_refused_call); the end-to-end flow is
+    # the owner API key's.
+    _serve_with_accounts(monkeypatch, mode="api-key")
+    auth = {"Authorization": "Bearer " + API_KEY}
     written = []
     monkeypatch.setattr(server, "file_write", lambda **kwargs: written.append(kwargs) or "wrote it")
     with _http_server(monkeypatch) as port:
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", auth)
         assert status == 200, reply
         text = reply["choices"][0]["message"]["content"]
         assert text.startswith("refused /write:")  # the text is unchanged
@@ -125,31 +229,32 @@ def test_chat_write_refusal_carries_the_pending_call_id_and_approval_runs_it_onc
         assert "/approve %s" % refusal["call_id"] in text
         assert written == []
 
-        status, _, payload = _request(port, "GET", "/v1/approvals")
+        status, _, payload = _request(port, "GET", "/v1/approvals", headers=auth)
         assert status == 200
         pending = json.loads(payload)["pending"]
         assert [row["call_id"] for row in pending] == [refusal["call_id"]]
         assert pending[0]["tool"] == "file_write"
 
         status, _, payload = _request(port, "POST", "/v1/approvals/%s" % refusal["call_id"],
-                                      body=json.dumps({"ttl_seconds": 600}), headers=JSON)
+                                      body=json.dumps({"ttl_seconds": 600}),
+                                      headers={**JSON, **auth})
         assert status == 201, payload
         approval = json.loads(payload)["approval"]
-        assert approval["approver"] == "local-open" and approval["surface"] == "http"
+        assert approval["approver"] == "admin-key" and approval["surface"] == "http"
         assert approval["state"] == "open" and approval["ttl_seconds"] == 600
 
         # The unchanged call runs once and spends it ...
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", auth)
         assert reply["choices"][0]["message"]["content"] == "wrote it"
         assert "refusal" not in reply["sonder_receipt"]
         assert [{k: v for k, v in w.items() if k != "token"} for w in written] == [
             {"path": "notes.txt", "content": "hello", "mode": "create"}]
         # ... and only once.
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", auth)
         assert reply["choices"][0]["message"]["content"].startswith("refused /write:")
         assert len(written) == 1
         # A changed argument is a different call with a different id.
-        status, other = _chat(port, "/write notes.txt HELLO")
+        status, other = _chat(port, "/write notes.txt HELLO", auth)
         assert other["sonder_receipt"]["refusal"]["call_id"] != refusal["call_id"]
     assert any(args and args[0] == "permission_approve" for args, _ in ledger.audits)
 
@@ -208,14 +313,17 @@ def test_deployment_api_key_approves_as_admin_key(ledger, monkeypatch):
 
 
 def test_idempotent_retry_does_not_issue_a_second_approval(ledger, monkeypatch):
-    _local_open(monkeypatch)
+    # Was local-open; a local-open approval is now refused before any receipt,
+    # so replay is shown for the authenticated caller that can approve.
+    _serve_with_accounts(monkeypatch, mode="api-key")
+    auth = {**JSON, "Authorization": "Bearer " + API_KEY}
     decision = _refuse_write(ledger)
-    headers = {**JSON, "Idempotency-Key": "approve-once-1"}
+    headers = {**auth, "Idempotency-Key": "approve-once-1"}
     with _http_server(monkeypatch) as port:
         first = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=headers)
         second = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=headers)
         # Without a key a repeat is refused rather than stacking approvals.
-        third = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=JSON)
+        third = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=auth)
     assert first[0] == 201
     assert second[0] == 201 and json.loads(second[2]) == json.loads(first[2])
     assert third[0] == 409
@@ -285,12 +393,15 @@ def test_expiry(ledger, monkeypatch):
 
 
 def test_revoke_over_http(ledger, monkeypatch):
+    # Revoking stays allowed under local-open; the approval it withdraws used
+    # to be issued by a local-open POST, which is now refused, so it is issued
+    # off-HTTP here, as an attended approval would be.
     _local_open(monkeypatch)
     decision = _refuse_write(ledger)
+    issued = facade.approve_call(ledger, decision.call_id, {}, approver="console", surface="console")
+    assert issued.status == 201
+    nonce = issued.body["approval"]["nonce"]
     with _http_server(monkeypatch) as port:
-        _, _, payload = _request(port, "POST", "/v1/approvals/" + decision.call_id,
-                                 body="{}", headers=JSON)
-        nonce = json.loads(payload)["approval"]["nonce"]
         status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce,
                                       body="{}", headers=JSON)
         assert status == 200, payload
@@ -313,3 +424,143 @@ def test_ledger_unavailable_is_503(monkeypatch):
         status, _, payload = _request(port, "GET", "/v1/approvals")
     assert status == 503
     assert json.loads(payload)["error"]["code"] == "APPROVALS_UNAVAILABLE"
+
+
+# --- local-open may not approve: no credential stands behind the grant -------
+
+GRANT_REFUSED = "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"
+
+
+def _assert_grant_refused(status, payload, call_id):
+    assert status == 403, payload
+    error = json.loads(payload)["error"]
+    assert error["code"] == GRANT_REFUSED
+    assert error["retryable"] is False
+    message = error["message"]
+    assert "local-open" in message
+    assert "SONDER_API_KEY" in message and "SONDER_REQUIRE_ACCOUNT=1" in message
+    assert "/approve %s" % call_id in message
+
+
+@pytest.mark.parametrize("headers", [
+    {},
+    # An admin account token does not help: the effective mode stays local-open.
+    {"Authorization": "Bearer admin-token"},
+], ids=["no-credential", "admin-account-token"])
+def test_local_open_cannot_approve_a_refused_call(ledger, monkeypatch, headers):
+    _local_open(monkeypatch)
+    monkeypatch.setattr(
+        ts, "_auth_account",
+        lambda header: {"username": "ada", "role": "admin"}
+        if "admin-token" in str(header or "") else None)
+    written = []
+    monkeypatch.setattr(server, "file_write", lambda **kwargs: written.append(kwargs) or "wrote it")
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/write notes.txt hello", headers)
+        assert status == 200, reply
+        call_id = reply["sonder_receipt"]["refusal"]["call_id"]
+        for extra in ({}, {"Idempotency-Key": "grant-1"}, {"Idempotency-Key": "grant-1"}):
+            status, _, payload = _request(port, "POST", "/v1/approvals/" + call_id,
+                                          body="{}", headers={**JSON, **headers, **extra})
+            _assert_grant_refused(status, payload, call_id)
+        # Listing stays allowed, and the call is still pending, not approved.
+        status, _, payload = _request(port, "GET", "/v1/approvals", headers=headers)
+        assert status == 200
+        listed = json.loads(payload)
+        assert [row["call_id"] for row in listed["pending"]] == [call_id]
+        assert listed["approvals"] == []
+        status, reply = _chat(port, "/write notes.txt hello", headers)
+        assert reply["choices"][0]["message"]["content"].startswith("refused /write:")
+    assert written == []
+    assert ledger.approvals(include_spent=True) == []
+    assert not any(args and args[0] == "permission_approve" for args, _ in ledger.audits)
+
+
+def test_local_open_approval_cannot_unlock_chat_run_code(ledger, monkeypatch):
+    """The confirmed chain: approve the /run_code refusal's call id, re-run it."""
+    from sonder_runtime.adapters.execution_tools import code_runner
+
+    _local_open(monkeypatch)
+    ran = []
+
+    def runner(*args, **kwargs):
+        ran.append((args, kwargs))
+        return {"ok": True, "returncode": 0, "stdout": "42", "stderr": "",
+                "language": "python"}
+
+    monkeypatch.setattr(code_runner, "run_code", runner)
+    with _http_server(monkeypatch) as port:
+        status, reply = _chat(port, "/run_code print(6*7)")
+        assert status == 200, reply
+        call_id = reply["sonder_receipt"]["refusal"]["call_id"]
+        status, _, payload = _request(port, "POST", "/v1/approvals/" + call_id,
+                                      body="{}", headers=JSON)
+        status_again, again = _chat(port, "/run_code print(6*7)")
+    # Checked first so the pre-fix failure names the harm, not the status.
+    assert ran == [], "host code ran after a credential-less approval: %r" % again
+    _assert_grant_refused(status, payload, call_id)
+    assert again["choices"][0]["message"]["content"].startswith("refused /run_code:")
+    assert ledger.approvals(include_spent=True) == []
+
+
+def test_unknown_or_missing_auth_context_cannot_approve(ledger):
+    """``serve_post`` fails closed when it is handed no usable auth context."""
+    from types import SimpleNamespace
+
+    from sonder_runtime.interfaces.http.facades import approval_routes
+
+    def recording_handler(sent):
+        return SimpleNamespace(
+            headers={}, _correlation=lambda: "corr",
+            _send_json_payload=lambda payload, status=200: sent.append((payload, status)),
+            _send_auth_error=lambda: sent.append(("auth", 401)),
+            _send_not_found=lambda: sent.append(("missing", 404)),
+        )
+
+    decision = _refuse_write(ledger)
+    for context in (None, {}, {"mode": "", "authorized": True}, {"mode": "open", "authorized": True}):
+        sent = []
+        handler = recording_handler(sent)
+        ports = approval_routes.HttpApprovalPorts(
+            developer_authorized=lambda _c: True,
+            error_envelope=lambda code, message, corr, retryable=False: {
+                "error": {"code": code, "message": message, "retryable": retryable}},
+            ledger=lambda: ledger,
+            idempotent_action=lambda *_a: pytest.fail("a refused grant ran its action"),
+            send_idempotency_refusal=lambda _h, _r: False,
+            approver_of=lambda _c: "x", audit=lambda *_a: None,
+            clock=time.time, log=SimpleNamespace(warning=lambda *a, **k: None),
+        )
+        approval_routes.serve_post(handler, "/v1/approvals/" + decision.call_id, {}, context, ports)
+        assert len(sent) == 1, (context, sent)
+        payload, status = sent[0]
+        assert status == 403 and payload["error"]["code"] == GRANT_REFUSED, (context, sent)
+    assert ledger.approvals(include_spent=True) == []
+
+
+def test_refused_grant_does_not_echo_a_malformed_path(ledger, monkeypatch):
+    _local_open(monkeypatch)
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(port, "POST", "/v1/approvals/%3Cscript%3E",
+                                      body="{}", headers=JSON)
+    assert status == 403, payload
+    message = json.loads(payload)["error"]["message"]
+    assert "/approve <call_id>" in message and "script" not in message
+
+
+def test_authenticated_developer_and_admin_keep_approving(ledger, monkeypatch):
+    """account mode with a developer or admin account, and the API key: unchanged."""
+    _serve_with_accounts(monkeypatch, mode="account")
+    first = _refuse_write(ledger, path="a.txt")
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(port, "POST", "/v1/approvals/" + first.call_id, body="{}",
+                                      headers={**JSON, "Authorization": "Bearer admin-token"})
+    assert status == 201, payload
+    _serve_with_accounts(monkeypatch, mode="both")
+    second = _refuse_write(ledger, path="b.txt")
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(
+            port, "POST", "/v1/approvals/" + second.call_id, body="{}",
+            headers={**JSON, "Authorization": "Bearer " + API_KEY,
+                     "X-Sonder-Account-Token": "admin-token"})
+    assert status == 201, payload

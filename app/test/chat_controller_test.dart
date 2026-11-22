@@ -23,6 +23,23 @@ Future<ChatController> _start(
 }
 
 void main() {
+  testWidgets('prose mentioning verbose errors is sent, not toggled locally',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = ChatController(backend, model: 'sonder');
+    final before = c.verboseErrors;
+    final sent = c.send('show the full traceback for this error');
+    await tester.pump();
+    expect(backend.lastTurn.request.history.last.content,
+        'show the full traceback for this error');
+    expect(c.verboseErrors, before);
+    backend.lastTurn.done('answer');
+    await sent;
+    expect(c.localToggle('/verbose on'), contains('**on**'));
+    expect(c.verboseErrors, isTrue);
+    c.dispose();
+  });
+
   testWidgets('control commands use runtime model despite concrete selection', (
     tester,
   ) async {
@@ -337,6 +354,32 @@ void main() {
           ..mode = permissionModeFor('manual'),
         identityChanged: true);
     expect(c.modeReadOnly, isFalse);
+    c.dispose();
+  });
+
+  testWidgets(
+      'a local-open refusal of a raise shows the server text and leaves '
+      'the chip writable', (tester) async {
+    const serverText = 'raising the permission mode from manual to auto is '
+        'refused: this server runs in local-open mode. Run /mode auto at the '
+        'Sonder console. Lowering the mode is allowed here.';
+    final backend = FakeChatBackend()
+      ..mode = permissionModeFor('manual')
+      ..modeWriteError = SonderException(serverText,
+          httpStatus: 403, code: 'PERMISSION_MODE_ESCALATION_REFUSED');
+    final c = await _start(tester, backend);
+    await tester.pump();
+    final (outcome, text) =
+        await c.requestModeChange('auto', confirm: (_, __) async => true);
+    expect(outcome, ModeChangeOutcome.failed);
+    expect(text, serverText);
+    expect(c.modeReadOnly, isFalse);
+    expect(c.permissionMode?.mode, 'manual');
+
+    // Lowering is still sent to the server.
+    backend.modeWriteError = null;
+    await c.requestModeChange('plan', confirm: (_, __) async => true);
+    expect(backend.modePosts, ['auto', 'plan']);
     c.dispose();
   });
 

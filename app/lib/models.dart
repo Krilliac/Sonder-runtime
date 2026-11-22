@@ -340,12 +340,19 @@ class ChatRefusal {
   final String mode;
   final List<String> remedies;
 
+  /// False when the receipt's `approve_once` remedy says
+  /// `http_available: false` (a local-open server refuses every HTTP
+  /// approval). [callId] is kept for the `/approve <id>` console command;
+  /// the app must not offer to approve the call itself.
+  final bool approveOverHttp;
+
   const ChatRefusal({
     this.callId = '',
     this.tool = '',
     this.reason = '',
     this.mode = '',
     this.remedies = const [],
+    this.approveOverHttp = true,
   });
 
   // Case-sensitive: the server's gates always write lowercase `refused`,
@@ -355,6 +362,18 @@ class ChatRefusal {
 
   factory ChatRefusal.fromJson(Map<String, dynamic> json) {
     final id = json['call_id']?.toString().trim() ?? '';
+    // `approve_over_http` is this class's own persisted form (toJson keeps
+    // remedies only as text); the server's form is the remedy itself.
+    var approveOverHttp = json['approve_over_http'] != false;
+    if (json['remedies'] is List) {
+      for (final r in json['remedies'] as List) {
+        if (r is Map &&
+            r['kind'] == 'approve_once' &&
+            r['http_available'] == false) {
+          approveOverHttp = false;
+        }
+      }
+    }
     final remedies = json['remedies'] is List
         ? (json['remedies'] as List)
             .map((r) => _boundedMetadataText(r, 512))
@@ -368,6 +387,7 @@ class ChatRefusal {
       reason: _boundedMetadataText(json['reason'], 1024),
       mode: _boundedMetadataText(json['mode'], 32),
       remedies: remedies,
+      approveOverHttp: approveOverHttp,
     );
   }
 
@@ -390,6 +410,7 @@ class ChatRefusal {
         if (reason.isNotEmpty) 'reason': reason,
         if (mode.isNotEmpty) 'mode': mode,
         if (remedies.isNotEmpty) 'remedies': remedies,
+        if (!approveOverHttp) 'approve_over_http': false,
       };
 }
 

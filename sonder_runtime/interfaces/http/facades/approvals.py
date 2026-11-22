@@ -5,7 +5,8 @@ Two halves of one flow (app plan S1/S2):
 * ``refusal_receipt`` turns an unattended permission refusal that named a
   call (``Decision.call_id``) into the ``sonder_receipt.refusal`` object a
   chat response carries, so a client can show *what* was refused and offer
-  "approve this call once" without parsing prose.
+  "approve this call once" without parsing prose. ``turn_refusal_receipt``
+  builds it for a turn from the permission-policy port serve.py passes in.
 * ``approvals_payload`` / ``approve_call`` / ``revoke_approval`` serve
   ``GET /v1/approvals``, ``POST /v1/approvals/<call_id>`` and
   ``POST /v1/approvals/revoke/<nonce>`` over the same approval ledger the
@@ -37,6 +38,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .local_open_authority import AUTHENTICATED_ADMIN_REMEDY, credential_less
+
 __all__ = [
     "ApprovalResult",
     "CALL_ID_CHARS",
@@ -46,6 +49,7 @@ __all__ = [
     "pending_view",
     "refusal_receipt",
     "revoke_approval",
+    "turn_refusal_receipt",
 ]
 
 CALL_ID_CHARS = 16
@@ -58,6 +62,13 @@ _BODY_KEYS = frozenset({"ttl_seconds", "tool", "digest"})
 # Issue is check-then-insert; one lock per process keeps "one open approval
 # per call" true under concurrent requests on this listener.
 _ISSUE_LOCK = threading.Lock()
+# The 403 codes a credential-less (local-open) caller gets from the two HTTP
+# grants a refusal would otherwise offer. They restate approval_routes'
+# GRANT_REFUSED_CODE (that module imports this one, so it cannot be imported
+# here) and permission_mode_post's ESCALATION_CODE; a test holds each pair
+# equal.
+_GRANT_REFUSED_CODE = "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"
+_ESCALATION_REFUSED_CODE = "PERMISSION_MODE_ESCALATION_REFUSED"
 
 
 @dataclass(frozen=True)
@@ -81,13 +92,24 @@ def _error(status: int, code: str, message: str, **extra) -> ApprovalResult:
 
 
 def refusal_receipt(decision, *, mode_label: str = "", modes_allowing=(),
-                    count: int = 1) -> dict | None:
+                    count: int = 1, credential_less: bool = False,
+                    raises=()) -> dict | None:
     """``sonder_receipt.refusal`` for one unattended refusal that named a call.
 
     ``None`` when the decision is not such a refusal. The reason is the gate's
     own prose (it already names every remedy); ``remedies`` restates them as
     data a client can act on. Arguments never appear: only the tool, the
     call id and the mode.
+
+    ``credential_less`` is ``local_open_authority.credential_less`` for the
+    request that was refused. Such a caller is refused both HTTP grants
+    (approving the call; raising the mode), so the receipt must not offer
+    them: ``approve_once`` then carries no ``method``/``path``, only the
+    console command, and is marked ``http_available: false`` with the code
+    the POST would answer; a ``switch_mode`` to any mode in ``raises`` (the
+    modes of ``modes_allowing`` that would be a raise from the refusing mode)
+    is marked the same way; and an ``authenticate`` remedy names what
+    restores the HTTP grants. Pure; safe from any thread.
     """
     call = str(getattr(decision, "call_id", "") or "")
     if (
@@ -98,15 +120,35 @@ def refusal_receipt(decision, *, mode_label: str = "", modes_allowing=(),
         return None
     tool = str(getattr(decision, "tool", "") or "")
     mode = str(getattr(decision, "mode", "") or "")
-    remedies: list[dict] = [
-        {"kind": "approve_once", "call_id": call, "method": "POST",
-         "path": "/v1/approvals/%s" % call, "console": "/approve %s" % call},
-    ]
     modes = [m for m in (modes_allowing or ()) if m and m != mode]
-    if modes:
-        remedies.append({"kind": "switch_mode", "modes": modes})
+    remedies: list[dict]
+    if credential_less:
+        remedies = [
+            {"kind": "approve_once", "call_id": call, "console": "/approve %s" % call,
+             "http_available": False, "http_refusal": _GRANT_REFUSED_CODE},
+        ]
+        refused = set(raises or ())
+        lowering = [m for m in modes if m not in refused]
+        raising = [m for m in modes if m in refused]
+        if lowering:
+            remedies.append({"kind": "switch_mode", "modes": lowering})
+        if raising:
+            remedies.append({
+                "kind": "switch_mode", "modes": raising,
+                "console": "/mode %s" % raising[0],
+                "http_available": False, "http_refusal": _ESCALATION_REFUSED_CODE,
+            })
+    else:
+        remedies = [
+            {"kind": "approve_once", "call_id": call, "method": "POST",
+             "path": "/v1/approvals/%s" % call, "console": "/approve %s" % call},
+        ]
+        if modes:
+            remedies.append({"kind": "switch_mode", "modes": modes})
     remedies.append({"kind": "allow_rule", "console": "/permissions"})
     remedies.append({"kind": "console", "detail": "run it from the console and answer the prompt"})
+    if credential_less:
+        remedies.append({"kind": "authenticate", "detail": AUTHENTICATED_ADMIN_REMEDY})
     receipt = {
         "kind": "refused",
         "tool": tool,
@@ -121,6 +163,46 @@ def refusal_receipt(decision, *, mode_label: str = "", modes_allowing=(),
         # Only the last refusal is described; say that there were others.
         receipt["refusals_in_turn"] = int(count)
     return receipt
+
+
+def modes_raising_from(policy, current, modes) -> list:
+    """The modes of *modes* a credential-less caller may not select over HTTP.
+
+    ``policy`` is the permission-policy port; its ``is_unattended_escalation``
+    is the rule ``POST /v1/permission-mode`` applies under local-open. Fails
+    closed: when the policy cannot say, every mode counts as a raise.
+    """
+    try:
+        return [m for m in modes if policy.is_unattended_escalation(current, m)]
+    except Exception:
+        return list(modes)
+
+
+def turn_refusal_receipt(refusals, context, policy) -> dict | None:
+    """The structured refusal for the last nameable refusal of a turn, or None.
+
+    ``refusals`` are the turn's captured unattended refusals, ``context`` the
+    request's auth context and ``policy`` the permission-policy port. Under
+    local-open (and for a missing context, which fails closed) the receipt
+    marks the HTTP approval and a mode raise unavailable, as those routes
+    refuse such a caller. Safe from any thread; reads the policy only.
+    """
+    if not refusals:
+        return None
+    decision = refusals[-1]
+    try:
+        label = policy.mode_label(decision.mode)
+    except Exception:
+        label = str(decision.mode or "")
+    try:
+        modes = list(policy._modes_allowing(decision.risk))
+    except Exception:
+        modes = []
+    return refusal_receipt(
+        decision, mode_label=label, modes_allowing=modes,
+        count=len(refusals), credential_less=credential_less(context),
+        raises=modes_raising_from(policy, decision.mode, modes),
+    )
 
 
 def pending_view(item) -> dict:
@@ -222,6 +304,12 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
     if wanted_tool is not None and str(wanted_tool).strip().lstrip("/") != pending.tool:
         return _error(409, "CALL_DIGEST_MISMATCH",
                       "call %s is a %s call, not %s" % (pending.call_id, pending.tool, wanted_tool))
+    if not pending.complete:
+        return _error(409, "PREVIEW_INCOMPLETE",
+                      "call %s's preview does not show everything the approval would "
+                      "cover (redacted or truncated); approve it at the console with "
+                      "/approve call %s <arguments json> giving its full arguments"
+                      % (pending.call_id, pending.tool))
     with _ISSUE_LOCK:
         now = time.time()
         for existing in ledger.approvals(include_spent=False, limit=200):

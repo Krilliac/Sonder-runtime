@@ -749,6 +749,33 @@ void main() {
           findsOneWidget);
     });
 
+    // A local-open server lists pending calls but refuses the POST whoever
+    // is signed in, so the account advice would be wrong here.
+    testWidgets('a local-open refusal shows the server text, not the role hint',
+        (tester) async {
+      const serverText =
+          'approving a refused call over HTTP is refused: this server runs '
+          'in local-open mode. Approve it at the Sonder console with '
+          '/approve 3f9a12c0d1e2f3a4, or restart the server with '
+          'SONDER_API_KEY set and send that key.';
+      final data = FakeRuntimeData(
+          approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]))
+        ..approveError = SonderException(serverText,
+            code: 'APPROVAL_REQUIRES_AUTHENTICATED_ADMIN', httpStatus: 403);
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      await tester.tap(find.text('Approve once…'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approval-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('The approval was not recorded'),
+          findsOneWidget);
+      expect(find.textContaining('this server runs in local-open mode'),
+          findsOneWidget);
+      expect(find.textContaining('Approvals need a developer or admin account'),
+          findsNothing);
+    });
+
     testWidgets('Revoke cancels an open approval', (tester) async {
       final data = FakeRuntimeData(
         approvalsPage: ApprovalsPage(supported: true, open: [
@@ -1604,4 +1631,168 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     }, () => client);
   });
+
+  testWidgets('a server switch reloads even while the old load is in flight',
+      (tester) async {
+    final gate = Completer<void>();
+    final slow = _GatedRuntimeData(gate.future);
+    final fresh = FakeRuntimeData();
+    Widget screen(FakeRuntimeData data) => MaterialApp(
+          home: RuntimeScreen(
+            settings: Settings(serverUrl: 'http://192.168.1.20:11435'),
+            liveUpdates: false,
+            dataSource: data,
+            now: runtimeNow,
+          ),
+        );
+    await tester.pumpWidget(screen(slow));
+    await tester.pump();
+    expect(slow.workRunReads, 1, reason: 'old load is in flight');
+    await tester.pumpWidget(screen(fresh));
+    await tester.pump();
+    expect(fresh.workRunReads, 1, reason: 'switch must reload, not be dropped');
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(fresh.workRunReads, 1);
+  });
+
+  testWidgets('a transient inactive state does not stop polling',
+      (tester) async {
+    var statusReads = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/v1/sonder/status') {
+        statusReads++;
+        return http.Response('{"status": "ready", "models": []}', 200);
+      }
+      if (request.url.path == '/v1/work-runs') {
+        return http.Response('{"runs": []}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+        home: RuntimeScreen(
+            settings: Settings(serverUrl: 'http://127.0.0.1:11435')),
+      ));
+      await settleLive(tester);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      final before = statusReads;
+      for (var elapsed = 0; elapsed < 8000; elapsed += 500) {
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)));
+        await tester.pump(const Duration(milliseconds: 500));
+      }
+      expect(statusReads, greaterThan(before), reason: 'inactive: still polls');
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+
+  testWidgets(
+      'server controls are not left busy after a followed host operation '
+      'is abandoned in the background', (tester) async {
+    var hostHasActiveOperation = true;
+    final launcherPaths = <String>[];
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      if (path == '/v1/launcher/status') {
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'launcher': 'sonder-launcher 1.2',
+              'server_running': false,
+              'server_state': 'stopped',
+              'server_host': '127.0.0.1',
+              'server_port': 11435,
+              if (hostHasActiveOperation)
+                'active_operation': {
+                  'id': 'op-followed-1',
+                  'action': 'start',
+                  'phase': 'running',
+                },
+            }),
+            200);
+      }
+      if (path == '/v1/launcher/operations/op-followed-1') {
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'launcher': 'sonder-launcher 1.2',
+              'server_running': false,
+              'server_state': 'starting',
+              'operation': {
+                'id': 'op-followed-1',
+                'action': 'start',
+                'phase': 'running',
+              },
+            }),
+            200);
+      }
+      if (path == '/v1/launcher/start') {
+        launcherPaths.add(path);
+        return http.Response('{"error":{"message":"port 11435 is in use"}}', 409);
+      }
+      if (path == '/v1/sonder/status') {
+        return http.Response('{"status": "ready", "models": []}', 200);
+      }
+      return http.Response('{}', 404);
+    });
+    Future<void> realDelay(Duration d) async {
+      await tester.runAsync(() => Future<void>.delayed(d));
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: RuntimeScreen(
+          settings: Settings(
+            serverUrl: 'http://127.0.0.1:11435',
+            launcherUrl: 'http://127.0.0.1:11436',
+            launcherToken: 'launcher-token-0123456789abcdef',
+          ),
+          initialInfo: healthySystemInfo(),
+          initialCategory: 'server',
+        ),
+      ));
+      await settleLive(tester);
+      // The page followed the host's running operation: controls are busy.
+      expect(find.byKey(const Key('runtime-busy')), findsOneWidget);
+
+      // Backgrounding cancels the follow; its wait loop notices on its next
+      // 1 s tick and must release the server controls.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await realDelay(const Duration(milliseconds: 1600));
+      await realDelay(const Duration(milliseconds: 100));
+
+      hostHasActiveOperation = false;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await settleLive(tester);
+
+      expect(find.byKey(const Key('runtime-busy')), findsNothing);
+      await tester.tap(find.byKey(const Key('start-server')));
+      await realDelay(const Duration(milliseconds: 100));
+      await pumpFrames(tester);
+      expect(launcherPaths, ['/v1/launcher/start']);
+      await tester.pumpWidget(const SizedBox());
+    }, () => client);
+  });
+}
+
+class _GatedRuntimeData extends FakeRuntimeData {
+  _GatedRuntimeData(this.gate);
+  final Future<void> gate;
+
+  @override
+  Future<List<WorkRun>> workRuns() async {
+    workRunReads++;
+    await gate;
+    return runs;
+  }
 }

@@ -99,9 +99,11 @@ name.
 
 A reply that begins `refused /write:` (or another tool) was stopped by the
 server's permission mode because nobody was at its console to answer the
-prompt. The response's `sonder_receipt.refusal.call_id` names the call; a
-developer or administrator can approve it once with
-`POST /v1/approvals/<call_id>` and then resend the same request. See
+prompt. The response's `sonder_receipt.refusal.call_id` names the call; an
+authenticated developer or administrator can approve it once with
+`POST /v1/approvals/<call_id>` and then resend the same request (a server in
+local-open mode, with no `SONDER_API_KEY` or `SONDER_REQUIRE_ACCOUNT=1`,
+refuses that POST; approve at the console with `/approve <call_id>`). See
 [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
 
 `--server`/`--key` argv flags also work and override the env vars:

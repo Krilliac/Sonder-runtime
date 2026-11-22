@@ -196,8 +196,21 @@ extension AppControlWork on AppControlClient {
         _requireWorkScope();
         final command = _workCommand;
         if (command == null) throw const AppControlFailure('NOTHING_PENDING');
-        final value =
-            await _request(generation, 'POST', 'work', body: command.body);
+        final Map<String, dynamic> value;
+        try {
+          value =
+              await _request(generation, 'POST', 'work', body: command.body);
+        } on AppControlFailure catch (error) {
+          // A definitive refusal means the server did not create the work, so
+          // the held command must not lock preparation. An unknown outcome
+          // keeps the command for an idempotent retry.
+          if (!error.unknown && error.code != 'CONTEXT_CHANGED') {
+            _workCommand = null;
+            _workScope = null;
+            _workPrompt = '';
+          }
+          rethrow;
+        }
         try {
           final next = AppManagedWork.decode(value['work']);
           final receipt = _object(value['receipt']);

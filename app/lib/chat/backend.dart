@@ -319,6 +319,10 @@ class SonderApiChatBackend implements ChatBackend {
       if (e.code == ApprovalsApi.unavailableCode) {
         return const ApprovalOutcome(ApprovalStatus.unsupported);
       }
+      if (localOpenRefusalCodes.contains(e.code)) {
+        // Not a missing role: the server's message names what does work.
+        return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
+      }
       if (e.httpStatus == 401 || e.httpStatus == 403) {
         return const ApprovalOutcome(ApprovalStatus.forbidden,
             message: 'Approvals need a developer or admin account.');
@@ -335,6 +339,9 @@ class SonderApiChatBackend implements ChatBackend {
 /// (`{message: ..., code: FORBIDDEN}`). Turn them into words, and keep the
 /// 403 recognisable so the chip can go read-only.
 SonderException normalizeModeError(SonderException e) {
+  // A local-open server refusing a raise: its message is the explanation,
+  // and an administrator account would not change the answer.
+  if (localOpenRefusalCodes.contains(e.code)) return e;
   final raw = e.message;
   final forbidden = e.httpStatus == 403 ||
       e.code == 'FORBIDDEN' ||
