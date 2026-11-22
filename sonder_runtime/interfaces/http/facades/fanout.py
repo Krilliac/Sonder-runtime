@@ -22,11 +22,13 @@ from typing import Any, Callable
 
 def serve_get(handler: Any, route: str, *, parse_query: Callable[[], dict],
               developer_authorized: Callable[[Any], bool],
-              request_owner_of: Callable[[Any], str], runtime: Any) -> bool:
+              request_owner_of: Callable[[Any], str], runtime: Any,
+              admin_authorized: Callable[[Any], bool] | None = None) -> bool:
     """``GET /v1/fanout`` (run history) and ``GET /v1/fanout/<run_id>``.
 
     ``route`` is the request path without a trailing slash; ``parse_query``
-    parses the request's query string. Returns ``False`` for another route.
+    parses the request's query string; ``admin_authorized`` decides whether
+    the caller may see every owner's runs. Returns ``False`` for another route.
     """
     if route == "/v1/fanout":
         context = handler._request_auth_context()
@@ -58,8 +60,13 @@ def serve_get(handler: Any, route: str, *, parse_query: Callable[[], dict],
             handler._send_json_payload({"error": {"message": "include_finished must be true or false", "type": "invalid_request"}}, status=400)
             return True
         account = context.get("account") or {}
+        is_admin = (
+            bool(admin_authorized(context))
+            if admin_authorized is not None
+            else (account.get("role") == "admin" and not account.get("via_api_key"))
+        )
         request_owner = None
-        if context.get("mode") != "local-open" and account.get("role") != "admin":
+        if context.get("mode") != "local-open" and not is_admin:
             request_owner = request_owner_of(context)
         handler._send_json_payload({"runs": runtime.fanout_store.recent_run_summaries(
             request_owner=request_owner, include_finished=finished_text == "true",
