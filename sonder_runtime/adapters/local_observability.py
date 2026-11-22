@@ -22,6 +22,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from sonder_runtime.application.context import current_operation_context
 from sonder_runtime.adapters.observability.latency_formatting import (
     percentile,
 )
@@ -273,7 +274,13 @@ class LocalObservabilitySink:
         correlation_id: str | None = None,
         operation_id: str | None = None,
     ) -> None:
-        # The durable authority is invoked first with the untouched event.
+        if correlation_id is None:
+            # An emit made while serving a request belongs to that request.
+            ambient = current_operation_context()
+            if ambient is not None and ambient.correlation_id:
+                correlation_id = ambient.correlation_id
+        # The durable authority is invoked first; it receives the event with only
+        # the ambient correlation id filled in above.
         # Local validation and sanitization must never suppress or rewrite it.
         if self._delegate is not None:
             try:

@@ -394,6 +394,18 @@ def _above_manual(mode) -> bool:
 
 
 @contextlib.contextmanager
+def clear_preapproved_scope():
+    """Clear any inherited pre-approved execution tickets (e.g. for delegated children)."""
+    token = _PREAPPROVED_EXECUTION.set(None)
+    cap_token = _PREAPPROVED_CAPTURE.set(None)
+    try:
+        yield
+    finally:
+        _PREAPPROVED_CAPTURE.reset(cap_token)
+        _PREAPPROVED_EXECUTION.reset(token)
+
+
+@contextlib.contextmanager
 def capture_preapproved_scope():
     """Collect allowed decisions from a surface gate so downstream chain gates do not double-spend."""
     captured: dict[str, object] = {}

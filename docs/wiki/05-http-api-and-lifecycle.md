@@ -308,7 +308,10 @@ autopilot) runs as a **work run** with id `wr-…`:
   waits its bounded deadline for the current effect to finish.
 - At most `[server].work_max_running` (default 2,
   `SONDER_HTTP_WORK_MAX_RUNNING`) runs execute at once; another routed turn
-  is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`.
+  is refused with `429 WORK_CAPACITY_EXHAUSTED` and `Retry-After`. Runs parked
+  on an approval free their slot but still count toward
+  `[server].work_max_live` (default 0 = max(8, `work_max_running`), `SONDER_HTTP_WORK_MAX_LIVE`); past it the
+  same refusal applies.
 - A run left `running` by a stopped process is reported `interrupted` after
   restart.
 

@@ -681,6 +681,11 @@ class ChatController extends ChangeNotifier {
     final session = _sessions.remove(thread.id);
     _notify();
     await ChatStore.save(next);
+    if (session != null) {
+      try {
+        await ChatStore.saveSessions(_sessions);
+      } catch (_) {}
+    }
     return DeletedThread._(stored, index < 0 ? 0 : index, wasCurrent,
         session, placeholder?.id);
   }
@@ -705,6 +710,11 @@ class ChatController extends ChangeNotifier {
     }
     _notify();
     await ChatStore.save(next);
+    if (deleted._session != null) {
+      try {
+        await ChatStore.saveSessions(_sessions);
+      } catch (_) {}
+    }
   }
 
   // -- Session rotation (P1-9) -------------------------------------------

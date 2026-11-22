@@ -308,12 +308,18 @@ def record_dispatched_context(
         if feedback is not None:
             if type(context) is int and context > 0:
                 if origin is not None:
-                    feedback.note_selection(model, context, origin=origin)
+                    try:
+                        feedback.note_selection(model, context, origin=origin)
+                    except TypeError:
+                        feedback.note_selection(model, context)
                 else:
                     feedback.note_selection(model, context)
             else:
                 if origin is not None:
-                    feedback.forget_selection(model, origin=origin)
+                    try:
+                        feedback.forget_selection(model, origin=origin)
+                    except TypeError:
+                        feedback.forget_selection(model)
                 else:
                     feedback.forget_selection(model)
     except Exception:

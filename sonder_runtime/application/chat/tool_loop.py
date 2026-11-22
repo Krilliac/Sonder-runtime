@@ -10,12 +10,18 @@ from __future__ import annotations
 import contextvars
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
+from sonder_runtime.application.agents import delegation_runtime as _delegation
 from sonder_runtime.application.chat.honesty import guard_unverified_run_claim
 from sonder_runtime.application.chat.tool_manifest import CallableTool, TurnToolManifest
+from sonder_runtime.domain.agents.delegation import (
+    DELEGATION_TOOLS,
+    compact_text,
+    extract_thinking_summary,
+)
 from sonder_runtime.domain.chat_tools import (
     DEFAULT_CHAT_TOOL_BUDGET,
     ChatToolBudget,
@@ -67,6 +73,8 @@ class ChatToolTurn:
     blocked_tools: frozenset[str] = frozenset()
     budget: ChatToolBudget = DEFAULT_CHAT_TOOL_BUDGET
     on_tool_event: Callable[[dict[str, Any]], None] | None = None
+    on_agent_event: Callable[[dict[str, Any]], None] | None = None
+    on_board_event: Callable[[dict[str, Any]], None] | None = None
     wait_for_approval: Callable[[str, str, str, dict[str, Any]], str] | None = None
     is_aborted: Callable[[], bool] | None = None
     role_refusal: Callable[[str], str] | None = None
@@ -95,6 +103,11 @@ class ChatToolTurn:
         backend = self.backend.backend_for(name)
         if not name:
             return "ERROR: tool name is required", run_count
+        if name in DELEGATION_TOOLS and not _delegation.can_delegate():
+            msg = _delegation.depth_refusal_message(name)
+            self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
+            _delegation.emit_agent_event(phase="refused", tool=name, ok=False, summary=msg)
+            return msg, run_count
         if name in self.blocked_tools and not self.allow_system_tools:
             msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
@@ -179,7 +192,26 @@ class ChatToolTurn:
             "bidi_warning": preview["bidi_warning"],
             "bidi_chars": preview["bidi_chars"],
         })
-        exec_result = self.backend.execute(name, args)
+        _delegation.emit_agent_event(
+            phase="tool_call",
+            tool=name,
+            summary=f"calling {name}",
+        )
+        preapproved = getattr(self.permission_policy, "preapproved_scope", None)
+        preapproved_ctx = (
+            preapproved(name, decision)
+            if (callable(preapproved) and decision is not None and getattr(decision, "allowed", False))
+            else nullcontext()
+        )
+        with preapproved_ctx:
+            exec_result = self.backend.execute(name, args)
+        _delegation.emit_agent_event(
+            phase="tool_result",
+            tool=name,
+            ok=exec_result.ok,
+            elapsed_ms=exec_result.duration_ms,
+            summary=compact_text(exec_result.output, limit=180),
+        )
         new_runs = run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
         clipped_model, truncated = self._clip(exec_result.output, self.budget.model_output_chars)
         status = "ok" if exec_result.ok else ("timeout" if exec_result.timed_out else "error")
@@ -234,64 +266,116 @@ class ChatToolTurn:
         total_out = 0
         last_meta: dict[str, Any] = {}
         final_content = ""
+        board_cursor = 0
+        active_board = _delegation.current_board()
+        owns_board = active_board is None
+        board = active_board or _delegation.AgentProgressBoard()
+        on_agent = self.on_agent_event
+        on_peer = self.on_board_event
+        unsub_agent = (
+            board.subscribe(lambda ev: on_agent(ev.to_dict()))
+            if on_agent is not None else None
+        )
+        unsub_peer = (
+            board.subscribe_board(lambda msg: on_peer(msg.to_dict()))
+            if on_peer is not None else None
+        )
 
-        while calls < self.budget.max_model_calls:
-            if self.is_aborted is not None and self.is_aborted():
-                break
-            if (time.monotonic() - started) >= self.budget.wall_seconds:
-                break
-            calls += 1
-            step_tools = self.tools_payload if calls < self.budget.max_model_calls else None
-            step = generate_step(messages, step_tools)
-            message = step.get("message") if isinstance(step, Mapping) else {}
-            if not isinstance(message, Mapping):
-                message = {}
-            usage = step.get("usage") if isinstance(step, Mapping) else None
-            if isinstance(usage, Mapping):
-                total_in += int(usage.get("tokens_in") or 0)
-                total_out += int(usage.get("tokens_out") or 0)
-            meta = step.get("meta") if isinstance(step, Mapping) else None
-            if isinstance(meta, Mapping):
-                last_meta = dict(meta)
+        with (_delegation.bind_board(board) if owns_board else nullcontext()):
+            _delegation.emit_agent_event(
+                phase="starting",
+                step=0,
+                max_steps=self.budget.max_model_calls,
+                summary=compact_text(prompt, limit=180),
+            )
+            try:
+                while calls < self.budget.max_model_calls:
+                    if self.is_aborted is not None and self.is_aborted():
+                        break
+                    if (time.monotonic() - started) >= self.budget.wall_seconds:
+                        break
+                    calls += 1
+                    step_tools = self.tools_payload if calls < self.budget.max_model_calls else None
+                    step = generate_step(messages, step_tools)
+                    message = step.get("message") if isinstance(step, Mapping) else {}
+                    if not isinstance(message, Mapping):
+                        message = {}
+                    usage = step.get("usage") if isinstance(step, Mapping) else None
+                    if isinstance(usage, Mapping):
+                        total_in += int(usage.get("tokens_in") or 0)
+                        total_out += int(usage.get("tokens_out") or 0)
+                    meta = step.get("meta") if isinstance(step, Mapping) else None
+                    if isinstance(meta, Mapping):
+                        last_meta = dict(meta)
 
-            tool_calls = message.get("tool_calls")
-            content = str(message.get("content") or step.get("content") or "")
-            if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
-                final_content = content
-                break
-
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
-            assistant_msg["tool_calls"] = list(tool_calls)
-            messages.append(assistant_msg)
-            stopped_early = False
-            for raw_call in tool_calls:
-                if self.is_aborted is not None and self.is_aborted():
-                    stopped_early = True
-                    break
-                if (time.monotonic() - started) >= self.budget.wall_seconds:
-                    stopped_early = True
-                    break
-                tool_name = str(((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or "")
-                if tool_calls_total >= self.budget.max_tool_calls:
-                    msg = (
-                        f"ERROR: HOST POLICY: chat turn tool-call budget reached "
-                        f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
+                    tool_calls = message.get("tool_calls")
+                    content = str(message.get("content") or step.get("content") or "")
+                    thinking = compact_text(
+                        message.get("thinking") or step.get("thinking") or extract_thinking_summary(content),
+                        limit=280,
                     )
-                    backend = self.backend.backend_for(tool_name) if tool_name else "host"
-                    self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
-                    messages.append({"role": "tool", "name": tool_name, "content": msg})
-                    break
-                tool_calls_total += 1
-                obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
-                messages.append({"role": "tool", "name": tool_name, "content": obs})
-            if stopped_early:
-                break
-        else:
-            final_content = final_content or "Reached the per-turn tool-call limit before completing a final reply."
+                    if thinking:
+                        _delegation.emit_agent_event(
+                            phase="thinking",
+                            step=calls,
+                            max_steps=self.budget.max_model_calls,
+                            thinking=thinking,
+                            summary=thinking[:160],
+                            model=str(last_meta.get("model") or ""),
+                        )
+                    if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
+                        final_content = content
+                        break
 
-        if not final_content.strip():
-            final_content = "Turn ended without a final assistant answer."
-        final_content = guard_unverified_run_claim(final_content, self.records)
+                    assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+                    assistant_msg["tool_calls"] = list(tool_calls)
+                    messages.append(assistant_msg)
+                    stopped_early = False
+                    for raw_call in tool_calls:
+                        if self.is_aborted is not None and self.is_aborted():
+                            stopped_early = True
+                            break
+                        if (time.monotonic() - started) >= self.budget.wall_seconds:
+                            stopped_early = True
+                            break
+                        tool_name = str(((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or "")
+                        if tool_calls_total >= self.budget.max_tool_calls:
+                            msg = (
+                                f"ERROR: HOST POLICY: chat turn tool-call budget reached "
+                                f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
+                            )
+                            backend = self.backend.backend_for(tool_name) if tool_name else "host"
+                            self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
+                            messages.append({"role": "tool", "name": tool_name, "content": msg})
+                            break
+                        tool_calls_total += 1
+                        obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
+                        messages.append({"role": "tool", "name": tool_name, "content": obs})
+                    if stopped_early:
+                        break
+                    digest, board_cursor = _delegation.unseen_peer_board_digest(board_cursor)
+                    if digest:
+                        messages.append({"role": "user", "content": "[PEER BOARD UPDATES]\n" + digest})
+                else:
+                    final_content = final_content or "Reached the per-turn tool-call limit before completing a final reply."
+
+                if not final_content.strip():
+                    final_content = "Turn ended without a final assistant answer."
+                final_content = guard_unverified_run_claim(final_content, self.records)
+                _delegation.emit_agent_event(
+                    phase="completed",
+                    step=calls,
+                    max_steps=self.budget.max_model_calls,
+                    ok=True,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    summary=compact_text(final_content, limit=180),
+                    model=str(last_meta.get("model") or ""),
+                )
+            finally:
+                if unsub_agent is not None:
+                    unsub_agent()
+                if unsub_peer is not None:
+                    unsub_peer()
         return ChatToolOutcome(
             content=final_content,
             records=tuple(self.records),
@@ -334,6 +418,12 @@ def build_tool_turn_manifest(
             note = f"python/js/powershell; mode={mode}; backend={backend}"
         elif name == "tool_search":
             note = "discover other Sonder tools by query or name"
+        elif name == "report_progress":
+            note = "post live progress/thinking updates"
+        elif name in {"post_to_board", "read_board"}:
+            note = "shared peer board coordination with @handle mentions"
+        elif name in {"delegate_task", "spawn_agents"}:
+            note = "delegate bounded depth-1 child tasks (depth 0 only)"
         else:
             note = f"mode={mode}"
         callable_entries.append(CallableTool(name, note))

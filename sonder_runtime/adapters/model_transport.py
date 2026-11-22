@@ -32,6 +32,9 @@ class ModelCallError(urllib.error.URLError):
         retry_after_seconds: float | None = None,
         thinking_chars: int | None = None,
         reasoning_segments: int | None = None,
+        served_origin: str | None = None,
+        worker_id: str | None = None,
+        pool_refusal: str | None = None,
     ):
         self.kind = str(kind or "unknown")
         self.detail = str(detail or self.kind)[:800]
@@ -52,6 +55,13 @@ class ModelCallError(urllib.error.URLError):
         # or private reasoning content to the exception.
         self.thinking_chars = usage_count(thinking_chars)
         self.reasoning_segments = usage_count(reasoning_segments)
+        # The pool worker that served (and failed) the request, when known:
+        # lets error text name the host that actually answered, not the primary.
+        self.served_origin = str(served_origin)[:256] if served_origin else None
+        self.worker_id = str(worker_id)[:64] if worker_id else None
+        # Reply text for a refusal by Sonder's own worker pool (busy, draining,
+        # no worker), so a client is not told Ollama itself was unreachable.
+        self.pool_refusal = str(pool_refusal)[:300] if pool_refusal else None
         super().__init__(self.detail)
 
     def restamped(self, *, attempts: int, cloud: bool) -> "ModelCallError":
@@ -63,6 +73,8 @@ class ModelCallError(urllib.error.URLError):
         return ModelCallError(
             self.kind, self.detail, transient=False, status=self.status,
             attempts=attempts, cloud=cloud, retry_after_seconds=self.retry_after_seconds,
+            served_origin=self.served_origin, worker_id=self.worker_id,
+            pool_refusal=self.pool_refusal,
         )
 
 
