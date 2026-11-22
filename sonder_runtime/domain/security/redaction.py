@@ -140,6 +140,35 @@ PATTERNS: tuple[re.Pattern, ...] = (
 # redact further.
 _MAX_PASSES = 8
 
+# Second stage, run last: on the text the pattern passes and the path-prefix
+# labels have settled on. The same credential keys, with a value grammar that
+# also takes what the rule in PATTERNS stops short of. A quoted value (a
+# JSON-escaped quote, \", counts as a quote) may hold , ; { } and the other
+# quote; any other value runs to whitespace or , ; { } through every quote and
+# backslash on the way, so a value with fewer than four characters before an
+# interior quote is taken too. It only swaps matched text for the marker, and
+# it runs on exactly the text the earlier steps would have returned, so it can
+# never show a character they hid. Run any earlier and it could take the start
+# of a private path (up to a space in it), so that path no longer matches its
+# prefix and the rest of it is shown; run inside the passes and it could eat a
+# key that a later pass still needs.
+_CREDENTIAL_VALUE = re.compile(
+    r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"[\"']?\s*[:=]\s*)"
+    r'''("(?:[^\s"\\]|\\(?!")){4,}"|'(?:[^\s'\\]|\\(?!')){4,}'|\\"(?:[^\s"\\]|\\(?!")){4,}\\"|\\'(?:[^\s'\\]|\\(?!')){4,}\\'|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*)'''
+)
+
+
+def _sub_credential_values(text):
+    """The second stage over settled text, repeated until stable (bounded)."""
+    for _ in range(_MAX_PASSES):
+        after = _CREDENTIAL_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
+        if after == text:
+            break
+        text = after
+    return text
+
 _PEM_BEGIN_MARK = "-----BEGIN "
 _PEM_END_MARK = "-----END "
 _PEM_LABEL = re.compile(r"[A-Z ]*")
@@ -236,6 +265,7 @@ def redact_text(
     for prefix in path_prefixes:
         if prefix and prefix in text:
             text = text.replace(prefix, WORKSPACE_LABEL)
+    text = _sub_credential_values(text)
     return text
 
 
