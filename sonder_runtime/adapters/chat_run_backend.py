@@ -152,8 +152,27 @@ class ChatRunBackend:
         )
         duration_ms = int((time.monotonic() - started) * 1000)
         ok = not has_legacy_error_prefix(raw) and not raw.lstrip().startswith("refused")
-        timed_out = "timed out" in raw.lower() or "timeout" in raw.lower()
-        exit_code = 0 if ok else None
+        timed_out = bool(re.search(r"(?im)(?:^status:\s*timed[_ ]?out\b|\btimed out\b)", raw))
+        exit_code: int | None = None
+        rc_match = re.search(r"(?im)^[ \t]*returncode:\s*(-?\d+)\b", raw)
+        if rc_match is not None:
+            try:
+                exit_code = int(rc_match.group(1))
+            except ValueError:
+                exit_code = None
+        if ok and name in {
+            "run_code", "run_project", "script_run", "workspace_run",
+            "test_run", "lint_run", "format_code", "typecheck_run", "build_run",
+        }:
+            if (
+                timed_out
+                or (exit_code is not None and exit_code != 0)
+                or re.search(r"(?im)^[ \t]*status:\s*(?:failed|error|timed[_ ]?out)\b", raw)
+                or re.search(r"(?im)^[ \t]*ok:\s*false\b", raw)
+            ):
+                ok = False
+        if exit_code is None and ok:
+            exit_code = 0
         return ToolExecutionResult(
             ok=ok,
             output=raw,

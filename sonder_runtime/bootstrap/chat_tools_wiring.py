@@ -68,9 +68,13 @@ def _model_supports_tools(server: Any, model: str) -> bool:
     resolve_fn = getattr(server, "_serve_target", None)
     if callable(resolve_fn) and raw_model:
         try:
-            resolved = resolve_fn(raw_model)
-            if isinstance(resolved, str) and resolved.strip() and resolved.strip() not in candidates:
-                candidates.append(resolved.strip())
+            try:
+                resolved = resolve_fn(raw_model, False)
+            except TypeError:
+                resolved = resolve_fn(raw_model)
+            resolved_name = resolved[0] if isinstance(resolved, tuple) and resolved else resolved
+            if isinstance(resolved_name, str) and resolved_name.strip() and resolved_name.strip() not in candidates:
+                candidates.append(resolved_name.strip())
         except Exception:
             pass
     keys = {c.casefold() for c in candidates if c}

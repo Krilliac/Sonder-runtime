@@ -531,6 +531,8 @@ from sonder_runtime.domain.cancellation_policy import (
 )
 from sonder_runtime.application import foreground_turns as _foreground_turns
 from sonder_runtime.domain.code_gate_policy import (
+    check_python_static_errors as _code_gate_static_errors,
+    code_gate_compile_only_target as _code_gate_compile_only_policy,
     code_gate_target as _code_gate_target_policy,
 )
 from sonder_runtime.domain.cloud_thinking_budget import (
@@ -1061,6 +1063,7 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
     usage = {}
 
     def _repair(repair_prompt):
+        nonlocal captured
         gen = _make_generate(
             model, system, temperature, num_predict, num_ctx, cloud=cloud,
             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
@@ -1070,8 +1073,21 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
             {"role": "assistant", "content": captured},
         ]
         repaired = gen(repair_prompt, repair_history)
-        usage.clear()
-        usage.update(getattr(gen, "last_usage", None) or {})
+        if repaired:
+            captured = str(repaired)
+        step_usage = getattr(gen, "last_usage", None) or {}
+        if step_usage:
+            if not usage:
+                usage.update(step_usage)
+            else:
+                usage["tokens_in"] = int(usage.get("tokens_in") or 0) + int(step_usage.get("tokens_in") or 0)
+                usage["tokens_out"] = int(usage.get("tokens_out") or 0) + int(step_usage.get("tokens_out") or 0)
+                prev_src = str(usage.get("token_source") or "")
+                next_src = str(step_usage.get("token_source") or "")
+                if prev_src and next_src and prev_src != next_src:
+                    usage["token_source"] = "mixed"
+                elif next_src and not prev_src:
+                    usage["token_source"] = next_src
         return repaired
 
     gated, verified, repaired = _apply_code_gate(
@@ -4350,6 +4366,7 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
 # never distills into lessons. Python-only for now; opt out with
 # SONDER_CODE_GATE=0.
 _CODE_GATE_TIMEOUT = 8
+_CODE_GATE_DEFAULT_MAX_REPAIRS = 3
 
 
 def _code_gate_enabled() -> bool:
@@ -4358,9 +4375,24 @@ def _code_gate_enabled() -> bool:
     )
 
 
+def _code_gate_max_repairs() -> int:
+    raw = os.environ.get("SONDER_CODE_GATE_MAX_REPAIRS", "").strip()
+    if not raw:
+        return _CODE_GATE_DEFAULT_MAX_REPAIRS
+    try:
+        return max(1, min(4, int(raw)))
+    except ValueError:
+        return _CODE_GATE_DEFAULT_MAX_REPAIRS
+
+
 def _code_gate_target(reply):
     """Compatibility delegate for the packaged chat code-gate policy."""
     return _code_gate_target_policy(reply, grounding.extract_runnable_code_block)
+
+
+def _code_gate_compile_only_target(reply):
+    """Select interactive ``input()`` Python blocks for static compile/name checks."""
+    return _code_gate_compile_only_policy(reply, grounding.extract_runnable_code_block)
 
 
 def _release_lesson_distillation_claim(
@@ -4790,70 +4822,101 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
 
     Returns (reply, verified, repaired):
       True  -> the block ran cleanly (reply unchanged, or the repaired reply).
-      False -> still failing after one repair round-trip; the reply carries an
-               explicit NOT VERIFIED banner and the captured interaction got a
-               negative 'failed' outcome.
+      False -> still failing after iterative repair round-trips; the reply
+               carries an explicit NOT VERIFIED banner and the captured
+               interaction got a negative 'failed' outcome.
       None  -> nothing to gate, gate disabled, or inconclusive (an initial
                timeout is not failure: long-running demos/servers are legal).
-      repaired is True only when a regenerated reply ran cleanly. A timed-out
-      retry never replaces the original response or inherits its interaction ID.
+      repaired is True only when a regenerated reply passed verification. A
+      timed-out retry never replaces the original response or inherits its
+      interaction ID.
     """
     if not _code_gate_enabled():
         return reply, None, False
     code = _code_gate_target(reply)
+    compile_only = False
     if code is None:
-        return reply, None, False
-    try:
-        result = grounding.run_code_detail(
-            code, timeout=_CODE_GATE_TIMEOUT, compile_first=True,
-        )
-    except Exception as exc:
-        # An unavailable sandbox is intentionally inconclusive: do not label
-        # the reply's code as broken when it never ran.  It must still be
-        # visible to the operator; otherwise a full sandbox outage looks the
-        # same as a reply with no runnable code at all.
-        with contextlib.suppress(Exception):
-            activity_tracker.record_event(
-                "code_gate_unavailable",
-                summary="initial code verification unavailable: %s" % (
-                    type(exc).__name__,
-                ),
-            )
-        return reply, None, False
-    if result.get("ok"):
-        return reply, True, False
-    if result.get("timed_out"):
-        return reply, None, False
-    failure = (
-        result.get("stderr") or result.get("stdout") or "exited with an error"
-    ).strip()
-    if regenerate is not None:
-        repair_prompt = (
-            "The Python code block in your previous answer fails when run:\n"
-            "%s\n\nReturn the corrected complete answer with a fixed, "
-            "runnable Python code block." % failure[:1200]
-        )
+        code = _code_gate_compile_only_target(reply)
+        if code is None:
+            return reply, None, False
+        compile_only = True
+
+    if compile_only:
+        static_err = _code_gate_static_errors(code)
+        if static_err is None:
+            return reply, None, False
+        failure = static_err
+    else:
         try:
-            repaired = str(regenerate(repair_prompt) or "")
-        except Exception:
-            repaired = ""
-        repaired_code = _code_gate_target(repaired) if repaired else None
-        if repaired_code:
-            try:
-                retry = grounding.run_code_detail(
-                    repaired_code, timeout=_CODE_GATE_TIMEOUT,
-                    compile_first=True,
+            result = grounding.run_code_detail(
+                code, timeout=_CODE_GATE_TIMEOUT, compile_first=True,
+            )
+        except Exception as exc:
+            # An unavailable sandbox is intentionally inconclusive: do not label
+            # the reply's code as broken when it never ran.  It must still be
+            # visible to the operator; otherwise a full sandbox outage looks the
+            # same as a reply with no runnable code at all.
+            with contextlib.suppress(Exception):
+                activity_tracker.record_event(
+                    "code_gate_unavailable",
+                    summary="initial code verification unavailable: %s" % (
+                        type(exc).__name__,
+                    ),
                 )
+            return reply, None, False
+        if result.get("ok"):
+            return reply, True, False
+        if result.get("timed_out"):
+            return reply, None, False
+        failure = (
+            result.get("stderr") or result.get("stdout") or "exited with an error"
+        ).strip()
+
+    if regenerate is not None:
+        max_repairs = _code_gate_max_repairs()
+        last_code = code
+        for attempt in range(1, max_repairs + 1):
+            repair_prompt = (
+                "The Python code block in your previous answer fails when run:\n"
+                "%s\n\nReturn the corrected complete answer with a fixed, "
+                "runnable Python code block." % failure[:1200]
+            )
+            try:
+                repaired = str(regenerate(repair_prompt) or "")
             except Exception:
-                retry = {"ok": False, "timed_out": False}
-            if retry.get("ok"):
-                return repaired, True, True
-            if retry.get("timed_out"):
-                failure = "%s (repair verification timed out)" % failure
-            else:
+                repaired = ""
+            repaired_runnable = _code_gate_target(repaired) if repaired else None
+            repaired_interactive = (
+                _code_gate_compile_only_target(repaired)
+                if (repaired and repaired_runnable is None and compile_only)
+                else None
+            )
+            repaired_code = repaired_runnable if repaired_runnable is not None else repaired_interactive
+            if not repaired_code or repaired_code == last_code:
+                break
+            last_code = repaired_code
+            if repaired_runnable is not None:
+                try:
+                    retry = grounding.run_code_detail(
+                        repaired_runnable, timeout=_CODE_GATE_TIMEOUT,
+                        compile_first=True,
+                    )
+                except Exception:
+                    retry = {"ok": False, "timed_out": False}
+                if retry.get("ok"):
+                    return repaired, True, True
+                if retry.get("timed_out"):
+                    failure = "%s (repair verification timed out)" % failure
+                    break
                 failure = (
                     retry.get("stderr") or retry.get("stdout") or failure
                 ).strip() or failure
+            else:
+                retry_static = _code_gate_static_errors(repaired_interactive)
+                if retry_static is None:
+                    return repaired, True, True
+                failure = retry_static
+
     summary = "exited with an error"
     for line in reversed(failure.splitlines()):
         if line.strip():

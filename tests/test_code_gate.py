@@ -590,3 +590,80 @@ def test_history_impl_persists_verified_repair(monkeypatch, tmp_path):
 
     assert "[interaction_id: iid-persist-history]" in out
     _assert_persisted_repair(db_path, "iid-persist-history")
+
+
+def test_code_gate_iterates_through_cascading_errors_before_returning(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_code_gate_failure", lambda iid: recorded.append(iid),
+    )
+    still_broken = (
+        "Attempt 1:\n\n```python\n"
+        "def parse(s):\n    return 1 / 0\n\n"
+        "print(parse('P3D'))\n"
+        "```\n"
+    )
+    attempts = iter([still_broken, FIXED_REPLY])
+    prompts = []
+
+    def regenerate(repair_prompt):
+        prompts.append(repair_prompt)
+        return next(attempts)
+
+    reply, verified, repaired = server._apply_code_gate(
+        BAD_REPLY, interaction_id="iid-cascade", regenerate=regenerate,
+    )
+
+    assert verified is True
+    assert repaired is True
+    assert reply == FIXED_REPLY
+    assert len(prompts) == 2
+    assert "NameError" in prompts[0]
+    assert "ZeroDivisionError" in prompts[1]
+    assert recorded == []
+
+
+def test_code_gate_statically_checks_and_repairs_interactive_python_code(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_code_gate_failure", lambda iid: recorded.append(iid),
+    )
+    broken_game = (
+        "Here is your game:\n\n```python\n"
+        "def start_game():\n"
+        "    if input('enter? ') == 'yes':\n"
+        "        enter_castle()\n"
+        "start_game()\n"
+        "```\n"
+    )
+    fixed_game = (
+        "Fixed game:\n\n```python\n"
+        "def enter_castle():\n"
+        "    print('Welcome inside!')\n\n"
+        "def start_game():\n"
+        "    if input('enter? ') == 'yes':\n"
+        "        enter_castle()\n"
+        "```\n"
+    )
+    prompts = []
+
+    def regenerate(repair_prompt):
+        prompts.append(repair_prompt)
+        return fixed_game
+
+    reply, verified, repaired = server._apply_code_gate(
+        broken_game, interaction_id="iid-interactive", regenerate=regenerate,
+    )
+
+    assert verified is True
+    assert repaired is True
+    assert reply == fixed_game
+    assert len(prompts) == 1
+    assert "enter_castle" in prompts[0]
+    assert recorded == []
+
+    # Clean interactive code stays untouched with no false failure.
+    clean_reply, clean_verified, clean_repaired = server._apply_code_gate(
+        fixed_game, interaction_id="iid-interactive-clean",
+    )
+    assert (clean_reply, clean_verified, clean_repaired) == (fixed_game, None, False)
