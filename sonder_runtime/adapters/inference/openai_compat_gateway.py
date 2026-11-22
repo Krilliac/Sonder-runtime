@@ -122,6 +122,7 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
+from ...domain.sampling_temperature import check_temperature
 from ...platform.metrics import default_registry
 from ..model_request_admission import (
     HostModelRequestAdmission,
@@ -902,8 +903,10 @@ class OpenAICompatibleGateway:
             # decides: a streaming call reads the event stream and returns the
             # same aggregated document, so everything below is unchanged.
             "stream": live is not None,
-            "temperature": float(options.get("temperature", 0.2)),
         }
+        temperature = check_temperature(options.get("temperature"))
+        if temperature is not None:  # unset: the server's preset applies
+            payload["temperature"] = temperature
         if live is not None:
             payload["stream_options"] = {"include_usage": True}
         try:
