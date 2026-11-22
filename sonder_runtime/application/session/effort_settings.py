@@ -153,7 +153,7 @@ def effort_command(
         parsed = parse_effort_setting(raw)
         stored = store.set(session, parsed, owner=owner)
     except InvalidInput as exc:
-        return "ERROR: %s" % exc
+        return "refused /effort: %s" % exc
     if stored is None:
         return "reasoning effort: auto (model default) for this session."
     return "reasoning effort: %s for this session." % format_effort(stored)
