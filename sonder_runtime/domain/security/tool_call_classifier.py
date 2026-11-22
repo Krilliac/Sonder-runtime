@@ -564,6 +564,36 @@ def _is_root_reading(drive: str, path: str) -> bool:
     return short is not None and (not rest or short.group(1) in _SHORT_TREE_STEMS)
 
 
+_EMPTY_PLACE = _Place("", False, 0, (), 0)
+
+
+def _any_root_against(readings: list[tuple[str, str]], cwd: tuple[_Place, ...],
+                      relatives: dict[str, _Place]) -> bool:
+    """Whether any reading resolves to a root against ``cwd`` (fast equivalent of ``_against``)."""
+    if not cwd:
+        for drive, path in readings:
+            if _is_root_reading(drive, path):
+                return True
+        return False
+    for drive, path in readings:
+        if drive or path.startswith("/"):
+            if _is_root_reading(drive, path):
+                return True
+        else:
+            relative = relatives.get(path)
+            if relative is None:
+                relative = relatives[path] = _place("", path)
+            for place in cwd:
+                if not place.absolute:
+                    if place.ups or relative.ups > place.depth:
+                        return True
+                else:
+                    for rdrive, rpath in _place_readings(_descend(place, relative)):
+                        if _is_root_reading(rdrive, rpath):
+                            return True
+    return False
+
+
 def _is_root_target(token: str, cwd: tuple[_Place, ...] = ()) -> bool:
     """Whether any reading of ``token`` names a drive, share, filesystem or home root, or a path in a system tree."""
     return any(_is_root_reading(drive, path) for drive, path in _against(_normalize_targets(token), cwd))
@@ -780,9 +810,7 @@ class _Scan:
     def _root(self, word: str) -> bool:
         cached = self.roots.get(word)
         if cached is None:
-            cached = self.roots[word] = any(
-                _is_root_reading(drive, path)
-                for drive, path in _against(self._readings(word), self.cwd, self.relatives))
+            cached = self.roots[word] = _any_root_against(self._readings(word), self.cwd, self.relatives)
         return cached
 
     def _readings(self, word: str) -> list[tuple[str, str]]:
@@ -804,8 +832,9 @@ class _Scan:
         return False
 
     def _word(self, context: _Context, word: str, glued: bool) -> bool:
-        name = _program_name(word)
-        if word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs") or _MKFS.fullmatch(name):
+        name = _program_name(word) if ("/" in word or "\\" in word or word.endswith(".exe")) else word
+        if (word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs")
+                or (name.startswith("mkfs") and _MKFS.fullmatch(name))):
             return True
         if self.previous == "format" and _is_drive_root(word):
             return True
@@ -916,8 +945,11 @@ class _Scan:
             return True
         if command.downloads or (command.piped and command.after_download):
             self._record_outputs(command)
-        if self.shell and command.program_at >= 0 and _program_name(words[command.program_at]) in _CD_VERBS:
-            self._change_directory(words[command.program_at + 1:])
+        if self.shell and command.program_at >= 0:
+            prog = words[command.program_at]
+            if prog in _CD_VERBS or (("/" in prog or "\\" in prog or prog.endswith(".exe"))
+                                     and _program_name(prog) in _CD_VERBS):
+                self._change_directory(words[command.program_at + 1:])
         return False
 
     def _runs_a_download(self, command: _Command) -> bool:
@@ -971,14 +1003,36 @@ class _Scan:
             self.names.add(name)
 
     def _change_directory(self, operands: list[str]) -> None:
-        target = next((word for word in operands if not _is_flag(word)), "~")
+        target = "~"
+        for word in operands:
+            if not _is_flag(word):
+                target = word
+                break
         readings = self._readings(target)
+        if len(readings) == 1 and not readings[0][0] and not readings[0][1].startswith("/"):
+            path = readings[0][1]
+            rel = self.relatives.get(path)
+            if rel is None:
+                rel = self.relatives[path] = _place("", path)
+            cwd = self.cwd
+            if not cwd:
+                self._move((_descend(_EMPTY_PLACE, rel),))
+            elif len(cwd) == 1:
+                self._move((_descend(cwd[0], rel),))
+            else:
+                self._move(tuple(_descend(place, rel) for place in cwd))
+            return
         if any(drive or path.startswith("/") for drive, path in readings):
             self._move(tuple(_place(drive, path) for drive, path in readings))
         else:
             # Each step is bounded (``_Place``), so a ``cd`` flood stays linear.
-            relatives = [_place("", path) for _drive, path in readings]
-            self._move(tuple(_descend(place, relative) for place in self.cwd or (_place("", ""),)
+            relatives = []
+            for _drive, path in readings:
+                rel = self.relatives.get(path)
+                if rel is None:
+                    rel = self.relatives[path] = _place("", path)
+                relatives.append(rel)
+            self._move(tuple(_descend(place, relative) for place in self.cwd or (_EMPTY_PLACE,)
                              for relative in relatives))
 
 
