@@ -973,12 +973,15 @@ def fetch_artifact(
         prior_requested = str((prior or {}).get("url") or "")
         prior_final = str((prior or {}).get("final_url") or prior_requested)
         prior_digest = str((prior or {}).get("sha256") or "")
-        if (url not in (prior_requested, prior_final)
+        if (not prior_digest
+                or url not in (prior_requested, prior_final)
                 or prior_digest.lower() != str(existing.get("sha256", "")).lower()):
             existing["ok"] = False
             existing["verdict"] = "rejected"
             existing["checks"].append(_check("provenance", False, "existing artifact is not proven to originate from requested URL"))
             existing["failures"] = [row for row in existing["checks"] if not row["ok"]]
+            return existing
+        if not existing.get("ok"):
             return existing
         existing["url"] = url
         existing["reused"] = True
@@ -1382,9 +1385,10 @@ def read_provenance(dest):
     """Load the sidecar for *dest*, or ``None`` when it has no recorded origin."""
     sidecar = _provenance_path(Path(dest))
     try:
-        return json.loads(sidecar.read_text(encoding="utf-8"))
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 # --- formatting -----------------------------------------------------------

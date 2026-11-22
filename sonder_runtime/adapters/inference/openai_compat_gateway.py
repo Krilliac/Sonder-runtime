@@ -68,7 +68,6 @@ from decimal import Decimal, InvalidOperation
 from email.utils import format_datetime, parsedate_to_datetime
 from types import SimpleNamespace
 from typing import Any, Sequence
-from urllib.parse import urlsplit
 
 import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
 from .exchange_transport import (
@@ -111,6 +110,7 @@ from ...domain.common.errors import (
 )
 from ...domain.gpu_admission import RefusalReason
 from ...domain.openai_spend_policy import (
+    MAX_PRICE_USD_PER_MTOK,
     ChatPrice,
     OpenAISpendPolicyError,
     cost_usd,
@@ -175,18 +175,43 @@ def shared_https_context() -> ssl.SSLContext:
     return default_https_context()
 
 
+def _host_is_loopback(host: str) -> bool:
+    """True for ``localhost`` (allowing one trailing dot) or a loopback IP.
+
+    Unspecified addresses such as ``0.0.0.0`` and ``::`` are excluded.
+    """
+    text = (host or "").strip().lower()
+    if text.endswith("."):
+        text = text[:-1]
+    if not text:
+        return False
+    if text == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
 def _bypasses_proxy(url: str) -> bool:
     """True when ``url`` must never be sent through an ambient proxy.
 
     That is every plaintext ``http://`` URL (loopback or an operator-trusted
-    private IP) and every loopback URL.  An http request through a proxy is
-    sent to the proxy in clear -- prompt, bearer key and all -- and urllib has
-    no implicit loopback bypass.  Only remote https keeps proxy support: the
-    proxy then sees just a CONNECT tunnel.  Redirects are never followed, so
-    the URL's own scheme decides.
+    private IP) and every non-credentialed ``https://`` loopback URL.  An http
+    request through a proxy is sent to the proxy in clear -- prompt, bearer key
+    and all -- and urllib has no implicit loopback bypass.  Only remote https
+    keeps proxy support: the proxy then sees just a CONNECT tunnel.  Redirects
+    are never followed, so the URL's own scheme decides.
     """
-    parts = urlsplit(url)
-    return (parts.scheme or "").lower() == "http" or (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+    parts = urlsplit_or_none(url)
+    if parts is None:
+        return False
+    scheme = (parts.scheme or "").lower()
+    if scheme == "http":
+        return True
+    if scheme == "https" and "@" not in parts.netloc:
+        return _host_is_loopback(parts.hostname or "")
+    return False
 
 
 def _opener_for(url: str):
@@ -329,6 +354,33 @@ class OpenAICompatibleConfig:
                 0.0 <= float(value) <= MAX_STREAM_STALL_SECONDS
             ):
                 raise InvalidInput("%s must be in [0, 86400] (0 disables it)" % name)
+        if (not isinstance(self.daily_usd, Decimal)
+                or not self.daily_usd.is_finite()
+                or not Decimal(0) <= self.daily_usd <= MAX_DAILY_USD):
+            raise InvalidInput("%s must be a finite Decimal between 0 and %s" % (ENV_DAILY_USD, MAX_DAILY_USD))
+        if (isinstance(self.max_tokens_ceiling, bool)
+                or not isinstance(self.max_tokens_ceiling, int)
+                or not 1 <= self.max_tokens_ceiling <= MAX_TOKENS_LIMIT):
+            raise InvalidInput("%s must be an integer in [1, %d]" % (ENV_MAX_TOKENS, MAX_TOKENS_LIMIT))
+        if self.price is not None:
+            if not isinstance(self.price, ChatPrice):
+                raise InvalidInput("%s must be a ChatPrice or None" % ENV_PRICE)
+            for rate, label in ((self.price.input, "input price"), (self.price.output, "output price")):
+                if (not isinstance(rate, Decimal)
+                        or not rate.is_finite()
+                        or not Decimal(0) <= rate <= MAX_PRICE_USD_PER_MTOK):
+                    raise InvalidInput(
+                        "%s %s must be a finite Decimal between 0 and %s"
+                        % (ENV_PRICE, label, MAX_PRICE_USD_PER_MTOK)
+                    )
+        if self.embed_price is not None:
+            if (not isinstance(self.embed_price, Decimal)
+                    or not self.embed_price.is_finite()
+                    or not Decimal(0) <= self.embed_price <= MAX_PRICE_USD_PER_MTOK):
+                raise InvalidInput(
+                    "%s must be a finite Decimal between 0 and %s"
+                    % (ENV_EMBED_PRICE, MAX_PRICE_USD_PER_MTOK)
+                )
 
 
 def _env_seconds(name: str) -> float:
@@ -590,15 +642,14 @@ class OpenAICompatibleGateway:
     def _is_loopback(base_url: str) -> bool:
         # Unparsable is never loopback; _require_secure_transport refuses it.
         # Shared by the consent gate, the transport check and the hostedness
-        # probe: only a plain http(s) URL with no userinfo and a named loopback
-        # host counts (0.0.0.0 is the unspecified address, not loopback).
+        # probe: only a plain http(s) URL with no userinfo and a loopback host
+        # counts (0.0.0.0 is the unspecified address, not loopback).
         parts = urlsplit_or_none(base_url)
         if parts is None or parts.scheme.lower() not in ("http", "https"):
             return False
         if "@" in parts.netloc:
             return False
-        host = (parts.hostname or "").lower()
-        return host != "0.0.0.0" and host in _LOOPBACK_HOSTS
+        return _host_is_loopback(parts.hostname or "")
 
     def endpoint_is_loopback(self) -> bool:
         """Whether a call made now would send its prompt to a loopback endpoint.
