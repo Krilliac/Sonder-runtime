@@ -19,6 +19,8 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
+from sonder_runtime.domain.network_path_spelling import is_network_spelling
+
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TEXT_BYTES = 8 * 1024 * 1024
@@ -66,6 +68,57 @@ def _is_reparse_point(path: Path) -> bool:
     except (FileNotFoundError, OSError):
         return False
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+_WINDOWS_RESERVED_DEVICE_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9\u00b2\u00b3\u00b9]|LPT[1-9\u00b2\u00b3\u00b9])$",
+    re.IGNORECASE,
+)
+
+
+def _has_control_chars(text: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+
+
+def _is_safe_path_component(part: str) -> bool:
+    """True when one path segment is a plain local filename/folder component."""
+    if not part or part in (".", ".."):
+        return False
+    if _has_control_chars(part) or ":" in part:
+        return False
+    if part.strip(".") == "" or part.strip() == "":
+        return False
+    if part.endswith((".", " ")) or part != part.strip():
+        return False
+    stem = part.split(".", 1)[0].rstrip(" ")
+    if _WINDOWS_RESERVED_DEVICE_RE.fullmatch(stem):
+        return False
+    return True
+
+
+def _safe_relative_parts(value, *, allow_subdirs: bool = True) -> tuple[str, ...] | None:
+    """Purely lexical check for a plain relative path; makes zero FS calls.
+
+    Refuses non-strings, empty or whitespace-padded names, control characters
+    (including NUL), UNC/device/NT spellings, drive-qualified or absolute paths,
+    colons (ADS), empty/dot/parent segments, trailing dots/spaces, and Windows
+    reserved device names.
+    """
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    if _has_control_chars(value) or ":" in value:
+        return None
+    if is_network_spelling(value):
+        return None
+    flat = value.replace("\\", "/")
+    if flat.startswith("/") or flat.endswith("/"):
+        return None
+    parts = flat.split("/")
+    if not allow_subdirs and len(parts) != 1:
+        return None
+    if not all(_is_safe_path_component(part) for part in parts):
+        return None
+    return tuple(parts)
 
 
 def _directory_items(path: Path):
@@ -512,7 +565,8 @@ def _validate_html(path: Path, requirements: dict, checks: list):
         decoded = unquote(clean).replace("\\", "/")
         pure = PurePosixPath(decoded)
         if (
-            "\x00" in decoded
+            _has_control_chars(decoded)
+            or is_network_spelling(decoded)
             or pure.is_absolute()
             or any(":" in part for part in pure.parts)
         ):
@@ -528,7 +582,7 @@ def _validate_html(path: Path, requirements: dict, checks: list):
         # feeds the containment check, which still catches any spelling the
         # OS normalises differently from posixpath.normpath.
         parts = PurePosixPath(posixpath.normpath(decoded)).parts
-        if parts[:1] == ("..",):
+        if parts[:1] == ("..",) or any(not _is_safe_path_component(part) for part in parts):
             missing.append(ref)
             continue
         candidate = root
@@ -1549,20 +1603,13 @@ def _validate_edl(path: Path, requirements: dict, checks: list):
         missing = []
         root = path.parent.resolve()
         for clip_name in clip_names:
-            pure = PurePosixPath(clip_name.replace("\\", "/"))
-            if (
-                not pure.parts
-                or pure.is_absolute()
-                or ".." in pure.parts
-                or _is_external_ref(clip_name)
-                or ":" in pure.parts[0]
-            ):
+            if _is_external_ref(clip_name):
                 unsafe.append(clip_name)
                 continue
-            candidate = (root / Path(*pure.parts)).resolve()
-            if root not in (candidate, *candidate.parents):
+            candidate = _safe_manifest_path(root, clip_name)
+            if candidate is None:
                 unsafe.append(clip_name)
-            elif not candidate.is_file() or candidate.is_symlink():
+            elif not candidate.is_file() or _is_reparse_point(candidate):
                 missing.append(clip_name)
         _check(
             checks,
@@ -3655,23 +3702,25 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
     }
 
 
-def _safe_manifest_path(root: Path, value: str) -> Path | None:
-    pure = PurePosixPath(str(value or "").replace("\\", "/"))
-    if not pure.parts or pure.is_absolute() or ".." in pure.parts:
+def _safe_manifest_path(root: Path, value) -> Path | None:
+    parts = _safe_relative_parts(value, allow_subdirs=True)
+    if parts is None:
         return None
-    # Lexical refusal before any filesystem call: a drive-qualified or NUL-bearing
-    # part makes ``root / part`` replace the root, and resolving it leaves the pack.
-    if any(":" in part or chr(0) in part for part in pure.parts):
-        return None
-    lexical = root / Path(*pure.parts)
-    candidate = lexical.resolve()
-    if root not in candidate.parents:
-        return None
+    # Walk one lexical component at a time and refuse any symlink or Windows
+    # reparse point (including directory junctions) BEFORE calling resolve(),
+    # so a link inside the bundle cannot redirect resolve() to a UNC share.
     current = root
-    for part in pure.parts:
+    for part in parts:
         current = current / part
-        if current.is_symlink():
+        if _is_reparse_point(current):
             return None
+    resolved_root = root.resolve()
+    try:
+        candidate = current.resolve()
+    except (OSError, ValueError):
+        return None
+    if resolved_root not in candidate.parents:
+        return None
     return candidate
 
 
@@ -3683,7 +3732,9 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
     manifest_path = path / "manifest.json"
     require_manifest = bool(requirements.get("require_manifest", False))
     manifest = None
-    if manifest_path.is_file():
+    if _is_reparse_point(manifest_path):
+        _check(checks, "bundle-manifest-json", False, "manifest.json may not be a symlink or reparse point")
+    elif manifest_path.is_file():
         try:
             manifest = json.loads(_read_text(manifest_path))
             _check(checks, "bundle-manifest-json", isinstance(manifest, dict), "manifest.json is an object")
@@ -3698,20 +3749,33 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         valid_list = isinstance(files, list) and bool(files)
         _check(checks, "bundle-manifest-files", valid_list, "%d declared files" % (len(files) if isinstance(files, list) else 0))
         seen = set()
+        seen_resolved = set()
         if isinstance(files, list):
             for row in files[: MAX_BUNDLE_FILES + 1]:
                 if not isinstance(row, dict):
                     _check(checks, "bundle-manifest-row", False, "file row must be an object")
                     continue
-                relative = str(row.get("path", ""))
-                candidate = _safe_manifest_path(path, relative)
-                unique = relative not in seen
-                _check(checks, "bundle-unique-path", unique, relative or "(empty)")
-                seen.add(relative)
+                raw_path = row.get("path")
+                display = (
+                    raw_path if isinstance(raw_path, str) and raw_path
+                    else (repr(raw_path) if raw_path is not None else "(empty)")
+                )
+                candidate = _safe_manifest_path(path, raw_path)
+                dedup_key = (
+                    os.path.normcase(raw_path.replace("\\", "/"))
+                    if isinstance(raw_path, str)
+                    else repr(raw_path)
+                )
+                unique = dedup_key not in seen and (candidate is None or candidate not in seen_resolved)
+                _check(checks, "bundle-unique-path", unique, display)
+                seen.add(dedup_key)
+                if candidate is not None:
+                    seen_resolved.add(candidate)
                 safe = candidate is not None
-                _check(checks, "bundle-safe-path", safe, relative or "(empty)")
-                if not safe:
+                _check(checks, "bundle-safe-path", safe, display)
+                if not safe or not unique:
                     continue
+                relative = raw_path
                 exists = candidate.is_file() and not _is_reparse_point(candidate)
                 _check(checks, "bundle-file-exists", exists, relative)
                 if not exists:
@@ -3886,7 +3950,27 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
 def validate(path, recipe="auto", requirements=None) -> dict:
     """Validate one artifact path with an inferred or explicit recipe."""
     requirements = parse_requirements(requirements)
-    requested = Path(path).expanduser()
+    raw_text = os.fspath(path)
+    if isinstance(raw_text, bytes):
+        raw_text = os.fsdecode(raw_text)
+    if is_network_spelling(raw_text):
+        return {
+            "ok": False,
+            "path": str(raw_text),
+            "recipe": str(recipe or "auto"),
+            "checks": [
+                {
+                    "name": "network-path",
+                    "ok": False,
+                    "detail": "artifact path may not use a UNC, device or network spelling",
+                }
+            ],
+            "children": [],
+            "checked_files": 0,
+            "passed_checks": 0,
+            "failed_checks": 1,
+        }
+    requested = Path(raw_text).expanduser()
     if not requested.exists():
         return {
             "ok": False,
