@@ -7579,7 +7579,7 @@ class Handler(BaseHTTPRequestHandler):
                             # cache so each draw is independent; force temp>0.
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(_live_serve_temperature()) or 0.0,
+                                float(_serve_policy.serve_temperature() or 0.0),
                                 0.05,
                             )
                             _samples = []

@@ -527,7 +527,7 @@
       ]
     },
     {
-      "file_count": 430,
+      "file_count": 431,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -537,6 +537,7 @@
         "sonder_runtime/application/agents/__init__.py",
         "sonder_runtime/application/agents/delegated_verification.py",
         "sonder_runtime/application/agents/delegation.py",
+        "sonder_runtime/application/agents/delegation_runtime.py",
         "sonder_runtime/application/agents/delegation_service.py",
         "sonder_runtime/application/agents/durable_lineage.py",
         "sonder_runtime/application/agents/fleet_breadth.py",
@@ -963,7 +964,7 @@
       ]
     },
     {
-      "file_count": 87,
+      "file_count": 90,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -1003,6 +1004,8 @@
         "sonder_runtime/bootstrap/control_state_rehearsal.py",
         "sonder_runtime/bootstrap/debug_tools.py",
         "sonder_runtime/bootstrap/delegated_verification.py",
+        "sonder_runtime/bootstrap/delegation_agent_tools.py",
+        "sonder_runtime/bootstrap/delegation_wiring.py",
         "sonder_runtime/bootstrap/developer_tools.py",
         "sonder_runtime/bootstrap/diagnostics.py",
         "sonder_runtime/bootstrap/doctor_checks.py",
@@ -1038,6 +1041,7 @@
         "sonder_runtime/bootstrap/owned_http_runtime.py",
         "sonder_runtime/bootstrap/playbook_context.py",
         "sonder_runtime/bootstrap/playbooks.py",
+        "sonder_runtime/bootstrap/pool_wiring.py",
         "sonder_runtime/bootstrap/prepared_workbench.py",
         "sonder_runtime/bootstrap/provider_bindings.py",
         "sonder_runtime/bootstrap/reference_agent_tools.py",
@@ -1056,7 +1060,7 @@
       ]
     },
     {
-      "file_count": 327,
+      "file_count": 328,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1071,6 +1075,7 @@
         "sonder_runtime/domain/agents/activity_command.py",
         "sonder_runtime/domain/agents/claim_review.py",
         "sonder_runtime/domain/agents/decision_parsing.py",
+        "sonder_runtime/domain/agents/delegation.py",
         "sonder_runtime/domain/agents/evidence_quality.py",
         "sonder_runtime/domain/agents/file_page_rendering.py",
         "sonder_runtime/domain/agents/observation_prompt.py",

@@ -319,8 +319,9 @@ def _run_one_child(
     else:
         route_ctx = contextlib.nullcontext()
 
+    clear_preapproved: Any = PermissionPolicyProvider().clear_preapproved_scope()
     with (
-        PermissionPolicyProvider().clear_preapproved_scope(),
+        clear_preapproved,
         _rt.depth_scope(1),
         _rt.bind_board(board),
         _rt.agent_identity_scope(
