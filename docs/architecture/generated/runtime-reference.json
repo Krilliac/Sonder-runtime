@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+    "catalog_digest": "3f8fff65508846646cc90d432d6764d127d8daa1649916aacda5f906f2f04b1e",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+      "catalog_digest": "3f8fff65508846646cc90d432d6764d127d8daa1649916aacda5f906f2f04b1e",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -311,6 +311,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -336,6 +341,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -5329,7 +5339,7 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -5338,6 +5348,11 @@
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -14713,10 +14728,16 @@
           "name": "limit",
           "required": false,
           "type": "int"
+        },
+        {
+          "default": "",
+          "name": "token",
+          "required": false,
+          "type": "str"
         }
       ],
       "risk": "safe",
-      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
       "tool": "permission_approvals"
     },
     {
@@ -18159,6 +18180,18 @@
           "name": "session",
           "required": false,
           "type": "str"
+        },
+        {
+          "default": "",
+          "name": "cwd",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": true,
+          "name": "strict_project_tools",
+          "required": false,
+          "type": "bool"
         }
       ],
       "risk": "ask",
@@ -20495,7 +20528,7 @@
     "schemas": 4,
     "tools": 242
   },
-  "digest": "de4702f105f7aedbd0faf0631baeb39edcfc3a2fb6e01d974edd247efdbc2b2b",
+  "digest": "ab6d16ddb204d7cc9251592d977c01f25f80b4fd6b5ba00f024851abd73c3a55",
   "events": [
     {
       "name": "session.started",
@@ -23207,9 +23240,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+    "catalog_digest": "3f8fff65508846646cc90d432d6764d127d8daa1649916aacda5f906f2f04b1e",
     "client": {
-      "digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+      "digest": "3f8fff65508846646cc90d432d6764d127d8daa1649916aacda5f906f2f04b1e",
       "events": [
         {
           "name": "approval.denied",
@@ -25384,7 +25417,7 @@
           {
             "name": "permission_approvals",
             "schema_available": true,
-            "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued."
+            "summary": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token)."
           },
           {
             "name": "permission_approve",
@@ -26066,6 +26099,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -26091,6 +26129,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -31084,7 +31127,7 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -31093,6 +31136,11 @@
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -35511,6 +35559,11 @@
                 "title": "Checklist",
                 "type": "boolean"
               },
+              "cwd": {
+                "default": "",
+                "title": "Cwd",
+                "type": "string"
+              },
               "max_steps": {
                 "default": 6,
                 "title": "Max Steps",
@@ -35536,6 +35589,11 @@
                 ],
                 "default": null,
                 "title": "Session"
+              },
+              "strict_project_tools": {
+                "default": true,
+                "title": "Strict Project Tools",
+                "type": "boolean"
               },
               "tier": {
                 "default": "code",
@@ -40247,13 +40305,18 @@
           "name": "parallel_run_code"
         },
         {
-          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+          "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
           "inputSchema": {
             "properties": {
               "limit": {
                 "default": 20,
                 "title": "Limit",
                 "type": "integer"
+              },
+              "token": {
+                "default": "",
+                "title": "Token",
+                "type": "string"
               }
             },
             "title": "permission_approvalsArguments",
@@ -43360,6 +43423,11 @@
                   "title": "Checklist",
                   "type": "boolean"
                 },
+                "cwd": {
+                  "default": "",
+                  "title": "Cwd",
+                  "type": "string"
+                },
                 "max_steps": {
                   "default": 6,
                   "title": "Max Steps",
@@ -43385,6 +43453,11 @@
                   ],
                   "default": null,
                   "title": "Session"
+                },
+                "strict_project_tools": {
+                  "default": true,
+                  "title": "Strict Project Tools",
+                  "type": "boolean"
                 },
                 "tier": {
                   "default": "code",
@@ -48521,7 +48594,7 @@
         },
         {
           "function": {
-            "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+            "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
             "name": "permission_approvals",
             "parameters": {
               "properties": {
@@ -48529,6 +48602,11 @@
                   "default": 20,
                   "title": "Limit",
                   "type": "integer"
+                },
+                "token": {
+                  "default": "",
+                  "title": "Token",
+                  "type": "string"
                 }
               },
               "title": "permission_approvalsArguments",
@@ -51672,7 +51750,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "f44f3fe0bf9bebdf830a7fb4edd9230c58cd9fb6d328920a1b94e6179def376c",
+    "server.py": "af29f123f565d4b09783ec199c612aceca239e62d19cd9f84d1eef010ac7bfbc",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -51891,6 +51969,11 @@
             "title": "Checklist",
             "type": "boolean"
           },
+          "cwd": {
+            "default": "",
+            "title": "Cwd",
+            "type": "string"
+          },
           "max_steps": {
             "default": 6,
             "title": "Max Steps",
@@ -51916,6 +51999,11 @@
             ],
             "default": null,
             "title": "Session"
+          },
+          "strict_project_tools": {
+            "default": true,
+            "title": "Strict Project Tools",
+            "type": "boolean"
           },
           "tier": {
             "default": "code",
@@ -56626,7 +56714,7 @@
       }
     },
     {
-      "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued.",
+      "description": "List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token).",
       "name": "permission_approvals",
       "parameters": {
         "properties": {
@@ -56634,6 +56722,11 @@
             "default": 20,
             "title": "Limit",
             "type": "integer"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
           }
         },
         "title": "permission_approvalsArguments",
