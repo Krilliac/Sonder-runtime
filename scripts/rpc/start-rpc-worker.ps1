@@ -22,6 +22,7 @@ param(
     [string]$Action = 'Status',
     [string]$BindAddress = $env:SONDER_RPC_WORKER_ADDRESS,
     [string]$Port = $env:SONDER_RPC_PORT,
+    [ValidatePattern('^[A-Za-z0-9,_-]*$')]
     [string]$Device = '',
     [int]$Threads = 0,
     [switch]$UseCache,
@@ -120,19 +121,21 @@ switch ($Action) {
     'Stop' {
         $state = Get-CurrentState
         if ($state) {
-            Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
-            Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
-            if ($state.wrapperPid) {
-                Stop-Process -Id ([int]$state.wrapperPid) -Force -ErrorAction SilentlyContinue
+            # Only stop a process that is still the one we launched (same exe and
+            # start time); a recycled PID or a foreign listener is left alone.
+            if (Test-RpcOwnedProcess -ProcessId ([int]$state.pid) -ExePath ([string]$state.exe) -StartedUtc ([string]$state.startedUtc)) {
+                Stop-Process -Id ([int]$state.pid) -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id ([int]$state.pid) -Timeout 10 -ErrorAction SilentlyContinue
+                Write-Output "Stopped rpc-server on ${bindHost}:${rpcPort}"
+            }
+            else {
+                Write-Warning "PID $($state.pid) is not the rpc-server recorded in the state file; not stopping it."
             }
         }
-        Get-NetTCPConnection -State Listen -LocalPort $rpcPort -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalAddress -eq $bindHost } |
-            ForEach-Object {
-                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-            }
+        else {
+            Write-Output "No tracked rpc-server to stop on ${bindHost}:${rpcPort}"
+        }
         Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-        Write-Output "Stopped rpc-server on ${bindHost}:${rpcPort}"
     }
 
     'Start' {
@@ -155,8 +158,10 @@ switch ($Action) {
 
         $exe = Resolve-RpcServerExe $InstallDir
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $stdout = Join-Path $logDir "llama-rpc-worker-$stamp.stdout.log"
-        $stderr = Join-Path $logDir "llama-rpc-worker-$stamp.stderr.log"
+        # Detached launch has no stdout/stderr capture (rpc-server has no verified
+        # log-file option), so no log paths are recorded for the worker.
+        $stdout = $null
+        $stderr = $null
 
         $rpcArgs = @('--host', $bindHost, '--port', [string]$rpcPort)
         if ($Device.Trim()) {
@@ -169,21 +174,11 @@ switch ($Action) {
             $rpcArgs += '-c'
         }
 
-        $argLine = ($rpcArgs | ForEach-Object {
-            if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
-        }) -join ' '
-        $wrapperScript = "& `"$exe`" $argLine 1> `"$stdout`" 2> `"$stderr`""
-        $encodedWrapper = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapperScript))
-        $cmdLine = "powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand $encodedWrapper"
-
-        $cimResult = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-            CommandLine      = $cmdLine
-            CurrentDirectory = $InstallDir
-        }
-        if ($cimResult.ReturnValue -ne 0) {
-            throw "Win32_Process Create failed with return code $($cimResult.ReturnValue)."
-        }
-        $wrapperPid = [int]$cimResult.ProcessId
+        $launchedPid = Start-RpcDetached -ExePath $exe `
+            -ArgumentString (ConvertTo-RpcArgumentString $rpcArgs) `
+            -WorkingDirectory $InstallDir
+        $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
+        $recordedExe = Get-RpcProcessPath -ProcessId $launchedPid
 
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
         $ready = $false
@@ -197,22 +192,23 @@ switch ($Action) {
                 $ready = $true
                 break
             }
-            $wrapperAlive = Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue
-            if ($null -eq $wrapperAlive) {
-                $errTail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 20) -join "`n" } else { '' }
-                throw "rpc-server wrapper exited during startup: $errTail"
+            $alive = Get-Process -Id $launchedPid -ErrorAction SilentlyContinue
+            if ($null -eq $alive) {
+                throw "rpc-server exited during startup."
             }
             Start-Sleep -Milliseconds 250
         }
         if (-not $ready -or $null -eq $rpcPid) {
-            Stop-Process -Id $wrapperPid -Force -ErrorAction SilentlyContinue
+            if (Test-RpcOwnedProcess -ProcessId $launchedPid -ExePath $recordedExe -StartedUtc $startedUtc) {
+                Stop-Process -Id $launchedPid -Force -ErrorAction SilentlyContinue
+            }
             throw "rpc-server did not start listening on ${bindHost}:${rpcPort} within 20s."
         }
 
         $stateObj = [ordered]@{
-            pid        = $rpcPid
-            wrapperPid = $wrapperPid
-            exe        = $exe
+            pid        = $launchedPid
+            exe        = $recordedExe
+            startedUtc = $startedUtc
             host       = $bindHost
             port       = $rpcPort
             device     = $Device

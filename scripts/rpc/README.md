@@ -80,3 +80,7 @@ sets them for the child process and starts Sonder from the repository root
 layers on the main GPU (for a worker with a small or shared-memory GPU).
 Named presets live in `sonder_runtime/adapters/data/rpc_sharding_profiles.json`
 (override with `SONDER_RPC_PROFILES_FILE`).
+
+## Launch behaviour
+
+Both launchers start the server through `Win32_Process.Create` (via `Start-RpcDetached`), so the process is detached from the caller: it holds none of the caller's pipe handles and is outside the caller's job object. `Start` therefore returns promptly even under a one-shot `ssh host powershell -File ...` or a piped CI/agent wrapper, and the server survives the session closing. Trade-off: stdout is not captured. `start-rpc-sharded.ps1` passes `--log-file` to `llama-server` (the `stderr` path in the state file); `rpc-server` has no log capture.
