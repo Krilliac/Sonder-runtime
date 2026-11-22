@@ -2269,6 +2269,8 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         )
 
     mode_action = _MATRIX[active].get(risk, ASK)
+    if opaque_powershell and mode_action == ALLOW:
+        mode_action = ASK
 
     # 2c. Deleting files asks every time in every mode (including bypass): no
     #     mode or allow rule can waive it; unattended requires a one-shot

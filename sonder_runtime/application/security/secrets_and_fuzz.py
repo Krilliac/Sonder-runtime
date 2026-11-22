@@ -204,14 +204,17 @@ class CredentialScanner:
         self.max_bytes = max_bytes
 
     def scan(self, content: str | bytes) -> tuple[CredentialFinding, ...]:
-        # Every input byte or character is at least one UTF-8 byte after the
-        # decode below, so an input longer than the bound is refused before
-        # decoding and re-encoding copies it.
-        if len(content) > self.max_bytes:
-            raise ValueError("content exceeds scan bound")
-        raw = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
-        if len(raw.encode("utf-8")) > self.max_bytes:
-            raise ValueError("content exceeds scan bound")
+        # Check the byte bound on the original bytes before decoding with
+        # replacement (each invalid UTF-8 byte expands to a 3-byte U+FFFD,
+        # which would reject valid 334 KB - 1 MB non-UTF-8 files).
+        if isinstance(content, bytes):
+            if len(content) > self.max_bytes:
+                raise ValueError("content exceeds scan bound")
+            raw = content.decode("utf-8", errors="replace")
+        else:
+            if len(content) > self.max_bytes or len(content.encode("utf-8")) > self.max_bytes:
+                raise ValueError("content exceeds scan bound")
+            raw = content
         findings: list[CredentialFinding] = []
         for line_no, line in enumerate(raw.splitlines(), 1):
             for kind, pattern, accept in self._patterns:

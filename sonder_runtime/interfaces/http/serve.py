@@ -87,7 +87,6 @@ import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
-from sonder_runtime.interfaces.http.slash_call_arguments import slash_call_arguments
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -3032,7 +3031,7 @@ def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
     # this chain and `server.control_command` cannot disagree about a read.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _http_tool_refusal(
-        tools, cmd, context=context, arguments=arguments if arguments is not None else slash_call_arguments(cmd, argument),
+        tools, cmd, context=context, arguments=arguments if arguments is not None else _slash_call_arguments(cmd, argument),
     )
 
 
@@ -6279,6 +6278,7 @@ class Handler(BaseHTTPRequestHandler):
             observe_state=_observe_client_control_state, mode_data=server.permission_mode_data,
             approver_of=_http_approver, audit_transition=server._http_chat_tools().audit_mode_transition,
             error_envelope=sonder_lifecycle.error_envelope,
+            send_escalation_refusal=_mode_post.send_escalation_refusal,
         )
 
 

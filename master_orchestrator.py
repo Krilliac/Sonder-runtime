@@ -92,8 +92,6 @@ def get_swarm_status() -> list[dict]:
     """Every local agent row, for the admin-only app-control swarm view."""
     with _LOCK:
         return [{"id": agent_id, **data} for agent_id, data in _AGENTS.items()]
-
-
 def _lane_deadline(row, progress_deadline: float) -> float:
     """Progress deadline for one lane's current fleet row (see fleet_store)."""
     resolve = getattr(fleet_store, "lane_progress_deadline", None)
@@ -693,16 +691,13 @@ def capacity(
         reserved = _RESERVED_SLOTS
     if reserved > 0:
         limits["reserved_capacity"] = max(1, int(requested) - reserved)
-    # Ollama's own batching width is the hard ceiling on REAL concurrency --
-    # handing it more concurrent requests than it will batch just queues them.
+    # Ollama's batching width is the hard ceiling on REAL concurrency.
     ollama_parallel = int(pool_route[2]["total"]) if pool_route else _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
     if ollama_parallel > 0:
         limits["pool_model_capacity" if pool_route else "ollama_num_parallel"] = int(ollama_parallel)
     automatic = max(1, min(limits.values()))
     bound_by = min(limits, key=lambda key: (limits[key], key))
-
-    source = "auto"
-    slots = automatic
+    source, slots = "auto", automatic
     operator_ceiling, operator_error = operator_worker_ceiling()
     raw_override = os.environ.get("SONDER_PARALLEL_WORKERS", "").strip()
     if raw_override:
@@ -711,17 +706,15 @@ def capacity(
             cap_error = cap_error or "invalid SONDER_PARALLEL_WORKERS: %s" % legacy_error
         else:
             slots = min(override, requested, STANDARD_MAX_WORKERS, operator_ceiling)
-            source = "SONDER_PARALLEL_WORKERS"
-            bound_by = "SONDER_PARALLEL_WORKERS"
+            source = bound_by = "SONDER_PARALLEL_WORKERS"
     if explicit_cap:
         slots = min(explicit_cap, requested, operator_ceiling, ABSOLUTE_MAX_WORKERS)
         source = "per-run worker_cap"
-        if slots == operator_ceiling and explicit_cap > operator_ceiling:
-            bound_by = "operator worker ceiling"
-        elif slots == requested and explicit_cap > requested:
-            bound_by = "requested agents"
-        else:
-            bound_by = "per-run worker_cap"
+        bound_by = (
+            "operator worker ceiling" if slots == operator_ceiling and explicit_cap > operator_ceiling
+            else "requested agents" if slots == requested and explicit_cap > requested
+            else "per-run worker_cap"
+        )
     pool_note, slots, bound_by = _dw.pool_capacity_note(pool_route, requested, slots, bound_by)
     gpu_total, gpu_free = gpu_memory_bytes()
     warnings = [message for message in (operator_error, cap_error, pool_note) if message]

@@ -12,14 +12,12 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
-import sonder_runtime.adapters.secret_scan as secret_scan_adapter
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
@@ -32,7 +30,6 @@ from sonder_runtime.adapters.git_mutation_guard import (
 )
 import git_tools
 import sonder_logging
-import sonder_paths
 import unsafe_lab
 
 MAX_OUTPUT = 256_000
