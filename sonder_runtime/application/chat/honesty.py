@@ -183,4 +183,27 @@ def no_tools_system(system: str, prompt: str) -> str:
     return f"{system}\n\n{_NO_TOOLS_GUIDANCE}" if system else _NO_TOOLS_GUIDANCE
 
 
-__all__ = ["guard_unsaved_file_claim", "no_tools_system"]
+_NO_VERIFICATION_GUIDANCE = (
+    "This chat turn has no tools. Never say or imply that you compiled, ran, "
+    "tested, linted or verified code, and never show a Passed/Verified/checkmark "
+    "results table, unless a tool result in this conversation shows it. If asked "
+    "to validate code, say you cannot run it here and suggest the /run command."
+)
+
+
+def no_verification_claims_system(system: str) -> str:
+    """Add the no-fabricated-verification rule to a tool-less chat turn.
+
+    Every served chat turn calls no tools, so the rule is unconditional and is
+    kept short.  Idempotent: a system prompt that already carries it is
+    returned unchanged.
+    """
+
+    if not isinstance(system, str):
+        return system
+    if _NO_VERIFICATION_GUIDANCE in system:
+        return system
+    return f"{system}\n\n{_NO_VERIFICATION_GUIDANCE}" if system else _NO_VERIFICATION_GUIDANCE
+
+
+__all__ = ["guard_unsaved_file_claim", "no_tools_system", "no_verification_claims_system"]
