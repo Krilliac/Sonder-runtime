@@ -163,7 +163,11 @@ binding, and sends privacy-first routing preferences (no prompt logging,
 zero data retention) unless overridden. Claude models can likewise be bound
 through the [Anthropic provider](docs/integration/anthropic.md): the same
 opt-in, `SONDER_ANTHROPIC_API_KEY` (plus an optional second key), and a
-`SONDER_ANTHROPIC_DAILY_USD` spend cap. Any OpenAI-compatible server
+`SONDER_ANTHROPIC_DAILY_USD` spend cap. Ollama `:cloud` models are kept current
+by the [cloud model refresh](docs/integration/cloud-model-refresh.md): it
+retires models the provider retired, records the ollama.com catalog, and
+rebinds a retired cloud tier only to an entry of your preference ladder.
+Any OpenAI-compatible server
 (llama.cpp server, vLLM, LM Studio) can serve a tier through the
 [OpenAI-compatible provider](docs/integration/openai-compatible.md).
 

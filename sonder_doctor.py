@@ -243,9 +243,10 @@ def schema_epoch_check(config=None):
     ``serve`` refuses to start until ``migrate --adopt-epoch2`` has stamped
     every SPEC-5 domain database at schema epoch 2, so an un-adopted home is a
     FAIL here: a doctor that says WARN/rc 0 while serve refuses is lying about
-    whether the runtime can start. A home with no databases at all is also
-    un-adopted -- serve's own startup creates ``memory.db`` before the gate
-    and then refuses -- so it is reported the same way.
+    whether the runtime can start. A home with no databases at all is not
+    refused by serve: its startup calls ``stamp_fresh_home`` to create a fresh
+    home at epoch 2 before the gate. This read-only check does not stamp, so
+    it still reports such a home as un-adopted (FAIL).
     """
     def check():
         try:
