@@ -14730,16 +14730,15 @@ def artifact_verify(path: str) -> str:
     """Verify every generated file against its manifest and format contract."""
     _maybe_live_reload()
     try:
+        # Refuse a UNC/device spelling before any filesystem call (NTLM leak);
+        # PermissionError is an OSError, so the handler below reports it.
         file_ops._reject_network_path(str(path or ""))
-    except PermissionError as exc:
-        return "ERROR: %s" % exc
-    target = os.path.abspath(os.path.expanduser(str(path or "")))
-    if not os.path.exists(target):
-        return "ERROR: artifact path not found: %s" % target
-    if not os.path.isdir(target):
-        return ("ERROR: artifact path is not a pack directory (expected a "
-                "directory containing manifest.json): %s" % target)
-    try:
+        target = os.path.abspath(os.path.expanduser(str(path or "")))
+        if not os.path.exists(target):
+            return "ERROR: artifact path not found: %s" % target
+        if not os.path.isdir(target):
+            return ("ERROR: artifact path is not a pack directory (expected a "
+                    "directory containing manifest.json): %s" % target)
         result = assetgen.verify_pack(path)
     except FileNotFoundError as exc:
         missing = getattr(exc, "filename", None) or os.path.basename(str(exc)) or "a required file"
