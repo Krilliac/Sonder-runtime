@@ -4106,7 +4106,7 @@ def _openai_model_rows():
         rows.append({"id": identifier, "object": "model", "owned_by": owned_by})
 
     try:
-        records = server.discovered_model_records()
+        records = server.servable_model_records()  # the same catalog _chat_model_selection_error checks
     except Exception:
         records = ()
 

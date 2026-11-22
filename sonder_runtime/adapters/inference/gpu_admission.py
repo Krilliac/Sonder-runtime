@@ -162,6 +162,8 @@ class _Entry:
     digest: str = ""
     store_ok: bool = True
     backend: bool = False
+    # Called once, with no admission lock held, just before the first wait.
+    on_queue: Callable[[], None] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -281,6 +283,9 @@ def _positive(value: object) -> int | None:
 
 class GpuAdmission:
     """The admission service; one per process (see ``process_service``)."""
+
+    # ``admit`` takes ``on_queue``; callers feature-test this before passing it.
+    accepts_queue_callback = True
 
     def __init__(
         self,
@@ -472,8 +477,14 @@ class GpuAdmission:
         self, path: str, payload: Mapping[str, Any] | None, *, origin: str,
         deadline: float | None = None, caller: str = "interactive",
         prewarm: bool = False, ctx_policy: CtxPolicy | None = None,
+        on_queue: Callable[[], None] | None = None,
     ) -> Iterator[AdmissionTicket]:
-        """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value."""
+        """Gate one request. ``deadline`` is an absolute ``time.monotonic()`` value.
+
+        ``on_queue`` is called at most once, on the requesting thread and with
+        no admission lock held, just before the request first waits in the
+        GPU or host-memory queue. An exception from it is logged and ignored.
+        """
         origin = _origin_without_userinfo(origin)
         mode = self.config.mode
         if mode == "off":
@@ -506,7 +517,8 @@ class GpuAdmission:
             yield passthrough_ticket(payload)
             self._after_unload(origin, key)
             return
-        entry = self._enter(lane, body, origin, key, deadline, caller, ctx_policy)
+        entry = self._enter(lane, body, origin, key, deadline, caller, ctx_policy,
+                            on_queue=on_queue)
         token = _HELD_TICKET.set(entry)
         succeeded = False
         try:
@@ -694,11 +706,13 @@ class GpuAdmission:
     def _enter(
         self, lane: AdmissionLane, body: Mapping[str, Any], origin: str, key: str,
         deadline: float | None, caller: str, ctx_policy: CtxPolicy | None,
+        *, on_queue: Callable[[], None] | None = None,
     ) -> _Entry:
         ticket = AdmissionTicket(lane, body, requested_num_ctx=policy.requested_num_ctx(body))
         entry = _Entry(ticket, lane=lane, origin=origin, model_key=key,
                        ticket_id=uuid.uuid4().hex,
-                       pool="embed" if lane is AdmissionLane.EMBED else "gpu")
+                       pool="embed" if lane is AdmissionLane.EMBED else "gpu",
+                       on_queue=on_queue)
         ticket.served_num_ctx = ticket.requested_num_ctx
         if self.config.mode == "observe":
             self._observe(entry, body, deadline, ctx_policy)
@@ -747,6 +761,7 @@ class GpuAdmission:
                     "waited %.0f s for a free %s GPU slot" % (
                         self.config.max_queue_wait_seconds, entry.pool),
                     retry_after_seconds=5.0))
+            self._signal_queued(entry)
             wait_status.report_wait(
                 entry.model_key, detail="every %s GPU slot is busy" % entry.pool)
             self._pause(min(interval, max(0.0, limit - self._clock())))
@@ -765,6 +780,22 @@ class GpuAdmission:
         wait_status.report_wait(
             model_key, free, need, refusal.detail,
             reason=refusal.reason.value, floor_bytes=floor)
+
+    @staticmethod
+    def _signal_queued(entry: _Entry) -> None:
+        """Run ``entry.on_queue`` once; never while holding ``_lock`` or ``_wake``.
+
+        The pool's callback takes the pool lock, and the pool calls
+        ``snapshot()`` (which takes ``_lock``) while holding it, so calling it
+        under an admission lock could deadlock.
+        """
+        callback, entry.on_queue = entry.on_queue, None
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            logger.warning("gpu admission: on_queue callback failed; still queueing", exc_info=True)
 
     def _release_quietly(self, entry: _Entry) -> None:
         if entry.enqueued and self._store is not None:
@@ -817,6 +848,7 @@ class GpuAdmission:
             self._release_quietly(entry)
             with self._lock:
                 self._counters["queued"] += 1
+            self._signal_queued(entry)
             self._report_memory_wait(entry.model_key, refusal)
             self._pause(wait_interval)
         wait_status.report_admitted()

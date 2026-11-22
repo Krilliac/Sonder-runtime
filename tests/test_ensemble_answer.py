@@ -152,7 +152,7 @@ def _stub(monkeypatch, answers, synth="merged answer"):
         tier = model.replace("model-", "")
 
         def gen(prompt, history=None):
-            if "COMPOUNDED ANSWER:" in prompt:
+            if "COMPOUNDED ANSWER:" in prompt or "FINAL FILE:" in prompt:
                 if isinstance(synth, Exception):
                     raise synth
                 return synth
@@ -732,3 +732,28 @@ def test_explicit_think_false_skips_learned_headroom_and_retry(monkeypatch):
 
     assert content == "direct answer"
     assert seen == [(260, False)]
+
+
+@pytest.mark.parametrize("synth_output", [
+    "def add(a, b):\n    return a + b\n```",
+    "```python\ndef add(a, b):\n    return a + b\n```",
+    "```\ndef add(a, b):\n    return a + b\n```\n",
+])
+def test_ensemble_code_mode_strips_trailing_and_wrapper_fences(monkeypatch, synth_output):
+    _stub(monkeypatch, {"a": "def add(a, b):\n    return a+b", "b": "```python\ndef add(a, b):\n    return a + b\n```"}, synth=synth_output)
+    out = server.ensemble_answer("write add", tiers="a,b", mode="code")
+    assert out == "def add(a, b):\n    return a + b"
+    assert not out.rstrip().endswith("```")
+
+
+def test_ensemble_code_mode_single_answer_and_fallback_strip_fences(monkeypatch):
+    _stub(monkeypatch, {"a": "def single():\n    return 1\n```"})
+    assert server.ensemble_answer("write single", tiers="a", mode="code") == "def single():\n    return 1"
+
+    _stub(
+        monkeypatch,
+        {"a": "def a():\n    return 1\n```", "b": "def b():\n    return 2 + 2\n```"},
+        synth=RuntimeError("synth failed"),
+    )
+    out = server.ensemble_answer("write b", tiers="a,b", mode="code")
+    assert out == "def b():\n    return 2 + 2"
