@@ -633,6 +633,70 @@ def test_reroute_never_reaches_a_cloud_model_or_remote_endpoint(
     assert local_ollama.routes == []
 
 
+# --- the reroute and the operator's Ollama pool (Node1 pooled inference) ---
+#
+# With a loopback BASE and a pool holding operator-configured remote workers
+# (each admitted only with SONDER_ALLOW_REMOTE_OLLAMA=1 and https), the reroute
+# may be served by the pool: that is the intended Node1 widening.  A remote
+# BASE is refused whatever the pool holds: the pool never makes a remote
+# primary endpoint eligible.
+
+def _pool(*, remote_workers):
+    return SimpleNamespace(enabled=True, has_remote_workers=remote_workers)
+
+
+def test_reroute_on_a_loopback_base_with_remote_pool_workers_may_use_the_pool(
+        monkeypatch, local_ollama):
+    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
+    graph = _inference_graph(fallback=True)
+    _install(monkeypatch, graph)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        out, content = server._chat_request(_schema_payload(format={"type": "object"}),
+                                            model="qwen2.5:7b")
+    assert content == '{"ok": true}'
+    [post] = local_ollama
+    assert post["local_only"] is False  # the pool may place it on a remote worker
+    assert graph.model_gateway.calls == []
+
+
+def test_reroute_on_a_loopback_base_without_remote_workers_stays_loopback_only(
+        monkeypatch, local_ollama):
+    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=False))
+    graph = _inference_graph(fallback=True)
+    _install(monkeypatch, graph)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        server._chat_request(_schema_payload(format={"type": "object"}), model="qwen2.5:7b")
+    [post] = local_ollama
+    assert post["local_only"] is True
+
+
+def test_reroute_refuses_a_remote_base_even_when_the_pool_has_remote_workers(
+        monkeypatch, local_ollama):
+    monkeypatch.setattr(server, "BASE", "https://ollama.example.net:11434")
+    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
+    graph = _inference_graph(fallback=True)
+    _install(monkeypatch, graph)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        with pytest.raises(server.ModelCallError) as caught:
+            server._chat_request(_schema_payload(format={"type": "object"}),
+                                 model="qwen2.5:7b")
+    assert caught.value.status == 400
+    assert "remote" in caught.value.detail
+    assert local_ollama == [] and graph.model_gateway.calls == []
+
+
+def test_reroute_stays_loopback_only_for_a_local_only_call_even_with_a_pool(
+        monkeypatch, local_ollama):
+    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
+    graph = _inference_graph(fallback=True)
+    _install(monkeypatch, graph)
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        server._chat_request(_schema_payload(format={"type": "object"}), model="qwen2.5:7b",
+                             local_only=True)
+    [post] = local_ollama
+    assert post["local_only"] is True
+
+
 def test_other_bridged_providers_keep_the_plain_refusal(monkeypatch, local_ollama):
     _install(monkeypatch, _graph(_openai_transport()))
     with provider_bridge.bind_rung("openai_compatible", "general"):

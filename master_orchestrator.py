@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -688,7 +689,8 @@ def capacity(
         limits["reserved_capacity"] = max(1, int(requested) - reserved)
     # Ollama's own batching width is the hard ceiling on REAL concurrency --
     # handing it more concurrent requests than it will batch just queues them.
-    ollama_parallel = ollama_parallel_limit()
+    from sonder_runtime.bootstrap import delegation_wiring as _dw
+    ollama_parallel = _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
     if ollama_parallel > 0:
         limits["ollama_num_parallel"] = int(ollama_parallel)
     automatic = max(1, min(limits.values()))
@@ -2737,6 +2739,8 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
                 ),
                 "database": "",
             }
+    from sonder_runtime.application.agents.delegation_runtime import merge_ephemeral_snapshot
+    merge_ephemeral_snapshot(data, include_finished=include_finished, limit=limit)
     data["capacity"] = capacity()
     data["store_error"] = _STORE_ERROR
     return data

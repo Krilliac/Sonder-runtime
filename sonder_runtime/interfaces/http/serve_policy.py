@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import threading
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -64,3 +65,22 @@ def serve_temperature() -> float:
         logger.warning(f"SONDER_SERVE_TEMPERATURE value={value} clamped to {clamped} (valid range 0.0-2.0)")
     logger.debug(f"serve_temperature: resolved={clamped} (raw={raw!r})")
     return clamped
+def extract_request_temperature(options: object, validator: Callable[[object], int | float | None]) -> float | None:
+    """Validate and return a finite request-level ``temperature`` in [0, 2], or ``None``."""
+    if not isinstance(options, Mapping):
+        return None
+    raw = options.get("temperature")
+    if raw is None:
+        return None
+    checked = validator(raw)
+    return None if checked is None else float(checked)
+
+
+@contextmanager
+def maybe_temperature_override(value: float | None, *, session_override: bool = False):
+    """Apply a per-request temperature override unless a request-scoped session override wins."""
+    if value is None or session_override:
+        yield None
+        return
+    with serve_temperature_override(value) as overridden:
+        yield overridden

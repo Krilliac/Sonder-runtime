@@ -183,8 +183,15 @@ def _is_env_admin_open() -> bool:
 
 
 def admin_opt_in_active() -> bool:
-    """True when an authorized local-open/admin caller explicitly opted into denied models."""
-    return bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open()
+    """True when an authorized local-open/admin caller opted into denied models or BYPASS."""
+    if bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open():
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
 
 
 @contextlib.contextmanager
@@ -195,6 +202,52 @@ def admin_opt_in(enabled: bool = True) -> Iterator[None]:
         yield
     finally:
         _ADMIN_OPT_IN.reset(token)
+
+
+_LOCAL_PROVIDERS = frozenset({"", "ollama"})
+
+
+def _sonder_inference_on_loopback() -> bool:
+    """Whether the configured Sonder Inference endpoint is this machine's loopback.
+
+    Read the way the gateway reads it (``config_from_env``, on every call).  The
+    loopback primary is the only Sonder Inference endpoint that counts as local:
+    the approved private workers it places work on (Node1) are reached through
+    it.  A remote endpoint (``SONDER_ALLOW_REMOTE_INFERENCE=1``) does not count,
+    and neither does a configuration that cannot be read.  A loopback endpoint
+    with a remote route behind it does not count either: private inference
+    workers (``SONDER_INFERENCE_PRIVATE_WORKERS``), or the Ollama fallback
+    (``SONDER_INFERENCE_FALLBACK=ollama``) when its primary origin (typed
+    endpoint or ``OLLAMA_HOST``) is not loopback, or when remote Ollama
+    workers are configured (typed, or ``SONDER_OLLAMA_WORKERS``; loopback-only
+    workers do not count), can place the prompt on another machine.
+    """
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
+        from sonder_runtime.adapters.provider_bindings import inference_fallback_from_env
+
+        config = config_from_env()
+        if not config.loopback or config.workers:
+            return False
+        if inference_fallback_from_env(os.environ) == "ollama":
+            from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+
+            if ollama_pool.has_configured_remote_workers():
+                return False
+            if not ollama_endpoint.is_loopback(ollama_endpoint.normalize()):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _is_non_local_provider(provider: Any) -> bool:
+    name = str(provider or "").strip().lower()
+    if name in _LOCAL_PROVIDERS:
+        return False
+    if name == "sonder_inference":
+        return not _sonder_inference_on_loopback()
+    return True
 
 
 def admit(
@@ -221,7 +274,7 @@ def admit(
     if admin_opt_in_active():
         target = tuple(resolve())
         model, cloud, _augment, label = target
-        if model is not None and not cloud and not provider_for(label) and str(label or "").startswith("model:"):
+        if model is not None and not cloud and not _is_non_local_provider(provider_for(label)) and str(label or "").startswith("model:"):
             return RestrictedRun(
                 lane=lane_entry.lane, model=str(model), tools=frozenset(),
                 profiles=("admin-opt-in",), secret_globs=(),
@@ -236,9 +289,10 @@ def admit(
         return None, _refusal(
             "model '%s' has a restricted tool grant but is not an installed local model." % (selector,)
         )
-    if cloud or provider_for(label):
+    if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
-            "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
+            "model '%s' has a restricted tool grant, which applies only to a local model "
+            "(Ollama, or Sonder Inference on loopback)." % (selector,)
         )
     confirmed = decide(model, policy)
     tools = decision.tools & confirmed.tools
@@ -483,6 +537,14 @@ class RestrictedRun:
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
+        if self.admin_open:
+            def admin_check(tool_name: str, args: Any) -> str:
+                if not self.still_granted():
+                    return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
+                return str(inner(tool_name, args) or "") if inner is not None else ""
+
+            return admin_check
+
         def check(tool_name: str, args: Any) -> str:
             if tool_name not in self.tools:
                 return _refusal(
@@ -613,6 +675,8 @@ class RestrictedRun:
         The globs are read again now (:meth:`current_secret_globs`); when they
         cannot be read the whole result is withheld.
         """
+        if self.admin_open:
+            return observation
         if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from sonder_runtime.adapters.security import role_tool_policy
+from sonder_runtime.application.agents.delegation_runtime import can_delegate
+from sonder_runtime.domain.agents.delegation import DELEGATION_TOOLS
 from sonder_runtime.domain.agents.tool_help import tool_help_text
 from sonder_runtime.domain.chat_tools import tool_backend_label
 from sonder_runtime.domain.cloud_access import LEGACY_ERROR_PREFIX, has_legacy_error_prefix
@@ -39,9 +41,12 @@ def _filtered_catalog(
         mode = str(permission_policy.current_mode() or "")
     except Exception:
         mode = ""
+    allow_delegation = can_delegate()
     out: dict[str, Any] = {}
     for name, meta in (catalog or {}).items():
         if name in blocked_tools:
+            continue
+        if not allow_delegation and name in DELEGATION_TOOLS:
             continue
         if role_tool_policy.agent_refusal(name):
             continue

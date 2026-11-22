@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from sonder_runtime.domain.agents.delegation import BOARD_MESSAGE_KINDS, DELEGATION_TOOLS
+
 TOOL_BACKEND_CONTAINER = "container"
 TOOL_BACKEND_HOST = "host"
 TOOL_BACKEND_WORKSPACE = "workspace"
@@ -229,6 +231,101 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         },
         backend=TOOL_BACKEND_HOST,
     ),
+    ChatToolDefinition(
+        name="report_progress",
+        description="Post a concise status or thinking update to the shared live agent progress board.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Short status or milestone update."},
+                "thinking": {"type": "string", "default": ""},
+                "phase": {"type": "string", "default": "progress"},
+            },
+            "required": ["summary"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
+        name="post_to_board",
+        description=(
+            "Post a message to the shared peer coordination board (supports @handle mentions "
+            "for handoffs, findings, praise, complaints/pushback, or brief jokes)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Message for teammates; use @handle to mention a peer."},
+                "kind": {
+                    "type": "string",
+                    "enum": sorted(BOARD_MESSAGE_KINDS),
+                    "default": "chat",
+                },
+            },
+            "required": ["text"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
+        name="read_board",
+        description="Read recent messages from the shared peer coordination board (optionally filtered by since_seq or mentions).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "since_seq": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                "mentions_only": {"type": "boolean", "default": False},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="delegate_task",
+        description=(
+            "Delegate one bounded subtask to a depth-1 child agent (depth 0 only; "
+            "children run independently across Main/Node1 and cannot delegate further)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Subtask instruction for the child agent."},
+                "name": {"type": "string", "default": "", "description": "Optional handle such as coder, scout, security, skeptic."},
+                "role": {"type": "string", "default": ""},
+                "tier": {"type": "string", "default": ""},
+                "model": {"type": "string", "default": ""},
+                "project": {"type": "string", "default": ""},
+                "cwd": {"type": "string", "default": ""},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 16, "default": 8},
+                "read_only": {"type": "boolean"},
+            },
+            "required": ["task"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
+        name="spawn_agents",
+        description=(
+            "Spawn multiple bounded depth-1 child agents in parallel across Main and Node1 "
+            "(depth 0 only; children coordinate via the peer board and cannot delegate further)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "List of task strings or {task, name, role, personality, tier, model, project, cwd, max_steps, read_only} objects.",
+                    "items": {"type": "object"},
+                },
+                "tier": {"type": "string", "default": ""},
+                "model": {"type": "string", "default": ""},
+                "project": {"type": "string", "default": ""},
+                "cwd": {"type": "string", "default": ""},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 16, "default": 8},
+                "read_only": {"type": "boolean"},
+            },
+            "required": ["tasks"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
 )
 
 _BACKEND_BY_TOOL = {item.name: item.backend for item in CORE_CHAT_TOOL_DEFINITIONS}
@@ -303,6 +400,7 @@ def chat_tools_payload(
     *,
     allowed_names: Sequence[str] | frozenset[str] | None = None,
     extra_definitions: Sequence[ChatToolDefinition] = (),
+    depth: int = 0,
 ) -> list[dict[str, Any]]:
     """Render bounded Ollama/OpenAI tool definitions for ``allowed_names``."""
     items = [*CORE_CHAT_TOOL_DEFINITIONS, *extra_definitions]
@@ -311,6 +409,8 @@ def chat_tools_payload(
     allow = None if allowed_names is None else set(allowed_names)
     for entry in items:
         if entry.name in seen:
+            continue
+        if int(depth) >= 1 and entry.name in DELEGATION_TOOLS:
             continue
         if allow is not None and entry.name not in allow:
             continue

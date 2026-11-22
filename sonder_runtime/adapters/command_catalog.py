@@ -448,6 +448,9 @@ _READ_ONLY = frozenset({
     # (bootstrap/reference_agent_tools.py): query and count only, no model
     # call, no write, no network; the index path is never an argument.
     "reference_search",
+    # Transient in-memory agent progress / peer-board coordination only (no
+    # disk, database, network, or command execution).
+    "report_progress", "post_status", "post_to_board", "read_board",
 })
 
 # Branches whose real work is done by module-level functions that front no
