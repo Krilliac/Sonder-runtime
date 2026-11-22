@@ -122,9 +122,8 @@ PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"(?:\\?[\"'])?\s*[:=]\s*)"
-        r"(\\?\"[^\"\r\n]*\"|\\?'[^'\r\n]*'|\[REDACTED\](?=[\s,;}\])]|$)|"
-        r"\\?[\"']?[^\s\"']+[\"']?)"
+        r"[\"']?\s*[:=]\s*)"
+        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
     _URL_USERINFO,
     re.compile(
@@ -150,6 +149,52 @@ PATTERNS: tuple[re.Pattern, ...] = (
 # been redacted: the result may be non-idempotent, and a second call can
 # redact further.
 _MAX_PASSES = 8
+
+# Second stage, run last: on the text the pattern passes and the path-prefix
+# labels have settled on. The same credential keys, with a value grammar that
+# also takes what the rule in PATTERNS stops short of. A quoted value (a
+# JSON-escaped quote, \", counts as a quote) may hold , ; { } and the other
+# quote; any other value runs to whitespace or , ; { } through every quote and
+# backslash on the way, so a value with fewer than four characters before an
+# interior quote is taken too. It only swaps matched text for the marker, and
+# it runs on exactly the text the earlier steps would have returned, so it can
+# never show a character they hid. Run any earlier and it could take the start
+# of a private path (up to a space in it), so that path no longer matches its
+# prefix and the rest of it is shown; run inside the passes and it could eat a
+# key that a later pass still needs.
+_CREDENTIAL_VALUE = re.compile(
+    r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"(?:\\?[\"'])?\s*[:=]\s*)"
+    r'''("(?:[^"\\\r\n]++|\\[^\r\n])++"|'(?:[^'\\\r\n]++|\\[^\r\n])++'|\\"(?:[^"\\\r\n]++|\\(?!"))++\\"|\\'(?:[^'\\\r\n]++|\\(?!'))++\\'|\[REDACTED\](?=[\s,;}\])]|$)|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*|[^\s"'}{,;]++(?:[,;]++[^\s"'}{,;]++)++)'''
+)
+
+# Stage 1's unquoted-width rule turns ``password: "correct horse staple"``
+# into ``password: [REDACTED] horse staple"`` (eating the opening quote and
+# first word). When the key itself has no unclosed leading quote, finish
+# scrubbing that single split quoted phrase once before the Stage 2 loop.
+_SPLIT_QUOTED_CREDENTIAL = re.compile(
+    r"(?i)((?:(?<![\"'])(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"|\"(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))\""
+    r"|'(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))')"
+    r"\s*[:=]\s*)"
+    r"(\[REDACTED\][ \t]++[^\"'\r\n:={}\[\],;]++[\"'])"
+)
+
+
+def _sub_credential_values(text):
+    """The second stage over settled text, repeated until stable (bounded)."""
+    if REDACTED in text:
+        text = _SPLIT_QUOTED_CREDENTIAL.sub(lambda m: m.group(1) + REDACTED, text)
+    for _ in range(_MAX_PASSES):
+        after = _CREDENTIAL_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
+        if after == text:
+            break
+        text = after
+    return text
 
 _PEM_BEGIN_MARK = "-----BEGIN "
 _PEM_END_MARK = "-----END "
@@ -237,6 +282,12 @@ def redact_text(
     for value in sorted({v for v in secret_values if v}, key=len, reverse=True):
         if value in text:
             text = text.replace(value, REDACTED)
+    # Replace private path prefixes before the pattern passes so a greedy
+    # credential value cannot eat the start of a spaced path and leave the
+    # tail behind unredacted.
+    for prefix in path_prefixes:
+        if prefix and prefix in text:
+            text = text.replace(prefix, WORKSPACE_LABEL)
     # A substitution can create a new word boundary (``[REDACTED]Cookie: a=b``),
     # so repeat the pattern passes until the text is stable (see _MAX_PASSES).
     for _ in range(_MAX_PASSES):
@@ -244,9 +295,7 @@ def redact_text(
         text = _apply_patterns(text)
         if text == before:
             break
-    for prefix in path_prefixes:
-        if prefix and prefix in text:
-            text = text.replace(prefix, WORKSPACE_LABEL)
+    text = _sub_credential_values(text)
     return text
 
 

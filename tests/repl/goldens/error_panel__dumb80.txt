@@ -2,7 +2,7 @@ explode now
 working...
 
 x error
-ERROR: local Ollama rejected the model request (HTTP 500) after 1 attempt(s):
-fake model crashed
+ERROR: local Ollama at http://127.0.0.1:<port> rejected the model request (HTTP
+500) after 1 attempt(s): fake model crashed
   failed after <t> | 1 model call
 >

@@ -41,6 +41,12 @@ _GIT_PROGRAM_KEY_RE = re.compile(
     r"(?P<key>clean|smudge|process|required|driver|textconv)$",
     re.IGNORECASE | re.DOTALL,
 )
+# Driver names an override can address.  ``-c`` splits at the first '=', so a
+# name containing '=' (``filter.a=b.clean=...`` sets ``filter.a``) would leave
+# the real driver live; quotes, whitespace, control and non-ASCII characters
+# are refused for the same reason.  Matched without IGNORECASE so no Unicode
+# case-fold (KELVIN SIGN, long s) slips into the ASCII ranges.
+_SAFE_DRIVER_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # ``git merge-file`` is git's own three-way text merge: what the built-in
 # driver does, with none of the repository's configuration.
 BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
@@ -103,16 +109,9 @@ def driver_overrides(keys: Iterable[str]) -> list[str]:
         if match is None:
             raise GitProgramConfigError("unexpected git driver configuration key: %s" % key)
         section, name = match.group("section").lower(), match.group("name")
-        # ``git -c <key>=<value>`` is split at the FIRST ``=``: a driver name
-        # holding one would set ``<section>.<text before it>`` and leave the
-        # repository's program in place.  A control character cannot be
-        # carried in a key either.  A name whose bytes were not valid UTF-8
-        # was decoded to U+FFFD or a lone surrogate: the ``-c`` argument would
-        # name a different subsection than the one configured.  None of these
-        # can be overridden, so refuse.
-        if "=" in name or any(_unexpressible(char) for char in name):
+        if _SAFE_DRIVER_NAME_RE.fullmatch(name) is None:
             raise GitProgramConfigError(
-                f"git driver name cannot be overridden on the command line: {key!r}"
+                f"git {section} driver name {name!r} cannot be overridden safely"
             )
         if (section, name) in seen:
             continue

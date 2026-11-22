@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 LEGACY_ERROR_PREFIX = "ERROR:"
+LEGACY_CONTACTING_PREFIX = "ERROR contacting "
 _TRUE = frozenset({"1", "true", "yes", "on"})
 
 
@@ -13,7 +14,8 @@ def cloud_allowed(environment) -> bool:
 
 def has_legacy_error_prefix(value: object) -> bool:
     """Return whether a compatibility-boundary value is a legacy error."""
-    return str(value or "").startswith(LEGACY_ERROR_PREFIX)
+    text = str(value or "")
+    return text.startswith(LEGACY_ERROR_PREFIX) or text.startswith(LEGACY_CONTACTING_PREFIX)
 
 
 def cloud_disabled_message() -> str:

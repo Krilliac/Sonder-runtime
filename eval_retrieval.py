@@ -192,7 +192,8 @@ def run_task(task, model=None, digest_probe=None, expected_digest=None):
 
     prove_model()
     retrieval_ok, retrieval_detail = _run_condition(
-        prompt, check, lambda p: server.sonder(p, model_override=model))
+        # Both arms at 0.2, so the A/B compares retrieval, not temperature.
+        prompt, check, lambda p: server.sonder(p, model_override=model, temperature=0.2))
     prove_model()
     baseline_ok, baseline_detail = _run_condition(
         prompt, check, lambda p: baseline_generate(p, model))

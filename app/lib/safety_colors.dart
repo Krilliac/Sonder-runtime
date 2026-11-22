@@ -80,6 +80,8 @@ IconData permissionModeIcon(String mode) {
       return Icons.edit_outlined;
     case 'auto':
       return Icons.fast_forward_outlined;
+    case 'bypass':
+      return Icons.gpp_maybe_outlined;
     default:
       return Icons.help_outline;
   }

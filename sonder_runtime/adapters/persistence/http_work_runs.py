@@ -15,6 +15,11 @@ Bounds: answers are truncated to ``MAX_OUTPUT_CHARS``; finished rows expire
 after ``retention_seconds()`` and the table keeps at most ``row_limit()`` rows
 (oldest finished first).  ``running`` rows are never pruned; a row left
 ``running`` by an earlier process is reconciled to ``interrupted``.
+
+Terminal statuses beyond the lane's own return: ``refused`` (the host or lane
+declined), ``failed`` (an error or an unmet evidence requirement), ``busy`` (no
+capacity; retryable) and ``delegated`` (the work started a fleet or Autopilot
+run that continues under its own id, listed in the narration links).
 """
 from __future__ import annotations
 
@@ -31,7 +36,7 @@ from sonder_runtime.platform import paths as sonder_paths
 
 STATUSES = (
     "running", "returned", "unknown", "refused", "cancelled",
-    "budget_exceeded", "interrupted", "failed",
+    "budget_exceeded", "interrupted", "failed", "busy", "delegated",
 )
 TERMINAL_STATUSES = frozenset(STATUSES) - {"running"}
 MAX_OUTPUT_CHARS = 256 * 1024
@@ -87,6 +92,7 @@ def _connect() -> sqlite3.Connection:
                 # Additive migration for databases created before narration.
                 _ensure_narration_column(conn)
                 conn.commit()
+                _ensure_status_vocabulary(conn)
             finally:
                 conn.close()
             if os.name != "nt":
@@ -105,6 +111,61 @@ def _ensure_narration_column(conn) -> None:
         conn.execute("ALTER TABLE http_work_runs ADD COLUMN narration TEXT NOT NULL DEFAULT '{}'")
 
 
+_COLUMNS = ("run_id, owner_scope, process_id, status, created_ts, updated_ts, deadline_ts, "
+            "cancel_requested, output, output_truncated, narration")
+
+
+def _ensure_status_vocabulary(conn) -> None:
+    """Rebuild a table whose status CHECK predates a status in ``STATUSES``.
+
+    SQLite cannot alter a CHECK constraint, so an older database is copied into
+    a table created from the current schema inside one transaction.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'http_work_runs'"
+    ).fetchone()
+    if row is None or all("'%s'" % status in (row[0] or "") for status in STATUSES):
+        return
+    try:
+        conn.executescript(
+            "BEGIN IMMEDIATE;"
+            "DROP INDEX IF EXISTS http_work_runs_owner;"
+            "ALTER TABLE http_work_runs RENAME TO http_work_runs_old;"
+            + _SCHEMA +
+            "INSERT INTO http_work_runs(%s) SELECT %s FROM http_work_runs_old;"
+            "DROP TABLE http_work_runs_old;"
+            "COMMIT;" % (_COLUMNS, _COLUMNS)
+        )
+    except BaseException:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        raise
+
+
+_MAX_AWAITING = 16
+
+
+def _waiting(narration: dict) -> list[dict]:
+    """Waiting approvals, oldest first (a legacy single entry is folded in)."""
+    found: dict[str, dict] = {}
+    entries = narration.get("awaiting_approvals")
+    for item in (entries.values() if isinstance(entries, dict) else ()):
+        if isinstance(item, dict) and item.get("call_id"):
+            found[str(item["call_id"])] = item
+    legacy = narration.get("awaiting_approval")
+    if isinstance(legacy, dict) and legacy.get("call_id"):
+        found.setdefault(str(legacy["call_id"]), legacy)
+
+    def order(item: dict) -> tuple[float, str]:
+        try:
+            since = float(item.get("since") or 0.0)
+        except (TypeError, ValueError):
+            since = 0.0
+        return (since, str(item["call_id"]))
+
+    return sorted(found.values(), key=order)
+
+
 def _public(row) -> dict:
     try:
         narration = json.loads(row["narration"] or "{}")
@@ -112,9 +173,17 @@ def _public(row) -> dict:
         narration = {}
     if not isinstance(narration, dict):
         narration = {}
+    waiting = _waiting(narration) if row["status"] == "running" else []
     return {
         "id": row["run_id"],
         "status": row["status"],
+        # ``status`` stays ``running`` while a run waits on an operator; the
+        # phase names what it is waiting for.  ``awaiting_approval`` is the
+        # oldest waiting call, ``awaiting_approvals`` all of them.
+        "phase": "awaiting_approval" if waiting else row["status"],
+        "awaiting_approval": waiting[0] if waiting else None,
+        "awaiting_approvals": waiting,
+        "has_output": bool(row["output"]),
         "created_at": row["created_ts"],
         "updated_at": row["updated_ts"],
         "deadline_at": row["deadline_ts"],
@@ -124,6 +193,7 @@ def _public(row) -> dict:
         "narration": narration,
         "acknowledgement": narration.get("acknowledgement", ""),
         "result_receipt": narration.get("result_receipt", {}),
+        "pending_refusal": narration.get("pending_refusal") or None,
     }
 
 
@@ -171,6 +241,25 @@ def finish(run_id: str, status: str, output: str = "", *, now: float | None = No
     conn = _connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT narration FROM http_work_runs WHERE run_id = ? AND status = 'running'",
+            (run_id,),
+        ).fetchone()
+        if row is not None:
+            try:
+                narr = json.loads(row[0] or "{}")
+            except (TypeError, ValueError):
+                narr = {}
+            stale = ["awaiting_approval", "awaiting_approvals"]
+            if status in {"returned", "cancelled", "interrupted", "delegated"}:
+                stale.append("pending_refusal")
+            if isinstance(narr, dict) and any(key in narr for key in stale):
+                for key in stale:
+                    narr.pop(key, None)
+                conn.execute(
+                    "UPDATE http_work_runs SET narration = ? WHERE run_id = ?",
+                    (json.dumps(narr, separators=(",", ":"), ensure_ascii=True), run_id),
+                )
         conn.execute(
             "UPDATE http_work_runs SET status = ?, output = ?, output_truncated = ?, "
             "updated_ts = ? WHERE run_id = ? AND status = 'running'",
@@ -183,12 +272,15 @@ def finish(run_id: str, status: str, output: str = "", *, now: float | None = No
 
 
 def _update_narration(run_id: str, mutate) -> None:
-    """Apply a bounded narration update without exposing another store."""
+    """Apply a bounded narration update without exposing another store.
+
+    ``mutate(value, status)`` receives the narration dict and the row status.
+    """
     conn = _connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT narration FROM http_work_runs WHERE run_id = ?", (run_id,)
+            "SELECT narration, status FROM http_work_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
         if row is None:
             conn.rollback()
@@ -197,7 +289,7 @@ def _update_narration(run_id: str, mutate) -> None:
             value = json.loads(row[0] or "{}")
         except (TypeError, ValueError):
             value = {}
-        value = mutate(value if isinstance(value, dict) else {})
+        value = mutate(value if isinstance(value, dict) else {}, str(row[1]))
         if not isinstance(value, dict):
             raise ValueError("narration mutation must return a mapping")
         conn.execute(
@@ -209,20 +301,73 @@ def _update_narration(run_id: str, mutate) -> None:
         conn.close()
 
 
-def set_narration(run_id: str, *, acknowledgement: str = "", activity_id: str = "", result_receipt=None) -> None:
-    """Persist the owner-visible acknowledgement and optional activity id."""
+def set_narration(
+    run_id: str,
+    *,
+    acknowledgement: str = "",
+    activity_id: str = "",
+    result_receipt=None,
+    pending_refusal: dict | None = None,
+    clear_pending_refusal: bool = False,
+    awaiting_approval: dict | None = None,
+    clear_awaiting_approval: bool | str = False,
+) -> None:
+    """Persist the owner-visible acknowledgement, optional activity id, and pending refusal."""
     acknowledgement = str(acknowledgement or "")[:2000]
     activity_id = str(activity_id or "")[:256]
 
-    def mutate(value):
+    def mutate(value, status):
         if acknowledgement:
             value["acknowledgement"] = acknowledgement
         if activity_id:
             value["activity_id"] = activity_id
         if isinstance(result_receipt, dict):
             allowed = {"status", "work_run_id", "requested_mode", "routing_reason", "session_ref",
-                       "admission_event_id", "return_event_id", "source_event_id", "get_url", "cancel_url"}
+                       "admission_event_id", "return_event_id", "source_event_id", "get_url", "cancel_url",
+                       "child_run_id"}
             value["result_receipt"] = {key: str(item)[:512] for key, item in result_receipt.items() if key in allowed}
+        entries = value.get("awaiting_approvals")
+        if not isinstance(entries, dict):
+            entries = {}
+        legacy = value.pop("awaiting_approval", None)
+        if isinstance(legacy, dict) and legacy.get("call_id"):
+            entries.setdefault(str(legacy["call_id"])[:256], legacy)
+        if clear_awaiting_approval is True:
+            entries.clear()
+        elif isinstance(clear_awaiting_approval, str) and clear_awaiting_approval:
+            entries.pop(clear_awaiting_approval[:256], None)
+        elif (status == "running" and isinstance(awaiting_approval, dict)
+              and awaiting_approval.get("call_id")):
+            key = str(awaiting_approval["call_id"])[:256]
+            if key in entries or len(entries) < _MAX_AWAITING:
+                entries[key] = {
+                    name: str(awaiting_approval[name])[:256]
+                    for name in ("call_id", "tool", "since", "wait_seconds")
+                    if awaiting_approval.get(name) is not None
+                }
+        if entries:
+            value["awaiting_approvals"] = entries
+        else:
+            value.pop("awaiting_approvals", None)
+        if clear_pending_refusal:
+            value.pop("pending_refusal", None)
+        elif isinstance(pending_refusal, dict) and pending_refusal:
+            kept: dict[str, object] = {}
+            for key in ("call_id", "tool", "risk", "mode", "mode_label", "reason"):
+                if key in pending_refusal and pending_refusal[key] is not None:
+                    kept[key] = str(pending_refusal[key])[:1000]
+            if "detail" in pending_refusal and pending_refusal["detail"] is not None:
+                kept["detail"] = str(pending_refusal["detail"])[:4000]
+            for bkey in ("detail_truncated", "bidi_warning"):
+                if bkey in pending_refusal:
+                    kept[bkey] = bool(pending_refusal[bkey])
+            if "detail_chars" in pending_refusal and pending_refusal["detail_chars"] is not None:
+                kept["detail_chars"] = int(pending_refusal["detail_chars"])
+            if "bidi_chars" in pending_refusal and isinstance(pending_refusal["bidi_chars"], (list, tuple)):
+                kept["bidi_chars"] = [str(c)[:16] for c in pending_refusal["bidi_chars"][:16]]
+            if "remedies" in pending_refusal and isinstance(pending_refusal["remedies"], list):
+                kept["remedies"] = pending_refusal["remedies"][:8]
+            value["pending_refusal"] = kept
         return value
 
     _update_narration(run_id, mutate)
@@ -234,7 +379,7 @@ def link_run(run_id: str, kind: str, child_id: str) -> None:
     if not kind or not child_id:
         return
 
-    def mutate(value):
+    def mutate(value, _status):
         links = value.get("links", [])
         if not isinstance(links, list):
             links = []
@@ -245,6 +390,23 @@ def link_run(run_id: str, kind: str, child_id: str) -> None:
         return value
 
     _update_narration(run_id, mutate)
+
+
+def links(run_id: str) -> list[dict]:
+    """The child ids a run linked so far (``[{"kind", "id"}]``), oldest first."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT narration FROM http_work_runs WHERE run_id = ?", (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    try:
+        value = json.loads(row[0] or "{}") if row is not None else {}
+    except (TypeError, ValueError):
+        value = {}
+    found = value.get("links", []) if isinstance(value, dict) else []
+    return [dict(item) for item in found if isinstance(item, dict)]
 
 
 def request_cancel(run_id: str, *, owner_scope: str) -> dict | None:
@@ -336,5 +498,5 @@ __all__ = [
     "MAX_OUTPUT_CHARS", "STATUSES", "TERMINAL_STATUSES", "cancel_requested",
     "database_path", "finish", "get", "recent", "reconcile", "request_cancel",
     "reset_for_tests", "retention_seconds", "row_limit", "start",
-    "set_narration", "link_run",
+    "set_narration", "link_run", "links",
 ]

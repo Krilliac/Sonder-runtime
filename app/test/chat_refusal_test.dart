@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sonder_runtime/api.dart' show ApprovalsApi, PendingApproval;
 import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat/classify.dart';
 import 'package:sonder_runtime/models.dart';
@@ -247,7 +248,8 @@ void main() {
     await unmountChat(tester);
   });
 
-  testWidgets('a 403 says who can approve', (tester) async {
+  testWidgets('a 403 on the lookup says who can list approvals',
+      (tester) async {
     final backend = FakeChatBackend()
       ..lookupOverride = const PendingCallLookup(ApprovalStatus.forbidden,
           message: 'Approvals need a developer or admin account.');
@@ -359,6 +361,31 @@ void main() {
     });
   });
 
+  testWidgets('a 403 on approve says an administrator is needed',
+      (tester) async {
+    // A developer can list (the lookup finds the call) but the approve
+    // answers 403: the notice must name the administrator, not tell a
+    // developer to sign in as a developer.
+    final backend = FakeChatBackend()
+      ..approvalOutcome = const ApprovalOutcome(ApprovalStatus.forbidden,
+          message: ApprovalsApi.forbiddenToIssue);
+    await pumpChat(tester, backend);
+    await _sendRefused(tester, backend);
+    await tester.tap(find.byKey(const Key('refusal-approve')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('approval-confirm')));
+    await tester.pumpAndSettle();
+    expect(backend.approvals, hasLength(1));
+    expect(find.byKey(const Key('approval-forbidden')), findsOneWidget);
+    expect(
+        find.textContaining('needs an administrator account',
+            findRichText: true),
+        findsOneWidget);
+    expect(find.textContaining('developer or admin', findRichText: true),
+        findsNothing);
+    await unmountChat(tester);
+  });
+
   group('SonderApiChatBackend.approveCall', () {
     Future<ApprovalOutcome> approveWith(
         http.Response Function() reply, List<http.Request> seen) {
@@ -439,7 +466,78 @@ void main() {
               '{"error":{"message":"forbidden","code":"FORBIDDEN"}}', 403),
           []);
       expect(outcome.status, ApprovalStatus.forbidden);
-      expect(outcome.message, 'Approvals need a developer or admin account.');
+      expect(outcome.message, ApprovalsApi.forbiddenToIssue);
     });
+
+    test('a developer approving gets 403 and is told to use an administrator',
+        () async {
+      final outcome = await approveWith(
+          () => http.Response(
+              '{"error":{"message":"administrator authorization is required '
+              'to approve or revoke calls","type":"forbidden",'
+              '"code":"FORBIDDEN"}}',
+              403),
+          []);
+      expect(outcome.status, ApprovalStatus.forbidden);
+      expect(
+          outcome.message,
+          'Approving or revoking needs an administrator account or the '
+          'deployment API key.');
+    });
+
+    test('a 403 on the lookup still names developer or admin', () async {
+      final found = await http.runWithClient(
+        () =>
+            SonderApiChatBackend(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
+                .lookupPendingCall('3f9a12c0'),
+        () => MockClient((r) async => http.Response(
+            '{"error":{"message":"forbidden","code":"FORBIDDEN"}}', 403)),
+      );
+      expect(found.status, ApprovalStatus.forbidden);
+      expect(found.message, 'Approvals need a developer or admin account.');
+    });
+  });
+
+  testWidgets('post-turn slash refusals (/mkdir, /run) open sheet with detail & bidi warning',
+      (tester) async {
+    final backend = FakeChatBackend()
+      ..pendingCalls = {
+        '3f9a12c0': const PendingApproval(
+          callId: '3f9a12c0',
+          digest: _fakeDigest,
+          tool: 'run_code',
+          preview: 'language=python',
+          detail: 'print("hello")',
+          bidiWarning: true,
+          mode: 'manual',
+        ),
+      };
+    await pumpChat(tester, backend);
+    await tester.enterText(find.byType(TextField), '/run');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    backend.lastTurn.done(
+      'refused /run: execution asks in manual mode (mode: manual)',
+      metadata: const ChatResponseMetadata(
+        status: 'refused',
+        refusal: ChatRefusal(
+          callId: '3f9a12c0',
+          tool: 'run_code',
+          reason: 'execution asks in manual mode',
+          mode: 'manual',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byKey(const Key('refusal-notice')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('refusal-approve')));
+    await tester.pumpAndSettle();
+    expect(find.text('print("hello")'), findsOneWidget);
+    expect(find.textContaining('Hidden bidirectional'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('approval-cancel')));
+    await tester.pumpAndSettle();
+    await unmountChat(tester);
   });
 }

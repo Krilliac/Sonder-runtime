@@ -174,6 +174,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/project": "sets the session's project scope; assignment only",
     "/trace": "session output toggle (apply_trace)",
     "/strict": "session output toggle (apply_strict)",
+    "/temp": "sets this session's sampling temperature in process memory (temperature_settings.STORE); no tool call",
     "/model": "chooses which model answers; no tool call",
     "/persona": "chooses the persona; reads personas.names()",
     "/prompts": "lists/shows editable prompt files (prompt_store.command); reload only clears a read cache",

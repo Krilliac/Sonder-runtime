@@ -146,7 +146,10 @@ def _validate_target(url: str) -> tuple[urllib.parse.ParseResult, tuple[str, ...
     path_names = {part.casefold() for part in decoded_path.split("/") if part}
     if any(_is_sensitive_path_name(name) for name in path_names):
         raise ValueError("probe URL targets sensitive control-plane state")
-    for key, _value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+    for segment in re.split(r"[&;]", parsed.query):
+        if not segment:
+            continue
+        key, _sep, _value = segment.partition("=")
         normalized = re.sub(
             r"[^a-z0-9]+", "_", _fully_unquote(key).casefold(),
         ).strip("_")
@@ -371,7 +374,7 @@ def _request_once(
         # (spaces, non-ASCII) are encoded.
         query = urllib.parse.quote(
             parsed.query,
-            safe="!$&'()*+,;=:@/?-._~%",
+            safe="!$&'()*+,=:@/?-._~%",
         )
         target = urllib.parse.urlunsplit(("", "", path, query, ""))
         request = (

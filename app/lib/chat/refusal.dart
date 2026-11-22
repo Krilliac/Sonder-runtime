@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../ui/approval_sheet.dart'
     show ApprovalReceipt, ApprovalRequest, showApprovalSheet;
-import '../api/approvals.dart' show PendingApproval;
+import '../api/approvals.dart' show ApprovalsApi, PendingApproval;
 import '../theme.dart' show SonderSpace;
 import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
 import 'backend.dart';
@@ -177,12 +177,17 @@ class _RefusalNoticeState extends State<RefusalNotice> {
           'command at the Sonder console on the PC.',
         );
       case ApprovalStatus.forbidden:
-        return const WorkspaceNotice(
+        // The lookup (a list) and the approve answer 403 for different
+        // roles, so show the message the backend chose for the step that
+        // failed.
+        return WorkspaceNotice(
           framed: false,
-          key: Key('approval-forbidden'),
+          key: const Key('approval-forbidden'),
           kind: StatusKind.warn,
           liveRegion: true,
-          title: 'Approvals need a developer or admin account',
+          title: outcome.message.isNotEmpty
+              ? outcome.message
+              : ApprovalsApi.forbiddenToIssue,
         );
       case ApprovalStatus.failed:
         return WorkspaceNotice(
@@ -231,8 +236,12 @@ ApprovalRequest approvalRequestForPending(
     ApprovalRequest(
       tool: call.tool.isEmpty ? 'call' : call.tool,
       callId: call.callId,
-      arguments:
-          call.preview.isEmpty ? const [] : [('arguments', call.preview)],
+      arguments: [
+        if (call.preview.isNotEmpty) ('arguments', call.preview),
+        if (call.detail.isNotEmpty) ('detail', call.detail),
+        if (call.bidiWarning)
+          ('warning', 'Hidden bidirectional or control characters detected'),
+      ],
       mode: call.mode.isNotEmpty
           ? call.mode
           : (r.mode.isEmpty ? 'the current' : r.mode),

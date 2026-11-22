@@ -91,7 +91,7 @@ void main() {
         isA<SonderException>().having(
           (e) => e.message,
           'message',
-          'Approvals need a developer or admin account.',
+          'Approving or revoking needs an administrator account or the deployment API key.',
         ),
       ),
     );

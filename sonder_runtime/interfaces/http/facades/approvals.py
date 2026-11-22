@@ -7,8 +7,9 @@ Two halves of one flow (app plan S1/S2):
   chat response carries, so a client can show *what* was refused and offer
   "approve this call once" without parsing prose. ``turn_refusal_receipt``
   builds it for a turn from the permission-policy port serve.py passes in.
-* ``approvals_payload`` / ``approve_call`` / ``revoke_approval`` serve
-  ``GET /v1/approvals``, ``POST /v1/approvals/<call_id>`` and
+* ``approvals_payload`` / ``approve_call`` / ``deny_call`` / ``revoke_approval``
+  serve ``GET /v1/approvals``, ``POST /v1/approvals/<call_id>``,
+  ``POST /v1/approvals/deny/<call_id>`` and
   ``POST /v1/approvals/revoke/<nonce>`` over the same approval ledger the
   permission gate spends from.
 
@@ -24,7 +25,10 @@ What an HTTP approval can and cannot do:
 * It is bound to that call's full digest (tool name plus canonical,
   credential-free arguments). The path takes the 16-character call id or the
   full 64-character digest, never a shorter prefix, and a body ``digest`` or
-  ``tool`` that disagrees with the pending call is refused.
+  ``tool`` that disagrees with the pending call is refused. When the same call
+  is pending for more than one owner the bare id is refused (409
+  ``CALL_AMBIGUOUS``); ``<call id>@<owner tag>`` (a listing's ``call_ref``)
+  names one row, and the approval or denial is bound to that row's owner.
 * At most one open approval exists per call: a second POST for a call that
   already has an open approval is refused with that approval, so a retried
   request can never let the call run twice.
@@ -46,6 +50,7 @@ __all__ = [
     "approval_view",
     "approvals_payload",
     "approve_call",
+    "deny_call",
     "pending_view",
     "refusal_receipt",
     "revoke_approval",
@@ -205,9 +210,19 @@ def turn_refusal_receipt(refusals, context, policy) -> dict | None:
     )
 
 
-def pending_view(item) -> dict:
+def pending_view(item, *, show_detail: bool = True) -> dict:
+    """One pending call. ``detail`` (the exact code of a run_code call) is
+    withheld, with ``detail_hidden`` true, when ``show_detail`` is false."""
+    from sonder_runtime.application.chat.bidi import detect_bidi_chars
+
+    detail = str(getattr(item, "detail", "") or "")
+    chars = int(getattr(item, "detail_chars", 0) or 0)
+    has_bidi, bidi = detect_bidi_chars(detail) if (show_detail and detail) else (False, [])
     return {
         "call_id": str(item.call_id),
+        # Names exactly this row (``<call id>@-`` for the unowned one), even
+        # when the same call is pending for more than one owner.
+        "call_ref": str(getattr(item, "ref", "") or item.call_id),
         "digest": str(item.digest),
         "tool": str(item.tool),
         "surface": str(item.surface or ""),
@@ -215,6 +230,13 @@ def pending_view(item) -> dict:
         "count": int(item.count),
         "first_at": _iso(item.first_ts),
         "last_at": _iso(item.last_ts),
+        "detail": detail if show_detail else None,
+        "detail_hidden": not show_detail,
+        "detail_truncated": bool(getattr(item, "detail_truncated", False)),
+        "detail_chars": chars,
+        "bidi_warning": has_bidi,
+        "bidi_chars": list(bidi),
+        "denied": bool(getattr(item, "denied", False)),
     }
 
 
@@ -239,13 +261,14 @@ def approval_view(item, now: float | None = None) -> dict:
     }
 
 
-def approvals_payload(ledger, *, limit: int = 20, include_spent: bool = False) -> dict:
+def approvals_payload(ledger, *, limit: int = 20, include_spent: bool = False,
+                      show_detail: bool = True) -> dict:
     """Pending (refused, approvable) calls and approvals; previews are pre-redacted."""
     limit = max(1, min(int(limit), 200))
     now = time.time()
     return {
         "object": "approvals",
-        "pending": [pending_view(item) for item in ledger.pending(limit)],
+        "pending": [pending_view(item, show_detail=show_detail) for item in ledger.pending(limit)],
         "approvals": [
             approval_view(item, now)
             for item in ledger.approvals(include_spent=include_spent, limit=limit)
@@ -253,8 +276,29 @@ def approvals_payload(ledger, *, limit: int = 20, include_spent: bool = False) -
     }
 
 
+_TAG_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
+_MAX_TAG_CHARS = 80
+
+
 def _valid_call_ref(value: str) -> bool:
-    return len(value) in (CALL_ID_CHARS, DIGEST_CHARS) and all(c in _HEX for c in value)
+    """A call id or full digest, optionally ``@<owner tag>`` (``@-``: unowned)."""
+    call, sep, tag = value.partition("@")
+    if sep and not (0 < len(tag) <= _MAX_TAG_CHARS and all(c in _TAG_CHARS for c in tag)):
+        return False
+    return len(call) in (CALL_ID_CHARS, DIGEST_CHARS) and all(c in _HEX for c in call)
+
+
+def _resolve(ledger, ref: str):
+    """``(pending, None)``, or ``(None, error)`` for a ref naming no single row."""
+    try:
+        return ledger.resolve_call(ref), None
+    except ValueError as exc:
+        if getattr(exc, "ambiguous", False):
+            # The same call pending for more than one owner: never guess one.
+            return None, _error(409, "CALL_AMBIGUOUS", str(exc))
+        return None, _error(404, "CALL_NOT_PENDING",
+                            "no refused call %s is waiting for approval; it may already "
+                            "have been approved and run, or have aged out" % ref)
 
 
 def _ttl(value) -> int | None:
@@ -289,12 +333,10 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
     ttl = _ttl(request.get("ttl_seconds"))
     if ttl is None:
         return _error(400, "INVALID_TTL", "ttl_seconds must be a whole number of seconds")
-    try:
-        pending = ledger.resolve_call(ref)
-    except ValueError:
-        return _error(404, "CALL_NOT_PENDING",
-                      "no refused call %s is waiting for approval; it may already "
-                      "have been approved and run, or have aged out" % ref)
+    pending, failure = _resolve(ledger, ref)
+    if failure is not None:
+        return failure
+    owner = str(getattr(pending, "owner", "") or "")
     wanted_digest = request.get("digest")
     if wanted_digest is not None and str(wanted_digest).strip().lower() != pending.digest:
         return _error(409, "CALL_DIGEST_MISMATCH",
@@ -313,17 +355,23 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
     with _ISSUE_LOCK:
         now = time.time()
         for existing in ledger.approvals(include_spent=False, limit=200):
-            if existing.digest == pending.digest and existing.tool == pending.tool:
+            if (existing.digest == pending.digest and existing.tool == pending.tool
+                    and str(getattr(existing, "owner", "") or "") == owner):
                 result = _error(409, "APPROVAL_ALREADY_OPEN",
                                 "call %s already has an open approval" % pending.call_id)
                 result.body["error"]["approval"] = approval_view(existing, now)
                 return result
         try:
+            # Bound to exactly the row resolved above: its owner and digest.
             approval = ledger.issue(
                 pending.tool, pending.digest, approver=approver, surface=surface,
-                ttl_seconds=ttl, preview=pending.preview,
+                ttl_seconds=ttl, preview=pending.preview, owner=owner,
             )
         except ValueError as exc:
+            if getattr(exc, "denied", False):
+                # Decided inside the ledger's issuing transaction, so a deny
+                # racing this approve can never leave an approval behind.
+                return _error(409, "CALL_DENIED", str(exc))
             code = "INVALID_TTL" if "ttl" in str(exc) else "INVALID_REQUEST"
             return _error(400, code, str(exc))
     view = approval_view(approval)
@@ -335,6 +383,56 @@ def approve_call(ledger, call_ref: str, request, *, approver: str,
             "runs once and spends it (expires %s)"
             % (approval.tool, approval.call_id, view["expires_at"])
         ),
+    })
+
+
+def deny_call(ledger, call_ref: str, request) -> ApprovalResult:
+    """Record that the operator declined one pending call.
+
+    Authorises nothing: it revokes any open approval for the call and marks the
+    pending call denied so a waiting turn can see it. ``request`` is the
+    decoded JSON body; optional ``tool`` and ``digest`` must equal the pending
+    call's, as for approving. Repeating it is harmless.
+    """
+    ref = str(call_ref or "").strip().lower()
+    if not _valid_call_ref(ref):
+        return _error(400, "INVALID_CALL_ID",
+                      "a call id is the 16 hex characters a refusal names "
+                      "(or the full 64-character digest)")
+    if request is None:
+        request = {}
+    if not isinstance(request, Mapping):
+        return _error(400, "INVALID_REQUEST", "the request body must be a JSON object")
+    unknown = sorted(set(request) - {"tool", "digest"})
+    if unknown:
+        return _error(400, "INVALID_REQUEST",
+                      "unknown field(s): %s" % ", ".join(str(k) for k in unknown))
+    pending, failure = _resolve(ledger, ref)
+    if failure is not None:
+        return failure
+    wanted_digest = request.get("digest")
+    if wanted_digest is not None and str(wanted_digest).strip().lower() != pending.digest:
+        return _error(409, "CALL_DIGEST_MISMATCH",
+                      "the call's arguments changed since it was refused")
+    wanted_tool = request.get("tool")
+    if wanted_tool is not None and str(wanted_tool).strip().lstrip("/") != pending.tool:
+        return _error(409, "CALL_DIGEST_MISMATCH",
+                      "call %s is a %s call, not %s" % (pending.call_id, pending.tool, wanted_tool))
+    try:
+        # Exactly the row resolved above: its digest and its owner.
+        denied = ledger.deny(pending.digest, owner=str(getattr(pending, "owner", "") or ""))
+    except ValueError:
+        return _error(404, "CALL_NOT_PENDING",
+                      "call %s is no longer pending" % pending.call_id)
+    return ApprovalResult(200, {
+        "object": "denial",
+        "denial": {
+            "tool": str(denied.tool),
+            "call_id": str(denied.call_id),
+            "digest": str(denied.digest),
+            "denied_at": _iso(getattr(denied, "denied_ts", None)),
+        },
+        "message": "denied %s call %s; nothing is approved or run" % (denied.tool, denied.call_id),
     })
 
 

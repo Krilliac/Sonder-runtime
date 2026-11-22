@@ -5,12 +5,15 @@ import 'package:flutter/widgets.dart' show AppLifecycleState;
 
 import '../api.dart';
 import '../chat_store.dart';
+import '../local_manager.dart';
 import '../models.dart';
 import '../runtime/model_routing.dart';
+import '../settings.dart';
 import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
 import 'permission_rules.dart';
+import 'session_temperature.dart';
 
 /// One transcript row: a stored [message] plus client-only facts that are
 /// never persisted or sent (a stable id for keys, whether Retry applies,
@@ -20,14 +23,21 @@ class ChatEntry {
   final ChatMessage message;
   final bool retryable;
   final int? elapsedMs;
+  final List<ChatStreamToolEvent> toolCalls;
 
   const ChatEntry(this.id, this.message,
-      {this.retryable = false, this.elapsedMs});
+      {this.retryable = false,
+      this.elapsedMs,
+      this.toolCalls = const []});
 
-  ChatEntry withMessage(ChatMessage next, {bool? retryable, int? elapsedMs}) =>
+  ChatEntry withMessage(ChatMessage next,
+          {bool? retryable,
+          int? elapsedMs,
+          List<ChatStreamToolEvent>? toolCalls}) =>
       ChatEntry(id, next,
           retryable: retryable ?? this.retryable,
-          elapsedMs: elapsedMs ?? this.elapsedMs);
+          elapsedMs: elapsedMs ?? this.elapsedMs,
+          toolCalls: toolCalls ?? this.toolCalls);
 }
 
 /// What the in-flight turn is doing, for the live line.
@@ -41,6 +51,9 @@ class LiveTurn {
   /// status comment, cleared by the first answer text.
   final String? waitStatus;
 
+  /// Active/recent `sonder_tool` calls during this turn.
+  final List<ChatStreamToolEvent> toolCalls;
+
   /// Whole seconds since the turn started. Advanced by the controller's
   /// 1 Hz tick and never behind the wall clock, so it is right after the app
   /// was suspended and testable under fake time.
@@ -52,6 +65,7 @@ class LiveTurn {
     this.model = '',
     this.tokensIn,
     this.waitStatus,
+    this.toolCalls = const [],
     this.elapsedSeconds = 0,
   });
 
@@ -61,6 +75,7 @@ class LiveTurn {
     int? elapsedSeconds,
     String? waitStatus,
     bool clearWaitStatus = false,
+    List<ChatStreamToolEvent>? toolCalls,
   }) =>
       LiveTurn(
         startedAt: startedAt,
@@ -68,6 +83,7 @@ class LiveTurn {
         model: model,
         tokensIn: tokensIn ?? this.tokensIn,
         waitStatus: clearWaitStatus ? null : waitStatus ?? this.waitStatus,
+        toolCalls: toolCalls ?? this.toolCalls,
         elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
       );
 }
@@ -213,6 +229,80 @@ class ChatController extends ChangeNotifier {
   bool _modeReadOnly = false;
   bool get modeReadOnly => _modeReadOnly;
 
+  // -- Capabilities, role & client-side execution -------------------------
+  ServerCapabilities? _capabilities;
+  ServerCapabilities? get capabilities => _capabilities;
+
+  WhoamiInfo? _whoami;
+  WhoamiInfo? get whoami => _whoami;
+
+  bool clientExecEnabled = true;
+  String clientPermissionMode = 'manual';
+  String clientWorkspaceRoot = '';
+  String clientAgentUrl = Settings.defaultClientAgentUrl;
+  String clientAgentToken = '';
+  void Function(String mode)? onClientModeChanged;
+  final Set<String> _handledClientCalls = <String>{};
+
+  bool get isRestrictedUser {
+    final who = _whoami;
+    if (who != null) return who.isRestrictedUser;
+    final caps = _capabilities;
+    if (caps != null && caps.role.isNotEmpty) {
+      return caps.role == 'user' ||
+          (caps.publicHosting && !caps.allowedFeatures.hostAdmin);
+    }
+    final infoFeatures = status.value?.allowedFeatures;
+    if (infoFeatures != null) return !infoFeatures.hostAdmin;
+    return false;
+  }
+
+  bool get hostAdminAllowed {
+    final who = _whoami;
+    if (who != null) return who.allowedFeatures.hostAdmin;
+    final caps = _capabilities;
+    if (caps != null && caps.role.isNotEmpty) {
+      return caps.allowedFeatures.hostAdmin;
+    }
+    final infoFeatures = status.value?.allowedFeatures;
+    if (infoFeatures != null) return infoFeatures.hostAdmin;
+    return true;
+  }
+
+  bool get hostBypassAllowed {
+    final who = _whoami;
+    if (who != null) return who.hostBypassAllowed;
+    final caps = _capabilities;
+    if (caps != null && caps.role.isNotEmpty) return caps.hostBypassAllowed;
+    final infoBypass = status.value?.hostBypassAllowed;
+    if (infoBypass != null) return infoBypass;
+    return _mode?.canBypass ?? false;
+  }
+
+  bool get clientExecSupported =>
+      _capabilities?.clientExecSupported ??
+      _whoami?.clientExecSupported ??
+      status.value?.clientExecSupported ??
+      true;
+
+  bool get isClientExecActive => clientExecEnabled && clientExecSupported;
+
+  PermissionMode get clientModeState => PermissionMode(
+        mode: clientPermissionMode,
+        label: clientPermissionMode,
+        blurb: modeBlurbs[clientPermissionMode] ?? '',
+        elevated: false,
+        canBypass: true,
+        modes: [
+          for (final name in permissionModes)
+            PermissionModeOption(
+              name: name,
+              label: name,
+              blurb: modeBlurbs[name] ?? '',
+            ),
+        ],
+      );
+
   // ------------------------------------------------------------------------
 
   void _notify() {
@@ -223,6 +313,8 @@ class ChatController extends ChangeNotifier {
   Future<void> start() async {
     if (_started) return;
     _started = true;
+    unawaited(refreshCapabilities());
+    unawaited(refreshWhoami());
     unawaited(refreshModels());
     unawaited(refreshCommands());
     unawaited(pollStatus());
@@ -230,23 +322,45 @@ class ChatController extends ChangeNotifier {
     await loadThreads();
   }
 
+  /// Cancel and discard any in-flight streamed turn so switching servers or
+  /// signing in/out never lets replies bleed or persist across identities (RC8).
+  void _discardActiveTurn() {
+    _handledClientCalls.clear();
+    final turn = _turn;
+    if (turn == null) return;
+    if (_turnThreadId == _currentThreadId) {
+      _entries.removeWhere((e) => e.id == _pendingId && e.message.pending);
+    }
+    turn.cancel();
+    _endTurn();
+  }
+
   /// Point the controller at a different server/key/account. Resets
   /// everything that belonged to the old one.
   void updateBackend(ChatBackend next, {required bool identityChanged}) {
     _backend = next;
     if (identityChanged) {
+      _temperatureSync.reset();
+      // A turn still running against the old server must not confirm its
+      // value into the new server's record.
+      _tempInFlight = null;
+      _discardActiveTurn();
       _backendGeneration++;
       _pollInFlight = false;
       _modeInFlight = false;
       _modeReadOnly = false;
       _mode = null;
       _lastKnownMode = null;
+      _capabilities = null;
+      _whoami = null;
       _routing = const ModelRouting();
       _origins = const {};
       connection.value = ConnectionStatus.connecting(next.serverUrl);
       status.value = null;
       _notify();
       unawaited(pollStatus());
+      unawaited(refreshCapabilities());
+      unawaited(refreshWhoami());
       unawaited(refreshPermissionMode());
       unawaited(refreshModels());
       unawaited(refreshCommands());
@@ -319,6 +433,8 @@ class ChatController extends ChangeNotifier {
     if (connection.value == next) return;
     final wasOffline = connection.value.isOffline;
     connection.value = next;
+    // Back from offline: the server may have restarted and lost sessions.
+    if (wasOffline && !next.isOffline) _temperatureSync.reset();
     // The chip's enabled state depends on reachability.
     if (wasOffline != next.isOffline) _notify();
   }
@@ -329,9 +445,77 @@ class ChatController extends ChangeNotifier {
     _notify();
     await Future.wait([
       pollStatus(),
+      refreshCapabilities(),
+      refreshWhoami(),
       refreshPermissionMode(),
       refreshModels(),
     ]);
+  }
+
+  Future<void> refreshCapabilities() async {
+    final generation = _backendGeneration;
+    try {
+      final caps = await _backend.fetchCapabilities();
+      if (_disposed || generation != _backendGeneration || caps == null) return;
+      _capabilities = caps;
+      _notify();
+    } catch (_) {
+      // Older server or offline: leave null.
+    }
+  }
+
+  Future<void> refreshWhoami() async {
+    final generation = _backendGeneration;
+    try {
+      final who = await _backend.fetchWhoami();
+      if (_disposed || generation != _backendGeneration || who == null) return;
+      _whoami = who;
+      _notify();
+    } catch (_) {
+      // Unauthenticated or older server: leave null.
+    }
+  }
+
+  /// Switch the user's own client-local permission mode (including `bypass`
+  /// after explicit confirmation via [confirm]). Never mutates the server.
+  Future<(ModeChangeOutcome, String)> requestClientModeChange(
+    String target, {
+    required Future<bool> Function(String from, String to) confirm,
+  }) async {
+    final resolved = resolvePermissionMode(target);
+    if (resolved == null) {
+      return (ModeChangeOutcome.failed, "Unknown mode '$target'.");
+    }
+    if (resolved == clientPermissionMode) {
+      return (ModeChangeOutcome.unchanged, '');
+    }
+    final generation = _backendGeneration;
+    if (isModeRaise(clientPermissionMode, resolved)) {
+      final ok = await confirm(clientPermissionMode, resolved);
+      if (!ok || _disposed || generation != _backendGeneration) {
+        return (ModeChangeOutcome.declined, '');
+      }
+    }
+    clientPermissionMode = resolved;
+    onClientModeChanged?.call(resolved);
+    _notify();
+    unawaited(LocalManager.setClientAgentMode(
+      mode: resolved,
+      confirmBypass: resolved == PermissionMode.bypass,
+      companionUrl: clientAgentUrl,
+      token: clientAgentToken,
+    ));
+    return (ModeChangeOutcome.changed, '');
+  }
+
+  /// Cycle client-local modes without ever entering `bypass`.
+  String? nextClientModeInCycle() {
+    final cycle = permissionModes
+        .where((m) => m != PermissionMode.bypass)
+        .toList(growable: false);
+    if (cycle.isEmpty) return null;
+    final idx = cycle.indexOf(clientPermissionMode);
+    return cycle[(idx + 1) % cycle.length];
   }
 
   // -- Models and commands ---------------------------------------------------
@@ -425,6 +609,7 @@ class ChatController extends ChangeNotifier {
     if (next?.mode == _mode?.mode &&
         next?.elevated == _mode?.elevated &&
         next?.elevationReason == _mode?.elevationReason &&
+        next?.canBypass == _mode?.canBypass &&
         (next == null) == (_mode == null)) {
       return;
     }
@@ -447,6 +632,13 @@ class ChatController extends ChangeNotifier {
       return (ModeChangeOutcome.readOnly, modeReadOnlyText);
     }
     if (target == current.mode) return (ModeChangeOutcome.unchanged, '');
+    final resolvedTarget = resolvePermissionMode(target);
+    if (resolvedTarget == PermissionMode.bypass && !current.canBypass) {
+      return (
+        ModeChangeOutcome.readOnly,
+        'Only an administrator can enable bypass mode.'
+      );
+    }
     final generation = _backendGeneration;
     if (isModeRaise(current.mode, target)) {
       final ok = await confirm(current.mode, target);
@@ -459,7 +651,10 @@ class ChatController extends ChangeNotifier {
     _switchingMode = true;
     _notify();
     try {
-      final next = await _backend.setPermissionMode(target);
+      final next = await _backend.setPermissionMode(
+        target,
+        confirmBypass: resolvedTarget == PermissionMode.bypass,
+      );
       if (_disposed || generation != _backendGeneration) {
         return (ModeChangeOutcome.changed, '');
       }
@@ -500,12 +695,17 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  /// The mode Shift+Tab would move to, or null.
+  /// The mode Shift+Tab would move to, or null. Never cycles into `bypass`
+  /// — entering bypass requires explicit selection and confirmation.
   String? nextModeInCycle() {
     final current = _mode;
     if (current == null || current.options.isEmpty) return null;
-    final index = current.options.indexWhere((o) => o.name == current.mode);
-    return current.options[(index + 1) % current.options.length].name;
+    final cycle = current.options
+        .where((o) => o.name != PermissionMode.bypass)
+        .toList(growable: false);
+    if (cycle.isEmpty) return null;
+    final index = cycle.indexWhere((o) => o.name == current.mode);
+    return cycle[(index + 1) % cycle.length].name;
   }
 
   // -- Threads -------------------------------------------------------------
@@ -645,6 +845,11 @@ class ChatController extends ChangeNotifier {
     final session = _sessions.remove(thread.id);
     _notify();
     await ChatStore.save(next);
+    if (session != null) {
+      try {
+        await ChatStore.saveSessions(_sessions);
+      } catch (_) {}
+    }
     return DeletedThread._(stored, index < 0 ? 0 : index, wasCurrent,
         session, placeholder?.id);
   }
@@ -669,6 +874,11 @@ class ChatController extends ChangeNotifier {
     }
     _notify();
     await ChatStore.save(next);
+    if (deleted._session != null) {
+      try {
+        await ChatStore.saveSessions(_sessions);
+      } catch (_) {}
+    }
   }
 
   // -- Session rotation (P1-9) -------------------------------------------
@@ -743,11 +953,11 @@ class ChatController extends ChangeNotifier {
 
   int _indexOf(int id) => _entries.indexWhere((e) => e.id == id);
 
-  // Control commands must use the runtime control route even when the
-  // person selected a concrete chat model. Ordinary prose keeps that choice.
-  static bool _isControlCommand(String text) => RegExp(
-        r'^/(?:delegate|master|master_orchestrate)(?:\s|$)',
-        caseSensitive: false,
+  // Slash commands must use the runtime control route ('sonder') even when
+  // the person selected a non-default tier (code, fast) or concrete model.
+  // File paths (/etc/passwd), comments (// foo), and prose keep that choice.
+  static bool _isSlashCommand(String text) => RegExp(
+        r'^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)',
       ).hasMatch(text.trim());
 
   void _replace(int id, ChatEntry Function(ChatEntry) update) {
@@ -780,7 +990,7 @@ class ChatController extends ChangeNotifier {
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
     _turnThreadId = _currentThreadId;
-    final requestModel = _isControlCommand(trimmed) ? 'sonder' : _model;
+    final requestModel = _isSlashCommand(trimmed) ? 'sonder' : _model;
     live.value = LiveTurn(startedAt: DateTime.now(), model: requestModel);
     _liveTimer?.cancel();
     _liveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -791,6 +1001,9 @@ class ChatController extends ChangeNotifier {
       live.value = current.copyWith(elapsedSeconds: wall > next ? wall : next);
     });
 
+    final tempSession = sessionFor(_currentThreadId);
+    final tempSent = _temperatureSync.pending(tempSession, temperature);
+    _tempInFlight = tempSent == null ? null : (tempSession, tempSent);
     final request = TurnRequest(
       history: history,
       model: requestModel,
@@ -798,8 +1011,12 @@ class ChatController extends ChangeNotifier {
       sessionId: sessionFor(_currentThreadId),
       project: _project,
       allowApproximateLocation: allowApproximateLocation,
+      sessionTemperature: tempSent,
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
+      clientExec: isClientExecActive,
     );
+    _handledClientCalls.clear();
+    final turnGeneration = _backendGeneration;
     final done = Completer<void>();
     _turnDone = done;
     final turn = _backend.startTurn(request);
@@ -813,7 +1030,11 @@ class ChatController extends ChangeNotifier {
     final buffer = StringBuffer();
     _turnSub = turn.events.listen(
       (event) {
-        if (!identical(_turn, turn)) return;
+        if (_disposed ||
+            !identical(_turn, turn) ||
+            turnGeneration != _backendGeneration) {
+          return;
+        }
         switch (event) {
           case TurnPhase(:final phase, :final tokensIn):
             live.value = live.value?.copyWith(phase: phase, tokensIn: tokensIn);
@@ -830,6 +1051,8 @@ class ChatController extends ChangeNotifier {
               // value (a status is never progress).
               live.value = current.copyWith(waitStatus: text);
             }
+          case TurnTool(:final tool):
+            _handleTurnTool(turn, tool, turnGeneration);
           case TurnDelta(:final text):
             if (live.value?.waitStatus != null) {
               live.value = live.value?.copyWith(clearWaitStatus: true);
@@ -837,20 +1060,27 @@ class ChatController extends ChangeNotifier {
             buffer.write(text);
             _updatePending(buffer.toString());
           case TurnDone(:final reply):
-            _finishOk(turn, reply);
+            _finishOk(turn, reply, expectedGeneration: turnGeneration);
         }
       },
       onError: (Object e, StackTrace _) {
-        if (identical(_turn, turn)) _finishError(turn, e);
+        if (!_disposed &&
+            identical(_turn, turn) &&
+            turnGeneration == _backendGeneration) {
+          _finishError(turn, e, expectedGeneration: turnGeneration);
+        }
       },
       onDone: () {
         // A stream that closed without a result (a dropped connection).
-        if (identical(_turn, turn)) {
+        if (!_disposed &&
+            identical(_turn, turn) &&
+            turnGeneration == _backendGeneration) {
           _finishError(
               turn,
               SonderException(
                   'The connection closed before the reply finished.',
-                  retryable: true));
+                  retryable: true),
+              expectedGeneration: turnGeneration);
         }
       },
       cancelOnError: true,
@@ -858,9 +1088,314 @@ class ChatController extends ChangeNotifier {
     return done.future;
   }
 
+  void _upsertLiveTool(ChatStreamToolEvent tool, {bool? awaiting}) {
+    final current = live.value;
+    if (current == null) return;
+    final updated = List<ChatStreamToolEvent>.of(current.toolCalls);
+    final key = tool.id.isNotEmpty ? tool.id : tool.callId;
+    final idx = key.isEmpty
+        ? -1
+        : updated.indexWhere(
+            (t) => (t.id.isNotEmpty ? t.id : t.callId) == key,
+          );
+    if (idx >= 0) {
+      updated[idx] = tool.mergedOnto(updated[idx]);
+    } else {
+      updated.add(tool);
+    }
+    final isWaiting = awaiting ??
+        (tool.isAwaitingApproval || tool.isAwaitingClientApproval);
+    live.value = current.copyWith(
+      phase: isWaiting ? 'awaiting approval' : null,
+      toolCalls: List.unmodifiable(updated),
+      clearWaitStatus: isWaiting,
+    );
+  }
+
+  static const _clientExecDisabledMessage =
+      'Client PC tool execution is disabled in Settings.';
+
+  void _handleTurnTool(
+    ChatTurn turn,
+    ChatStreamToolEvent tool,
+    int turnGeneration,
+  ) {
+    if (tool.isAwaitingClientResult && tool.callId.isNotEmpty) {
+      final firstSeen = _handledClientCalls.add(tool.callId);
+      if (!firstSeen) return;
+      if (!clientExecEnabled) {
+        _upsertLiveTool(
+          tool.copyWith(
+            state: 'denied',
+            phase: 'denied',
+            error: _clientExecDisabledMessage,
+          ),
+          awaiting: false,
+        );
+        final session = tool.session.isNotEmpty
+            ? tool.session
+            : sessionFor(
+                _turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
+        unawaited(_backend
+            .submitClientToolResult(
+              tool.callId,
+              ok: false,
+              error: _clientExecDisabledMessage,
+              denied: true,
+              session: session,
+            )
+            .catchError((Object _) {}));
+        return;
+      }
+      final risk = effectiveClientToolRisk(tool.risk, tool.tool);
+      if (clientModeAllowsWithoutPrompt(clientPermissionMode, risk)) {
+        _upsertLiveTool(tool, awaiting: false);
+        unawaited(_executeAndSubmitClientTool(
+          tool,
+          expectedGeneration: turnGeneration,
+          approved: true,
+        ));
+      } else {
+        _upsertLiveTool(
+          tool.copyWith(state: 'awaiting_client_approval'),
+          awaiting: true,
+        );
+      }
+      return;
+    }
+    _upsertLiveTool(tool);
+  }
+
+  Future<ClientToolExecResult> _executeAndSubmitClientTool(
+    ChatStreamToolEvent tool, {
+    required int expectedGeneration,
+    required bool approved,
+  }) async {
+    if (!clientExecEnabled) {
+      return const ClientToolExecResult(
+        ok: false,
+        denied: true,
+        error: _clientExecDisabledMessage,
+      );
+    }
+    final backend = _backend;
+    final execRes = await backend.executeClientTool(
+      callId: tool.callId,
+      tool: tool.tool,
+      args: tool.rawArgs,
+      risk: tool.risk,
+      mode: clientPermissionMode,
+      workspaceRoot: clientWorkspaceRoot,
+      approved: approved,
+      companionUrl: clientAgentUrl,
+      companionToken: clientAgentToken,
+    );
+    if (_disposed || expectedGeneration != _backendGeneration) {
+      return execRes;
+    }
+    if (execRes.companionUnavailable) {
+      _upsertLiveTool(
+        tool.copyWith(
+          state: 'awaiting_client_approval',
+          error: execRes.error,
+        ),
+        awaiting: true,
+      );
+      return execRes;
+    }
+    if (execRes.needsApproval) {
+      _upsertLiveTool(
+        tool.copyWith(state: 'awaiting_client_approval'),
+        awaiting: true,
+      );
+      return execRes;
+    }
+    final session = tool.session.isNotEmpty
+        ? tool.session
+        : sessionFor(_turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
+    await backend.submitClientToolResult(
+      tool.callId,
+      ok: execRes.ok,
+      output: execRes.output,
+      error: execRes.error,
+      denied: execRes.denied,
+      session: session,
+    );
+    return execRes;
+  }
+
+  ChatStreamToolEvent? _findClientToolEvent(String callId) {
+    final liveTools = live.value?.toolCalls;
+    if (liveTools != null) {
+      for (final t in liveTools) {
+        if (t.callId == callId) return t;
+      }
+    }
+    for (final e in _entries) {
+      for (final t in e.toolCalls) {
+        if (t.callId == callId) return t;
+      }
+    }
+    return null;
+  }
+
+  void _updateEntryTool(
+      String callId, ChatStreamToolEvent Function(ChatStreamToolEvent) update) {
+    var changed = false;
+    for (var i = 0; i < _entries.length; i++) {
+      final tools = _entries[i].toolCalls;
+      final idx = tools.indexWhere((t) => t.callId == callId);
+      if (idx >= 0) {
+        final nextTools = List<ChatStreamToolEvent>.of(tools);
+        nextTools[idx] = update(nextTools[idx]);
+        _entries[i] =
+            _entries[i].withMessage(_entries[i].message, toolCalls: List.unmodifiable(nextTools));
+        changed = true;
+      }
+    }
+    if (changed) _notify();
+  }
+
+  /// Execute a paused `execution_target="client"` tool on the user's PC and
+  /// POST the result to `POST /v1/client-tools/<call_id>/result`.
+  Future<ApprovalOutcome> approveClientTool(
+    String callId,
+    String toolName,
+    String digest,
+  ) async {
+    if (!clientExecEnabled) {
+      return const ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: _clientExecDisabledMessage,
+      );
+    }
+    final ev = _findClientToolEvent(callId);
+    if (ev == null) {
+      return const ApprovalOutcome(ApprovalStatus.failed,
+          message: 'Client tool call is no longer active.');
+    }
+    final generation = _backendGeneration;
+    final backend = _backend;
+    final execRes = await backend.executeClientTool(
+      callId: callId,
+      tool: ev.tool.isNotEmpty ? ev.tool : toolName,
+      args: ev.rawArgs,
+      risk: ev.risk,
+      mode: clientPermissionMode,
+      workspaceRoot: clientWorkspaceRoot,
+      approved: true,
+      companionUrl: clientAgentUrl,
+      companionToken: clientAgentToken,
+    );
+    if (_disposed || generation != _backendGeneration) {
+      return const ApprovalOutcome(ApprovalStatus.failed,
+          message: 'Server or account changed.');
+    }
+    if (execRes.companionUnavailable) {
+      _upsertLiveTool(
+        ev.copyWith(state: 'awaiting_client_approval', error: execRes.error),
+        awaiting: true,
+      );
+      _updateEntryTool(
+        callId,
+        (t) => t.copyWith(state: 'awaiting_client_approval', error: execRes.error),
+      );
+      return ApprovalOutcome(ApprovalStatus.failed, message: execRes.error);
+    }
+    final session = ev.session.isNotEmpty
+        ? ev.session
+        : sessionFor(_turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
+    try {
+      await backend.submitClientToolResult(
+        callId,
+        ok: execRes.ok,
+        output: execRes.output,
+        error: execRes.error,
+        denied: execRes.denied,
+        session: session,
+      );
+    } on SonderException catch (e) {
+      return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
+    } catch (e) {
+      return ApprovalOutcome(ApprovalStatus.failed, message: '$e');
+    }
+    if (_disposed || generation != _backendGeneration) {
+      return const ApprovalOutcome(ApprovalStatus.failed,
+          message: 'Server or account changed.');
+    }
+    _updateEntryTool(
+      callId,
+      (t) => t.copyWith(
+        state: execRes.ok ? 'done' : 'error',
+        phase: execRes.ok ? 'finished' : 'error',
+        ok: execRes.ok,
+        error: execRes.error.isEmpty ? null : execRes.error,
+        clearError: execRes.error.isEmpty,
+        result: ToolRunResult(ok: execRes.ok, output: execRes.output),
+      ),
+    );
+    return const ApprovalOutcome(ApprovalStatus.approved);
+  }
+
+  /// Deny a paused `execution_target="client"` tool on the user's PC and
+  /// report denial to `POST /v1/client-tools/<call_id>/result`.
+  Future<ApprovalOutcome> denyClientTool(
+    String callId,
+    String toolName,
+    String digest,
+  ) async {
+    final ev = _findClientToolEvent(callId);
+    final generation = _backendGeneration;
+    final backend = _backend;
+    final session = (ev?.session.isNotEmpty == true)
+        ? ev!.session
+        : sessionFor(_turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
+    try {
+      await backend.submitClientToolResult(
+        callId,
+        ok: false,
+        denied: true,
+        error: 'Denied by user on client PC.',
+        session: session,
+      );
+    } on SonderException catch (e) {
+      return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
+    } catch (e) {
+      return ApprovalOutcome(ApprovalStatus.failed, message: '$e');
+    }
+    if (_disposed || generation != _backendGeneration) {
+      return const ApprovalOutcome(ApprovalStatus.failed,
+          message: 'Server or account changed.');
+    }
+    _updateEntryTool(
+      callId,
+      (t) => t.copyWith(
+        state: 'denied',
+        phase: 'denied',
+        ok: false,
+        denied: true,
+        error: 'Denied by user on client PC.',
+      ),
+    );
+    return const ApprovalOutcome(ApprovalStatus.approved);
+  }
+
   /// Chat request settings the shell keeps in sync from [Settings].
   String contextSize = '8192';
   bool allowApproximateLocation = false;
+
+  /// Sampling temperature (null is Auto). Sent as `session_temperature` on
+  /// a session's first request and whenever it differs from the value the
+  /// server last accepted for it, so a `/temp` typed in chat survives. A
+  /// failed turn resends it next time, which can overwrite a typed `/temp`
+  /// on that session: the server may or may not have stored it, and
+  /// resending the visible setting is the safe side.
+  double? temperature;
+  final SessionTemperatureSync _temperatureSync = SessionTemperatureSync();
+
+  /// The session and `session_temperature` value the live turn carries,
+  /// confirmed when the turn succeeds and forgotten when it does not.
+  (String, Object)? _tempInFlight;
 
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;
@@ -900,6 +1435,9 @@ class ChatController extends ChangeNotifier {
   }
 
   void _endTurn() {
+    final unconfirmed = _tempInFlight;
+    _tempInFlight = null;
+    if (unconfirmed != null) _temperatureSync.forget(unconfirmed.$1);
     _liveTimer?.cancel();
     _liveTimer = null;
     _turn = null;
@@ -913,13 +1451,23 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> _deliver(ChatMessage message,
-      {bool retryable = false, int? elapsedMs}) async {
+      {bool retryable = false,
+      int? elapsedMs,
+      List<ChatStreamToolEvent> toolCalls = const [],
+      int? expectedGeneration}) async {
+    if (_disposed ||
+        (expectedGeneration != null &&
+            expectedGeneration != _backendGeneration)) {
+      return;
+    }
     final threadId = _turnThreadId;
     if (threadId == _currentThreadId) {
       _replace(
           _pendingId,
           (e) => ChatEntry(e.id, message,
-              retryable: retryable, elapsedMs: elapsedMs));
+              retryable: retryable,
+              elapsedMs: elapsedMs,
+              toolCalls: toolCalls));
       await _saveThread(threadId, messages);
     } else {
       // The user moved to another thread: the reply still belongs to the
@@ -931,8 +1479,56 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  void _finishOk(ChatTurn turn, ChatReply reply) {
+  void _finishOk(ChatTurn turn, ChatReply reply, {int? expectedGeneration}) {
+    final generation = expectedGeneration ?? _backendGeneration;
+    if (_disposed || generation != _backendGeneration) return;
+    final sent = _tempInFlight;
+    if (sent != null) _temperatureSync.confirm(sent.$1, sent.$2);
+    _tempInFlight = null;
     final elapsed = _liveElapsedMs();
+    final liveTools = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
+    final handoffTools = <ChatStreamToolEvent>[...liveTools];
+    final seenIds = {for (final t in liveTools) if (t.callId.isNotEmpty) t.callId};
+    final autoHandoffs = <ChatStreamToolEvent>[];
+    for (final h in reply.metadata?.clientToolHandoffs ?? const <ClientToolHandoff>[]) {
+      if (h.callId.isNotEmpty && !seenIds.contains(h.callId)) {
+        seenIds.add(h.callId);
+        final effectiveRisk = effectiveClientToolRisk(h.risk, h.tool);
+        if (!clientExecEnabled) {
+          final ev = ChatStreamToolEvent.fromJson({
+            'id': h.callId,
+            'call_id': h.callId,
+            'execution_target': h.executionTarget,
+            'backend': h.executionTarget,
+            'phase': 'denied',
+            'state': 'denied',
+            'error': _clientExecDisabledMessage,
+            'tool': h.tool,
+            'args': h.args,
+            'risk': effectiveRisk,
+            'session': h.session,
+          });
+          handoffTools.add(ev);
+          continue;
+        }
+        final allowed =
+            clientModeAllowsWithoutPrompt(clientPermissionMode, effectiveRisk);
+        final ev = ChatStreamToolEvent.fromJson({
+          'id': h.callId,
+          'call_id': h.callId,
+          'execution_target': h.executionTarget,
+          'backend': h.executionTarget,
+          'phase': h.phase,
+          'state': allowed ? 'running' : 'awaiting_client_approval',
+          'tool': h.tool,
+          'args': h.args,
+          'risk': effectiveRisk,
+          'session': h.session,
+        });
+        handoffTools.add(ev);
+        if (allowed) autoHandoffs.add(ev);
+      }
+    }
     if (reply.metadata?.tier.isNotEmpty == true) {
       lastTier = reply.metadata!.tier;
     }
@@ -943,14 +1539,85 @@ class ChatController extends ChangeNotifier {
       responseMetadata: reply.metadata,
     );
     _endTurn();
-    unawaited(_deliver(message, elapsedMs: elapsed));
+    unawaited(_deliver(message,
+        elapsedMs: elapsed,
+        toolCalls: List.unmodifiable(handoffTools),
+        expectedGeneration: generation));
+    for (final ev in autoHandoffs) {
+      unawaited(_executeNonStreamHandoff(ev, generation));
+    }
     _notify();
     onAnnounce?.call('Sonder replied');
     _afterTurn();
   }
 
-  void _finishError(ChatTurn turn, Object e) {
+  Future<void> _executeNonStreamHandoff(
+      ChatStreamToolEvent ev, int generation) async {
+    if (!clientExecEnabled) return;
+    final execRes = await _backend.executeClientTool(
+      callId: ev.callId,
+      tool: ev.tool,
+      args: ev.rawArgs,
+      risk: ev.risk,
+      mode: clientPermissionMode,
+      workspaceRoot: clientWorkspaceRoot,
+      approved: true,
+      companionUrl: clientAgentUrl,
+      companionToken: clientAgentToken,
+    );
+    if (_disposed || generation != _backendGeneration) return;
+    if (execRes.companionUnavailable || execRes.needsApproval) {
+      _updateEntryTool(
+        ev.callId,
+        (t) => t.copyWith(
+          state: 'awaiting_client_approval',
+          error: execRes.error.isEmpty ? null : execRes.error,
+        ),
+      );
+      return;
+    }
+    final session = ev.session.isNotEmpty
+        ? ev.session
+        : sessionFor(_currentThreadId);
+    try {
+      await _backend.submitClientToolResult(
+        ev.callId,
+        ok: execRes.ok,
+        output: execRes.output,
+        error: execRes.error,
+        denied: execRes.denied,
+        session: session,
+      );
+      if (_disposed || generation != _backendGeneration) return;
+      _updateEntryTool(
+        ev.callId,
+        (t) => t.copyWith(
+          state: execRes.ok ? 'done' : 'error',
+          phase: execRes.ok ? 'finished' : 'error',
+          ok: execRes.ok,
+          error: execRes.error.isEmpty ? null : execRes.error,
+          clearError: execRes.error.isEmpty,
+          result: ToolRunResult(ok: execRes.ok, output: execRes.output),
+        ),
+      );
+    } catch (e) {
+      if (_disposed || generation != _backendGeneration) return;
+      _updateEntryTool(
+        ev.callId,
+        (t) => t.copyWith(state: 'error', error: '$e'),
+      );
+    }
+  }
+
+  void _finishError(ChatTurn turn, Object e, {int? expectedGeneration}) {
+    final generation = expectedGeneration ?? _backendGeneration;
+    if (_disposed || generation != _backendGeneration) return;
+    // A transport failure says nothing about what the server kept.
+    if (e is! SonderException || e.httpStatus == null) {
+      _temperatureSync.reset();
+    }
     final elapsed = _liveElapsedMs();
+    final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
     ChatMessage message;
     var retryable = false;
     if (e is SonderException && isWorkCapacityError(e)) {
@@ -988,7 +1655,11 @@ class ChatController extends ChangeNotifier {
       retryable = true;
     }
     _endTurn();
-    unawaited(_deliver(message, retryable: retryable, elapsedMs: elapsed));
+    unawaited(_deliver(message,
+        retryable: retryable,
+        elapsedMs: elapsed,
+        toolCalls: toolCalls,
+        expectedGeneration: generation));
     _notify();
     onAnnounce?.call('Request failed: ${message.content.split('\n').first}');
     _afterTurn();
@@ -1066,19 +1737,43 @@ class ChatController extends ChangeNotifier {
       case 'returned':
       case 'refused':
         final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final pendingRefusal = run.pendingRefusal;
         final parts = <String>[
           if (acknowledgement.isNotEmpty) acknowledgement,
           if (run.finalSummary.isNotEmpty) run.finalSummary,
           if (run.output.isNotEmpty) run.output,
+          if (run.status == 'refused' &&
+              run.finalSummary.isEmpty &&
+              run.output.isEmpty &&
+              pendingRefusal != null &&
+              pendingRefusal.reason.isNotEmpty)
+            pendingRefusal.reason,
         ];
+        final isRefused = run.status == 'refused' || pendingRefusal != null;
+        final nextMeta = old.responseMetadata != null
+            ? old.responseMetadata!.withWork(
+                workStatus: run.status,
+                status: isRefused ? 'refused' : null,
+                refusal: pendingRefusal,
+              )
+            : (isRefused
+                ? ChatResponseMetadata(
+                    workRunId: run.id,
+                    workStatus: run.status,
+                    status: 'refused',
+                    refusal: pendingRefusal,
+                  )
+                : null);
         next = ChatMessage(
           role: Role.assistant,
-          content: parts.isEmpty ? '(empty response)' : parts.join('\n\n'),
+          content: parts.isEmpty
+              ? (isRefused
+                  ? 'refused: work run ${run.id} was refused'
+                  : '(empty response)')
+              : parts.join('\n\n'),
           // The run is settled: keep the receipt, but it no longer marks a
           // running work run (workRunOf reads it first).
-          responseMetadata: old.responseMetadata?.withWork(
-            workStatus: run.status,
-          ),
+          responseMetadata: nextMeta,
         );
       default:
         final label = switch (run.status) {
@@ -1130,12 +1825,11 @@ class ChatController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _discardActiveTurn();
     _disposed = true;
     _pollTimer?.cancel();
     _modeTimer?.cancel();
     _liveTimer?.cancel();
-    _turn?.cancel();
-    _turnSub?.cancel();
     status.dispose();
     connection.dispose();
     live.dispose();

@@ -48,6 +48,7 @@ shared and holds no lock.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import json
 import os
@@ -70,6 +71,7 @@ from sonder_runtime.domain.tool_lane_models import ModelLaneStatus, refusal_mess
 
 # None: no entry point has spoken (lane defaults apply); "": suppressed.
 _ENTRY: ContextVar[str | None] = ContextVar("sonder_restricted_tool_lane_entry", default=None)
+_ADMIN_OPT_IN: ContextVar[bool] = ContextVar("sonder_restricted_tool_lane_admin_open", default=False)
 _SUPPRESSED = ""
 _POLICY = "ERROR: HOST POLICY: "
 _SEARCH_TOOLS = frozenset({"text_search", "repository_symbol_index"})
@@ -95,6 +97,126 @@ _TREE_TRUNCATED = re.compile(r"^  \.\.\. truncated at \d+ entries$")
 def _refusal(text: str) -> str:
     message = "%s%s" % (_POLICY, text)
     return message
+
+
+def classifier_verdict(tool_name: str, args: Any) -> str:
+    """``allow``, ``ask`` or ``block`` for one call, with the catalog's risk grade filled in.
+
+    The rules are ``domain.security.tool_call_classifier``; a grade that cannot
+    be read is no grade, which they answer with ``ask``, as they answer any
+    fault.  No model name is an input, so no model is exempt.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    try:
+        risk = str(gate.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - no grade: the rules ask
+        risk = ""
+    return classifier.classify(tool_name, args, risk=risk)
+
+
+def classifier_block_refusal(tool_name: str, args: Any) -> str:
+    """A refusal when the safety classifier blocks this call, else ``""``.
+
+    The dispatch gate asks it for every model-originated call in every
+    permission mode, bypass included, whatever the model.  ``ask`` is not
+    decided here: it stays this lane's rule (:func:`classifier_refusal`).
+    """
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    if classifier_verdict(tool_name, args) != classifier.BLOCK:
+        return ""
+    return _refusal("the safety classifier blocks tool '%s'." % tool_name)
+
+
+# Records a classifier ask this lane refused, as ``(decision, tool_name,
+# arguments)``, on the caller's HTTP work-run row.  The composition root
+# (``server.py``) installs it, because recording needs the interfaces layer,
+# which an adapter must not import.  None records nothing.  It is installed
+# once at import and only read afterwards.
+PendingRefusalRecorder = Callable[[Any, str, Mapping[str, Any] | None], None]
+_pending_refusal_recorder: PendingRefusalRecorder | None = None
+
+
+def install_pending_refusal_recorder(recorder: PendingRefusalRecorder | None) -> None:
+    """Install (or, with None, remove) the recorder :func:`classifier_refusal` calls."""
+    global _pending_refusal_recorder
+    _pending_refusal_recorder = recorder
+
+
+def _record_pending_refusal(decision: Any, tool_name: str, arguments: Mapping[str, Any] | None,
+                            reason: str) -> None:
+    """Hand one unattended refusal to the installed recorder; recording never changes the refusal.
+
+    The receipt carries the operator's mode, not the ``manual`` this lane
+    decided under, and this lane's reason, because no mode lifts a classifier ask.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+
+    recorder = _pending_refusal_recorder
+    if recorder is None or getattr(decision, "source", "") != "unattended":
+        return
+    try:
+        recorder(dataclasses.replace(decision, mode=gate.current_mode(), reason=reason),
+                 tool_name, arguments)
+    except Exception:  # noqa: BLE001 - the record is a route out, not the gate
+        pass
+
+
+def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
+    """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
+
+    ``block`` refuses in every permission mode, bypass included.  ``allow``
+    goes on to the operator's own gate at dispatch, which still decides.
+    ``ask`` is skipped only in bypass (``bypass_root_containment_active``, so a
+    restricted caller role in bypass is still asked).  Otherwise the call must
+    be confirmed by a person: when the operator's mode would already ask for
+    it, the dispatch gate asks, so this returns ``""``; when the mode would
+    let it run outright (``auto``, say), it is decided here as ``manual``
+    would, so it stays refused, naming its call id, until an operator approves
+    exactly that call once (an explicit ``allow`` rule the operator wrote for
+    the tool also answers it, as it answers ``manual``).  Any fault on this
+    path refuses.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    verdict = classifier_verdict(tool_name, args)
+    if verdict == classifier.ALLOW:
+        return ""
+    if verdict != classifier.ASK:
+        return _refusal("the safety classifier blocks tool '%s' for model '%s'." % (tool_name, model))
+    try:
+        from sonder_runtime.adapters.execution import effect_fence
+
+        bypass_active = getattr(gate, "bypass_root_containment_active", None)
+        if callable(bypass_active) and bypass_active():
+            return ""
+        arguments = args if isinstance(args, dict) else None
+        preflight = gate.decide(tool_name, interactive=False, surface="agent", record=False,
+                                arguments=arguments)
+        if not preflight.allowed:
+            return ""  # the dispatch gate asks (or refuses) for this call itself
+        decision = gate.decide(tool_name, interactive=False, mode=gate.MANUAL, surface="agent",
+                               record=True, arguments=arguments, fence=effect_fence.current())
+        if decision.allowed:
+            return ""
+        call = str(getattr(decision, "call_id", "") or "")
+        # Not decision.reason: its remedies name modes, and no mode lifts this ask.
+        reason = (
+            "approve exactly this call once at the console with /approve %s, or write an "
+            "explicit allow rule for the tool with /permissions" % call
+            if call else str(decision.reason)
+        )
+        if call:
+            _record_pending_refusal(decision, tool_name, arguments, reason)
+    except Exception:  # noqa: BLE001 - an unconfirmable ask is a refusal, never an allow
+        reason = "the confirmation could not be checked"
+    return _refusal(
+        "the safety classifier requires confirmation for tool '%s' from model '%s': %s"
+        % (tool_name, model, reason)
+    )
 
 
 # ---- entry marking ------------------------------------------------------------
@@ -170,6 +292,85 @@ def decide(model: Any, policy: Mapping[str, Any] | None = None) -> _rules.ModelT
     return _rules.decide_tools(model, deny, grants.grants, deny_only, free_form=True)
 
 
+def _is_env_admin_open() -> bool:
+    raw = str(os.environ.get("SONDER_RESTRICTED_TOOL_LANE_ADMIN_OPEN", "")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from sonder_runtime.adapters.security import role_tool_policy
+        return role_tool_policy.agent_refusal("run_code") == ""
+    except Exception:
+        return False
+
+
+def admin_opt_in_active() -> bool:
+    """True when an authorized local-open/admin caller opted into denied models or BYPASS."""
+    if bool(_ADMIN_OPT_IN.get()) or _is_env_admin_open():
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def admin_opt_in(enabled: bool = True) -> Iterator[None]:
+    """Explicit opt-in scope for ``local-open``/admin callers on denied-list models."""
+    token = _ADMIN_OPT_IN.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _ADMIN_OPT_IN.reset(token)
+
+
+_LOCAL_PROVIDERS = frozenset({"", "ollama"})
+
+
+def _sonder_inference_on_loopback() -> bool:
+    """Whether the configured Sonder Inference endpoint is this machine's loopback.
+
+    Read the way the gateway reads it (``config_from_env``, on every call).  The
+    loopback primary is the only Sonder Inference endpoint that counts as local:
+    the approved private workers it places work on (Node1) are reached through
+    it.  A remote endpoint (``SONDER_ALLOW_REMOTE_INFERENCE=1``) does not count,
+    and neither does a configuration that cannot be read.  A loopback endpoint
+    with a remote route behind it does not count either: private inference
+    workers (``SONDER_INFERENCE_PRIVATE_WORKERS``), or the Ollama fallback
+    (``SONDER_INFERENCE_FALLBACK=ollama``) when its primary origin (typed
+    endpoint or ``OLLAMA_HOST``) is not loopback, or when remote Ollama
+    workers are configured (typed, or ``SONDER_OLLAMA_WORKERS``; loopback-only
+    workers do not count), can place the prompt on another machine.
+    """
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import config_from_env
+        from sonder_runtime.adapters.provider_bindings import inference_fallback_from_env
+
+        config = config_from_env()
+        if not config.loopback or config.workers:
+            return False
+        if inference_fallback_from_env(os.environ) == "ollama":
+            from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+
+            if ollama_pool.has_configured_remote_workers():
+                return False
+            if not ollama_endpoint.is_loopback(ollama_endpoint.normalize()):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _is_non_local_provider(provider: Any) -> bool:
+    name = str(provider or "").strip().lower()
+    if name in _LOCAL_PROVIDERS:
+        return False
+    if name == "sonder_inference":
+        return not _sonder_inference_on_loopback()
+    return True
+
+
 def admit(
     lane_entry: LaneEntry | None,
     selector: Any,
@@ -191,6 +392,15 @@ def admit(
     """
     if lane_entry is None or unsafe or prepared or tier_label != _guard.DENIED_LABEL:
         return None, ""
+    if admin_opt_in_active():
+        target = tuple(resolve())
+        model, cloud, _augment, label = target
+        if model is not None and not cloud and not _is_non_local_provider(provider_for(label)) and str(label or "").startswith("model:"):
+            return RestrictedRun(
+                lane=lane_entry.lane, model=str(model), tools=frozenset(),
+                profiles=("admin-opt-in",), secret_globs=(),
+                caller_project=lane_entry.caller_project, target=target, admin_open=True,
+            ), ""
     decision = decide(selector, policy)
     if not decision.permits(lane_entry.lane):
         return None, ""
@@ -200,9 +410,10 @@ def admit(
         return None, _refusal(
             "model '%s' has a restricted tool grant but is not an installed local model." % (selector,)
         )
-    if cloud or provider_for(label):
+    if cloud or _is_non_local_provider(provider_for(label)):
         return None, _refusal(
-            "model '%s' has a restricted tool grant, which applies only to a local Ollama model." % (selector,)
+            "model '%s' has a restricted tool grant, which applies only to a local model "
+            "(Ollama, or Sonder Inference on loopback)." % (selector,)
         )
     confirmed = decide(model, policy)
     tools = decision.tools & confirmed.tools
@@ -249,6 +460,7 @@ class RestrictedRun:
     def __init__(
         self, *, lane: str, model: str, tools: frozenset[str], profiles: tuple[str, ...],
         secret_globs: tuple[str, ...], caller_project: str, target: tuple[Any, ...],
+        admin_open: bool = False,
     ) -> None:
         self.lane = lane
         self.model = model
@@ -257,6 +469,7 @@ class RestrictedRun:
         self.secret_globs = tuple(secret_globs)
         self.caller_project = caller_project
         self.target = target
+        self.admin_open = bool(admin_open)
         self.project_root = ""
 
     def generator(self, generate: Callable[..., Any]) -> Callable[..., Any]:
@@ -286,6 +499,8 @@ class RestrictedRun:
         Decided again on each model call, so revoking any one of the run's
         tools mid-turn stops its next model call.  Any fault answers False.
         """
+        if self.admin_open:
+            return admin_opt_in_active()
         return self.current_tools(policy) == self.tools
 
     def current_secret_globs(self) -> tuple[str, ...] | None:
@@ -307,14 +522,22 @@ class RestrictedRun:
             return None
         return tuple(dict.fromkeys(self.secret_globs + current))
 
-    def allowlist(self, requested: Any) -> frozenset[str]:
+    def allowlist(self, requested: Any) -> frozenset[str] | None:
         """The caller's allowlist (when it gave one) narrowed to the granted tools."""
+        if self.admin_open:
+            if requested is None:
+                return None
+            return frozenset(str(name) for name in requested if name)
         if requested is None:
             return self.tools
         return self.tools & frozenset(str(name) for name in requested if name)
 
     def bind_project(self, project_scope: str, *, codegen_requested: bool = False) -> str:
         """Bind the project root; a refusal when there is none the caller named."""
+        if self.admin_open:
+            scope = str(project_scope or "").strip()
+            self.project_root = os.path.realpath(scope) if scope else ""
+            return ""
         if codegen_requested:
             return _refusal(
                 "model '%s' is restricted to read-only tools and cannot run compiler-feedback retries."
@@ -435,6 +658,14 @@ class RestrictedRun:
         (``server._project_scope_args``), so the paths checked are the paths
         dispatched.
         """
+        if self.admin_open:
+            def admin_check(tool_name: str, args: Any) -> str:
+                if not self.still_granted():
+                    return _refusal("admin opt-in for model '%s' is no longer active." % self.model)
+                return str(inner(tool_name, args) or "") if inner is not None else ""
+
+            return admin_check
+
         def check(tool_name: str, args: Any) -> str:
             if tool_name not in self.tools:
                 return _refusal(
@@ -466,7 +697,8 @@ class RestrictedRun:
             refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root), globs)
             if refused:
                 return refused
-            return str(inner(tool_name, args) or "") if inner is not None else ""
+            refused = str(inner(tool_name, args) or "") if inner is not None else ""
+            return refused or classifier_refusal(self.model, tool_name, args)
 
         return check
 
@@ -565,6 +797,8 @@ class RestrictedRun:
         The globs are read again now (:meth:`current_secret_globs`); when they
         cannot be read the whole result is withheld.
         """
+        if self.admin_open:
+            return observation
         if tool_name not in _SEARCH_TOOLS and tool_name != _TREE_TOOL:
             return observation
         text = str(observation)
@@ -629,6 +863,8 @@ class RestrictedRun:
 
 
 __all__ = [
-    "LaneEntry", "RestrictedRun", "admit", "decide", "entering", "entry", "permitted",
-    "suppressed", "suppressing",
+    "LaneEntry", "PendingRefusalRecorder", "RestrictedRun", "admit",
+    "classifier_block_refusal", "classifier_refusal", "classifier_verdict",
+    "decide", "entering", "entry", "install_pending_refusal_recorder",
+    "permitted", "suppressed", "suppressing",
 ]

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,11 +7,14 @@ import 'package:flutter/services.dart';
 
 import 'account_session.dart';
 import 'api.dart';
+import 'chat/permission_mode.dart';
 import 'local_manager.dart';
+import 'models.dart';
 import 'runtime/model_routing.dart';
 import 'settings.dart';
 import 'settings/connection.dart';
 import 'settings/context_size.dart';
+import 'settings/temperature.dart';
 import 'settings/model_picker.dart';
 import 'settings/widgets.dart';
 import 'theme.dart';
@@ -103,6 +107,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _launcherToken;
   late final TextEditingController _observatoryExecutable;
   late final TextEditingController _observatoryWebUrl;
+  late final TextEditingController _clientWorkspaceRoot;
+  late final TextEditingController _clientAgentUrl;
+  late final TextEditingController _clientAgentToken;
   late final List<TextEditingController> _stagedText;
 
   /// Sign-in inputs: not settings, so never persisted and never "unsaved".
@@ -121,6 +128,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _bootstrapServer = '';
 
   late bool _allowHosted;
+
+  /// Staged sampling temperature; null is Auto.
+  double? _temperature;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
 
@@ -128,14 +138,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// [CleartextKeyPolicy]); changed only by an explicit per-host choice.
   late Set<String> _cleartextKeyHosts;
   AccountSession? _account;
+  late bool _clientExecEnabled;
+  late String _clientPermissionMode;
 
   bool _obscureKey = true;
   bool _obscureLauncherToken = true;
   bool _obscureBootstrap = true;
+  bool _obscureClientAgentToken = true;
+
+  ServerCapabilities? _capabilities;
+  WhoamiInfo? _whoami;
+  ClientAgentHealth? _companionHealth;
+  bool _checkingCompanion = false;
+  int _capabilitiesEpoch = 0;
 
   ConnectionDiagnosis? _connection;
   ActionOutcome? _launcherOutcome;
   ActionOutcome? _accountOutcome;
+  ActionOutcome? _apiOutcome;
+
+  /// A freshly generated API key, held only until the person dismisses it:
+  /// the server keeps a hash and cannot show it again.
+  String? _newApiKey;
+
+  /// `key_id`s from the last key listing, one revoke button each.
+  List<String> _apiKeyIds = const <String>[];
   String? _keyringWarning;
   String? _saveError;
 
@@ -184,11 +211,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _observatoryExecutable =
         TextEditingController(text: s.observatoryExecutable);
     _observatoryWebUrl = TextEditingController(text: s.observatoryWebUrl);
+    _clientWorkspaceRoot = TextEditingController(text: s.clientWorkspaceRoot);
+    _clientAgentUrl = TextEditingController(text: s.clientAgentUrl);
+    _clientAgentToken = TextEditingController(text: s.clientAgentToken);
     _username = TextEditingController(text: widget.initialUsername ?? '');
     _allowHosted = s.allowHosted;
+    _temperature = s.temperature;
     _keepServerRunning = s.keepServerRunning;
     _allowApproximateLocation = s.allowApproximateLocation;
     _cleartextKeyHosts = {...s.cleartextKeyHosts};
+    _clientExecEnabled = s.clientExecEnabled;
+    _clientPermissionMode = s.clientPermissionMode;
     _stagedText = [
       _server,
       _key,
@@ -198,6 +231,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _launcherToken,
       _observatoryExecutable,
       _observatoryWebUrl,
+      _clientWorkspaceRoot,
+      _clientAgentUrl,
+      _clientAgentToken,
     ];
     for (final controller in _stagedText) {
       controller.addListener(_stagedEdited);
@@ -208,6 +244,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _initialCategory = widget.initialCategory ??
         (_firstRun ? SettingsCategory.connection : null);
     widget.registerLeaveGuard?.call(_leaveGuard);
+    unawaited(_probeServerPolicy());
   }
 
   @override
@@ -267,10 +304,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       // A result for another address would mislead.
       _connection = null;
+      _capabilities = null;
+      _whoami = null;
       if (_needsBootstrap || _bootstrapSecret.text.isNotEmpty) {
         _forgetBootstrapSecret();
       }
     });
+    unawaited(_probeServerPolicy());
   }
 
   void _forgetBootstrapSecret() {
@@ -310,12 +350,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     follow(_launcherToken, (s) => s.launcherToken);
     follow(_observatoryExecutable, (s) => s.observatoryExecutable);
     follow(_observatoryWebUrl, (s) => s.observatoryWebUrl);
+    follow(_clientWorkspaceRoot, (s) => s.clientWorkspaceRoot);
+    follow(_clientAgentUrl, (s) => s.clientAgentUrl);
+    follow(_clientAgentToken, (s) => s.clientAgentToken);
     if (_allowHosted == before.allowHosted) _allowHosted = next.allowHosted;
+    if (_temperature == before.temperature) _temperature = next.temperature;
     if (_keepServerRunning == before.keepServerRunning) {
       _keepServerRunning = next.keepServerRunning;
     }
     if (_allowApproximateLocation == before.allowApproximateLocation) {
       _allowApproximateLocation = next.allowApproximateLocation;
+    }
+    if (_clientExecEnabled == before.clientExecEnabled) {
+      _clientExecEnabled = next.clientExecEnabled;
+    }
+    if (_clientPermissionMode == before.clientPermissionMode) {
+      _clientPermissionMode = next.clientPermissionMode;
     }
     if (setEquals(_cleartextKeyHosts, before.cleartextKeyHosts.toSet())) {
       _cleartextKeyHosts = {...next.cleartextKeyHosts};
@@ -350,6 +400,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return staged != saved;
   }
 
+  bool get _temperatureChanged => _temperature != _saved.temperature;
   bool get _launcherUrlChanged =>
       _textChanged(_launcherUrl, _saved.launcherUrl);
   bool get _launcherTokenChanged =>
@@ -366,10 +417,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _textChanged(_observatoryExecutable, _saved.observatoryExecutable);
   bool get _observatoryWebUrlChanged =>
       _textChanged(_observatoryWebUrl, _saved.observatoryWebUrl);
+  bool get _clientExecChanged =>
+      _clientExecEnabled != _saved.clientExecEnabled ||
+      _clientPermissionMode != _saved.clientPermissionMode ||
+      _textChanged(_clientWorkspaceRoot, _saved.clientWorkspaceRoot) ||
+      _textChanged(_clientAgentUrl, _saved.clientAgentUrl) ||
+      _textChanged(_clientAgentToken, _saved.clientAgentToken);
 
   /// Which pages hold staged changes.
   Map<String, bool> get _changes => {
-        SettingsCategory.general: _modelChanged || _contextChanged,
+        SettingsCategory.general: _modelChanged ||
+            _contextChanged ||
+            _temperatureChanged ||
+            _clientExecChanged,
         SettingsCategory.connection: _serverChanged ||
             _keyChanged ||
             _hostsChanged ||
@@ -421,6 +481,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         themeMode: _saved.themeMode,
         allowHosted: _allowHosted,
         contextSize: canonicalContextSize(_contextSize.text),
+        temperature: _temperature,
         keepServerRunning: _keepServerRunning,
         allowApproximateLocation: _allowApproximateLocation,
         launcherUrl: _launcherUrl.text.trim(),
@@ -429,6 +490,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         observatoryWebUrl: _observatoryWebUrl.text.trim(),
         cleartextKeyHosts: _cleartextKeyHosts.toList()..sort(),
         model: _modelValue,
+        clientExecEnabled: _clientExecEnabled,
+        clientPermissionMode: _clientPermissionMode,
+        clientWorkspaceRoot: _clientWorkspaceRoot.text.trim(),
+        clientAgentUrl: _clientAgentUrl.text.trim().isEmpty
+            ? Settings.defaultClientAgentUrl
+            : _clientAgentUrl.text.trim(),
+        clientAgentToken: _clientAgentToken.text,
       );
 
   /// For page code (extensions may not call the protected [setState]).
@@ -482,6 +550,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _contextNote = null);
   }
 
+  void _setTemperature(double? value) =>
+      _stage(() => _temperature = normalizeTemperature(value));
+
   void _discard() {
     _setText(_server, _saved.serverUrl);
     _setText(_key, _saved.apiKey);
@@ -491,11 +562,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _setText(_launcherToken, _saved.launcherToken);
     _setText(_observatoryExecutable, _saved.observatoryExecutable);
     _setText(_observatoryWebUrl, _saved.observatoryWebUrl);
+    _setText(_clientWorkspaceRoot, _saved.clientWorkspaceRoot);
+    _setText(_clientAgentUrl, _saved.clientAgentUrl);
+    _setText(_clientAgentToken, _saved.clientAgentToken);
     setState(() {
       _allowHosted = _saved.allowHosted;
+      _temperature = _saved.temperature;
       _keepServerRunning = _saved.keepServerRunning;
       _allowApproximateLocation = _saved.allowApproximateLocation;
       _cleartextKeyHosts = {..._saved.cleartextKeyHosts};
+      _clientExecEnabled = _saved.clientExecEnabled;
+      _clientPermissionMode = _saved.clientPermissionMode;
       _account = _saved.accountSession;
       _saveError = null;
       _contextNote = null;
@@ -576,6 +653,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // -- Network actions -------------------------------------------------------
 
+  bool get _isPublicHosting =>
+      _capabilities?.publicHosting == true || _whoami?.publicHosting == true;
+
+  bool get _isAccountAuthMode =>
+      (_capabilities?.authMode ?? _whoami?.authMode ?? '') == 'account';
+
+  bool get _isHostAdminFalse {
+    final who = _whoami;
+    if (who != null) return !who.allowedFeatures.hostAdmin;
+    final caps = _capabilities;
+    if (caps != null && (caps.role.isNotEmpty || caps.publicHosting)) {
+      return !caps.allowedFeatures.hostAdmin;
+    }
+    return false;
+  }
+
+  Future<void> _probeServerPolicy() async {
+    final epoch = ++_capabilitiesEpoch;
+    final server = _server.text;
+    final key = _key.text;
+    final account = _account?.matches(server) == true ? _account : null;
+    final caps = await widget.connection.capabilities(server, key, account);
+    WhoamiInfo? who;
+    if (account != null || key.trim().isNotEmpty) {
+      who = await widget.connection.whoami(server, key, account);
+    }
+    if (!mounted || epoch != _capabilitiesEpoch || _server.text != server) {
+      return;
+    }
+    setState(() {
+      _capabilities = caps;
+      _whoami = who;
+      if (caps?.publicHosting == true) {
+        _forgetBootstrapSecret();
+      }
+    });
+  }
+
+  Future<void> _checkCompanion() async {
+    setState(() => _checkingCompanion = true);
+    final health = await LocalManager.checkClientAgent(
+      companionUrl: _clientAgentUrl.text.trim(),
+      token: _clientAgentToken.text,
+      workspaceRoot: _clientWorkspaceRoot.text.trim(),
+    );
+    if (!mounted) return;
+    setState(() {
+      _checkingCompanion = false;
+      _companionHealth = health;
+    });
+  }
+
+  Future<void> _pickClientPermissionMode() async {
+    final state = PermissionMode(
+      mode: _clientPermissionMode,
+      label: _clientPermissionMode,
+      blurb: modeBlurbs[_clientPermissionMode] ?? '',
+      canBypass: true,
+      modes: [
+        for (final name in permissionModes)
+          PermissionModeOption(
+            name: name,
+            label: name,
+            blurb: modeBlurbs[name] ?? '',
+          ),
+      ],
+    );
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => PermissionModeDialog(state: state),
+    );
+    if (picked == null || !mounted || picked == _clientPermissionMode) return;
+    final ok = await confirmModeChange(
+      context,
+      from: _clientPermissionMode,
+      to: picked,
+      host: 'this PC',
+    );
+    if (!ok || !mounted) return;
+    _stage(() => _clientPermissionMode = picked);
+  }
+
   void _rememberModels(
       String server, ModelCatalog catalog, ModelRouting routing) {
     _models = ModelChoices(catalog.ids, routing);
@@ -611,6 +770,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // A result for an address that has since been edited would mislead.
     if (!mounted || _server.text != server) return;
     setState(() => _connection = diagnosis);
+    unawaited(_probeServerPolicy());
   }
 
   Future<ModelChoices> _loadModelChoices() async {
@@ -684,7 +844,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final loginOrigin = serverOrigin(server);
       if (register) {
-        final secret = _needsBootstrap ? _bootstrapSecret.text : null;
+        if (_isPublicHosting) {
+          final hintError = validatePublicHostingPassword(
+            _password.text,
+            username: _username.text,
+          );
+          if (hintError != null) {
+            setState(() => _accountOutcome = ActionOutcome.failed(hintError));
+            return;
+          }
+        }
+        final secret =
+            !_isPublicHosting && _needsBootstrap ? _bootstrapSecret.text : null;
         String message;
         try {
           message = await widget.connection.register(
@@ -720,6 +891,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
     } on BootstrapSecretRequired {
       if (!mounted) return;
+      if (_isPublicHosting) {
+        setState(() {
+          _needsBootstrap = false;
+          _accountOutcome = const ActionOutcome.failed(
+              'Public registration does not accept a bootstrap secret.');
+        });
+        return;
+      }
       setState(() {
         _needsBootstrap = true;
         _accountOutcome = const ActionOutcome(
@@ -783,6 +962,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _accountOutcome = ActionOutcome.ok('Signed in to $origin.',
             detail: 'Save to keep this session with the new server URL.');
       });
+      unawaited(_probeServerPolicy());
       return;
     }
     setState(() {
@@ -800,14 +980,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   detail: 'The session lasts until the app closes.');
     });
     widget.onChanged(_saved.copyWith());
+    unawaited(_probeServerPolicy());
   }
 
   void _dropSession() {
     _account = null;
     _signedInUser = null;
     _signedInToken = null;
+    _newApiKey = null;
+    _apiKeyIds = const <String>[];
+    _whoami = null;
     _password.clear();
     _saved = _saved.copyWith(withoutAccountSession: true);
+    unawaited(_probeServerPolicy());
   }
 
   Future<void> _signOut() async {
@@ -906,6 +1091,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (_saved.launcherToken.trim().isNotEmpty &&
           s.launcherToken.trim().isEmpty) {
         await Settings.clearLauncherToken();
+      }
+      if (_saved.clientAgentToken.trim().isNotEmpty &&
+          s.clientAgentToken.trim().isEmpty) {
+        await Settings.clearClientAgentToken();
       }
       result = await s.save();
     } catch (_) {
@@ -1048,7 +1237,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         badge: unsaved(SettingsCategory.privacy),
         builder: _privacyPage,
       ),
-      if (LocalManager.canRunLocalTools)
+      if (LocalManager.canRunLocalTools && !_isHostAdminFalse)
         SonderCategory(
           id: SettingsCategory.desktop,
           label: 'Desktop',
@@ -1058,15 +1247,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           badge: unsaved(SettingsCategory.desktop),
           builder: _desktopPage,
         ),
-      SonderCategory(
-        id: SettingsCategory.observatory,
-        label: 'Observatory',
-        icon: Icons.insights_outlined,
-        description: 'Where Runtime opens the Observatory.',
-        keywords: const ['executable', 'web url', 'path', 'cors'],
-        badge: unsaved(SettingsCategory.observatory),
-        builder: _observatoryPage,
-      ),
+      if (!_isHostAdminFalse)
+        SonderCategory(
+          id: SettingsCategory.observatory,
+          label: 'Observatory',
+          icon: Icons.insights_outlined,
+          description: 'Where Runtime opens the Observatory.',
+          keywords: const ['executable', 'web url', 'path', 'cors'],
+          badge: unsaved(SettingsCategory.observatory),
+          builder: _observatoryPage,
+        ),
       SonderCategory(
         id: SettingsCategory.about,
         label: 'About',

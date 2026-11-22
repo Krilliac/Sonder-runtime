@@ -6,7 +6,9 @@ import '../api.dart';
 import '../theme.dart';
 import '../workspace_ui.dart'
     show ConversationContent, StatusKind, WorkspaceNotice;
+import 'backend.dart' show PendingCallLookup;
 import 'classify.dart';
+import 'refusal.dart' show ApproveCallback, RefusalNotice;
 import '../ui/status_line.dart';
 
 export 'classify.dart' show WorkRunRef, workRunOf;
@@ -28,6 +30,9 @@ class WorkRunCard extends StatefulWidget {
   final Future<WorkRun> Function(String id) cancel;
   final ValueChanged<WorkRun> onResolved;
   final String acknowledgement;
+  final Future<PendingCallLookup> Function(String callId)? onLookupApproval;
+  final ApproveCallback? onApprove;
+  final VoidCallback? onChangeMode;
 
   /// Poll delays, in order; the last one repeats.
   final List<Duration> backoff;
@@ -39,6 +44,9 @@ class WorkRunCard extends StatefulWidget {
     required this.cancel,
     required this.onResolved,
     this.acknowledgement = '',
+    this.onLookupApproval,
+    this.onApprove,
+    this.onChangeMode,
     this.backoff = const [
       Duration(seconds: 2),
       Duration(seconds: 5),
@@ -317,6 +325,24 @@ class _WorkRunCardState extends State<WorkRunCard> with WidgetsBindingObserver {
               ),
             ],
           ),
+          if (info?.pendingRefusal != null) ...[
+            const SizedBox(height: SonderSpace.sm),
+            Container(
+              key: const Key('work-run-pending-refusal'),
+              child: RefusalNotice(
+                refusal: RefusalInfo(
+                  subject: info!.pendingRefusal!.tool,
+                  reason: info.pendingRefusal!.reason,
+                  mode: info.pendingRefusal!.mode,
+                  callId: info.pendingRefusal!.callId,
+                ),
+                onLookup: widget.onLookupApproval,
+                onApprove: widget.onApprove,
+                onChangeMode: widget.onChangeMode,
+                onRetry: () => unawaited(_refresh(manual: true)),
+              ),
+            ),
+          ],
           if (info?.progress.isNotEmpty == true) ...[
             const SizedBox(height: SonderSpace.tight),
             Semantics(

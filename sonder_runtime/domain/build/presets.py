@@ -215,48 +215,161 @@ def parse_cmake_presets(
 
     # Memoised per (pool, name, field, depth): diamond inheritance in an untrusted
     # presets file would otherwise be walked once per path (exponential in depth).
+    # Precompute cycle membership per pool in O(V+E) via iterative Tarjan SCC:
+    # acyclic nodes (`name not in in_cycle`) cannot reach any ancestor on `stack`,
+    # so their results stay memoised even above a cyclic descendant; only nodes
+    # inside a cycle skip memoisation when a cycle cut occurs. A per-root step
+    # A per-root step budget caps dense cyclic cliques (e.g. K_16) to
+    # milliseconds: acyclic nodes are memoised and bounded by _MAX_RESOLVE_STEPS,
+    # while cyclic SCC exploration is additionally capped by _MAX_CYCLE_STEPS.
+    _MAX_RESOLVE_STEPS = 4096
+    _MAX_CYCLE_STEPS = 256
     resolved_memo: dict[tuple[int, str, str, int], object] = {}
     merged_memo: dict[tuple[int, str, int], dict[str, str]] = {}
+    cycle_sets: dict[int, frozenset[str]] = {}
 
-    def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
+    def _parents_of(preset: dict) -> list[str]:
+        raw = preset.get("inherits")
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        return [parent for parent in raw[:16] if isinstance(parent, str)]
+
+    def _cycle_nodes(pool: dict) -> frozenset[str]:
+        cached = cycle_sets.get(id(pool))
+        if cached is not None:
+            return cached
+        adj = {
+            name: [p for p in _parents_of(entry[0]) if p in pool]
+            for name, entry in pool.items()
+        }
+        index_counter = 0
+        indices: dict[str, int] = {}
+        lowlink: dict[str, int] = {}
+        on_stack: set[str] = set()
+        tarjan_stack: list[str] = []
+        in_cycle: set[str] = set()
+        for start in adj:
+            if start in indices:
+                continue
+            call_stack: list[tuple[str, int]] = [(start, 0)]
+            indices[start] = lowlink[start] = index_counter
+            index_counter += 1
+            tarjan_stack.append(start)
+            on_stack.add(start)
+            while call_stack:
+                node, edge_i = call_stack[-1]
+                neighbors = adj[node]
+                if edge_i < len(neighbors):
+                    call_stack[-1] = (node, edge_i + 1)
+                    nxt = neighbors[edge_i]
+                    if nxt not in indices:
+                        indices[nxt] = lowlink[nxt] = index_counter
+                        index_counter += 1
+                        tarjan_stack.append(nxt)
+                        on_stack.add(nxt)
+                        call_stack.append((nxt, 0))
+                    elif nxt in on_stack:
+                        if indices[nxt] < lowlink[node]:
+                            lowlink[node] = indices[nxt]
+                else:
+                    call_stack.pop()
+                    if call_stack:
+                        parent_node = call_stack[-1][0]
+                        if lowlink[node] < lowlink[parent_node]:
+                            lowlink[parent_node] = lowlink[node]
+                    if lowlink[node] == indices[node]:
+                        comp: list[str] = []
+                        while True:
+                            member = tarjan_stack.pop()
+                            on_stack.discard(member)
+                            comp.append(member)
+                            if member == node:
+                                break
+                        if len(comp) > 1 or node in adj[node]:
+                            in_cycle.update(comp)
+        result = frozenset(in_cycle)
+        cycle_sets[id(pool)] = result
+        return result
+
+    def _resolved(
+        pool: dict, name: str, field: str, depth: int, stack: tuple[str, ...],
+        in_cycle: frozenset[str], budget: list[int],
+    ) -> tuple[object, bool, bool]:
         entry = pool.get(name)
-        if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
-            return None
+        if name in stack:
+            return None, True, False
+        if entry is None or depth > MAX_INHERIT_DEPTH:
+            return None, False, False
         key = (id(pool), name, field, depth)
         if key in resolved_memo:
-            return resolved_memo[key]
+            return resolved_memo[key], False, False
+        is_cyclic = name in in_cycle
+        if budget[0] <= 0 or (is_cyclic and budget[1] <= 0):
+            return None, True, True
+        budget[0] -= 1
+        if is_cyclic:
+            budget[1] -= 1
         preset = entry[0]
         if field in preset:
-            return preset[field]
-        parents = preset.get("inherits")
-        if isinstance(parents, str):
-            parents = [parents]
+            return preset[field], False, False
         found: object = None
-        for parent in (parents or ())[:16]:
-            if isinstance(parent, str):
-                value = resolved(pool, parent, field, depth + 1, stack + (name,))
-                if value is not None:
-                    found = value
-                    break
-        resolved_memo[key] = found
-        return found
+        cycle_cut = False
+        budget_hit = False
+        for parent in _parents_of(preset):
+            value, child_cut, child_budget = _resolved(
+                pool, parent, field, depth + 1, stack + (name,), in_cycle, budget,
+            )
+            if child_cut:
+                cycle_cut = True
+            if child_budget:
+                budget_hit = True
+            if value is not None:
+                found = value
+                break
+        if not budget_hit and (not cycle_cut or name not in in_cycle):
+            resolved_memo[key] = found
+        return found, cycle_cut, budget_hit
 
-    def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
+    def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
+        value, _, _ = _resolved(
+            pool, name, field, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS, _MAX_CYCLE_STEPS],
+        )
+        return value
+
+    def _merged_cache(
+        pool: dict, name: str, depth: int, stack: tuple[str, ...],
+        in_cycle: frozenset[str], budget: list[int],
+    ) -> tuple[dict[str, str], bool, bool]:
         entry = pool.get(name)
-        if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
-            return {}
+        if name in stack:
+            return {}, True, False
+        if entry is None or depth > MAX_INHERIT_DEPTH:
+            return {}, False, False
         memo_key = (id(pool), name, depth)
         cached = merged_memo.get(memo_key)
         if cached is not None:
-            return cached
+            return dict(cached), False, False
+        is_cyclic = name in in_cycle
+        if budget[0] <= 0 or (is_cyclic and budget[1] <= 0):
+            return {}, True, True
+        budget[0] -= 1
+        if is_cyclic:
+            budget[1] -= 1
         preset = entry[0]
         out: dict[str, str] = {}
-        parents = preset.get("inherits")
-        if isinstance(parents, str):
-            parents = [parents]
-        for parent in reversed(list(parents or ())[:16]):
-            if isinstance(parent, str):
-                out.update(merged_cache(pool, parent, depth + 1, stack + (name,)))
+        cycle_cut = False
+        budget_hit = False
+        for parent in reversed(_parents_of(preset)):
+            parent_cache, child_cut, child_budget = _merged_cache(
+                pool, parent, depth + 1, stack + (name,), in_cycle, budget,
+            )
+            if child_cut:
+                cycle_cut = True
+            if child_budget:
+                budget_hit = True
+            out.update(parent_cache)
         own = preset.get("cacheVariables")
         if isinstance(own, dict):
             for key, value in list(own.items())[:256]:
@@ -268,7 +381,14 @@ def parse_cmake_presets(
                     value = "ON" if value else "OFF"
                 if isinstance(value, str):
                     out[key] = clip(value, 1024)
-        merged_memo[memo_key] = out
+        if not budget_hit and (not cycle_cut or name not in in_cycle):
+            merged_memo[memo_key] = dict(out)
+        return out, cycle_cut, budget_hit
+
+    def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
+        out, _, _ = _merged_cache(
+            pool, name, depth, stack, _cycle_nodes(pool), [_MAX_RESOLVE_STEPS, _MAX_CYCLE_STEPS],
+        )
         return out
 
     configure: list[PresetInfo] = []

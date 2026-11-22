@@ -1039,9 +1039,13 @@ _ENTRIES = [
     ("server.py", "_agent_dispatch", "offload", 1, TEXT,
      "the agent offload tool: the answer returns to the agent as text, prompt input for its next step"),
     ("server.py", "_agent_turn", "_make_tier_generate", 1, EXEC, "agent decisions become tool calls"),
+    ("server.py", "_answer", "_chat_request", 1, EXEC,
+     "chat tool loop (maybe_answer_chat_tools) runs tools on the model's calls; leaves default refusing text_only=False"),
     ("server.py", "_answer", "_make_generate", 1, TEXT,
      ("chat answer (sonder, by tier or by name); handed to reference_lookup_lanes.chat_generate, "
       "which forwards text_only to the framed call")),
+    ("server.py", "_answer_with_history_impl", "_chat_request", 1, EXEC,
+     "chat tool loop (maybe_answer_chat_tools) runs tools on the model's calls; leaves default refusing text_only=False"),
     ("server.py", "_answer_with_history_impl", "_make_generate", 1, TEXT,
      ("chat answer with history (MCP and HTTP chat); handed to reference_lookup_lanes.chat_generate, "
       "which forwards text_only to the framed call")),
@@ -1103,12 +1107,16 @@ _ENTRIES = [
     ("server.py", "_offload_tier_impl.invoke_nonlearning", "_chat_request", 1, TEXT, "offload answer"),
     ("server.py", "_offload_tier_impl.invoke_nonlearning", "_chat_request_with_cloud_fallback", 1, TEXT,
      "offload answer"),
+    ("server.py", "_ollama_pool_admin_status_data", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1, CHOKE,
+     "reads the gateway's unified worker status for pool admin status; generates nothing"),
     ("server.py", "_orchestrator_worker.worker", "_offload_impl", 1, TEXT,
      "fleet text worker: its output is the fleet's text (repository workers use _agent_turn)"),
     ("server.py", "_post", "/api/chat", 1, CHOKE, "pool transport below _post_model"),
     ("server.py", "_post", "/api/generate", 1, CHOKE, "pool transport below _post_model"),
     ("server.py", "_post.send", "/api/chat", 1, CHOKE, "pool transport below _post_model"),
     ("server.py", "_post.send", "/api/generate", 1, CHOKE, "pool transport below _post_model"),
+    ("server.py", "_post.send.transport", "/api/chat", 1, CHOKE, "pool transport below _post_model"),
+    ("server.py", "_post.send.transport", "/api/generate", 1, CHOKE, "pool transport below _post_model"),
     ("server.py", "_prepare_lesson_candidate_bounded.generate", "_gateway_generate_text", 1, TEXT,
      "lesson text, stored as prose and injected into prompts"),
     ("server.py", "_record_failure_pitfall", "_gateway_generate_text", 1, TEXT,
@@ -1130,7 +1138,6 @@ _ENTRIES = [
     ("server.py", "consult", "ensemble_answer", 1, TEXT, "consult answer"),
     ("server.py", "control_command", "ensemble_answer", 1, TEXT, "/ensemble answer"),
     ("server.py", "control_command", "vision_analyze", 1, TEXT, "/vision answer"),
-    ("server.py", "ensemble_answer", "/api/generate", 1, CHOKE, _UNLOAD),
     ("server.py", "ensemble_answer", "_make_tier_generate", 3, TEXT,
      ("ensemble members and synthesis, and the factory handed to the shared reference lookup "
       "for its search-terms call (parsed into query words); the answer is returned")),
@@ -1145,6 +1152,8 @@ _ENTRIES = [
      "candidates are run; refuses a denied tier first"),
     ("server.py", "parallel_generate_run_languages.one", "_make_tier_generate", 1, EXEC,
      "candidates are run; refuses a denied tier first"),
+    ("server.py", "register_pool_worker", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1, CHOKE,
+     "registers a peer Ollama worker on the gateway; generates nothing"),
     ("server.py", "sonder", "ensemble_answer", 1, TEXT, "sonder(tier='ensemble') answer"),
     ("server.py", "sonder", "model_fanout", 1, TEXT, "sonder fanout answer"),
     ("server.py", "sonder", "_sonder_impl", 1, TEXT, "sonder chat answer"),
@@ -1229,10 +1238,10 @@ _ENTRIES = [
      GATEWAY_GENERATE, 4, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/application/structured_output.py", "generate_structured", GATEWAY_GENERATE, 1, CHOKE,
      "packaged gateway plumbing; the reply is parsed and checked, never run or applied"),
-    ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 4, CHOKE,
-     "the unwrapped gateway: built once, wrapped as the default handle, and handed only "
-     "to Application.model_gateway (the legacy bridge, which judges the served model on every "
-     "call) and, through ServedTierGateway, to ChatService (text consumers)"),
+    ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 5, CHOKE,
+     "the unwrapped gateway: built once, wrapped as the default handle, attached to the inference "
+     "pool, and handed only to Application.model_gateway (the legacy bridge, which judges the served "
+     "model on every call) and, through ServedTierGateway, to ChatService (text consumers)"),
     ("sonder_runtime/bootstrap/batch_job_executor.py", "FanoutStepExecutor.execute", "_execute_fanout_run", 1, TEXT,
      "batch step: the answer is vault-sealed and returned to the owner as text, never run or applied"),
     ("sonder_runtime/bootstrap/build_tools.py", "_LazyModelGateway.generate", GATEWAY_GENERATE, 1, CHOKE,
@@ -1243,6 +1252,8 @@ _ENTRIES = [
      "the vision critique steers the next round's script; a refused vision tier turns the critique off",
      (), "the call passes no selector: _vision_analyze_impl always answers on the vision tier, "
      "which the critique judges by name ('vision')"),
+    ("sonder_runtime/bootstrap/pool_wiring.py", "execute_ensemble_poll.unload_member", "/api/generate", 1, CHOKE,
+     _UNLOAD),
     ("sonder_runtime/bootstrap/security_eval_agent_tools.py", "evaluate", "raw-gateway:" + RAW_GATEWAY_ATTRIBUTE, 1,
      TEXT, "reads Application.model_gateway only to wrap it in ServedTierGateway (the text consumers' handle, as "
      "ChatService gets it): the tool is text-only, and the checked ToolLaneGateway would refuse the "

@@ -11,6 +11,7 @@ import ntpath
 import re
 from collections.abc import Mapping
 
+from ...domain.security.delete_calls import HOST_PROGRAM_TOOLS
 from .powershell_ast import PowerShellInspection, inspect_powershell
 
 _LANGUAGES = frozenset({"powershell", "pwsh", "ps1"})
@@ -301,6 +302,19 @@ def loop_gate_arguments(tool_name, action):
     if powershell_arguments(tool_name, loop_arguments(action)) is None:
         return None
     return action
+
+
+def loop_decision_arguments(tool_name, action):
+    """The arguments the loop surface's permission decision binds.
+
+    PowerShell binds the action as sent (:func:`loop_gate_arguments`). A
+    host-program tool can delete files, so it binds its aliased arguments and
+    the delete ask sees what would run. Any other tool decides without them.
+    """
+    gate_arguments = loop_gate_arguments(tool_name, action)
+    if gate_arguments is None and tool_name in HOST_PROGRAM_TOOLS:
+        return loop_arguments(action)
+    return gate_arguments
 
 
 def runnable_powershell(block):

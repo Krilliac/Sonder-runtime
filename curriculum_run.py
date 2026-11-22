@@ -51,7 +51,7 @@ def practice_on(tasks):
             if refusal := server._tool_lane_guard.prompt_refusal(t["prompt"], server.natural_model_request, server.TIERS, server._RUNTIME_POLICY):
                 print("    -> SKIP " + refusal)
                 continue
-            resp = server.sonder(t["prompt"])
+            resp = server.sonder(t["prompt"], temperature=0.2)  # practice keeps its fixed 0.2
             iid = server.parse_interaction_id(resp)
             code = grounding.extract_code_block(resp)
             ok = False

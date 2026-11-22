@@ -21,10 +21,12 @@ the trusted MCP/console surface, a developer or admin caller).
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 from sonder_runtime.domain import public_policy
@@ -74,6 +76,31 @@ def refusal_reason(tool: object, role: str) -> str:
 def bind_caller_role(role: str | None) -> None:
     """Declare the role the current handler thread serves (None: unrestricted)."""
     _CALLER_ROLE.set(role)
+
+
+@contextlib.contextmanager
+def caller_role_scope(role: str | None) -> Iterator[None]:
+    """Temporarily bind ``role`` on the current context and restore prior state (even unbound)."""
+    token = _CALLER_ROLE.set(role)
+    try:
+        yield
+    finally:
+        _CALLER_ROLE.reset(token)
+
+
+_UNBOUND = object()
+
+
+def caller_bound_unrestricted() -> bool:
+    """True only when a handler explicitly bound "no role restriction" here.
+
+    ``agent_refusal`` reads an unbound context as unrestricted, which suits
+    the trusted MCP/console surfaces. A caller that needs positive evidence of
+    developer authority (a hint naming a developer-only command) uses this
+    instead: a context that never received the binding (a plain worker
+    thread, a direct library call) reads as restricted.
+    """
+    return _CALLER_ROLE.get(_UNBOUND) is None
 
 
 def agent_refusal(tool: object) -> str:

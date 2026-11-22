@@ -138,10 +138,11 @@ def registered_tools():
 
 
 def test_matrix_never_allows_the_dangerous_class_in_any_mode():
-    for mode in pm.MODES:
+    for mode in pm._CYCLE_MODES:
         assert pm._MATRIX[mode]["dangerous"] != pm.ALLOW, (
             "mode %r allows dangerous tools outright" % mode
         )
+    assert pm._MATRIX[pm.BYPASS]["dangerous"] == pm.ALLOW
 
 
 def test_every_mode_is_covered_by_the_matrix_for_every_risk_class():
@@ -157,18 +158,16 @@ def test_every_mode_is_covered_by_the_matrix_for_every_risk_class():
 
 
 def test_no_catalog_dangerous_tool_is_ever_allowed(dangerous_tools):
-    """The module's headline promise, asserted against the real catalog.
-
-    This was a strict xfail: ``risk_of`` consulted ``EXECUTION_TOOLS`` before
-    the catalog, so ``self_heal_repair`` -- in both sets -- reported as
-    ``execution``, which ``auto`` allows outright. The precedence is now
-    dangerous > execution, so this holds and is asserted for real.
-    """
-    for mode in pm.MODES:
+    """Non-bypass modes never allow dangerous tools outright; bypass keeps durable authority guarded."""
+    for mode in pm._CYCLE_MODES:
         for tool in dangerous_tools:
             assert pm.decide(tool, mode=mode).action != pm.ALLOW, (
                 "%s is allowed outright in %s" % (tool, mode)
             )
+    for tool in pm.DURABLE_AUTHORITY_TOOLS:
+        assert pm.decide(tool, mode=pm.BYPASS).action != pm.ALLOW, (
+            "%s must stay guarded even in bypass" % tool
+        )
 
 
 def test_dangerous_outranks_execution_for_a_tool_in_both_buckets(catalog_commands):
@@ -385,7 +384,7 @@ def test_default_mode_is_the_conservative_one():
 
 
 def test_mode_order_is_least_to_most_autonomous():
-    assert pm.MODES == (pm.PLAN, pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO)
+    assert pm.MODES == (pm.PLAN, pm.MANUAL, pm.ACCEPT_EDITS, pm.AUTO, pm.BYPASS)
 
 
 @pytest.mark.parametrize("risk", _RISK_CLASSES)
@@ -708,10 +707,15 @@ def test_default_rule_lookup_reads_the_real_on_disk_policy(tmp_path, monkeypatch
     monkeypatch.setattr(sonder_paths, "default_home", lambda: tmp_path)
 
     # No permissions.json yet: permission_rules falls back to its built-in
-    # defaults, which include an explicit file_delete deny.
-    rule = pm._default_rule_lookup("file_delete")
+    # defaults, which include an explicit deny (the private chain of thought)
+    # and the file_delete row, which asks (deletes always ask).
+    rule = pm._default_rule_lookup("admin_private_chain_of_thought")
     assert rule is not None
     assert rule["action"] == "deny"
+    rule = pm._default_rule_lookup("file_delete")
+    assert rule is not None
+    # NO_MATCH_RULE is "ask" too: the pattern proves the shipped row matched.
+    assert rule["action"] == "ask" and rule["pattern"] == "file_delete"
 
     # A tool nothing matches must come back as None ("no rule"), not the
     # permissive NO_MATCH_RULE dict -- decide() only special-cases allow/deny,
@@ -912,18 +916,18 @@ def test_set_mode_persists_to_the_state_file(state_file):
 
 
 def test_cycle_mode_wraps_forwards():
-    pm.set_mode(pm.MODES[0])
-    seen = [pm.cycle_mode() for _ in range(len(pm.MODES))]
-    assert seen == list(pm.MODES[1:]) + [pm.MODES[0]]
-    assert pm.current_mode() == pm.MODES[0], "cycle_mode did not wrap"
+    pm.set_mode(pm._CYCLE_MODES[0])
+    seen = [pm.cycle_mode() for _ in range(len(pm._CYCLE_MODES))]
+    assert seen == list(pm._CYCLE_MODES[1:]) + [pm._CYCLE_MODES[0]]
+    assert pm.current_mode() == pm._CYCLE_MODES[0], "cycle_mode did not wrap"
 
 
 def test_cycle_mode_wraps_backwards():
-    pm.set_mode(pm.MODES[0])
-    assert pm.cycle_mode(-1) == pm.MODES[-1]
-    assert pm.current_mode() == pm.MODES[-1]
-    seen = [pm.cycle_mode(-1) for _ in range(len(pm.MODES))]
-    assert seen == list(reversed(pm.MODES[:-1])) + [pm.MODES[-1]]
+    pm.set_mode(pm._CYCLE_MODES[0])
+    assert pm.cycle_mode(-1) == pm._CYCLE_MODES[-1]
+    assert pm.current_mode() == pm._CYCLE_MODES[-1]
+    seen = [pm.cycle_mode(-1) for _ in range(len(pm._CYCLE_MODES))]
+    assert seen == list(reversed(pm._CYCLE_MODES[:-1])) + [pm._CYCLE_MODES[-1]]
 
 
 def test_cycle_mode_returns_the_new_mode():

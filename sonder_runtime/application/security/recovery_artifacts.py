@@ -271,9 +271,20 @@ class RecoveryArtifactService:
             # log refuses the write instead of orphaning artifact files.
             if len(entries) >= self.max_audit_entries:
                 raise RecoveryArtifactError("audit entry bound reached")
-            previous = entries[-1].get("audit_digest", "") if entries else ""
-            if not isinstance(previous, str) or (previous and not _DIGEST.fullmatch(previous)):
-                raise RecoveryArtifactIntegrityError("existing audit chain is malformed")
+            previous = ""
+            for existing_entry in entries:
+                entry_digest = existing_entry.get("audit_digest")
+                if not isinstance(entry_digest, str) or not _DIGEST.fullmatch(entry_digest):
+                    raise RecoveryArtifactIntegrityError("existing audit chain is malformed")
+                expected_existing = _digest({
+                    "artifact_digest": existing_entry.get("artifact_digest"),
+                    "artifact_id": existing_entry.get("artifact_id"),
+                    "owner": existing_entry.get("owner"),
+                    "previous": existing_entry.get("previous", ""),
+                })
+                if existing_entry.get("previous", "") != previous or entry_digest != expected_existing:
+                    raise RecoveryArtifactIntegrityError("existing audit chain is malformed")
+                previous = entry_digest
             audit_material = {"artifact_digest": digest, "artifact_id": artifact_id, "owner": self.owner, "previous": previous}
             audit_digest = _digest(audit_material)
             metadata = {
@@ -289,6 +300,8 @@ class RecoveryArtifactService:
                 existing_audit = audit_path.read_bytes() if audit_path.exists() else b""
             except OSError as exc:
                 raise RecoveryArtifactIntegrityError("audit file cannot be read") from exc
+            if existing_audit and not existing_audit.endswith(b"\n"):
+                raise RecoveryArtifactIntegrityError("existing audit file is missing trailing newline")
             # The payload bound applies to the artifact body only.  Metadata is
             # the body plus fixed digest fields, and the audit log is bounded
             # by max_audit_entries.
@@ -323,7 +336,11 @@ class RecoveryArtifactService:
         body_owner = body.get("owner")
         kind = body.get("kind")
         payload = body.get("payload")
-        if not isinstance(body_owner, str) or not isinstance(kind, str) or not isinstance(payload, dict):
+        if (
+            not isinstance(body_owner, str) or not body_owner.strip() or "\x00" in body_owner
+            or not isinstance(kind, str) or not kind.strip() or "\x00" in kind
+            or not isinstance(payload, dict)
+        ):
             raise RecoveryArtifactIntegrityError("artifact body is malformed")
         digest = sha256(_canonical(body)).hexdigest()
         # The metadata file is not covered by the digest, so every field it
@@ -344,6 +361,9 @@ class RecoveryArtifactService:
                 break
             previous = entry["audit_digest"]
             if entry.get("artifact_id") == artifact_id:
+                if matching is not None:
+                    chain_matches = False
+                    break
                 matching = entry
         previous_audit_digest = ""
         audit_digest = "0" * 64
@@ -353,15 +373,19 @@ class RecoveryArtifactService:
         chain_matches = (
             chain_matches
             and matching is not None
+            and matching.get("owner") == self.owner
             and matching.get("artifact_digest") == digest
             and metadata.get("previous_audit_digest") == previous_audit_digest
             and metadata.get("audit_digest") == audit_digest
         )
         # The returned record is built only from the digest-checked body and
         # the chain-checked audit entry, never from the unhashed metadata.
-        artifact = RecoveryArtifact(
-            artifact_id, body_owner, kind, payload, digest, previous_audit_digest, audit_digest,
-        )
+        try:
+            artifact = RecoveryArtifact(
+                artifact_id, body_owner, kind, payload, digest, previous_audit_digest, audit_digest,
+            )
+        except RecoveryArtifactError as exc:
+            raise RecoveryArtifactIntegrityError("artifact body is malformed") from exc
         return RecoveryArtifactInspection(artifact, artifact_path, owner_matches, digest_matches, chain_matches)
 
     def verify(self, artifact_id: str, *, actor: str) -> RecoveryArtifact:

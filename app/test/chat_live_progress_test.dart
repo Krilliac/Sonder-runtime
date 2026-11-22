@@ -202,6 +202,49 @@ void main() {
     expect(events.last, isA<TurnDone>());
   });
 
+  test('toolEvent transitions through awaiting approval, tool name, and thinking',
+      () {
+      final progress = TurnProgress(model: 'sonder');
+      expect(progress.opened(), isTrue);
+      expect(progress.phase, 'thinking');
+      expect(progress.wrote(), isTrue);
+      expect(progress.phase, 'writing');
+
+      // Pausing for approval overrides writing phase.
+      expect(
+        progress.toolEvent(const ChatStreamToolEvent(
+          id: 'tc_1',
+          tool: 'run_code',
+          state: 'awaiting_approval',
+        )),
+        isTrue,
+      );
+      expect(progress.phase, 'awaiting approval');
+
+      // A status poll does not clobber awaiting approval.
+      expect(progress.observe(null), isFalse);
+      expect(progress.phase, 'awaiting approval');
+
+      expect(
+        progress.toolEvent(const ChatStreamToolEvent(
+          id: 'tc_1',
+          tool: 'run_code',
+          state: 'running',
+        )),
+        isTrue,
+      );
+      expect(progress.phase, 'run_code');
+
+      expect(
+        progress.toolEvent(const ChatStreamToolEvent(
+          id: 'tc_1',
+          tool: 'run_code',
+          state: 'done',
+        )),
+        isTrue,
+      );
+      expect(progress.phase, 'thinking');
+  });
   test('the production backend maps sonder-status comments to TurnStatus',
       () async {
     final events = <TurnEvent>[];
@@ -419,6 +462,23 @@ void main() {
       final glyph =
           tester.widget<AnimatedOpacity>(find.byKey(const Key('live-glyph')));
       expect(glyph.opacity, lessThan(1));
+    });
+
+    testWidgets('awaiting approval phase never shows slow-model stall hint',
+        (tester) async {
+      await pumpLine(tester);
+      live.value = live.value!.copyWith(phase: 'awaiting approval');
+      for (var i = 0; i < 30; i++) {
+        tick();
+      }
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+          find.textContaining('working · awaiting approval · 30s',
+              findRichText: true),
+          findsOneWidget);
+      expect(find.textContaining('slow local model?', findRichText: true),
+          findsNothing);
     });
   });
 }

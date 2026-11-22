@@ -44,6 +44,11 @@ Per-request (without flipping global config):
 X-Sonder-Spanda: 1
 ```
 
+The header multiplies model calls, so the server honours it only for a
+developer-authorized caller (a developer or administrator account, the
+deployment API key, or the local-open listener), like a fan-out request. An
+ordinary account's header is ignored and its turn runs as configured.
+
 If `block = true` and `rsc >= threshold`, the server returns **409** with an
 `epistemic_uncertainty` error body (existing JSON error style). Auth is
 unchanged — api-key / account gates still apply before sampling.

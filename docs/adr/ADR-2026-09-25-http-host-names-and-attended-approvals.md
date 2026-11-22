@@ -48,7 +48,7 @@ approval is narrower than a mode change:
   refused);
 - at most one open approval exists per call, it is spent atomically once,
   and it expires;
-- the approver (`developer:<user>`, `admin-key` or `local-open`) and surface
+- the approver (`<role>:<user>`, `admin-key` or `local-open`) and surface
   `http` are recorded, and the action is audited as `permission_approve`.
 
 The chat response carries the refused call as data
@@ -61,6 +61,12 @@ to any holder of a developer or administrator credential. It needs a
 sonder-security-and-privacy review before release. If that review rejects it,
 remove the POST routes; clients fall back to "approve from the console"
 (`/approve <call id>`), which the receipt also names.
+
+Amendment (2026-11-21): approving or revoking over HTTP now needs the
+authority chat's `/permission_approve` needs, the administrator role (the
+deployment API key and the local-open listener count). A developer account
+may still list pending calls with `GET /v1/approvals` but may not approve
+or revoke one, and the recorded approver names the account's real role.
 
 ## Consequences
 

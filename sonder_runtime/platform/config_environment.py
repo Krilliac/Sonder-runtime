@@ -110,6 +110,25 @@ def env_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_bool_checked(
+    name: str,
+    env: dict[str, str],
+    current: bool,
+    errors: list[str],
+) -> bool:
+    """Parse an explicit boolean env var, preserving ``current`` on empty and flagging typos."""
+    raw = str(env.get(name, "") or "").strip()
+    if not raw:
+        return current
+    lowered = raw.lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    errors.append(f"{name} is not a boolean: {raw!r}")
+    return current
+
+
 def env_bool_from_env(
     name: str,
     default: bool = False,

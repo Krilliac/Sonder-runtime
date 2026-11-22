@@ -242,10 +242,10 @@ def test_guard_still_overrides_ordinary_driver_names():
     from sonder_runtime.adapters import git_program_guard
 
     overrides = git_program_guard.driver_overrides(
-        ["filter.lfs.clean", "filter.my filter.v2.smudge", "diff.Word-Doc.textconv"],
+        ["filter.lfs.clean", "filter.my-filter.v2.smudge", "diff.Word-Doc.textconv"],
     )
     assert "filter.lfs.clean=cat" in overrides
-    assert "filter.my filter.v2.smudge=cat" in overrides
+    assert "filter.my-filter.v2.smudge=cat" in overrides
     assert "diff.Word-Doc.textconv=cat" in overrides
 
 
@@ -312,8 +312,8 @@ def test_guard_refuses_driver_names_that_were_not_valid_utf8(key):
         git_program_guard.driver_overrides(["filter.ok.clean", key])
 
 
-def test_guard_still_overrides_non_ascii_utf8_driver_names():
+def test_guard_refuses_non_ascii_driver_names():
     from sonder_runtime.adapters import git_program_guard
 
-    overrides = git_program_guard.driver_overrides(["filter.caf\u00e9.clean"])
-    assert "filter.caf\u00e9.clean=cat" in overrides
+    with pytest.raises(git_program_guard.GitProgramConfigError):
+        git_program_guard.driver_overrides(["filter.caf\u00e9.clean"])

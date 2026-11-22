@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 
+from sonder_runtime.domain.thinking_controls import note_reply_truncation
 from sonder_runtime.domain.thinking_pace import (
     MIN_THINKING_TOKENS,
     RATE_WINDOW,
@@ -44,6 +46,18 @@ from sonder_runtime.domain.thinking_pace import (
 _logger = logging.getLogger("sonder.model_pace")
 _LOCK = threading.Lock()
 _RATES: dict[str, deque[float]] = {}
+
+# Thinking exhaustion memory.  A model that spent its whole reply budget on
+# thought with no answer EXHAUSTED_BEFORE_SKIP times in a row is asked without
+# thinking for EXHAUSTION_TTL_SECONDS (from the last exhaustion); an answered
+# thinking request ends the run of exhaustions.  Per process, per model name.
+EXHAUSTED_BEFORE_SKIP = 2
+EXHAUSTION_TTL_SECONDS = 3600.0
+_EXHAUSTED: dict[str, tuple[int, float]] = {}
+
+
+def _now() -> float:
+    return time.monotonic()
 
 
 def _key(model: object) -> str:
@@ -60,6 +74,52 @@ def observe(model: object, response: object, *, local: bool = True) -> None:
         return
     with _LOCK:
         _RATES.setdefault(name, deque(maxlen=RATE_WINDOW)).append(measured)
+
+
+def note_thinking_exhausted(model: object) -> None:
+    """Count one more thinking exhaustion for ``model`` (a run restarts once the TTL has passed)."""
+    name = _key(model)
+    if not name:
+        return
+    now = _now()
+    with _LOCK:
+        count, stamp = _EXHAUSTED.get(name, (0, now))
+        if now - stamp > EXHAUSTION_TTL_SECONDS:
+            count = 0
+        _EXHAUSTED[name] = (count + 1, now)
+
+
+def note_thinking_answered(model: object) -> None:
+    """A thinking request to ``model`` returned an answer: forget its run of exhaustions."""
+    with _LOCK:
+        _EXHAUSTED.pop(_key(model), None)
+
+
+def note_reply(model: object, response: object, *, thinking_requested: bool) -> None:
+    """Record a returned reply: end ``model``'s run of exhaustions, and note whether it was cut at its budget.
+
+    ``thinking_requested`` is true for a local request that asked for thinking
+    (so the reply answering it counts as an answered thinking request).
+    """
+    if thinking_requested:
+        note_thinking_answered(model)
+    reason = response.get("done_reason") if isinstance(response, dict) else None
+    note_reply_truncation(str(reason or "").strip().casefold() == "length")
+
+
+def thinking_skip_due(model: object) -> bool:
+    """Whether ``model`` exhausted its thinking budget often enough, recently enough, to be asked without it."""
+    name = _key(model)
+    now = _now()
+    with _LOCK:
+        entry = _EXHAUSTED.get(name)
+        if entry is None:
+            return False
+        count, stamp = entry
+        if now - stamp > EXHAUSTION_TTL_SECONDS:
+            del _EXHAUSTED[name]
+            return False
+        return count >= EXHAUSTED_BEFORE_SKIP
 
 
 def rate(model: object) -> float | None:
@@ -137,6 +197,18 @@ def up_front(payload: dict, caller_payload: object, model: object, timeout_secon
     answer that call fails as an empty response.  The refusal is remembered, so
     later calls keep thinking with the fitted headroom.
     """
+    if (
+        can_skip_thinking and thinking_skip_due(model)
+        and "think" not in payload and isinstance(caller_payload, dict) and "think" not in caller_payload
+        and isinstance(caller_payload.get("options"), dict)
+    ):
+        remembered = dict(caller_payload)
+        remembered["think"] = False
+        _logger.debug(
+            "%s asked without thinking: it used its whole thinking budget with no answer %s times running",
+            _key(model)[:80], EXHAUSTED_BEFORE_SKIP,
+        )
+        return remembered
     affordable = _affordable(model, timeout_seconds)
     plain = without_thinking(payload, caller_payload, *affordable) if can_skip_thinking else None
     if plain is None:
@@ -154,3 +226,4 @@ def reset() -> None:
     """Forget every measurement (tests)."""
     with _LOCK:
         _RATES.clear()
+        _EXHAUSTED.clear()

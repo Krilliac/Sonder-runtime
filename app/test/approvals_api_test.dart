@@ -58,7 +58,15 @@ void main() {
     expect(issued.ttlSeconds, 900);
   });
 
-  test('403 reads "Approvals need a developer or admin account"', () async {
+  // The server lets developers list approvals but issues and revokes them
+  // for an administrator (or the deployment API key) only, so a 403 on the
+  // POST routes must not tell a developer to sign in as a developer.
+  const developerApprove403 = '{"error":{"message":"administrator '
+      'authorization is required to approve or revoke calls",'
+      '"type":"forbidden","code":"FORBIDDEN"}}';
+
+  test('403 on approve says an administrator or the API key is needed',
+      () async {
     await expectLater(
       http.runWithClient(
           () => SonderApi(baseUrl: 'http://127.0.0.1:11435')
@@ -66,8 +74,64 @@ void main() {
               .approve(_call),
           () => MockClient((r) async =>
               fixtureResponse('permission_mode_forbidden_403.json', 403))),
-      throwsA(isA<SonderException>().having((e) => e.message, 'message',
-          'Approvals need a developer or admin account.')),
+      throwsA(isA<SonderException>()
+          .having((e) => e.message, 'message', ApprovalsApi.forbiddenToIssue)
+          .having((e) => e.remedy, 'remedy', contains('administrator'))),
+    );
+  });
+
+  test('a developer approving gets 403: the wording names the administrator',
+      () async {
+    await expectLater(
+      http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:11435')
+              .approvals
+              .approve(_call),
+          () => MockClient(
+              (r) async => http.Response(developerApprove403, 403))),
+      throwsA(isA<SonderException>()
+          .having((e) => e.httpStatus, 'httpStatus', 403)
+          .having((e) => e.message, 'message',
+              'Approving or revoking needs an administrator account or the '
+                  'deployment API key.')
+          .having((e) => e.message, 'message',
+              isNot(contains('developer or admin')))
+          .having((e) => e.remedy, 'remedy',
+              isNot(contains('developer or admin')))),
+    );
+  });
+
+  test('a developer revoking gets 403: the wording names the administrator',
+      () async {
+    await expectLater(
+      http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:11435')
+              .approvals
+              .revoke('n_c41a'),
+          () => MockClient(
+              (r) async => http.Response(developerApprove403, 403))),
+      throwsA(isA<SonderException>()
+          .having((e) => e.httpStatus, 'httpStatus', 403)
+          .having(
+              (e) => e.message, 'message', ApprovalsApi.forbiddenToIssue)),
+    );
+  });
+
+  test('403 on the list still reads "Approvals need a developer or admin '
+      'account"', () async {
+    await expectLater(
+      http.runWithClient(
+          () => SonderApi(baseUrl: 'http://127.0.0.1:11435').approvals.list(),
+          () => MockClient((r) async => http.Response(
+              '{"error":{"message":"developer or administrator authorization '
+              'is required to review or approve calls","type":"forbidden",'
+              '"code":"FORBIDDEN"}}',
+              403))),
+      throwsA(isA<SonderException>()
+          .having((e) => e.message, 'message',
+              'Approvals need a developer or admin account.')
+          .having((e) => e.remedy, 'remedy',
+              'Sign in with a developer or admin account.')),
     );
   });
 
@@ -112,6 +176,63 @@ void main() {
               return http.Response('{"ok":true}', 200);
             }));
     expect(seen, ['POST /v1/approvals/revoke/n_c41a']);
+  });
+
+  test('deny posts to /deny/<call_id> with Idempotency-Key and tool/digest',
+      () async {
+    final seen = <http.Request>[];
+    final digest = 'b' * 64;
+    await http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:11435', apiKey: 'k')
+            .approvals
+            .deny(_call, tool: 'run_code', digest: digest),
+        () => MockClient((r) async {
+              seen.add(r);
+              return http.Response(
+                  jsonEncode({
+                    'object': 'denial',
+                    'denial': {
+                      'tool': 'run_code',
+                      'call_id': _call,
+                      'digest': digest,
+                    },
+                  }),
+                  200);
+            }));
+    expect(seen, hasLength(1));
+    expect(seen.single.url.path, '/v1/approvals/deny/$_call');
+    expect(seen.single.headers['Idempotency-Key'], startsWith('deny-'));
+    expect(jsonDecode(seen.single.body), {'tool': 'run_code', 'digest': digest});
+  });
+
+  test('PendingApproval parses detail, denied and bidi_warning fields',
+      () async {
+    final snap = await http.runWithClient(
+        () => SonderApi(baseUrl: 'http://127.0.0.1:11435').approvals.list(),
+        () => MockClient((r) async => http.Response(
+            jsonEncode({
+              'pending': [
+                {
+                  'call_id': _call,
+                  'tool': 'run_code',
+                  'preview': 'language=python',
+                  'mode': 'manual',
+                  'detail': 'print(1)',
+                  'detail_hidden': false,
+                  'detail_truncated': true,
+                  'detail_chars': 5000,
+                  'denied': true,
+                  'bidi_warning': true,
+                },
+              ],
+            }),
+            200)));
+    final p = snap!.pending.single;
+    expect(p.detail, 'print(1)');
+    expect(p.detailTruncated, isTrue);
+    expect(p.detailChars, 5000);
+    expect(p.denied, isTrue);
+    expect(p.bidiWarning, isTrue);
   });
 
   group('refusal metadata', () {

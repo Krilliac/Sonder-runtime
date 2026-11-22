@@ -61,10 +61,10 @@ def effects(monkeypatch):
 
 
 @contextmanager
-def _http_server(monkeypatch):
+def _http_server(monkeypatch, *, api_key: str = ""):
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
-    monkeypatch.setattr(ts, "API_KEY", "")
-    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "API_KEY", api_key)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key" if api_key else "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -88,7 +88,7 @@ def _http_server(monkeypatch):
         thread.join(timeout=5)
 
 
-def _chat(monkeypatch, prompt):
+def _chat(monkeypatch, prompt, *, api_key: str = ""):
     body = json.dumps({
         "model": "sonder",
         "messages": [
@@ -97,10 +97,12 @@ def _chat(monkeypatch, prompt):
             {"role": "user", "content": prompt},
         ],
     }).encode("utf-8")
-    with _http_server(monkeypatch) as port:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    with _http_server(monkeypatch, api_key=api_key) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
-        conn.request("POST", "/v1/chat/completions", body=body,
-                     headers={"Content-Type": "application/json"})
+        conn.request("POST", "/v1/chat/completions", body=body, headers=headers)
         response = conn.getresponse()
         status, payload = response.status, response.read()
         conn.close()
@@ -136,11 +138,16 @@ def test_http_train_intent_is_refused_like_slash_train(monkeypatch, effects, mod
 
 def test_http_run_and_train_intents_still_work_in_auto(monkeypatch, effects):
     pm.set_mode(pm.AUTO)
+    # Local-open HTTP requests stay capped at manual (L27) and refuse "run it".
+    assert "refused /run:" in _chat(monkeypatch, "run it")
+    assert effects["ran"] == []
 
-    assert "[ran OK]" in _chat(monkeypatch, "run it")
+    # An authenticated owner API-key caller receives the active auto mode.
+    key = "intent-owner-key-0123456789abcdef"
+    assert "[ran OK]" in _chat(monkeypatch, "run it", api_key=key)
     assert effects["ran"] == [("print('pwned')", "python")]
 
-    assert _chat(monkeypatch, "practice 3 tasks") == "practiced 3"
+    assert _chat(monkeypatch, "practice 3 tasks", api_key=key) == "practiced 3"
     assert effects["trained"] == [3]
 
 

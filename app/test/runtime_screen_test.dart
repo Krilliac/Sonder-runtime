@@ -734,7 +734,7 @@ void main() {
       expect(find.text('/approve 3f9a12c0d1e2f3a4'), findsOneWidget);
     });
 
-    testWidgets('a 403 says approvals need a developer or admin account',
+    testWidgets('a 403 on approve says an administrator is needed',
         (tester) async {
       final data = FakeRuntimeData(
           approvalsPage: ApprovalsPage(supported: true, pending: [_pending()]))
@@ -745,8 +745,11 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('approval-confirm')));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Approvals need a developer or admin account'),
+      expect(
+          find.textContaining(
+              'Approving or revoking needs an administrator account'),
           findsOneWidget);
+      expect(find.textContaining('developer or admin'), findsNothing);
     });
 
     // A local-open server lists pending calls but refuses the POST whoever
@@ -794,6 +797,28 @@ void main() {
       expect(data.revoked, ['n_1234']);
       expect(find.textContaining('Revoked the approval for git_commit'),
           findsOneWidget);
+    });
+
+    testWidgets('a 403 on revoke says an administrator is needed',
+        (tester) async {
+      final data = FakeRuntimeData(
+        approvalsPage: ApprovalsPage(supported: true, open: [
+          IssuedApproval(
+              nonce: 'n_1234',
+              callId: '11aa22bb33cc44dd',
+              tool: 'git_commit',
+              expiresAt: runtimeNow.add(const Duration(minutes: 14))),
+        ]),
+      )..revokeError = SonderException('forbidden', httpStatus: 403);
+      await pumpRuntime(tester,
+          info: healthySystemInfo(), data: data, category: 'permissions');
+      await tester.tap(find.text('Revoke'));
+      await tester.pumpAndSettle();
+      expect(
+          find.textContaining(
+              'Approving or revoking needs an administrator account'),
+          findsOneWidget);
+      expect(find.textContaining('developer or admin'), findsNothing);
     });
   });
 

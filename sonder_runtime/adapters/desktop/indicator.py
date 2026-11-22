@@ -31,7 +31,7 @@ _HOTKEY_ID = 0x5D0E
 
 
 def _write(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -79,14 +79,28 @@ class _HotkeyListener:
     """
 
     def __init__(self, user32, kernel32, modifiers: int, vk: int,
-                 hotkey_id: int = _HOTKEY_ID) -> None:
+                 hotkey_id: int = _HOTKEY_ID, *,
+                 on_stop=None, stop_file: Path | None = None,
+                 stop_lock: threading.Lock | None = None) -> None:
         self._user32, self._kernel32 = user32, kernel32
         self._modifiers, self._vk, self._id = modifiers, vk, hotkey_id
+        self._on_stop = on_stop
+        self._stop_file = stop_file
+        self._stop_lock = stop_lock or threading.Lock()
+        self._stop_requested = threading.Event()
         self.fired = threading.Event()
         self._started = threading.Event()
         self.registered = False
         self.thread_id = 0
         self._thread = owned_runtime_thread(target=self._run, name="sonder-kill-hotkey", daemon=True)
+
+    def _record_stop(self, why: str) -> None:
+        if self._on_stop is not None:
+            self._on_stop(why)
+        elif self._stop_file is not None:
+            with self._stop_lock:
+                if not self._stop_file.exists():
+                    _write(self._stop_file, {"reason": why, "at": time.time()})
 
     def start(self, timeout: float = 5.0) -> bool:
         """Start the thread; True once the hotkey is registered on it."""
@@ -97,6 +111,7 @@ class _HotkeyListener:
         return self._thread.is_alive()
 
     def stop(self, timeout: float = 2.0) -> None:
+        self._stop_requested.set()
         if self.thread_id and self._thread.is_alive():
             self._user32.PostThreadMessageW(self.thread_id, _WM_QUIT, 0, 0)
             self._thread.join(timeout)
@@ -117,9 +132,12 @@ class _HotkeyListener:
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) not in (0, -1):
                 if msg.message == _WM_HOTKEY and msg.wParam == self._id:
+                    self._record_stop("kill hotkey")
                     self.fired.set()
         finally:
             user32.UnregisterHotKey(None, self._id)
+            if not self.fired.is_set() and not self._stop_requested.is_set():
+                self._record_stop("the kill hotkey stopped working")
 
 
 def main(argv=None) -> int:
@@ -138,8 +156,20 @@ def main(argv=None) -> int:
     if not parent:
         _write(ready_file, {"ok": False, "error": "parent process is gone"})
         return 4
-    hotkey = _HotkeyListener(user32, kernel32,
-                             _MOD_CONTROL | _MOD_ALT | _MOD_SHIFT | _MOD_NOREPEAT, _VK_K)
+    stop_lock = threading.Lock()
+    reason = {"value": ""}
+
+    def record_stop(why: str) -> None:
+        with stop_lock:
+            if not reason["value"]:
+                _write(stop_file, {"reason": why, "at": time.time()})
+                reason["value"] = why
+
+    hotkey = _HotkeyListener(
+        user32, kernel32,
+        _MOD_CONTROL | _MOD_ALT | _MOD_SHIFT | _MOD_NOREPEAT, _VK_K,
+        on_stop=record_stop,
+    )
     if not hotkey.start():
         hotkey.stop()
         _write(ready_file, {"ok": False,
@@ -159,12 +189,9 @@ def main(argv=None) -> int:
     text = f"  Sonder is driving {args.label}  -  press {HOTKEY_TEXT} or Stop  "
     tk.Label(root, text=text, fg="white", bg="#b00020",
              font=("Segoe UI", 10, "bold")).pack(side="left", pady=3)
-    reason = {"value": ""}
 
     def stop(why: str) -> None:
-        if not reason["value"]:
-            reason["value"] = why
-            _write(stop_file, {"reason": why, "at": time.time()})
+        record_stop(why)
         root.destroy()
 
     tk.Button(root, text="Stop", command=lambda: stop("stop button"),
