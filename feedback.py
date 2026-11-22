@@ -85,9 +85,14 @@ def classify_signal(text):
     if not t or len(t.split()) > _MAX_WORDS or _GUARD_RE.match(t):
         return None
     if _NEGATIVE_RE.search(t):
-        # Mixed cues ("thanks, no problem") are ambiguous, as in
-        # classify_feedback: record nothing rather than a false rejection.
-        if _POSITIVE_RE.search(t):
+        # Mixed cues ("thanks, no problem", "copied, no issues") are ambiguous:
+        # record nothing rather than a false rejection.
+        if (
+            _POSITIVE_RE.search(t)
+            or _COPIED_RE.search(t)
+            or _USED_RE.search(t)
+            or _EDITED_RE.search(t)
+        ):
             return None
         return "rejected"
     if _COPIED_RE.search(t):

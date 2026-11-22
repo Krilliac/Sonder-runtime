@@ -362,3 +362,46 @@ def test_operator_profiles():
     for document in bad_documents:
         with pytest.raises(Exception):
             parse_build_profiles(json.dumps(document).encode())
+
+
+def test_classify_targets_exempts_only_per_model_build_aliases():
+    from sonder_runtime.domain.build.model import BuildModel, BuildTarget, Generator, TargetType
+    from sonder_runtime.domain.build.tool_targets import apply_safety, build_aliases_for, classify_targets
+
+    cmake_ninja = BuildModel(
+        project_label="demo",
+        source_root=SOURCE,
+        build_dir=SOURCE + "/build",
+        system=BuildSystem.CMAKE,
+        generator=Generator.NINJA,
+        targets=(
+            BuildTarget("all", TargetType.UTILITY),
+            BuildTarget("Build", TargetType.UTILITY),
+            BuildTarget("ALL_BUILD", TargetType.UTILITY),
+        ),
+    )
+    assert build_aliases_for(cmake_ninja) == frozenset({"all"})
+    ninja_safety = classify_targets(cmake_ninja)
+    assert "all" not in ninja_safety.utility
+    assert "Build" in ninja_safety.utility
+    assert "ALL_BUILD" in ninja_safety.utility
+    updated = {t.name: t for t in apply_safety(cmake_ninja, ninja_safety)}
+    assert not updated["all"].utility
+    assert updated["Build"].utility and updated["ALL_BUILD"].utility
+
+    msbuild = BuildModel(
+        project_label="demo",
+        source_root=SOURCE,
+        build_dir=SOURCE + "/build",
+        system=BuildSystem.MSBUILD,
+        generator=Generator.OTHER,
+        targets=(
+            BuildTarget("Build", TargetType.UTILITY),
+            BuildTarget("all", TargetType.UTILITY),
+            BuildTarget("ALL_BUILD", TargetType.UTILITY),
+        ),
+    )
+    assert build_aliases_for(msbuild) == frozenset({"Build"})
+    ms_safety = classify_targets(msbuild)
+    assert "Build" not in ms_safety.utility
+    assert "all" in ms_safety.utility and "ALL_BUILD" in ms_safety.utility

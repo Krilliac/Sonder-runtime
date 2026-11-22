@@ -75,6 +75,10 @@ HOSTILE = [
     '#include <aws/CREDEN~1>\n',
     '#include <aws/credentials:stream>\n',
     '#include <sub/CON>\n',
+    '#include <credentials/>\n',
+    '#include <id_rsa/>\n',
+    '#include <aws/credentials/>\n',
+    '#include <credentials/foo.h>\n',
 ]
 
 

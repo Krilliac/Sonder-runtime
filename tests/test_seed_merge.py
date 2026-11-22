@@ -90,3 +90,50 @@ def test_merge_runtime_embed_records_provenance_and_dedupes_current(monkeypatch)
     assert stored["embedding_model"] == embeddings.EMBED_IDENTITY
     assert stored["embedding_revision"] == embeddings.EMBED_REVISION
     assert stored["embedding_dim"] == 2
+
+
+def test_merge_skips_non_dict_rows_and_tombstoned_lessons():
+    c = ms.connect(":memory:")
+    tombstoned_text = "Always validate UTF-8 byte offsets before slicing."
+    ms.add_lesson(c, "L-tomb", tombstoned_text, None, "prior")
+    ms.tombstone_lesson(c, "L-tomb")
+
+    stats = seed_merge.merge_records(
+        c,
+        [
+            "not a dict",
+            42,
+            None,
+            {"lesson": tombstoned_text.upper(), "source": "seed:x"},
+            {"lesson": "Check sqlite3 WAL checkpoint before backup copy.", "source": "seed:x"},
+        ],
+        embed_fn=_emb,
+    )
+    assert stats["skipped_vague"] == 3
+    assert stats["skipped_tombstoned"] == 1
+    assert stats["added"] == 1
+    assert [row["text"] for row in ms.all_lessons(c)] == [
+        "Check sqlite3 WAL checkpoint before backup copy."
+    ]
+
+
+def test_merge_skips_embedding_tombstoned_duplicate(monkeypatch):
+    c = ms.connect(":memory:")
+    vec = [0.6, 0.8]
+    monkeypatch.setattr(embeddings, "embed", lambda _text: vec)
+    blob = embeddings.to_blob(vec)
+    ms.add_lesson(
+        c, "L-tomb-emb", "Pin subprocess timeouts on every host tool call.", blob, "prior",
+        embedding_model=embeddings.EMBED_IDENTITY,
+        embedding_revision=embeddings.EMBED_REVISION,
+        embedding_dim=2,
+    )
+    ms.tombstone_lesson(c, "L-tomb-emb")
+
+    stats = seed_merge.merge_records(
+        c,
+        [{"lesson": "Set explicit subprocess timeouts on host tool invocations.", "source": "seed:x"}],
+    )
+    assert stats["added"] == 0
+    assert stats["skipped_tombstoned"] == 1
+    assert ms.all_lessons(c) == []
