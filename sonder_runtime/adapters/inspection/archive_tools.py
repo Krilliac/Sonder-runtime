@@ -626,6 +626,20 @@ def extract_archive(
         developer_authorized=developer_authorized,
     )
     plan = _plan(source, limits, deadline=deadline)
+    # The destination check sees only a directory name, which no module rule
+    # matches. Each member's final path gets the guard's code rules, so an
+    # extraction cannot plant what write_file refuses: the ``__init__.py`` of
+    # a new top-level package (``yaml/__init__.py``) or a collected test
+    # module / ``conftest.py`` under ``tests``. Secret names keep the member
+    # policy of _portable_member_path.
+    if not developer_authorized:
+        for entry in plan["entries"]:
+            target = destination.joinpath(*entry["path"].split("/"))
+            if file_ops._is_runtime_code_path(target):
+                raise PermissionError(
+                    f"refusing to mutate protected Sonder control-plane path {target} "
+                    "without an authenticated developer token"
+                )
     stage = Path(tempfile.mkdtemp(prefix=".sonder-archive-", dir=destination.parent))
     promoted = False
     try:
