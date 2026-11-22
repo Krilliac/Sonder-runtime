@@ -24,6 +24,7 @@ is immutable and safe to share between threads.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from sonder_runtime.domain.prompt_composition import join_system_parts
@@ -48,6 +49,7 @@ USER_RUN_LINE = (
 )
 
 _SECTION_BREAK = "\n\n"
+_SECTION_SEP = re.compile(r"\r?\n(?:[ \t]*\r?\n)+")
 
 
 def _one_line(value: object, what: str) -> str:
@@ -118,26 +120,30 @@ class TurnToolManifest:
 def _split(system: str) -> tuple[str, str]:
     """``system`` without its manifest blocks, and the last block found.
 
-    A block starts at a section boundary with ``HEADER`` and runs to the next
-    blank line or the end. Header text that does not open a section is left
-    alone.
+    A block starts at a section boundary with ``HEADER`` (allowing CRLF
+    blank-line breaks and leading horizontal whitespace on the header line) and
+    runs to the next blank line or the end. Header text that does not open a
+    section is left alone.
     """
-    base, kept = system, ""
-    search_end = len(base)
-    while True:
-        start = base.rfind(HEADER, 0, search_end)
-        if start < 0:
-            return base, kept
-        if start and base[start - len(_SECTION_BREAK):start] != _SECTION_BREAK:
-            search_end = start
+    pieces = _SECTION_SEP.split(system)
+    seps = _SECTION_SEP.findall(system)
+    kept_block = ""
+    out: list[str] = []
+    prev_kept = -1
+    for index, piece in enumerate(pieces):
+        stripped = piece.lstrip(" \t\r\n") if index == 0 else piece.lstrip(" \t\r")
+        if stripped.startswith(HEADER):
+            kept_block = stripped
             continue
-        end = base.find(_SECTION_BREAK, start)
-        block = base[start:] if end < 0 else base[start:end]
-        before = base[:start - len(_SECTION_BREAK)] if start else ""
-        after = "" if end < 0 else base[end + len(_SECTION_BREAK):]
-        kept = kept or block
-        base = join_system_parts(before, after)
-        search_end = len(before)
+        if not piece:
+            continue
+        if out:
+            out.append(seps[index - 1] if prev_kept == index - 1 else _SECTION_BREAK)
+        out.append(piece)
+        prev_kept = index
+    if not kept_block:
+        return system, ""
+    return "".join(out), kept_block
 
 
 def with_manifest(system: object, manifest: TurnToolManifest) -> str:

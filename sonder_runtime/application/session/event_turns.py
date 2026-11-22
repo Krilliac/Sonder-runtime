@@ -118,13 +118,22 @@ def fuller_turns(get_repository: Callable[[], Any], session_id: str,
     """
     try:
         events = list(get_repository().read_complete(session_id))
-        raw_tasks = [str(e.payload.get("content") or "") for e in events
-                     if e.event_type == "user.message" and isinstance(e.payload, Mapping)]
-        logged = turns_from_events(_retention_aware(events))
     except Exception:
         return interaction_turns
-    if not logged:
+    if not events:
         return interaction_turns
+    raw_tasks = [str(e.payload.get("content") or "") for e in events
+                 if e.event_type == "user.message" and isinstance(e.payload, Mapping)]
+    try:
+        logged = turns_from_events(_retention_aware(events))
+    except Exception:
+        # Fail closed on every event-logged turn when retention validation or
+        # event projection fails: keep only genuinely pre-log interaction rows,
+        # never fall back to raw SQLite copies of event-logged (potentially
+        # retention-withheld) turns.
+        return _unmatched(interaction_turns, raw_tasks)
+    if not logged:
+        return _unmatched(interaction_turns, raw_tasks) if raw_tasks else interaction_turns
     return [*_unmatched(interaction_turns, raw_tasks), *logged]
 
 

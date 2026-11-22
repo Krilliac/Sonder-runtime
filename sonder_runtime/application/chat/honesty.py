@@ -190,7 +190,7 @@ _NO_VERIFICATION_GUIDANCE = (
     "This chat turn has no tools. Never say or imply that you compiled, ran, "
     "tested, linted or verified code, and never show a Passed/Verified/checkmark "
     "results table, unless a tool result in this conversation shows it. If asked "
-    "to validate code, say you cannot run it here and suggest the /run command."
+    "to validate code, say you cannot run it here."
 )
 
 
