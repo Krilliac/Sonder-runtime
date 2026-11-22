@@ -661,3 +661,217 @@ def test_windows_slash_switch_paths_are_confined(project, program, switch):
     escape = switch + "../../" + "/".join(project.parts[1:]) + "/x.exe"
     assert OUTSIDE in _guard(project, program, ["src/a.c", escape])
     assert OUTSIDE in _guard(project, program, ["src/a.c", switch + "../x=y"])
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 adversarial must-refuse & regression tests (B1-B9)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("command", [
+    # B1: redirection targets delimited by `=` / `,` / `;`
+    ">nul=python -c print(12345)",
+    "1>nul=cmd/c echo 12345",
+    # B3: glued `/` and `(` and multi-`=` after call / if / start
+    "call powershell/nop -c Write-Output 12345",
+    "if 1==1 powershell/nop -c Write-Output 12345",
+    "call pwsh/nop -c Write-Output 12345",
+    "call powershell/nol Write-Output 12345",
+    "call powershell(Write-Output 12345)",
+    "if 1==1 powershell(Write-Output 12345)",
+    "call cmd(/c echo 12345)",
+    "if 1==1=cmd=/c=python=-c=print(12345)",
+    # B5/B6/B8: Python -m timeit, Perl -M/-d injection, ADS, missing interpreters
+    "python -m timeit -n 1 -r 1 print(12345)",
+    "perl -Mstrict;print(12345);exit src/run.py",
+    "perl -d:a;print(12345) src/run.py",
+    r"C:\Python312\python.exe::$DATA -c print(12345)",
+    "php -r echo(12345);",
+    "deno eval console.log(12345)",
+    "bun -e console.log(12345)",
+    "lua -e print(12345)",
+    "awk BEGIN{print(12345)}",
+])
+def test_build_run_refuses_wave2_inline_bypasses(project, command):
+    assert INLINE in _build_run_guard(project, command)
+
+
+@pytest.mark.parametrize("command", [
+    # B1: redirection target swallowing `=` / `,` / `;` before stdin interpreter
+    "<payload.txt=python",
+    ">nul,python -Wx,y < payload.txt",
+    ">nul;python -Wx,y < payload.txt",
+    "<payload.txt,python -Wx,y",
+    "<payload.txt;python -Wx,y",
+    # B2: closed-group stdin redirection after prior redirection or fd digit
+    "(python) >nul <payload.txt",
+    "(python) 2>&1 <payload.txt",
+    "(python) 0<payload.txt",
+    # B4: PowerShell -NoExit enters stdin command loop after -File
+    "echo Write-Output 12345 | powershell -NoExit -File src/run.ps1",
+    "echo Write-Output 12345 | pwsh -NoExit -File src/run.ps1",
+    # B5: Python REPL submodules
+    "python -m code.__main__ < payload.txt",
+    "python -m asyncio.__main__ < payload.txt",
+    "python -m _pyrepl.__main__ < payload.txt",
+])
+def test_build_run_refuses_wave2_stdin_bypasses(project, command):
+    assert STDIN in _build_run_guard(project, command)
+
+
+@pytest.mark.parametrize("command", [
+    # B1 & B3: command-string launchers hidden after redirection or glued `/`
+    ">nul=forfiles -c python0x20-c0x20print(12345)",
+    "call forfiles/m src/run.py -c python0x20-c0x20print(12345)",
+    "if 1==1 forfiles/c python0x20-c0x20print(12345)",
+    "start /b forfiles/c python0x20-c0x20print(12345)",
+    "call regsvr32/s src/run.py",
+    "call msiexec/i src/run.py",
+    "call certutil/decode a b",
+    "call bitsadmin/list",
+    "call schtasks/run /tn x",
+    "call wmic/node:localhost process call create notepad",
+    "echo ok & call mshta/x about:blank",
+    "if 1==1=cmd=/c=forfiles/m=payload.py=/c=python0x20-c0x20print(12345)",
+    "call=cmd=/c=forfiles/m=payload.py=/c=python0x20-c0x20print(12345)",
+    # B8: newly covered command-string launchers
+    "wsl echo 12345",
+    "wsl p$(echo y)thon3 -c print(12345)",
+    "pcalua -a calc.exe",
+    "syncappvpublishingserver n;Write-Output",
+    "ssh -o ProxyCommand=calc localhost",
+    "sc create x binPath= calc.exe",
+    "call at 12:00 notepad",
+])
+def test_build_run_refuses_wave2_launcher_bypasses(project, command):
+    assert LAUNCHER in _build_run_guard(project, command)
+
+
+@pytest.mark.parametrize("command", [
+    "if exist payload.py=for /f %i in (a) do echo 1",
+    "if 1==1 for/f delims= %i in (a) do echo 1",
+])
+def test_build_run_refuses_wave2_for_loop_bypasses(project, command):
+    assert "for loops are not supported" in _build_run_guard(project, command)
+
+
+@pytest.mark.parametrize("command", [
+    r"..\outside.bat",
+    r"echo ok&..\outside.bat",
+    r"type=..\outside.txt",
+    r"type=..\..\outside.txt",
+    pytest.param("type C:secret", marks=pytest.mark.skipif(
+        os.name != "nt", reason="Windows drive-relative path",
+    )),
+])
+def test_build_run_refuses_wave2_path_escapes(project, command):
+    assert OUTSIDE in _build_run_guard(project, command)
+
+
+def test_build_run_posix_flat_reading_refuses_pipe_and_amp_inside_option_value():
+    from sonder_runtime.domain.agents import interpreter_argv
+
+    plan_pipe = interpreter_argv.analyze_build_command(
+        "python -W x|y -c print(12345)", stdin_present=False, is_windows=False,
+    )
+    assert plan_pipe.inline_violation is True
+    plan_amp = interpreter_argv.analyze_build_command(
+        "python -W x&y -c print(12345)", stdin_present=False, is_windows=False,
+    )
+    assert plan_amp.inline_violation is True
+
+
+@pytest.mark.parametrize(("program", "args"), [
+    ("python", ["-m", "timeit", "-n", "1", "-r", "1", "print(12345)"]),
+    ("perl", ["-Mstrict;print(12345);exit", "src/run.py"]),
+    ("perl", ["-M", "strict;print(12345);exit", "src/run.py"]),
+    ("perl", ["-d:a;print(12345)", "src/run.py"]),
+    ("node", ["--import=data:text/javascript,console.log(12345)", "src/run.py"]),
+    ("node", ["--import", "data:text/javascript,console.log(12345)", "src/run.py"]),
+    (r"C:\Python312\python.exe::$DATA", ["-c", "print(12345)"]),
+    ("php", ["-r", "echo(12345);"]),
+    ("deno", ["eval", "console.log(12345)"]),
+    ("bun", ["-e", "console.log(12345)"]),
+    ("lua", ["-e", "print(12345)"]),
+    ("awk", ["BEGIN{print 12345}"]),
+    ("env", ["-S", "python -c print(12345)"]),
+])
+def test_workspace_run_refuses_wave2_inline_bypasses(project, program, args):
+    assert INLINE in _guard(project, program, args)
+
+
+@pytest.mark.parametrize(("program", "args"), [
+    ("powershell", ["-NoExit", "-File", "src/run.ps1"]),
+    ("pwsh", ["-NoExit", "-File", "src/run.ps1"]),
+    ("python", ["-m", "code.__main__"]),
+    ("python", ["-m", "asyncio.__main__"]),
+    ("python", ["-m", "_pyrepl.__main__"]),
+    ("ruby", ["-S", "irb"]),
+])
+def test_workspace_run_refuses_wave2_stdin_bypasses(project, program, args):
+    assert STDIN in _guard(project, program, args, stdin="print(12345)")
+
+
+@pytest.mark.parametrize(("program", "args"), [
+    ("wsl", ["echo", "12345"]),
+    ("wsl", ["p$(echo y)thon3", "-c", "print(12345)"]),
+    ("pcalua", ["-a", "calc.exe"]),
+    ("syncappvpublishingserver", ["n;Write-Output 12345"]),
+    ("ssh", ["-o", "ProxyCommand=calc", "localhost"]),
+    ("sc", ["create", "x", "binPath=", "calc.exe"]),
+    ("at", ["12:00", "notepad"]),
+])
+def test_workspace_run_refuses_wave2_launcher_bypasses(project, program, args):
+    assert LAUNCHER in _guard(project, program, args)
+
+
+@pytest.mark.parametrize(("program", "args"), [
+    ("dd", ["of=../../outside.txt"]),
+    ("make", ["DESTDIR=../outside"]),
+    pytest.param("type", ["C:secret"], marks=pytest.mark.skipif(
+        os.name != "nt", reason="Windows drive-relative path",
+    )),
+])
+def test_workspace_run_refuses_wave2_path_escapes(project, program, args):
+    assert OUTSIDE in _guard(project, program, args)
+
+
+def test_ensemble_codegen_build_loop_is_guarded(project):
+    err = server._agent_project_execution_argument_error(
+        "ensemble_codegen_build_loop",
+        {
+            "project_dir": str(project),
+            "build_program": "python",
+            "build_args_json": '["-Ic", "print(12345)"]',
+        },
+        str(project),
+    )
+    assert INLINE in err
+
+
+def test_command_pos_scoped_at_does_not_overblock_ordinary_arguments(project):
+    assert _build_run_guard(project, "echo look at this") == ""
+    assert _build_run_guard(project, "pytest -k at") == ""
+    assert _build_run_guard(project, "python src/run.py --flag=at") == ""
+    assert _guard(project, "pytest", ["-k", "at"]) == ""
+    assert _guard(project, "git", ["log", "--grep", "at"]) == ""
+
+
+def test_workbench_refuse_inline_code_covers_wave2_bypasses(project):
+    from sonder_runtime.adapters.filesystem import workbench
+
+    for exe, argv, has_stdin in [
+        ("powershell.exe.", ["-c", "Write-Output 1"], False),
+        ("cmd.exe.", ["/c", "echo 1"], False),
+        (r"C:\Python312\python.exe::$DATA", ["-c", "print(12345)"], False),
+        ("powershell.exe", ["Write-Output 1"], False),
+        ("powershell.exe", ["-NoExit", "-File", "src/run.ps1"], True),
+        ("python.exe", ["-m", "timeit", "print(12345)"], False),
+        ("bash.exe", ["+c", "echo 1"], False),
+        ("forfiles.exe", ["/m", "src/run.py", "/c", "cmd"], False),
+        ("wsl.exe", ["echo", "1"], False),
+    ]:
+        with pytest.raises(PermissionError):
+            workbench._refuse_inline_code(
+                exe, argv, has_stdin=has_stdin, allow_cmd_script=False,
+                script_args_start=None, working=project,
+            )
