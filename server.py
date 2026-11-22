@@ -171,7 +171,7 @@ from sonder_runtime.adapters import model_list_consumers as _model_list_consumer
 import sonder_runtime.adapters.runtime_policy as runtime_policy
 from sonder_runtime.adapters.inference import startup_prewarm as _startup_prewarm
 from sonder_runtime.adapters import tool_lane_guard as _tool_lane_guard, model_tool_grants as _model_tool_grants, model_tool_policy_editor as _model_tool_policy_editor, restricted_tool_lane as _restricted_tool_lane
-from sonder_runtime.adapters import chat_observers as _chat_observers, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi, chat_temperature as _chat_temperature
+from sonder_runtime.adapters import chat_observers as _chat_observers, chat_temperature as _chat_temperature, chat_tool_manifest as _chat_tool_manifest, reference_lookup_lanes as _reference_lookup_lanes, reference_lookup_multi as _reference_lookup_multi
 import sonder_runtime.adapters.accelerators.npu.contract as npu_contract
 import sonder_runtime.adapters.accelerators.npu.service as npu_service
 import calibration
@@ -228,6 +228,8 @@ from sonder_runtime.domain.master_timeout import (
 from sonder_runtime.domain.distillation_policy import (
     distillation_timeout_seconds as _distillation_timeout_policy,
 )
+from sonder_runtime.application.chat import model_fitness as _chat_model_fitness
+from sonder_runtime.application.session import event_turns as _event_turns
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
 )
@@ -345,6 +347,7 @@ from sonder_runtime.domain.thinking_controls import (
     with_local_thinking_budget as _with_local_thinking_budget,
 )
 from sonder_runtime.domain import reasoning_continuation as _reasoning_continuation
+from sonder_runtime.domain import thinking_controls as _thinking_controls
 from sonder_runtime.domain import verification_progress
 from sonder_runtime.domain import batch_coalescing as _batch_coalescing
 from sonder_runtime.domain.fanout_receipts import (
@@ -917,7 +920,12 @@ def _remember_thinking_model(model):
 def _known_thinking_model(model) -> bool:
     """Whether we already know this model reasons. Never performs I/O."""
     with _THINKING_CAPABILITY_LOCK:
-        return _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+        known = _THINKING_CAPABILITY_CACHE.get(str(model or "").strip(), False)
+    return known or _thinking_controls.pool_says_thinking(OLLAMA_POOL, model)
+
+
+def _chat_reply_num_predict(*, explicit: bool = False) -> int:
+    return _thinking_controls.reply_num_predict(_env_int_option, explicit=explicit)
 
 
 def _think_option_supported(model) -> bool:
@@ -1766,6 +1774,17 @@ def _model_context_metadata(model):
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
+
+
+_CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(
+    lambda model: _post("/api/show", {"model": model, "name": model}, timeout=10),
+    vision_only_model_families=lambda: _model_list_consumers.values()["vision_only_model_families"],
+)
+
+
+def chat_model_unfit_reason(model):
+    """Why a local model cannot serve chat, or "" (cloud models are not probed)."""
+    return "" if _is_cloud_model_name(model) else _CHAT_FITNESS.unfit_reason(model)
 
 
 def _residency_feedback():
@@ -4199,9 +4218,9 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
-    effective_system, playbook_selection = playbook_context.augment(
+    effective_system, playbook_selection = _chat_tool_manifest.manifest_last(effective_system, playbook_context.augment(  # the turn's own tools block stays last
         effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
-    )
+    ))
     gen = _reference_lookup_lanes.chat_generate(  # passages frame the user turn; the stored task stays raw
         _make_generate, prompt, model, effective_system, temperature, num_predict, num_ctx,
         cloud=cloud, allow_cloud_fallback=allow_cloud_fallback, text_only=True,
@@ -5322,7 +5341,13 @@ def _chat_request(
         # content, so a tight cap hits done_reason "length" having emitted
         # nothing. Give thinking headroom, as the cloud path does. Cache-only:
         # this must not add a speculative round trip to the hot path.
-        payload = _model_pace.up_front(_with_local_thinking_budget(payload), caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), planned=payload)
+        payload = _model_pace.up_front(
+            _with_local_thinking_budget(
+                payload,
+                headroom=_thinking_controls.LOCAL_STEP_THINKING_HEADROOM if (accept_native_tool_calls or payload.get("tools")) and not text_only else None,
+            ),
+            caller_payload, model, _bound_request_timeout(timeout, TIMEOUT), _think_option_supported(model), planned=payload,
+        )
         # Never override an explicit choice; the cloud policy sets `think`
         # itself. Ollama returns message.thinking for these models regardless,
         # so this is belt-and-braces rather than the mechanism.
@@ -5529,6 +5554,7 @@ def _chat_request(
                 fallback_payload["think"] = False
                 activity_tracker.record_event("model_thinking_fallback", model=str(model or "")[:80],
                                               reason="thinking_exhausted_budget" if exhausted_thinking else "thinking_without_answer")
+                _model_pace.note_thinking_exhausted(model)
                 try:
                     return _chat_request(
                         fallback_payload,
@@ -5548,12 +5574,17 @@ def _chat_request(
                     activity_tracker.record_event(
                         "model_thinking_fallback_failed", model=str(model or "")[:80],
                         failure=str(fallback_error.kind or "")[:40])
+                    logging.getLogger("sonder.server").warning(
+                        "thinking fallback for %s also failed (%s)",
+                        str(model or "")[:80], str(fallback_error.kind or "")[:40],
+                    )
         raise ModelCallError(
             "empty_response",
             _empty_model_response_detail(out, message),
             attempts=attempts,
             cloud=cloud,
         )
+    _model_pace.note_reply(model, out, thinking_requested=not cloud and not reasoning_continuation and payload.get("think") is not False)
     return out, content
 
 
@@ -6100,6 +6131,10 @@ def _offload_tier_impl(
 from sonder_runtime.interfaces import standalone_agent_lanes as _standalone_lanes
 
 _MANAGED_AGENT_ADMISSION = contextvars.ContextVar('managed_agent_admission', default=None)
+
+
+def _stream_turn_admission(*, timeout_seconds=None):
+    return ollama_pool.local_agent_admission(caller="interactive_stream", timeout_seconds=timeout_seconds)
 
 
 def _managed_agent_controller():
@@ -7197,11 +7232,13 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _reference_lookup_lanes.system_for(model, _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))))
-            if not cloud and not _explicit_serve_selection(tier, ""):
-                from sonder_runtime.application.chat.honesty import no_tools_system
-                effective_system = _reference_lookup_lanes.system_for(model, no_tools_system(effective_system, prompt))
+            from sonder_runtime.application.chat.honesty import no_verification_claims_system
+            # A served chat turn calls no tools, on every route and model; one tools block stays last.
+            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(
+                no_verification_claims_system(_build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                    _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))),
+                prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, ""),
+            ))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -7212,6 +7249,7 @@ def _answer_with_history_impl(
                 else _auto_model_context(model)
             )
             req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
+            reply_num_predict = _chat_reply_num_predict(explicit=_explicit_serve_selection(tier, ""))
             try:
                 if learn:
                     # Augmentation policy controls what the model sees, not provenance.
@@ -7219,7 +7257,7 @@ def _answer_with_history_impl(
                     # later grounded outcome cannot become an unscoped raw recall.
                     capture_project = project_id
                     response, iid, trace_ctx = _answer(
-                        conn, prompt, model, effective_system, temperature, 1024, req_ctx,
+                        conn, prompt, model, effective_system, temperature, reply_num_predict, req_ctx,
                         session_id, capture_project, history or None, trace=trace,
                         # ``augment`` is an HTTP-owned privacy boundary.  A model
                         # route can further opt out (for example cloud teacher mode),
@@ -7266,7 +7304,7 @@ def _answer_with_history_impl(
                             history=history or [],
                             options=_platform_local_model_options(
                                 temperature,
-                                1024,
+                                reply_num_predict,
                                 req_ctx,
                                 native_context=context_policy.native,
                                 environ=os.environ,
@@ -7277,7 +7315,7 @@ def _answer_with_history_impl(
                         request_cache_status = "hit" if response is not None else "miss"
                     if response is None:
                         gen = _reference_lookup_lanes.chat_generate(
-                            _make_generate, prompt, model, effective_system, temperature, 1024, req_ctx,
+                            _make_generate, prompt, model, effective_system, temperature, reply_num_predict, req_ctx,
                             cloud=cloud, text_only=True,
                             allow_cloud_fallback=_allow_cloud_fallback_for_target(tier_label),
                         )
@@ -7314,7 +7352,7 @@ def _answer_with_history_impl(
                         _gate_answer_code(
                             response, iid=iid, prompt=prompt, history=history,
                             model=model, system=effective_system,
-                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=1024,
+                            temperature=_chat_temperature.repair_temperature(temperature), num_predict=reply_num_predict,
                             num_ctx=req_ctx, cloud=cloud, tier_label=tier_label,
                         )
                     )
@@ -7489,8 +7527,8 @@ def structured_answer_with_history(
         else None if bridged_provider is not None
         else _auto_model_context(model)
     )
-    system = _build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(
-        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+    system = _chat_tool_manifest.chat_system(_build_system("", False, "", cloud=cloud, provider=bridged_provider, model=(  # served chat too: one tools block, last
+        _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))), prompt, file_guidance=False)
     # A non-Ollama rung refuses decoder schemas with a 400 (the bridge
     # cannot carry ``format``) instead of reaching an absent Ollama.
     with _provider_bridge.bind_rung(bridged_provider, tier_label):
@@ -14387,6 +14425,11 @@ def sonder_sessions(limit: int = 20) -> str:
     conn = _open_db()
     try:
         sessions = memory_store.list_sessions(conn, limit=limit)
+        logged = _event_turns.merged_turn_counts(
+            lambda: _application().session_repository(),
+            lambda sid: memory_store.session_turns(conn, sid),
+            [s["session_id"] for s in sessions],
+        )
     finally:
         conn.close()
     if not sessions:
@@ -14394,7 +14437,7 @@ def sonder_sessions(limit: int = 20) -> str:
     lines = ["sonder sessions (most recent first):"]
     for s in sessions:
         lines.append("  %s  [%d turns]  %s  (updated %s)" % (
-            s["session_id"], s["turn_count"], s.get("title") or "(untitled)",
+            s["session_id"], logged.get(s["session_id"], s["turn_count"]), s.get("title") or "(untitled)",
             s.get("updated_ts") or "?",
         ))
     return "\n".join(lines)
@@ -16780,8 +16823,15 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         if sess is None:
             return "ERROR: no session '%s'." % session
         if export_format == "atif":
-            return atif_export.interaction_session_atif(conn, session_id, sess, limit=limit)
-        turns = memory_store.session_turns(conn, session_id)[-limit:]
+            return atif_export.interaction_session_atif(
+                conn, session_id, sess, limit=limit,
+                get_repository=lambda: _application().session_repository(),
+            )
+        turns = _event_turns.fuller_turns(
+            lambda: _application().session_repository(),
+            session_id,
+            memory_store.session_turns(conn, session_id),
+        )[-limit:]  # the event log also holds selected-model/cloud turns
     finally:
         conn.close()
     # Same value-aware redactor durable capture uses (graph config or env secrets).

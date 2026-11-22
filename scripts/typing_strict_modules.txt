@@ -15,6 +15,7 @@ sonder_runtime/adapters/build/candidates.py
 sonder_runtime/adapters/build/fix_effect_verifier.py
 sonder_runtime/adapters/chat_observers.py
 sonder_runtime/adapters/chat_temperature.py
+sonder_runtime/adapters/chat_tool_manifest.py
 sonder_runtime/adapters/claim_checker.py
 sonder_runtime/adapters/cli_options.py
 sonder_runtime/adapters/client_config.py
@@ -240,9 +241,11 @@ sonder_runtime/application/chat/__init__.py
 sonder_runtime/application/chat/admission_wait_status.py
 sonder_runtime/application/chat/handoff_receipts.py
 sonder_runtime/application/chat/honesty.py
+sonder_runtime/application/chat/model_fitness.py
 sonder_runtime/application/chat/reference_lookup.py
 sonder_runtime/application/chat/stream_sink.py
 sonder_runtime/application/chat/tool_intent.py
+sonder_runtime/application/chat/tool_manifest.py
 sonder_runtime/application/command_surface/__init__.py
 sonder_runtime/application/command_surface/command_text.py
 sonder_runtime/application/command_surface/mcp.py
@@ -432,6 +435,7 @@ sonder_runtime/application/selfmod/stage_refusal.py
 sonder_runtime/application/session/__init__.py
 sonder_runtime/application/session/checkpoints.py
 sonder_runtime/application/session/continuity.py
+sonder_runtime/application/session/event_turns.py
 sonder_runtime/application/session/projections.py
 sonder_runtime/application/session/temperature_settings.py
 sonder_runtime/application/session/transcript_export.py
@@ -531,6 +535,7 @@ sonder_runtime/domain/campaign_expectations.py
 sonder_runtime/domain/campaign_formatting.py
 sonder_runtime/domain/campaign_prompt.py
 sonder_runtime/domain/cancellation_tree.py
+sonder_runtime/domain/chat_model_fitness.py
 sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py

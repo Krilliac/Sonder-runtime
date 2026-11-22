@@ -417,13 +417,16 @@ def guard_unsaved_file_claim(
 
 
 _NO_TOOLS_GUIDANCE = (
-    "If this request needs local workspace facts or file contents, Sonder can "
-    "use its scoped read-only tools: workspace_inventory, directory_tree, "
-    "file_find, text_search, file_read/file_read_range, and "
-    "repository_symbol_index. If asked to create or edit files, Sonder can use "
-    "the gated workbench/agent lane. Without a tool result, do not claim that "
-    "a file was written, run, or verified. Ask directly in chat so the runtime "
-    "can choose the appropriate scoped lane."
+    "If this request needs local workspace facts or file contents, you cannot "
+    "read or change them in this turn: none of Sonder's tools is callable by "
+    "you here. The host, not you, may route such a request to a scoped lane: "
+    "read-only workspace tools (workspace_inventory, directory_tree, "
+    "file_find, text_search, file_read/file_read_range, "
+    "repository_symbol_index), or the gated workbench/agent lane for creating "
+    "or editing files. Without a tool result in this conversation, do not "
+    "claim that a file was read, written, run, or verified. Suggest that the "
+    "user ask for it directly in chat so the host can choose the appropriate "
+    "scoped lane."
 )
 
 
@@ -443,4 +446,27 @@ def no_tools_system(system: str, prompt: str) -> str:
     return f"{system}\n\n{_NO_TOOLS_GUIDANCE}" if system else _NO_TOOLS_GUIDANCE
 
 
-__all__ = ["guard_unsaved_file_claim", "no_tools_system"]
+_NO_VERIFICATION_GUIDANCE = (
+    "This chat turn has no tools. Never say or imply that you compiled, ran, "
+    "tested, linted or verified code, and never show a Passed/Verified/checkmark "
+    "results table, unless a tool result in this conversation shows it. If asked "
+    "to validate code, say you cannot run it here."
+)
+
+
+def no_verification_claims_system(system: str) -> str:
+    """Add the no-fabricated-verification rule to a tool-less chat turn.
+
+    Every served chat turn calls no tools, so the rule is unconditional and is
+    kept short.  Idempotent: a system prompt that already carries it is
+    returned unchanged.
+    """
+
+    if not isinstance(system, str):
+        return system
+    if _NO_VERIFICATION_GUIDANCE in system:
+        return system
+    return f"{system}\n\n{_NO_VERIFICATION_GUIDANCE}" if system else _NO_VERIFICATION_GUIDANCE
+
+
+__all__ = ["guard_unsaved_file_claim", "no_tools_system", "no_verification_claims_system"]
