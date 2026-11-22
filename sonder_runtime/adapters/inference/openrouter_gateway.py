@@ -392,7 +392,9 @@ def check_cloud_consent(settings: OpenRouterSettings) -> None:
         raise Forbidden(
             "OpenRouter is a hosted, metered provider: prompts and the API key "
             "leave this machine. It stays off until cloud is enabled: set "
-            "%s=1 for the runtime (or run cloud_opt_in on)" % ENV_ALLOW_CLOUD
+            "%s=1 for the runtime (or run /cloud on at the attended Sonder "
+            "console; cloud_opt_in on is refused to unattended callers such "
+            "as MCP clients and HTTP)" % ENV_ALLOW_CLOUD
         )
 
 

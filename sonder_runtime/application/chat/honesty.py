@@ -454,6 +454,35 @@ _NO_VERIFICATION_GUIDANCE = (
 )
 
 
+_EXECUTION_TOOLS = frozenset({"run_code", "test_run", "build_run", "lint_run", "workspace_run"})
+_RUN_CLAIM_RE = re.compile(
+    r"(?:\b(?:i\s+(?:just\s+)?(?:ran|executed|tested|compiled|verified)|"
+    r"tests?\s+passed|all\s+\d+\s+tests?\s+pass|execution\s+output|"
+    r"output\s+was|exit\s+code\s*(?:is|=|:)?\s*0)\b|[\u2705\u2713])",
+    re.IGNORECASE,
+)
+_UNVERIFIED_RUN_NOTE = (
+    "\n\n(Note: no code or test tool executed in this turn, so no runtime output was verified.)"
+)
+
+
+def guard_unverified_run_claim(
+    reply: str,
+    executed_tools: Iterable[object] = (),
+) -> str:
+    """Append a factual note if a reply claims execution/pass without a matching tool run."""
+    if not isinstance(reply, str) or not reply.strip():
+        return reply
+    for item in executed_tools:
+        name = str(getattr(item, "tool", item) or "").strip()
+        status = str(getattr(item, "status", "ok") or "").strip()
+        if name in _EXECUTION_TOOLS and status in {"ok", "completed", "ran"}:
+            return reply
+    if _RUN_CLAIM_RE.search(reply) and _UNVERIFIED_RUN_NOTE.strip() not in reply:
+        return reply.rstrip() + _UNVERIFIED_RUN_NOTE
+    return reply
+
+
 def no_verification_claims_system(system: str) -> str:
     """Add the no-fabricated-verification rule to a tool-less chat turn.
 
@@ -469,4 +498,9 @@ def no_verification_claims_system(system: str) -> str:
     return f"{system}\n\n{_NO_VERIFICATION_GUIDANCE}" if system else _NO_VERIFICATION_GUIDANCE
 
 
-__all__ = ["guard_unsaved_file_claim", "no_tools_system", "no_verification_claims_system"]
+__all__ = [
+    "guard_unsaved_file_claim",
+    "guard_unverified_run_claim",
+    "no_tools_system",
+    "no_verification_claims_system",
+]

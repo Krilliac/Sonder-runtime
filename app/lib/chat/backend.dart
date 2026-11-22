@@ -6,6 +6,8 @@ import '../models.dart';
 import '../settings.dart';
 import 'turn_progress.dart';
 
+export '../api/stream.dart' show ChatStreamToolEvent, ToolRunResult;
+
 /// Everything the chat workspace needs from a server, behind one seam.
 ///
 /// The chat controller talks only to this interface so its behaviour
@@ -37,7 +39,8 @@ abstract class ChatBackend {
   Future<EcosystemReading> ecosystemStatus();
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();
-  Future<PermissionMode> setPermissionMode(String mode);
+  Future<PermissionMode> setPermissionMode(String mode,
+      {bool confirmBypass = false});
 
   Future<WorkRun> getWorkRun(String id);
   Future<WorkRun> cancelWorkRun(String id);
@@ -52,6 +55,11 @@ abstract class ChatBackend {
   /// bound to the [tool] and [digest] the person was shown.
   Future<ApprovalOutcome> approveCall(String callId,
       {Duration ttl, String tool, String digest});
+
+  /// Decline one pending call (`POST /v1/approvals/deny/<call_id>`), bound
+  /// to [tool] and [digest] so an in-flight waiting turn stops waiting.
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''});
 
   /// Release anything held (open turns, clients).
   void dispose() {}
@@ -115,6 +123,12 @@ class TurnStatus extends TurnEvent {
 class TurnDelta extends TurnEvent {
   final String text;
   const TurnDelta(this.text);
+}
+
+/// A live `sonder_tool` approval/execution update during the turn.
+class TurnTool extends TurnEvent {
+  final ChatStreamToolEvent tool;
+  const TurnTool(this.tool);
 }
 
 /// The final reply. Its text replaces whatever the deltas built up.
@@ -254,9 +268,10 @@ class SonderApiChatBackend implements ChatBackend {
   Future<PermissionMode?> fetchPermissionMode() => api.fetchPermissionMode();
 
   @override
-  Future<PermissionMode> setPermissionMode(String mode) async {
+  Future<PermissionMode> setPermissionMode(String mode,
+      {bool confirmBypass = false}) async {
     try {
-      return await api.setPermissionMode(mode);
+      return await api.setPermissionMode(mode, confirmBypass: confirmBypass);
     } on SonderException catch (e) {
       throw normalizeModeError(e);
     }
@@ -331,6 +346,24 @@ class SonderApiChatBackend implements ChatBackend {
       if (e.httpStatus == 401 || e.httpStatus == 403) {
         return const ApprovalOutcome(ApprovalStatus.forbidden,
             message: ApprovalsApi.forbiddenToIssue);
+      }
+      return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
+    }
+  }
+
+  @override
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''}) async {
+    try {
+      await api.approvals.deny(callId, tool: tool, digest: digest);
+      return const ApprovalOutcome(ApprovalStatus.approved);
+    } on SonderException catch (e) {
+      if (e.code == ApprovalsApi.unavailableCode) {
+        return const ApprovalOutcome(ApprovalStatus.unsupported);
+      }
+      if (e.httpStatus == 401 || e.httpStatus == 403) {
+        return const ApprovalOutcome(ApprovalStatus.forbidden,
+            message: 'Denying tool calls needs an administrator account.');
       }
       return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
     }
@@ -416,6 +449,9 @@ class _ApiTurn implements ChatTurn {
             break;
           case ChatStreamStatus(:final text):
             _controller.add(TurnStatus(text));
+          case ChatStreamToolEvent():
+            if (_progress.toolEvent(event)) _phase();
+            _controller.add(TurnTool(event));
           case ChatStreamDelta(:final text):
             if (text.isNotEmpty) {
               if (_progress.wrote()) _phase();

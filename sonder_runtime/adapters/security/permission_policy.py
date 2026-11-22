@@ -69,9 +69,24 @@ class PermissionPolicyProvider:
         """The exception type ``set_mode_without_escalation`` raises."""
         return _engine().ModeEscalationRefused
 
+    def set_global_mode(self, name: str) -> str:
+        return _engine().set_global_mode(name)
+
     def attended_mode_change(self):
         """Context for a mode change a present person makes (console only)."""
         return _engine().attended_mode_change()
+
+    def attended_bypass_confirm(self):
+        """Context for explicit attended confirmation of bypass mode."""
+        return _engine().attended_bypass_confirm()
+
+    def bind_unauthenticated_caller(self, unauthenticated: bool) -> None:
+        """Cap this handler thread's permission mode at manual (local-open request)."""
+        _engine().bind_unauthenticated_caller(unauthenticated)
+
+    def mode_scope(self, principal: str = "", session: str = "", *, local_open: bool = False):
+        """Context binding principal/session permission-mode scope."""
+        return _engine().mode_scope(principal, session, local_open=local_open)
 
     def current_mode(self) -> str:
         return _engine().current_mode()

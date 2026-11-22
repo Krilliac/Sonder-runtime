@@ -51,6 +51,7 @@ String? canonicalMode(String typed) => switch (typed.toLowerCase()) {
       'edits' =>
         'acceptEdits',
       'auto' => 'auto',
+      'bypass' => 'bypass',
       _ => null,
     };
 

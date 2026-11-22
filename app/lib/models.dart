@@ -119,14 +119,19 @@ class ChatResponseMetadata {
       );
 
   /// A copy with the work-run fields replaced (after a refresh or cancel).
-  ChatResponseMetadata withWork({String? workRunId, String? workStatus}) =>
+  ChatResponseMetadata withWork({
+    String? workRunId,
+    String? workStatus,
+    String? status,
+    ChatRefusal? refusal,
+  }) =>
       ChatResponseMetadata(
         completionId: completionId,
         requestId: requestId,
         model: model,
         tier: tier,
         finishReason: finishReason,
-        status: status,
+        status: status ?? this.status,
         cache: cache,
         elapsedMs: elapsedMs,
         promptTokens: promptTokens,
@@ -137,9 +142,9 @@ class ChatResponseMetadata {
         workRunId: workRunId ?? this.workRunId,
         workStatus: workStatus ?? this.workStatus,
         acknowledgement: acknowledgement,
-        refusal: refusal,
+        refusal: refusal ?? this.refusal,
         overflow: overflow,
-      agentLane: agentLane,
+        agentLane: agentLane,
         orchestration: orchestration,
       );
 
@@ -335,9 +340,11 @@ class ChatRefusal {
   final String callId;
   final String tool;
   final String reason;
+  final String risk;
 
   /// The permission mode that refused the call, as the server reported it.
   final String mode;
+  final String modeLabel;
   final List<String> remedies;
 
   /// False when the receipt's `approve_once` remedy says
@@ -350,7 +357,9 @@ class ChatRefusal {
     this.callId = '',
     this.tool = '',
     this.reason = '',
+    this.risk = '',
     this.mode = '',
+    this.modeLabel = '',
     this.remedies = const [],
     this.approveOverHttp = true,
   });
@@ -385,7 +394,9 @@ class ChatRefusal {
       callId: RegExp(r'^[0-9a-f]{8,64}$').hasMatch(id) ? id : '',
       tool: _boundedMetadataText(json['tool'], 128),
       reason: _boundedMetadataText(json['reason'], 1024),
+      risk: _boundedMetadataText(json['risk'], 32),
       mode: _boundedMetadataText(json['mode'], 32),
+      modeLabel: _boundedMetadataText(json['mode_label'], 32),
       remedies: remedies,
       approveOverHttp: approveOverHttp,
     );
@@ -408,7 +419,9 @@ class ChatRefusal {
         if (callId.isNotEmpty) 'call_id': callId,
         if (tool.isNotEmpty) 'tool': tool,
         if (reason.isNotEmpty) 'reason': reason,
+        if (risk.isNotEmpty) 'risk': risk,
         if (mode.isNotEmpty) 'mode': mode,
+        if (modeLabel.isNotEmpty) 'mode_label': modeLabel,
         if (remedies.isNotEmpty) 'remedies': remedies,
         if (!approveOverHttp) 'approve_over_http': false,
       };

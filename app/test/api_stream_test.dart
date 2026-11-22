@@ -411,5 +411,86 @@ void main() {
       expect(events.whereType<ChatStreamDone>().single.reply.text,
           endsWith('PELICAN'));
     });
+
+    test('sonder_tool SSE chunks emit ChatStreamToolEvent with full fields',
+        () async {
+      final digest = 'a' * 64;
+      final awaitChunk = jsonEncode({
+        'object': 'chat.completion.chunk',
+        'choices': [
+          {'index': 0, 'delta': {}, 'finish_reason': null}
+        ],
+        'sonder_tool': {
+          'id': 'tc_1',
+          'call_id': 'c03cd79321b5f7a2',
+          'digest': digest,
+          'tool': 'run_code',
+          'language': 'python',
+          'code': 'print("hi\u202e")',
+          'args': {'language': 'python'},
+          'preview': 'language=python',
+          'timeout': 10,
+          'backend': 'host',
+          'bidi_warning': true,
+          'bidi_chars': ['U+202E'],
+          'state': 'awaiting_approval',
+          'error': null,
+          'result': null,
+        },
+      });
+      final doneChunk = jsonEncode({
+        'object': 'chat.completion.chunk',
+        'choices': [
+          {'index': 0, 'delta': {}, 'finish_reason': null}
+        ],
+        'sonder_tool': {
+          'id': 'tc_1',
+          'call_id': 'c03cd79321b5f7a2',
+          'digest': digest,
+          'tool': 'run_code',
+          'language': 'python',
+          'code': 'print("hi")',
+          'backend': 'container',
+          'state': 'done',
+          'result': {
+            'ok': true,
+            'returncode': 0,
+            'timed_out': false,
+            'elapsed_ms': 42,
+            'stdout_tail': 'hi\n',
+            'stderr_tail': '',
+            'output': 'hi\n',
+            'truncated': false,
+          },
+        },
+      });
+      final (events, error, _) = await run(
+        req(maxLineChars: 16384),
+        () => _streamed([
+          'data: $awaitChunk\n\n',
+          'data: $doneChunk\n\n',
+          'data: {"choices":[{"delta":{"content":"Done"}}]}\n\n',
+          'data: [DONE]\n\n',
+        ]),
+      );
+      expect(error, isNull);
+      final tools = events.whereType<ChatStreamToolEvent>().toList();
+      expect(tools, hasLength(2));
+      expect(tools.first.id, 'tc_1');
+      expect(tools.first.callId, 'c03cd79321b5f7a2');
+      expect(tools.first.digest, digest);
+      expect(tools.first.tool, 'run_code');
+      expect(tools.first.language, 'python');
+      expect(tools.first.backend, 'host');
+      expect(tools.first.bidiWarning, isTrue);
+      expect(tools.first.bidiChars, ['U+202E']);
+      expect(tools.first.state, 'awaiting_approval');
+      expect(tools.first.isAwaitingApproval, isTrue);
+      expect(tools.last.state, 'done');
+      expect(tools.last.backend, 'container');
+      expect(tools.last.result!.ok, isTrue);
+      expect(tools.last.result!.elapsedMs, 42);
+      expect(tools.last.result!.output, 'hi\n');
+    });
   });
 }

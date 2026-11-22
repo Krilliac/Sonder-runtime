@@ -27,7 +27,7 @@ abstract interface class SonderApiPort {
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();
   Future<PermissionMode> setPermissionMode(String mode,
-      {String? idempotencyKey});
+      {String? idempotencyKey, bool confirmBypass = false});
 
   Future<String> chat(
     List<ChatMessage> messages, {
