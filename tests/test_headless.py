@@ -371,6 +371,8 @@ def _fail_on_kill(monkeypatch):
 
 
 def test_stop_ollama_refuses_a_reused_pid(monkeypatch, tmp_path):
+    # Hermetic on POSIX: never read the real /proc/<pid>/cmdline of a host process.
+    monkeypatch.setattr(H, "_proc_cmdline_bytes", lambda pid: b"")
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
     monkeypatch.delenv("SONDER_OLLAMA_EXE", raising=False)
     monkeypatch.setattr(H, "ollama_exe", lambda: "")
@@ -431,6 +433,7 @@ def test_stop_ollama_kills_a_verified_ollama_serve(monkeypatch, tmp_path):
     ],
 )
 def test_ollama_server_identity(monkeypatch, command, configured, expected):
+    monkeypatch.setattr(H, "_proc_cmdline_bytes", lambda pid: b"")
     monkeypatch.setattr(H, "_pid_command_line", lambda pid: command)
     monkeypatch.setattr(H, "ollama_exe", lambda: configured)
 
