@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -427,6 +428,10 @@ def test_edl_validator_refuses_ads_device_and_alias_clip_names_before_resolve(
     assert safe["ok"] is False
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows extended-length local drive prefix requires Windows Path semantics",
+)
 def test_resolve_pack_dir_uses_stripped_extended_local_path(monkeypatch, tmp_path):
     monkeypatch.setattr(assetgen, "workspace_root", lambda: str(tmp_path))
     assets_root = tmp_path / "artifacts" / "generated"

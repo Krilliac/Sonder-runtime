@@ -1147,12 +1147,18 @@ def current_and_peak():
         if not query(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
             raise OSError(ctypes.get_last_error(), "K32GetProcessMemoryInfo failed")
         return counters.PagefileUsage, counters.PeakPagefileUsage
-    import os
-    import resource
-
-    with open("/proc/self/statm") as handle:
-        current = int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
-    return current, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    # Read per-process VmRSS and VmHWM from /proc/self/status rather than
+    # resource.getrusage().ru_maxrss: on Linux ru_maxrss inherits the forked
+    # parent pytest worker's peak across execve(), whereas VmHWM tracks only
+    # this fresh child's mm_struct.
+    current = peak = 0
+    with open("/proc/self/status", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("VmRSS:"):
+                current = int(line.split()[1]) * 1024
+            elif line.startswith("VmHWM:"):
+                peak = int(line.split()[1]) * 1024
+    return current, peak
 
 
 model = Path(sys.argv[2])
@@ -1219,7 +1225,7 @@ def test_glb_accessor_slot_cost_matches_measured_memory(
     which are never shared small ints) and for many single-row accessors
     right after a cache resize, and checks it against the per-slot figure
     the cap is derived from, per slot as _validate_glb charges them."""
-    if sys.platform != "win32" and not Path("/proc/self/statm").exists():
+    if sys.platform != "win32" and not Path("/proc/self/status").exists():
         pytest.skip("needs Windows process counters or Linux /proc")
     components = {"SCALAR": 1, "MAT4": 16}[value_type]
     code = {5126: "f", 5125: "I"}[component_type]

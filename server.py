@@ -17538,7 +17538,7 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 refusal = "ERROR: agent project path rejected: %s uses a %s" % (
                     label, _network_spelling.REFUSAL)
                 return refusal
-            target = Path(raw).expanduser()
+            target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
             if not target.is_absolute():
                 target = root / target
             if label == "diff path":
@@ -17594,9 +17594,8 @@ def _argv_value_outside_root(raw, base, root):
     if drive_match:
         raw = raw[drive_match.start():]
     if (
-        os.name == "nt"
-        and re.fullmatch(r"/[A-Za-z][A-Za-z0-9:+\-]*", raw)
-        and not os.path.lexists(str(base / raw))
+        (os.name == "nt" and re.fullmatch(r"/[A-Za-z][A-Za-z0-9:+\-]*", raw) and not os.path.lexists(str(base / raw)))
+        or (os.name != "nt" and ".." not in raw and re.fullmatch(r"/[A-Za-z][A-Za-z0-9+\-]*:[A-Za-z0-9_.=+\-]+", raw) and not os.path.lexists(raw))
     ):
         return False
     drive_relative = os.name == "nt" and bool(re.fullmatch(r"[A-Za-z]:[^:=]+", raw))
@@ -17610,7 +17609,7 @@ def _argv_value_outside_root(raw, base, root):
     )
     if not path_like:
         return False
-    target = Path(raw).expanduser()
+    target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
     if not target.is_absolute():
         target = base / target
     try:
@@ -17637,7 +17636,7 @@ def _program_token_escape_error(raw_program, base, root, *, check_outside):
     )
     if not looks_like_path:
         return ""
-    target = Path(token).expanduser()
+    target = Path(token.replace("\\", "/") if os.name != "nt" else token).expanduser()
     if not target.is_absolute():
         target = base / target
     try:
