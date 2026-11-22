@@ -322,6 +322,41 @@ void main() {
       expect(approvals, 0);
     });
 
+    testWidgets('bidi, control and invisible characters render as escapes',
+        (tester) async {
+      _phone(tester);
+      await tester.pumpWidget(_host(SingleChildScrollView(
+        child: ApprovalSheet(
+          request: const ApprovalRequest(
+            tool: 'write\u2066_file',
+            callId: '3f9a12c0d4e5',
+            arguments: [
+              ('pa\u200bth', 'notes\u202etxt.exe'),
+              ('arguments', 'a\nrefused  12:39\tb\u{E0041}'),
+            ],
+            mode: 'manual',
+            reason: 'nobody\u2028asked',
+          ),
+          onApprove: (_) {},
+          onCancel: () {},
+        ),
+      )));
+      expect(find.text(r'notes\u202etxt.exe'), findsOneWidget);
+      expect(find.text(r'pa\u200bth'), findsOneWidget);
+      expect(
+          find.text(r'a\u000arefused  12:39\u0009b\U000e0041'), findsOneWidget);
+      expect(find.text(r'write\u2066_file · call 3f9a12c0'), findsOneWidget);
+      expect(find.text(r'manual mode · nobody\u2028asked'), findsOneWidget);
+      // Nothing the sheet draws still carries a raw override or newline.
+      for (final widget in tester.widgetList<Text>(find.byType(Text))) {
+        final data = widget.data ?? '';
+        expect(data.contains('\u202e'), isFalse, reason: data);
+        expect(data.contains('\n'), isFalse, reason: data);
+      }
+      // Plain paths, backslashes included, are unchanged.
+      expect(approvalVisibleText(r'C:\src\main.dart'), r'C:\src\main.dart');
+    });
+
     testWidgets('receipt names the call once and offers explicit actions',
         (tester) async {
       var retries = 0;

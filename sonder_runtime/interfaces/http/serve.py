@@ -2443,7 +2443,7 @@ def _dangerous_http_slash(content):
         action = pieces[1].lower() if len(pieces) > 1 else "apply"
         return action in ("apply", "now")
     if command in ("/stash", "/runtime-stash"):
-        action = pieces[1].lower() if len(pieces) > 1 else "status"
+        action = (pieces[1].lower() if len(pieces) > 1 else "status").replace("_", "-")
         return action in ("save", "save-untracked", "pop")
     if command in ("/selfmod", "/selfmodify"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
@@ -3051,83 +3051,19 @@ def _ensure_refusal_observer():
         _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
 
 
-def _loop_global_operation_refusal(actions_json, context=None):
-    """Refuse HTTP loop payloads that would mutate shared runtime state.
-
-    ``server.loop`` remains the single parser/executor for validity and
-    bounded-loop semantics.  This shallow inspection only recognizes global
-    actions early enough to apply served-account authority; malformed
-    payloads continue to receive the loop tool's normal error.
-
-    Derived, not hand-kept: each action resolves to its canonical tool
-    through ``server._loop_action_tool`` -- the same resolution the loop's
-    own permission gate uses -- and then meets exactly the role binding its
-    ``/<tool>`` spelling meets (``tool_contract.system_operation_for``,
-    deny-by-default for a declared system operation with no binding). The
-    hand map this replaces named 4 of the 7 loop-reachable system
-    operations, so ``{"type": "memory_privacy_repair"}`` ran for an
-    ordinary served account while ``/memory_privacy_repair`` required the
-    developer role -- the same work, the other spelling.
-    """
-    if context is None:
-        return ""
-    try:
-        parsed = json.loads(actions_json)
-    except (TypeError, ValueError):
-        return ""
-    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
-    if not isinstance(actions, list):
-        return ""
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        # Same default as server._loop_dispatch: an action with no type runs as "code".
-        action_type = str(action.get("type") or action.get("action") or "code").strip().lower()
-        action_tool = server._loop_action_tool(action_type)
-        # The global-memory account check ``/<tool>`` meets, for every role.
-        if memory_error := _account_global_memory_refusal(action_tool, context):
-            return "refused /loop: %s" % memory_error
-        operation = _http_system_operation_for(action_tool)
-        if not operation:
-            role_error = _role_tool_refusal_reason(action_tool, context) if action_tool else ""
-            if role_error:
-                return "refused /loop: %s" % role_error
-            continue
-        if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
-            if not _admin_authorized(context):
-                return (
-                    "refused /loop: administrator authorization is required "
-                    "for an unclassified system operation"
-                )
-            continue
-        authority_error = _system_operation_authority_error(operation, context)
-        if authority_error:
-            return "refused /loop: %s" % authority_error
-    return ""
+def _loop_global_operation_refusal(actions_json, context=None, *, _depth=0):
+    """Refuse HTTP loop payloads that would mutate shared runtime state."""
+    return tool_contract.loop_global_operation_refusal(
+        actions_json, context, loop_action_tool=server._loop_action_tool,
+        system_operation_for=_http_system_operation_for, role_tool_refusal=_role_tool_refusal_reason,
+        admin_authorized=_admin_authorized, authority_error=_system_operation_authority_error,
+        nested_slash_refusal=_nested_slash_authority_refusal,
+        account_global_memory_refusal=_account_global_memory_refusal, depth=_depth,
+    )
 
 
-def _http_tool_refusal(tools, label, context=None, arguments=None):
-    """The decision itself, shared by this surface's two entry points.
-
-    ``arguments`` are meaningful only for a single tool (the dynamic
-    ``/<tool>`` path passes its parsed keywords): they let an unattended
-    refusal name the call so an operator can approve exactly it once, and
-    let such an approval answer the retry.
-
-    Only a `deny` can come back under `interactive=False`, so this is a flat
-    loop rather than a copy of the console's ask-and-rank gate.
-
-    The operation lookup goes through `tool_contract.system_operation_for`
-    rather than reading `SYSTEM_OPERATION_TOOLS` directly, which buys two
-    things: alias spellings canonicalize before grading, and a tool the
-    runtime declares to be a system operation (`_AGENT_SYSTEM_OPERATOR_TOOLS`)
-    that nobody bound to a role fails CLOSED for served accounts instead of
-    open. `admin_accounts` was the live case: agent-refused, catalogued
-    `ask`, no binding -- an ordinary served account reached the tool body and
-    only its in-tool token check stood between a crafted request and the
-    account list. Boundary drift must not depend on every tool author
-    remembering a second map.
-    """
+def _http_tool_authority_refusal(tools, label, context=None):
+    """Account-memory, system-operation, and role checks for *tools*."""
     for tool in tools:
         memory_error = _account_global_memory_refusal(tool, context)
         if memory_error:
@@ -3135,12 +3071,6 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
         operation = _http_system_operation_for(tool)
         if operation and context is not None:
             if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
-                # Durable-authority tools are already refused non-interactively
-                # by decide() below -- on every surface, for every role -- and
-                # its refusal names the remedy (the console prompt or an
-                # explicit allow rule). Returning the generic unbound message
-                # here would replace actionable text with a role demand that
-                # even an admin cannot satisfy on this path.
                 if permission_policy.is_durable_authority_tool(tool):
                     pass
                 elif not _admin_authorized(context):
@@ -3152,13 +3082,18 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 authority_error = _system_operation_authority_error(operation, context)
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
-    # Deny by default, ahead of the permission decision: the mode is
-    # process-wide and says nothing about who is calling. After every tool's
-    # own authority check, so a mixed alias still names the operation's role.
     for tool in tools:
         role_error = _role_tool_refusal_reason(tool, context)
         if role_error:
             return "refused %s: %s" % (label, role_error)
+    return ""
+
+
+def _http_tool_refusal(tools, label, context=None, arguments=None):
+    """The decision itself, shared by this surface's two entry points."""
+    authority_refusal = _http_tool_authority_refusal(tools, label, context=context)
+    if authority_refusal:
+        return authority_refusal
     for tool in tools:
         decision = permission_policy.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True, surface="http",
@@ -3175,34 +3110,38 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
 
 
 def _slash_system_operation(command, argument):
-    """Classify named slash controls that bypass catalogued tool dispatch.
+    """Classify named slash controls that bypass catalogued tool dispatch."""
+    return tool_contract.slash_system_operation(command, argument, slash_head=_slash_head)
 
-    ``/runtime set`` is parsed by ``server.control_command`` rather than the
-    dynamic ``/<tool>`` catalog.  Keeping this tiny parser next to the HTTP
-    choke point prevents a role declaration from becoming decorative merely
-    because a command has two spellings.
-    """
-    command = _slash_head(command)
-    parts = str(argument or "").strip().split(None, 1)
-    action = parts[0].lower() if parts else ""
-    if command in ("/runtime", "/models") and action in ("set", "reset"):
-        return "runtime_policy_change"
-    # ``/runtime tools allow|revoke|deny|undeny`` would write the model tool
-    # overlay; server.control_command refuses it on this surface anyway (no
-    # console operator), and this keeps the role check from reading it as a read.
-    if command in ("/runtime", "/models") and action == "tools" and (
-        parts[1:] and parts[1].split()[0].lower() in ("allow", "revoke", "deny", "undeny")
-    ):
-        return "runtime_policy_change"
-    if command in ("/runtime", "/models") and action == "overflow" and (
-        parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")
-    ):
-        return "runtime_policy_change"
-    if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
-        return "selfmod_deploy"
-    if command in ("/stash", "/runtime-stash") and action in ("save", "save-untracked", "pop"):
-        return "selfmod_deploy"
-    return ""
+
+def _nested_slash_authority_refusal(prompt, label, context, *, _depth=0):
+    """Enforce HTTP slash and tool authority on a nested prompt reaching control_command."""
+    return tool_contract.nested_slash_authority_refusal(
+        prompt, label, context, slash_head=_slash_head,
+        slash_operation=_slash_system_operation, authority_error=_system_operation_authority_error,
+        dangerous_slash=_dangerous_http_slash, developer_authorized=_developer_authorized,
+        console_tools=command_catalog.console_tools, http_slash_tools=command_catalog.http_slash_tools,
+        narrow_branch_tools=command_catalog.narrow_branch_tools,
+        catalog_unavailable=command_catalog.CatalogUnavailable,
+        tool_authority_refusal=_http_tool_authority_refusal,
+        task_boundary_refusal=_account_task_boundary_refusal,
+        parse_invocation=command_catalog.parse_invocation,
+        project_refusal=server.served_project_refusal,
+        loop_refusal=_loop_global_operation_refusal, depth=_depth,
+    )
+
+
+def _served_control_guard_for(context, *, disabled=False):
+    """Build the ``server.served_control_guard`` callback for an HTTP request."""
+    if disabled:
+        return lambda _text: server.CONTROL_COMMAND_SKIP
+    if context is None:
+        return None
+    return lambda text: (
+        _nested_slash_authority_refusal(
+            text.strip(), _slash_head(text.strip().split(None, 1)[0]), context,
+        ) if str(text or "").strip().startswith("/") else ""
+    )
 
 
 _BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -3598,7 +3537,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             except ValueError as error:
                 return str(error)
             master_project = project if workspace_project is None else workspace_project
-            return _idempotent_http_action(
+            return server.served_project_refusal(master_project) or _idempotent_http_action(
                 context, idempotency_key, "master\0" + stripped,
                 lambda: _narrate_http_command(
                     "master_orchestrate", {"task": parsed.task, "mode": parsed.mode, "agents": (count := resolved_agent_count(parsed, server.master_orchestrator.capacity))},
@@ -3736,7 +3675,11 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
             return refusal
-    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
+    if tool_name == "sonder":
+        refusal = _nested_slash_authority_refusal(kwargs.get("prompt", ""), "/sonder", context)
+        if refusal:
+            return refusal
+    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context) or (tool_name in ("master_orchestrate", "sonder") and server.served_project_refusal(kwargs.get("project", "")))
     if task_boundary_error:
         return task_boundary_error
     # ``server.tool_manifest`` is intentionally the complete direct-MCP
@@ -3758,10 +3701,18 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
         command = command_catalog.by_name(line.split(None, 1)[0])
         if command and any(p.name == "token" for p in command.params):
             kwargs["token"] = state.token
+    control_guard = _served_control_guard_for(context)
+
+    def _run_handler():
+        if control_guard is None:
+            return str(handler(**kwargs))
+        with server.served_control_guard(control_guard):
+            return str(handler(**kwargs))
+
     try:
         if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
             return _served_task_tool(tool_name, kwargs, context)
-        return _narrate_http_command(tool_name, kwargs, lambda: str(handler(**kwargs)), context)
+        return _narrate_http_command(tool_name, kwargs, _run_handler, context)
     except TypeError as error:
         return "%s: %s" % (tool_name, error)
     except Exception as error:  # a tool fault is a chat answer, not a 500
@@ -5020,16 +4971,16 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _peer_is_loopback(self):
-        # A loopback peer earns its conveniences only through a trusted Host
-        # name; see ``_reject_disallowed_host``.
-        return getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
+        # Only with a trusted Host (``_reject_disallowed_host``), and never behind a declared
+        # proxy, whose loopback peer relays remote clients (as ``_local_log_dashboard_allowed``).
+        return not TLS_TERMINATED_BY_PROXY and getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
 
     def _handle_lifecycle_get(self, path):
         """SPEC-2 WP3 endpoints. Returns True when the path was handled.
 
         /live is unauthenticated and reveals only {status: alive}.  The
         other lifecycle routes require authentication unless the peer is
-        loopback (the reverse proxy restricts them to loopback upstream).
+        loopback with a trusted Host and no reverse proxy is declared.
         """
         lifecycle = sonder_lifecycle.get()
         route = _HEALTH_STATUS_FACADE.route(path)
@@ -7564,6 +7515,9 @@ class Handler(BaseHTTPRequestHandler):
                             _SPANDA_CONFIG, self.headers
                         )
                         self._spanda_headers = None
+                        _prompt_control_guard = _served_control_guard_for(
+                            context, disabled=(model_operation == "responses"),
+                        )
                         if _spanda_policy.active:
                             # Multi-sample exact-match R_sc. Disable request
                             # cache so each draw is independent; force temp>0.
@@ -7575,7 +7529,7 @@ class Handler(BaseHTTPRequestHandler):
                             _samples = []
                             _sample_turns = []
                             _sample_lookups = {}  # each sample's own reference-lookup state
-                            with _serve_temp_override(_sample_temp):
+                            with _serve_temp_override(_sample_temp), server.served_control_guard(_prompt_control_guard):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
                                     # session capture; only the consensus turn
@@ -7657,33 +7611,34 @@ class Handler(BaseHTTPRequestHandler):
                                 # alive while the turn generates.
                                 self._begin_early_stream(model)
                             try:
-                                turn = self._run_streamable_prompt(
-                                prompt,
-                                history,
-                                model_selector,
-                                context_size=context_size,
-                                session=storage_session,
-                                project=storage_project,
-                                state=state,
-                                return_result=True,
-                                capture_request_id=self._correlation(),
-                                capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
-                                # The deterministic request cache is offered only
-                                # to this plain, non-streaming generation
-                                # fall-through: every control/tool/web/work/agent
-                                # route has already returned above, and streamed
-                                # or structured turns never receive a scope.  An
-                                # empty scope is an unconditional cache denial.
-                                cache_scope=(
-                                    "" if stream else _request_cache_scope(context)
-                                ),
-                                # Account-backed deployments intentionally do not
-                                # inject or train the legacy global lesson store.
-                                # Their durable chat/session project IDs remain
-                                # principal-namespaced above.
-                                augment=not bool(context.get("account")),
-                                metrics=_lifecycle.metrics,
-                                )
+                                with server.served_control_guard(_prompt_control_guard):
+                                    turn = self._run_streamable_prompt(
+                                        prompt,
+                                        history,
+                                        model_selector,
+                                        context_size=context_size,
+                                        session=storage_session,
+                                        project=storage_project,
+                                        state=state,
+                                        return_result=True,
+                                        capture_request_id=self._correlation(),
+                                        capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
+                                        # The deterministic request cache is offered only
+                                        # to this plain, non-streaming generation
+                                        # fall-through: every control/tool/web/work/agent
+                                        # route has already returned above, and streamed
+                                        # or structured turns never receive a scope.  An
+                                        # empty scope is an unconditional cache denial.
+                                        cache_scope=(
+                                            "" if stream else _request_cache_scope(context)
+                                        ),
+                                        # Account-backed deployments intentionally do not
+                                        # inject or train the legacy global lesson store.
+                                        # Their durable chat/session project IDs remain
+                                        # principal-namespaced above.
+                                        augment=not bool(context.get("account")),
+                                        metrics=_lifecycle.metrics,
+                                    )
                             finally:
                                 self._pause_early_stream()
                             content = turn.content

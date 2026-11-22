@@ -1108,6 +1108,12 @@ def served_work_project(project):
     return candidate
 
 
+def served_project_refusal(project):
+    """``delegation.served_project_refusal`` against the fleet's root resolver and the file roots."""
+    from sonder_runtime.application.agents.delegation import served_project_refusal as refusal
+    return refusal(project, master_orchestrator.canonical_project_root, file_ops.inside_allowed_roots)
+
+
 def _note_escalation(step, surface):
     """Record one escalation; the superseded rung no longer decides the outcome."""
     try:
@@ -3665,6 +3671,20 @@ def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=No
     return ""
 
 
+_SERVED_CONTROL_GUARD = contextvars.ContextVar("sonder_served_control_guard", default=None)
+CONTROL_COMMAND_SKIP = object()
+
+
+@contextlib.contextmanager
+def served_control_guard(guard):
+    """Bind a served-surface authority check for any nested ``control_command``."""
+    token = _SERVED_CONTROL_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _SERVED_CONTROL_GUARD.reset(token)
+
+
 def control_command(prompt: str, history=None, session="", project="",
                     operator_approved=False, autopilot_request_owner: str | None = None):
     """Handle safe slash commands before a prompt reaches the model.
@@ -3703,6 +3723,13 @@ def control_command(prompt: str, history=None, session="", project="",
     text = (prompt or "").strip()
     if not text.startswith("/"):
         return None
+    guard = _SERVED_CONTROL_GUARD.get()
+    if guard is not None:
+        guard_result = guard(text)
+        if guard_result is CONTROL_COMMAND_SKIP:
+            return None
+        if guard_result:
+            return str(guard_result)
     parts = text.split(None, 1)
     cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
@@ -15325,6 +15352,12 @@ def _loop_dispatch(action):
             learn=action.get("learn", True),
         ))
     if action_type == "sonder":
+        # sonder() hands this project to control_command, whose ``/master`` branch
+        # starts a fleet rooted there: the same model- or caller-written project
+        # as the ``master`` action below, so it takes the same file-roots check.
+        project_refusal = served_project_refusal(action.get("project", ""))
+        if project_refusal:
+            return {**_loop_text_result("sonder", project_refusal), "ok": False}
         return _loop_text_result("sonder", sonder(
             prompt=action.get("prompt", ""),
             system=action.get("system", ""),
@@ -15405,6 +15438,11 @@ def _loop_dispatch(action):
             tier=action.get("tier", ""),
         ))
     if action_type in ("master", "master_orchestrate"):
+        # A loop action's project is model- or caller-written (also over HTTP
+        # ``/loop``), never the operator's selection: it must stay inside the file roots.
+        project_refusal = served_project_refusal(action.get("project", ""))
+        if project_refusal:
+            return {**_loop_text_result("master_orchestrate", project_refusal), "ok": False}
         return _loop_text_result("master_orchestrate", master_orchestrate(
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
@@ -19135,6 +19173,10 @@ def _agent_dispatch(
             tier=args.get("tier", ""),
         )
     if tool_name in ("master_orchestrate", "master"):
+        # The agent model chose this project: it must stay inside the file roots.
+        project_refusal = served_project_refusal(args.get("project", ""))
+        if project_refusal:
+            return project_refusal
         return master_orchestrate(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
@@ -23300,7 +23342,8 @@ def _route_work_request(
             master_kwargs["worker_cap"] = explicit_worker_cap
         if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
             master_kwargs["project"] = resolved_project
-        output = master_orchestrate(**master_kwargs)
+        # Only HTTP chat reaches this route, so the project is a served caller's.
+        output = served_project_refusal(master_kwargs.get("project", "")) or master_orchestrate(**master_kwargs)
     elif mode == "workbench":
         _narration_reason(reason)
         output, selected_tier = _workbench_agent_escalating(

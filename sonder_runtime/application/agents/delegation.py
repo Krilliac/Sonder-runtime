@@ -63,6 +63,26 @@ def rejected_project_refusal(project: object, served_work_project: Callable[[str
     return "Refused: project '%s': %s." % (" ".join(text[:300].split()), project_refusal())
 
 
+def served_project_refusal(
+    project: object,
+    canonical_root: Callable[[str], str],
+    inside_roots: Callable[[str], bool],
+) -> str:
+    """A refusal when a served caller's *project* would widen a fleet's reach, else ``""``.
+
+    ``master_orchestrator.resolve_repository_project_root`` treats an explicit
+    project as authoritative, which is right for the local operator. A served
+    caller's project must instead name a directory inside the roots the
+    deployment already exposes. *canonical_root* is the resolver the fleet
+    itself uses, so this judges the same directory the run would get; a value
+    it resolves to ``""`` is never used as a root and is not refused here.
+    """
+    root = canonical_root(str(project or ""))
+    if root and not inside_roots(root):
+        return "Refused: %s." % project_refusal()
+    return ""
+
+
 def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
