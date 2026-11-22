@@ -20,14 +20,21 @@ class ChatEntry {
   final ChatMessage message;
   final bool retryable;
   final int? elapsedMs;
+  final List<ChatStreamToolEvent> toolCalls;
 
   const ChatEntry(this.id, this.message,
-      {this.retryable = false, this.elapsedMs});
+      {this.retryable = false,
+      this.elapsedMs,
+      this.toolCalls = const []});
 
-  ChatEntry withMessage(ChatMessage next, {bool? retryable, int? elapsedMs}) =>
+  ChatEntry withMessage(ChatMessage next,
+          {bool? retryable,
+          int? elapsedMs,
+          List<ChatStreamToolEvent>? toolCalls}) =>
       ChatEntry(id, next,
           retryable: retryable ?? this.retryable,
-          elapsedMs: elapsedMs ?? this.elapsedMs);
+          elapsedMs: elapsedMs ?? this.elapsedMs,
+          toolCalls: toolCalls ?? this.toolCalls);
 }
 
 /// What the in-flight turn is doing, for the live line.
@@ -41,6 +48,9 @@ class LiveTurn {
   /// status comment, cleared by the first answer text.
   final String? waitStatus;
 
+  /// Active/recent `sonder_tool` calls during this turn.
+  final List<ChatStreamToolEvent> toolCalls;
+
   /// Whole seconds since the turn started. Advanced by the controller's
   /// 1 Hz tick and never behind the wall clock, so it is right after the app
   /// was suspended and testable under fake time.
@@ -52,6 +62,7 @@ class LiveTurn {
     this.model = '',
     this.tokensIn,
     this.waitStatus,
+    this.toolCalls = const [],
     this.elapsedSeconds = 0,
   });
 
@@ -61,6 +72,7 @@ class LiveTurn {
     int? elapsedSeconds,
     String? waitStatus,
     bool clearWaitStatus = false,
+    List<ChatStreamToolEvent>? toolCalls,
   }) =>
       LiveTurn(
         startedAt: startedAt,
@@ -68,6 +80,7 @@ class LiveTurn {
         model: model,
         tokensIn: tokensIn ?? this.tokensIn,
         waitStatus: clearWaitStatus ? null : waitStatus ?? this.waitStatus,
+        toolCalls: toolCalls ?? this.toolCalls,
         elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
       );
 }
@@ -417,6 +430,7 @@ class ChatController extends ChangeNotifier {
     if (next?.mode == _mode?.mode &&
         next?.elevated == _mode?.elevated &&
         next?.elevationReason == _mode?.elevationReason &&
+        next?.canBypass == _mode?.canBypass &&
         (next == null) == (_mode == null)) {
       return;
     }
@@ -439,6 +453,13 @@ class ChatController extends ChangeNotifier {
       return (ModeChangeOutcome.readOnly, modeReadOnlyText);
     }
     if (target == current.mode) return (ModeChangeOutcome.unchanged, '');
+    final resolvedTarget = resolvePermissionMode(target);
+    if (resolvedTarget == PermissionMode.bypass && !current.canBypass) {
+      return (
+        ModeChangeOutcome.readOnly,
+        'Only an administrator can enable bypass mode.'
+      );
+    }
     final generation = _backendGeneration;
     if (isModeRaise(current.mode, target)) {
       final ok = await confirm(current.mode, target);
@@ -451,7 +472,10 @@ class ChatController extends ChangeNotifier {
     _switchingMode = true;
     _notify();
     try {
-      final next = await _backend.setPermissionMode(target);
+      final next = await _backend.setPermissionMode(
+        target,
+        confirmBypass: resolvedTarget == PermissionMode.bypass,
+      );
       if (_disposed || generation != _backendGeneration) {
         return (ModeChangeOutcome.changed, '');
       }
@@ -487,12 +511,17 @@ class ChatController extends ChangeNotifier {
     }
   }
 
-  /// The mode Shift+Tab would move to, or null.
+  /// The mode Shift+Tab would move to, or null. Never cycles into `bypass`
+  /// — entering bypass requires explicit selection and confirmation.
   String? nextModeInCycle() {
     final current = _mode;
     if (current == null || current.options.isEmpty) return null;
-    final index = current.options.indexWhere((o) => o.name == current.mode);
-    return current.options[(index + 1) % current.options.length].name;
+    final cycle = current.options
+        .where((o) => o.name != PermissionMode.bypass)
+        .toList(growable: false);
+    if (cycle.isEmpty) return null;
+    final index = cycle.indexWhere((o) => o.name == current.mode);
+    return cycle[(index + 1) % cycle.length].name;
   }
 
   // -- Threads -------------------------------------------------------------
@@ -706,11 +735,11 @@ class ChatController extends ChangeNotifier {
 
   int _indexOf(int id) => _entries.indexWhere((e) => e.id == id);
 
-  // Control commands must use the runtime control route even when the
-  // person selected a concrete chat model. Ordinary prose keeps that choice.
-  static bool _isControlCommand(String text) => RegExp(
-        r'^/(?:delegate|master|master_orchestrate)(?:\s|$)',
-        caseSensitive: false,
+  // Slash commands must use the runtime control route ('sonder') even when
+  // the person selected a non-default tier (code, fast) or concrete model.
+  // File paths (/etc/passwd), comments (// foo), and prose keep that choice.
+  static bool _isSlashCommand(String text) => RegExp(
+        r'^/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)',
       ).hasMatch(text.trim());
 
   void _replace(int id, ChatEntry Function(ChatEntry) update) {
@@ -743,7 +772,7 @@ class ChatController extends ChangeNotifier {
     _add(const ChatMessage(role: Role.assistant, content: '', pending: true));
     _pendingId = _entries.last.id;
     _turnThreadId = _currentThreadId;
-    final requestModel = _isControlCommand(trimmed) ? 'sonder' : _model;
+    final requestModel = _isSlashCommand(trimmed) ? 'sonder' : _model;
     live.value = LiveTurn(startedAt: DateTime.now(), model: requestModel);
     _liveTimer?.cancel();
     _liveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -793,6 +822,26 @@ class ChatController extends ChangeNotifier {
               // value (a status is never progress).
               live.value = current.copyWith(waitStatus: text);
             }
+          case TurnTool(:final tool):
+            final current = live.value;
+            if (current == null) break;
+            final updated = List<ChatStreamToolEvent>.of(current.toolCalls);
+            final key = tool.id.isNotEmpty ? tool.id : tool.callId;
+            final idx = key.isEmpty
+                ? -1
+                : updated.indexWhere(
+                    (t) => (t.id.isNotEmpty ? t.id : t.callId) == key,
+                  );
+            if (idx >= 0) {
+              updated[idx] = tool.mergedOnto(updated[idx]);
+            } else {
+              updated.add(tool);
+            }
+            live.value = current.copyWith(
+              phase: tool.isAwaitingApproval ? 'awaiting approval' : null,
+              toolCalls: List.unmodifiable(updated),
+              clearWaitStatus: tool.isAwaitingApproval,
+            );
           case TurnDelta(:final text):
             if (live.value?.waitStatus != null) {
               live.value = live.value?.copyWith(clearWaitStatus: true);
@@ -876,13 +925,17 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> _deliver(ChatMessage message,
-      {bool retryable = false, int? elapsedMs}) async {
+      {bool retryable = false,
+      int? elapsedMs,
+      List<ChatStreamToolEvent> toolCalls = const []}) async {
     final threadId = _turnThreadId;
     if (threadId == _currentThreadId) {
       _replace(
           _pendingId,
           (e) => ChatEntry(e.id, message,
-              retryable: retryable, elapsedMs: elapsedMs));
+              retryable: retryable,
+              elapsedMs: elapsedMs,
+              toolCalls: toolCalls));
       await _saveThread(threadId, messages);
     } else {
       // The user moved to another thread: the reply still belongs to the
@@ -896,6 +949,7 @@ class ChatController extends ChangeNotifier {
 
   void _finishOk(ChatTurn turn, ChatReply reply) {
     final elapsed = _liveElapsedMs();
+    final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
     if (reply.metadata?.tier.isNotEmpty == true) {
       lastTier = reply.metadata!.tier;
     }
@@ -906,7 +960,7 @@ class ChatController extends ChangeNotifier {
       responseMetadata: reply.metadata,
     );
     _endTurn();
-    unawaited(_deliver(message, elapsedMs: elapsed));
+    unawaited(_deliver(message, elapsedMs: elapsed, toolCalls: toolCalls));
     _notify();
     onAnnounce?.call('Sonder replied');
     _afterTurn();
@@ -914,6 +968,7 @@ class ChatController extends ChangeNotifier {
 
   void _finishError(ChatTurn turn, Object e) {
     final elapsed = _liveElapsedMs();
+    final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
     ChatMessage message;
     var retryable = false;
     if (e is SonderException && isWorkCapacityError(e)) {
@@ -951,7 +1006,8 @@ class ChatController extends ChangeNotifier {
       retryable = true;
     }
     _endTurn();
-    unawaited(_deliver(message, retryable: retryable, elapsedMs: elapsed));
+    unawaited(_deliver(message,
+        retryable: retryable, elapsedMs: elapsed, toolCalls: toolCalls));
     _notify();
     onAnnounce?.call('Request failed: ${message.content.split('\n').first}');
     _afterTurn();
@@ -1016,19 +1072,43 @@ class ChatController extends ChangeNotifier {
       case 'returned':
       case 'refused':
         final acknowledgement = old.responseMetadata?.acknowledgement ?? '';
+        final pendingRefusal = run.pendingRefusal;
         final parts = <String>[
           if (acknowledgement.isNotEmpty) acknowledgement,
           if (run.finalSummary.isNotEmpty) run.finalSummary,
           if (run.output.isNotEmpty) run.output,
+          if (run.status == 'refused' &&
+              run.finalSummary.isEmpty &&
+              run.output.isEmpty &&
+              pendingRefusal != null &&
+              pendingRefusal.reason.isNotEmpty)
+            pendingRefusal.reason,
         ];
+        final isRefused = run.status == 'refused' || pendingRefusal != null;
+        final nextMeta = old.responseMetadata != null
+            ? old.responseMetadata!.withWork(
+                workStatus: run.status,
+                status: isRefused ? 'refused' : null,
+                refusal: pendingRefusal,
+              )
+            : (isRefused
+                ? ChatResponseMetadata(
+                    workRunId: run.id,
+                    workStatus: run.status,
+                    status: 'refused',
+                    refusal: pendingRefusal,
+                  )
+                : null);
         next = ChatMessage(
           role: Role.assistant,
-          content: parts.isEmpty ? '(empty response)' : parts.join('\n\n'),
+          content: parts.isEmpty
+              ? (isRefused
+                  ? 'refused: work run ${run.id} was refused'
+                  : '(empty response)')
+              : parts.join('\n\n'),
           // The run is settled: keep the receipt, but it no longer marks a
           // running work run (workRunOf reads it first).
-          responseMetadata: old.responseMetadata?.withWork(
-            workStatus: run.status,
-          ),
+          responseMetadata: nextMeta,
         );
       default:
         final label = switch (run.status) {

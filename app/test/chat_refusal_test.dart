@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sonder_runtime/api.dart' show ApprovalsApi;
+import 'package:sonder_runtime/api.dart' show ApprovalsApi, PendingApproval;
 import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat/classify.dart';
 import 'package:sonder_runtime/models.dart';
@@ -400,5 +400,48 @@ void main() {
       expect(found.status, ApprovalStatus.forbidden);
       expect(found.message, 'Approvals need a developer or admin account.');
     });
+  });
+
+  testWidgets('post-turn slash refusals (/mkdir, /run) open sheet with detail & bidi warning',
+      (tester) async {
+    final backend = FakeChatBackend()
+      ..pendingCalls = {
+        '3f9a12c0': const PendingApproval(
+          callId: '3f9a12c0',
+          digest: _fakeDigest,
+          tool: 'run_code',
+          preview: 'language=python',
+          detail: 'print("hello")',
+          bidiWarning: true,
+          mode: 'manual',
+        ),
+      };
+    await pumpChat(tester, backend);
+    await tester.enterText(find.byType(TextField), '/run');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    backend.lastTurn.done(
+      'refused /run: execution asks in manual mode (mode: manual)',
+      metadata: const ChatResponseMetadata(
+        status: 'refused',
+        refusal: ChatRefusal(
+          callId: '3f9a12c0',
+          tool: 'run_code',
+          reason: 'execution asks in manual mode',
+          mode: 'manual',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byKey(const Key('refusal-notice')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('refusal-approve')));
+    await tester.pumpAndSettle();
+    expect(find.text('print("hello")'), findsOneWidget);
+    expect(find.textContaining('Hidden bidirectional'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('approval-cancel')));
+    await tester.pumpAndSettle();
+    await unmountChat(tester);
   });
 }

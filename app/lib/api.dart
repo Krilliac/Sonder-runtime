@@ -656,11 +656,14 @@ class PermissionModeOption {
 /// check: a record with no mode name is not a mode, and a blank or guessed
 /// chip is worse than no chip at all.
 class PermissionMode {
+  static const bypass = 'bypass';
+
   final String mode;
   final String label;
   final String blurb;
   final bool elevated;
   final String elevationReason;
+  final bool canBypass;
   final List<PermissionModeOption> modes;
 
   /// risk class -> allow | ask | deny, as the server resolved it for [mode].
@@ -672,6 +675,7 @@ class PermissionMode {
     this.blurb = '',
     this.elevated = false,
     this.elevationReason = '',
+    this.canBypass = false,
     this.modes = const [],
     this.matrix = const {},
   });
@@ -689,6 +693,7 @@ class PermissionMode {
       elevationReason: json['elevationReason']?.toString() ??
           json['elevation_reason']?.toString() ??
           '',
+      canBypass: json['can_bypass'] == true || json['canBypass'] == true,
       modes: rawModes is List
           ? rawModes
               .whereType<Map>()
@@ -1379,7 +1384,7 @@ class SonderApi implements SonderApiPort {
   /// administrator can change the permission mode." (code `FORBIDDEN`).
   @override
   Future<PermissionMode> setPermissionMode(String mode,
-      {String? idempotencyKey}) async {
+      {String? idempotencyKey, bool confirmBypass = false}) async {
     final wanted = mode.trim();
     if (wanted.isEmpty) {
       throw SonderException('A permission mode name is required.');
@@ -1392,7 +1397,10 @@ class SonderApi implements SonderApiPort {
           ..._headers(),
           'Idempotency-Key': idempotencyKey ?? newIdempotencyKey('mode'),
         },
-        body: jsonEncode({'mode': wanted}),
+        body: jsonEncode({
+          'mode': wanted,
+          if (confirmBypass) 'confirm_bypass': true,
+        }),
         timeout: const Duration(seconds: 10),
       );
     } catch (e) {
