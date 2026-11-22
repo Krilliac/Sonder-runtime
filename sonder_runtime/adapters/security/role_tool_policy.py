@@ -76,6 +76,21 @@ def bind_caller_role(role: str | None) -> None:
     _CALLER_ROLE.set(role)
 
 
+_UNBOUND = object()
+
+
+def caller_bound_unrestricted() -> bool:
+    """True only when a handler explicitly bound "no role restriction" here.
+
+    ``agent_refusal`` reads an unbound context as unrestricted, which suits
+    the trusted MCP/console surfaces. A caller that needs positive evidence of
+    developer authority (a hint naming a developer-only command) uses this
+    instead: a context that never received the binding (a plain worker
+    thread, a direct library call) reads as restricted.
+    """
+    return _CALLER_ROLE.get(_UNBOUND) is None
+
+
 def agent_refusal(tool: object) -> str:
     """The agent loop's HOST POLICY observation for a restricted caller, or ""."""
     role = _CALLER_ROLE.get()

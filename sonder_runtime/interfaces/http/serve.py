@@ -115,8 +115,7 @@ from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
-from sonder_runtime.domain import launcher_health as sonder_health
-from sonder_runtime.domain import public_policy
+from sonder_runtime.domain import launcher_health as sonder_health, public_policy, thinking_controls as _thinking_controls
 from sonder_runtime.domain.common.errors import (
     Conflict,
     DependencyUnavailable,
@@ -3304,8 +3303,8 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
-    """Return response text if `content` is a recognized slash command, else None."""
+                  idempotency_key="", workspace_project=None, lane_session="", selected_model=False):
+    """Return response text if `content` is a recognized slash command, else None.  selected_model: a lone unknown "/word" goes to the model."""
     state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
@@ -3690,7 +3689,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if dispatched is not None:
         return dispatched
 
-    if _BARE_SLASH_COMMAND.fullmatch(stripped):
+    if _BARE_SLASH_COMMAND.fullmatch(stripped) and not selected_model:
         # A lone "/word" is a command attempt, not a sentence: answer without
         # spending a model call on a typo.  Same text as a hidden command so
         # the reply does not reveal which names exist for other accounts.
@@ -4106,6 +4105,8 @@ def _chat_model_selection_error(selector):
         if tier_label == "cloud-disabled":
             return 403, "cloud model access is disabled by the operator"
         if tier_label is not None:
+            if (unfit := "" if _cloud or not _target else server.chat_model_unfit_reason(_target)):
+                return 400, "model is not chat-capable (%s); choose another model" % unfit
             return None
         found = server.resolve_discovered_model_record(selector)
     except Exception:
@@ -4148,16 +4149,14 @@ def _openai_model_rows():
     add("sonder", "local")
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
-        if not cloud and server._runtime_model_capability_error(
-            tier_name, model, records,
-        ):
+        if not cloud and (server._runtime_model_capability_error(tier_name, model, records) or server.chat_model_unfit_reason(model)):
             continue
         add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue
         cloud = server._is_cloud_model_name(name)
-        if cloud and not server.cloud_allowed():
+        if (cloud and not server.cloud_allowed()) or (not cloud and server.chat_model_unfit_reason(name)):
             continue
         add(name, "cloud" if cloud else "local")
     return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
@@ -4519,7 +4518,7 @@ def _chat_completion_object(
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
+            "finish_reason": "length" if isinstance(receipt, dict) and receipt.get("truncated") else "stop",
         }],
         "usage": chat_formatting.chat_usage(activity_response),
         "sonder_activity": activity,
@@ -7414,17 +7413,18 @@ class Handler(BaseHTTPRequestHandler):
         # receipt can carry the call id a client needs to approve it once.
         turn_refusals = []
         refusal_scope = _CHAT_REFUSALS.set(turn_refusals)
+        truncation_flag, truncation_scope = _thinking_controls.begin_reply_truncation()
         _ensure_refusal_observer()
         _lifecycle = sonder_lifecycle.get()
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
         # route retains Sonder's slash, feedback, web, and work conveniences;
-        # an explicit target receives the caller's text unchanged instead of
-        # allowing any of those local dispatchers to consume it.
+        # an explicit target receives the caller's text unchanged, bar slash commands.
         allow_control_routes = (
             model_operation != "responses"
             and _uses_default_model_route(model)
         )
+        allow_slash_command = model_operation != "responses" and prompt.lstrip().startswith("/")
         # A user-role caller reaches no computer-use or web tool route: those
         # dispatch tools outside the role allowlist (public-mode P2).
         role_runs_tools = _restricted_tool_role(context) is None
@@ -7473,12 +7473,12 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                    elif allow_control_routes:
+                    elif allow_control_routes or allow_slash_command:
                         reply = _handle_slash(
-                            prompt, messages=messages, state=state,
+                            prompt, state=state, messages=[*history, *(messages or ())] if history and not _history_from_messages(messages) else messages,
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
-                            workspace_project=project, lane_session=session,
+                            workspace_project=project, lane_session=session, selected_model=not allow_control_routes,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
@@ -7527,8 +7527,7 @@ class Handler(BaseHTTPRequestHandler):
                             gateway_bound=True,
                         )
                         web_routed = reply is not None
-                    if (structured_schema is None and reply is None and
-                            (allow_control_routes or (model_operation != "responses" and intents.classify_file_intent(prompt)))):
+                    if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
                             prompt,
@@ -7536,13 +7535,11 @@ class Handler(BaseHTTPRequestHandler):
                             authorized=_developer_authorized(context),
                             context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
-                            session_id=storage_session or _hosted_storage_id(
-                                context, work_session_ref, "session",
-                            ),
+                            session_id=storage_session or _hosted_storage_id(context, work_session_ref, "session"),
                             session_ref=work_session_ref,
                             correlation_id=self._correlation(),
                             with_receipt=True,
-                            tool_tier=model_selector if not allow_control_routes else "",
+                            tool_tier="",
                         )
                         execution_routed = reply is not None
                     if isinstance(reply, ChatWorkResult):
@@ -7832,6 +7829,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         finally:
             _CHAT_REFUSALS.reset(refusal_scope)
+            _thinking_controls.REPLY_TRUNCATION.reset(truncation_scope)
             _release_http_conversation_state(state, state_pinned)
 
         # The handler timer starts before body parsing, authentication, and
@@ -7863,6 +7861,8 @@ class Handler(BaseHTTPRequestHandler):
             receipt["degraded"] = list(turn_degradations)
         if chat_work_receipt is not None:
             receipt["chat_work"] = chat_work_receipt
+        if turn is not None and reply is None and truncation_flag[0]:
+            receipt["truncated"] = True
         from sonder_runtime.interfaces.orchestration_commands import reply_receipt_fields
         receipt.update(reply_receipt_fields(reply))
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
@@ -8016,7 +8016,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run_streamable_prompt(self, *args, **kwargs):
         """The plain model turn; a streaming provider forwards live deltas."""
-        with _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled()):
+        with _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled()), _live_stream.stream_admission(self, server._bound_request_timeout(None, server.TIMEOUT), bool(kwargs.get("capture_stream")), admission=server._stream_turn_admission):
             return _run_prompt(*args, **kwargs)
 
     def _begin_early_stream(self, model="sonder"):
