@@ -1022,12 +1022,24 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             entry = show_failures.get((origin, model_name, digest))
         return entry is not None and time.monotonic() < entry[0]
 
+    probe_gate_ref: list[Callable[[str], Callable[[], None]] | None] = [None]
+
     def fill_show_cache(origin: str, pending: list[tuple[str, str]]) -> None:
         try:
             for name, digest in pending:
                 if show_is_cached(origin, name, digest):
                     continue
-                read_show_cached(origin, name, digest=digest)
+                gate = probe_gate_ref[0]
+                release: Callable[[], None] = lambda: None
+                if gate is not None:
+                    try:
+                        release = gate(origin)
+                    except (gpu_admission_module.GpuAdmissionRefused, CapabilityProbeDeferred):
+                        return
+                try:
+                    read_show_cached(origin, name, digest=digest)
+                finally:
+                    release()
                 if show_is_backed_off(origin, name, digest):
                     # One failing /api/show ends this pass; the backoff keeps
                     # the model out of later passes until it expires.
@@ -1168,6 +1180,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
     probe.show = show  # type: ignore[attr-defined]
     probe.clear_show_cache = clear_show_cache  # type: ignore[attr-defined]
     probe.wait_show_fill = wait_show_fill  # type: ignore[attr-defined]
+    probe.bind_probe_gate = lambda fn: probe_gate_ref.__setitem__(0, fn)  # type: ignore[attr-defined]
     probe._sonder_default_allow_remote = allow_remote  # type: ignore[attr-defined]
     return probe
 
@@ -1315,6 +1328,9 @@ class OllamaWorkerPool:
         self.gpu_admission = (
             gpu_admission if gpu_admission is not None else gpu_admission_module.process_service()
         )
+        bind_gate = getattr(self._capability_prober, "bind_probe_gate", None)
+        if callable(bind_gate):
+            bind_gate(self._show_probe_permit)
         self._recent_evidence = recent_evidence
         self._identity_for = identity_for
         self._capability_routing = capability_routing
@@ -1661,6 +1677,13 @@ class OllamaWorkerPool:
         except gpu_admission_module.GpuAdmissionRefused as refused:
             raise CapabilityProbeDeferred(
                 "capability probe deferred: %s" % refused.refusal.reason.value) from None
+
+    def _show_probe_permit(self, origin: str) -> Callable[[], None]:
+        """Take the PROBE admission for one background /api/show metadata fetch."""
+        acquire = getattr(self.gpu_admission, "acquire_probe", None)
+        if acquire is None:
+            return lambda: None
+        return acquire("/api/show", origin=origin)
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:

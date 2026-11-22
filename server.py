@@ -25373,6 +25373,8 @@ def improve_function(
     empty.
     """
     _maybe_live_reload()
+    if tier and (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)):
+        return refusal
     try:
         data = file_ops.read_file(path)
         source = data.get("text", "") if isinstance(data, dict) else str(data)

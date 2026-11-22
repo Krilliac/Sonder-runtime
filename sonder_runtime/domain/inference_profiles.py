@@ -12,13 +12,11 @@ the parsing and lookup rules live here so they stay I/O free.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from math import isfinite
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from typing import Any, cast
 
 
 # Approximate resident weight size in decimal GB per billion parameters.  The
