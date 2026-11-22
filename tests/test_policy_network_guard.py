@@ -338,3 +338,129 @@ def test_prefetcher_never_predicts_a_network_spelling(recorder, form):
     prefetcher.observe("file_read", {"path": "src/b.py"}, "ok")
     assert prefetcher.predict_read() is None
     assert recorder.calls == []
+
+
+# -- served_work_project ------------------------------------------------------
+
+@pytest.mark.parametrize("form", FORMS)
+def test_served_work_project_refuses_network_spellings_before_any_fs_call(
+    recorder, monkeypatch, tmp_path, form,
+):
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    assert server.served_work_project(form) == ""
+    assert server.served_work_project(form.replace("\\", "/")) == ""
+    assert recorder.calls == []
+
+
+def test_served_work_project_keeps_local_directories(recorder, monkeypatch, tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    assert server.served_work_project(str(project)) == str(project.resolve())
+    assert recorder.calls == []
+
+
+# -- batching-guard target identity -------------------------------------------
+
+@pytest.mark.parametrize("form", FORMS)
+def test_batch_target_identity_never_resolves_a_network_spelling(recorder, form):
+    assert server._agent_batch_target_identity(form) == form
+    assert server._agent_batch_target_identity("  %s  " % form) == form
+    assert recorder.calls == []
+
+
+# -- forward-slash UNC glued to an option -------------------------------------
+
+FORWARD_EMBEDDED = [
+    "-I//attacker/share",
+    "-I//attacker/share/inc",
+    "/Fo//attacker/share/x.obj",
+    "x=//attacker/share/x",
+    "-Wl,//attacker/share/x",
+    "a.jar;//attacker/share/b.jar",
+    "-I//./pipe/x",
+    r"-I\/attacker/share",
+]
+
+
+@pytest.mark.parametrize("token", FORWARD_EMBEDDED)
+def test_forward_slash_unc_glued_to_an_option_is_a_network_spelling(token):
+    from sonder_runtime.domain import network_path_spelling as spelling
+
+    assert spelling.contains_network_spelling(token)
+
+
+@pytest.mark.parametrize("token", [
+    "a//b/c", "src//x.py", "-Iinclude", "-I../inc", "--url=https://h/x",
+    "-Dhttps://example.invalid/x", "-I//?/C:/x", "/Zi",
+])
+def test_ordinary_tokens_are_not_network_spellings(token):
+    from sonder_runtime.domain import network_path_spelling as spelling
+
+    assert not spelling.contains_network_spelling(token)
+
+
+@pytest.mark.parametrize("token", [
+    "-I//host/share/x=y",
+    "/I//host/share/x=y",
+    "-I//attacker/share/inc=x",
+    r"-I\\host\share\x=y",
+    r"/I\\host\share\a=b",
+])
+def test_execution_guard_refuses_a_glued_unc_with_a_trailing_equals(
+    recorder, project, token,
+):
+    # Splitting the token at its first `=` used to leave only the suffix
+    # ("y") for the network check, while the tool reads the whole value.
+    result = server._agent_project_execution_argument_error(
+        "workspace_run", {"program": "cl", "args": [token], "cwd": str(project)},
+        str(project),
+    )
+    assert REFUSAL in result, (token, result)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("token", [
+    "-D%//example.invalid/x",
+    "-I$//host/share",
+    pytest.param("/I%//host/share", marks=pytest.mark.skipif(
+        os.name != "nt", reason="slash switches are Windows-only",
+    )),
+])
+def test_execution_guard_refuses_a_unc_reached_from_a_glued_start(recorder, project, token):
+    # The whole token is not a network spelling, but one start position of
+    # the glued-path expansion is "//host/share"; it must be refused, never
+    # resolved.
+    result = server._agent_project_execution_argument_error(
+        "workspace_run", {"program": "gcc", "args": [token], "cwd": str(project)},
+        str(project),
+    )
+    assert REFUSAL in result, (token, result)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("token", [
+    "-Dhttps://example.invalid/x",
+    "-DURL=https://example.invalid/x",
+    "--url=https://example.invalid/x",
+])
+def test_execution_guard_never_resolves_a_unc_cut_out_of_a_url(recorder, project, token):
+    # No start position of the glued-path expansion may hand a UNC spelling
+    # cut out of a URL to resolve.
+    server._agent_project_execution_argument_error(
+        "workspace_run", {"program": "gcc", "args": [token], "cwd": str(project)},
+        str(project),
+    )
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("token", FORWARD_EMBEDDED)
+def test_execution_guard_refuses_a_forward_slash_unc_glued_to_an_option(
+    recorder, project, token,
+):
+    result = server._agent_project_execution_argument_error(
+        "workspace_run", {"program": "cl", "args": [token], "cwd": str(project)},
+        str(project),
+    )
+    assert REFUSAL in result, (token, result)
+    assert recorder.calls == []

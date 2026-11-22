@@ -3530,6 +3530,27 @@ def test_campaign_string_task_uses_the_actual_reversal():
     assert server._campaign_expected("string") == "rednos"
 
 
+def _patch_self_graded_recording(monkeypatch, records):
+    """Capture campaign verdicts; the caller-stamped path must never be used.
+
+    The campaign drivers invent the task, run the check and file the verdict,
+    so their rows are self-graded (OUTCOME_SOURCE_SELF_CURRICULUM). Filing
+    them through the caller-facing record_outcome stamped them 'caller' and
+    let a campaign run inflate reviewed_positive_percent.
+    """
+    def caller_path(iid, signal):
+        raise AssertionError(
+            "campaign recorded %r for %s through the caller-stamped "
+            "record_outcome" % (signal, iid)
+        )
+
+    monkeypatch.setattr(server, "record_outcome", caller_path)
+    monkeypatch.setattr(
+        server, "record_self_graded_outcome",
+        lambda iid, signal: records.append((iid, signal)) or "recorded",
+    )
+
+
 def test_campaign_records_passing_interactions(monkeypatch):
     def fake_sonder(prompt, **kwargs):
         return "```python\nprint('sonder-ok')\n```\n\n[interaction_id: abc123]"
@@ -3541,7 +3562,7 @@ def test_campaign_records_passing_interactions(monkeypatch):
         "run_language_code",
         lambda code, language, timeout=8, execute=True: (True, "sonder-ok"),
     )
-    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+    _patch_self_graded_recording(monkeypatch, records)
 
     out = server.campaign_generate_compile_execute_record(
         total=1,
@@ -3570,7 +3591,7 @@ def test_campaign_repairs_then_records(monkeypatch):
         "run_language_code",
         lambda code, language, timeout=8, execute=True: next(outputs),
     )
-    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+    _patch_self_graded_recording(monkeypatch, records)
 
     out = server.campaign_generate_compile_execute_record(
         total=1,
@@ -3593,7 +3614,7 @@ def test_campaign_records_terminal_failures(monkeypatch):
         "run_language_code",
         lambda code, language, timeout=8, execute=True: (True, "wrong"),
     )
-    monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+    _patch_self_graded_recording(monkeypatch, records)
 
     out = server.campaign_generate_compile_execute_record(
         total=1,
@@ -3605,6 +3626,48 @@ def test_campaign_records_terminal_failures(monkeypatch):
     assert "0/1 passed" in out
     assert "0 recorded, 1 failed-recorded" in out
     assert records == [("bad123", "failed")]
+
+
+def test_campaign_repo_repair_records_self_graded_outcomes(monkeypatch):
+    # The planted suite fails before the repair; each repair run then passes
+    # for the first job and fails terminally for the second.
+    verdicts = {"pre": (False, "assert 1 == 2", ""), "ok": (True, "", ""),
+                "bad": (False, "still failing", "")}
+
+    def fake_pytest(workdir, timeout):
+        module = (workdir / "module.py").read_text(encoding="utf-8")
+        if "repaired-ok" in module:
+            return verdicts["ok"]
+        if "repaired-bad" in module:
+            return verdicts["bad"]
+        return verdicts["pre"]
+
+    def fake_sonder(prompt, **kwargs):
+        fake_sonder.calls += 1
+        marker, iid = (
+            ("repaired-ok", "a11ce1") if fake_sonder.calls == 1
+            else ("repaired-bad", "bad1")
+        )
+        return (
+            "```python\n# %s\nprint('fixed')\n```\n\n[interaction_id: %s]"
+            % (marker, iid)
+        )
+
+    fake_sonder.calls = 0
+    records = []
+    monkeypatch.setattr(server, "_repo_repair_pytest", fake_pytest)
+    monkeypatch.setattr(server, "sonder", fake_sonder)
+    monkeypatch.setattr(
+        server, "_record_failure_pitfall", lambda *a, **k: ("", ""),
+    )
+    _patch_self_graded_recording(monkeypatch, records)
+
+    out = server.campaign_repo_repair(
+        total=2, max_workers=1, repair_rounds=0, record_failures=True,
+    )
+
+    assert "1/2 suites fixed" in out
+    assert sorted(records) == [("a11ce1", "tests_passed"), ("bad1", "failed")]
 
 
 def test_learn_tiers_reports_all_defaults(monkeypatch):
