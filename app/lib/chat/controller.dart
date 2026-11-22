@@ -811,18 +811,26 @@ class ChatController extends ChangeNotifier {
   }
 
   bool _syncingSessions = false;
+  Future<void>? _syncSessionsFuture;
   DateTime? _lastSessionSync;
 
   /// Pull durable sessions from `GET /v1/sessions` (API, TUI/REPL, other GUIs)
   /// and merge them into the sidebar thread list without discarding local chats.
-  Future<void> syncServerSessions({bool force = false}) async {
-    if (_disposed || _syncingSessions) return;
+  Future<void> syncServerSessions({bool force = false}) {
+    if (_disposed) return Future<void>.value();
+    if (_syncingSessions) return _syncSessionsFuture ?? Future<void>.value();
     if (!force &&
         _lastSessionSync != null &&
         DateTime.now().difference(_lastSessionSync!) <
             const Duration(seconds: 10)) {
-      return;
+      return Future<void>.value();
     }
+    final future = _runSyncServerSessions();
+    _syncSessionsFuture = future;
+    return future;
+  }
+
+  Future<void> _runSyncServerSessions() async {
     _syncingSessions = true;
     final generation = _backendGeneration;
     try {
@@ -889,6 +897,7 @@ class ChatController extends ChangeNotifier {
       // Offline, 403 for non-admin, or older server: leave local threads intact.
     } finally {
       _syncingSessions = false;
+      _syncSessionsFuture = null;
     }
   }
 
