@@ -29,6 +29,10 @@ import sonder_runtime.adapters.git_discovery as git_discovery
 import sonder_runtime.adapters.filesystem.operator_only_paths as _operator_only
 import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.platform.policy_roots import (
+    EXTENDED_LOCAL_RE as _EXTENDED_LOCAL_RE,
+    try_parse_policy_root as _parse_policy_root,
+)
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 from sonder_runtime.adapters.filesystem.intent_executor import (
     execute_delete as _execute_delete_intent,
@@ -261,11 +265,11 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
 
 
 def _split_roots(raw: str) -> list[Path]:
-    roots = []
+    roots: list[Path] = []
     for item in (raw or "").split(os.pathsep):
-        item = item.strip()
-        if item:
-            roots.append(Path(item).expanduser())
+        parsed = _parse_policy_root(item)
+        if parsed is not None:
+            roots.append(parsed)
     return roots
 
 
@@ -283,11 +287,13 @@ def _roots_from_file() -> list[Path]:
         lines = roots_file_path().read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):
         return []
-    roots = []
+    roots: list[Path] = []
     for line in lines:
         value = line.strip()
         if value and not value.startswith("#"):
-            roots.append(Path(value).expanduser())
+            parsed = _parse_policy_root(value)
+            if parsed is not None:
+                roots.append(parsed)
     return roots
 
 
@@ -413,15 +419,23 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
             excluded.append(root.resolve())
         except OSError:
             excluded.append(_normalized_absolute(root))
-    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
+    explicit: list[Path] = []
+    for item in configured or ():
+        if item is None:
+            continue
+        parsed = _parse_policy_root(str(item))
+        if parsed is not None:
+            explicit.append(parsed)
     roots = []
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     default_root = None
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         default_root = runtime_paths.default_workspace_root()
-    if default_root is not None and os.path.isdir(default_root):
-        roots.append(Path(default_root))
+    if default_root is not None:
+        parsed_default = _parse_policy_root(str(default_root))
+        if parsed_default is not None and parsed_default.is_dir():
+            roots.append(parsed_default)
     out: list[str] = []
     for root in explicit + roots:
         try:
@@ -1384,9 +1398,6 @@ def _require_plain_name_spelling(path: str) -> None:
             "refusing path with a Windows alias component (%r): a trailing dot or space or a ':' "
             "names the same file as its trimmed spelling" % alias
         )
-
-
-_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
 
 
 def _reject_network_path(path: str) -> str:

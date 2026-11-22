@@ -700,6 +700,7 @@ sonder_runtime/platform/model_paths.py
 sonder_runtime/platform/model_retry_policy.py
 sonder_runtime/platform/netns_probe.py
 sonder_runtime/platform/npu_policy.py
+sonder_runtime/platform/policy_roots.py
 sonder_runtime/platform/process.py
 sonder_runtime/platform/reference_library_config.py
 sonder_runtime/platform/rpc_sharding_config.py
