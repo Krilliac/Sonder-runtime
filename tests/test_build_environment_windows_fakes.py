@@ -295,7 +295,7 @@ def test_a_project_local_windows_path_entry_is_dropped(tmp_path):
 def test_the_default_windows_project_local_guard_is_installed(monkeypatch):
     from sonder_runtime.adapters.host_tools import guards
 
-    monkeypatch.setattr(guards, "project_local", lambda path: path.lower().startswith("d:\proj"))
+    monkeypatch.setattr(guards, "project_local", lambda path: path.lower().startswith(r"d:\proj"))
     with monkeypatch.context() as patch:
         patch.setattr(os, "name", "nt")  # the default guard only applies on a Windows host
         provider = ScrubbedEnvironmentProvider(
