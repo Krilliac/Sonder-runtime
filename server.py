@@ -1146,6 +1146,7 @@ DEFAULT_PROJECT = os.environ.get("SONDER_DEFAULT_PROJECT", "default")
 # Sessioned calls use the context policy selected for the live model and keep the
 # last MAX_TURNS turns live; older turns are rolled into a summary.
 SESSION_NUM_CTX = context_policy.default_requested()
+_SESSION_NUM_CTX_PINNED = False
 MAX_TURNS = int(os.environ.get("SONDER_MAX_TURNS", "12"))
 # A model can ignore the decoder schema. Keep server-side ``uniqueItems``
 # validation bounded even for direct callers that did not pass through HTTP
@@ -4246,10 +4247,8 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
         _reference_lookup_lanes.mark_learning_skip(conn, iid)  # a passage-grounded turn never distills or trains
         playbook_context.record_usage(conn, playbook_selection, iid)
         _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
-        _capture_preferences(
-            conn, prompt, source_interaction=iid,
-            scope="project:%s" % project if project else "global",
-        )
+        if augment or str(project or "").startswith("http-project-"):
+            _capture_preferences(conn, prompt, source_interaction=iid, scope="project:%s" % project if project else "global")
         return resp, iid, tctx
     resp, iid = orchestrator.run_with_learning(
         conn, prompt, tier, gen, retrieve_fn=retrieve_fn, history=history,
@@ -4264,10 +4263,8 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
     _reference_lookup_lanes.mark_learning_skip(conn, iid)  # a passage-grounded turn never distills or trains
     playbook_context.record_usage(conn, playbook_selection, iid)
     _prefix_cache.observe_chat_turn(effective_system, model=model, cloud=cloud, bridged=_provider_bridge.active_rung, response_meta=getattr(gen, "last_response_meta", None))
-    _capture_preferences(
-        conn, prompt, source_interaction=iid,
-        scope="project:%s" % project if project else "global",
-    )
+    if augment or str(project or "").startswith("http-project-"):
+        _capture_preferences(conn, prompt, source_interaction=iid, scope="project:%s" % project if project else "global")
     return resp, iid, None
 
 
@@ -6773,14 +6770,9 @@ def _sonder_impl_serialized(
 
     session_id = _resolve_session(session)
     project_id = _resolve_project(project)
-    explicit_context = bool(str(context_size or "").strip()) or int(num_ctx or 0) > 0
+    explicit_context = bool(str(context_size or "").strip()) or int(num_ctx or 0) > 0 or _SESSION_NUM_CTX_PINNED
     if explicit_context:
-        requested_ctx = _platform_requested_context(
-            context_size or (SESSION_NUM_CTX if session_id else num_ctx),
-            default_value=SESSION_NUM_CTX,
-        )
-        # Sessioned threads get the selected virtual context window; honor a
-        # larger explicit num_ctx.
+        requested_ctx = _platform_requested_context(context_size or (SESSION_NUM_CTX if (session_id or _SESSION_NUM_CTX_PINNED) else num_ctx), default_value=SESSION_NUM_CTX)
         pinned_ctx = max(num_ctx, requested_ctx) if session_id else requested_ctx
     else:
         pinned_ctx = None
@@ -7170,10 +7162,11 @@ def _answer_with_history_impl(
     temperature = _serve_temperature()
     pinned_ctx = (
         _platform_requested_context(context_size, default_value=SESSION_NUM_CTX)
-        if str(context_size or "").strip() else None
+        if str(context_size or "").strip()
+        else (_platform_requested_context(SESSION_NUM_CTX, default_value=SESSION_NUM_CTX) if _SESSION_NUM_CTX_PINNED else None)
     )
     session_id = _resolve_session(session) if (session or "").strip() else None
-    project_id = _resolve_project(project)
+    project_id = "" if (not augment and not (project or "").strip()) else _resolve_project(project)
     interaction_snapshot = None
     # Each rung binds the provider its tier is bound to (None = Ollama); the
     # binding covers every local model step of the rung, including repairs.
@@ -8522,7 +8515,7 @@ def context_policy_status(context_size: str = "") -> str:
 @mcp.tool()
 def set_context_size(context_size: str) -> str:
     """Select Sonder's requested virtual context size, up to 1m by default."""
-    global SESSION_NUM_CTX
+    global SESSION_NUM_CTX, _SESSION_NUM_CTX_PINNED
     _maybe_live_reload()
     # Validate before applying. Previously an invalid value (non-numeric,
     # negative) silently fell back to the 8192 default and reported success,
@@ -8539,6 +8532,7 @@ def set_context_size(context_size: str) -> str:
                     "context that small makes inference unusable."
                     % (parsed, context_policy.MIN_CONTEXT))
     SESSION_NUM_CTX = context_policy.requested(context_size)
+    _SESSION_NUM_CTX_PINNED = bool(str(context_size or "").strip())
     return "context size selected\n" + context_policy.format_policy(SESSION_NUM_CTX)
 
 
@@ -10540,13 +10534,16 @@ def admin_login(username: str, password: str) -> str:
 
 
 @mcp.tool()
-def admin_whoami(token: str = "") -> str:
+def admin_whoami(token: str = "", public_hosting: bool | None = None) -> str:
     """Show the account attached to a session token."""
     _maybe_live_reload()
     account = _admin_account_from_token(token)
     if not account:
         return "not logged in"
-    return _format_account(account)
+    from sonder_runtime.domain.public_policy import allowed_features_for_role
+    is_public = os.environ.get("SONDER_PUBLIC_HOSTING", "").strip().lower() in ("1", "true", "yes", "on") if public_hosting is None else bool(public_hosting)
+    features = allowed_features_for_role(account.get("role"), public_hosting=is_public, client_exec_supported=True)
+    return "%s features=%s" % (_format_account(account), ",".join(n for n, a in features.items() if a))
 
 
 @mcp.tool()
@@ -24641,41 +24638,42 @@ def _execute_fanout_run(run_id):
 
     # Local execution stays serial for VRAM safety.  Cloud calls retain their
     # public two-worker cap while each model row remains independently claimed.
-    while True:
-        row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
-        if row is None or _is_cloud_model_name(row["model"]):
-            break
-        persist(invoke(row))
-        fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
-    # If the first unclaimed remaining row is cloud, it is still pending; claim
-    # the cloud set below.  A local row can never follow it because result rows
-    # are alphabetically ordered, so claim all rows then route each safely.
-    pending_cloud = []
-    if row is not None:
-        pending_cloud.append(row)
-    with owned_runtime_pool(max_workers=limits["cloud_workers"]) as pool:
-        inflight = {}
+    with fanout_execution.fanout_lease_heartbeat(fanout_store, run_id, owner_id, lease_seconds):
         while True:
-            while pending_cloud and len(inflight) < limits["cloud_workers"]:
-                claimed = pending_cloud.pop()
-                if _is_cloud_model_name(claimed["model"]):
-                    inflight[pool.submit(invoke, claimed)] = claimed
-                else:
-                    persist(invoke(claimed))
-            while len(inflight) < limits["cloud_workers"]:
-                claimed = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
-                if claimed is None:
-                    break
-                if _is_cloud_model_name(claimed["model"]):
-                    inflight[pool.submit(invoke, claimed)] = claimed
-                else:
-                    persist(invoke(claimed))
-            if not inflight:
+            row = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+            if row is None or _is_cloud_model_name(row["model"]):
                 break
-            future = next(as_completed(inflight))
-            del inflight[future]
-            persist(future.result())
+            persist(invoke(row))
             fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
+        # If the first unclaimed remaining row is cloud, it is still pending; claim
+        # the cloud set below.  A local row can never follow it because result rows
+        # are alphabetically ordered, so claim all rows then route each safely.
+        pending_cloud = []
+        if row is not None:
+            pending_cloud.append(row)
+        with owned_runtime_pool(max_workers=limits["cloud_workers"]) as pool:
+            inflight = {}
+            while True:
+                while pending_cloud and len(inflight) < limits["cloud_workers"]:
+                    claimed = pending_cloud.pop()
+                    if _is_cloud_model_name(claimed["model"]):
+                        inflight[pool.submit(invoke, claimed)] = claimed
+                    else:
+                        persist(invoke(claimed))
+                while len(inflight) < limits["cloud_workers"]:
+                    claimed = fanout_store.claim_next_result(run_id, owner_id, owner_pid=os.getpid(), lease_seconds=lease_seconds)
+                    if claimed is None:
+                        break
+                    if _is_cloud_model_name(claimed["model"]):
+                        inflight[pool.submit(invoke, claimed)] = claimed
+                    else:
+                        persist(invoke(claimed))
+                if not inflight:
+                    break
+                future = next(as_completed(inflight))
+                del inflight[future]
+                persist(future.result())
+                fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
     receipt = _fanout_receipt(run_id)
     if receipt is not None and not limits["batch_job_id"]:
         # Local calls are recorded by _make_generate in this response thread.

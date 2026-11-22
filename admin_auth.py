@@ -97,12 +97,45 @@ def _username(value, *, generic_error: bool = False) -> str:
     return normalized
 
 
-def _password(value, *, generic_error: bool = False) -> str:
+def _password(
+    value,
+    *,
+    generic_error: bool = False,
+    strong: bool = False,
+    username: str = "",
+) -> str:
     message = "invalid username or password" if generic_error else (
         "password must be 8..%d characters" % MAX_PASSWORD_CHARS
     )
-    if not isinstance(value, str) or not 8 <= len(value) <= MAX_PASSWORD_CHARS:
+    if not isinstance(value, str):
         raise ValueError(message)
+    min_len = 12 if (strong and not generic_error) else 8
+    if not min_len <= len(value) <= MAX_PASSWORD_CHARS:
+        if strong and not generic_error:
+            raise ValueError(
+                "password must be 12..%d characters with at least 3 character classes "
+                "(lowercase, uppercase, digit, symbol) and must not contain the username"
+                % MAX_PASSWORD_CHARS
+            )
+        raise ValueError(message)
+    if strong and not generic_error:
+        if not value.strip():
+            raise ValueError("password must not be blank whitespace")
+        classes = sum((
+            any("a" <= ch <= "z" for ch in value),
+            any("A" <= ch <= "Z" for ch in value),
+            any("0" <= ch <= "9" for ch in value),
+            any(not ch.isalnum() and not ch.isspace() for ch in value),
+        ))
+        if classes < 3:
+            raise ValueError(
+                "password must be 12..%d characters with at least 3 character classes "
+                "(lowercase, uppercase, digit, symbol) and must not contain the username"
+                % MAX_PASSWORD_CHARS
+            )
+        normalized_user = str(username or "").strip().lower()
+        if len(normalized_user) >= 3 and normalized_user in value.lower():
+            raise ValueError("password must not contain the username")
     return value
 
 
@@ -195,23 +228,30 @@ def register(
     bootstrap_secret: str = "",
     allow_additional: bool = False,
     actor: dict | None = None,
+    public_hosting: bool = False,
 ) -> dict:
     """Create an account under an explicit registration policy.
 
     Direct callers are a trusted local path for backward compatibility. Hosted
     callers pass trusted_local=False; the first account then consumes the
     configured bootstrap secret exactly once. Later hosted registration needs
-    both an admin actor and an explicit opt-in.
+    both an admin actor and an explicit opt-in, unless ``public_hosting=True``
+    in which case remote signups are permitted with strong passwords and are
+    strictly pinned to ``role="user"`` (first-admin bootstrap over HTTP is
+    disabled so remote signups can never become ``admin``).
     """
     init(conn)
     username = _username(username)
-    password = _password(password)
+    password = _password(password, strong=bool(public_hosting), username=username)
     role = role if role in ("user", "developer", "admin") else "user"
     salt, digest = _hash_password(password)
     conn.execute("BEGIN IMMEDIATE")
     try:
         first_account = conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0
-        if first_account:
+        remote_public_signup = bool(public_hosting and not trusted_local)
+        if remote_public_signup:
+            role = "user"
+        elif first_account:
             role = "admin"
             if not trusted_local:
                 configured = _bootstrap_secret()
@@ -239,7 +279,7 @@ def register(
             "VALUES(?, ?, ?, ?, ?)",
             (username, salt, digest, role, _now()),
         )
-        if first_account and not trusted_local:
+        if first_account and not trusted_local and not remote_public_signup:
             conn.execute(
                 "INSERT INTO auth_bootstrap_state(singleton, consumed_ts, consumed_by) "
                 "VALUES(1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
@@ -473,6 +513,8 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
     ranks = {"user": 0, "developer": 1, "admin": 2}
     if role not in ranks:
         return False, "unknown role"
+    if role == "admin" and account.get("via_api_key"):
+        return False, "API keys cannot exercise admin authority; sign in with an admin account or use the deployment key"
     if ranks.get(account.get("role", "user"), 0) < ranks.get(role, 0):
         return False, "%s role required" % role
     if account.get("banned"):
