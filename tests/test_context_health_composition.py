@@ -71,24 +71,29 @@ def test_context_health_data_scopes_to_explicit_session_and_falls_back_to_sessio
                 "gui-thread-live": [
                     types.SimpleNamespace(
                         session_id="gui-thread-live",
-                        seq=1,
-                        kind="user.message",
+                        sequence=1,
+                        event_type="user.message",
                         payload={"content": "hello world " * 40},
                     ),
                     types.SimpleNamespace(
                         session_id="gui-thread-live",
-                        seq=2,
-                        kind="assistant.message",
+                        sequence=2,
+                        event_type="model.response",
                         payload={"content": "assistant reply " * 60},
                     ),
                 ],
             }
 
-        def events(self, sid):
-            return list(self._events.get(sid, []))
+        def read_tail(self, sid, limit=128):
+            return list(self._events.get(sid, []))[-limit:]
+
+    _repo_instance = _FakeRepo()
 
     class _FakeApp:
-        session_repository = _FakeRepo()
+        @staticmethod
+        def session_repository():
+            return _repo_instance
+
         provider_health_data = staticmethod(lambda: ())
 
     monkeypatch.setattr("sonder_runtime.bootstrap.app.default_app", lambda: _FakeApp())
