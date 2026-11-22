@@ -490,7 +490,23 @@ def test_ollama_manifest_symlink_escape_is_refused(tmp_path: Path) -> None:
     models_dir = tmp_path / "m"
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "latest").write_text('{"layers": []}', encoding="utf-8")
+    hex_part = "a" * 64
+    (outside / "latest").write_text(
+        json.dumps(
+            {
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.ollama.image.model",
+                        "digest": f"sha256:{hex_part}",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    blobs = models_dir / "blobs"
+    blobs.mkdir(parents=True)
+    (blobs / f"sha256-{hex_part}").write_bytes(b"GGUF")
     ns = models_dir / "manifests" / "registry.ollama.ai" / "library"
     ns.mkdir(parents=True)
     try:

@@ -207,6 +207,21 @@ function Resolve-OllamaBlob([string]$Tag, [string]$ModelsRoot) {
     return $blobPath
 }
 
+function ConvertTo-RpcFullPath([string]$Path) {
+    # Canonical absolute form (relative to the PowerShell location, not the
+    # process working directory), with forward slashes and dot segments folded.
+    $unresolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    return [System.IO.Path]::GetFullPath($unresolved)
+}
+
+function Get-RpcProcessPath([int]$ProcessId) {
+    # Canonical executable path of a live process, as the OS reports it.
+    $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+    $path = [string]$proc.Path
+    if (-not $path) { throw "Cannot read the executable path of process $ProcessId." }
+    return $path
+}
+
 function Test-RpcOwnedProcess([int]$ProcessId, [string]$ExePath, [string]$StartedUtc) {
     # True only when the live process still is the one we launched: same
     # executable and same start time (guards against PID reuse).
@@ -218,7 +233,13 @@ function Test-RpcOwnedProcess([int]$ProcessId, [string]$ExePath, [string]$Starte
         $actualStart = $proc.StartTime.ToUniversalTime()
     }
     catch { return $false }
-    if (-not $actualPath -or -not [string]::Equals($actualPath, $ExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $actualPath) { return $false }
+    try {
+        $expectedFull = ConvertTo-RpcFullPath $ExePath
+        $actualFull = ConvertTo-RpcFullPath $actualPath
+    }
+    catch { return $false }
+    if (-not [string]::Equals($actualFull, $expectedFull, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
     $recorded = [datetime]::MinValue

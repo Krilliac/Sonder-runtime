@@ -153,8 +153,11 @@ def _validate_loopback_base_url(base_url: str) -> str:
     try:
         parsed = urlsplit(raw)
         hostname = parsed.hostname
+        port = parsed.port
     except ValueError as exc:
         raise RpcClusterConfigError(f"invalid sharded server URL: {base_url!r}") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise RpcClusterConfigError(f"invalid sharded server URL port: {base_url!r}")
     if parsed.scheme not in ("http", "https") or not hostname:
         raise RpcClusterConfigError(f"invalid sharded server URL: {base_url!r}")
     if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:

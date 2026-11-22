@@ -139,6 +139,31 @@ $d = Test-RpcOwnedProcess -ProcessId $PID -ExePath $exe -StartedUtc ''
     assert result.stdout.strip() == "True False False False"
 
 
+def test_owned_process_check_accepts_relative_and_noncanonical_exe(shell: str, tmp_path: Path) -> None:
+    body = r"""
+$me = Get-Process -Id $PID
+$started = $me.StartTime.ToUniversalTime().ToString('o')
+$dir = Split-Path -Parent $me.Path
+$leaf = Split-Path -Leaf $me.Path
+Set-Location -LiteralPath $dir
+$rel = Test-RpcOwnedProcess -ProcessId $PID -ExePath (Join-Path '.' $leaf) -StartedUtc $started
+$fwd = Test-RpcOwnedProcess -ProcessId $PID -ExePath ($me.Path.Replace([char]92, [char]47)) -StartedUtc $started
+$dots = Test-RpcOwnedProcess -ProcessId $PID -ExePath (Join-Path $dir (Join-Path '..' (Join-Path (Split-Path -Leaf $dir) $leaf))) -StartedUtc $started
+$rec = Get-RpcProcessPath -ProcessId $PID
+$canon = [string]::Equals($rec, $me.Path, [System.StringComparison]::OrdinalIgnoreCase)
+"$rel $fwd $dots $canon"
+"""
+    result = _run(shell, tmp_path, body)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "True True True True"
+
+
+@pytest.mark.parametrize("name", ["start-rpc-worker.ps1", "start-rpc-sharded.ps1"])
+def test_launchers_record_canonical_exe_path(name: str) -> None:
+    text = (SCRIPTS / name).read_text(encoding="utf-8")
+    assert "Get-RpcProcessPath" in text
+
+
 @pytest.mark.parametrize("name", ["start-rpc-worker.ps1", "start-rpc-sharded.ps1"])
 def test_launchers_use_start_process_not_encoded_wrapper(name: str) -> None:
     text = (SCRIPTS / name).read_text(encoding="utf-8")
