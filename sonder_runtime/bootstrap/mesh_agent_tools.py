@@ -75,15 +75,22 @@ def _read_text(path: str, limit: int, label: str) -> tuple[Path, str]:
 
 def _output_root(rt, output_dir: str, slug: str) -> Path:
     assetgen = rt.assetgen
+    raw_output = str(output_dir or "").strip()
+    if raw_output:
+        try:
+            raw_output = file_ops._reject_network_path(raw_output)
+        except (PermissionError, ValueError) as exc:
+            raise SonderError("mesh output path refused: %s" % exc) from exc
     workspace = Path(os.path.realpath(assetgen.workspace_root()))
-    base = Path(output_dir.strip()) if output_dir.strip() else Path(assetgen.default_asset_root()) / "meshgen"
+    asset_root = Path(os.path.realpath(assetgen.default_asset_root()))
+    base = Path(raw_output) if raw_output else asset_root / "meshgen"
     if not base.is_absolute():
         base = workspace / base
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = Path(os.path.abspath(base)) / ("%s-%s" % (slug, stamp))
     real = Path(os.path.realpath(target))
-    if real != workspace and workspace not in real.parents:
-        raise SonderError("mesh output must stay inside the asset workspace: %s" % output_dir)
+    if real != asset_root and asset_root not in real.parents:
+        raise SonderError("mesh output must stay inside the asset workspace root: %s" % output_dir)
     return target
 
 
