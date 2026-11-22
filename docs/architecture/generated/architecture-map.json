@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 480,
+      "file_count": 481,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -86,6 +86,7 @@
         "sonder_runtime/adapters/build/tree_reader.py",
         "sonder_runtime/adapters/chat_file_routing.py",
         "sonder_runtime/adapters/chat_observers.py",
+        "sonder_runtime/adapters/chat_tool_manifest.py",
         "sonder_runtime/adapters/cheat_trial_runner.py",
         "sonder_runtime/adapters/claim_checker.py",
         "sonder_runtime/adapters/cli_options.py",
@@ -524,7 +525,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 428,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -580,10 +581,12 @@
         "sonder_runtime/application/chat/handoff_receipts.py",
         "sonder_runtime/application/chat/honesty.py",
         "sonder_runtime/application/chat/lanes.py",
+        "sonder_runtime/application/chat/model_fitness.py",
         "sonder_runtime/application/chat/provider_bridge.py",
         "sonder_runtime/application/chat/reference_lookup.py",
         "sonder_runtime/application/chat/stream_sink.py",
         "sonder_runtime/application/chat/tool_intent.py",
+        "sonder_runtime/application/chat/tool_manifest.py",
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/command_text.py",
         "sonder_runtime/application/command_surface/mcp.py",
@@ -878,6 +881,7 @@
         "sonder_runtime/application/session/checkpoints.py",
         "sonder_runtime/application/session/continuity.py",
         "sonder_runtime/application/session/durable_replay.py",
+        "sonder_runtime/application/session/event_turns.py",
         "sonder_runtime/application/session/fork.py",
         "sonder_runtime/application/session/http_facade.py",
         "sonder_runtime/application/session/model_steps.py",
@@ -1047,7 +1051,7 @@
       ]
     },
     {
-      "file_count": 324,
+      "file_count": 325,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1115,6 +1119,7 @@
         "sonder_runtime/domain/campaign_prompt.py",
         "sonder_runtime/domain/cancellation_policy.py",
         "sonder_runtime/domain/cancellation_tree.py",
+        "sonder_runtime/domain/chat_model_fitness.py",
         "sonder_runtime/domain/chat_template_policy.py",
         "sonder_runtime/domain/circuit_breaker.py",
         "sonder_runtime/domain/claim_check.py",
