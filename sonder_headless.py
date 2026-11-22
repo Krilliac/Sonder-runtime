@@ -180,6 +180,28 @@ def _listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     return listeners[0] if listeners else None
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _proc_cmdline_bytes(pid: int) -> bytes:
+    """Raw NUL-separated ``/proc/<pid>/cmdline`` (POSIX); empty when unreadable."""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes()
+    except OSError:
+        return b""
+
+
+def _pid_argv(pid: int) -> list[str]:
+    """Exact argv of ``pid`` on POSIX, so paths containing spaces stay intact."""
+    raw = _proc_cmdline_bytes(pid)
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
+
+
 def _pid_command_line(pid: int) -> str:
     if os.name == "nt":
         command = (
@@ -244,8 +266,9 @@ def _is_ollama_server_pid(pid: int) -> bool:
     process tree, so it must prove the identity first, exactly as it already
     does for ``sonder_serve``.
     """
-    command = _pid_command_line(pid).strip().lower()
-    if not command:
+    posix_argv = [] if _is_windows() else _pid_argv(pid)
+    command = "" if posix_argv else _pid_command_line(pid).strip().lower()
+    if not posix_argv and not command:
         return False
     names = {"ollama"}
     configured = ollama_exe()
@@ -255,6 +278,12 @@ def _is_ollama_server_pid(pid: int) -> bool:
             base = base[:-4]
         if base:
             names.add(base)
+    if posix_argv:
+        # POSIX: argv is exact, so a path with spaces needs no quoting heuristics.
+        base = re.split(r"[\/]", posix_argv[0])[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        return base in names and len(posix_argv) > 1 and posix_argv[1] == "serve"
     alternatives = "|".join(re.escape(name) for name in sorted(names))
     # Anchor to the executable token so an unrelated process that merely
     # mentions "ollama serve" in its arguments is not mistaken for the daemon.

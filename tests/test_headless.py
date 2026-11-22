@@ -437,6 +437,25 @@ def test_ollama_server_identity(monkeypatch, command, configured, expected):
     assert H._is_ollama_server_pid(4321) is expected
 
 
+@pytest.mark.parametrize(
+    ("cmdline", "expected"),
+    [
+        (b"/home/john smith/sonder/engine/bin/ollama\0serve\0", True),
+        (b"/opt/my apps/ollama\0serve\0", True),
+        (b"/usr/bin/python3\0/home/john smith/ollama\0serve\0", False),
+        (b"/usr/bin/notollama\0serve\0", False),
+        (b"/opt/my apps/ollama\0run\0serve\0", False),
+        (b"", False),
+    ],
+)
+def test_ollama_server_identity_posix_whitespace(monkeypatch, cmdline, expected):
+    monkeypatch.setattr(H, "_is_windows", lambda: False)
+    monkeypatch.setattr(H, "_proc_cmdline_bytes", lambda pid: cmdline)
+    monkeypatch.setattr(H, "ollama_exe", lambda: "/home/john smith/sonder/engine/bin/ollama")
+
+    assert H._is_ollama_server_pid(4321) is expected
+
+
 def test_managed_pid_repairs_stale_venv_launcher_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(H, "run_dir", lambda: tmp_path)
     H.pid_file("sonder_serve").write_text("111", encoding="ascii")
