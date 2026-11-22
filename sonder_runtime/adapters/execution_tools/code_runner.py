@@ -58,6 +58,11 @@ SUPPORTED_LANGUAGES = {
         "suffix": ".cpp",
         "missing": "C++ compiler not found (tried g++, clang++, cl, and Visual Studio vcvars64.bat)",
     },
+    "c": {
+        "aliases": {"c", "c11", "c99"},
+        "suffix": ".c",
+        "missing": "C compiler not found (tried gcc, clang, cl, and Visual Studio vcvars64.bat)",
+    },
     "csharp": {
         "aliases": {"csharp", "cs", "c#"},
         "suffix": ".cs",
@@ -125,6 +130,101 @@ SUPPORTED_LANGUAGES = {
         "aliases": {"rust", "rs"},
         "suffix": ".rs",
         "missing": "rustc not found on PATH",
+    },
+    "dart": {
+        "aliases": {"dart"},
+        "suffix": ".dart",
+        "cmd": lambda path: ["dart", "run", path],
+        "missing": "dart SDK not found on PATH",
+    },
+    "zig": {
+        "aliases": {"zig"},
+        "suffix": ".zig",
+        "cmd": lambda path: ["zig", "run", path],
+        "missing": "zig compiler not found on PATH",
+    },
+    "kotlin": {
+        "aliases": {"kotlin", "kt"},
+        "suffix": ".kt",
+        "missing": "kotlinc/kotlin toolchain not found on PATH",
+    },
+    "swift": {
+        "aliases": {"swift"},
+        "suffix": ".swift",
+        "cmd": lambda path: ["swift", path],
+        "missing": "swift toolchain not found on PATH",
+    },
+    "elixir": {
+        "aliases": {"elixir", "ex", "exs"},
+        "suffix": ".exs",
+        "cmd": lambda path: ["elixir", path],
+        "missing": "elixir executable not found on PATH",
+    },
+    "scala": {
+        "aliases": {"scala"},
+        "suffix": ".scala",
+        "cmd": lambda path: ["scala", path],
+        "missing": "scala executable not found on PATH",
+    },
+    "haskell": {
+        "aliases": {"haskell", "hs"},
+        "suffix": ".hs",
+        "cmd": lambda path: ["runghc", path],
+        "missing": "runghc (GHC Haskell) not found on PATH",
+    },
+    "julia": {
+        "aliases": {"julia", "jl"},
+        "suffix": ".jl",
+        "cmd": lambda path: ["julia", path],
+        "missing": "julia executable not found on PATH",
+    },
+    "nim": {
+        "aliases": {"nim"},
+        "suffix": ".nim",
+        "cmd": lambda path: ["nim", "c", "-r", "--hints:off", "--verbosity:0", path],
+        "missing": "nim compiler not found on PATH",
+    },
+    "sql": {
+        "aliases": {"sql", "sqlite", "sqlite3"},
+        "suffix": ".sql",
+        "cmd": lambda path: [
+            sys.executable, "-c",
+            (
+                "import sqlite3, sys\n"
+                "sql = open(sys.argv[1], encoding='utf-8').read()\n"
+                "con = sqlite3.connect(':memory:')\n"
+                "cur = con.cursor()\n"
+                "stmts, buf = [], ''\n"
+                "for ln in sql.splitlines(True):\n"
+                "    buf += ln\n"
+                "    if sqlite3.complete_statement(buf):\n"
+                "        s = buf.strip()\n"
+                "        if s:\n"
+                "            stmts.append(s)\n"
+                "        buf = ''\n"
+                "if buf.strip():\n"
+                "    stmts.append(buf.strip())\n"
+                "for s in stmts:\n"
+                "    cur.execute(s)\n"
+                "    if cur.description:\n"
+                "        cols = [d[0] for d in cur.description]\n"
+                "        rows = cur.fetchall()\n"
+                "        print(' | '.join(cols))\n"
+                "        print('-+-'.join('-' * max(3, len(c)) for c in cols))\n"
+                "        for r in rows:\n"
+                "            print(' | '.join('NULL' if v is None else str(v) for v in r))\n"
+                "con.commit()\n"
+                "con.close()\n"
+            ),
+            path,
+        ],
+        "missing": "python sqlite3 runtime not available",
+    },
+    "batch": {
+        "aliases": {"batch", "bat", "cmd"},
+        "suffix": ".bat",
+        "cmd": lambda path: ["cmd", "/d", "/c", path],
+        "missing": "cmd.exe not available",
     },
 }
 
@@ -1336,6 +1436,55 @@ def _msvc_compile_result(vcvars, sources, exe, cwd, timeout, language):
     return _run_process(["cmd", "/c", bat], cwd, "", timeout, language)
 
 
+def _c_compiler():
+    for candidate in ("gcc", "clang", "cl"):
+        found = shutil.which(candidate)
+        if found:
+            return candidate, found
+    if os.name == "nt":
+        vcvars = _find_vcvars64()
+        if vcvars:
+            return "msvc-vcvars", vcvars
+    return None, None
+
+
+def _run_c(path, tmp, stdin, timeout, cwd):
+    name, compiler = _c_compiler()
+    if not compiler:
+        return _error_result("c", cwd, timeout, SUPPORTED_LANGUAGES["c"]["missing"])
+    exe_name = "snippet.exe" if os.name == "nt" or name in ("msvc-vcvars", "cl") else "snippet"
+    exe = os.path.join(tmp, exe_name)
+    if name == "msvc-vcvars":
+        compile_result = _msvc_compile_result(compiler, [path], exe, tmp, timeout, "c")
+    elif name == "cl":
+        compile_cmd = [compiler, "/nologo", "/std:c11", "/Fe:" + exe, path]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "c")
+    else:
+        compile_cmd = [compiler, "-std=c11", path, "-o", exe]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "c")
+    if not compile_result.get("ok"):
+        return compile_result
+    return _run_process([exe], cwd, stdin, timeout, "c")
+
+
+def _run_kotlin(path, tmp, stdin, timeout, cwd):
+    kotlinc = shutil.which("kotlinc")
+    java_exe = shutil.which("java")
+    if kotlinc and java_exe:
+        jar = os.path.join(tmp, "snippet.jar")
+        compile_result = _run_process(
+            [kotlinc, path, "-include-runtime", "-d", jar],
+            tmp, "", timeout, "kotlin",
+        )
+        if not compile_result.get("ok"):
+            return compile_result
+        return _run_process([java_exe, "-jar", jar], cwd, stdin, timeout, "kotlin")
+    kotlin_exe = shutil.which("kotlin")
+    if kotlin_exe:
+        return _run_process([kotlin_exe, path], cwd, stdin, timeout, "kotlin")
+    return _error_result("kotlin", cwd, timeout, SUPPORTED_LANGUAGES["kotlin"]["missing"])
+
+
 def _run_cpp(path, tmp, stdin, timeout, cwd):
     name, compiler = _cpp_compiler()
     if not compiler:
@@ -1491,7 +1640,7 @@ def run_code(
     cfg = SUPPORTED_LANGUAGES[language]
     if limits is not None and not isinstance(limits, RunLimits):
         raise TypeError("limits must be a RunLimits")
-    if limits is not None and language in ("cpp", "csharp", "rust"):
+    if limits is not None and language in ("c", "cpp", "csharp", "rust", "kotlin"):
         # Their compile steps and launchers are not wired for limits; refuse
         # rather than run a "limited" snippet without them.
         raise ValueError("run limits are not supported for %s" % language)
@@ -1509,12 +1658,16 @@ def run_code(
         path = os.path.join(tmp, "snippet" + cfg["suffix"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
+        if language == "c":
+            return _run_c(path, tmp, stdin, timeout, cwd)
         if language == "cpp":
             return _run_cpp(path, tmp, stdin, timeout, cwd)
         if language == "csharp":
             return _run_csharp(path, tmp, stdin, timeout, cwd)
         if language == "rust":
             return _run_rust(path, tmp, stdin, timeout, cwd)
+        if language == "kotlin":
+            return _run_kotlin(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
         if limits is None:
             return _run_process(cmd, cwd, stdin, timeout, language)

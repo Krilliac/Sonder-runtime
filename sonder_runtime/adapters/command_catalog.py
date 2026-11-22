@@ -210,6 +210,8 @@ _CATEGORY_BY_TOOL = {
     "document_extract": "data",
     "media_inspect": "creative",
     "code_metrics": "dev",
+    "schema_validate": "data",
+    "language_matrix": "dev",
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",

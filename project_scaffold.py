@@ -45,6 +45,18 @@ ALIASES = {
     "webapp": "web-app",
     "html": "web-app",
     "flutter-dart": "dart",
+    "c": "c-cmake",
+    "c11": "c-cmake",
+    "kt": "kotlin-gradle",
+    "kotlin": "kotlin-gradle",
+    "rb": "ruby",
+    "ex": "elixir",
+    "exs": "elixir",
+    "ps1": "powershell",
+    "pwsh": "powershell",
+    "sh": "bash-cli",
+    "bash": "bash-cli",
+    "shell": "bash-cli",
 }
 
 
@@ -439,6 +451,248 @@ _TEMPLATES = {
             "    expect(greeting('Sonder'), 'Hello from @NAME@, Sonder!');\n"
             "  });\n"
             "}\n"
+        ),
+    },
+    "c-cmake": {
+        "CMakeLists.txt": (
+            "cmake_minimum_required(VERSION 3.16)\n"
+            "project(@NAME@ LANGUAGES C)\n"
+            "set(CMAKE_C_STANDARD 11)\n"
+            "set(CMAKE_C_STANDARD_REQUIRED ON)\n"
+            "add_executable(@NAME@ src/main.c)\n"
+            "target_include_directories(@NAME@ PRIVATE include)\n"
+        ),
+        "include/@LOWER@.h": (
+            "#ifndef @LOWER@_H\n"
+            "#define @LOWER@_H\n\n"
+            "const char *@LOWER@_greeting(void);\n\n"
+            "#endif\n"
+        ),
+        "src/main.c": (
+            "#include <stdio.h>\n"
+            "#include \"@LOWER@.h\"\n\n"
+            "const char *@LOWER@_greeting(void) { return \"Hello from @NAME@!\"; }\n\n"
+            "int main(void) {\n"
+            "    puts(@LOWER@_greeting());\n"
+            "    return 0;\n"
+            "}\n"
+        ),
+    },
+    "zig": {
+        "build.zig": (
+            "const std = @import(\"std\");\n\n"
+            "pub fn build(b: *std.Build) void {\n"
+            "    const target = b.standardTargetOptions(.{});\n"
+            "    const optimize = b.standardOptimizeOption(.{});\n"
+            "    const exe = b.addExecutable(.{\n"
+            "        .name = \"@LOWER@\",\n"
+            "        .root_source_file = b.path(\"src/main.zig\"),\n"
+            "        .target = target,\n"
+            "        .optimize = optimize,\n"
+            "    });\n"
+            "    b.installArtifact(exe);\n"
+            "    const unit_tests = b.addTest(.{\n"
+            "        .root_source_file = b.path(\"src/main.zig\"),\n"
+            "        .target = target,\n"
+            "        .optimize = optimize,\n"
+            "    });\n"
+            "    const test_step = b.step(\"test\", \"Run unit tests\");\n"
+            "    test_step.dependOn(&b.addRunArtifact(unit_tests).step);\n"
+            "}\n"
+        ),
+        "src/main.zig": (
+            "const std = @import(\"std\");\n\n"
+            "pub fn add(a: i32, b: i32) i32 {\n"
+            "    return a + b;\n"
+            "}\n\n"
+            "pub fn main() !void {\n"
+            "    std.debug.print(\"Hello from @NAME@!\\n\", .{});\n"
+            "}\n\n"
+            "test \"add works\" {\n"
+            "    try std.testing.expectEqual(@as(i32, 5), add(2, 3));\n"
+            "}\n"
+        ),
+    },
+    "kotlin-gradle": {
+        "settings.gradle.kts": "rootProject.name = \"@LOWER@\"\n",
+        "build.gradle.kts": (
+            "plugins {\n"
+            "    kotlin(\"jvm\") version \"2.0.21\"\n"
+            "    application\n"
+            "}\n\n"
+            "repositories { mavenCentral() }\n"
+            "application { mainClass.set(\"MainKt\") }\n"
+        ),
+        "src/main/kotlin/Main.kt": (
+            "fun greeting(target: String): String = \"Hello from @NAME@, $target!\"\n\n"
+            "fun main() {\n"
+            "    println(greeting(\"world\"))\n"
+            "}\n"
+        ),
+    },
+    "swift": {
+        "Package.swift": (
+            "// swift-tools-version: 5.9\n"
+            "import PackageDescription\n\n"
+            "let package = Package(\n"
+            "    name: \"@NAME@\",\n"
+            "    targets: [\n"
+            "        .executableTarget(name: \"@NAME@\"),\n"
+            "    ]\n"
+            ")\n"
+        ),
+        "Sources/@NAME@/main.swift": (
+            "func greeting(_ target: String) -> String {\n"
+            "    \"Hello from @NAME@, \\(target)!\"\n"
+            "}\n"
+            "print(greeting(\"world\"))\n"
+        ),
+    },
+    "elixir": {
+        "mix.exs": (
+            "defmodule @NAME@.MixProject do\n"
+            "  use Mix.Project\n\n"
+            "  def project do\n"
+            "    [app: :@LOWER@, version: \"0.1.0\", elixir: \"~> 1.15\", deps: []]\n"
+            "  end\n"
+            "end\n"
+        ),
+        "lib/@LOWER@.ex": (
+            "defmodule @NAME@ do\n"
+            "  def greeting(target \\\\ \"world\"), do: \"Hello from @NAME@, #{target}!\"\n"
+            "end\n"
+        ),
+        "test/@LOWER@_test.exs": (
+            "ExUnit.start()\n"
+            "defmodule @NAME@Test do\n"
+            "  use ExUnit.Case\n"
+            "  test \"greeting\" do\n"
+            "    assert @NAME@.greeting(\"Sonder\") == \"Hello from @NAME@, Sonder!\"\n"
+            "  end\n"
+            "end\n"
+        ),
+    },
+    "ruby": {
+        "Gemfile": "source 'https://rubygems.org'\n\ngem 'rspec'\n",
+        "lib/@LOWER@.rb": (
+            "module @NAME@\n"
+            "  def self.greeting(target = 'world')\n"
+            "    \"Hello from @NAME@, #{target}!\"\n"
+            "  end\n"
+            "end\n"
+        ),
+        "spec/@LOWER@_spec.rb": (
+            "require_relative '../lib/@LOWER@'\n\n"
+            "RSpec.describe @NAME@ do\n"
+            "  it 'greets cleanly' do\n"
+            "    expect(described_class.greeting('Sonder')).to eq('Hello from @NAME@, Sonder!')\n"
+            "  end\n"
+            "end\n"
+        ),
+    },
+    "php": {
+        "composer.json": (
+            "{\n"
+            "  \"name\": \"local/@LOWER@\",\n"
+            "  \"description\": \"@NAME@ PHP project\",\n"
+            "  \"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}\n"
+            "}\n"
+        ),
+        "src/App.php": (
+            "<?php\n"
+            "declare(strict_types=1);\n\n"
+            "namespace App;\n\n"
+            "final class App {\n"
+            "    public static function greeting(string $target = 'world'): string {\n"
+            "        return \"Hello from @NAME@, {$target}!\";\n"
+            "    }\n"
+            "}\n"
+        ),
+        "index.php": (
+            "<?php\n"
+            "require __DIR__ . '/src/App.php';\n"
+            "echo App\\App::greeting('world') . PHP_EOL;\n"
+        ),
+    },
+    "lua": {
+        "src/@LOWER@.lua": (
+            "local M = {}\n"
+            "function M.greeting(target)\n"
+            "  return 'Hello from @NAME@, ' .. (target or 'world') .. '!'\n"
+            "end\n"
+            "return M\n"
+        ),
+        "src/main.lua": (
+            "local mod = require('src.@LOWER@')\n"
+            "print(mod.greeting('world'))\n"
+        ),
+    },
+    "flutter": {
+        "pubspec.yaml": (
+            "name: @LOWER@\n"
+            "description: @NAME@ Flutter application.\n"
+            "version: 0.1.0+1\n"
+            "environment:\n"
+            "  sdk: ^3.0.0\n"
+            "dependencies:\n"
+            "  flutter:\n"
+            "    sdk: flutter\n"
+            "dev_dependencies:\n"
+            "  flutter_test:\n"
+            "    sdk: flutter\n"
+        ),
+        "lib/main.dart": (
+            "import 'package:flutter/material.dart';\n\n"
+            "void main() => runApp(const @NAME@App());\n\n"
+            "class @NAME@App extends StatelessWidget {\n"
+            "  const @NAME@App({super.key});\n"
+            "  @override\n"
+            "  Widget build(BuildContext context) {\n"
+            "    return const MaterialApp(\n"
+            "      home: Scaffold(body: Center(child: Text('Hello from @NAME@!'))),\n"
+            "    );\n"
+            "  }\n"
+            "}\n"
+        ),
+        "test/widget_test.dart": (
+            "import 'package:flutter_test/flutter_test.dart';\n"
+            "import 'package:@LOWER@/main.dart';\n\n"
+            "void main() {\n"
+            "  testWidgets('renders greeting', (tester) async {\n"
+            "    await tester.pumpWidget(const @NAME@App());\n"
+            "    expect(find.text('Hello from @NAME@!'), findsOneWidget);\n"
+            "  });\n"
+            "}\n"
+        ),
+    },
+    "powershell": {
+        "@NAME@.psm1": (
+            "function Get-@NAME@Greeting {\n"
+            "    param([string]$Target = 'world')\n"
+            "    return \"Hello from @NAME@, $Target!\"\n"
+            "}\n"
+            "Export-ModuleMember -Function Get-@NAME@Greeting\n"
+        ),
+        "tests/@NAME@.Tests.ps1": (
+            "Import-Module \"$PSScriptRoot\\..\\@NAME@.psm1\" -Force\n"
+            "$msg = Get-@NAME@Greeting -Target 'Sonder'\n"
+            "if ($msg -ne 'Hello from @NAME@, Sonder!') { throw \"Unexpected: $msg\" }\n"
+            "Write-Host 'PASS'\n"
+        ),
+    },
+    "bash-cli": {
+        "bin/@LOWER@.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "target=\"${1:-world}\"\n"
+            "printf 'Hello from @NAME@, %s!\\n' \"$target\"\n"
+        ),
+        "tests/test_@LOWER@.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "out=\"$(bash \"$(dirname \"$0\")/../bin/@LOWER@.sh\" Sonder)\"\n"
+            "test \"$out\" = 'Hello from @NAME@, Sonder!'\n"
+            "echo PASS\n"
         ),
     },
 }

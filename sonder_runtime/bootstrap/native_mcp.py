@@ -274,6 +274,23 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "schema_validate",
+        "Validate a guarded JSON, JSONL, or TOML file against a guarded JSON Schema file or inline schema_json",
+        {"type": "object", "properties": {
+            "path": _PATH,
+            "schema_path": _PATH,
+            "schema_json": {"type": "string"},
+            "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "language_matrix",
+        "Report Sonder's full multi-language capability matrix (run_code, scaffolds, symbol index, build/test/lint/format/typecheck/pkg) and live host binary readiness",
+        {"type": "object", "properties": {
+            "language": {"type": "string"},
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,

@@ -415,9 +415,21 @@ _TEST_FRAMEWORKS = {
     "jest": {"cmd": ["npx", "jest"], "marker_files": ["jest.config.js", "jest.config.ts", "jest.config.mjs"]},
     "vitest": {"cmd": ["npx", "vitest", "run"], "marker_files": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts"]},
     "mocha": {"cmd": ["npx", "mocha"], "marker_files": [".mocharc.yml", ".mocharc.json", ".mocharc.js"]},
+    "bun": {"cmd": ["bun", "test"], "marker_files": ["bunfig.toml", "bun.lock", "bun.lockb"]},
+    "node-test": {"cmd": ["node", "--test"], "marker_files": []},
     "cargo": {"cmd": ["cargo", "test"], "marker_files": ["Cargo.toml"]},
     "go": {"cmd": ["go", "test", "./..."], "marker_files": ["go.mod"]},
-    "dotnet": {"cmd": ["dotnet", "test"], "marker_files": ["*.csproj", "*.sln"]},
+    "dotnet": {"cmd": ["dotnet", "test"], "marker_files": ["*.csproj", "*.fsproj", "*.vbproj", "*.sln"]},
+    "dart": {"cmd": ["dart", "test"], "marker_files": ["pubspec.yaml"]},
+    "flutter": {"cmd": ["flutter", "test"], "marker_files": []},
+    "ctest": {"cmd": ["ctest", "--test-dir", "build", "--output-on-failure"], "marker_files": ["CMakeLists.txt"]},
+    "zig": {"cmd": ["zig", "build", "test"], "marker_files": ["build.zig"]},
+    "swift": {"cmd": ["swift", "test"], "marker_files": ["Package.swift"]},
+    "maven": {"cmd": ["mvn", "test", "-q"], "marker_files": ["pom.xml"]},
+    "gradle": {"cmd": ["./gradlew" if os.name != "nt" else "gradlew.bat", "test"], "marker_files": ["build.gradle", "build.gradle.kts"]},
+    "elixir": {"cmd": ["mix", "test"], "marker_files": ["mix.exs"]},
+    "phpunit": {"cmd": ["phpunit"], "marker_files": ["phpunit.xml", "phpunit.xml.dist", "composer.json"]},
+    "rspec": {"cmd": ["bundle", "exec", "rspec"], "marker_files": [".rspec", "Gemfile"]},
 }
 
 
@@ -447,6 +459,14 @@ def _pytest_cmd():
 
 def _detect_test_framework(root):
     root = Path(root)
+    if (root / "pubspec.yaml").exists():
+        try:
+            pub_text = (root / "pubspec.yaml").read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^\s{0,4}flutter\s*:", pub_text):
+                return "flutter"
+        except OSError:
+            pass
+        return "dart"
     for name, info in _TEST_FRAMEWORKS.items():
         for marker in info["marker_files"]:
             if "*" in marker:
@@ -608,20 +628,40 @@ _LINT_TOOLS = {
     "py_compile": {"check": [sys.executable, "-I", "-m", "compileall", "-q"], "fix": None},
     "pylint": {"check": ["pylint"], "fix": None},
     "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
+    "biome": {"check": ["npx", "@biomejs/biome", "lint"], "fix": ["npx", "@biomejs/biome", "lint", "--write"]},
     "clippy": {"check": ["cargo", "clippy"], "fix": ["cargo", "clippy", "--fix", "--allow-dirty"]},
+    "go-vet": {"check": ["go", "vet", "./..."], "fix": None},
+    "golangci-lint": {"check": ["golangci-lint", "run"], "fix": ["golangci-lint", "run", "--fix"]},
     "dart": {"check": ["dart", "analyze"], "fix": ["dart", "fix", "--apply"]},
     "dotnet": {"check": ["dotnet", "format", "--verify-no-changes"], "fix": ["dotnet", "format"]},
+    "shellcheck": {"check": ["shellcheck"], "fix": None},
+    "phpcs": {"check": ["phpcs"], "fix": ["phpcbf"]},
+    "phpstan": {"check": ["phpstan", "analyse"], "fix": None},
+    "rubocop": {"check": ["rubocop"], "fix": ["rubocop", "-A"]},
+    "ktlint": {"check": ["ktlint"], "fix": ["ktlint", "-F"]},
+    "swiftlint": {"check": ["swiftlint", "lint"], "fix": ["swiftlint", "--fix"]},
+    "credo": {"check": ["mix", "credo"], "fix": None},
+    "luacheck": {"check": ["luacheck"], "fix": None},
+    "clang-tidy": {"check": ["clang-tidy"], "fix": None},
 }
 
 _FORMATTERS = {
     "ruff": ["ruff", "format"],
     "black": ["black"],
     "prettier": ["npx", "prettier", "--write"],
+    "biome": ["npx", "@biomejs/biome", "format", "--write"],
     "rustfmt": ["cargo", "fmt"],
     "gofmt": ["gofmt", "-w"],
     "clang-format": ["clang-format", "-i"],
     "dart": ["dart", "format"],
     "dotnet": ["dotnet", "format"],
+    "zig": ["zig", "fmt"],
+    "swift-format": ["swift-format", "format", "-i"],
+    "mix": ["mix", "format"],
+    "shfmt": ["shfmt", "-w"],
+    "stylua": ["stylua"],
+    "ktlint": ["ktlint", "-F"],
+    "rubocop": ["rubocop", "-A"],
 }
 
 _TYPECHECKERS = {
@@ -629,6 +669,13 @@ _TYPECHECKERS = {
     "pyright": ["npx", "pyright"],
     "tsc": ["npx", "tsc", "--noEmit"],
     "dart": ["dart", "analyze"],
+    "go-vet": ["go", "vet", "./..."],
+    "cargo-check": ["cargo", "check"],
+    "dotnet": ["dotnet", "build", "--no-incremental", "-v", "q"],
+    "zig": ["zig", "ast-check"],
+    "phpstan": ["phpstan", "analyse"],
+    "sorbet": ["bundle", "exec", "srb", "tc"],
+    "dialyzer": ["mix", "dialyzer"],
 }
 
 
@@ -646,10 +693,25 @@ def _detect_linter(root):
         return "dart"
     if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
         return "dotnet"
+    if (root / "biome.json").exists():
+        return "biome"
     if (root / ".eslintrc.js").exists() or (root / ".eslintrc.json").exists() or (root / "eslint.config.js").exists():
         return "eslint"
     if (root / "Cargo.toml").exists():
         return "clippy"
+    if (root / "go.mod").exists():
+        return "golangci-lint" if shutil.which("golangci-lint") else "go-vet"
+    if (root / "mix.exs").exists():
+        return "credo"
+    if (root / "Package.swift").exists() and shutil.which("swiftlint"):
+        return "swiftlint"
+    if (root / "Gemfile").exists() and shutil.which("rubocop"):
+        return "rubocop"
+    if (root / "composer.json").exists():
+        if shutil.which("phpstan"):
+            return "phpstan"
+        if shutil.which("phpcs"):
+            return "phpcs"
     if ruff_available:
         return "ruff"
     if shutil.which("flake8"):
@@ -669,6 +731,14 @@ def _detect_formatter(root):
         return "dart"
     if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
         return "dotnet"
+    if (root / "build.zig").exists() and shutil.which("zig"):
+        return "zig"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists() and shutil.which("swift-format"):
+        return "swift-format"
+    if (root / "biome.json").exists():
+        return "biome"
     if ((root / ".clang-format").exists() or (root / "CMakeLists.txt").exists()) and shutil.which("clang-format"):
         return "clang-format"
     if shutil.which("black"):
@@ -688,6 +758,16 @@ def _detect_typechecker(root):
         return "tsc"
     if (root / "pubspec.yaml").exists() and shutil.which("dart"):
         return "dart"
+    if (root / "Cargo.toml").exists():
+        return "cargo-check"
+    if (root / "go.mod").exists():
+        return "go-vet"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
+    if (root / "composer.json").exists() and shutil.which("phpstan"):
+        return "phpstan"
+    if (root / "mix.exs").exists():
+        return "dialyzer"
     if (root / "pyrightconfig.json").exists():
         return "pyright"
     if shutil.which("mypy"):
@@ -796,16 +876,35 @@ def _detect_package_manager(root):
         return "cargo"
     if (root / "go.mod").exists():
         return "go"
+    if (root / "uv.lock").exists() and shutil.which("uv"):
+        return "uv"
     if (root / "requirements.txt").exists() or (root / "pyproject.toml").exists():
         return "pip"
+    if (root / "pubspec.yaml").exists():
+        try:
+            if re.search(r"(?m)^\s{0,4}flutter\s*:", (root / "pubspec.yaml").read_text(encoding="utf-8", errors="replace")):
+                return "flutter"
+        except OSError:
+            pass
+        return "dart"
+    if _has_glob(root, "*.csproj") or _has_glob(root, "*.fsproj") or _has_glob(root, "*.sln"):
+        return "dotnet"
+    if (root / "bun.lock").exists() or (root / "bun.lockb").exists():
+        return "bun"
     if (root / "pnpm-lock.yaml").exists():
         return "pnpm"
     if (root / "yarn.lock").exists():
         return "yarn"
     if (root / "package.json").exists():
         return "npm"
+    if (root / "composer.json").exists():
+        return "composer"
     if (root / "Gemfile").exists():
         return "bundler"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists():
+        return "swift"
     return "pip"
 
 
@@ -822,16 +921,28 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
     mgr = _detect_package_manager(root)
     if mgr == "pip":
         cmd = [sys.executable, "-m", "pip", "install"] + packages
+    elif mgr == "uv":
+        cmd = ["uv", "add"] + (["--dev"] if dev else []) + packages
     elif mgr == "npm":
         cmd = ["npm", "install"] + (["--save-dev"] if dev else []) + packages
     elif mgr == "pnpm":
         cmd = ["pnpm", "add"] + (["-D"] if dev else []) + packages
     elif mgr == "yarn":
         cmd = ["yarn", "add"] + (["--dev"] if dev else []) + packages
+    elif mgr == "bun":
+        cmd = ["bun", "add"] + (["-d"] if dev else []) + packages
     elif mgr == "cargo":
-        cmd = ["cargo", "add"] + packages
+        cmd = ["cargo", "add"] + (["--dev"] if dev else []) + packages
     elif mgr == "go":
         cmd = ["go", "get"] + packages
+    elif mgr == "dotnet":
+        cmd = ["dotnet", "add", "package", packages[0]]
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "add"] + ([f"dev:{p}" for p in packages] if dev else packages)
+    elif mgr == "composer":
+        cmd = ["composer", "require"] + (["--dev"] if dev else []) + packages
+    elif mgr == "bundler":
+        cmd = ["bundle", "add"] + packages
     else:
         return {"ok": False, "error": "unsupported package manager: %s" % mgr}
 
@@ -854,14 +965,26 @@ def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
     mgr = _detect_package_manager(root)
     if mgr == "pip":
         cmd = [sys.executable, "-m", "pip", "uninstall", "-y"] + packages
+    elif mgr == "uv":
+        cmd = ["uv", "remove"] + packages
     elif mgr == "npm":
         cmd = ["npm", "uninstall"] + packages
     elif mgr == "pnpm":
         cmd = ["pnpm", "remove"] + packages
     elif mgr == "yarn":
         cmd = ["yarn", "remove"] + packages
+    elif mgr == "bun":
+        cmd = ["bun", "remove"] + packages
     elif mgr == "cargo":
         cmd = ["cargo", "remove"] + packages
+    elif mgr == "dotnet":
+        cmd = ["dotnet", "remove", "package", packages[0]]
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "remove"] + packages
+    elif mgr == "composer":
+        cmd = ["composer", "remove"] + packages
+    elif mgr == "bundler":
+        cmd = ["bundle", "remove"] + packages
     else:
         return {"ok": False, "error": "unsupported for remove: %s" % mgr}
 
@@ -887,16 +1010,30 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
             cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages
         else:
             cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
+    elif mgr == "uv":
+        cmd = ["uv", "lock", "--upgrade"]
     elif mgr == "npm":
         cmd = ["npm", "update"] + packages
     elif mgr == "pnpm":
         cmd = ["pnpm", "update"] + packages
     elif mgr == "yarn":
         cmd = ["yarn", "upgrade"] + packages
+    elif mgr == "bun":
+        cmd = ["bun", "update"] + packages
     elif mgr == "cargo":
         cmd = ["cargo", "update"] + (["--package"] + packages if packages else [])
     elif mgr == "go":
         cmd = ["go", "get", "-u"] + (packages or ["./..."])
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "upgrade"] + packages
+    elif mgr == "composer":
+        cmd = ["composer", "update"] + packages
+    elif mgr == "bundler":
+        cmd = ["bundle", "update"] + packages
+    elif mgr == "mix":
+        cmd = ["mix", "deps.update"] + (packages if packages else ["--all"])
+    elif mgr == "swift":
+        cmd = ["swift", "package", "update"]
     else:
         return {"ok": False, "error": "unsupported for update: %s" % mgr}
 
@@ -920,6 +1057,17 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
             result = _run(["cargo", "audit"], cwd=root, timeout=timeout)
         else:
             result = {"ok": False, "error": "cargo-audit not installed; run: cargo install cargo-audit"}
+    elif mgr == "dotnet":
+        result = _run(["dotnet", "list", "package", "--vulnerable"], cwd=root, timeout=timeout)
+    elif mgr in ("dart", "flutter"):
+        result = _run([mgr, "pub", "outdated"], cwd=root, timeout=timeout)
+    elif mgr == "composer":
+        result = _run(["composer", "audit"], cwd=root, timeout=timeout)
+    elif mgr == "go":
+        if shutil.which("govulncheck"):
+            result = _run(["govulncheck", "./..."], cwd=root, timeout=timeout)
+        else:
+            result = _run(["go", "vet", "./..."], cwd=root, timeout=timeout)
     else:
         result = {"ok": False, "error": "no audit support for %s" % mgr}
     result["manager"] = mgr
@@ -1146,7 +1294,17 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
         return _run(["cmake", "--build", "build"], cwd=root, timeout=timeout)
     if (root / "meson.build").exists():
         return _run(["meson", "compile", "-C", "build"], cwd=root, timeout=timeout)
-    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj"))
+    if (root / "build.zig").exists():
+        return _run(["zig", "build"], cwd=root, timeout=timeout)
+    if (root / "Package.swift").exists():
+        return _run(["swift", "build"], cwd=root, timeout=timeout)
+    if (root / "mix.exs").exists():
+        return _run(["mix", "compile"], cwd=root, timeout=timeout)
+    if (root / "WORKSPACE").exists() or (root / "MODULE.bazel").exists():
+        return _run(["bazel", "build", "//..."], cwd=root, timeout=timeout)
+    if (root / "SConstruct").exists():
+        return _run(["scons"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj")) or sorted(root.glob("*.fsproj"))
     if dotnet_targets:
         return _run(["dotnet", "build", dotnet_targets[0].name], cwd=root, timeout=timeout)
     if (root / "pubspec.yaml").exists():
@@ -1161,6 +1319,8 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
         return _run(["./gradlew" if os.name != "nt" else "gradlew.bat", "build"], cwd=root, timeout=timeout)
     if (root / "pom.xml").exists():
         return _run(["mvn", "package", "-q"], cwd=root, timeout=timeout)
+    if (root / "pyproject.toml").exists():
+        return _run([sys.executable, "-I", "-m", "compileall", "-q", "."], cwd=root, timeout=timeout)
 
     return {"ok": False, "error": "no recognized build system found at %s" % root}
 
@@ -1173,7 +1333,15 @@ def build_clean(root=".", timeout=30, extra_roots=""):
         return _run(["make", "clean"], cwd=root, timeout=timeout)
     if (root / "Cargo.toml").exists():
         return _run(["cargo", "clean"], cwd=root, timeout=timeout)
-    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj"))
+    if (root / "Package.swift").exists():
+        return _run(["swift", "package", "clean"], cwd=root, timeout=timeout)
+    if (root / "mix.exs").exists():
+        return _run(["mix", "clean"], cwd=root, timeout=timeout)
+    if (root / "WORKSPACE").exists() or (root / "MODULE.bazel").exists():
+        return _run(["bazel", "clean"], cwd=root, timeout=timeout)
+    if (root / "pubspec.yaml").exists() and shutil.which("flutter"):
+        return _run(["flutter", "clean"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj")) or sorted(root.glob("*.fsproj"))
     if dotnet_targets:
         return _run(["dotnet", "clean", dotnet_targets[0].name], cwd=root, timeout=timeout)
     if (root / "go.mod").exists():

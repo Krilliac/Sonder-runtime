@@ -245,6 +245,18 @@ COMMANDS = [
         "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots.",
     },
     {
+        "name": "/schema",
+        "category": "data",
+        "risk": "safe",
+        "summary": "Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline JSON schema.",
+    },
+    {
+        "name": "/languages",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Show Sonder's full 28-language capability matrix and live host toolchain readiness.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

@@ -30,13 +30,20 @@ DEFAULT_MAX_FILE_BYTES = 256_000
 DEFAULT_MAX_SYMBOLS = 2_000
 
 EXTENSION_LANGUAGES = {
-    ".py": "python",
+    ".py": "python", ".pyw": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
     ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript",
     ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp",
     ".cxx": "cpp", ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp",
     ".cs": "csharp", ".rs": "rust", ".go": "go",
+    ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+    ".dart": "dart", ".swift": "swift", ".zig": "zig",
+    ".rb": "ruby", ".php": "php", ".lua": "lua",
+    ".ex": "elixir", ".exs": "elixir", ".scala": "scala",
+    ".hs": "haskell", ".ps1": "powershell", ".psm1": "powershell",
+    ".sh": "bash", ".bash": "bash", ".zsh": "bash",
+    ".sql": "sql",
 }
 LANGUAGE_ALIASES = {
     "py": "python", "python": "python",
@@ -45,6 +52,16 @@ LANGUAGE_ALIASES = {
     "c": "c", "cpp": "cpp", "c++": "cpp", "cc": "cpp",
     "csharp": "csharp", "c#": "csharp", "cs": "csharp",
     "rust": "rust", "rs": "rust", "go": "go", "golang": "go",
+    "java": "java", "kotlin": "kotlin", "kt": "kotlin",
+    "dart": "dart", "flutter": "dart",
+    "swift": "swift", "zig": "zig",
+    "ruby": "ruby", "rb": "ruby",
+    "php": "php", "lua": "lua",
+    "elixir": "elixir", "ex": "elixir", "exs": "elixir",
+    "scala": "scala", "haskell": "haskell", "hs": "haskell",
+    "powershell": "powershell", "pwsh": "powershell", "ps1": "powershell",
+    "bash": "bash", "sh": "bash", "shell": "bash", "zsh": "bash",
+    "sql": "sql", "sqlite": "sql",
 }
 
 _IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
@@ -91,6 +108,51 @@ _RUST_MACRO = re.compile(r"^\s*macro_rules!\s*([A-Za-z_]\w*)\b")
 _GO_DECL = re.compile(
     r"^\s*(func|type|var|const)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\b"
 )
+_JAVA_TYPE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*"
+    r"(class|interface|enum|record)\s+([A-Za-z_]\w*)\b"
+)
+_JAVA_METHOD = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|default)\s+)+"
+    r"(?:[A-Za-z_]\w*(?:<[^;{}]*>)?(?:\[\])*)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)"
+)
+_KOTLIN_DECL = re.compile(
+    r"^\s*(?:(?:public|private|protected|internal|open|abstract|sealed|data|inner|enum|suspend|inline|override)\s+)*"
+    r"(class|interface|object|fun|typealias)\s+(?:<[^;{}]*>\s+)?([A-Za-z_]\w*)\b"
+)
+_DART_TYPE = re.compile(
+    r"^\s*(?:(?:abstract|base|interface|final|sealed|mixin)\s+)*"
+    r"(class|mixin|extension|enum|typedef)\s+([A-Za-z_]\w*)\b"
+)
+_DART_FUNC = re.compile(
+    r"^(?:[A-Za-z_]\w*(?:<[^;{}]*>)?\??\s+)?([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:async\s*)?(?:\{|=>)"
+)
+_SWIFT_DECL = re.compile(
+    r"^\s*(?:(?:public|private|fileprivate|internal|open|final|static|class|override|mutating|async)\s+)*"
+    r"(class|struct|enum|protocol|actor|extension|func|typealias)\s+([A-Za-z_]\w*)\b"
+)
+_ZIG_FN = re.compile(r"^\s*(?:pub\s+)?(?:export\s+|inline\s+|extern\s+)?fn\s+([A-Za-z_]\w*)\b")
+_ZIG_TYPE = re.compile(r"^\s*(?:pub\s+)?const\s+([A-Za-z_]\w*)\s*=\s*(?:packed\s+|extern\s+)?(struct|enum|union)\b")
+_RUBY_DECL = re.compile(r"^\s*(module|class|def)\s+(?:self\.)?([A-Za-z_][\w:!?=]*)")
+_PHP_DECL = re.compile(
+    r"^\s*(?:(?:abstract|final|readonly|public|private|protected|static)\s+)*"
+    r"(namespace|class|interface|trait|enum|function)\s+([A-Za-z_][\w\\]*)\b"
+)
+_LUA_FUNC = re.compile(r"^\s*(?:local\s+)?function\s+([A-Za-z_][\w.:]*)\s*\(")
+_ELIXIR_DECL = re.compile(r"^\s*(defmodule|defprotocol|defstruct|defmacro|defmacrop|defp|def)\s+([A-Za-z_][\w.!?]*)")
+_SCALA_DECL = re.compile(
+    r"^\s*(?:(?:private|protected|override|abstract|final|sealed|case|implicit|lazy)\s+)*"
+    r"(class|trait|object|enum|def|type)\s+([A-Za-z_]\w*)\b"
+)
+_HASKELL_TYPE = re.compile(r"^\s*(module|data|newtype|type|class)\s+([A-Z][\w.]*)")
+_HASKELL_SIG = re.compile(r"^([a-z_][\w']*)\s*::\s*")
+_PS_DECL = re.compile(r"^\s*(function|filter|class|enum)\s+([A-Za-z_][\w:-]*)\b", re.IGNORECASE)
+_BASH_FUNC = re.compile(r"^\s*(?:function\s+([A-Za-z_]\w*)(?:\s*\(\s*\))?|([A-Za-z_]\w*)\s*\(\s*\)\s*\{?)")
+_SQL_DECL = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?"
+    r"(TABLE|VIEW|INDEX|TRIGGER|FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([`\"\[\]\w.]+)",
+    re.IGNORECASE,
+)
 
 
 def _bounded(value, default: int, ceiling: int) -> int:
@@ -109,8 +171,8 @@ def _language_filter(value: str) -> str:
         return LANGUAGE_ALIASES[raw]
     except KeyError as exc:
         raise ValueError(
-            "unsupported language %r; use python, javascript, typescript, c, "
-            "cpp, csharp, rust, go, or auto" % value
+            "unsupported language %r; use auto or one of: %s"
+            % (value, ", ".join(sorted(set(LANGUAGE_ALIASES.values()))))
         ) from exc
 
 
@@ -393,6 +455,80 @@ def _regex_symbols(text: str, language: str, limit: int):
             match = _GO_DECL.match(line)
             if match:
                 candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "java":
+            match = _JAVA_TYPE.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+            else:
+                match = _JAVA_METHOD.match(line)
+                if match and match.group(1) not in {"if", "for", "while", "switch", "catch"}:
+                    candidates.append(("method", match.group(1), match.start(1) + 1))
+        elif language == "kotlin":
+            match = _KOTLIN_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "dart":
+            match = _DART_TYPE.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+            else:
+                match = _DART_FUNC.match(line)
+                if match and match.group(1) not in {"if", "for", "while", "switch", "catch", "return"}:
+                    candidates.append(("function", match.group(1), match.start(1) + 1))
+        elif language == "swift":
+            match = _SWIFT_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "zig":
+            match = _ZIG_FN.match(line)
+            if match:
+                candidates.append(("fn", match.group(1), match.start(1) + 1))
+            match = _ZIG_TYPE.match(line)
+            if match:
+                candidates.append((match.group(2), match.group(1), match.start(1) + 1))
+        elif language == "ruby":
+            match = _RUBY_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "php":
+            match = _PHP_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "lua":
+            match = _LUA_FUNC.match(line)
+            if match:
+                candidates.append(("function", match.group(1), match.start(1) + 1))
+        elif language == "elixir":
+            match = _ELIXIR_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "scala":
+            match = _SCALA_DECL.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+        elif language == "haskell":
+            match = _HASKELL_TYPE.match(line)
+            if match:
+                candidates.append((match.group(1), match.group(2), match.start(2) + 1))
+            else:
+                match = _HASKELL_SIG.match(line)
+                if match:
+                    candidates.append(("function", match.group(1), match.start(1) + 1))
+        elif language == "powershell":
+            match = _PS_DECL.match(line)
+            if match:
+                candidates.append((match.group(1).lower(), match.group(2), match.start(2) + 1))
+        elif language == "bash":
+            match = _BASH_FUNC.match(line)
+            if match:
+                name = match.group(1) or match.group(2)
+                col = (match.start(1) if match.group(1) else match.start(2)) + 1
+                if name:
+                    candidates.append(("function", name, col))
+        elif language == "sql":
+            match = _SQL_DECL.match(line)
+            if match:
+                candidates.append((match.group(1).lower(), match.group(2).strip('`[]"'), match.start(2) + 1))
         for kind, name, column in candidates:
             key = (line_number, column, kind, name)
             if key not in seen:
