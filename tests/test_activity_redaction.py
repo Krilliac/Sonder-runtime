@@ -622,3 +622,19 @@ def test_activity_redacts_provider_key_shapes_and_empty_user_uri(secret):
 def test_uri_empty_user_redaction_stays_linear():
     _assert_linear(at._redact_text, lambda size: "a://:" + "b" * size)
     _assert_linear(at._redact_text, lambda size: "a://u:" + ":" * size)
+
+
+def test_jwt_redaction_is_linear_on_hyphen_ey_runs():
+    _assert_linear(at._redact_text, lambda size: _repeat("-ey", size))
+    _assert_linear(at._redact_text, lambda size: _repeat("-ey", size) + ".bbbbbbbb.cccc")
+    _assert_linear(at._redact_text, lambda size: _repeat("-a", size) + ".bbbbbbbb.cccc")
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcd1234"
+    assert at._redact_text("tok=" + jwt) == "tok=<redacted-token>"
+    assert at._redact_text("prefix-" + jwt + " ok") == "prefix-<redacted-token> ok"
+
+
+def test_pre_truncated_unterminated_quoted_secret_never_leaks():
+    assert at._redact_text('token = "correct horse battery staple') == "token=<redacted>"
+    assert at._redact_text("token = 'correct horse battery staple") == "token=<redacted>"
+    assert at._redact_text('token = "correct horse\nnext line') == "token=<redacted>\nnext line"
+    assert at._redact_text('password = "line1\nline2" ok') == "password=<redacted> ok"

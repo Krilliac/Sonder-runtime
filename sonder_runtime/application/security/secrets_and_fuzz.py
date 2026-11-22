@@ -178,9 +178,12 @@ class CredentialScanner:
             r"|xox[abpr]-[A-Za-z0-9-]{10,100})"
         ), None),
         # scheme://user:password@host and scheme://:password@host, the
-        # .git-credentials / Redis / DSN shapes (possessive so linear).
+        # .git-credentials / Redis / SQLAlchemy / DSN shapes (possessive so linear).
         ("url_credential", re.compile(
-            r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,15}://[^/@\s:]{0,128}+:[^/@\s]{1,2048}+@"
+            r"(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://[^/@\s:]{0,128}+:[^/@\s]{1,2048}+@"
+        ), None),
+        ("bearer_token", re.compile(
+            r"(?i)\bbearer[^\S\r\n]{1,16}+[A-Za-z0-9._~+/-]{20,256}+={0,4}+"
         ), None),
         # One attempt per run of base64url characters keeps this linear on
         # hostile input such as a long run of "-eyJ": the lookahead checks
@@ -201,9 +204,14 @@ class CredentialScanner:
         self.max_bytes = max_bytes
 
     def scan(self, content: str | bytes) -> tuple[CredentialFinding, ...]:
-        raw = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
-        if len(raw.encode("utf-8")) > self.max_bytes:
-            raise ValueError("content exceeds scan bound")
+        if isinstance(content, bytes):
+            if len(content) > self.max_bytes:
+                raise ValueError("content exceeds scan bound")
+            raw = content.decode("utf-8", errors="replace")
+        else:
+            if len(content.encode("utf-8")) > self.max_bytes:
+                raise ValueError("content exceeds scan bound")
+            raw = content
         findings: list[CredentialFinding] = []
         for line_no, line in enumerate(raw.splitlines(), 1):
             for kind, pattern, accept in self._patterns:

@@ -23,6 +23,7 @@ from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
 from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters import protected_write_scope
+from sonder_runtime.adapters import secret_scan as _secret_scan_adapter
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
@@ -1351,67 +1352,41 @@ def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roo
 # ---------------------------------------------------------------------------
 
 _REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+_HARNESS_FINDING_LABELS = {
+    "private_key": "Private key",
+    "aws_access_key": "AWS credential",
+    "github_token": "GitHub PAT",
+    "api_token": "API key",
+    "bearer_token": "Bearer token",
+    "url_credential": "URL credential",
+    "jwt": "JWT",
+    "credential_assignment": "Secret/password",
+}
 
 
 def secret_scan(root=".", timeout=30, extra_roots=""):
-    root = _resolve_root(root, extra_roots)
+    resolved = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
-
-    secret_patterns = [
-        (r'(?i)(api[_-]?key|apikey)\s*[:=]\s*["\']?[a-z0-9]{20,}', "API key"),
-        (r'(?i)(secret|password|passwd|pwd)\s*[:=]\s*["\'][^"\']{8,}', "Secret/password"),
-        (r'(?i)(aws_access_key_id|aws_secret_access_key)\s*[:=]\s*["\']?[A-Z0-9]{16,}', "AWS credential"),
-        (r'ghp_[a-zA-Z0-9]{36}', "GitHub PAT"),
-        (r'sk-[a-zA-Z0-9]{32,}', "OpenAI/Stripe key"),
-        (r'-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----', "Private key"),
-        (r'(?i)bearer\s+[a-z0-9._\-]{20,}', "Bearer token"),
+    # Delegate the walk, symlink/junction confinement, credential-store skip
+    # and CredentialScanner matching to the canonical adapter so the live MCP
+    # tool shares the exact same security guarantees.
+    result = _secret_scan_adapter._scan_resolved(resolved, timeout=timeout)
+    findings = [
+        {
+            "file": item["file"],
+            "line": item["line"],
+            "type": _HARNESS_FINDING_LABELS.get(item["type"], item["type"]),
+            "match": _REDACTED_CREDENTIAL,
+        }
+        for item in result["findings"]
     ]
-
-    findings = []
-    scanned = 0
-    # ``timeout`` is a wall-clock budget for the whole walk, checked before
-    # each entry and between patterns: a large tree used to be walked to the
-    # end whatever the caller asked for. On expiry the partial result is
-    # returned and marked, as the packaged adapter (adapters/secret_scan.py)
-    # does, so a caller never mistakes a cut-short scan for a clean one.
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    for path in root.rglob("*"):
-        if time.monotonic() >= deadline:
-            timed_out = True
-            break
-        if not path.is_file() or path.stat().st_size > 1_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") and part != "." for part in Path(rel).parts):
-            if not rel.startswith(".env"):
-                continue
-        if path.suffix.lower() in (".pyc", ".pyo", ".exe", ".dll", ".so", ".png", ".jpg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".jar"):
-            continue
-        scanned += 1
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        for pattern_str, label in secret_patterns:
-            if time.monotonic() >= deadline:
-                timed_out = True
-                break
-            for m in re.finditer(pattern_str, content):
-                line_no = content[:m.start()].count("\n") + 1
-                # Never echo the matched text: a 40-character prefix of a
-                # credential is usually the whole credential, and callers
-                # render and durably record this field. Same placeholder as
-                # the packaged scanner (adapters/secret_scan.py).
-                findings.append({
-                    "file": rel, "line": line_no, "type": label,
-                    "match": _REDACTED_CREDENTIAL,
-                })
-                if len(findings) >= 100:
-                    return {"ok": True, "findings": findings, "files_scanned": scanned,
-                            "truncated": True, "timed_out": False}
-        if timed_out:
-            break
-
-    return {"ok": True, "findings": findings, "files_scanned": scanned,
-            "truncated": timed_out, "timed_out": timed_out, "timeout": timeout}
+    return {
+        "ok": True,
+        "findings": findings,
+        "files_scanned": result["files_scanned"],
+        "truncated": result["truncated"],
+        "timed_out": result["timed_out"],
+        "timeout": timeout,
+        "credential_files_skipped": result["credential_files_skipped"],
+        "links_skipped": result["links_skipped"],
+    }

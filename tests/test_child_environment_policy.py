@@ -46,12 +46,20 @@ def test_child_environment_strips_generic_authority_names_outside_unsafe_lab():
     assert child == {"PATH": "safe-path"}
 
 
-@pytest.mark.parametrize("name", ("GITHUB_PAT", "OPENWEATHERMAP_APIKEY", "SENTRY_DSN", "MY_PAT_VALUE", "PAT"))
+@pytest.mark.parametrize(
+    "name",
+    ("GITHUB_PAT", "OPENWEATHERMAP_APIKEY", "SENTRY_DSN", "MY_PAT_VALUE", "PAT",
+     "GPG_PASSPHRASE", "SSH_PASSPHRASE", "MYSQL_PWD", "DB_PWD"),
+)
 def test_child_secret_policy_covers_pat_apikey_and_dsn_names(name):
     assert child_environment_policy.unsafe_child_secret_name(name)
 
 
-@pytest.mark.parametrize("name", ("PATH", "PATHEXT", "PYTHONPATH", "PATTERN", "COMPATIBLE", "DSNAME", "PATCH_LEVEL"))
+@pytest.mark.parametrize(
+    "name",
+    ("PATH", "PATHEXT", "PYTHONPATH", "PATTERN", "COMPATIBLE", "DSNAME", "PATCH_LEVEL",
+     "PWD", "OLDPWD"),
+)
 def test_child_secret_policy_matches_pat_and_dsn_on_segments_only(name):
     assert not child_environment_policy.unsafe_child_secret_name(name)
 
