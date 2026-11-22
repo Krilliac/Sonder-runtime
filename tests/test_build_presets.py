@@ -5,6 +5,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from sonder_runtime.domain.build.presets import MAX_PRESET_FILES, parse_cmake_presets
 
 SPARK = Path(__file__).parent / "fixtures" / "cpp_build" / "sparklite"
@@ -153,3 +155,47 @@ def test_cyclic_presets_are_order_independent_for_resolved_and_merged_cache():
     m1 = parse_cmake_presets(_doc(configurePresets=[a2, b, d, y]), includes={}, source_root=ROOT)
     m2 = parse_cmake_presets(_doc(configurePresets=[y, b, d, a2]), includes={}, source_root=ROOT)
     assert dict(m1.find("Y").cache) == dict(m2.find("Y").cache) == {"CMAKE_BUILD_TYPE": "Debug"}
+
+
+@pytest.mark.parametrize("cycle_kind", ["self", "two_node"])
+def test_diamond_inheritance_above_cyclic_leaf_stays_bounded(cycle_kind):
+    # G1261 diamond (layers=11, width=4) sitting atop a cyclic leaf must stay
+    # polynomial (acyclic nodes remain memoised despite cyclic descendants).
+    layers, width = 11, 4
+    configure = [{"name": "top", "inherits": ["l0_%d" % i for i in range(width)]}]
+    for layer in range(layers):
+        for i in range(width):
+            preset = {"name": "l%d_%d" % (layer, i), "hidden": True}
+            if layer + 1 < layers:
+                preset["inherits"] = ["l%d_%d" % (layer + 1, j) for j in range(width)]
+            else:
+                preset["inherits"] = ["cyc_a", "leaf_ok"]
+            configure.append(preset)
+    if cycle_kind == "self":
+        configure.append({"name": "cyc_a", "hidden": True, "inherits": ["cyc_a"]})
+    else:
+        configure.append({"name": "cyc_a", "hidden": True, "inherits": ["cyc_b"]})
+        configure.append({"name": "cyc_b", "hidden": True, "inherits": ["cyc_a"]})
+    configure.append({
+        "name": "leaf_ok", "hidden": True, "generator": "Ninja",
+        "binaryDir": "${sourceDir}/deep", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"},
+    })
+    started = time.perf_counter()
+    presets = parse_cmake_presets(_doc(configurePresets=configure), includes={}, source_root=ROOT)
+    elapsed = time.perf_counter() - started
+    top = presets.find("top")
+    assert top is not None
+    assert top.generator == "Ninja" and top.binary_dir == ROOT + "/deep"
+    assert dict(top.cache) == {"CMAKE_BUILD_TYPE": "Debug"}
+    assert elapsed < 2.0, elapsed
+
+
+def test_dense_cyclic_clique_terminates_within_step_budget():
+    # K_16 cyclic clique: every preset inherits all 16 members. Must finish fast.
+    names = ["k%d" % i for i in range(16)]
+    configure = [{"name": name, "inherits": names} for name in names]
+    started = time.perf_counter()
+    presets = parse_cmake_presets(_doc(configurePresets=configure), includes={}, source_root=ROOT)
+    elapsed = time.perf_counter() - started
+    assert len(presets.configure) == 16
+    assert elapsed < 2.0, elapsed

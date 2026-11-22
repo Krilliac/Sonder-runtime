@@ -154,6 +154,7 @@ def main(argv=None):
     print("  skipped private:   %d" % stats["skipped_private"])
     print("  skipped dup(text): %d" % stats["skipped_dup_text"])
     print("  skipped dup(embed):%d" % stats["skipped_dup_embed"])
+    print("  skipped tombstoned:%d" % stats["skipped_tombstoned"])
     print("  lessons %d -> %d" % (before, after))
     print("  by source:")
     for src in sorted(stats["by_source"]):
