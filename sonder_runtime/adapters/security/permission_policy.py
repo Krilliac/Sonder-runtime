@@ -77,7 +77,7 @@ class PermissionPolicyProvider:
         """Context binding principal/session permission-mode scope."""
         return _engine().mode_scope(principal, session, local_open=local_open)
 
-    def clear_preapproved_scope(self):
+    def clear_preapproved_scope(self) -> object:
         """Clear any inherited pre-approved execution tickets for a child context."""
         return _engine().clear_preapproved_scope()
 
