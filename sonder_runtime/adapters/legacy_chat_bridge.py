@@ -71,6 +71,9 @@ def endpoint_is_loopback(provider: str, graph: object) -> bool:
         from .inference.openai_compat_gateway import configured_endpoint_is_loopback
 
         return configured_endpoint_is_loopback()
+    bindings = getattr(graph, "provider_bindings", None)
+    if bindings is not None and provider not in bindings.bound_providers:
+        return False  # no gateway is bound for this provider
     seen: set[int] = set()
     while gateway is not None and id(gateway) not in seen:
         seen.add(id(gateway))
