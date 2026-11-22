@@ -3888,6 +3888,15 @@ def control_command(prompt: str, history=None, session="", project="",
         return media_inspect(path=arg.strip()) if arg.strip() else "usage: /media <path>"
     if cmd in ("/loc", "/code_metrics"):
         return code_metrics(path=arg.strip() or ".")
+    if cmd in ("/schema", "/schema_validate"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return "usage: /schema <data path> | <schema path or inline JSON>"
+        if parts[1].startswith("{"):
+            return schema_validate(path=parts[0], schema_json=parts[1])
+        return schema_validate(path=parts[0], schema_path=parts[1])
+    if cmd in ("/languages", "/language_matrix"):
+        return language_matrix(language=arg.strip())
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -14232,6 +14241,64 @@ def code_metrics(
     return output
 
 
+@mcp.tool()
+def schema_validate(
+    path: str,
+    schema_path: str = "",
+    schema_json: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline schema_json."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "schema_path": schema_path, "has_inline_schema": bool(schema_json)}
+    try:
+        import sonder_runtime.adapters.inspection.schema_validate as _schema_validate
+
+        data = _schema_validate.validate_schema(
+            path,
+            schema_path=schema_path,
+            schema_json=schema_json,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("schema_validate", args, ok=False, started=started, summary=str(exc))
+        return "schema validation refused: %s" % exc
+    output = _schema_validate.format_result(data)
+    _record_direct_tool(
+        "schema_validate", args, ok=True, started=started,
+        summary="valid=%s errors=%d" % (data.get("valid"), data.get("error_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def language_matrix(language: str = "") -> str:
+    """Report Sonder's full multi-language capability matrix and live host toolchain readiness."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"language": language}
+    try:
+        import sonder_runtime.adapters.inspection.language_matrix as _lang_matrix
+
+        data = _lang_matrix.inspect_language_matrix(language=language)
+    except Exception as exc:
+        _record_direct_tool("language_matrix", args, ok=False, started=started, summary=str(exc))
+        return "language matrix refused: %s" % exc
+    output = _lang_matrix.format_result(data)
+    _record_direct_tool(
+        "language_matrix", args, ok=True, started=started,
+        summary="languages=%d ready=%d" % (data.get("language_count", 0), data.get("host_ready_count", 0)),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -17249,6 +17316,8 @@ AGENT_TOOL_HELP = """Available tools:
 - document_extract: {"path": "artifacts/generated/demo/document.docx", "max_chars": 32000, "max_items": 200} -- extract text/tables/slides/cues from DOCX, XLSX, PPTX, HTML, SVG, SRT, VTT
 - media_inspect: {"path": "artifacts/generated/demo/rigged.glb"} -- inspect WAV audio, MIDI, AVI video, GLB/glTF/OBJ/STL 3D meshes
 - code_metrics: {"path": ".", "max_files": 2000, "top_n": 10} -- language LOC, TODO/FIXME markers, largest files, and complexity hotspots
+- schema_validate: {"path": "config.json", "schema_path": "config.schema.json", "schema_json": ""} -- validate JSON/JSONL/TOML against JSON Schema
+- language_matrix: {"language": ""} -- report supported languages, tools, and live host toolchain readiness
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -17326,7 +17395,8 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
-    "document_extract", "media_inspect", "code_metrics", "command_registry_list",
+    "document_extract", "media_inspect", "code_metrics", "schema_validate",
+    "language_matrix", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -17385,6 +17455,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - document_extract: {"path": "<task-relevant DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT path>", "max_chars": 32000, "max_items": 200}
 - media_inspect: {"path": "<task-relevant WAV/MIDI/AVI/GLB/glTF/OBJ/STL path>"}
 - code_metrics: {"path": ".", "max_files": 2000, "top_n": 10}
+- schema_validate: {"path": "<task-relevant JSON/JSONL/TOML path>", "schema_path": "<schema JSON path>", "schema_json": ""}
+- language_matrix: {"language": ""}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -17904,6 +17976,20 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name == "schema_validate":
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""),
+                allow_workspace_root=False,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+            if str(args.get("schema_path") or "").strip():
+                file_ops.resolve_repository_read_path(
+                    args.get("schema_path", ""),
+                    allow_workspace_root=False,
+                    reject_sensitive=True,
+                    extra_roots=trusted_extra_roots,
+                )
         elif tool_name == "code_metrics":
             file_ops.resolve_repository_read_path(
                 args.get("path", ".") or ".",
@@ -19151,6 +19237,17 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "schema_validate":
+        return schema_validate(
+            path=args.get("path", ""),
+            schema_path=args.get("schema_path", ""),
+            schema_json=args.get("schema_json", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "language_matrix":
+        return language_matrix(language=args.get("language", ""))
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -19588,7 +19685,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -19652,7 +19749,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board",
         "environment_status", "toolchain_status", "hardware_profile",
-        "tool_inventory", "output_digest",
+        "tool_inventory", "output_digest", "language_matrix",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -19670,7 +19767,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -20069,7 +20166,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 # Leads an end report that claims completion the record says must be earned.
@@ -20247,7 +20344,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -20312,7 +20409,7 @@ _UNCONFINED_ROOT_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory", "artifact_risk_inspect",
 })
@@ -20321,7 +20418,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -22402,7 +22499,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

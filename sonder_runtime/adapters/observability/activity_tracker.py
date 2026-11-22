@@ -483,6 +483,8 @@ ACTION_TITLES = {
     "document_extract": "Extracted Document",
     "media_inspect": "Inspected Media Asset",
     "code_metrics": "Measured Code Metrics",
+    "schema_validate": "Validated Schema",
+    "language_matrix": "Checked Language Matrix",
     "artifact_generate": "Generated Assets",
     "mesh_generate": "Generated Model",
     "security_eval": "Ran Security Eval",

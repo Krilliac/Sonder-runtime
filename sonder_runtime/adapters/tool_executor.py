@@ -118,6 +118,30 @@ class ToolExecutorAdapter:
                     output=code_metrics.format_result(res),
                     evidence=res,
                 )
+            if call.tool == "schema_validate":
+                import sonder_runtime.adapters.inspection.schema_validate as schema_validate
+
+                _require_read(args["path"], args, context)
+                if args.get("schema_path"):
+                    _require_read(args["schema_path"], args, context)
+                res = schema_validate.validate_schema(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=schema_validate.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "language_matrix":
+                import sonder_runtime.adapters.inspection.language_matrix as language_matrix
+
+                res = language_matrix.inspect_language_matrix(**args)
+                return ToolResult(
+                    ok=True,
+                    output=language_matrix.format_result(res),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

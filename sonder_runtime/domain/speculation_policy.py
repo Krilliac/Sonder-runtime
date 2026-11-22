@@ -22,6 +22,8 @@ SPECULATABLE_TOOLS = frozenset({
     "document_extract",
     "media_inspect",
     "code_metrics",
+    "schema_validate",
+    "language_matrix",
     "data_inspect",
     "memory_search",
     "activity_status",

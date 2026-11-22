@@ -256,6 +256,13 @@ _DESCRIPTORS = (
     _read_tool("document_extract"),
     _read_tool("media_inspect"),
     _read_tool("code_metrics"),
+    _read_tool("schema_validate"),
+    _read_tool(
+        "language_matrix",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
     _read_tool("repo_status", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool("repo_diff", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool(

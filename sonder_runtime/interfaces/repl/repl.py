@@ -4804,6 +4804,7 @@ def main(*, machine_output=False):
                         "/programs", "/programfind", "/scripts", "/scriptfind",
                         "/image", "/inspectimage", "/doc", "/document_extract",
                         "/media", "/media_inspect", "/loc", "/code_metrics",
+                        "/schema", "/schema_validate", "/languages", "/language_matrix",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",

@@ -367,3 +367,171 @@ def test_new_tools_registered_with_read_only_traits_and_mcp_schema():
         desc = registry.get(name)
         assert desc is not None
         assert desc.traits.is_read_only
+
+
+def test_polyglot_code_runner_languages_and_sql_execution():
+    from sonder_runtime.adapters.execution_tools import code_runner
+
+    for lang in (
+        "c", "dart", "zig", "kotlin", "swift", "elixir",
+        "scala", "haskell", "julia", "nim", "sql", "batch",
+    ):
+        assert lang in code_runner.SUPPORTED_LANGUAGES
+
+    sql_res = code_runner.run_code(
+        "CREATE TABLE scores(player TEXT, pts INT);\n"
+        "INSERT INTO scores VALUES ('Nova', 42), ('Vex', 99);\n"
+        "SELECT player, pts FROM scores ORDER BY pts DESC;\n",
+        language="sql",
+    )
+    assert sql_res["ok"] is True
+    assert "Vex | 99" in sql_res["stdout"]
+    assert "Nova | 42" in sql_res["stdout"]
+
+    with pytest.raises(ValueError, match="run limits are not supported"):
+        code_runner.run_code("int main(){return 0;}", language="c", limits=code_runner.RunLimits())
+
+
+def test_symbol_index_broad_language_support(sandbox_root: Path):
+    import symbol_index
+
+    samples = {
+        "Main.java": ("public class ArenaService {\n    public int score(int x) { return x; }\n}\n", {"ArenaService", "score"}),
+        "App.kt": ("data class Hero(val name: String)\nfun greet(x: String) = x\n", {"Hero", "greet"}),
+        "game.dart": ("class MatchState {}\nvoid tick(int dt) {}\n", {"MatchState", "tick"}),
+        "App.swift": ("struct Vector3 {}\nfunc step() {}\n", {"Vector3", "step"}),
+        "main.zig": ("pub const Vec2 = struct { x: f32 };\npub fn main() void {}\n", {"Vec2", "main"}),
+        "lib.rb": ("module Arena\n  class Bot\n    def tick; end\n  end\nend\n", {"Arena", "Bot", "tick"}),
+        "App.php": ("<?php\nnamespace App;\nclass Engine {\n  public function run() {}\n}\n", {"App", "Engine", "run"}),
+        "ai.lua": ("local function patrol(dt) end\nfunction M.attack() end\n", {"patrol", "M.attack"}),
+        "arena.ex": ("defmodule Arena do\n  def start(x), do: x\nend\n", {"Arena", "start"}),
+        "Main.scala": ("object Arena {\n  def run(): Unit = ()\n}\n", {"Arena", "run"}),
+        "Core.hs": ("module Core where\ndata State = Ready\nstep :: State -> State\n", {"Core", "State", "step"}),
+        "helper.ps1": ("class Runner {}\nfunction Invoke-Arena { param($x) }\n", {"Runner", "Invoke-Arena"}),
+        "cli.sh": ("#!/usr/bin/env bash\nrun_match() {\n  echo ok\n}\n", {"run_match"}),
+        "schema.sql": ("CREATE TABLE matches (id INT);\nCREATE VIEW top_scores AS SELECT 1;\n", {"matches", "top_scores"}),
+    }
+    for filename, (content, expected) in samples.items():
+        fpath = sandbox_root / filename
+        fpath.write_text(content, encoding="utf-8")
+        res = symbol_index.index_repository(str(fpath))
+        found = {s["name"] for s in res["symbols"]}
+        assert expected <= found, f"{filename}: expected {expected}, got {found}"
+
+
+def test_project_scaffold_all_22_templates():
+    expected_new = {
+        "c-cmake", "zig", "kotlin-gradle", "swift", "elixir",
+        "ruby", "php", "lua", "flutter", "powershell", "bash-cli",
+    }
+    assert expected_new <= set(project_scaffold.kinds())
+    assert len(project_scaffold.kinds()) >= 22
+    for kind in expected_new:
+        files = project_scaffold.render(kind, "ArenaKit")
+        assert files, f"empty scaffold for {kind}"
+        assert all("@NAME@" not in content and "@LOWER@" not in content for content in files.values())
+
+
+def test_project_detect_and_harness_broad_ecosystems(sandbox_root: Path, monkeypatch: pytest.MonkeyPatch):
+    from sonder_runtime.adapters.inspection import project_detect
+
+    zig_dir = sandbox_root / "zig_app"
+    zig_dir.mkdir()
+    (zig_dir / "build.zig").write_text("pub fn build(b: anytype) void {}\n", encoding="utf-8")
+    det_zig = project_detect.detect_project(str(zig_dir))
+    assert any(lang["name"] == "Zig" for lang in det_zig["languages"])
+
+    ex_dir = sandbox_root / "ex_app"
+    ex_dir.mkdir()
+    (ex_dir / "mix.exs").write_text("defmodule Demo.MixProject do end\n", encoding="utf-8")
+    det_ex = project_detect.detect_project(str(ex_dir))
+    assert any(lang["name"] == "Elixir" for lang in det_ex["languages"])
+
+    ue_dir = sandbox_root / "ue_game"
+    ue_dir.mkdir()
+    (ue_dir / "Arena.uproject").write_text('{"FileVersion": 3}', encoding="utf-8")
+    det_ue = project_detect.detect_project(str(ue_dir))
+    assert any(f["name"] == "Unreal Engine" for f in det_ue["frameworks"])
+
+    calls = []
+    monkeypatch.setattr(harness_tools, "_run", lambda cmd, cwd, timeout=120: (calls.append(cmd) or {"ok": True, "command": cmd}))
+    harness_tools.build_run(str(zig_dir))
+    assert calls[-1] == ["zig", "build"]
+    harness_tools.build_run(str(ex_dir))
+    assert calls[-1] == ["mix", "compile"]
+    assert harness_tools._detect_test_framework(zig_dir) == "zig"
+    assert harness_tools._detect_test_framework(ex_dir) == "elixir"
+    assert harness_tools._detect_package_manager(ex_dir) == "mix"
+
+
+def test_schema_validate_json_jsonl_toml_and_security_must_refuse(sandbox_root: Path, tmp_path: Path):
+    from sonder_runtime.adapters.inspection import schema_validate
+
+    schema_p = sandbox_root / "weapon.schema.json"
+    schema_p.write_text(json.dumps({
+        "$defs": {
+            "weapon": {
+                "type": "object",
+                "required": ["name", "damage"],
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "minLength": 2},
+                    "damage": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
+            }
+        },
+        "$ref": "#/$defs/weapon",
+    }), encoding="utf-8")
+
+    good = sandbox_root / "good.json"
+    good.write_text(json.dumps({"name": "Railgun", "damage": 120}), encoding="utf-8")
+    r_ok = schema_validate.validate_schema(str(good), schema_path=str(schema_p))
+    assert r_ok["valid"] is True and r_ok["error_count"] == 0
+
+    bad = sandbox_root / "bad.json"
+    bad.write_text(json.dumps({"name": "X", "damage": 999, "extra": True}), encoding="utf-8")
+    r_bad = schema_validate.validate_schema(str(bad), schema_path=str(schema_p))
+    assert r_bad["valid"] is False and r_bad["error_count"] == 3
+
+    toml_good = sandbox_root / "good.toml"
+    toml_good.write_text('name = "Plasma"\ndamage = 85\n', encoding="utf-8")
+    r_toml = schema_validate.validate_schema(str(toml_good), schema_path=str(schema_p))
+    assert r_toml["valid"] is True and r_toml["data_format"] == "toml"
+
+    jsonl_p = sandbox_root / "items.jsonl"
+    jsonl_p.write_text('{"name":"Railgun","damage":120}\n{"name":"Bad","damage":-5}\n', encoding="utf-8")
+    r_jsonl = schema_validate.validate_schema(str(jsonl_p), schema_path=str(schema_p))
+    assert r_jsonl["valid"] is False and r_jsonl["records_checked"] == 2
+    assert r_jsonl["errors"][0]["path"] == "$[1].damage"
+
+    # Security must-refuse: external $ref, cyclic $ref, out-of-root path
+    with pytest.raises(schema_validate.SchemaValidateError, match="local fragment"):
+        schema_validate.validate_schema(
+            str(good), schema_json=json.dumps({"$ref": "https://example.com/evil.json"}),
+        )
+    with pytest.raises(schema_validate.SchemaValidateError, match="cyclic"):
+        schema_validate.validate_schema(
+            str(good), schema_json=json.dumps({"$defs": {"a": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"}),
+        )
+    outside = tmp_path / "escape.json"
+    outside.write_text("{}", encoding="utf-8")
+    with pytest.raises(schema_validate.SchemaValidateError, match="rejected"):
+        schema_validate.validate_schema(str(outside), schema_path=str(schema_p))
+
+
+def test_language_matrix_and_new_tool_traits():
+    from sonder_runtime.adapters.inspection import language_matrix
+
+    full = language_matrix.inspect_language_matrix()
+    assert full["ok"] is True
+    assert full["language_count"] >= 26
+    assert full["totals"]["run_code_languages"] >= 26
+    assert full["totals"]["scaffold_templates"] >= 22
+    assert full["totals"]["symbol_index_languages"] >= 22
+    filtered = language_matrix.inspect_language_matrix("rust")
+    assert filtered["language_count"] == 1 and filtered["languages"][0]["language"] == "rust"
+
+    registry = native_tool_registry()
+    for name in ("schema_validate", "language_matrix"):
+        assert builtin_traits(name).is_read_only
+        assert registry.get(name).traits.is_read_only
