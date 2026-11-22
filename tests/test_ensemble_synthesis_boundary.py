@@ -41,3 +41,16 @@ def test_prompts_carry_the_authoritative_request_and_the_framed_candidates():
     assert prose.startswith("Several local models were asked the same question independently.")
     assert "QUESTION (authoritative):\nwhy\n\n" + framed + "\n\nCOMPOUNDED ANSWER:" in prose
     assert prose.endswith("COMPOUNDED ANSWER:")
+
+
+def test_strip_code_fences_removes_wrappers_and_stray_trailing_fence():
+    assert ensemble_synthesis.strip_code_fences("def f():\n    return 1\n```") == "def f():\n    return 1"
+    assert ensemble_synthesis.strip_code_fences("def f():\n    return 1\n```\n") == "def f():\n    return 1"
+    assert ensemble_synthesis.strip_code_fences("```python\ndef f():\n    return 1\n```") == "def f():\n    return 1"
+    assert ensemble_synthesis.strip_code_fences("```\ndef f():\n    return 1\n```") == "def f():\n    return 1"
+    assert ensemble_synthesis.strip_code_fences("```python\ndef f():\n    return 1") == "def f():\n    return 1"
+    assert ensemble_synthesis.strip_code_fences("Here is the file:\n```python\ndef f():\n    return 1\n```") == "def f():\n    return 1"
+
+    with_docstring = 'def f():\n    """\n    ```\n    x\n    ```\n    """\n    return 1'
+    assert ensemble_synthesis.strip_code_fences(with_docstring) == with_docstring
+    assert ensemble_synthesis.strip_code_fences(with_docstring + "\n```") == with_docstring

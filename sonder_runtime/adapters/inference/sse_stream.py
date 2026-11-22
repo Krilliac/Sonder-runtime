@@ -451,6 +451,9 @@ def post_streaming(
                 raise Cancelled(
                     "the streaming client disconnected; generation cancelled"
                 ) from exc
+            if getattr(budget, "aborted", False):
+                # The operation's cancellation token closed the exchange.
+                raise Cancelled("the operation was cancelled; generation stopped") from exc
             if stall is not None and stall.fired is not None:
                 raise stall.fired from exc
             if budget.expired:
