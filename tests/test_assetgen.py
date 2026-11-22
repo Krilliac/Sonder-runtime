@@ -333,6 +333,27 @@ def test_manifest_is_machine_readable(monkeypatch, tmp_path):
     assert manifest["validation"]["failed_checks"] == 0
 
 
+def test_generated_artifacts_redact_credentials_in_brief(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    secret_value = "example-secret-value"
+    pack = assetgen.generate_artifacts(
+        "redacted-brief",
+        "Brand launch with api_key=" + secret_value,
+        kinds="vector,diagram,document,web,data",
+    )
+
+    for filename in (
+        "vector.svg", "diagram.svg", "brief.md", "preview.html",
+        "data.json", "request.json", "manifest.json",
+    ):
+        with open(os.path.join(pack["root"], filename), encoding="utf-8") as handle:
+            output = handle.read()
+        assert secret_value not in output, filename
+        assert "api_key=[REDACTED]" in output, filename
+    assert pack["brief"] == "Brand launch with api_key=[REDACTED]"
+    assert assetgen.verify_pack(pack["root"])["ok"]
+
+
 def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
     pack = assetgen.generate_artifacts(

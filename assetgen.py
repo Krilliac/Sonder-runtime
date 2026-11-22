@@ -22,6 +22,7 @@ import wave
 import zlib
 
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
+from sonder_runtime.domain.security.redaction import redact_text
 import media_assets
 import model_assets
 import ooxml_assets
@@ -757,6 +758,7 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
                        dimension: str = "auto", theme: str = "auto",
                        seed: int | None = None, output_dir: str = "") -> dict:
     request = infer_request(brief, kinds, dimension, theme, seed)
+    request["brief"] = redact_text(request["brief"])
     dimension = request["dimension"]
     theme = request["theme"]
     if dimension not in DIMENSIONS:

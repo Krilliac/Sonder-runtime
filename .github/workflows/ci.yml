@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   # "tests" is a required branch-protection status check (see repo settings)
   # -- keep this job's id and name exactly "tests". Splitting it into a matrix
