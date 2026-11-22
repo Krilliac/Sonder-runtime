@@ -111,7 +111,9 @@ class _LiveLineViewState extends State<LiveLineView> {
     final turn = _turn;
     final seconds = turn?.elapsedSeconds ?? 0;
     final quiet = seconds - _lastProgress < 0 ? 0 : seconds - _lastProgress;
-    final stalled = turn != null && quiet >= slowTurnSeconds;
+    final stalled = turn != null &&
+        turn.phase != 'awaiting approval' &&
+        quiet >= slowTurnSeconds;
     final state = LiveState(
       phase: turn?.phase ?? 'working',
       elapsedS: seconds,

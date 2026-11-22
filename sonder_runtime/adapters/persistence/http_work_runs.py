@@ -124,6 +124,7 @@ def _public(row) -> dict:
         "narration": narration,
         "acknowledgement": narration.get("acknowledgement", ""),
         "result_receipt": narration.get("result_receipt", {}),
+        "pending_refusal": narration.get("pending_refusal") or None,
     }
 
 
@@ -171,6 +172,21 @@ def finish(run_id: str, status: str, output: str = "", *, now: float | None = No
     conn = _connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT narration FROM http_work_runs WHERE run_id = ? AND status = 'running'",
+            (run_id,),
+        ).fetchone()
+        if row is not None and status in {"returned", "cancelled", "interrupted"}:
+            try:
+                narr = json.loads(row[0] or "{}")
+            except (TypeError, ValueError):
+                narr = {}
+            if isinstance(narr, dict) and "pending_refusal" in narr:
+                narr.pop("pending_refusal", None)
+                conn.execute(
+                    "UPDATE http_work_runs SET narration = ? WHERE run_id = ?",
+                    (json.dumps(narr, separators=(",", ":"), ensure_ascii=True), run_id),
+                )
         conn.execute(
             "UPDATE http_work_runs SET status = ?, output = ?, output_truncated = ?, "
             "updated_ts = ? WHERE run_id = ? AND status = 'running'",
@@ -209,8 +225,16 @@ def _update_narration(run_id: str, mutate) -> None:
         conn.close()
 
 
-def set_narration(run_id: str, *, acknowledgement: str = "", activity_id: str = "", result_receipt=None) -> None:
-    """Persist the owner-visible acknowledgement and optional activity id."""
+def set_narration(
+    run_id: str,
+    *,
+    acknowledgement: str = "",
+    activity_id: str = "",
+    result_receipt=None,
+    pending_refusal: dict | None = None,
+    clear_pending_refusal: bool = False,
+) -> None:
+    """Persist the owner-visible acknowledgement, optional activity id, and pending refusal."""
     acknowledgement = str(acknowledgement or "")[:2000]
     activity_id = str(activity_id or "")[:256]
 
@@ -223,6 +247,25 @@ def set_narration(run_id: str, *, acknowledgement: str = "", activity_id: str = 
             allowed = {"status", "work_run_id", "requested_mode", "routing_reason", "session_ref",
                        "admission_event_id", "return_event_id", "source_event_id", "get_url", "cancel_url"}
             value["result_receipt"] = {key: str(item)[:512] for key, item in result_receipt.items() if key in allowed}
+        if clear_pending_refusal:
+            value.pop("pending_refusal", None)
+        elif isinstance(pending_refusal, dict) and pending_refusal:
+            kept: dict[str, object] = {}
+            for key in ("call_id", "tool", "risk", "mode", "mode_label", "reason"):
+                if key in pending_refusal and pending_refusal[key] is not None:
+                    kept[key] = str(pending_refusal[key])[:1000]
+            if "detail" in pending_refusal and pending_refusal["detail"] is not None:
+                kept["detail"] = str(pending_refusal["detail"])[:4000]
+            for bkey in ("detail_truncated", "bidi_warning"):
+                if bkey in pending_refusal:
+                    kept[bkey] = bool(pending_refusal[bkey])
+            if "detail_chars" in pending_refusal and pending_refusal["detail_chars"] is not None:
+                kept["detail_chars"] = int(pending_refusal["detail_chars"])
+            if "bidi_chars" in pending_refusal and isinstance(pending_refusal["bidi_chars"], (list, tuple)):
+                kept["bidi_chars"] = [str(c)[:16] for c in pending_refusal["bidi_chars"][:16]]
+            if "remedies" in pending_refusal and isinstance(pending_refusal["remedies"], list):
+                kept["remedies"] = pending_refusal["remedies"][:8]
+            value["pending_refusal"] = kept
         return value
 
     _update_narration(run_id, mutate)

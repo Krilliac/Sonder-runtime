@@ -31,8 +31,8 @@ editing a file is recoverable from git, launching a process is not.
 
 Why ``dangerous`` always asks
 -----------------------------
-Claude Code offers a full bypass. This deliberately does not: in every mode,
-including ``auto``, the tools the catalog classes ``dangerous`` (``file_delete``,
+In every mode but ``bypass``, including ``auto``, the tools the catalog classes
+``dangerous`` (``file_delete``,
 ``sqlite_mutate``, ``task_delete``, ``git_merge``, ``self_heal_repair``,
 ``admin_register``/``admin_set_account``, and the policy-changing
 ``runtime_policy_update``/``permission_rule_set``) still stop and ask.
@@ -58,6 +58,20 @@ tools is not a combination worth shipping as a single keystroke. A standing
 exemption for a specific tool is still available -- as an explicit, persistent,
 auditable rule via ``permission_rule_set`` -- which is the right shape for that
 decision because it is narrow and it is written down.
+
+Bypass
+------
+``bypass`` is the one mode that skips the prompts: every graded class runs
+without asking. It skips prompts (``ask``) only. Every deny rule -- one the
+operator wrote, a shipped default such as ``file_delete: deny``, the
+degraded-policy deny, the chain-of-thought guard -- and privilege
+(elevation), durable-authority tools, process-wide cloud consent
+(``BYPASS_HELD_TOOLS``), the effect fence and a name nothing can
+classify still stop it. Entering it needs an attended confirmation
+(``/mode bypass`` answered at the console, or an administrator's
+``confirm_bypass``). Over HTTP it applies to that caller's principal and
+session only, and a process-global bypass is not applied to scoped turns.
+It is never saved to disk, for the global mode or any scope.
 
 Enforcement scope
 -----------------
@@ -311,6 +325,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 # --- modes ----------------------------------------------------------------
@@ -319,9 +334,13 @@ PLAN = "plan"
 MANUAL = "manual"
 ACCEPT_EDITS = "acceptEdits"
 AUTO = "auto"
+BYPASS = "bypass"
 
 # Cycle order for the keybinding: least autonomy -> most.
-MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
+MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO, BYPASS)
+# Keybindings and unattended switch hints only cycle through non-bypass modes;
+# entering ``bypass`` always requires explicit operator confirmation.
+_CYCLE_MODES = (PLAN, MANUAL, ACCEPT_EDITS, AUTO)
 DEFAULT_MODE = MANUAL
 
 # Set only by surfaces where a person is present to make a mode change
@@ -329,6 +348,133 @@ DEFAULT_MODE = MANUAL
 _ATTENDED_MODE_CHANGE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "sonder_attended_mode_change", default=False,
 )
+_BYPASS_CONFIRMED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_bypass_confirmed", default=False,
+)
+_MODE_SCOPE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "sonder_mode_scope", default=None,
+)
+_AGENT_APPROVAL_HOOK: contextvars.ContextVar[object] = contextvars.ContextVar(
+    "sonder_agent_approval_hook", default=None,
+)
+_PREAPPROVED_EXECUTION: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
+    "sonder_preapproved_execution", default=None,
+)
+_PREAPPROVED_CAPTURE: contextvars.ContextVar[dict[str, object] | None] = contextvars.ContextVar(
+    "sonder_preapproved_capture", default=None,
+)
+_SCOPED_MODES: dict[str, str] = {}
+
+LOCAL_OPEN_PRINCIPAL = "local-open"
+_MODE_SCOPE_CAPPED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_mode_scope_capped", default=False,
+)
+LOCAL_OPEN_SCOPE_REFUSAL = (
+    "refused: a local-open (unauthenticated) scope cannot hold a permission "
+    "mode above manual; set SONDER_API_KEY or SONDER_REQUIRE_ACCOUNT=1, or "
+    "work at the attended Sonder console."
+)
+
+
+def bind_unauthenticated_caller(unauthenticated: bool) -> None:
+    """Declare whether the current handler thread serves a local-open request."""
+    _MODE_SCOPE_CAPPED.set(bool(unauthenticated))
+
+
+def _is_local_open_principal(principal) -> bool:
+    return str(principal or "").strip().lower() == LOCAL_OPEN_PRINCIPAL
+
+
+def _scope_key_is_local_open(key) -> bool:
+    return _is_local_open_principal(str(key or "").split("|", 1)[0])
+
+
+def _above_manual(mode) -> bool:
+    return mode in MODES and MODES.index(mode) > MODES.index(MANUAL)
+
+
+@contextlib.contextmanager
+def capture_preapproved_scope():
+    """Collect allowed decisions from a surface gate so downstream chain gates do not double-spend."""
+    captured: dict[str, object] = {}
+    token = _PREAPPROVED_CAPTURE.set(captured)
+    try:
+        yield captured
+    finally:
+        _PREAPPROVED_CAPTURE.reset(token)
+
+
+def note_preapproved_decision(tool_name: str, decision) -> None:
+    """Record an allowed surface decision if ``capture_preapproved_scope`` is active."""
+    captured = _PREAPPROVED_CAPTURE.get()
+    if captured is None or decision is None or not getattr(decision, "allowed", False):
+        return
+    canonical = str(tool_name or "").strip().lstrip("/")
+    if canonical:
+        captured[canonical] = decision
+
+
+@contextlib.contextmanager
+def preapproved_tools_scope(decisions):
+    """Allow the immediately following dispatch of tools in ``decisions`` once without double-spending."""
+    normalized = {
+        str(name or "").strip().lstrip("/"): decision
+        for name, decision in dict(decisions or {}).items()
+        if str(name or "").strip().lstrip("/")
+        and decision is not None
+        and getattr(decision, "allowed", False)
+    }
+    if not normalized:
+        yield normalized
+        return
+    merged = dict(_PREAPPROVED_EXECUTION.get() or {})
+    merged.update(normalized)
+    token = _PREAPPROVED_EXECUTION.set(merged)
+    try:
+        yield normalized
+    finally:
+        _PREAPPROVED_EXECUTION.reset(token)
+
+
+@contextlib.contextmanager
+def preapproved_scope(tool_name: str, decision):
+    """Allow the immediately following dispatch of ``tool_name`` without double-spending a one-shot approval."""
+    canonical = str(tool_name or "").strip().lstrip("/")
+    if not canonical or decision is None or not getattr(decision, "allowed", False):
+        yield decision
+        return
+    with preapproved_tools_scope({canonical: decision}):
+        yield decision
+
+
+def consume_preapproved_decision(tool_name: str):
+    """Pop and return the pre-approved decision iff it matches ``tool_name``."""
+    entry = _PREAPPROVED_EXECUTION.get()
+    if not entry:
+        return None
+    canonical = str(tool_name or "").strip().lstrip("/")
+    if not canonical or canonical not in entry:
+        return None
+    remaining = dict(entry)
+    decision = remaining.pop(canonical, None)
+    _PREAPPROVED_EXECUTION.set(remaining or None)
+    if decision is not None and getattr(decision, "allowed", False):
+        return decision
+    return None
+
+
+@contextlib.contextmanager
+def agent_approval_hook(hook):
+    """Install a per-turn interactive approval hook for ``agent()`` dispatch refusals."""
+    token = _AGENT_APPROVAL_HOOK.set(hook)
+    try:
+        yield hook
+    finally:
+        _AGENT_APPROVAL_HOOK.reset(token)
+
+
+def current_agent_approval_hook():
+    return _AGENT_APPROVAL_HOOK.get()
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
@@ -337,6 +483,7 @@ MODE_LABELS = {
     MANUAL: "manual",
     ACCEPT_EDITS: "accept edits",
     AUTO: "auto",
+    BYPASS: "bypass",
 }
 
 # The one sentence that keeps every "ask" claim on this module's surfaces
@@ -349,8 +496,9 @@ ASK_CAVEAT = (
     "'ask' means a prompt at the console; with nobody to ask, file changes, "
     "host programs, and destructive tools are refused (write an allow rule, "
     "pick a mode that allows the class, or answer at the console), while "
-    "ask-class tools proceed and are recorded; plan denies, and tools nothing "
-    "can classify are always refused."
+    "ask-class tools proceed and are recorded; plan denies, bypass skips the "
+    "prompts but not an explicit deny rule, and tools nothing can classify are "
+    "always refused."
 )
 
 MODE_BLURBS = {
@@ -363,10 +511,11 @@ MODE_BLURBS = {
     # happens and what happens when it cannot, because both are true and only
     # one used to be said.
     AUTO: "file changes and programs proceed; destructive asks at the console, or is refused unattended",
+    BYPASS: "all non-admin tools run without prompts and root containment is bypassed (local operator/admin only)",
 }
 
 # Colour hints for whatever renders the indicator (ANSI 256 palette).
-MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221}
+MODE_COLOURS = {PLAN: 117, MANUAL: 250, ACCEPT_EDITS: 114, AUTO: 221, BYPASS: 196}
 
 # The grade ``risk_of`` returns when it CANNOT grade: an empty name, a blind
 # catalog, or a name nothing has ever heard of. Deliberately not one of the
@@ -416,9 +565,6 @@ NATIVE_MCP_WORK = {
     # claim_check (bootstrap/claim_check_agent_tools.py) only reads files the
     # repository read guard allows and writes nothing.
     "claim_check": "safe",
-    # cloud_models_status (bootstrap/cloud_models_agent_tools.py) reads the
-    # cloud model refresh state files only; no network calls, no writes.
-    "cloud_models_status": "safe",
     "test_run_result": "safe",
     # C++ build tools (bootstrap/build_tools.py). The two readers of the
     # caller's own jobs and the model reader never write or launch;
@@ -639,6 +785,11 @@ _MATRIX = {
                    "execution": ASK, "dangerous": ASK, UNCLASSIFIED: ASK},
     AUTO: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
            "execution": ALLOW, "dangerous": ASK, UNCLASSIFIED: ASK},
+    # Bypass skips the prompts for every graded class. ``unclassified`` stays
+    # ASK: "nothing could classify this" is not a prompt to skip, so a person
+    # at the console is asked and an unattended caller is refused (5a below).
+    BYPASS: {"safe": ALLOW, "ask": ALLOW, "mutation": ALLOW,
+             "execution": ALLOW, "dangerous": ALLOW, UNCLASSIFIED: ASK},
 }
 
 # Tools that start a host process. Kept here rather than imported from server
@@ -759,6 +910,47 @@ DURABLE_AUTHORITY_TOOLS = frozenset({
     "admin_login", "admin_register", "admin_set_account",
     "elevate", "permission_rule_set", "permission_approve",
 })
+
+# What ``bypass`` still holds besides the durable-authority tools. Over HTTP a
+# bypass is one principal's and one session's, but ``cloud_opt_in`` is
+# process-wide: turning it on sends every later ``cloud-*`` prompt of every
+# caller off the machine, and enabling it is explicit consent, which a skipped
+# prompt is not. Bypass holds these as it holds the durable-authority tools: an
+# unattended caller is refused, the console is asked, and an explicit allow
+# rule still lets them run, as in every other mode.
+BYPASS_HELD_TOOLS = DURABLE_AUTHORITY_TOOLS | frozenset({"cloud_opt_in"})
+
+# Consent that only a person may give. ``cloud_opt_in on`` sets
+# ``SONDER_ALLOW_CLOUD=1`` for the whole process, so every later ``cloud-*``
+# prompt, from every caller, leaves the machine. An unattended enabling call is
+# refused in every mode, including bypass, and neither an ``allow`` rule nor a
+# one-shot approval reopens it. Only the enabling form is held here: ``status``
+# reads and ``off`` revokes, and both keep the ordinary grading.
+UNATTENDED_CONSENT_TOOLS = frozenset({"cloud_opt_in"})
+
+CONSENT_PREFLIGHT_NOTE = (
+    "  arguments: action=status (enabling forms such as 'on' are refused to "
+    "every unattended caller in every mode; only the attended Sonder console "
+    "can enable it)"
+)
+
+_CONSENT_NON_ENABLING_ACTIONS = {
+    "cloud_opt_in": frozenset({
+        "status", "show", "",
+        "off", "disable", "disabled", "0", "false", "no",
+    }),
+}
+
+
+def enables_unattended_consent(tool_name: str, arguments) -> bool:
+    """True when this call of a consent tool would grant consent (fails closed)."""
+    name = str(tool_name or "").strip().lstrip("/")
+    if name not in UNATTENDED_CONSENT_TOOLS:
+        return False
+    if not isinstance(arguments, Mapping):
+        return True
+    action = str(arguments.get("action") or "status").strip().lower()
+    return action not in _CONSENT_NON_ENABLING_ACTIONS[name]
 
 _LOCK = threading.RLock()
 _STATE = {"mode": DEFAULT_MODE, "elevated": False, "elevation_reason": ""}
@@ -906,6 +1098,7 @@ def _load() -> None:
         if _LOADED:
             return
         _LOADED = True
+        _SCOPED_MODES.clear()
         try:
             with open(_state_path(), encoding="utf-8") as handle:
                 saved = json.load(handle)
@@ -914,8 +1107,19 @@ def _load() -> None:
         if not isinstance(saved, dict):
             return
         mode = str(saved.get("mode", "")).strip()
-        if mode in _MATRIX:
+        if mode in _MATRIX and mode != BYPASS:
             _STATE["mode"] = mode
+        raw_scopes = saved.get("scopes")
+        if isinstance(raw_scopes, dict):
+            for key, value in raw_scopes.items():
+                scope_key = str(key or "").strip()
+                scope_mode = str(value or "").strip()
+                # Bypass is never restored, for a scope any more than for the
+                # global mode: each entry needs a fresh, attended confirmation.
+                if scope_key and scope_mode in _MATRIX and scope_mode != BYPASS:
+                    if _scope_key_is_local_open(scope_key) and _above_manual(scope_mode):
+                        scope_mode = MANUAL
+                    _SCOPED_MODES[scope_key] = scope_mode
         # Elevation is deliberately NOT restored from disk. It is a decision
         # about this session made by whoever is at the keyboard now; silently
         # resuming it days later is exactly the surprise to avoid.
@@ -931,7 +1135,7 @@ class ModePersistenceError(ValueError):
     """
 
 
-def _write_state(mode: str) -> None:
+def _write_state(mode: str, scopes: dict[str, str] | None = None) -> None:
     """Replace the saved mode atomically; raises ``OSError`` on any failure.
 
     The temporary sibling is named ``<file>.tmp-*``, which the file-tool
@@ -940,12 +1144,23 @@ def _write_state(mode: str) -> None:
     path = _state_path()
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
+    # Never persist bypass across restarts: not as the global fallback mode,
+    # and not for any (principal, session) scope. A bypass scope lives only in
+    # this process's memory.
+    persisted_default = DEFAULT_MODE if mode == BYPASS else mode
+    payload: dict = {"mode": persisted_default}
+    kept = {
+        key: (MANUAL if _scope_key_is_local_open(key) and _above_manual(value) else value)
+        for key, value in (scopes or {}).items() if value != BYPASS
+    }
+    if kept:
+        payload["scopes"] = kept
     handle, temporary = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp-", dir=directory,
     )
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"mode": mode}, stream)
+            json.dump(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -968,26 +1183,28 @@ def _discard_saved_state() -> bool:
     return True
 
 
-def _save(previous: str) -> None:
+def _save(previous: str, *, scope: str | None = None, scope_prior: str | None = None) -> None:
     """Persist ``_STATE["mode"]`` (caller holds ``_LOCK``), failing closed.
 
-    A write that fails used to be ignored, so a lowered mode came back as the
-    old, higher one at the next start. Now:
-
-    * a raise that cannot be saved is rolled back and refused;
-    * a lowering stays in effect for this session (the safe direction), the
-      stale saved mode is removed so the next start falls back to
-      DEFAULT_MODE rather than the higher mode, and the caller is told.
+    ``scope_prior`` is the scope's own entry before the change (``None`` when it
+    had none), so a refused raise puts back exactly that: a scope that was
+    following the global mode keeps following it.
     """
-    mode = _STATE["mode"]
+    mode = _SCOPED_MODES[scope] if (scope and scope in _SCOPED_MODES) else _STATE["mode"]
     try:
-        _write_state(mode)
+        _write_state(_STATE["mode"], dict(_SCOPED_MODES) if _SCOPED_MODES else None)
         return
     except OSError as exc:
         failure = "%s: %s" % (type(exc).__name__, exc)
     order = {name: index for index, name in enumerate(MODES)}
     if order.get(mode, len(MODES)) > order.get(previous, -1):
-        _STATE["mode"] = previous
+        if scope:
+            if scope_prior in _MATRIX:
+                _SCOPED_MODES[scope] = scope_prior
+            else:
+                _SCOPED_MODES.pop(scope, None)
+        else:
+            _STATE["mode"] = previous
         raise ModePersistenceError(
             "permission mode not changed: saving %s failed (%s); the mode "
             "stays %s" % (mode, failure, previous)
@@ -1008,10 +1225,109 @@ def _save(previous: str) -> None:
 # --- mode state -----------------------------------------------------------
 
 
+def _scope_key(principal: str = "", session: str = "") -> str | None:
+    p = str(principal or "").strip()
+    s = str(session or "").strip()
+    if not p and not s:
+        return None
+    return "%s|%s" % (p, s)
+
+
+class mode_scope:
+    """Bind principal/session scope for ``permission_modes`` lookups and writes."""
+
+    def __init__(self, principal: str = "", session: str = "", *, local_open: bool = False):
+        p = str(principal or "").strip()
+        s = str(session or "").strip()
+        self._pair: tuple[str, str] | None = (p, s) if (p or s) else None
+        self._capped = bool(local_open) or _is_local_open_principal(p)
+        self._token = None
+        self._capped_token = None
+        self._owner_ctx = None
+
+    def __enter__(self):
+        self._token = _MODE_SCOPE.set(self._pair)
+        self._capped_token = _MODE_SCOPE_CAPPED.set(
+            bool(self._capped or _MODE_SCOPE_CAPPED.get())
+        )
+        principal = self._pair[0] if self._pair is not None else ""
+        if principal.startswith("account:"):
+            from sonder_runtime.adapters.security import approval_ledger
+            owner = "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+            self._owner_ctx = approval_ledger.owner_scope(owner)
+            self._owner_ctx.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        if self._owner_ctx is not None:
+            try:
+                self._owner_ctx.__exit__(*exc)
+            finally:
+                self._owner_ctx = None
+        if self._capped_token is not None:
+            _MODE_SCOPE_CAPPED.reset(self._capped_token)
+            self._capped_token = None
+        if self._token is not None:
+            _MODE_SCOPE.reset(self._token)
+        return False
+
+
+class attended_bypass_confirm:
+    """Context in which an explicit operator confirmation for ``bypass`` was given."""
+
+    def __enter__(self):
+        self._token = _BYPASS_CONFIRMED.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _BYPASS_CONFIRMED.reset(self._token)
+        return False
+
+
+def _reset_for_tests() -> None:
+    """Reset module-level permission-mode caches for isolated unit tests."""
+    global _LOADED
+    with _LOCK:
+        _LOADED = False
+        _STATE.clear()
+        _STATE.update(mode=DEFAULT_MODE, elevated=False, elevation_reason="")
+        _SCOPED_MODES.clear()
+    _MODE_SCOPE_CAPPED.set(False)
+
+
+def _scoped_mode_unlocked(pair: tuple[str, str] | None) -> str | None:
+    if pair is None:
+        return None
+    principal, session = pair
+    if session:
+        key = _scope_key(principal, session)
+        if key and key in _SCOPED_MODES:
+            return _SCOPED_MODES[key]
+    if principal:
+        pkey = _scope_key(principal, "")
+        if pkey and pkey in _SCOPED_MODES:
+            return _SCOPED_MODES[pkey]
+    return None
+
+
+def _current_mode_uncapped() -> str:
+    pair = _MODE_SCOPE.get()
+    with _LOCK:
+        scoped = _scoped_mode_unlocked(pair)
+        if scoped is not None:
+            return scoped
+        mode = _STATE["mode"]
+        if pair is not None and mode == BYPASS:
+            return DEFAULT_MODE
+        return mode
+
+
 def current_mode() -> str:
     _load()
-    with _LOCK:
-        return _STATE["mode"]
+    mode = _current_mode_uncapped()
+    if _MODE_SCOPE_CAPPED.get() and _above_manual(mode):
+        return MANUAL
+    return mode
 
 
 class attended_mode_change:
@@ -1053,17 +1369,24 @@ def unattended_escalation_refusal(target_name: str) -> str:
     """
     target = resolve_mode(target_name)
     current = current_mode()
+    if target == BYPASS and not (mode_change_attended() and _BYPASS_CONFIRMED.get()):
+        return (
+            "refused: bypass mode requires explicit attended confirmation "
+            "(run /mode bypass and confirm 'yes' at the console, or POST /v1/permission-mode "
+            "with confirm_bypass: true as an authenticated administrator; never under local-open auth); "
+            "unattended callers cannot enter bypass."
+        )
     if mode_change_attended() or not is_unattended_escalation(current, target):
         return ""
     return (
         "refused: raising the permission mode from %s to %s needs a person to "
         "confirm it, and this caller is unattended (an MCP client, the HTTP "
         "chat, or a control command). Run /mode %s at the Sonder console, or "
-        "have an administrator send POST /v1/permission-mode with the "
-        "server's API key (SONDER_API_KEY) or an admin account token "
-        "(SONDER_REQUIRE_ACCOUNT=1); a server in local-open mode, with "
-        "neither configured, refuses that raise. Lowering the mode, or "
-        "returning from plan to manual, is allowed here." % (current, target, target)
+        "have an authenticated administrator send POST /v1/permission-mode with "
+        "the server's API key (SONDER_API_KEY) or an admin account token "
+        "(SONDER_REQUIRE_ACCOUNT=1); under local-open auth, with neither "
+        "configured, that control cannot raise the mode above manual either. "
+        "Lowering the mode, or returning from plan to manual, is allowed here." % (current, target, target)
     )
 
 
@@ -1097,10 +1420,59 @@ def set_mode(name: str) -> str:
     """
     _load()
     match = resolve_mode(name)
+    pair = _MODE_SCOPE.get()
+    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
+    if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
+        raise ValueError(LOCAL_OPEN_SCOPE_REFUSAL)
+    with _LOCK:
+        if scope:
+            previous = _scoped_mode_unlocked(pair) or _STATE["mode"]
+            prior = _SCOPED_MODES.get(scope)
+            _SCOPED_MODES[scope] = match
+            _save(previous, scope=scope, scope_prior=prior)
+        else:
+            previous = _STATE["mode"]
+            _STATE["mode"] = match
+            _save(previous)
+    return match
+
+
+def set_global_mode(name: str) -> str:
+    """Set the process-global mode for every caller; returns the new mode.
+
+    The administrator's mode control (``POST /v1/permission-mode`` for any mode
+    but bypass) uses this. It ignores any bound ``mode_scope`` and clears every
+    (principal, session) scope that is not stricter than the new mode, so the
+    mode it sets is the one MCP clients, loops, autopilot and every account
+    turn now run under -- including a session that was in bypass. That makes
+    lowering it a real safety stop. It never loosens a scope: a session a user
+    put in a stricter mode (``plan`` under a new global ``auto``) keeps it.
+    Bypass is refused here: it is only ever entered for one caller's scope (or
+    at the attended console) and never applies process-wide over HTTP.
+    """
+    _load()
+    match = resolve_mode(name)
+    if match == BYPASS:
+        raise ValueError("bypass is entered per session, never as the global mode over HTTP")
+    if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
+        raise ValueError(LOCAL_OPEN_SCOPE_REFUSAL)
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
     with _LOCK:
         previous = _STATE["mode"]
+        prior_scopes = dict(_SCOPED_MODES)
         _STATE["mode"] = match
-        _save(previous)
+        for scope, scoped in prior_scopes.items():
+            if order.get(scoped, len(MODES)) >= order[match]:
+                del _SCOPED_MODES[scope]
+        try:
+            _save(previous)
+        except ModePersistenceError:
+            # A refused raise restored the global mode; the scopes it would
+            # have cleared come back too. A lowering that could not be saved
+            # still holds for this process, looser scopes cleared.
+            if _STATE["mode"] != match:
+                _SCOPED_MODES.update(prior_scopes)
+            raise
     return match
 
 
@@ -1139,19 +1511,48 @@ def set_mode_without_escalation(name: str) -> str:
         current = _STATE["mode"]
         if is_unattended_escalation(current, target):
             raise ModeEscalationRefused(current, target)
-        return set_mode(target)
+        # Verified lowering (or same mode): clear looser per-session scopes
+        # as a safety stop, even when called inside a capped local-open scope.
+        token = _MODE_SCOPE_CAPPED.set(False)
+        try:
+            return set_global_mode(target)
+        finally:
+            _MODE_SCOPE_CAPPED.reset(token)
 
 
 def cycle_mode(step: int = 1) -> str:
-    """Advance to the next mode. Backs the Shift+Tab keybinding."""
+    """Advance to the next non-bypass mode. Backs the Shift+Tab keybinding."""
     _load()
+    pair = _MODE_SCOPE.get()
+    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
     with _LOCK:
-        previous = _STATE["mode"]
-        index = MODES.index(previous)
-        _STATE["mode"] = MODES[(index + step) % len(MODES)]
-        new = _STATE["mode"]
-        _save(previous)
+        previous = (_scoped_mode_unlocked(pair) if pair is not None else None) or _STATE["mode"]
+        if previous in _CYCLE_MODES:
+            index = _CYCLE_MODES.index(previous)
+            new = _CYCLE_MODES[(index + step) % len(_CYCLE_MODES)]
+        else:
+            new = _CYCLE_MODES[0] if step >= 0 else _CYCLE_MODES[-1]
+        if _MODE_SCOPE_CAPPED.get() and _above_manual(new):
+            raise ValueError(LOCAL_OPEN_SCOPE_REFUSAL)
+        if scope:
+            prior = _SCOPED_MODES.get(scope)
+            _SCOPED_MODES[scope] = new
+            _save(previous, scope=scope, scope_prior=prior)
+        else:
+            _STATE["mode"] = new
+            _save(previous)
     return new
+
+
+def bypass_root_containment_active() -> bool:
+    """True when ``bypass`` mode is active for an unrestricted (non-user) caller."""
+    if current_mode() != BYPASS:
+        return False
+    try:
+        from sonder_runtime.adapters.security import role_tool_policy
+        return role_tool_policy.agent_refusal("file_write") == ""
+    except Exception:
+        return False
 
 
 # --- privilege axis -------------------------------------------------------
@@ -1477,8 +1878,8 @@ def approval_ledger():
     return _ledger_for(None)
 
 
-def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
-    """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "").
+def _rule_for(tool_name: str, rule_lookup) -> tuple[str | None, str, dict | None]:
+    """Resolve ``(action, pattern, rule)`` for a tool, or ``(None, "", None)``.
 
     Only ``allow``/``deny`` are meaningful here -- see the module docstring.
     A missing/failing/malformed lookup, or a rule that says ``ask`` (or
@@ -1486,17 +1887,23 @@ def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
     """
     lookup = rule_lookup if rule_lookup is not None else _rule_lookup
     if lookup is None:
-        return None, ""
+        return None, "", None
     try:
         rule = lookup(tool_name)
     except Exception:
-        return None, ""
+        return None, "", None
     if not isinstance(rule, dict):
-        return None, ""
+        return None, "", None
     action = str(rule.get("action", "")).strip().lower()
     if action not in (ALLOW, DENY):
-        return None, ""
-    return action, str(rule.get("pattern", "")).strip()
+        return None, "", None
+    return action, str(rule.get("pattern", "")).strip(), rule
+
+
+def _rule_action_for(tool_name: str, rule_lookup) -> tuple[str | None, str]:
+    """Resolve ``(action, pattern)`` for a tool via a rule lookup, or (None, "")."""
+    action, pattern, _rule = _rule_for(tool_name, rule_lookup)
+    return action, pattern
 
 
 def decide_for_caller(tool_name: str, *, interactive: bool,
@@ -1618,8 +2025,12 @@ _EFFECT_NOUNS = {
 
 
 def _modes_allowing(risk: str) -> list:
-    """Modes whose matrix already allows ``risk`` outright, least autonomous first."""
-    return [m for m in MODES if _MATRIX[m].get(risk) == ALLOW]
+    """Standard modes whose matrix allows ``risk`` outright, least autonomous first.
+
+    Excludes ``bypass`` so unattended refusals never suggest escalating into
+    unattended bypass mode without explicit operator confirmation.
+    """
+    return [m for m in _CYCLE_MODES if _MATRIX[m].get(risk) == ALLOW]
 
 
 # Surfaces whose caller reaches the approval ledger over HTTP, not at a console.
@@ -1671,7 +2082,7 @@ def _unattended_reason(name: str, active: str, risk: str, call: str = "",
 
 
 def always_asks(tool_name: str, arguments=None) -> bool:
-    """Whether this call asks every time, in every mode.
+    """Whether this call asks every time, in every mode (including bypass).
 
     Deleting files: the ``file_delete`` tool, and a host program or code
     (``git rm``, ``rm``, ``del``, ``Remove-Item``, ``os.remove``...) run
@@ -1782,11 +2193,13 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 name, source="fence", call_id=call,
             )
 
-    rule_action, rule_pattern = _rule_action_for(name, rule_lookup)
+    rule_action, rule_pattern, _rule_row = _rule_for(name, rule_lookup)
 
     # 1. An explicit deny is a narrower, written-down decision than any mode
-    #    dial, so it wins outright -- including over auto, and immune to the
-    #    unattended rule below (a real deny is never softened).
+    #    dial, so it wins outright -- including over auto and bypass, and
+    #    immune to the unattended rule below. Bypass skips ``ask`` only: every
+    #    deny rule holds in it, the shipped defaults (``file_delete``) and the
+    #    degraded-policy deny included, with no exception.
     if rule_action == DENY:
         return Decision(
             DENY, active, risk,
@@ -1805,12 +2218,49 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(DENY, active, risk, "needs elevation, which is off", name,
                         source="privilege", call_id=call)
 
+    # 2b. Consent only a person may give (UNATTENDED_CONSENT_TOOLS): refused
+    #     to every unattended caller in every mode, including bypass. Ahead of
+    #     the bypass allowance, the allow-rule branch (3) and one-shot approval.
+    if not interactive and enables_unattended_consent(name, arguments):
+        return Decision(
+            DENY, active, risk,
+            "%s would give consent that applies to every later caller, and "
+            "only a person may give it: no mode, allow rule or one-shot "
+            "approval grants it unattended; run it at the Sonder console, or "
+            "set SONDER_ALLOW_CLOUD=1 in the host configuration"
+            % (name or "(empty name)"),
+            name,
+            source="durable-authority", call_id=call,
+        )
+
+    if (
+        active == BYPASS
+        and name in BYPASS_HELD_TOOLS
+        and rule_action != ALLOW
+        and (name not in UNATTENDED_CONSENT_TOOLS or enables_unattended_consent(name, arguments))
+    ):
+        if not interactive:
+            return Decision(
+                DENY, active, risk,
+                "%s grants authority that outlives this call, and there is no "
+                "one here to be told it happened; run it from the console and "
+                "answer the prompt, or write an explicit allow rule with "
+                "/permissions" % (name or "(empty name)"),
+                name,
+                source="durable-authority", call_id=call,
+            )
+        return Decision(
+            ASK, active, risk,
+            mode_reason(ASK, active, risk),
+            name,
+            source="durable-authority", call_id=call,
+        )
+
     mode_action = _MATRIX[active].get(risk, ASK)
 
-    # 2b. Deleting files asks every time in every mode: the mode cannot allow
-    #     it, an allow rule cannot waive it, and (below) the unattended answer
-    #     is a one-shot approval of exactly this call, never a standing grant.
-    #     ``plan`` keeps denying it outright.
+    # 2c. Deleting files asks every time in every mode (including bypass): no
+    #     mode or allow rule can waive it; unattended requires a one-shot
+    #     approval bound to the exact call. ``plan`` keeps denying it outright.
     always_ask = always_asks(name, arguments)
     if always_ask and mode_action == ALLOW:
         mode_action = ASK
@@ -1922,11 +2372,15 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             name,
             source="non-interactive", call_id=call,
         )
+    decision_source = (
+        "mode:bypass" if active == BYPASS and risk == "dangerous" and action == ALLOW
+        else "mode"
+    )
     reason = mode_reason(action, active, risk)
     if always_ask and action == ASK:
         reason = "deleting files asks every time, in every mode (%s)" % reason
     return Decision(action, active, risk, reason, name,
-                    source="mode", call_id=call)
+                    source=decision_source, call_id=call)
 
 
 # Plain words for each risk class, used in the reason an operator reads at an
@@ -1952,6 +2406,19 @@ def mode_reason(action: str, mode: str, risk: str) -> str:
     what = RISK_PLAIN.get(risk, "%s commands" % risk)
     verb = {ALLOW: "allows", ASK: "asks before", DENY: "blocks"}.get(action, action)
     return "%s %s %s" % (label, verb, what)
+
+
+def render_policy_text(home, tool_name: str, mode_context_fn, permission_rules_mod) -> str:
+    """Render the effective rule + mode table for one home snapshot."""
+    rules, report = permission_rules_mod.load_report(home)
+    mode = current_mode()
+    lookup = permission_rules_mod.rule_lookup(rules)
+    table = permission_rules_mod.format_policy(
+        home, tool_name,
+        decide=lambda name: decide(name, interactive=True, mode=mode, rule_lookup=lookup),
+        snapshot=(rules, report),
+    )
+    return "%s\n\n%s\n  %s" % (table, mode_context_fn(mode), unattended_summary())
 
 
 # --- presentation ---------------------------------------------------------

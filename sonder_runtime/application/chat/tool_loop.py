@@ -1,0 +1,349 @@
+"""Bounded interactive chat-tool turn orchestration (`ChatToolTurn`).
+
+Drives native tool-calling turns inside ``/v1/chat/completions`` and ``sonder()``
+with strict wall/step/run budgets, mid-turn operator approval waits via
+``ApprovalLedger.open_for`` / ``denied_for``, SSE ``sonder_tool`` event
+callbacks, and ``TurnToolManifest`` honesty checks.
+"""
+from __future__ import annotations
+
+import contextvars
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any
+
+from sonder_runtime.application.chat.honesty import guard_unverified_run_claim
+from sonder_runtime.application.chat.tool_manifest import CallableTool, TurnToolManifest
+from sonder_runtime.domain.chat_tools import (
+    DEFAULT_CHAT_TOOL_BUDGET,
+    ChatToolBudget,
+    ChatToolRecord,
+    parse_tool_arguments,
+    preview_tool_arguments,
+)
+
+_ACTIVE_TURN: contextvars.ContextVar["ChatToolTurn | None"] = contextvars.ContextVar(
+    "sonder_active_chat_tool_turn", default=None,
+)
+
+_EXECUTION_CAP_TOOLS = frozenset({
+    "run_code", "run_project", "workspace_run", "script_run",
+    "test_run", "lint_run", "format_code", "typecheck_run", "build_run",
+})
+_CREDENTIAL_KEYS = frozenset({"token", "approval", "extra_roots", "bypass", "developer_authorized"})
+
+
+def _has_credential_argument(args: Mapping[str, Any]) -> bool:
+    return any(
+        key in args and args.get(key) not in (None, "", False, (), [], {})
+        for key in _CREDENTIAL_KEYS
+    )
+
+
+@dataclass(frozen=True)
+class ChatToolOutcome:
+    """Final output and structured records from running a ``ChatToolTurn``."""
+
+    content: str
+    records: tuple[ChatToolRecord, ...] = ()
+    model_calls: int = 0
+    usage: dict[str, Any] = field(default_factory=dict)
+    response_meta: dict[str, Any] = field(default_factory=dict)
+
+    def receipt_entries(self) -> list[dict[str, Any]]:
+        return [record.to_receipt() for record in self.records]
+
+
+@dataclass
+class ChatToolTurn:
+    """State and callbacks for one interactive chat turn that can call tools."""
+
+    manifest: TurnToolManifest
+    tools_payload: list[dict[str, Any]]
+    backend: Any
+    permission_policy: Any
+    blocked_tools: frozenset[str] = frozenset()
+    budget: ChatToolBudget = DEFAULT_CHAT_TOOL_BUDGET
+    on_tool_event: Callable[[dict[str, Any]], None] | None = None
+    wait_for_approval: Callable[[str, str, str, dict[str, Any]], str] | None = None
+    is_aborted: Callable[[], bool] | None = None
+    role_refusal: Callable[[str], str] | None = None
+    allow_system_tools: bool = False
+    records: list[ChatToolRecord] = field(default_factory=list)
+
+    def _emit(self, payload: Mapping[str, Any]) -> None:
+        if self.on_tool_event is None:
+            return
+        try:
+            self.on_tool_event(dict(payload))
+        except Exception:
+            pass
+
+    def _clip(self, text: str, limit: int) -> tuple[str, bool]:
+        if len(text) <= limit:
+            return text, False
+        return text[:limit] + f"\n... (truncated {len(text) - limit} chars)", True
+
+    def _run_tool_call(self, raw_call: Mapping[str, Any], *, run_count: int) -> tuple[str, int]:
+        fn = raw_call.get("function") if isinstance(raw_call, Mapping) else None
+        if not isinstance(fn, Mapping):
+            return "ERROR: malformed native tool call", run_count
+        name = str(fn.get("name") or "").strip().lstrip("/")
+        args = parse_tool_arguments(fn.get("arguments"))
+        backend = self.backend.backend_for(name)
+        if not name:
+            return "ERROR: tool name is required", run_count
+        if name in self.blocked_tools and not self.allow_system_tools:
+            msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
+            self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
+            return msg, run_count
+        if _has_credential_argument(args):
+            msg = f"ERROR: HOST POLICY: tool '{name}' cannot receive caller credential arguments."
+            self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
+            return msg, run_count
+        if self.role_refusal is not None and (role_refusal := self.role_refusal(name)):
+            self.records.append(ChatToolRecord("", name, "refused", backend, reason=role_refusal[:200]))
+            return role_refusal, run_count
+        if name in _EXECUTION_CAP_TOOLS and run_count >= self.budget.max_runs:
+            msg = (
+                f"ERROR: HOST POLICY: chat turn execution budget reached "
+                f"({self.budget.max_runs} execution runs per turn). Summarize with existing results."
+            )
+            self.records.append(ChatToolRecord("", name, "budget_exceeded", backend, reason=msg[:200]))
+            return msg, run_count
+
+        decision = self.permission_policy.decide(
+            name,
+            interactive=False,
+            surface="chat-tool",
+            arguments=args,
+        )
+        call_id = str(getattr(decision, "call_id", "") or "")
+        preview = preview_tool_arguments(name, args)
+
+        if not getattr(decision, "allowed", False):
+            source = str(getattr(decision, "source", "") or "")
+            if (
+                source == "unattended"
+                and call_id
+                and self.wait_for_approval is not None
+            ):
+                self._emit({
+                    "phase": "awaiting_approval",
+                    "call_id": call_id,
+                    "tool": name,
+                    "risk": str(getattr(decision, "risk", "") or ""),
+                    "mode": str(getattr(decision, "mode", "") or ""),
+                    "backend": backend,
+                    "arguments": preview["arguments"],
+                    "detail": preview["detail"],
+                    "detail_truncated": preview["detail_truncated"],
+                    "detail_chars": preview["detail_chars"],
+                    "bidi_warning": preview["bidi_warning"],
+                    "bidi_chars": preview["bidi_chars"],
+                    "timeout_seconds": int(self.budget.approval_wait_seconds),
+                })
+                outcome = self.wait_for_approval(name, call_id, decision, preview)
+                if outcome == "approved":
+                    self._emit({"phase": "approved", "call_id": call_id, "tool": name})
+                    decision = self.permission_policy.decide(
+                        name, interactive=False, surface="chat-tool", arguments=args,
+                    )
+                else:
+                    self._emit({"phase": outcome, "call_id": call_id, "tool": name})
+                    msg = f"ERROR: HOST POLICY: operator {outcome} {name} (call {call_id})."
+                    self.records.append(ChatToolRecord(
+                        call_id, name, outcome, backend,
+                        bidi_warning=bool(preview["bidi_warning"]),
+                        bidi_chars=tuple(preview["bidi_chars"]),
+                        reason=msg[:200],
+                    ))
+                    return msg, run_count
+            if not getattr(decision, "allowed", False):
+                msg = f"ERROR: HOST POLICY: {getattr(decision, 'reason', 'refused')}"
+                self.records.append(ChatToolRecord(
+                    call_id, name, "refused", backend,
+                    bidi_warning=bool(preview["bidi_warning"]),
+                    bidi_chars=tuple(preview["bidi_chars"]),
+                    reason=msg[:200],
+                ))
+                return msg, run_count
+
+        self._emit({
+            "phase": "started",
+            "call_id": call_id,
+            "tool": name,
+            "backend": backend,
+            "bidi_warning": preview["bidi_warning"],
+            "bidi_chars": preview["bidi_chars"],
+        })
+        exec_result = self.backend.execute(name, args)
+        new_runs = run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
+        clipped_model, truncated = self._clip(exec_result.output, self.budget.model_output_chars)
+        status = "ok" if exec_result.ok else ("timeout" if exec_result.timed_out else "error")
+        self.records.append(ChatToolRecord(
+            call_id=call_id,
+            tool=name,
+            status=status,
+            backend=exec_result.backend,
+            duration_ms=exec_result.duration_ms,
+            exit_code=exec_result.exit_code,
+            timed_out=exec_result.timed_out,
+            truncated=truncated,
+            bidi_warning=bool(preview["bidi_warning"]),
+            bidi_chars=tuple(preview["bidi_chars"]),
+            stdout_preview=exec_result.stdout_preview,
+            stderr_preview=exec_result.stderr_preview,
+            reason=exec_result.reason,
+        ))
+        self._emit({
+            "phase": "finished",
+            "call_id": call_id,
+            "tool": name,
+            "ok": exec_result.ok,
+            "status": status,
+            "backend": exec_result.backend,
+            "exit_code": exec_result.exit_code,
+            "duration_ms": exec_result.duration_ms,
+        })
+        return clipped_model, new_runs
+
+    def run(
+        self,
+        generate_step: Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], dict[str, Any]],
+        *,
+        system: str,
+        prompt: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> ChatToolOutcome:
+        """Execute up to ``budget.max_model_calls`` model/tool turns."""
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        if history:
+            messages.extend(dict(item) for item in history)
+        messages.append({"role": "user", "content": prompt})
+
+        started = time.monotonic()
+        run_count = 0
+        tool_calls_total = 0
+        calls = 0
+        total_in = 0
+        total_out = 0
+        last_meta: dict[str, Any] = {}
+        final_content = ""
+
+        while calls < self.budget.max_model_calls:
+            if self.is_aborted is not None and self.is_aborted():
+                break
+            if (time.monotonic() - started) >= self.budget.wall_seconds:
+                break
+            calls += 1
+            step_tools = self.tools_payload if calls < self.budget.max_model_calls else None
+            step = generate_step(messages, step_tools)
+            message = step.get("message") if isinstance(step, Mapping) else {}
+            if not isinstance(message, Mapping):
+                message = {}
+            usage = step.get("usage") if isinstance(step, Mapping) else None
+            if isinstance(usage, Mapping):
+                total_in += int(usage.get("tokens_in") or 0)
+                total_out += int(usage.get("tokens_out") or 0)
+            meta = step.get("meta") if isinstance(step, Mapping) else None
+            if isinstance(meta, Mapping):
+                last_meta = dict(meta)
+
+            tool_calls = message.get("tool_calls")
+            content = str(message.get("content") or step.get("content") or "")
+            if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
+                final_content = content
+                break
+
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+            assistant_msg["tool_calls"] = list(tool_calls)
+            messages.append(assistant_msg)
+            stopped_early = False
+            for raw_call in tool_calls:
+                if self.is_aborted is not None and self.is_aborted():
+                    stopped_early = True
+                    break
+                if (time.monotonic() - started) >= self.budget.wall_seconds:
+                    stopped_early = True
+                    break
+                tool_name = str(((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or "")
+                if tool_calls_total >= self.budget.max_tool_calls:
+                    msg = (
+                        f"ERROR: HOST POLICY: chat turn tool-call budget reached "
+                        f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
+                    )
+                    backend = self.backend.backend_for(tool_name) if tool_name else "host"
+                    self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
+                    messages.append({"role": "tool", "name": tool_name, "content": msg})
+                    break
+                tool_calls_total += 1
+                obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
+                messages.append({"role": "tool", "name": tool_name, "content": obs})
+            if stopped_early:
+                break
+        else:
+            final_content = final_content or "Reached the per-turn tool-call limit before completing a final reply."
+
+        if not final_content.strip():
+            final_content = "Turn ended without a final assistant answer."
+        final_content = guard_unverified_run_claim(final_content, self.records)
+        return ChatToolOutcome(
+            content=final_content,
+            records=tuple(self.records),
+            model_calls=calls,
+            usage={"tokens_in": total_in, "tokens_out": total_out, "token_source": "chat_tool_loop"},
+            response_meta=last_meta,
+        )
+
+
+@contextmanager
+def bind_turn(turn: ChatToolTurn | None) -> Iterator[ChatToolTurn | None]:
+    token = _ACTIVE_TURN.set(turn)
+    try:
+        yield turn
+    finally:
+        _ACTIVE_TURN.reset(token)
+
+
+def current_turn() -> ChatToolTurn | None:
+    return _ACTIVE_TURN.get()
+
+
+def build_tool_turn_manifest(
+    *,
+    admitted_tools: Sequence[str],
+    user_run_command: bool,
+    mode: str,
+    container_active: bool = False,
+) -> TurnToolManifest:
+    """Build the authoritative ``TurnToolManifest`` for an active chat-tool turn."""
+    callable_entries: list[CallableTool] = []
+    seen: set[str] = set()
+    for raw in admitted_tools:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if name == "run_code":
+            backend = "container" if container_active else "host"
+            note = f"python/js/powershell; mode={mode}; backend={backend}"
+        elif name == "tool_search":
+            note = "discover other Sonder tools by query or name"
+        else:
+            note = f"mode={mode}"
+        callable_entries.append(CallableTool(name, note))
+    return TurnToolManifest(tuple(callable_entries), user_run_command=bool(user_run_command))
+
+
+__all__ = [
+    "ChatToolOutcome",
+    "ChatToolTurn",
+    "bind_turn",
+    "build_tool_turn_manifest",
+    "current_turn",
+]

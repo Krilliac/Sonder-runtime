@@ -19,6 +19,7 @@
 library;
 
 import '../api.dart' show ActivityResponse, ActivityStatus;
+import '../api/stream.dart' show ChatStreamToolEvent;
 
 /// Activity kinds with a clearer word than the REPL's fallback.
 const _namedPhases = <String, String>{
@@ -26,6 +27,8 @@ const _namedPhases = <String, String>{
   'model_retry': 'retrying',
   'model_context_compaction': 'compacting context',
   'work_plan': 'planning',
+  'approval_wait': 'awaiting approval',
+  'awaiting_approval': 'awaiting approval',
 };
 
 /// The kind of [span]'s newest event (`tool_call`, `model_call`, …), or
@@ -66,6 +69,7 @@ class TurnProgress {
       : _preexisting = preexisting;
 
   bool _opened = false;
+  bool _awaitingApproval = false;
   String? _activityPhase;
   String? _spanId;
   String? _activityKey;
@@ -79,6 +83,7 @@ class TurnProgress {
 
   /// The phase to show now.
   String get phase {
+    if (_awaitingApproval) return 'awaiting approval';
     if (_wroteAt > _activityAt) return 'writing';
     return _activityPhase ?? (_opened ? 'thinking' : 'routing');
   }
@@ -94,12 +99,39 @@ class TurnProgress {
   /// Answer text arrived.
   bool wrote() {
     final before = phase;
+    _awaitingApproval = false;
     _wroteAt = ++_clock;
     return phase != before;
   }
 
+  /// A `sonder_tool` SSE event arrived.
+  bool toolEvent(ChatStreamToolEvent event) {
+    final before = phase;
+    _activityAt = ++_clock;
+    switch (event.state) {
+      case 'awaiting_approval':
+        _awaitingApproval = true;
+        _activityPhase = 'awaiting approval';
+      case 'approved':
+      case 'running':
+        _awaitingApproval = false;
+        _activityPhase = event.tool.isNotEmpty ? event.tool : 'tool';
+      case 'done':
+      case 'denied':
+      case 'expired':
+      case 'refused':
+        _awaitingApproval = false;
+        _activityPhase = 'thinking';
+      default:
+        _awaitingApproval = false;
+        _activityPhase = event.tool.isNotEmpty ? event.tool : 'tool';
+    }
+    return phase != before || event.state == 'awaiting_approval';
+  }
+
   /// A status reading arrived; [activity] is its activity section, if any.
   bool observe(ActivityStatus? activity) {
+    if (_awaitingApproval) return false;
     final span = _spanOf(activity);
     if (span == null) return false;
     final key = [

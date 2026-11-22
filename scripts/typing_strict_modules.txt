@@ -14,6 +14,7 @@ sonder_runtime/adapters/build/__init__.py
 sonder_runtime/adapters/build/candidates.py
 sonder_runtime/adapters/build/fix_effect_verifier.py
 sonder_runtime/adapters/chat_observers.py
+sonder_runtime/adapters/chat_run_backend.py
 sonder_runtime/adapters/chat_temperature.py
 sonder_runtime/adapters/chat_tool_manifest.py
 sonder_runtime/adapters/claim_checker.py
@@ -239,12 +240,14 @@ sonder_runtime/application/capabilities/lifecycle.py
 sonder_runtime/application/capabilities/observability.py
 sonder_runtime/application/chat/__init__.py
 sonder_runtime/application/chat/admission_wait_status.py
+sonder_runtime/application/chat/bidi.py
 sonder_runtime/application/chat/handoff_receipts.py
 sonder_runtime/application/chat/honesty.py
 sonder_runtime/application/chat/model_fitness.py
 sonder_runtime/application/chat/reference_lookup.py
 sonder_runtime/application/chat/stream_sink.py
 sonder_runtime/application/chat/tool_intent.py
+sonder_runtime/application/chat/tool_loop.py
 sonder_runtime/application/chat/tool_manifest.py
 sonder_runtime/application/command_surface/__init__.py
 sonder_runtime/application/command_surface/command_text.py
@@ -484,6 +487,7 @@ sonder_runtime/bootstrap/anthropic_cli.py
 sonder_runtime/bootstrap/batch_job_executor.py
 sonder_runtime/bootstrap/batch_job_tools.py
 sonder_runtime/bootstrap/capabilities.py
+sonder_runtime/bootstrap/chat_tools_wiring.py
 sonder_runtime/bootstrap/claim_check_agent_tools.py
 sonder_runtime/bootstrap/cloud_models_agent_tools.py
 sonder_runtime/bootstrap/cloud_models_cli.py
@@ -539,6 +543,7 @@ sonder_runtime/domain/campaign_prompt.py
 sonder_runtime/domain/cancellation_tree.py
 sonder_runtime/domain/chat_model_fitness.py
 sonder_runtime/domain/chat_template_policy.py
+sonder_runtime/domain/chat_tools.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py
 sonder_runtime/domain/cloud_model_policy.py
@@ -682,6 +687,7 @@ sonder_runtime/interfaces/cli/__init__.py
 sonder_runtime/interfaces/cli/headless.py
 sonder_runtime/interfaces/editor/__init__.py
 sonder_runtime/interfaces/http/__init__.py
+sonder_runtime/interfaces/http/chat_tool_stream.py
 sonder_runtime/interfaces/http/facades/__init__.py
 sonder_runtime/interfaces/http/facades/client_protocol.py
 sonder_runtime/interfaces/http/facades/compute_fabric.py

@@ -5,8 +5,18 @@ programs, destructive tools -- when nobody is present to answer a mode's
 ``ask``. This ledger is the fourth route out, next to an allow rule, a mode
 that allows the class, and the console prompt: an operator approves *exactly
 one call* (one tool, one argument digest) and the next unchanged call from
-any surface runs once. Nothing here widens a rule, nothing survives one use
-or its expiry, and the ledger never stores bulk payloads with one exception: a
+any surface runs once -- the next one made by the owner whose refused call it
+answers: an account's turns record and spend under that account's owner key,
+the operator's own surfaces under the unowned key ''. Only an explicit
+``operator_scope`` (bound by the console and the MCP entry after an
+admin-level check, and by the HTTP routes for an administrator) sees and
+approves every owner's calls; with no scope bound a caller sees exactly the
+unowned ones; an account sees only its own; a developer its own plus the
+unowned ones. Approve and deny bind to the exact pending row (its owner and
+digest): two owners with an identical call get one reference each,
+``<call id>@<owner tag>``, and the owner is never guessed. Nothing here widens
+a rule, nothing survives one use or its expiry, and the ledger never stores
+bulk payloads with one exception: a
 ``run_code`` pending call carries a bounded, redacted copy of its code
 (``detail``) so the operator can read what they approve. Otherwise the digest
 and a bounded, redacted preview of the rest are what an operator sees and
@@ -60,13 +70,14 @@ from __future__ import annotations
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
 import contextlib
+import contextvars
 import json
 import re
 import secrets
 import sqlite3
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator, Sequence, Union
 
@@ -100,6 +111,7 @@ _BARE_PREVIEW_TOKEN = re.compile(r"[!#-<>-~]+\Z")
 # shown unquoted.
 PreviewField = tuple[str, str, bool]
 Preview = Union[str, Sequence[PreviewField]]
+UNOWNED_TAG = "-"
 PENDING_RETENTION_SECONDS = 7 * 86_400
 APPROVAL_RETENTION_SECONDS = 30 * 86_400
 DATABASE_NAME = "approvals.db"
@@ -108,7 +120,8 @@ DATABASE_ENV = "SONDER_APPROVALS_DB"
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS pending_calls (
-        digest TEXT PRIMARY KEY,
+        owner TEXT NOT NULL DEFAULT '',
+        digest TEXT NOT NULL,
         tool TEXT NOT NULL,
         surface TEXT NOT NULL DEFAULT '',
         preview TEXT NOT NULL DEFAULT '',
@@ -117,12 +130,14 @@ _SCHEMA = (
         count INTEGER NOT NULL DEFAULT 1,
         detail TEXT NOT NULL DEFAULT '',
         denied_ts REAL,
-        detail_chars INTEGER NOT NULL DEFAULT 0
+        detail_chars INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner, digest)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS approvals (
         nonce TEXT PRIMARY KEY,
+        owner TEXT NOT NULL DEFAULT '',
         tool TEXT NOT NULL,
         digest TEXT NOT NULL,
         approver TEXT NOT NULL,
@@ -135,7 +150,7 @@ _SCHEMA = (
         revoked_ts REAL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS approvals_call ON approvals (tool, digest)",
+    "CREATE INDEX IF NOT EXISTS approvals_call ON approvals (owner, tool, digest)",
 )
 
 # Columns added after the first release: a database created by an older build
@@ -147,15 +162,145 @@ _PENDING_COLUMNS = (
     ("detail_chars", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# Who is asking. ``None`` means no owner scope was ever bound on this context;
+# it reads, writes and approves exactly the unowned ('') rows, the same as
+# ``owner_scope("")``. It never grants the all-owners view: that takes an
+# explicit ``operator_scope``, so a path that loses its context (a thread
+# started without ``copy_context``) fails closed. An account turn always binds
+# its owner key (``permission_modes.mode_scope`` does it for every
+# ``account:`` principal).
+_OWNER_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sonder_approval_ledger_owner", default=None
+)
+_INCLUDE_UNOWNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_approval_ledger_include_unowned", default=False
+)
+_ALL_OWNERS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_approval_ledger_all_owners", default=False
+)
+
+
+@contextlib.contextmanager
+def owner_scope(owner: str = "", *, include_unowned: bool = False,
+                all_owners: bool = False) -> Iterator[None]:
+    """Bind the active principal owner key for approval ledger operations.
+
+    ``include_unowned`` adds the unowned ('') rows to the owner's view (a
+    developer). ``all_owners`` is the operator view (an administrator, or the
+    single-owner local-open / deployment-key listener): it reads, resolves,
+    approves, denies and revokes every owner's calls. Writes made on the
+    caller's own behalf (``record_pending``, ``consume``, ``restore``) and the
+    waiting-turn queries (``open_for``, ``denied_for``, ``get``) always use
+    exactly the bound owner key.
+    """
+    token = _OWNER_SCOPE.set(str(owner or "").strip())
+    unowned_token = _INCLUDE_UNOWNED.set(bool(include_unowned))
+    all_token = _ALL_OWNERS.set(bool(all_owners))
+    try:
+        yield
+    finally:
+        _ALL_OWNERS.reset(all_token)
+        _INCLUDE_UNOWNED.reset(unowned_token)
+        _OWNER_SCOPE.reset(token)
+
+
+def operator_scope() -> contextlib.AbstractContextManager[None]:
+    """The operator view: every owner's pending calls and approvals.
+
+    Bind it only after an admin-level check (the attended console, an
+    administrator's token or session, the deployment key).
+    """
+    return owner_scope("", all_owners=True)
+
+
+def current_owner() -> str:
+    return _OWNER_SCOPE.get() or ""
+
+
+def operator_view() -> bool:
+    """True when this context sees every owner's calls.
+
+    Only inside an explicit ``operator_scope`` / ``owner_scope(all_owners=True)``.
+    An unbound context is not the operator: it sees the unowned rows only.
+    """
+    return bool(_ALL_OWNERS.get())
+
+
+def owner_tag(owner: str) -> str:
+    """The owner part of a call reference: the whole owner key, so two owners
+    never share one (a prefix of it can collide), and ``-`` for the unowned key.
+    ``resolve_call`` still accepts any typed prefix of it."""
+    owner = str(owner or "")
+    return owner if owner else UNOWNED_TAG
+
+
+def call_ref(digest: str, owner: str = "") -> str:
+    """What an operator types to name exactly one pending row: the call id
+    qualified by its owner tag, ``<call id>@<owner tag>``; the unowned row is
+    ``<call id>@-``. The bare call id stays accepted while only one owner has
+    that call pending, but it is never shown, since a second owner's identical
+    call would make it ambiguous."""
+    return "%s@%s" % (call_id(digest), owner_tag(owner))
+
+
+def _split_ref(text: str) -> tuple[str, str | None]:
+    """``(lowercased digest prefix, owner tag or None)`` from a call reference."""
+    head, sep, tag = str(text or "").strip().partition("@")
+    return head.strip().lower(), (tag.strip() if sep else None)
+
+
+_ALL = "all"
+_WITH_UNOWNED = "with_unowned"
+_EXACT = "exact"
+
+
+def _read_scope(owner: str | None, include_unowned: bool | None) -> tuple[str, str]:
+    """``(kind, owner_key)`` for an operator-facing read or resolve.
+
+    An explicit ``owner`` argument is always exact (plus unowned rows when
+    ``include_unowned`` is true); only the bound context can grant the
+    operator view.
+    """
+    if owner is None:
+        owner_key = current_owner()
+        if operator_view():
+            return _ALL, owner_key
+        unowned = _INCLUDE_UNOWNED.get() if include_unowned is None else bool(include_unowned)
+    else:
+        owner_key = str(owner or "").strip()
+        unowned = bool(include_unowned)
+    if unowned and owner_key:
+        return _WITH_UNOWNED, owner_key
+    return _EXACT, owner_key
+
+
+def _owner_sql(kind: str, owner_key: str) -> tuple[str, tuple[str, ...]]:
+    if kind == _ALL:
+        return "1=1", ()
+    if kind == _WITH_UNOWNED:
+        return "owner IN (?, '')", (owner_key,)
+    return "owner=?", (owner_key,)
+
+
+def _prefer_own(kind: str, owner_key: str, rows: list) -> list:
+    """In an own-plus-unowned view (a developer), the caller's own row of a
+    call also pending unowned: the caller's own call, not a guess between
+    owners. Every other view, the operator's included, keeps all the rows."""
+    if kind != _WITH_UNOWNED:
+        return rows
+    own = [row for row in rows if str(row["owner"]) == owner_key]
+    return own or rows
+
+
 # One definition of "spendable" shared by ``open_for`` and ``consume``, so the
 # query and the spend can only disagree by a race: not consumed, not revoked,
 # not expired, and the pending call has not been denied within the denial TTL.
-# Parameters: tool, digest, now, now - DENIAL_TTL_SECONDS.
+# Parameters: owner, tool, digest, now, owner, now - DENIAL_TTL_SECONDS.
 _SPENDABLE = (
-    "tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL "
+    "owner=? AND tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL "
     "AND expires_ts > ? "
     "AND NOT EXISTS (SELECT 1 FROM pending_calls p "
-    "WHERE p.digest=approvals.digest AND p.denied_ts IS NOT NULL AND p.denied_ts > ?)"
+    "WHERE p.owner=? AND p.digest=approvals.digest AND p.denied_ts IS NOT NULL AND p.denied_ts > ?)"
 )
 
 
@@ -167,6 +312,13 @@ class ApprovalDeniedError(ApprovalLedgerError):
     """``issue`` refused: an operator denied this call and the denial still stands."""
 
     denied = True
+
+
+class AmbiguousCallError(ApprovalLedgerError):
+    """A call id that names more than one call, or one call pending for more
+    than one owner; the message lists the references that each name one row."""
+
+    ambiguous = True
 
 
 def call_id(digest: str) -> str:
@@ -282,6 +434,7 @@ class PendingCall:
     detail: str = ""
     denied_ts: float | None = None
     detail_chars: int = 0
+    owner: str = ""
 
     @property
     def call_id(self) -> str:
@@ -291,6 +444,11 @@ class PendingCall:
     def complete(self) -> bool:
         """The preview shows everything an approval of this call covers."""
         return preview_complete(self.preview)
+
+    @property
+    def ref(self) -> str:
+        """The reference that names exactly this row (see ``call_ref``)."""
+        return call_ref(self.digest, self.owner)
 
     @property
     def denied(self) -> bool:
@@ -315,6 +473,9 @@ class Approval:
     consumed_ts: float | None = None
     consumed_surface: str = ""
     revoked_ts: float | None = None
+    owner: str = ""
+    # Set only on the value ``issue`` returns: it cleared a standing denial.
+    overrode_denial: bool = field(default=False, compare=False)
 
     @property
     def call_id(self) -> str:
@@ -375,6 +536,11 @@ class ApprovalLedger:
             return self._path
         return runtime_paths.state_path(DATABASE_NAME, DATABASE_ENV)
 
+    def scope(self, owner: str = "", *, include_unowned: bool = False,
+              all_owners: bool = False) -> contextlib.AbstractContextManager[None]:
+        """Bind the principal owner scope for approval ledger calls (see ``owner_scope``)."""
+        return owner_scope(owner, include_unowned=include_unowned, all_owners=all_owners)
+
     def pinned(self):
         """Resolve configuration once for one multi-operation host decision.
 
@@ -395,7 +561,7 @@ class ApprovalLedger:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         conn = owned_sqlite_connect(path, timeout=5.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        for statement in _SCHEMA:
+        for statement in _SCHEMA[:2]:
             conn.execute(statement)
         existing = {str(r["name"]) for r in conn.execute("PRAGMA table_info(pending_calls)")}
         for name, ddl in _PENDING_COLUMNS:
@@ -407,6 +573,60 @@ class ApprovalLedger:
                 # A concurrent connection added it first.
                 if "duplicate column" not in str(exc).lower():
                     raise
+        if "owner" not in existing:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                still = {str(r["name"]) for r in conn.execute("PRAGMA table_info(pending_calls)")}
+                if "owner" not in still:
+                    # One statement at a time: ``executescript`` would COMMIT
+                    # the BEGIN IMMEDIATE above first, so a racing upgrader
+                    # could see the table gone between DROP and RENAME, and a
+                    # crash there would leave pending_calls_v2 orphaned. As
+                    # separate statements the rebuild is one transaction, and
+                    # an orphan a pre-fix build left behind is dropped first.
+                    conn.execute("DROP TABLE IF EXISTS pending_calls_v2")
+                    conn.execute(
+                        """
+                        CREATE TABLE pending_calls_v2 (
+                            owner TEXT NOT NULL DEFAULT '',
+                            digest TEXT NOT NULL,
+                            tool TEXT NOT NULL,
+                            surface TEXT NOT NULL DEFAULT '',
+                            preview TEXT NOT NULL DEFAULT '',
+                            first_ts REAL NOT NULL,
+                            last_ts REAL NOT NULL,
+                            count INTEGER NOT NULL DEFAULT 1,
+                            detail TEXT NOT NULL DEFAULT '',
+                            denied_ts REAL,
+                            detail_chars INTEGER NOT NULL DEFAULT 0,
+                            PRIMARY KEY (owner, digest)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO pending_calls_v2
+                            (owner, digest, tool, surface, preview, first_ts, last_ts, count, detail, denied_ts, detail_chars)
+                        SELECT '', digest, tool, surface, preview, first_ts, last_ts, count, detail, denied_ts, detail_chars
+                        FROM pending_calls
+                        """
+                    )
+                    conn.execute("DROP TABLE pending_calls")
+                    conn.execute("ALTER TABLE pending_calls_v2 RENAME TO pending_calls")
+                if conn.in_transaction:
+                    conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+        approval_cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(approvals)")}
+        if "owner" not in approval_cols:
+            try:
+                conn.execute("ALTER TABLE approvals ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        conn.execute(_SCHEMA[2])
         return conn
 
     @contextlib.contextmanager
@@ -490,7 +710,7 @@ class ApprovalLedger:
     # -- pending calls -----------------------------------------------------
 
     def record_pending(self, tool: str, digest: str, *, surface: str = "",
-                       preview: Preview = "", detail: str = "") -> PendingCall:
+                       preview: Preview = "", detail: str = "", owner: str | None = None) -> PendingCall:
         """Note one refused effect-class call so an operator can approve it.
 
         A denial of the same digest within ``DENIAL_TTL_SECONDS`` is kept, so a
@@ -501,6 +721,7 @@ class ApprovalLedger:
         digest = str(digest or "").strip().lower()
         if not tool or len(digest) != 64:
             raise ApprovalLedgerError("a pending call needs a tool and a full digest")
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         now = time.time()
         clean = self._clean_preview(preview)
         clean_detail, detail_chars = self._clean_detail(detail)
@@ -508,10 +729,10 @@ class ApprovalLedger:
             self._prune(conn, now)
             conn.execute(
                 """
-                INSERT INTO pending_calls (digest, tool, surface, preview, first_ts, last_ts,
+                INSERT INTO pending_calls (owner, digest, tool, surface, preview, first_ts, last_ts,
                                            count, detail, detail_chars)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-                ON CONFLICT(digest) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(owner, digest) DO UPDATE SET
                     last_ts=excluded.last_ts,
                     surface=excluded.surface,
                     preview=CASE WHEN excluded.preview != '' THEN excluded.preview ELSE preview END,
@@ -522,37 +743,71 @@ class ApprovalLedger:
                                    THEN denied_ts ELSE NULL END,
                     count=count+1
                 """,
-                (digest, tool, str(surface or ""), clean, now, now, clean_detail,
+                (owner_key, digest, tool, str(surface or ""), clean, now, now, clean_detail,
                  detail_chars, now - DENIAL_TTL_SECONDS),
             )
             row = conn.execute(
-                "SELECT * FROM pending_calls WHERE digest=?", (digest,)
+                "SELECT * FROM pending_calls WHERE owner=? AND digest=?", (owner_key, digest)
             ).fetchone()
         return self._pending(row)
 
-    def resolve_call(self, call_id_or_digest: str) -> PendingCall:
-        """The one pending call whose digest starts with ``call_id_or_digest``."""
-        prefix = str(call_id_or_digest or "").strip().lower()
+    def resolve_call(self, call_id_or_digest: str, *, owner: str | None = None,
+                     include_unowned: bool | None = None) -> PendingCall:
+        """The one pending row ``call_id_or_digest`` names.
+
+        The reference is a digest prefix (the call id), optionally qualified by
+        an owner tag, ``<call id>@<owner tag>`` (``@-`` names the unowned key).
+        A call pending for more than one owner in this view (the same tool and
+        arguments) raises ``AmbiguousCallError`` listing each row's reference:
+        the owner is never guessed. A developer's own-plus-unowned view
+        resolves a bare id to the developer's own row (``_prefer_own``).
+        """
+        prefix, tag = _split_ref(call_id_or_digest)
         if len(prefix) < MIN_CALL_ID_CHARS or any(c not in "0123456789abcdef" for c in prefix):
             raise ApprovalLedgerError(
                 "a call id is at least %d hex characters (see /approvals)" % MIN_CALL_ID_CHARS
             )
+        if tag is not None and not tag:
+            raise ApprovalLedgerError("an owner tag follows '@' (see /approvals)")
+        kind, owner_key = _read_scope(owner, include_unowned)
+        where, params = _owner_sql(kind, owner_key)
+        if tag == UNOWNED_TAG:
+            where += " AND owner=''"
+        elif tag is not None:
+            where, params = where + " AND substr(owner, 1, ?)=?", (*params, len(tag), tag)
         with self._read() as conn:
-            rows = conn.execute(
-                "SELECT * FROM pending_calls WHERE digest LIKE ? ORDER BY last_ts DESC LIMIT 2",
-                (prefix + "%",),
+            digests = conn.execute(
+                "SELECT DISTINCT digest FROM pending_calls WHERE " + where
+                + " AND digest LIKE ? LIMIT 2",
+                (*params, prefix + "%"),
             ).fetchall()
-        if not rows:
-            raise ApprovalLedgerError("no pending call starts with %r" % prefix)
+            if not digests:
+                raise ApprovalLedgerError("no pending call starts with %r%s" % (
+                    prefix, "" if tag is None else " for owner %s" % tag))
+            if len(digests) > 1:
+                raise AmbiguousCallError("call id %r is ambiguous; give more characters" % prefix)
+            rows = conn.execute(
+                "SELECT * FROM pending_calls WHERE " + where
+                + " AND digest=? ORDER BY last_ts DESC LIMIT 20",
+                (*params, str(digests[0]["digest"])),
+            ).fetchall()
+        rows = _prefer_own(kind, owner_key, rows)
         if len(rows) > 1:
-            raise ApprovalLedgerError("call id %r is ambiguous; give more characters" % prefix)
+            raise AmbiguousCallError(
+                "call %s is pending for more than one owner; name one: %s" % (
+                    call_id(str(rows[0]["digest"])),
+                    ", ".join(call_ref(str(r["digest"]), str(r["owner"])) for r in rows))
+            )
         return self._pending(rows[0])
 
-    def pending(self, limit: int = 20) -> list[PendingCall]:
+    def pending(self, limit: int = 20, *, owner: str | None = None,
+                include_unowned: bool | None = None) -> list[PendingCall]:
+        kind, owner_key = _read_scope(owner, include_unowned)
+        where, params = _owner_sql(kind, owner_key)
         with self._read() as conn:
             rows = conn.execute(
-                "SELECT * FROM pending_calls ORDER BY last_ts DESC LIMIT ?",
-                (max(1, min(int(limit), 200)),),
+                "SELECT * FROM pending_calls WHERE " + where + " ORDER BY last_ts DESC LIMIT ?",
+                (*params, max(1, min(int(limit), 200))),
             ).fetchall()
         return [self._pending(row) for row in rows]
 
@@ -560,7 +815,7 @@ class ApprovalLedger:
 
     def issue(self, tool: str, digest: str, *, approver: str, surface: str = "",
               ttl_seconds: int = DEFAULT_TTL_SECONDS, preview: Preview = "",
-              override_denial: bool = False) -> Approval:
+              override_denial: bool = False, owner: str | None = None) -> Approval:
         """Approve exactly one future call of ``tool`` with argument ``digest``.
 
         Raises ``ApprovalDeniedError`` while an operator's denial of this call
@@ -568,6 +823,15 @@ class ApprovalLedger:
         transaction, so it serialises with ``deny``. ``override_denial=True``
         clears the denial and issues in that same transaction; only the
         console ``/approve`` command passes it.
+
+        The approval belongs to the owner whose pending call it answers, so
+        that owner's next unchanged call spends it. A caller that resolved a
+        pending row passes that row's ``owner``. Without one, in a view wider
+        than one owner (the operator, a developer), it is the one owner in view
+        with this call pending (a developer's own row first); more than one
+        raises ``AmbiguousCallError`` instead of guessing. With no pending call to answer it belongs to the
+        caller's own owner. The returned approval has ``overrode_denial`` set
+        when it cleared a standing denial.
         """
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
@@ -576,14 +840,35 @@ class ApprovalLedger:
             raise ApprovalLedgerError("an approval needs a tool and a full digest")
         if not approver:
             raise ApprovalLedgerError("an approval must name who approved it")
+        if owner is None:
+            kind, owner_key = _read_scope(None, None)
+        else:
+            kind, owner_key = _EXACT, str(owner or "").strip()
         ttl = clamp_ttl(ttl_seconds)
         now = time.time()
         nonce = "apv_" + secrets.token_hex(8)
         clean = self._clean_preview(preview)
         with self._write() as conn:
             self._prune(conn, now)
+            if kind != _EXACT:
+                where, params = _owner_sql(kind, owner_key)
+                matches = conn.execute(
+                    "SELECT owner FROM pending_calls WHERE " + where + " AND digest=? LIMIT 20",
+                    (*params, digest),
+                ).fetchall()
+                matches = _prefer_own(kind, owner_key, matches)
+                if len(matches) > 1:
+                    raise AmbiguousCallError(
+                        "call %s is pending for more than one owner; approve one by its "
+                        "reference: %s" % (call_id(digest), ", ".join(
+                            call_ref(digest, str(m["owner"])) for m in matches))
+                    )
+                if matches:
+                    owner_key = str(matches[0]["owner"])
+            overrode = False
             row = conn.execute(
-                "SELECT preview, denied_ts FROM pending_calls WHERE digest=?", (digest,)
+                "SELECT preview, denied_ts FROM pending_calls WHERE owner=? AND digest=?",
+                (owner_key, digest),
             ).fetchone()
             if (row is not None and row["denied_ts"] is not None
                     and float(row["denied_ts"]) > now - DENIAL_TTL_SECONDS):
@@ -593,7 +878,11 @@ class ApprovalLedger:
                         "or approved at the console, before it can be approved"
                         % (call_id(digest), DENIAL_TTL_SECONDS // 60)
                     )
-                conn.execute("UPDATE pending_calls SET denied_ts=NULL WHERE digest=?", (digest,))
+                conn.execute(
+                    "UPDATE pending_calls SET denied_ts=NULL WHERE owner=? AND digest=?",
+                    (owner_key, digest),
+                )
+                overrode = True
             stored = str(row["preview"]) if row is not None else ""
             # The pending call's own preview (``/approve <call id>``) is
             # already clean; running the redactor over it again could eat
@@ -602,47 +891,52 @@ class ApprovalLedger:
                 clean = stored
             conn.execute(
                 """
-                INSERT INTO approvals (nonce, tool, digest, approver, surface, preview,
+                INSERT INTO approvals (nonce, owner, tool, digest, approver, surface, preview,
                                        issued_ts, expires_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (nonce, tool, digest, approver, str(surface or ""), clean, now, now + ttl),
+                (nonce, owner_key, tool, digest, approver, str(surface or ""), clean, now, now + ttl),
             )
             row = conn.execute("SELECT * FROM approvals WHERE nonce=?", (nonce,)).fetchone()
-        return self._approval(row)
+        return replace(self._approval(row), overrode_denial=overrode)
 
-    def consume(self, tool: str, digest: str, *, surface: str = "") -> Approval | None:
+    def consume(self, tool: str, digest: str, *, surface: str = "",
+                owner: str | None = None) -> Approval | None:
         """Spend one open approval for exactly this call, atomically, or None."""
         tool = str(tool or "").strip().lstrip("/")
         digest = str(digest or "").strip().lower()
         if not tool or len(digest) != 64:
             return None
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         now = time.time()
         with self._write() as conn:
             row = conn.execute(
                 "SELECT nonce FROM approvals WHERE " + _SPENDABLE
                 + " ORDER BY issued_ts LIMIT 1",
-                (tool, digest, now, now - DENIAL_TTL_SECONDS),
+                (owner_key, tool, digest, now, owner_key, now - DENIAL_TTL_SECONDS),
             ).fetchone()
             if row is None:
                 return None
             cursor = conn.execute(
                 """
                 UPDATE approvals SET consumed_ts=?, consumed_surface=?
-                WHERE nonce=? AND consumed_ts IS NULL AND revoked_ts IS NULL
+                WHERE nonce=? AND owner=? AND consumed_ts IS NULL AND revoked_ts IS NULL
                 """,
-                (now, str(surface or ""), row["nonce"]),
+                (now, str(surface or ""), row["nonce"], owner_key),
             )
             if cursor.rowcount != 1:
                 return None
             # The request that asked for this call is answered.
-            conn.execute("DELETE FROM pending_calls WHERE digest=?", (digest,))
+            conn.execute(
+                "DELETE FROM pending_calls WHERE owner=? AND digest=?",
+                (owner_key, digest),
+            )
             spent = conn.execute(
                 "SELECT * FROM approvals WHERE nonce=?", (row["nonce"],)
             ).fetchone()
         return self._approval(spent)
 
-    def open_for(self, tool: str, digest: str) -> bool:
+    def open_for(self, tool: str, digest: str, *, owner: str | None = None) -> bool:
         """Whether an approval for exactly this call could be spent right now.
 
         Read-only: it never spends, restores, revokes or writes anything, so a
@@ -657,15 +951,17 @@ class ApprovalLedger:
         digest = str(digest or "").strip().lower()
         if not tool or len(digest) != 64 or not Path(self.path).exists():
             return False
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         now = time.time()
         with self._read() as conn:
             row = conn.execute(
                 "SELECT 1 FROM approvals WHERE " + _SPENDABLE + " LIMIT 1",
-                (tool, digest, now, now - DENIAL_TTL_SECONDS),
+                (owner_key, tool, digest, now, owner_key, now - DENIAL_TTL_SECONDS),
             ).fetchone()
         return row is not None
 
-    def deny(self, call_id_or_digest: str) -> PendingCall:
+    def deny(self, call_id_or_digest: str, *, owner: str | None = None,
+             include_unowned: bool | None = None) -> PendingCall:
         """Record that an operator declined one pending call.
 
         The pending call stays listed, marked denied, so a waiting turn sees it
@@ -673,30 +969,36 @@ class ApprovalLedger:
         while the denial stands ``consume``, ``open_for`` and ``issue`` refuse
         the call. A denial authorises nothing and is scoped to one digest. It
         lasts ``DENIAL_TTL_SECONDS``; a refusal inside that window does not
-        clear it.
+        clear it. A caller that already resolved the row passes its digest and
+        ``owner``, so the denial lands on exactly that row.
         """
-        pending = self.resolve_call(call_id_or_digest)
+        pending = self.resolve_call(
+            call_id_or_digest, owner=owner, include_unowned=include_unowned,
+        )
+        target_owner = pending.owner
         now = time.time()
         with self._write() as conn:
             cursor = conn.execute(
-                "UPDATE pending_calls SET denied_ts=? WHERE digest=?", (now, pending.digest),
+                "UPDATE pending_calls SET denied_ts=? WHERE owner=? AND digest=?",
+                (now, target_owner, pending.digest),
             )
             if cursor.rowcount != 1:
                 raise ApprovalLedgerError("call %s is no longer pending" % pending.call_id)
             conn.execute(
                 """
                 UPDATE approvals SET revoked_ts=?
-                WHERE tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL
+                WHERE owner=? AND tool=? AND digest=? AND consumed_ts IS NULL AND revoked_ts IS NULL
                       AND expires_ts > ?
                 """,
-                (now, pending.tool, pending.digest, now),
+                (now, target_owner, pending.tool, pending.digest, now),
             )
             row = conn.execute(
-                "SELECT * FROM pending_calls WHERE digest=?", (pending.digest,)
+                "SELECT * FROM pending_calls WHERE owner=? AND digest=?",
+                (target_owner, pending.digest),
             ).fetchone()
         return self._pending(row)
 
-    def denied_for(self, tool: str, digest: str) -> bool:
+    def denied_for(self, tool: str, digest: str, *, owner: str | None = None) -> bool:
         """Read-only: whether an operator declined this exact pending call.
 
         True for ``DENIAL_TTL_SECONDS`` after the denial. Like ``open_for`` it
@@ -706,15 +1008,16 @@ class ApprovalLedger:
         digest = str(digest or "").strip().lower()
         if not tool or len(digest) != 64 or not Path(self.path).exists():
             return False
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         with self._read() as conn:
             row = conn.execute(
-                "SELECT 1 FROM pending_calls WHERE tool=? AND digest=? "
+                "SELECT 1 FROM pending_calls WHERE owner=? AND tool=? AND digest=? "
                 "AND denied_ts IS NOT NULL AND denied_ts > ?",
-                (tool, digest, time.time() - DENIAL_TTL_SECONDS),
+                (owner_key, tool, digest, time.time() - DENIAL_TTL_SECONDS),
             ).fetchone()
         return row is not None
 
-    def restore(self, nonce: str, digest: str) -> Approval | None:
+    def restore(self, nonce: str, digest: str, *, owner: str | None = None) -> Approval | None:
         """Give back an approval spent on a call that did not take effect.
 
         Only a spent, unrevoked, unexpired approval for exactly ``digest``
@@ -724,61 +1027,70 @@ class ApprovalLedger:
         """
         nonce = str(nonce or "").strip()
         digest = str(digest or "").strip().lower()
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         now = time.time()
         with self._write() as conn:
             cursor = conn.execute(
                 """
                 UPDATE approvals SET consumed_ts=NULL, consumed_surface=''
-                WHERE nonce=? AND digest=? AND consumed_ts IS NOT NULL
+                WHERE nonce=? AND owner=? AND digest=? AND consumed_ts IS NOT NULL
                       AND revoked_ts IS NULL AND expires_ts > ?
                 """,
-                (nonce, digest, now),
+                (nonce, owner_key, digest, now),
             )
             if cursor.rowcount != 1:
                 return None
             row = conn.execute("SELECT * FROM approvals WHERE nonce=?", (nonce,)).fetchone()
         return self._approval(row)
 
-    def revoke(self, nonce: str) -> Approval | None:
+    def revoke(self, nonce: str, *, owner: str | None = None,
+               include_unowned: bool | None = None) -> Approval | None:
         """Withdraw an open approval; returns it, or None if there is none open."""
         nonce = str(nonce or "").strip()
+        kind, owner_key = _read_scope(owner, include_unowned)
+        owner_sql, owner_params = _owner_sql(kind, owner_key)
         now = time.time()
         with self._write() as conn:
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE approvals SET revoked_ts=?
-                WHERE nonce=? AND consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
+                WHERE nonce=? AND {owner_sql} AND consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
                 """,
-                (now, nonce, now),
+                (now, nonce, *owner_params, now),
             )
             if cursor.rowcount != 1:
                 return None
             row = conn.execute("SELECT * FROM approvals WHERE nonce=?", (nonce,)).fetchone()
         return self._approval(row)
 
-    def get(self, nonce: str) -> Approval | None:
+    def get(self, nonce: str, *, owner: str | None = None) -> Approval | None:
+        owner_key = current_owner() if owner is None else str(owner or "").strip()
         with self._read() as conn:
             row = conn.execute(
-                "SELECT * FROM approvals WHERE nonce=?", (str(nonce or "").strip(),)
+                "SELECT * FROM approvals WHERE nonce=? AND owner=?",
+                (str(nonce or "").strip(), owner_key),
             ).fetchone()
         return self._approval(row) if row is not None else None
 
-    def approvals(self, *, include_spent: bool = False, limit: int = 20) -> list[Approval]:
+    def approvals(self, *, include_spent: bool = False, limit: int = 20,
+                  owner: str | None = None, include_unowned: bool | None = None) -> list[Approval]:
+        kind, owner_key = _read_scope(owner, include_unowned)
+        owner_sql, owner_params = _owner_sql(kind, owner_key)
         now = time.time()
         with self._read() as conn:
             if include_spent:
                 rows = conn.execute(
-                    "SELECT * FROM approvals ORDER BY issued_ts DESC LIMIT ?",
-                    (max(1, min(int(limit), 200)),),
+                    f"SELECT * FROM approvals WHERE {owner_sql} ORDER BY issued_ts DESC LIMIT ?",
+                    (*owner_params, max(1, min(int(limit), 200))),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM approvals
-                    WHERE consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
+                    WHERE {owner_sql} AND consumed_ts IS NULL AND revoked_ts IS NULL AND expires_ts > ?
                     ORDER BY issued_ts DESC LIMIT ?
                     """,
-                    (now, max(1, min(int(limit), 200))),
+                    (*owner_params, now, max(1, min(int(limit), 200))),
                 ).fetchall()
         return [self._approval(row) for row in rows]
 
@@ -790,13 +1102,13 @@ class ApprovalLedger:
         pending = self.pending(limit)
         approvals = self.approvals(include_spent=True, limit=limit)
         lines = ["one-shot approvals"]
-        lines.append("  pending calls (refused unattended; approve one with /approve <call id>,")
+        lines.append("  pending calls (refused unattended; approve one with /approve <call ref>,")
         lines.append("  or with /approve call <tool> <json> when its preview says text is not shown):")
         if not pending:
             lines.append("    (none)")
         for item in pending:
             lines.append("    %s  %s  x%d  via %s  last %s  %s" % (
-                item.call_id, item.tool, item.count, item.surface or "-",
+                item.ref, item.tool, item.count, item.surface or "-",
                 _stamp(item.last_ts), escape_preview(item.preview),
             ))
         lines.append("  approvals:")
@@ -826,6 +1138,7 @@ class ApprovalLedger:
             detail=str(row["detail"] or ""),
             denied_ts=None if row["denied_ts"] is None else float(row["denied_ts"]),
             detail_chars=int(row["detail_chars"] or 0),
+            owner=str(row["owner"] or "") if "owner" in row.keys() else "",
         )
 
     @staticmethod
@@ -838,6 +1151,7 @@ class ApprovalLedger:
             consumed_ts=None if row["consumed_ts"] is None else float(row["consumed_ts"]),
             consumed_surface=str(row["consumed_surface"] or ""),
             revoked_ts=None if row["revoked_ts"] is None else float(row["revoked_ts"]),
+            owner=str(row["owner"] or "") if "owner" in row.keys() else "",
         )
 
 
@@ -849,9 +1163,11 @@ def default_ledger() -> ApprovalLedger:
 
 
 __all__ = [
-    "Approval", "ApprovalDeniedError", "ApprovalLedger", "ApprovalLedgerError",
-    "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS", "MAX_DETAIL_CHARS",
-    "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PREVIEW_INCOMPLETE", "PendingCall",
-    "Preview", "PreviewField", "call_id", "clamp_ttl", "default_ledger",
-    "escape_preview", "preview_complete", "preview_token", "render_preview",
+    "AmbiguousCallError", "Approval", "ApprovalDeniedError", "ApprovalLedger",
+    "ApprovalLedgerError", "DEFAULT_TTL_SECONDS", "DENIAL_TTL_SECONDS",
+    "MAX_DETAIL_CHARS", "MAX_TTL_SECONDS", "MIN_TTL_SECONDS", "PREVIEW_INCOMPLETE",
+    "PendingCall", "Preview", "PreviewField", "call_id", "call_ref", "clamp_ttl",
+    "current_owner", "default_ledger", "escape_preview", "operator_scope",
+    "operator_view", "owner_scope", "owner_tag", "preview_complete",
+    "preview_token", "render_preview",
 ]

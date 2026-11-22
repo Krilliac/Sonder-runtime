@@ -599,3 +599,12 @@ def without_standing():
         return text
 
     return _strip
+
+
+@pytest.fixture(autouse=True)
+def _unbind_local_open_mode_cap():
+    """A request handled on the test thread must not cap the next test's mode."""
+    import permission_modes
+    permission_modes.bind_unauthenticated_caller(False)
+    yield
+    permission_modes.bind_unauthenticated_caller(False)
