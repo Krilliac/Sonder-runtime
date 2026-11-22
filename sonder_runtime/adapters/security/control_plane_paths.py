@@ -260,6 +260,60 @@ def control_plane_scope(paths):
         _ADDITIONAL.reset(token)
 
 
+def _canonical_env_override(
+    raw: str,
+    variable: str,
+    *,
+    base: Path | None = None,
+    absolute: bool = False,
+    expand_user: bool = True,
+) -> Path:
+    """Validate an env-supplied path override lexically before any FS/SMB call."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise PermissionError(
+            f"refusing unsafe {variable} path (control character in path)"
+        )
+    text = raw.strip()
+    try:
+        cleaned = runtime_paths._strip_extended_or_refuse_prefixed(text)
+    except ValueError:
+        raise PermissionError(
+            f"refusing unsafe {variable} path (UNC or device/NT namespace)"
+        ) from None
+    if expand_user:
+        try:
+            expanded = Path(cleaned).expanduser()
+        except RuntimeError:
+            raise PermissionError(f"refusing unsafe {variable} path") from None
+        expanded_text = os.fspath(expanded)
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in expanded_text):
+            raise PermissionError(
+                f"refusing unsafe {variable} path (control character in path)"
+            )
+        try:
+            cleaned_expanded = runtime_paths._strip_extended_or_refuse_prefixed(expanded_text)
+        except ValueError:
+            raise PermissionError(
+                f"refusing unsafe {variable} path (UNC or device/NT namespace)"
+            ) from None
+        candidate = Path(cleaned_expanded)
+    else:
+        candidate = Path(cleaned)
+    if base is not None:
+        if not candidate.is_absolute():
+            candidate = base / candidate
+    elif absolute and not candidate.is_absolute():
+        candidate = candidate.absolute()
+    resolved = _canonical(candidate)
+    try:
+        runtime_paths._strip_extended_or_refuse_prefixed(os.fspath(resolved))
+    except ValueError:
+        raise PermissionError(
+            f"refusing unsafe {variable} path (resolved to UNC or device/NT namespace)"
+        ) from None
+    return resolved
+
+
 def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     """Read actual state-path precedence without state_path's mkdir/migration IO.
 
@@ -267,38 +321,79 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     constructed with explicit paths (e.g. terminal output), not request fields.
     """
     configured = runtime_paths._configured_home()
-    home = _canonical(runtime_paths.default_home())
+    raw_home = runtime_paths.default_home()
+    parsed_home = runtime_paths.try_parse_local_root(os.fspath(raw_home), expand_user=True)
+    if parsed_home is None:
+        raise PermissionError(
+            "refusing unsafe SONDER_HOME/SONDER_STATE_HOME path "
+            "(UNC, device/NT, relative, or drive-root spelling)"
+        )
+    home = _canonical(parsed_home)
+    if runtime_paths.try_parse_local_root(os.fspath(home), expand_user=False) is None:
+        raise PermissionError(
+            "refusing unsafe SONDER_HOME/SONDER_STATE_HOME path "
+            "(resolved to UNC, device/NT, relative, or drive-root spelling)"
+        )
 
     def state(name, variable=""):
         if configured is not None:
-            return _canonical(configured / name)
-        override = os.environ.get(variable, "").strip() if variable else ""
-        return _canonical(override if override else home / name)
+            return _canonical(home / name)
+        raw_override = os.environ.get(variable, "") if variable else ""
+        if raw_override.strip():
+            return _canonical_env_override(raw_override, variable)
+        return _canonical(home / name)
 
-    memory_override = os.environ.get("SONDER_DB", "").strip()
-    sessions_override = os.environ.get("SONDER_SESSIONS_DB", "").strip()
+    memory_override = os.environ.get("SONDER_DB", "")
+    sessions_override = os.environ.get("SONDER_SESSIONS_DB", "")
     fleet = state("fleet.db", "SONDER_FLEET_DB")
     databases = [
         fleet,
-        _canonical(memory_override) if memory_override else home / "memory.db",
         (
-            _canonical(Path(sessions_override).absolute())
-            if sessions_override
+            _canonical_env_override(memory_override, "SONDER_DB")
+            if memory_override.strip()
+            else home / "memory.db"
+        ),
+        (
+            _canonical_env_override(
+                sessions_override, "SONDER_SESSIONS_DB", absolute=True, expand_user=False
+            )
+            if sessions_override.strip()
             else state("sessions.db", "SONDER_SESSIONS_DB")
         ),
         *(state(name, variable) for name, variable in STATE_DATABASES),
     ]
     # app's task repository explicitly selects STATE_HOME/memory.db before the
     # canonical memory resolver. Both are actual composed paths.
-    state_home = os.environ.get("SONDER_STATE_HOME", "").strip()
-    if state_home:
-        databases.append(_canonical(Path(state_home).expanduser() / "memory.db"))
+    state_home = os.environ.get("SONDER_STATE_HOME", "")
+    if state_home.strip():
+        parsed_state_home = runtime_paths.try_parse_local_root(state_home, expand_user=True)
+        if parsed_state_home is None:
+            raise PermissionError(
+                "refusing unsafe SONDER_STATE_HOME path "
+                "(UNC, device/NT, relative, or drive-root spelling)"
+            )
+        resolved_state_home = _canonical(parsed_state_home)
+        if (
+            runtime_paths.try_parse_local_root(
+                os.fspath(resolved_state_home), expand_user=False
+            )
+            is None
+        ):
+            raise PermissionError(
+                "refusing unsafe SONDER_STATE_HOME path "
+                "(resolved to UNC, device/NT, relative, or drive-root spelling)"
+            )
+        databases.append(_canonical(resolved_state_home / "memory.db"))
     files = [state("fleet-principal.json", "SONDER_FLEET_PRINCIPAL_FILE")]
     workspace = Path(__file__).resolve().parents[3]
-    roots_override = os.environ.get("SONDER_FILE_ROOTS_FILE", "").strip()
+    roots_override = os.environ.get("SONDER_FILE_ROOTS_FILE", "")
     files.extend(
         (
-            _canonical(roots_override) if roots_override else home / "file_roots.local",
+            (
+                _canonical_env_override(roots_override, "SONDER_FILE_ROOTS_FILE")
+                if roots_override.strip()
+                else home / "file_roots.local"
+            ),
             workspace / "file_roots.local",
             workspace / "permissions.json",
             home / "permissions.json",
@@ -310,19 +405,22 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
         ("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
         ("SONDER_SYSTEM_PROFILE", "system_profile.md"),
     ):
-        raw = os.environ.get(variable, "").strip()
-        candidate = Path(raw).expanduser() if raw else workspace / name
+        raw = os.environ.get(variable, "")
         files.append(
-            _canonical(candidate if candidate.is_absolute() else workspace / candidate)
+            _canonical_env_override(raw, variable, base=workspace)
+            if raw.strip()
+            else _canonical(workspace / name)
         )
-    policy_override = os.environ.get("SONDER_RUNTIME_POLICY", "").strip()
+    policy_override = os.environ.get("SONDER_RUNTIME_POLICY", "")
     policy = (
-        _canonical(policy_override) if policy_override else state("runtime_policy.json")
+        _canonical_env_override(policy_override, "SONDER_RUNTIME_POLICY")
+        if policy_override.strip()
+        else state("runtime_policy.json")
     )
-    rotation_override = os.environ.get("SONDER_ROTATION_STATE", "").strip()
+    rotation_override = os.environ.get("SONDER_ROTATION_STATE", "")
     rotation = (
-        _canonical(rotation_override)
-        if rotation_override
+        _canonical_env_override(rotation_override, "SONDER_ROTATION_STATE")
+        if rotation_override.strip()
         else home / "secrets" / "rotation.json"
     )
     files.append(state("model-request-admission.sqlite3.lock"))
@@ -339,9 +437,13 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
         ("SONDER_CONFIG", "sonder.toml"),
         ("SONDER_SECRETS", "sonder.env"),
     ):
-        override = os.environ.get(variable, "").strip()
+        override = os.environ.get(variable, "")
         atomic.append(
-            _canonical(Path(override).absolute()) if override else home / name
+            _canonical_env_override(
+                override, variable, absolute=True, expand_user=False
+            )
+            if override.strip()
+            else home / name
         )
     atomic.append(home / "workflows.json")
     # The persisted permission mode (permission_modes._state_path). Written
@@ -360,24 +462,36 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     # write would grant tools or drop the operator's deny profiles.
     from ..model_tool_policy import OVERLAY_ENV, OVERLAY_FILE_NAME
 
-    tool_policy_override = os.environ.get(OVERLAY_ENV, "").strip()
+    tool_policy_override = os.environ.get(OVERLAY_ENV, "")
     atomic.append(
-        _canonical(tool_policy_override)
-        if tool_policy_override
+        _canonical_env_override(tool_policy_override, OVERLAY_ENV)
+        if tool_policy_override.strip()
         else state(OVERLAY_FILE_NAME)
     )
     from ..model_lists import OVERLAY_ENV as lists_env, OVERLAY_FILE_NAME as lists_file
 
-    lists_override = os.environ.get(lists_env, "").strip()
-    atomic.append(_canonical(Path(lists_override).expanduser()) if lists_override else state(lists_file))
-    from .unsafe_lab import _audit_path
+    lists_override = os.environ.get(lists_env, "")
+    atomic.append(
+        _canonical_env_override(lists_override, lists_env)
+        if lists_override.strip()
+        else state(lists_file)
+    )
+    from .unsafe_lab import AUDIT_PATH_ENV as unsafe_lab_audit_env, _audit_path
 
-    catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "").strip()
-    if catalog:
-        files.append(_canonical(catalog))
+    catalog = os.environ.get("SONDER_LANE_TEST_TARGETS_FILE", "")
+    if catalog.strip():
+        files.append(_canonical_env_override(catalog, "SONDER_LANE_TEST_TARGETS_FILE"))
+    unsafe_lab_override = os.environ.get(unsafe_lab_audit_env, "")
+    unsafe_lab_audit = (
+        _canonical_env_override(unsafe_lab_override, unsafe_lab_audit_env)
+        if unsafe_lab_override.strip()
+        else _canonical_env_override(
+            os.fspath(_audit_path(os.environ)), unsafe_lab_audit_env
+        )
+    )
     audits = [
         state(os.path.join("audit", "tool-receipts.jsonl"), "SONDER_TOOL_AUDIT"),
-        _canonical(_audit_path(os.environ)),
+        unsafe_lab_audit,
     ]
     owned, lock_dirs = [
         home / "secrets",

@@ -3,7 +3,8 @@
 from dataclasses import dataclass, field
 import hashlib
 import json
-from pathlib import Path
+
+from sonder_runtime.platform.private_files import try_parse_local_root
 
 
 _MAX_OBJECT_BYTES = 64 * 1024**3
@@ -57,10 +58,23 @@ def artifact_mobility_source_errors(config) -> list[str]:
         not isinstance(store_dir, str)
         or len(store_dir) > 4096
         or any(ord(character) < 32 for character in store_dir)
-        or (section.enabled and (not store_dir or not Path(store_dir).is_absolute()))
-        or (store_dir and not Path(store_dir).is_absolute())
+        or (
+            section.enabled
+            and (
+                not store_dir
+                or try_parse_local_root(store_dir, expand_user=True) is None
+            )
+        )
+        or (
+            store_dir
+            and try_parse_local_root(store_dir, expand_user=True) is None
+        )
     ):
         errors.append("[artifact_mobility_source].store_dir invalid")
+    state_home = getattr(getattr(config, "state", None), "home", "")
+    if section.enabled and isinstance(state_home, str) and state_home.strip():
+        if try_parse_local_root(state_home, expand_user=True) is None:
+            errors.append("[state].home invalid")
     bounds = {
         "max_object_bytes": (1, _MAX_OBJECT_BYTES),
         "total_bytes": (1, _MAX_TOTAL_BYTES),
