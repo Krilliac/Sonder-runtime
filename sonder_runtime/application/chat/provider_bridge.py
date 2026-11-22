@@ -330,6 +330,10 @@ def model_request_from_ollama_payload(
     prompt = turns.pop()["content"]
     raw_options = payload.get("options")
     options = {}
+    if str(tier or "").strip().lower().startswith("model:"):
+        pinned_model = str(payload.get("model") or str(tier).strip()[len("model:"):]).strip()
+        if pinned_model:
+            options["model"] = pinned_model
     if isinstance(raw_options, Mapping):
         for key in _FORWARDED_OPTIONS:
             value = raw_options.get(key)

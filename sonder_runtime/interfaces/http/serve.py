@@ -57,7 +57,7 @@ from sonder_runtime.interfaces.http.app_control import handle_app_control, is_ap
 from sonder_runtime.interfaces.http.work_runs import (
     WorkCapacityExhausted, WorkRunner, current_run_id as current_work_run_id,
 )
-from sonder_runtime.bootstrap.http_work_narration import deferred_post as _deferred_post, enrich_work_record as _enrich_work_record, run_scoped as _run_work_scoped, work_ack as _work_ack, start_work as _start_narrated_work, admission_result as _work_admission_result
+from sonder_runtime.bootstrap.http_work_narration import WORK_RUN_OUTCOMES, classify_work_output, deferred_post as _deferred_post, enrich_work_record as _enrich_work_record, run_scoped as _run_work_scoped, work_ack as _work_ack, start_work as _start_narrated_work, admission_result as _work_admission_result
 from sonder_runtime.bootstrap.work_narration import enrich_status as _narrated_status, cancel_linked_work as _cancel_linked_work
 from sonder_runtime.bootstrap.http_command_narration import dispatch as _dispatch_narrated_command
 
@@ -155,6 +155,7 @@ from sonder_runtime.interfaces.http.facades import saas_auth as _saas_auth
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http import thin_routes
 from sonder_runtime.interfaces.http import chat_tool_stream as _chat_tool_stream
+from sonder_runtime.interfaces.http import serve_policy as _serve_policy
 from sonder_runtime.platform import debug_dump
 
 from . import authority_contract as tool_contract
@@ -1257,6 +1258,7 @@ def configure_typed_config(config) -> None:
         wait_seconds=server_config.work_wait_seconds,
         budget_seconds=server_config.work_budget_seconds,
         max_running=server_config.work_max_running,
+        max_live=server_config.work_max_live,
     )
     global _HEALTH_STATUS_FACADE, _TRUSTED_PROXY_NETWORKS
     _HEALTH_STATUS_FACADE = HealthStatusFacade(
@@ -3102,6 +3104,7 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 label, decision.reason,
                 permission_policy.mode_label(decision.mode),
             )
+        permission_policy.note_preapproved_decision(tool, decision)
     return ""
 
 
@@ -3235,7 +3238,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     run_args = server._http_chat_tools().slash_run_arguments(
         cmd, lambda: _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block,
     )
-    refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
+    with permission_policy.capture_preapproved_scope() as preapproved:
+        refusal = _http_slash_refusal(cmd, arg, context=context) if run_args is None else _http_slash_refusal(cmd, arg, context=context, arguments=run_args)
     if refusal:
         _serve_logger.debug("_handle_slash: slash command refused")
         return refusal
@@ -3244,6 +3248,10 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         authority_error = _system_operation_authority_error(operation, context)
         if authority_error:
             return "refused %s: %s" % (cmd, authority_error)
+
+    def _control(**extra):
+        with permission_policy.preapproved_tools_scope(preapproved):
+            return server.control_command(stripped, project=project, **extra)
 
     if cmd == "/help":
         # The catalog derives every command from the dispatch chains and the
@@ -3259,7 +3267,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/context":
         return server.context_health()
     if cmd == "/prompts":
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/contextsize", "/ctxsize"):
         if arg.strip():
             return server.set_context_size(arg.strip())
@@ -3321,7 +3329,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/qualityfix":
         return server.memory_quality_repair(apply=(arg.strip().lower() == "apply"))
     if cmd in ("/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return server.emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -3340,7 +3348,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             )
             if task_boundary_error:
                 return task_boundary_error
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/activity", "/tools"):
         return server.activity_status()
     if cmd in ("/test", "/digest", "/build", "/fix-build", "/crash", "/profile"):
@@ -3352,29 +3360,27 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         # creating a sibling run.
         return _idempotent_http_action(
             context, idempotency_key, "autopilot\0%s\0%s" % (project, stripped),
-            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: server.control_command(
-                stripped,
-                project=project,
+            lambda: _narrate_http_command("autopilot", {"action": arg.partition(" ")[0], "objective": arg.partition(" ")[2], "project": project}, lambda: _control(
                 autopilot_request_owner=_task_account_scope(context),
             ), context),
         )
     if cmd in ("/runtime", "/models"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/update", "/updatecheck", "/updatesource"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/stash", "/runtime-stash"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/selfmod", "/selfmodify"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/goal", "/goals"):
         return _idempotent_http_action(
             context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
-            lambda: server.control_command(stripped, project=project),
+            lambda: _control(),
         )
     if cmd in ("/mcp", "/convergence"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/learning", "/learnhealth", "/metrics"):
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/weather", "/forecast"):
         if not arg.strip():
             return "usage: /weather <city/state or ZIP>"
@@ -3397,13 +3403,15 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                 prompt=arg.strip(), tier="auto", max_steps=12, project=work_project,
             ), context),
         )
+    if cmd == "/mkdir":
+        return _control()
     if cmd in (
         "/report", "/endreport", "/checklist", "/plan",
         "/inventory", "/workspace",
         "/tree", "/folders", "/search", "/grep",
         "/programs", "/programfind", "/scripts", "/scriptfind",
         "/image", "/inspectimage", "/vision", "/analyzeimage",
-        "/mkdir", "/runprogram", "/runscript",
+        "/runprogram", "/runscript",
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
         scope = _task_account_scope(context)
@@ -3413,7 +3421,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
                     "checklist_show", {"checklist_id": arg.strip()}, account_scope=scope,
                 )
             return server.scoped_latest_checklist(scope)
-        return server.control_command(stripped, project=project)
+        return _control()
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
         parts2 = arg.strip().split(None, 1)
         if len(parts2) != 2:
@@ -3822,6 +3830,7 @@ _WORK_RUNNER = WorkRunner(
     wait_seconds=_env_int("SONDER_HTTP_WORK_WAIT_SECONDS", 240),
     budget_seconds=_env_int("SONDER_HTTP_WORK_BUDGET_SECONDS", 1800),
     max_running=_env_int("SONDER_HTTP_WORK_MAX_RUNNING", 2),
+    max_live=_env_int("SONDER_HTTP_WORK_MAX_LIVE", 0),
     stop_reason=_work_run_stop_reason,
     lifetime=_work_run_lifetime,
     thread_factory=owned_runtime_thread,
@@ -3831,7 +3840,7 @@ _WORK_RUNNER = WorkRunner(
 def _work_run_record(result):
     """Durable (status, answer) for one finished work run."""
     if isinstance(result, ChatWorkResult):
-        status = result.status if result.status in ("returned", "unknown", "refused") else "unknown"
+        status = result.status if result.status in WORK_RUN_OUTCOMES else "unknown"
         return status, result.text
     if isinstance(result, str):
         return "refused", result
@@ -3931,7 +3940,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 with contextlib.suppress(Exception):
                     receipts.finish(session_id, admission, "unknown")
                 raise
-            status = "returned" if isinstance(output, str) and output.strip() else "unknown"
+            status, child_run_id = classify_work_output(output, http_work_runs, current_work_run_id())
             try:
                 terminal = receipts.finish(session_id, admission, status)
             except Exception as error:
@@ -3942,6 +3951,7 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 terminal.event_id, source.event_id if source else "",
                 routing_reason=decision.reason,
                 work_run_id=current_work_run_id(),
+                child_run_id=child_run_id,
             )
 
         # Bound work retains its cancel/budget and persisted answer by run id.
@@ -4466,7 +4476,8 @@ def _chat_completion_object(
 
 
 def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
-           usage=None, activity=None, sonder_tool=None):
+           usage=None, activity=None, sonder_tool=None, sonder_agent=None,
+           sonder_agent_board=None):
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion.chunk",
@@ -4483,13 +4494,14 @@ def _chunk(iid, model, delta, finish_reason=None, elapsed_ms=None, receipt=None,
         obj["sonder_receipt"] = receipt
     if usage is not None:
         obj["usage"] = usage
-    if activity is not None:
-        # The streaming counterpart of the bounded vendor extension returned
-        # by _chat_completion_object.  Keep execution evidence out of content
-        # so callers can safely replay assistant text as conversation history.
+    if activity is not None:  # streaming counterpart of _chat_completion_object's sonder_activity
         obj["sonder_activity"] = activity
     if sonder_tool is not None:
         obj["sonder_tool"] = sonder_tool
+    if sonder_agent is not None:
+        obj["sonder_agent"] = sonder_agent
+    if sonder_agent_board is not None:
+        obj["sonder_agent_board"] = sonder_agent_board
     return "data: %s\n\n" % json.dumps(obj)
 
 
@@ -6939,6 +6951,7 @@ class Handler(BaseHTTPRequestHandler):
                 "cancelled_count": len(records),
             })
             return
+        request_temperature = None
         model_route = _MODEL_REQUEST_FACADE.route(path)
         if model_route is not None:
             _serve_logger.debug(f"do_POST: model route matched, operation={model_route.operation!r}")
@@ -7013,6 +7026,14 @@ class Handler(BaseHTTPRequestHandler):
             req.pop("input", None)
             if model_operation == "responses":
                 path = "/v1/chat/completions"
+            try:
+                request_temperature = _serve_policy.extract_request_temperature(
+                    normalized.options, server.validate_request_temperature,
+                )
+            except InvalidInput as error:
+                record_early_chat_metric("invalid_temperature")
+                self._send_json_payload({"error": {"message": str(error), "type": "invalid_request"}}, status=400)
+                return
         if self._handle_fanout_post(path, req, context):
             return
         if self._handle_work_run_request("POST", path, context=context):
@@ -7398,6 +7419,9 @@ class Handler(BaseHTTPRequestHandler):
             self._turn_stack.enter_context(_chat_tool_stream.request_mode_scope(
                 permission_policy, context, _state_principal(context), session,
             ))
+            self._turn_stack.enter_context(_serve_policy.maybe_temperature_override(
+                request_temperature, session_override=False,
+            ))
         # No reference-lookup state from an earlier turn on this thread.
         _reference_lookup_lanes.reset_turn()
         tool_turn = None
@@ -7515,10 +7539,6 @@ class Handler(BaseHTTPRequestHandler):
                             response_headers as _spanda_response_headers,
                             uncertainty_error_body as _spanda_uncertainty_body,
                         )
-                        from sonder_runtime.interfaces.http.serve_policy import (
-                            serve_temperature as _live_serve_temperature,
-                            serve_temperature_override as _serve_temp_override,
-                        )
                         # The header opt-in multiplies model calls: developer-only, like fanout.
                         _spanda_policy = _resolve_spanda_policy(
                             _SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
@@ -7529,15 +7549,16 @@ class Handler(BaseHTTPRequestHandler):
                         if _spanda_policy.active:
                             # Multi-sample exact-match R_sc. Disable request
                             # cache so each draw is independent; force temp>0.
+                            _base_temp = _serve_policy.serve_temperature()
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(0.2 if _live_serve_temperature() is None else _live_serve_temperature()),  # auto keeps the old 0.2 floor
+                                float(0.2 if _base_temp is None else _base_temp),  # auto keeps the old 0.2 floor
                                 0.05,
                             )
                             _samples = []
                             _sample_turns = []
                             _sample_lookups = {}  # each sample's own reference-lookup state
-                            with _serve_temp_override(_sample_temp), server.served_control_guard(_prompt_control_guard):
+                            with _serve_policy.serve_temperature_override(_sample_temp), server.served_control_guard(_prompt_control_guard):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
                                     # session capture; only the consensus turn
@@ -7615,47 +7636,25 @@ class Handler(BaseHTTPRequestHandler):
                             response_tier = turn.resolved_tier
                         else:
                             if stream:
-                                # Commit to SSE now and keep the connection
-                                # alive while the turn generates.
                                 self._begin_early_stream(model)
                             tool_turn = server._http_chat_tools().build_http_chat_tool_turn(
-                                server=server, permission_policy=permission_policy,
-                                handler=self, chunk_fn=_chunk,
-                                write_tool_chunk_fn=_chat_tool_stream.write_tool_chunk,
-                                wait_for_approval_fn=_chat_tool_stream.wait_for_approval,
-                                model=model_selector or model,
-                                project=project, stream=stream,
+                                server=server, permission_policy=permission_policy, handler=self,
+                                chunk_fn=_chunk, stream_module=_chat_tool_stream,
+                                model=model_selector or model, project=project, stream=stream,
                                 authorized_tools=bool(role_runs_tools and _developer_authorized(context)),
                             )
                             try:
+                                # Request cache is only for plain non-streaming generation (empty scope denies cache);
+                                # account-backed deployments skip the legacy global lesson store.
                                 with server.served_control_guard(_prompt_control_guard):
                                     turn = self._run_streamable_prompt(
-                                        prompt,
-                                        history,
-                                        model_selector,
-                                        context_size=context_size,
-                                        session=storage_session,
-                                        project=storage_project,
-                                        state=state,
-                                        return_result=True,
-                                        capture_request_id=self._correlation(),
+                                        prompt, history, model_selector, context_size=context_size,
+                                        session=storage_session, project=storage_project, state=state,
+                                        return_result=True, capture_request_id=self._correlation(),
                                         capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
-                                        # The deterministic request cache is offered only
-                                        # to this plain, non-streaming generation
-                                        # fall-through: every control/tool/web/work/agent
-                                        # route has already returned above, and streamed
-                                        # or structured turns never receive a scope.  An
-                                        # empty scope is an unconditional cache denial.
-                                        cache_scope=(
-                                            "" if stream or tool_turn is not None else _request_cache_scope(context)
-                                        ),
-                                        # Account-backed deployments intentionally do not
-                                        # inject or train the legacy global lesson store.
-                                        # Their durable chat/session project IDs remain
-                                        # principal-namespaced above.
+                                        cache_scope="" if stream or tool_turn is not None else _request_cache_scope(context),
                                         augment=not bool(context.get("account")),
-                                        metrics=_lifecycle.metrics,
-                                        tool_turn=tool_turn,
+                                        metrics=_lifecycle.metrics, tool_turn=tool_turn,
                                     )
                             finally:
                                 self._pause_early_stream()
@@ -7747,6 +7746,9 @@ class Handler(BaseHTTPRequestHandler):
                 if status in (429, 503, 504) else None
             )
             message = error.detail
+            if getattr(error, "pool_refusal", None):
+                # Sonder's own pool had no slot: say "busy", not "Ollama down".
+                message = error.pool_refusal
             if error.cloud and error.status == 429:
                 message = server._format_model_call_error(error)
             if self._end_early_stream_with_error(
@@ -8015,8 +8017,10 @@ class Handler(BaseHTTPRequestHandler):
             if callable(flush):
                 flush()
 
+        wait_state = server.ollama_pool.track_queue_wait()
         keepalive = SSEKeepAlive(
             write, STREAM_HEARTBEAT_SECONDS, thread_factory=owned_runtime_thread,
+            status=wait_state.line,
         )
         self._early_stream, self._stream_model = keepalive, model
         self.close_connection = True
@@ -8044,6 +8048,7 @@ class Handler(BaseHTTPRequestHandler):
         early = getattr(self, "_early_stream", None)
         if early is not None:
             early.stop()
+            server.ollama_pool.clear_queue_wait()
 
     def _end_early_stream_with_error(self, message, error_type, code, model):
         """Deliver an error on an already-committed SSE response; else ``False``."""

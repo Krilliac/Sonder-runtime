@@ -313,6 +313,60 @@ def write_tool_chunk(
     return True
 
 
+def write_agent_chunk(
+    handler: Any,
+    chunk: Callable[..., str],
+    *,
+    iid: str,
+    model: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Write one ``sonder_agent`` SSE frame through ``early.lock``."""
+    return _write_early_chunk(handler, chunk, iid=iid, model=model, field="sonder_agent", payload=payload)
+
+
+def write_agent_board_chunk(
+    handler: Any,
+    chunk: Callable[..., str],
+    *,
+    iid: str,
+    model: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Write one ``sonder_agent_board`` SSE frame through ``early.lock``."""
+    return _write_early_chunk(handler, chunk, iid=iid, model=model, field="sonder_agent_board", payload=payload)
+
+
+def _write_early_chunk(
+    handler: Any,
+    chunk: Callable[..., str],
+    *,
+    iid: str,
+    model: str,
+    field: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    early = getattr(handler, "_early_stream", None)
+    if early is None or early.client_gone:
+        return False
+    frame_id = getattr(early, "completion_id", None) or iid
+    if not getattr(early, "completion_id", None):
+        early.completion_id = frame_id
+    frame = chunk(frame_id, model, {}, **{field: dict(payload)}).encode("utf-8")
+    with early.lock:
+        if early.client_gone:
+            return False
+        try:
+            handler.wfile.write(frame)
+            flush = getattr(handler.wfile, "flush", None)
+            if callable(flush):
+                flush()
+        except (OSError, ValueError):
+            early.client_gone = True
+            return False
+    return True
+
+
 def wait_for_approval(
     ledger: Any,
     tool: str,
@@ -363,5 +417,7 @@ __all__ = [
     "turn_refusal_receipt",
     "unregister_call_waiter",
     "wait_for_approval",
+    "write_agent_board_chunk",
+    "write_agent_chunk",
     "write_tool_chunk",
 ]
