@@ -13,12 +13,15 @@ import ast
 import contextlib
 import contextvars
 import fnmatch
+import functools
 import hashlib
+import importlib.machinery
 import json
 import os
 import re
 import secrets
 import stat
+import sys
 import tempfile
 import textwrap
 import threading
@@ -29,6 +32,10 @@ import sonder_runtime.adapters.git_discovery as git_discovery
 import sonder_runtime.adapters.filesystem.operator_only_paths as _operator_only
 import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.platform.policy_roots import (
+    EXTENDED_LOCAL_RE as _EXTENDED_LOCAL_RE,
+    try_parse_policy_root as _parse_policy_root,
+)
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 from sonder_runtime.adapters.filesystem.intent_executor import (
     execute_delete as _execute_delete_intent,
@@ -152,14 +159,73 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # nightly gates run pytest, which imports ``tests/conftest.py``. Any of these
 # written by an ordinary mutation-class call is code execution with runtime
 # privileges at the next run -- the same hole the root-level clause closes.
-FIRST_PARTY_CODE_DIRS = ("scripts", "migrations")
+#
+# The pytest gates collect ``testpaths = tests proposals`` (pytest.ini). pytest
+# imports every test module, nested ``conftest.py`` and ``__init__`` there, and
+# runs any ``test*.txt`` file as a doctest by default; tests also load their
+# own fixture files. So every file in both trees (PYTEST_COLLECTED_DIRS) is
+# protected, whatever its suffix, not only ``tests/conftest.py``.
+#
+# pytest's configuration decides what is collected and which plugins load
+# (``addopts = -p <module>``, ``testpaths``, ``python_files``), so a config
+# file it would pick up is code execution at the next gate. For each argument
+# (the invocation directory when there are none) pytest checks that path and
+# then each parent, nearest first, and uses the first file in it that holds
+# pytest configuration, trying the names in PYTEST_CONFIG_FILES' order
+# (pytest 9.2: ``_pytest/config/findpaths.py``, CONFIG_LOADERS_BY_NAME and
+# locate_config). A bare ``python -m pytest`` from the root therefore reads
+# the root's files, where a new ``pytest.toml`` outranks the existing
+# ``pytest.ini``, and a targeted run (``pytest tests/test_x.py``) would read a
+# ``tests/pytest.ini`` before the root's. These names are protected beside the
+# root (matched case-insensitively), and every ``.ini``/``.cfg``/``.toml``
+# file is protected inside the first-party code trees.
+FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tests", "proposals")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
+PYTEST_COLLECTED_DIRS = ("tests", "proposals")
+PYTEST_CONFIG_FILES = (
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "pyproject.toml",
+    "tox.ini",
+    "setup.cfg",
+)
+FIRST_PARTY_CONFIG_SUFFIXES = frozenset({".ini", ".cfg", ".toml"})
+# Installed-distribution metadata. ``importlib.metadata`` scans every
+# ``sys.path`` entry for children whose lower-cased name ends in one of these
+# (``Lookup`` in ``importlib/metadata/__init__.py``), and ``python -m pytest``
+# from the root puts the root on ``sys.path``. pytest then loads every
+# ``[pytest11]`` entry point it finds there as a plugin before collection, with
+# no config change, so such a directory beside the root names a module (for
+# example one in a namespace portion, see ``_is_root_import_path``) that runs at
+# the next gate. A direct child of the root with one of these suffixes, and
+# everything inside it, is protected.
+DISTRIBUTION_METADATA_SUFFIXES = (".dist-info", ".egg-info")
+# What the import system loads as a module from a directory on ``sys.path``:
+# source (``.py``, and ``.pyw`` on Windows), cached bytecode (``__pycache__``)
+# and extension modules. The install root is ``sys.path[0]`` for the runtime
+# and its scripts, so any of these in the root, or in a top-level regular
+# package under it, shadows or replaces a module the runtime imports. Built
+# from this interpreter's own loader suffixes (reduced to the last dotted part,
+# which is what ``Path.suffix`` compares: ``.cp312-win_amd64.pyd`` -> ``.pyd``)
+# plus every platform's spelling, so a guard decision never depends on which
+# platform the runtime happens to run on.
+PYTHON_MODULE_SUFFIXES = frozenset(
+    {"." + suffix.rsplit(".", 1)[-1].casefold() for suffix in importlib.machinery.all_suffixes()}
+    | {".py", ".pyw", ".pyc", ".pyd", ".so"}
+)
+# The runtime's own interpreter environment under the install root. A ``.pth``
+# or ``sitecustomize.py`` in its site-packages, or any module there, runs in
+# the runtime process at the next start.
+INTERPRETER_ENVIRONMENT_DIRS = ("venv", ".venv")
+_INTERPRETER_LIBRARY_KEYS = ("stdlib", "platstdlib", "purelib", "platlib")
 # Package data the runtime loads as policy (model_tool_policy.json holds the
 # tool-lane floor). It replaced Python constants that the ``.py`` clause below
 # protected, so it keeps that protection whatever its suffix.
 RUNTIME_PACKAGE_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # Launchers and scripts a host shell runs directly.
-EXECUTABLE_SCRIPT_SUFFIXES = frozenset({".py", ".cmd", ".bat", ".ps1", ".psm1", ".sh"})
+EXECUTABLE_SCRIPT_SUFFIXES = frozenset({".py", ".pyw", ".cmd", ".bat", ".ps1", ".psm1", ".sh"})
 # Repository metadata a later git command executes from (hooks, config with
 # core.fsmonitor / filter / diff / merge drivers). Never an ordinary mutation.
 GIT_METADATA_DIRECTORIES = frozenset({".git"})
@@ -260,12 +326,13 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
+
 def _split_roots(raw: str) -> list[Path]:
-    roots = []
+    roots: list[Path] = []
     for item in (raw or "").split(os.pathsep):
-        item = item.strip()
-        if item:
-            roots.append(Path(item).expanduser())
+        parsed = _parse_policy_root(item)
+        if parsed is not None:
+            roots.append(parsed)
     return roots
 
 
@@ -283,11 +350,13 @@ def _roots_from_file() -> list[Path]:
         lines = roots_file_path().read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):
         return []
-    roots = []
+    roots: list[Path] = []
     for line in lines:
         value = line.strip()
         if value and not value.startswith("#"):
-            roots.append(Path(value).expanduser())
+            parsed = _parse_policy_root(value)
+            if parsed is not None:
+                roots.append(parsed)
     return roots
 
 
@@ -383,8 +452,11 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
             resolved = root.resolve()
         except OSError:
             resolved = _normalized_absolute(root)
-        if resolved not in out:
-            out.append(resolved)
+        parsed = _parse_policy_root(str(resolved), expand_user=False)
+        if parsed is None:
+            continue
+        if parsed not in out:
+            out.append(parsed)
     return _attenuate_managed_roots(out)
 
 
@@ -410,28 +482,41 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
     excluded = []
     for root in (workspace_root(), Path(runtime_paths.default_home())):
         try:
-            excluded.append(root.resolve())
+            resolved_excluded = root.resolve()
         except OSError:
-            excluded.append(_normalized_absolute(root))
-    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
+            resolved_excluded = _normalized_absolute(root)
+        parsed_excluded = _parse_policy_root(str(resolved_excluded), expand_user=False)
+        excluded.append(parsed_excluded if parsed_excluded is not None else resolved_excluded)
+    explicit: list[Path] = []
+    for item in configured or ():
+        if item is None:
+            continue
+        parsed = _parse_policy_root(str(item))
+        if parsed is not None:
+            explicit.append(parsed)
     roots = []
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     default_root = None
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         default_root = runtime_paths.default_workspace_root()
-    if default_root is not None and os.path.isdir(default_root):
-        roots.append(Path(default_root))
+    if default_root is not None:
+        parsed_default = _parse_policy_root(str(default_root))
+        if parsed_default is not None and parsed_default.is_dir():
+            roots.append(parsed_default)
     out: list[str] = []
     for root in explicit + roots:
         try:
             resolved = root.resolve()
         except OSError:
             resolved = _normalized_absolute(root)
-        text = str(resolved)
+        parsed_resolved = _parse_policy_root(str(resolved), expand_user=False)
+        if parsed_resolved is None:
+            continue
+        text = str(parsed_resolved)
         # An operator's own [state].workspace_roots entry is kept as written;
         # only the ambient sources may not hand out the state home or checkout.
-        if text in out or (root not in explicit and resolved in excluded):
+        if text in out or (root not in explicit and parsed_resolved in excluded):
             continue
         out.append(text)
     return tuple(str(root) for root in _attenuate_managed_roots([Path(text) for text in out]))
@@ -659,7 +744,7 @@ def read_policy_snapshot():
     if _POLICY_SNAPSHOT.get() is not None:
         yield
         return
-    snapshot = (_control_plane_paths(), live_control_plane_inventory())
+    snapshot = (_control_plane_paths(), live_control_plane_inventory(), {})
     token = _POLICY_SNAPSHOT.set(snapshot)
     try:
         yield
@@ -736,15 +821,461 @@ def _is_protected_mutation_path(path: Path) -> bool:
     return _path_aliases.same_file_as_any(path, _identity_protected_files())
 
 
+_EXACT_MODULE_SUFFIXES: tuple[str, ...] = tuple(
+    sorted(set(importlib.machinery.all_suffixes()) | set(PYTHON_MODULE_SUFFIXES))
+)
+
+
+def _has_package_init(directory: Path) -> bool:
+    return any((directory / ("__init__" + suffix)).is_file() for suffix in _EXACT_MODULE_SUFFIXES)
+
+
+@functools.lru_cache(maxsize=1)
+def _namespace_site_dirs() -> tuple[Path, ...]:
+    """Directories where an installed distribution can place a top-level namespace portion.
+
+    sysconfig's ``purelib`` and ``platlib``, the user site when it is enabled,
+    and ``site.getsitepackages()`` for the active prefix and for
+    ``sys.base_prefix``. A distribution installs a PEP 420 portion directly in
+    one of these. ``sys.prefix``/``sys.base_prefix`` themselves (which
+    ``getsitepackages`` returns on Windows), the stdlib, ``DLLs``, ``include``
+    and ``Scripts`` are dropped: their children (``Lib``, ``tcl``, ``Doc``,
+    ``libs``, ...) are interpreter layout, not installed packages.
+
+    Directories reached only through a ``.pth`` line (pywin32's
+    ``site-packages\\win32`` and ``win32\\lib``, an editable install's source
+    tree) and other ``sys.path`` entries are not added: a distribution's
+    namespace portion lives directly in purelib/platlib, and the children of a
+    ``.pth`` interior directory (``lib``, ``libs``, ``include``, ``test``) are
+    ordinary names a nested project uses. A ``.pth`` directory that is itself
+    one of the site directories above still counts, and the ``.pth``-added
+    directory itself, when it sits directly in a site directory with no
+    ``__init__`` (``site-packages\\win32``), is a portion like any other.
+    """
+    import site
+    import sysconfig
+
+    paths = sysconfig.get_paths()
+    found: list[str] = [paths[key] for key in ("purelib", "platlib") if paths.get(key)]
+    if getattr(site, "ENABLE_USER_SITE", False):
+        found.append(site.getusersitepackages())
+    getsitepackages = getattr(site, "getsitepackages", None)
+    if getsitepackages is not None:
+        found.extend(getsitepackages())
+        found.extend(getsitepackages([sys.base_prefix]))
+    layout = [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]
+    layout.extend(
+        paths[key]
+        for key in ("stdlib", "platstdlib", "include", "platinclude", "scripts", "data")
+        if paths.get(key)
+    )
+    layout.extend(os.path.join(prefix, "DLLs") for prefix in (sys.prefix, sys.base_prefix))
+    excluded = {os.path.normcase(str(_resolve_best_effort(Path(item)))) for item in layout}
+    seen: set[str] = set()
+    places: list[Path] = []
+    for item in found:
+        place = _resolve_best_effort(Path(item))
+        key = os.path.normcase(str(place))
+        if key in excluded or key in seen:
+            continue
+        seen.add(key)
+        places.append(place)
+    return tuple(places)
+
+
+def _import_case_relaxed() -> bool:
+    """Whether FileFinder matches names case-insensitively in this environment.
+
+    Mirrors ``importlib._bootstrap_external._relax_case``: only on Windows,
+    Cygwin and macOS, only when ``PYTHONCASEOK`` is set and ``-E`` is not.
+    """
+    return (
+        sys.platform.startswith(("win", "cygwin", "darwin"))
+        and not sys.flags.ignore_environment
+        and "PYTHONCASEOK" in os.environ
+    )
+
+
+def _directory_mtime_ns(place: Path) -> int | None:
+    try:
+        return os.stat(place).st_mtime_ns
+    except (OSError, ValueError):
+        return None
+
+
+def _normalize_import_filename(file_name: str) -> str:
+    """Match ``FileFinder._fill_cache()`` suffix lowercasing on Windows."""
+    if not sys.platform.startswith("win"):
+        return file_name
+    stem, dot, suffix = file_name.partition(".")
+    return f"{stem}.{suffix.lower()}" if dot else file_name
+
+
+def _module_name_of(file_name: str, suffixes: tuple[str, ...]) -> str | None:
+    """The module a file named ``file_name`` provides to FileFinder, or None."""
+    normalized = _normalize_import_filename(file_name)
+    for suffix in suffixes:
+        if normalized.endswith(suffix) and len(normalized) > len(suffix):
+            return normalized[: -len(suffix)]
+    return None
+
+
+def _classify_site_directory(directory: str, suffixes: tuple[str, ...], init_names: frozenset[str]) -> str:
+    """Classify a site-directory child: ``"regular"``, ``"portion"`` or ``""``.
+
+    ``"regular"`` is a directory with an ``__init__`` module file (a regular
+    package); ``"portion"`` is a PEP 420 namespace portion.
+
+    A portion holds at least one module file or subpackage directory and no
+    ``__init__`` module file. The ``__init__`` stat FileFinder does is
+    case-insensitive on Windows, and ``FileFinder._fill_cache()`` lowercases
+    filename suffixes after the first ``.`` on Windows, so both are mirrored
+    here.
+    """
+    fold = os.name == "nt"
+    has_content = False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                try:
+                    is_file = entry.is_file()
+                    is_dir = not is_file and entry.is_dir()
+                except OSError:
+                    continue
+                if is_file and (name.casefold() if fold else name) in init_names:
+                    return "regular"
+                if has_content:
+                    continue
+                if is_dir:
+                    has_content = name.isidentifier() and name != "__pycache__"
+                elif is_file:
+                    has_content = _normalize_import_filename(name).endswith(suffixes)
+    except (OSError, ValueError):
+        return ""
+    return "portion" if has_content else ""
+
+
+# Per-place top-level site-directory listing cache:
+# {normcase_place: (mtime_ns, exact_dirs, lower_dirs, exact_modules, lower_modules)}
+_SiteListing = tuple[
+    int | None,
+    frozenset[str],
+    dict[str, tuple[str, ...]],
+    frozenset[str],
+    frozenset[str],
+]
+_SITE_LISTING_CACHE: dict[str, _SiteListing] = {}
+
+
+def _scan_site_directory_listing(
+    place: Path,
+    stamp: int | None,
+    suffixes: tuple[str, ...],
+) -> _SiteListing:
+    exact_dirs: set[str] = set()
+    lower_dirs_map: dict[str, list[str]] = {}
+    exact_modules: set[str] = set()
+    lower_modules: set[str] = set()
+    try:
+        with os.scandir(place) as entries:
+            listing = list(entries)
+    except (OSError, ValueError):
+        return (stamp, frozenset(), {}, frozenset(), frozenset())
+    for entry in listing:
+        name = entry.name
+        try:
+            is_dir = entry.is_dir()
+            is_file = not is_dir and entry.is_file()
+        except OSError:
+            continue
+        if is_file:
+            module = _module_name_of(name, suffixes)
+            if module is not None:
+                exact_modules.add(module)
+                lower_modules.add(module.lower())
+            continue
+        if not is_dir or not name.isidentifier() or name == "__pycache__":
+            continue
+        exact_dirs.add(name)
+        lower_dirs_map.setdefault(name.lower(), []).append(name)
+    return (
+        stamp,
+        frozenset(exact_dirs),
+        {k: tuple(v) for k, v in lower_dirs_map.items()},
+        frozenset(exact_modules),
+        frozenset(lower_modules),
+    )
+
+
+def _site_directory_listing(place: Path, suffixes: tuple[str, ...]) -> _SiteListing:
+    """Top-level directory and module-file names in ``place``, revalidated via ``st_mtime_ns``.
+
+    Inside ``read_policy_snapshot()``, each site directory is stat'ed at most
+    once per snapshot so bulk scans stay O(1) per file. Outside a snapshot
+    (including every mutation call), ``os.stat(place)`` always runs so newly
+    installed distributions are visible immediately with no blind TTL window.
+    """
+    place_key = os.path.normcase(str(place))
+    snapshot = _POLICY_SNAPSHOT.get()
+    snapshot_cache = snapshot[2] if snapshot is not None and len(snapshot) > 2 else None
+    if snapshot_cache is not None and place_key in snapshot_cache:
+        return snapshot_cache[place_key]
+    stamp = _directory_mtime_ns(place)
+    cached = _SITE_LISTING_CACHE.get(place_key)
+    if cached is not None and cached[0] == stamp:
+        listing = cached
+    else:
+        listing = _scan_site_directory_listing(place, stamp, suffixes)
+        _SITE_LISTING_CACHE[place_key] = listing
+    if snapshot_cache is not None:
+        snapshot_cache[place_key] = listing
+    return listing
+
+
+def _matches_namespace_in_group(
+    name: str,
+    group: list[tuple[Path, _SiteListing]],
+    *,
+    relaxed: bool,
+    suffixes: tuple[str, ...],
+    init_names: frozenset[str],
+) -> bool:
+    """Whether ``name`` is an unshadowed PEP 420 portion across ``group``."""
+    lookup = name.lower() if relaxed else name
+    has_portion = False
+    for place, listing in group:
+        _stamp, exact_dirs, lower_dirs, exact_modules, lower_modules = listing
+        if lookup in (lower_modules if relaxed else exact_modules):
+            return False
+        matched_dirs = lower_dirs.get(lookup, ()) if relaxed else ((name,) if name in exact_dirs else ())
+        for entry_name in matched_dirs:
+            kind = _classify_site_directory(str(place / entry_name), suffixes, init_names)
+            if kind == "regular":
+                return False
+            if kind == "portion":
+                has_portion = True
+    return has_portion
+
+
+def _is_installed_namespace_package(name: str, root: Path) -> bool:
+    """Whether top-level directory ``name`` under ``root`` joins an installed namespace package.
+
+    A directory under ``root`` with no ``__init__`` becomes the leading
+    portion of namespace package ``name`` when ``python -m pytest`` puts the
+    root first on ``sys.path``, so it can add or shadow submodules of an
+    installed namespace package (the venv's ``opentelemetry``, which ``mcp``
+    imports). ``name`` is the directory's on-disk spelling (the caller passes
+    a resolved path) and is matched the way FileFinder matches it: exactly,
+    or lower-cased under ``PYTHONCASEOK``. Only portions in the site
+    directories count (``_namespace_site_dirs()``).
+
+    Top-level listings per site directory are cached by ``st_mtime_ns`` (and
+    once per ``read_policy_snapshot``); whenever ``name`` matches an existing
+    site-directory child, that child is classified live on disk so in-place
+    transitions (adding the first module or removing ``__init__.py``) are seen
+    immediately. Active ``sys.path`` site directories and inactive site
+    directories (such as ``sys.base_prefix`` site-packages in an isolated venv)
+    are evaluated separately so a regular package in an inactive site directory
+    cannot falsely shadow an active venv namespace portion.
+    """
+    if not name.isidentifier() or name.casefold() == "__pycache__":
+        return False
+    relaxed = _import_case_relaxed()
+    places = tuple(place for place in _namespace_site_dirs() if not _is_inside(root, place))
+    if not places:
+        return False
+    suffixes = tuple(importlib.machinery.all_suffixes())
+    lookup = name.lower() if relaxed else name
+    place_listings = [(place, _site_directory_listing(place, suffixes)) for place in places]
+    if not any(
+        (lookup in listing[2]) if relaxed else (lookup in listing[1])
+        for _place, listing in place_listings
+    ):
+        return False
+    fold = os.name == "nt"
+    init_names = frozenset(
+        ("__init__" + suffix).casefold() if fold else "__init__" + suffix for suffix in suffixes
+    )
+    active_sys_path = {
+        os.path.normcase(str(_resolve_best_effort(Path(entry))))
+        for entry in sys.path
+        if entry
+    }
+    active_group = [
+        item for item in place_listings if os.path.normcase(str(item[0])) in active_sys_path
+    ]
+    inactive_group = [
+        item for item in place_listings if os.path.normcase(str(item[0])) not in active_sys_path
+    ]
+    if active_group and _matches_namespace_in_group(
+        name, active_group, relaxed=relaxed, suffixes=suffixes, init_names=init_names
+    ):
+        return True
+    if inactive_group and _matches_namespace_in_group(
+        name, inactive_group, relaxed=relaxed, suffixes=suffixes, init_names=init_names
+    ):
+        return True
+    return False
+
+
+def _is_root_import_path(path: Path, root: Path) -> bool:
+    """Whether ``path`` is a module the runtime can import from the install root.
+
+    True for a module, its cached bytecode or an extension module directly in
+    the root, anything of that kind in a first-party code directory or the
+    runtime package, the ``__init__`` that would make a new top-level directory
+    a regular package, every module inside an existing top-level regular
+    package (one with an ``__init__`` module), and every module (including
+    ``__pycache__`` bytecode and subpackage ``__init__`` files) inside a
+    top-level directory whose exact name is a PEP 420 namespace portion
+    installed in a site directory (``_is_installed_namespace_package``; the
+    interpreter layout under ``sys.prefix``/``sys.base_prefix`` and
+    directories reached only through a ``.pth`` line do not count).
+
+    An ordinary nested user project with no top-level ``__init__`` whose
+    top-level directory is not the name of an installed namespace portion
+    (``lib``, ``doc``, ``include``, ``tcl``, ...) stays editable. This guard
+    also protects pytest config names beside the root and in the first-party
+    code trees, and ``*.dist-info``/``*.egg-info`` directories beside the root
+    (``DISTRIBUTION_METADATA_SUFFIXES``); importing
+    an unrelated new namespace-only name explicitly (for example via an
+    optional import or ``PYTEST_ADDOPTS``), or metadata/config outside the root
+    and first-party trees, remain outside this path guard.
+    """
+    if path.suffix.casefold() not in PYTHON_MODULE_SUFFIXES:
+        return False
+    directory = path.parent
+    if directory.name.casefold() == "__pycache__":
+        directory = directory.parent
+    if directory == root:
+        return True
+    if any(_is_inside(path, root / name) for name in (*RUNTIME_PACKAGE_DIRS, *FIRST_PARTY_CODE_DIRS)):
+        return True
+    try:
+        package = root / directory.relative_to(root).parts[0]
+    except ValueError:
+        return False
+    # The import system finds a package's ``__init__`` with a case-insensitive
+    # stat on Windows (``pkg/__INIT__.py`` makes ``pkg`` a regular package),
+    # and under any module suffix (``__init__.pyw``, ``__init__.pyc``, ...).
+    if directory == package and path.name.split(".", 1)[0].casefold() == "__init__":
+        return True
+    if _has_package_init(package):
+        return True
+    return _is_installed_namespace_package(package.name, root)
+
+
+@functools.lru_cache(maxsize=1)
+def _interpreter_library_dirs() -> tuple[Path, ...]:
+    """The running interpreter's library directories.
+
+    The base installation (``sys.base_prefix``, which holds the stdlib, and on
+    Windows the ``DLLs`` directory and the prefix itself that ``sys.path``
+    lists), the active venv, sysconfig's stdlib and site-packages paths, and
+    the user site when it is enabled. Other ``sys.path`` entries are not added.
+    """
+    import site
+    import sysconfig
+
+    found: list[str] = [sys.base_prefix]
+    if sys.prefix != sys.base_prefix:
+        found.append(sys.prefix)
+    paths = sysconfig.get_paths()
+    found.extend(paths[key] for key in _INTERPRETER_LIBRARY_KEYS if paths.get(key))
+    if getattr(site, "ENABLE_USER_SITE", False):
+        found.append(site.getusersitepackages())
+    return tuple(_resolve_best_effort(Path(item)) for item in found)
+
+
+def _is_interpreter_environment_path(path: Path) -> bool:
+    """Whether writing ``path`` changes code the runtime's interpreter loads at start.
+
+    ``<root>/venv`` and ``<root>/.venv`` as a whole, and the running
+    interpreter's library directories (``_interpreter_library_dirs``). A
+    directory that holds the install root itself is skipped, so an unusual
+    layout never puts the whole workspace under this rule. Kept outside
+    ``_is_protected_mutation_path`` so reading library source stays allowed,
+    and enforced across mutation guards (single-file mutations, recursive
+    delete, batch preflight, archive extraction, patch and formatter scopes).
+    """
+    root = _resolve_best_effort(workspace_root())
+    places = [root / name for name in INTERPRETER_ENVIRONMENT_DIRS]
+    places.extend(place for place in _interpreter_library_dirs() if not _is_inside(root, place))
+    return any(_is_inside(path, place) for place in places)
+
+
+def _is_protected_interpreter_environment(path: Path) -> bool:
+    """Spelling-safe interpreter-environment check that fails closed on odd namespaces."""
+    try:
+        spelled = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True
+    return _is_interpreter_environment_path(spelled)
+
+
 def _is_protected_by_name(path: Path) -> bool:
     if _is_sensitive_control_path(path):
         return True
     if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
+    return _is_runtime_code_by_name(path, _resolve_best_effort(workspace_root()))
+
+
+def _is_runtime_code_path(path: Path) -> bool:
+    """Whether writing ``path`` creates or changes code the runtime imports or runs.
+
+    The code clauses of the mutation guard alone (root and first-party modules
+    and scripts, top-level regular packages, portions of installed PEP 420
+    namespace packages, every file under ``tests``/``proposals``, the pytest
+    configuration names beside the root, any ``.ini``/``.cfg``/``.toml`` in
+    the first-party code trees, and distribution metadata directories beside
+    the root), without its secret-name rules. ``archive_tools`` checks each
+    extracted member with it: an archive may carry a ``.npmrc`` (its own
+    policy), never a module the runtime would import. A spelling with no
+    ordinary form is refused.
+    """
+    try:
+        path = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True
+    return _is_runtime_code_by_name(path, _resolve_best_effort(workspace_root()))
+
+
+def _is_distribution_metadata_path(path: Path, root: Path) -> bool:
+    """Whether ``path`` is, or is inside, a ``*.dist-info``/``*.egg-info`` child of ``root``.
+
+    ``importlib.metadata`` matches the lower-cased name; casefold is checked
+    too, so no case spelling it would match is missed.
+    """
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    top = parts[0]
+    return top.lower().endswith(DISTRIBUTION_METADATA_SUFFIXES) or top.casefold().endswith(
+        DISTRIBUTION_METADATA_SUFFIXES
+    )
+
+
+def _is_runtime_code_by_name(path: Path, root: Path) -> bool:
+    if path.parent == root and path.name.lower() in PYTEST_CONFIG_FILES:
+        return True
+    if _is_distribution_metadata_path(path, root):
+        return True
+    if any(_is_inside(path, root / name) for name in PYTEST_COLLECTED_DIRS):
+        return True
+    if path.suffix.lower() in FIRST_PARTY_CONFIG_SUFFIXES and any(
+        _is_inside(path, root / name) for name in FIRST_PARTY_CODE_DIRS
+    ):
+        return True
+    if _is_root_import_path(path, root):
+        return True
     suffix = path.suffix.lower()
     if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:
         return False
-    root = _resolve_best_effort(workspace_root())
     # Sonder's own modules and launchers: directly in the install root, or
     # inside its first-party code directories (RUNTIME_PACKAGE_DIRS for
     # ``.py``, FIRST_PARTY_CODE_DIRS for any script). A *nested user project*
@@ -794,6 +1325,53 @@ def _policy_file_refusal(path: Path, *, holding: bool) -> PermissionError | None
     )
 
 
+def _sensitive_dir_component(path: Path) -> str:
+    """The sensitive directory component of *path* relative to containing roots, or ""."""
+    resolved = _resolve_best_effort(path)
+    containing = [
+        root
+        for root in (_resolve_best_effort(item) for item in allowed_roots())
+        if resolved == root or _is_inside(resolved, root)
+    ]
+    if not containing:
+        for part in resolved.parts[1:]:
+            if part.lower() in SENSITIVE_READ_DIRECTORIES:
+                return part.lower()
+        return ""
+    sensitive = ""
+    for root in containing:
+        if resolved == root:
+            parts: tuple[str, ...] = ()
+        else:
+            try:
+                parts = resolved.relative_to(root).parts
+            except ValueError:
+                parts = resolved.parts[1:]
+        match = next(
+            (part.lower() for part in parts if part.lower() in SENSITIVE_READ_DIRECTORIES),
+            "",
+        )
+        if not match:
+            return ""
+        sensitive = sensitive or match
+    return sensitive
+
+
+def _sensitive_mutation_component(path: Path) -> str:
+    """The sensitive directory or credential-store component of *path*, or "".
+
+    Checked relative to the containing allowed root(s) so an operator root
+    that explicitly names a sensitive directory (for example ``~/.ssh``) stays
+    writable. When *path* lies outside every allowed root (a bypass call), its
+    full absolute components are inspected so bypass never opens sensitive
+    directories.
+    """
+    sensitive = _sensitive_dir_component(path)
+    if sensitive:
+        return sensitive
+    return credential_read_component(path)
+
+
 def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
     refusal = _policy_file_refusal(path, holding=False)
     if refusal is not None:
@@ -815,6 +1393,25 @@ def _require_mutation_access(path: Path, developer_authorized: bool) -> None:
         raise PermissionError(
             "refusing to mutate protected Sonder control-plane path %s "
             "without an authenticated developer token" % path
+        )
+    try:
+        environment = _is_interpreter_environment_path(_protection_spelling(path))
+    except (OSError, ValueError):
+        environment = True
+    if environment:
+        # A .pth, sitecustomize.py or any module in the interpreter's library
+        # or venv directories runs in the runtime process at its next start.
+        raise PermissionError(
+            f"refusing to mutate the Python interpreter environment path {path} "
+            "without an authenticated developer token"
+        )
+    sensitive = _sensitive_mutation_component(path)
+    if sensitive:
+        # The path goes before the phrase: "token: <path>" reads as a
+        # credential to the output redactor.
+        raise PermissionError(
+            "refusing to mutate sensitive directory or credential store path %s (%s) "
+            "without an authenticated developer token" % (path, sensitive)
         )
     links = _path_aliases.hard_link_count(_resolve_best_effort(path))
     if links > 1:
@@ -846,10 +1443,14 @@ def _is_protected_read_path(path: Path) -> bool:
     """Paths whose CONTENTS are secret/control state and must not be read.
 
     Mirrors the mutation classifier (``_is_protected_mutation_path`` --
-    secrets, control-plane config/state, and root-level Sonder modules) and
-    adds the personal corpus, which is read-sensitive even though writing it
-    is not itself control-plane-protected. Writes already refuse the mutation
-    set; reads previously refused none of it -- this closes that asymmetry.
+    secrets, control-plane config/state, and the runtime's own code: root and
+    first-party modules and scripts, top-level regular packages, portions of
+    installed PEP 420 namespace packages, every file under
+    ``tests``/``proposals``, the pytest configuration and distribution
+    metadata beside the root) and adds the personal corpus, which is
+    read-sensitive even though writing it is not itself
+    control-plane-protected. Writes already refuse the mutation set; reads
+    previously refused none of it -- this closes that asymmetry.
     """
     path = _resolve_best_effort(path)
     return _is_protected_mutation_path(path) or _is_personal_corpus(path)
@@ -927,6 +1528,20 @@ def credential_read_component(path: Path) -> str:
             return ""
         found = found or part
     return found
+
+
+def is_credential_store(path) -> bool:
+    """Whether a walk must skip *path* as a credential store.
+
+    The entries ``credential_read_component`` names are the ones ``file_read``
+    refuses whatever the token or bypass, so a walk (a tree listing, a file
+    find, a script search, a secret scan) never lists or opens them either.
+    The name-only ``_credential_part`` runs first and the root-aware check
+    only on a hit, because ``credential_read_component`` resolves every
+    allowed root per call. A store an operator root names stays visible.
+    """
+    candidate = Path(path)
+    return bool(_credential_part(candidate.parts) and credential_read_component(candidate))
 
 
 def credential_path_component(root: Path, relative_parts) -> str:
@@ -1118,6 +1733,7 @@ def resolve_repository_read_path(
             _is_sensitive_control_path(resolved)
             or any(part.lower() in SENSITIVE_READ_DIRECTORIES for part in relative.parts)
             or credential_read_component(resolved)
+            or _is_personal_corpus(resolved)
         ):
             raise PermissionError("repository path is secret or control state")
     return resolved
@@ -1140,6 +1756,10 @@ def _is_reparse_point(path: Path) -> bool:
     except OSError as exc:
         raise PermissionError("could not safely inspect path metadata: %s" % path) from exc
     return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+# Public name for walks outside this module (the secret scan).
+is_reparse_point = _is_reparse_point
 
 
 def _require_no_reparse_components(path: Path) -> None:
@@ -1197,7 +1817,12 @@ def _require_safe_recursive_delete(
                         "refusing recursive deletion of a tree containing a symlink "
                         "or junction (%s) without an authenticated developer token" % child
                     )
-                if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
+                if (
+                    _is_sensitive_control_path(child)
+                    or _is_protected_mutation_path(child)
+                    or _is_protected_interpreter_environment(child)
+                    or _sensitive_mutation_component(child)
+                ):
                     raise PermissionError(
                         "refusing recursive deletion of a tree containing protected "
                         "control state (%s) without an authenticated developer token" % child
@@ -1216,7 +1841,12 @@ def _guard_delete_entry(child: Path) -> None:
     """Veto removal of a descendant that the recursive preflight would refuse."""
     if _is_reparse_point(child):
         raise PermissionError("refusing to traverse symlink or junction: %s" % child)
-    if _is_sensitive_control_path(child) or _is_protected_mutation_path(child):
+    if (
+        _is_sensitive_control_path(child)
+        or _is_protected_mutation_path(child)
+        or _is_protected_interpreter_environment(child)
+        or _sensitive_mutation_component(child)
+    ):
         raise PermissionError("refusing to delete protected control state: %s" % child)
 
 
@@ -1368,9 +1998,6 @@ def _require_plain_name_spelling(path: str) -> None:
         )
 
 
-_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
-
-
 def _reject_network_path(path: str) -> str:
     """Refuse a UNC / extended / device-namespace spelling before any filesystem call.
 
@@ -1504,6 +2131,7 @@ def find_files(
             name for name in dirs
             if name not in {".git", ".pytest_cache", "venv", "__pycache__"}
             and not _is_reparse_point(base_path / name)
+            and not is_credential_store(base_path / name)
             and (
                 visible is None
                 or os.path.normcase(
@@ -1520,6 +2148,10 @@ def find_files(
             if _is_reparse_point(path):
                 continue
             if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern) or pattern.lower() in rel.lower():
+                if is_credential_store(path):
+                    # Judged only on a match: a credential store is never
+                    # listed, and the walk does not pay for it per entry.
+                    continue
                 results.append({
                     "path": str(path),
                     "relative": rel,
@@ -1549,7 +2181,8 @@ def read_file(
         raise ValueError("path is not a file: %s" % p)
     size = p.stat().st_size
     limit = max(1, min(MAX_READ_BYTES, int(max_bytes or MAX_READ_BYTES)))
-    data = p.read_bytes()[:limit]
+    with p.open("rb") as handle:
+        data = handle.read(limit)
     text = data.decode("utf-8", errors="replace")
     return {"path": str(p), "bytes": size, "truncated": size > limit, "text": text}
 
@@ -2378,6 +3011,8 @@ def _batch_preflight(
             relative = resolved.relative_to(authorized_root)
             if (
                 _is_protected_mutation_path(resolved)
+                or _is_protected_interpreter_environment(resolved)
+                or _sensitive_mutation_component(resolved)
                 or any(
                     part.lower() in SENSITIVE_READ_DIRECTORIES
                     for part in relative.parts
@@ -2848,6 +3483,8 @@ def delete_path(
 # --- structured data inspection ---------------------------------------------
 
 INSPECT_PREVIEW_ITEMS = 20
+# Wall-clock bound on the SQLite preview's row counts.
+INSPECT_SQLITE_SECONDS = 5.0
 INSPECT_PREVIEW_CHARS = 2000
 # Walking a compressed TAR decompresses every payload to reach the next
 # header; previews stop at these bounds and report counts as floors.
@@ -2963,9 +3600,23 @@ def _inspect_csv(p: Path, max_bytes: int, delimiter: str) -> dict:
 
 def _inspect_sqlite(p: Path) -> dict:
     import sqlite3
+    import time
+    from urllib.parse import quote
 
-    uri = "file:%s?mode=ro" % p.as_posix()
+    # SQLite percent-decodes a URI path and ends it at '?' or '#', so the
+    # checked name is encoded: a file named "memory.db#.db" or "x%2F..%2Fa.db"
+    # must open itself read-only, not a sibling (with mode=ro cut off).
+    uri = "file:%s?mode=ro" % quote(p.as_posix(), safe="/:")
     conn = owned_sqlite_connect(uri, uri=True)
+    closing = threading.Lock()
+    closed = threading.Event()
+    timer: threading.Timer | None = None
+
+    def _interrupt() -> None:
+        with closing:
+            if not closed.is_set():
+                conn.interrupt()
+
     try:
         tables = [
             row[0]
@@ -2974,6 +3625,16 @@ def _inspect_sqlite(p: Path) -> dict:
                 " AND name NOT LIKE 'sqlite_%' ORDER BY name"
             )
         ]
+        # COUNT(*) over an untrusted database is a full scan per table; past
+        # the deadline every remaining count is interrupted and shown as "?".
+        # The progress handler refuses each later statement as it starts; a
+        # single long scan runs inside one opcode the handler never sees, so
+        # a timer interrupts it (``interrupt`` may be called from any thread).
+        deadline = time.monotonic() + INSPECT_SQLITE_SECONDS
+        conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1)
+        timer = threading.Timer(max(0.0, INSPECT_SQLITE_SECONDS), _interrupt)
+        timer.daemon = True
+        timer.start()
         counts = {}
         for table in tables[:INSPECT_PREVIEW_ITEMS]:
             try:
@@ -2983,7 +3644,11 @@ def _inspect_sqlite(p: Path) -> dict:
             except sqlite3.Error:
                 counts[table] = "?"
     finally:
-        conn.close()
+        if timer is not None:
+            timer.cancel()
+        with closing:
+            closed.set()
+            conn.close()
     return {
         "kind": "sqlite",
         "tables": len(tables),

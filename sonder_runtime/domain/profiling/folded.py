@@ -442,9 +442,14 @@ def digest_zones(
     frame_set = {frame_zone} if frame_zone else set(frame_names)
     best_thread = ""
     best_frames: list[tuple[int, int]] = []
+    # Folding gets its own budget.  The caller's budget also timed the read
+    # and latches once exceeded, so sharing it would fold nothing when the
+    # read ran out of time and discard every zone already parsed, instead of
+    # returning a truncated partial digest.
+    fold_budget = budget.renewed() if budget is not None else None
     for key in sorted(selected):
         zones = selected[key]
-        fold_zones(folded, zones, budget=budget)
+        fold_zones(folded, zones, budget=fold_budget)
         frames = sorted((start, duration) for start, duration, name in zones if name in frame_set)
         if len(frames) > len(best_frames):
             best_thread, best_frames = key, frames
@@ -466,7 +471,7 @@ def digest_zones(
         spikes = detect_spikes(durations, starts_ns=starts, label=frame_zone or "frame",
                                thread=names.get(best_thread, best_thread) or None)
     if not folded.stacks and not durations:
-        if budget is not None and budget.exceeded:
+        if fold_budget is not None and fold_budget.exceeded:
             raise ProfileParseError("time budget ran out before any zone was folded")
         raise ProfileParseError("no timed zones or frame markers found")
     return digest_folded(

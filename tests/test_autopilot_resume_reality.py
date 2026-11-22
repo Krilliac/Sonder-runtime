@@ -131,3 +131,17 @@ def test_pending_barrier_blocks_store_completion(repo):
     store.save_progress(run_id, "seed", plan=run["plan"])
     assert store.save_workspace_reality(run_id, "seed", {"pending": {"requires_replan": True}})
     assert store.finish_run(run_id, "seed", "completed") is None
+
+
+def test_provider_outage_during_resume_inspection_pauses_instead_of_failing(repo):
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    run_id = start(repo)
+    (repo / "main.py").write_text("changed externally\n", encoding="utf-8")
+
+    def work(_run, _task, _prior):
+        raise ModelCallError("transport", "connection refused")
+
+    result = controller.execute_run(run_id, "two", owner_pid=os.getpid(), plan_fn=plan,
+                                    work_fn=work, review_fn=lambda *_: {"decision": "complete"})
+    assert result["status"] == "paused"
+    assert "provider unavailable" in (result.get("last_error") or "")

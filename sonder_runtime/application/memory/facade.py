@@ -117,5 +117,29 @@ class MemoryLearningFacade:
             )
             return result
 
+    def promote_verified_claim(self, request):
+        """Apply the receipt-bound claim ladder through the live UoW.
+
+        ``request`` is a ``FactPromotionRequest`` naming durable observation
+        identities and the expected host claim; the claim must match the
+        persisted receipts' claim digest.  The fact source comes from the
+        composed persistence graph.  Returns a ``FactPromotionResult``.
+        """
+        from .receipt_bound_fact_promotion import ReceiptBoundFactPromotion
+
+        with self._unit_of_work() as scope:
+            source = scope.authoritative_fact_source
+            if source is None:
+                raise RuntimeError("authoritative fact source is not configured")
+            # Same snapshot rule as subject promotion: the observation read
+            # and the fact mutation share one write transaction.
+            scope.connection.execute("BEGIN IMMEDIATE")
+            return ReceiptBoundFactPromotion().apply(
+                request,
+                repository=scope.verifier_observations,
+                fact_source=source,
+                connection=scope.connection,
+            )
+
 
 __all__ = ["MemoryLearningFacade"]

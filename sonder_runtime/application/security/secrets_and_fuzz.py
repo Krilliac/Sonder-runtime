@@ -31,7 +31,13 @@ class CredentialScanner:
             r"(?=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
             r"(?:[A-Za-z0-9_-]*?-)?eyJ[A-Za-z0-9_-]{8}"
         )),
-        ("credential_assignment", re.compile(r"(?i)\b(?:api[_-]?key|secret|password|token)\s*[:=]\s*[^\s,;]+")),
+        # The name may carry a '_'/'-' prefix (OPENAI_API_KEY, DB_PASSWORD,
+        # client_secret), which ``\b`` cannot follow since '_' is a word
+        # character, and may close a quote before the separator, as a JSON
+        # key does (``{"password": ...}``, ``{\"token\": ...}``).
+        ("credential_assignment", re.compile(
+            r"(?i)(?<![a-z0-9])(?:api[_-]?key|secret|password|token)(?:\\?[\"'])?\s*[:=]\s*[^\s,;]+"
+        )),
     )
 
     def __init__(self, *, max_bytes: int = 1_000_000) -> None:
@@ -40,6 +46,11 @@ class CredentialScanner:
         self.max_bytes = max_bytes
 
     def scan(self, content: str | bytes) -> tuple[CredentialFinding, ...]:
+        # Every input byte or character is at least one UTF-8 byte after the
+        # decode below, so an input longer than the bound is refused before
+        # decoding and re-encoding copies it.
+        if len(content) > self.max_bytes:
+            raise ValueError("content exceeds scan bound")
         raw = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
         if len(raw.encode("utf-8")) > self.max_bytes:
             raise ValueError("content exceeds scan bound")

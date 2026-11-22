@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def unavailable(error: str = "") -> dict:
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
+
+
+def unavailable(error: str = "") -> dict[str, object]:
     return {
         "known": False, "running_lanes": None, "running_agents": None,
         "queued_agents": None, "active_agents": None,
@@ -12,7 +18,7 @@ def unavailable(error: str = "") -> dict:
     }
 
 
-def from_fleet_snapshot(snapshot: dict | None) -> dict:
+def from_fleet_snapshot(snapshot: Mapping[str, Any] | None) -> dict[str, object]:
     if not isinstance(snapshot, dict):
         return unavailable("fleet snapshot is unavailable")
     try:
@@ -29,7 +35,10 @@ def from_fleet_snapshot(snapshot: dict | None) -> dict:
             "semantics": "fleet model-call lanes and durable fleet agents", "error": ""}
 
 
-def with_feed(fleet_snapshot: dict | None, feed: dict | None) -> dict:
+def with_feed(
+    fleet_snapshot: Mapping[str, object] | None,
+    feed: Mapping[str, object] | None,
+) -> dict[str, object]:
     result = dict(fleet_snapshot) if isinstance(fleet_snapshot, dict) and fleet_snapshot.get("known") is False else from_fleet_snapshot(fleet_snapshot)
     result["feed"] = feed if isinstance(feed, dict) else {"known": False, "active_responses": None, "events": [], "truncated": False, "redaction_applied": False, "schema_version": 1, "runtime_id": "", "oldest_seq": None, "next_seq": None, "dropped_events": None, "sequence_gap": None, "bytes": 0, "limits": {"events": 20, "preview_chars": 1000}, "error": "activity feed is unavailable"}
     return result

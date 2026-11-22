@@ -588,8 +588,9 @@ def test_replan_respects_one_remaining_slot_and_preserves_validation():
     )
     assert len(plan) == 3
     assert plan[0]["status"] == "superseded"
-    assert plan[-1]["title"] == "Replacement"
-    assert any(task["kind"] == "validate" for task in plan)
+    titles = [task["title"] for task in plan]
+    assert titles.index("Replacement") < titles.index("Validate")
+    assert plan[-1]["kind"] == "validate" and plan[-1]["status"] == "pending"
 
 
 def test_observe_policy_rejects_implementation_during_replan():
@@ -920,3 +921,35 @@ def test_controller_failure_report_names_the_error_not_the_reviewer():
     assert "error: TimeoutError: <urlopen error timed out>" in result["final_report"]
     assert result["last_error"] == "TimeoutError: <urlopen error timed out>"
     assert "last error: TimeoutError" in autopilot_controller.format_run(result, include_report=False)
+
+
+def test_replan_supersedes_infra_retry_tasks_with_pending():
+    run = {
+        "objective": "finish", "max_tasks": 8, "criteria": ["ok"],
+        "plan": [
+            {"id": "task-01", "title": "Retry", "instruction": "old", "kind": "implement", "status": "infra_retry", "history": []},
+            {"id": "task-02", "title": "Later", "instruction": "old2", "kind": "validate", "status": "pending", "history": []},
+        ],
+    }
+    plan = autopilot_controller._append_replan(
+        run, None, [{"title": "Fresh", "kind": "inspect", "instruction": "look"}],
+        supersede_pending=True,
+    )
+    assert [task["status"] for task in plan[:2]] == ["superseded", "superseded"]
+    assert autopilot_controller._next_pending(plan)[1]["title"] == "Fresh"
+
+
+def test_replanned_implement_requires_validation_ordered_after_it():
+    run = {
+        "objective": "finish", "max_tasks": 8, "criteria": ["ok"],
+        "plan": [
+            {"id": "task-01", "title": "Validate", "instruction": "check", "kind": "validate",
+             "status": "passed", "history": [], "host_receipt": {"validation_passed": True}},
+        ],
+    }
+    plan = autopilot_controller._append_replan(
+        run, None, [{"title": "Edit more", "kind": "implement", "instruction": "change it"}],
+    )
+    kinds = [task["kind"] for task in plan]
+    assert kinds == ["validate", "implement", "validate"]
+    assert plan[-1]["status"] == "pending"

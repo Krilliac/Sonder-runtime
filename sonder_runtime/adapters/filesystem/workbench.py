@@ -14,6 +14,7 @@ import hashlib
 import heapq
 import json
 import os
+import queue
 import re
 import signal
 import shutil
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import sonder_runtime.adapters.git_discovery as git_discovery
+from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.platform import logging as runtime_logging
 from sonder_runtime.platform import paths as runtime_paths
 
@@ -34,6 +36,7 @@ from sonder_runtime.platform import paths as runtime_paths
 MAX_TREE_ENTRIES = 500
 MAX_SEARCH_RESULTS = 500
 MAX_SEARCH_FILE_BYTES = 2_000_000
+MAX_SEARCH_PATTERN_CHARS = 2_000
 MAX_RANGE_LINES = 2_000
 MAX_EXEC_OUTPUT = 128_000
 MAX_EXEC_TIMEOUT = 120
@@ -160,6 +163,11 @@ def _sensitive_directory(path: Path) -> str:
     if name in file_ops.CREDENTIAL_READ_DIRECTORIES and not file_ops.credential_read_component(path):
         return ""
     return "sensitive_directory"
+
+
+def _credential_directory(path: Path) -> str:
+    """Skip reason for a credential-store directory a listing walk must not enter."""
+    return "credential_store" if file_ops.is_credential_store(path) else ""
 
 
 def _secret_file(path: Path) -> bool:
@@ -480,6 +488,11 @@ def directory_tree(
             if is_dir and _skip_dir(child.name, include_ignored):
                 skipped += 1
                 continue
+            if file_ops.is_credential_store(candidate):
+                # A credential store is neither listed nor entered, whatever
+                # include_hidden says; its names and sizes are its metadata.
+                skipped += 1
+                continue
             try:
                 size = child.stat(follow_symlinks=False).st_size if not is_dir else 0
             except OSError:
@@ -539,6 +552,135 @@ def read_line_range(
     }
 
 
+# Child-side loop for _RegexSearchWorker. It reads one JSON header line
+# (pattern, flags), then per file a "<limit> <bytes>\n" line followed by that
+# many bytes of UTF-8 text, and answers each file with one JSON line of
+# [line, column, text] rows. Lines are split exactly as text_search's
+# in-process loop splits them (the parent already applied universal newlines).
+_REGEX_WORKER_SOURCE = r"""
+import io, json, re, sys
+source = sys.stdin.buffer
+sink = sys.stdout.buffer
+header = json.loads(source.readline())
+pattern = re.compile(header["pattern"], header["flags"])
+while True:
+    request = source.readline()
+    if not request:
+        break
+    limit, size = (int(part) for part in request.split())
+    text = source.read(size).decode("utf-8", "surrogatepass")
+    found = []
+    for number, line in enumerate(io.StringIO(text), 1):
+        match = pattern.search(line)
+        if match:
+            found.append([number, match.start() + 1, line.rstrip("\r\n")[:500]])
+            if len(found) >= limit:
+                break
+    sink.write(json.dumps(found).encode("ascii") + b"\n")
+    sink.flush()
+"""
+
+
+class _RegexSearchWorker:
+    """Run a caller-supplied regex in a child process under a hard deadline.
+
+    Python's ``re`` engine backtracks and cannot be interrupted from another
+    thread, so a pattern such as ``(a+)+$`` against a long line would pin the
+    request thread for hours; the walk deadline is only checked between
+    entries. The parent keeps every policy decision and opens every file
+    itself, then ships the decoded text to the child and waits for its answer
+    no longer than the search deadline, killing the child when it passes.
+
+    Ownership: one instance per text_search call, used from that call's thread
+    only; ``close()`` must run (it kills and reaps the child and joins the
+    reply reader). Starts one Python child process and one reader thread.
+    """
+
+    def __init__(self, pattern_text, flags):
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self._replies = queue.Queue()
+        self._reader = None
+        self._proc = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", _REGEX_WORKER_SOURCE],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=creationflags,
+        )
+        try:
+            self._reader = owned_runtime_thread(
+                target=self._read_replies, daemon=True,
+            )
+            self._reader.start()
+            header = json.dumps({"pattern": pattern_text, "flags": int(flags)})
+            self._proc.stdin.write(header.encode("utf-8", "surrogatepass") + b"\n")
+            self._proc.stdin.flush()
+        except BaseException:
+            self.close()
+            raise
+
+    def _read_replies(self):
+        try:
+            for line in self._proc.stdout:
+                self._replies.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._replies.put(None)
+
+    def search(self, text, limit, deadline):
+        """Return ``[line, column, text]`` rows, or None once ``deadline`` passes."""
+        if time.monotonic() >= deadline:
+            return None
+        payload = text.encode("utf-8", "surrogatepass")
+        try:
+            self._proc.stdin.write(b"%d %d\n" % (int(limit), len(payload)))
+            self._proc.stdin.write(payload)
+            self._proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("regex search worker stopped unexpectedly") from exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            reply = self._replies.get(timeout=remaining)
+        except queue.Empty:
+            return None
+        if reply is None:
+            raise RuntimeError("regex search worker stopped unexpectedly")
+        return json.loads(reply)
+
+    def close(self):
+        proc = self._proc
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        # The dead child's stdout reaches EOF, which ends the reader; close the
+        # pipe only after that so close() never waits on a blocked read.
+        if self._reader is not None:
+            self._reader.join(timeout=2)
+        if self._reader is None or not self._reader.is_alive():
+            try:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            except (OSError, ValueError):
+                pass
+
+
 def text_search(
     query, *, root=".", glob="*", regex=False, case_sensitive=False,
     max_results=100, max_file_bytes=MAX_SEARCH_FILE_BYTES,
@@ -556,6 +698,10 @@ def text_search(
         max_file_bytes, MAX_SEARCH_FILE_BYTES, 1, MAX_SEARCH_FILE_BYTES,
     )
     flags = 0 if case_sensitive else re.IGNORECASE
+    if regex and len(str(query)) > MAX_SEARCH_PATTERN_CHARS:
+        raise ValueError(
+            "regex query exceeds %d characters" % MAX_SEARCH_PATTERN_CHARS
+        )
     pattern = re.compile(str(query) if regex else re.escape(str(query)), flags)
     # The extension allowlist (TEXT_SUFFIXES) applies only to a broad glob. An
     # EXPLICIT glob ("*.tmp", a filename) is an intentional request to search
@@ -579,60 +725,93 @@ def text_search(
         prune_dir=_sensitive_directory,
     )
     result_limited = False
-    for item in iterator:
-        if item["type"] != "file":
-            continue
-        path = Path(item["path"])
-        name = item["name"]
-        relative = item["relative"]
-        if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
-            continue
-        # Judge and open the file the OS actually resolves to, as file_read
-        # does, not the walk's spelling of it: a junction, a trailing-dot name
-        # or any other alias the walk did not catch must not turn a refused
-        # file into a searchable one. The walk stays under root_path, so a
-        # resolved path outside it is an alias and is never opened.
-        resolved = file_ops._resolve_best_effort(path)
-        if not file_ops._is_inside(resolved, root_path):
-            _note_skip(state, path, "resolves_outside_root")
-            continue
-        if _secret_file(resolved):
-            secret_files_skipped += 1
-            _note_skip(state, path, "secret_file")
-            continue
-        if item["bytes"] > size_limit:
-            files_skipped += 1
-            continue
-        if not explicit_glob and resolved.suffix.lower() not in TEXT_SUFFIXES:
-            files_skipped += 1
-            continue
-        try:
-            with resolved.open("rb") as raw:
-                if b"\0" in raw.read(4096):
-                    files_skipped += 1
-                    continue
-            handle = resolved.open("r", encoding="utf-8", errors="replace")
-        except (OSError, PermissionError):
-            files_skipped += 1
-            continue
-        files_scanned += 1
-        with handle:
-            for number, line in enumerate(handle, 1):
-                found = pattern.search(line)
-                if not found:
-                    continue
-                matches.append({
-                    "path": str(path),
-                    "relative": relative,
-                    "line": number,
-                    "column": found.start() + 1,
-                    "text": line.rstrip("\r\n")[:500],
-                })
+    # A caller regex runs in a child process held to the walk's own wall
+    # budget (see _RegexSearchWorker); a literal query stays in-process.
+    deadline = time.monotonic() + state["timeout_seconds"]
+    regex_timed_out = False
+    worker = None
+    try:
+        for item in iterator:
+            if item["type"] != "file":
+                continue
+            path = Path(item["path"])
+            name = item["name"]
+            relative = item["relative"]
+            if not (fnmatch.fnmatch(name, glob) or fnmatch.fnmatch(relative, glob)):
+                continue
+            # Judge and open the file the OS actually resolves to, as file_read
+            # does, not the walk's spelling of it: a junction, a trailing-dot name
+            # or any other alias the walk did not catch must not turn a refused
+            # file into a searchable one. The walk stays under root_path, so a
+            # resolved path outside it is an alias and is never opened.
+            resolved = file_ops._resolve_best_effort(path)
+            if not file_ops._is_inside(resolved, root_path):
+                _note_skip(state, path, "resolves_outside_root")
+                continue
+            if _secret_file(resolved):
+                secret_files_skipped += 1
+                _note_skip(state, path, "secret_file")
+                continue
+            if item["bytes"] > size_limit:
+                files_skipped += 1
+                continue
+            if not explicit_glob and resolved.suffix.lower() not in TEXT_SUFFIXES:
+                files_skipped += 1
+                continue
+            try:
+                with resolved.open("rb") as raw:
+                    if b"\0" in raw.read(4096):
+                        files_skipped += 1
+                        continue
+                handle = resolved.open("r", encoding="utf-8", errors="replace")
+            except (OSError, PermissionError):
+                files_skipped += 1
+                continue
+            files_scanned += 1
+            if regex:
+                with handle:
+                    text = handle.read()
+                if worker is None:
+                    worker = _RegexSearchWorker(str(query), flags)
+                rows = worker.search(text, limit - len(matches), deadline)
+                if rows is None:
+                    regex_timed_out = True
+                    break
+                for number, column, line_text in rows:
+                    matches.append({
+                        "path": str(path),
+                        "relative": relative,
+                        "line": number,
+                        "column": column,
+                        "text": line_text,
+                    })
                 if len(matches) >= limit:
                     result_limited = True
                     break
-        if result_limited:
-            break
+                continue
+            with handle:
+                for number, line in enumerate(handle, 1):
+                    found = pattern.search(line)
+                    if not found:
+                        continue
+                    matches.append({
+                        "path": str(path),
+                        "relative": relative,
+                        "line": number,
+                        "column": found.start() + 1,
+                        "text": line.rstrip("\r\n")[:500],
+                    })
+                    if len(matches) >= limit:
+                        result_limited = True
+                        break
+            if result_limited:
+                break
+    finally:
+        if worker is not None:
+            worker.close()
+    if regex_timed_out:
+        state["truncated"] = True
+        state["truncation_reason"] = "timeout"
     scan = _finish_walk(iterator, state)
     if result_limited:
         scan["truncated"] = True
@@ -670,6 +849,7 @@ def script_search(
         include_ignored=include_ignored,
         max_entries=max_entries,
         timeout_seconds=timeout_seconds,
+        prune_dir=_credential_directory,
     )
     needle = str(query or "*").lower()
     results = []
@@ -679,6 +859,9 @@ def script_search(
         if item["type"] != "file" or suffix not in SCRIPT_EXTENSIONS:
             continue
         if needle not in ("", "*") and needle not in item["relative"].lower():
+            continue
+        if file_ops.is_credential_store(Path(item["path"])):
+            _note_skip(state, item["path"], "credential_store", expose_path=False)
             continue
         results.append({**item, "runner": SCRIPT_EXTENSIONS[suffix]})
         if len(results) >= limit:
@@ -816,6 +999,9 @@ def _resolve_program(program, *, extra_roots="", bypass=False):
     value = str(program or "").strip()
     if not value:
         raise ValueError("program is required")
+    # Refuse UNC/device/NT-namespace spellings before any os.path.realpath
+    # call can open an SMB share (NTLM credential leak).
+    value = file_ops._reject_network_path(value)
     if Path(value).is_absolute() or any(mark in value for mark in ("/", "\\")):
         if Path(value).is_absolute():
             if os.path.normcase(os.path.realpath(value)) == os.path.normcase(os.path.realpath(sys.executable)):
@@ -893,10 +1079,10 @@ def _write_stdin(pipe, payload):
             pass
 
 
-def _abandon_child(proc, threads):
+def _abandon_child(proc, threads, job=None):
     """Kill and reap ``proc`` and close its pipes after a failed I/O setup."""
     try:
-        _terminate_process_tree(proc)
+        _terminate_process_tree(proc, job)
     except OSError:
         pass
     try:
@@ -913,25 +1099,175 @@ def _abandon_child(proc, threads):
         thread.join(timeout=2)
 
 
-def _terminate_process_tree(proc):
-    if proc.poll() is not None:
-        return
+_JOB_KERNEL32 = None
+
+
+def _job_kernel32():
+    """A private kernel32 binding with Job Object prototypes (Windows only).
+
+    A separate ``WinDLL`` instance rather than the shared ``ctypes.windll``
+    one, so setting argtypes here cannot clash with other modules' prototypes.
+    Built once; a benign race may build it twice.
+    """
+    global _JOB_KERNEL32
+    if _JOB_KERNEL32 is None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        _JOB_KERNEL32 = kernel32
+    return _JOB_KERNEL32
+
+
+def _attach_kill_job(proc):
+    """Windows: put ``proc`` in a kill-on-close Job Object; return the handle.
+
+    Processes ``proc`` starts join the job automatically, so terminating the
+    job reaches them even after ``proc`` has exited and its PID no longer
+    anchors a ``taskkill /T`` walk. A child started in the instant between
+    ``Popen`` returning and the assignment escapes the job, as it would escape
+    the taskkill fallback. Returns None off Windows or when the job cannot be
+    set up. The caller owns the handle; _terminate_process_tree closes it.
+    """
+    if os.name != "nt":
+        return None
+    process_handle = getattr(proc, "_handle", None)
+    if process_handle is None:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount",
+                "OtherOperationCount", "ReadTransferCount",
+                "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = _job_kernel32()
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _ExtendedLimit()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        # 9 = JobObjectExtendedLimitInformation.
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info),
+        ) or not kernel32.AssignProcessToJobObject(job, int(process_handle)):
+            kernel32.CloseHandle(job)
+            return None
+        return job
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _terminate_process_tree(proc, job=None):
+    """Kill ``proc`` and every descendant still in its process group or job.
+
+    Runs after the leader exits as well as on timeout: a program that starts
+    a background child and exits 0 must not leave that child running past
+    the run's time bound, holding the output pipes. On POSIX the group id
+    stays valid while any member lives, and run_program waits on the leader
+    without reaping it (_wait_leader), so the group id cannot be recycled
+    before this kill. On Windows ``job`` (from _attach_kill_job) is
+    terminated and closed here; without one, ``taskkill /T`` is a fallback
+    that only reaches descendants while the leader is still alive.
+    A descendant that moved itself to a new session (POSIX) or was started
+    before the job assignment (Windows) is out of reach.
+    """
     if os.name == "nt":
-        taskkill = shutil.which("taskkill")
-        if taskkill:
-            subprocess.run(
-                [taskkill, "/PID", str(proc.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+        if job is not None:
+            kernel32 = _job_kernel32()
+            try:
+                kernel32.TerminateJobObject(job, 1)
+            finally:
+                kernel32.CloseHandle(job)
+        elif proc.poll() is None:
+            taskkill = shutil.which("taskkill")
+            if taskkill:
+                subprocess.run(
+                    [taskkill, "/PID", str(proc.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
     else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (OSError, ProcessLookupError):
             pass
     if proc.poll() is None:
-        proc.kill()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _wait_leader(proc, timeout):
+    """Wait up to ``timeout`` seconds for ``proc`` to exit.
+
+    Raises ``subprocess.TimeoutExpired`` like ``Popen.wait``. Where
+    ``os.waitid`` exists (POSIX) the exited leader is left unreaped
+    (``WNOWAIT``): as a zombie it keeps its pid -- which is also its process
+    group id -- from being reused until _terminate_process_tree has signalled
+    the group. The caller reaps it afterwards with ``proc.wait()``.
+    """
+    waitid = getattr(os, "waitid", None)
+    if os.name == "nt" or waitid is None:
+        proc.wait(timeout=timeout)
+        return
+    deadline = time.monotonic() + timeout
+    delay = 0.0005
+    while True:
+        try:
+            state = waitid(
+                os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG,
+            )
+        except ChildProcessError:
+            return
+        if state is not None:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        delay = min(delay * 2, remaining, 0.05)
+        time.sleep(delay)
 
 
 # Inline-code flags per interpreter. run_program is argv-only, so an inline
@@ -953,39 +1289,63 @@ _INLINE_CODE_FLAGS = {
     "php": ("-r",),
 }
 
+# Option letters after which the rest of a short-option cluster is that
+# option's value, so a code letter inside it is not an option: python's -W
+# and -m take a value, and the py launcher's -V:TAG selector ends at the
+# colon. Interpreters not listed treat every later letter as an option,
+# which can only over-refuse.
+_INLINE_CLUSTER_VALUE_STOPS = {"python": "wm:"}
+
+# Wrappers whose purpose is to launch another program named in their own
+# argv (``env python -c ...``, ``nice bash -c ...``). Every check here keys on
+# the executable's basename, so a wrapper would carry the real interpreter
+# past all of them; they are refused whenever they are given arguments.
+_COMMAND_LAUNCHERS = frozenset({
+    "busybox", "env", "nice", "nohup", "setsid", "stdbuf", "timeout", "xargs",
+})
+
 
 def _inline_interpreter_key(basename):
     """Normalize a resolved executable basename to an _INLINE_CODE_FLAGS key.
 
     Strips a trailing ".exe" and collapses versioned python names
-    (python3, python3.11) onto the bare "python" key. Returns None when the
-    basename is not a known inline-capable interpreter.
+    (python3, python3.11) and the Windows ``py``/``pyw`` launchers onto the
+    bare "python" key. Returns None when the basename is not a known
+    inline-capable interpreter.
     """
     name = basename[:-4] if basename.endswith(".exe") else basename
-    if name.startswith("python"):
+    if name.startswith("python") or name in ("py", "pyw"):
         name = "python"
     return name if name in _INLINE_CODE_FLAGS else None
 
 
-def _is_inline_code_arg(arg, flags):
+def _is_inline_code_arg(arg, flags, value_stops=""):
     """True if ``arg`` is one of ``flags`` including its value-glued forms.
 
     An exact-match check alone is trivially evaded, because the interpreters
     accept the code string glued onto the flag: ``python -cCODE``,
     ``perl -eCODE``, ``node --eval=CODE``.  A short option (``-c``) may carry
     the value directly appended; a long option (``--eval``) carries it after
-    ``=``.  Both forms run inline code and must be refused too.
+    ``=``.  The interpreters also accept clustered short options with the
+    code flag after others (``python -Ic``, ``bash -ec``, ``perl -le``), so a
+    single-dash cluster containing the code letter matches too, up to the
+    first letter in ``value_stops`` (whose value is the rest of the cluster).
     """
     for flag in flags:
         if arg == flag:
             return True
-        if flag.startswith("--"):
-            if arg.startswith(flag + "="):
+        if flag.startswith("--") and arg.startswith(flag + "="):
+            return True
+    letters = {
+        flag[1].lower() for flag in flags
+        if len(flag) == 2 and flag[0] == "-" and flag[1] != "-"
+    }
+    if letters and len(arg) >= 2 and arg[0] == "-" and arg[1] != "-":
+        for char in arg[1:].lower():
+            if char in letters:
                 return True
-        elif len(flag) == 2 and flag.startswith("-"):
-            # Short option: value appended directly, e.g. -cCODE / -eCODE.
-            if arg.startswith(flag):
-                return True
+            if char in value_stops:
+                return False
     return False
 
 
@@ -993,16 +1353,241 @@ def _is_inline_powershell_arg(arg):
     """Match PowerShell's executable-level abbreviations for inline code."""
     switch = arg.split("=", 1)[0]
     # powershell.exe accepts every Command prefix (including -co/-com), every
-    # EncodedCommand prefix, and the non-prefix -ec alias. Missing one lets an
-    # argv-only runner execute arbitrary script while claiming inline refusal.
+    # EncodedCommand prefix, and the non-prefix -ec alias; pwsh adds
+    # -CommandWithArgs and its -cwa alias. Missing one lets an argv-only
+    # runner execute arbitrary script while claiming inline refusal.
     return (
         len(switch) >= 2
         and (
             "-command".startswith(switch)
             or "-encodedcommand".startswith(switch)
-            or switch == "-ec"
+            or "-commandwithargs".startswith(switch)
+            or switch in ("-ec", "-cwa")
         )
     )
+
+
+def _powershell_names_script(lowered_args):
+    """True if PowerShell argv names a script file with ``-File <path>``."""
+    for index, arg in enumerate(lowered_args[:-1]):
+        if len(arg) >= 2 and "-file".startswith(arg):
+            return lowered_args[index + 1] != "-"
+    return False
+
+
+_STDIN_ALIAS_ROOTS = ("/dev", "/proc")
+
+# Same bound as Linux's MAXSYMLINKS: a longer chain is refused, not followed.
+_SYMLINK_HOP_LIMIT = 40
+
+
+def _under_stdin_alias_root(path):
+    """True if absolute POSIX ``path`` is /dev or /proc or lies under them."""
+    # POSIX normpath keeps a leading "//"; collapse every leading slash.
+    path = "/" + path.lstrip("/")
+    return any(
+        path == root or path.startswith(root + "/") for root in _STDIN_ALIAS_ROOTS
+    )
+
+
+def _posix_operand_mode(path):
+    """Return the st_mode ``path`` finally names, or None to refuse it.
+
+    ``path`` must be absolute and must not have been normalised: its "."
+    and ".." components are applied here, physically. Components are taken
+    left to right; a symlink is replaced by its target's components (relative
+    to the link's directory) before anything after it, so ``link/..`` is the
+    parent of the link's target, not of the link. Nothing inside /dev or
+    /proc is followed. Links there (/dev/stdin, /dev/fd/0, /proc/self/fd/0)
+    mean something different in each process: os.path.realpath here would
+    follow them to the runtime's own fd 0, not the child's. So a component
+    whose resolved path is /dev, /proc or under them is refused before it is
+    read, as is a chain longer than _SYMLINK_HOP_LIMIT, a missing component,
+    and a non-directory with components still to come. Only the literal
+    /dev and /proc paths are recognised; a procfs or devfs mounted anywhere
+    else is not detected.
+    """
+    pending = [part for part in path.split("/") if part]
+    pending.reverse()
+    current = "/"
+    hops = 0
+    while pending:
+        name = pending.pop()
+        if name == ".":
+            continue
+        if name == "..":
+            current = os.path.dirname(current)
+            continue
+        candidate = current.rstrip("/") + "/" + name
+        if _under_stdin_alias_root(candidate):
+            return None
+        try:
+            info = os.lstat(candidate)
+        except (OSError, ValueError):
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            hops += 1
+            if hops > _SYMLINK_HOP_LIMIT:
+                return None
+            try:
+                target = os.readlink(candidate)
+            except (OSError, ValueError):
+                return None
+            if target.startswith("/"):
+                current = "/"
+            pending.extend(reversed([part for part in target.split("/") if part]))
+            continue
+        if pending and not stat.S_ISDIR(info.st_mode):
+            return None
+        current = candidate
+    try:
+        # lstat: a link swapped in since the walk is not followed either.
+        return os.lstat(current).st_mode
+    except (OSError, ValueError):
+        return None
+
+
+def _stdin_program_operand(args, working):
+    """True if ``args`` could leave an interpreter reading its program from stdin.
+
+    That is no operand at all, a first argument that is an option (``-``,
+    ``-s``, ``-i``, ``+o``: the options' grammar is not modelled, so any
+    leading option counts), or a first operand that is not an existing
+    regular file once resolved against ``working``.
+
+    On POSIX the operand is refused if its lexically normalised path is
+    under /dev or /proc (``/./dev/stdin``, ``//dev/stdin``,
+    ``../../dev/stdin``). That lexical check can only over-refuse; the
+    deciding check is _posix_operand_mode on the joined path with its "."
+    and ".." components left in, which applies ".." after following the
+    symlink before it (``link/../fd/0`` with ``link`` pointing into
+    /proc/self is refused) and refuses any component or symlink hop into
+    /dev or /proc (a workspace symlink to ``/dev/stdin``) without following
+    it, so the runtime's own fd 0 never decides the answer. A FIFO or
+    directory is not a regular file and is refused too.
+
+    The check runs before the child starts, so a concurrent call that swaps
+    the operand for a link after it is made is not covered.
+    """
+    if not args:
+        return True
+    first = args[0]
+    if first[:1] in ("-", "+"):
+        return True
+    # os.path.join keeps ``first`` as-is when it is absolute (or, on Windows,
+    # rooted), so this is the path the child would open from ``working``.
+    # Not normalised: a lexical ".." collapse would drop the symlink that
+    # the kernel follows before applying it.
+    base = str(working)
+    if not os.path.isabs(base):
+        base = os.path.join(os.getcwd(), base)
+    joined = os.path.join(base, first)
+    if os.name != "nt":
+        if _under_stdin_alias_root(os.path.normpath(joined)):
+            return True
+        mode = _posix_operand_mode(joined)
+        return mode is None or not stat.S_ISREG(mode)
+    try:
+        mode = os.stat(os.path.realpath(joined)).st_mode
+    except (OSError, ValueError):
+        return True
+    return not stat.S_ISREG(mode)
+
+
+def _refuse_inline_code(
+    executable, args, *, has_stdin, allow_cmd_script, script_args_start,
+    working,
+):
+    """Raise PermissionError when ``executable args`` would run ad-hoc code.
+
+    Ad-hoc code -- an inline ``-c``/``-e`` string, a program fed on stdin, or
+    a wrapper launching another program -- never passes through script_run's
+    validation. ``script_args_start`` is set only by run_script, which built
+    ``args`` with its script operand just before that index: what follows is
+    the script's own argv and is not inspected, and the script operand means
+    stdin is the script's input, not a program. Direct callers pass None and
+    every argument is inspected, because the interpreters' option grammars
+    (which options take a separate value) are not modelled here and guessing
+    where options end could let a later ``-c`` through. ``working`` is the
+    resolved directory the child will start in; a stdin-fed program operand
+    is resolved against it.
+    """
+    basename = _interpreter_argv.program_name(executable)
+    stem = basename
+    for suffix in (".exe", ".cmd", ".bat", ".com"):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    inspected = args if script_args_start is None else args[:script_args_start]
+    lowered_args = [arg.lower() for arg in inspected]
+    stdin_is_program_input = has_stdin and script_args_start is None
+    if stem in _COMMAND_LAUNCHERS and args:
+        raise PermissionError(
+            "%s launches the program named in its arguments; run that program"
+            " directly or use script_run" % stem
+        )
+    if stem == "cmd" and not allow_cmd_script:
+        raise PermissionError("inline cmd execution is disabled; use script_run")
+    if Path(basename).suffix.lower() in (".bat", ".cmd") and not allow_cmd_script:
+        raise PermissionError("batch files must be executed with script_run")
+    if script_args_start is None:
+        launcher = _interpreter_argv.command_string_launcher([basename, *inspected])
+        if launcher:
+            raise PermissionError(
+                "%s launches the program named in its arguments; run that program"
+                " directly or use script_run" % launcher
+            )
+    family = _interpreter_argv.interpreter_family(basename)
+    if family in ("powershell", "pwsh"):
+        if any(_is_inline_powershell_arg(arg) for arg in lowered_args) or (
+            script_args_start is None and _interpreter_argv.runs_inline_code(family, inspected)
+        ):
+            raise PermissionError("inline PowerShell commands are disabled; use script_run")
+        if stdin_is_program_input and (
+            not _powershell_names_script(lowered_args)
+            or _interpreter_argv.stdin_runs_as_code(family, inspected)
+        ):
+            raise PermissionError(
+                "PowerShell would run stdin as commands; pass -File <script>"
+                " or use script_run"
+            )
+    if script_args_start is None:
+        verdict, detail = _interpreter_argv.analyze_argv_command(
+            basename, inspected, stdin_present=stdin_is_program_input,
+        )
+        if verdict == "inline":
+            if detail in ("powershell", "pwsh"):
+                raise PermissionError("inline PowerShell commands are disabled; use script_run")
+            if detail == "cmd" and not allow_cmd_script:
+                raise PermissionError("inline cmd execution is disabled; use script_run")
+            if detail != "cmd":
+                raise PermissionError("inline %s code is disabled; use script_run" % detail)
+        if verdict == "stdin":
+            if detail in ("powershell", "pwsh"):
+                raise PermissionError(
+                    "PowerShell would run stdin as commands; pass -File <script>"
+                    " or use script_run"
+                )
+            raise PermissionError(
+                "%s would run stdin as its program; pass the script path as the"
+                " first argument or use script_run" % detail
+            )
+    interp_key = _inline_interpreter_key(basename)
+    if interp_key is None:
+        return
+    value_stops = _INLINE_CLUSTER_VALUE_STOPS.get(interp_key, "")
+    if any(
+        _is_inline_code_arg(arg, _INLINE_CODE_FLAGS[interp_key], value_stops)
+        for arg in lowered_args
+    ):
+        raise PermissionError(
+            "inline %s code is disabled; use script_run" % interp_key
+        )
+    if stdin_is_program_input and _stdin_program_operand(args, working):
+        raise PermissionError(
+            "%s would run stdin as its program; pass the script path as the"
+            " first argument or use script_run" % interp_key
+        )
 
 
 def run_program(
@@ -1010,6 +1595,23 @@ def run_program(
     max_output=MAX_EXEC_OUTPUT, extra_roots="", bypass=False,
     _allow_cmd_script=False, _pass_fds=(),
 ):
+    return _run_program(
+        program, args_json=args_json, cwd=cwd, stdin=stdin, timeout=timeout,
+        max_output=max_output, extra_roots=extra_roots, bypass=bypass,
+        allow_cmd_script=_allow_cmd_script, pass_fds=_pass_fds,
+        script_args_start=None,
+    )
+
+
+def _run_program(
+    program, *, args_json, cwd, stdin, timeout, max_output, extra_roots,
+    bypass, allow_cmd_script, pass_fds, script_args_start,
+):
+    """run_program's body; ``script_args_start`` is run_script's alone.
+
+    Kept off the public signature so a tool call forwarding its arguments to
+    run_program can never mark its own argv as already-vetted script input.
+    """
     if str(program).strip().casefold() in {"bash", "sh"}:
         executable = runtime_paths.bash_executable()
         if not executable:
@@ -1017,30 +1619,17 @@ def run_program(
     else:
         executable = _resolve_program(program, extra_roots=extra_roots, bypass=bypass)
     args = _json_args(args_json)
-    basename = Path(executable).name.lower()
-    lowered_args = [arg.lower() for arg in args]
-    if basename in ("powershell", "powershell.exe", "pwsh", "pwsh.exe") and any(
-        _is_inline_powershell_arg(arg) for arg in lowered_args
-    ):
-        raise PermissionError("inline PowerShell commands are disabled; use script_run")
-    if basename in ("cmd", "cmd.exe") and not _allow_cmd_script:
-        raise PermissionError("inline cmd execution is disabled; use script_run")
-    if Path(executable).suffix.lower() in (".bat", ".cmd") and not _allow_cmd_script:
-        raise PermissionError("batch files must be executed with script_run")
-    interp_key = _inline_interpreter_key(basename)
-    if interp_key is not None and any(
-        _is_inline_code_arg(arg, _INLINE_CODE_FLAGS[interp_key])
-        for arg in lowered_args
-    ):
-        raise PermissionError(
-            "inline %s code is disabled; use script_run" % interp_key
-        )
+    input_bytes = str(stdin or "").encode("utf-8")
     working = _resolve(cwd, extra_roots=extra_roots, bypass=bypass)
+    _refuse_inline_code(
+        executable, args, has_stdin=bool(input_bytes),
+        allow_cmd_script=allow_cmd_script, script_args_start=script_args_start,
+        working=working,
+    )
     if not working.is_dir():
         raise ValueError("working directory is not a directory: %s" % working)
     timeout = _bounded_int(timeout, 30, 1, MAX_EXEC_TIMEOUT)
     output_limit = _bounded_int(max_output, MAX_EXEC_OUTPUT, 1, MAX_EXEC_OUTPUT)
-    input_bytes = str(stdin or "").encode("utf-8")
     if len(input_bytes) > 256_000:
         raise ValueError("stdin exceeds 256000 bytes")
     command = [executable, *args]
@@ -1062,7 +1651,7 @@ def run_program(
         creationflags=creationflags,
         start_new_session=os.name != "nt",
         # Only run_script's sealed exact-handoff descriptor is ever passed.
-        pass_fds=tuple(_pass_fds),
+        pass_fds=tuple(pass_fds),
         # Strip control-plane secrets before handing the environment to a
         # model-directed child. Without this, a .py run through script_run or
         # workspace_run could base64-dump os.environ and read back
@@ -1070,6 +1659,7 @@ def run_program(
         # code_runner lane was hardened against and this lane was not.
         env=_run_program_environment(),
     )
+    job = _attach_kill_job(proc)
     stdout_bytes = bytearray()
     stderr_bytes = bytearray()
     stdout_state = {"bytes": 0}
@@ -1098,14 +1688,22 @@ def run_program(
         # The child is already running, detached into its own process group.
         # If the owned-thread factory refuses a reader or the writer, nothing
         # would ever wait on, time out, or kill it: reap it here instead.
-        _abandon_child(proc, started_threads)
+        _abandon_child(proc, started_threads, job)
         raise
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _terminate_process_tree(proc)
-        proc.wait(timeout=10)
+        try:
+            _wait_leader(proc, timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    finally:
+        # Whether the leader exited or timed out, end whatever it left behind
+        # in its group/job, then reap it. A leader that will not die within
+        # the grace period is reported with returncode None, not raised.
+        _terminate_process_tree(proc, job)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
     writer.join(timeout=2)
     for thread in readers:
         thread.join(timeout=2)
@@ -1175,7 +1773,7 @@ def run_script(
     args = _json_args(args_json)
     if sealed_script is not None:
         executable, argv = _sealed_script_command(script, sealed_script, args)
-        result = run_program(
+        result = _run_program(
             executable,
             args_json=argv,
             cwd=cwd or str(script.parent),
@@ -1184,7 +1782,10 @@ def run_script(
             max_output=max_output,
             extra_roots=extra_roots,
             bypass=bypass,
-            _pass_fds=(sealed_script.fd,),
+            allow_cmd_script=False,
+            pass_fds=(sealed_script.fd,),
+            # The caller's args follow the sealed runner's own argv.
+            script_args_start=len(argv) - len(args),
         )
         result["exact_handoff"] = {
             "mechanism": sealed_script.mechanism,
@@ -1216,7 +1817,7 @@ def run_script(
         raise ValueError("unsupported script type: %s" % (suffix or "(none)"))
     if not executable:
         raise FileNotFoundError("runner is not installed for %s" % suffix)
-    return run_program(
+    return _run_program(
         executable,
         args_json=[*prefix, *args],
         cwd=cwd or str(script.parent),
@@ -1225,7 +1826,11 @@ def run_script(
         max_output=max_output,
         extra_roots=extra_roots,
         bypass=bypass,
-        _allow_cmd_script=suffix in (".cmd", ".bat"),
+        allow_cmd_script=suffix in (".cmd", ".bat"),
+        pass_fds=(),
+        # args after the script operand are the script's own; a .exe/.com
+        # runs itself (no prefix), so its whole argv stays inspected.
+        script_args_start=len(prefix) if prefix else None,
     )
 
 

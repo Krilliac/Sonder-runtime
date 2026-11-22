@@ -15,6 +15,7 @@ import curriculum_store
 import grounding
 import self_curriculum
 import server
+from sonder_runtime.domain.security.redaction import redact_text
 
 
 def build_gen_fn():
@@ -65,7 +66,7 @@ def practice_on(tasks):
                 msg = server.record_self_graded_outcome(iid, signal)
                 if "Distilled lesson" in msg:
                     new_lessons += 1
-                print("    -> %s  %s" % ("PASS" if ok else "FAIL", msg))
+                print("    -> %s  %s" % ("PASS" if ok else "FAIL", redact_text(msg)))
             else:
                 print("    -> %s (no interaction id)" % ("PASS" if ok else "FAIL"))
         except Exception as e:

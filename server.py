@@ -62,6 +62,7 @@ from sonder_runtime.application.command_surface.command_text import slash_head a
 import orchestrator
 import retriever
 from sonder_runtime.domain.memory import rules as reward_rules
+from sonder_runtime.domain.session_ref import parse_session_ref
 import reflection
 import sonder_runtime.adapters.embeddings as embeddings
 import personas
@@ -312,6 +313,7 @@ from sonder_runtime.domain.agents.verification_reach import (
     VERIFICATION_TOOLS as _AGENT_VERIFICATION_TOOLS,
     verifier_reachable as _verifier_reachable_policy,
 )
+from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.domain.agents.activity_command import (
     activity_argv as _activity_argv,
     activity_command as _agent_activity_command,
@@ -511,6 +513,7 @@ from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prew
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
 from sonder_runtime.adapters.inference.pool_model_catalog import (
     PoolCatalogCache,
+    discovery_tags as _pool_discovery_tags,
     resolve_model_pin,
 )
 from sonder_runtime.domain import ollama_policy
@@ -739,6 +742,12 @@ def _valid_tier_names():
     return _valid_tier_names_policy(available_tiers())
 
 
+def _discovery_tags(host_only=False):
+    """Known-model catalog: the pool's union, or this host's when ``host_only`` (pooled read if it is down)."""
+    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/api/tags"), lambda o: _pool_member_tags(
+        o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS), host_origin=BASE if host_only else None)
+
+
 def discovered_models():
     """Return the live Ollama catalog as canonical, deduplicated model names.
 
@@ -746,7 +755,7 @@ def discovered_models():
     operator's Ollama endpoint currently advertises, but cannot turn an
     arbitrary string into a backend request.
     """
-    return _catalog_names(_get("/api/tags"))
+    return _catalog_names(_discovery_tags())
 
 
 def discovered_model_records():
@@ -756,7 +765,12 @@ def discovered_model_records():
     Unknown records deliberately remain eligible; fanout excludes only models
     which the operator's catalog positively identifies as non-generative.
     """
-    return _catalog_records(_get("/api/tags"))
+    return _catalog_records(_discovery_tags())
+
+
+def servable_model_records():
+    """Records the chat gate and ``/v1/models`` share: when pooled, this host's (see ``_discovery_tags``)."""
+    return _catalog_records(_discovery_tags(True)) if OLLAMA_POOL.enabled else discovered_model_records()
 
 
 def _cache_model_revision(model):
@@ -773,7 +787,7 @@ def _cache_model_revision(model):
     if not requested:
         return ""
     try:
-        records = discovered_model_records()
+        records = servable_model_records()
     except Exception:
         return ""
     return _catalog_revision(requested, records)
@@ -785,11 +799,9 @@ def _inventory_rows(payload, endpoint):
 
 
 def resolve_discovered_model_record(selector):
-    """Resolve an exact live catalog record case-insensitively, or return None."""
+    """Resolve an exact ``servable_model_records()`` record case-insensitively, or None."""
     wanted = str(selector or "").strip().casefold()
-    if not wanted:
-        return None
-    return _resolve_catalog_record(wanted, discovered_model_records())
+    return _resolve_catalog_record(wanted, servable_model_records()) if wanted else None
 
 
 def resolve_discovered_model(selector):
@@ -1078,7 +1090,13 @@ def served_work_project(project):
     text = str(project or "").strip()
     if not text:
         return ""
-    expanded = os.path.expanduser(text)
+    # realpath/isdir on a UNC or device spelling opens it (SMB, NTLM) before
+    # the root check can refuse it, so decide on the spelling first.
+    try:
+        text = file_ops._reject_network_path(text)
+        expanded = file_ops._reject_network_path(os.path.expanduser(text))
+    except PermissionError:
+        return ""
     path_like = (
         os.path.isabs(expanded)
         or bool(re.match(r"^[A-Za-z]:", expanded))
@@ -1095,6 +1113,12 @@ def served_work_project(project):
     if not os.path.isdir(candidate) or not file_ops.inside_allowed_roots(candidate):
         return ""
     return candidate
+
+
+def served_project_refusal(project):
+    """``delegation.served_project_refusal`` against the fleet's root resolver and the file roots."""
+    from sonder_runtime.application.agents.delegation import served_project_refusal as refusal
+    return refusal(project, master_orchestrator.canonical_project_root, file_ops.inside_allowed_roots)
 
 
 def _note_escalation(step, surface):
@@ -3654,6 +3678,20 @@ def _control_tool_refusal(tools, label, *, operator_approved=False, arguments=No
     return ""
 
 
+_SERVED_CONTROL_GUARD = contextvars.ContextVar("sonder_served_control_guard", default=None)
+CONTROL_COMMAND_SKIP = object()
+
+
+@contextlib.contextmanager
+def served_control_guard(guard):
+    """Bind a served-surface authority check for any nested ``control_command``."""
+    token = _SERVED_CONTROL_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _SERVED_CONTROL_GUARD.reset(token)
+
+
 def control_command(prompt: str, history=None, session="", project="",
                     operator_approved=False, autopilot_request_owner: str | None = None):
     """Handle safe slash commands before a prompt reaches the model.
@@ -3692,6 +3730,13 @@ def control_command(prompt: str, history=None, session="", project="",
     text = (prompt or "").strip()
     if not text.startswith("/"):
         return None
+    guard = _SERVED_CONTROL_GUARD.get()
+    if guard is not None:
+        guard_result = guard(text)
+        if guard_result is CONTROL_COMMAND_SKIP:
+            return None
+        if guard_result:
+            return str(guard_result)
     parts = text.split(None, 1)
     cmd = _slash_head(parts[0])
     arg = parts[1] if len(parts) > 1 else ""
@@ -5184,6 +5229,14 @@ def _preserve_reasoning_failure_usage(
 def _bridge_provider_for_tier(tier_label, cloud=False):
     """The non-Ollama provider serving a local rung, or None for Ollama."""
     return _legacy_chat_bridge.provider_for_tier(tier_label, cloud, _APP_GRAPH)
+
+
+def _bridge_endpoint_is_loopback(provider):
+    """Hostedness of an endpoint-configured rung follows the live graph's endpoint."""
+    return _legacy_chat_bridge.endpoint_is_loopback(provider, _APP_GRAPH)
+
+
+_provider_bridge.set_endpoint_locality_probe(_bridge_endpoint_is_loopback)
 
 
 def _bridge_operation_context(timeout, cancel_check):
@@ -6834,8 +6887,8 @@ def _sonder_impl_serialized(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
@@ -7104,7 +7157,8 @@ def _answer_with_history_impl(
         if _explicit_serve_selection(tier, "")
         else _default_route_plan(prompt, start_rung)
     )
-    escalation_plan, overflow = _overflow_route.plan(sys.modules[__name__], prompt, history, escalation_plan)
+    escalation_plan, overflow = _overflow_route.plan(
+        sys.modules[__name__], prompt, history, escalation_plan, context_size=context_size)
     overflow_failure = ""
     temperature = _serve_temperature()
     pinned_ctx = (
@@ -7288,8 +7342,8 @@ def _answer_with_history_impl(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
@@ -7944,14 +7998,14 @@ def campaign_generate_compile_execute_record(
             approval_required = isinstance(out, _powershell_gate.ApprovalRequired)
             if ok and iid:
                 with _CAMPAIGN_LEARN_LOCK:
-                    record_msg = record_outcome(iid, "tests_passed")
+                    record_msg = record_self_graded_outcome(iid, "tests_passed")
             elif env_failure or approval_required:
                 # Toolchain or approval skip: the model was never judged, so no
                 # outcome and no pitfall are recorded against it.
                 pass
             elif attempt == repair_rounds and record_failures and iid:
                 with _CAMPAIGN_LEARN_LOCK:
-                    record_msg = record_outcome(iid, "failed")
+                    record_msg = record_self_graded_outcome(iid, "failed")
                     # A failure that teaches nothing recurs forever; distill
                     # the guard while the error is still in hand.
                     pitfall, pitfall_note = _record_failure_pitfall(
@@ -8152,12 +8206,12 @@ def campaign_repo_repair(
                     break
                 if ok and iid:
                     with _CAMPAIGN_LEARN_LOCK:
-                        record_msg = record_outcome(iid, "tests_passed")
+                        record_msg = record_self_graded_outcome(iid, "tests_passed")
                 elif (
                     attempt == repair_rounds and record_failures and iid
                 ):
                     with _CAMPAIGN_LEARN_LOCK:
-                        record_msg = record_outcome(iid, "failed")
+                        record_msg = record_self_graded_outcome(iid, "failed")
                         # infra failures already returned above, so this is
                         # an attributable model failure worth learning from.
                         pitfall, pitfall_note = _record_failure_pitfall(
@@ -9146,6 +9200,17 @@ def permission_approve(
     try:
         if call_id:
             pending = ledger.resolve_call(call_id)
+            if not pending.complete:
+                # The operator cannot see all of what the digest binds; they
+                # approve it by giving the full arguments instead.
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "call %s's preview does not show everything the approval "
+                    "would cover (%s); approve it with /approve call %s <arguments "
+                    "json> giving its full arguments" % (
+                        pending.call_id, pending.preview.split("]", 1)[0].lstrip("["),
+                        pending.tool,
+                    )
+                )
             target, digest, preview = pending.tool, pending.digest, pending.preview
         elif tool and arguments_json:
             try:
@@ -9160,7 +9225,7 @@ def permission_approve(
                 )
             target = str(tool or "").strip().lstrip("/")
             digest = permission_modes.call_digest(target, arguments)
-            preview = permission_modes.argument_preview(arguments)
+            preview = permission_modes.preview_fields(arguments)
             if not digest:
                 raise approval_ledger_module.ApprovalLedgerError(
                     "that call has no canonical form and cannot be approved"
@@ -10766,7 +10831,7 @@ def _isolated_write_approved() -> tuple[bool, str]:
     try:
         ledger.record_pending(
             "isolated_run", digest, surface="tool",
-            preview=permission_modes.argument_preview(args),
+            preview=permission_modes.preview_fields(args),
         )
     except Exception:
         pass
@@ -11926,11 +11991,7 @@ def _run_read_only_inspection(
     started = time.time()
     developer = _file_developer_allowed(token)
     authorized = _file_bypass_allowed(token, approval)
-    roots = tuple(
-        Path(item.strip()).expanduser()
-        for item in (extra_roots or "").split(os.pathsep)
-        if item.strip()
-    ) if authorized else ()
+    roots = tuple(file_ops._split_roots(extra_roots)) if authorized else ()
     context = local_owner_context(
         correlation_id="inspection-%s" % os.urandom(4).hex(),
         source="mcp",
@@ -13721,6 +13782,13 @@ def secret_scan(
     ]
     for f in findings:
         lines.append("  %s:%d  [%s]  %s" % (f["file"], f["line"], f["type"], f["match"]))
+    # Entries the scan refused to open are reported, so a scan that skipped
+    # something is never read as a clean one.
+    if data.get("credential_files_skipped"):
+        lines.append("  skipped %d credential-store file(s) (not opened)" % data["credential_files_skipped"])
+    if data.get("links_skipped"):
+        lines.append("  skipped %d symlink or junction entr%s (not followed)" % (
+            data["links_skipped"], "y" if data["links_skipped"] == 1 else "ies"))
     if data.get("timed_out"):
         lines.append("  ... (incomplete: stopped at the %ss timeout; raise timeout "
                      "to scan the rest)" % data.get("timeout", timeout))
@@ -14729,13 +14797,16 @@ def artifact_generate(
 def artifact_verify(path: str) -> str:
     """Verify every generated file against its manifest and format contract."""
     _maybe_live_reload()
-    target = os.path.abspath(os.path.expanduser(str(path or "")))
-    if not os.path.exists(target):
-        return "ERROR: artifact path not found: %s" % target
-    if not os.path.isdir(target):
-        return ("ERROR: artifact path is not a pack directory (expected a "
-                "directory containing manifest.json): %s" % target)
     try:
+        # Refuse a UNC/device spelling before any filesystem call (NTLM leak);
+        # PermissionError is an OSError, so the handler below reports it.
+        path = file_ops._reject_network_path(str(path or ""))
+        target = os.path.abspath(os.path.expanduser(path))
+        if not os.path.exists(target):
+            return "ERROR: artifact path not found: %s" % target
+        if not os.path.isdir(target):
+            return ("ERROR: artifact path is not a pack directory (expected a "
+                    "directory containing manifest.json): %s" % target)
         result = assetgen.verify_pack(path)
     except FileNotFoundError as exc:
         missing = getattr(exc, "filename", None) or os.path.basename(str(exc)) or "a required file"
@@ -15287,6 +15358,12 @@ def _loop_dispatch(action):
             learn=action.get("learn", True),
         ))
     if action_type == "sonder":
+        # sonder() hands this project to control_command, whose ``/master`` branch
+        # starts a fleet rooted there: the same model- or caller-written project
+        # as the ``master`` action below, so it takes the same file-roots check.
+        project_refusal = served_project_refusal(action.get("project", ""))
+        if project_refusal:
+            return {**_loop_text_result("sonder", project_refusal), "ok": False}
         return _loop_text_result("sonder", sonder(
             prompt=action.get("prompt", ""),
             system=action.get("system", ""),
@@ -15367,6 +15444,11 @@ def _loop_dispatch(action):
             tier=action.get("tier", ""),
         ))
     if action_type in ("master", "master_orchestrate"):
+        # A loop action's project is model- or caller-written (also over HTTP
+        # ``/loop``), never the operator's selection: it must stay inside the file roots.
+        project_refusal = served_project_refusal(action.get("project", ""))
+        if project_refusal:
+            return {**_loop_text_result("master_orchestrate", project_refusal), "ok": False}
         return _loop_text_result("master_orchestrate", master_orchestrate(
             task=action.get("task", action.get("prompt", "")),
             mode=action.get("mode", "ask"),
@@ -16539,70 +16621,26 @@ def _safe_limit(limit, default=10, max_value=100):
 @mcp.tool()
 def memory_search(query: str, limit: int = 10) -> str:
     """Search local lessons, facts, sessions, and recent interactions."""
-    _maybe_live_reload()
     query = (query or "").strip()
     if not query:
         return "ERROR: empty query."
+    return _memory_search_scoped(query, limit)
+
+
+def _memory_search_scoped(query, limit, bound_project=""):
+    """``bound_project`` is the host-selected project root of a bound agent
+    (never a model argument); empty is the operator's all-project view."""
+    query = (query or "").strip()
+    if not query:
+        return memory_search(query)  # the tool's own empty-query refusal
+    _maybe_live_reload()
     limit = _safe_limit_policy(limit, 10, 50)
-    like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
+    from sonder_runtime.adapters.memory_search import search_memory
     conn = _open_db()
     try:
-        lesson_ids = memory_store.fts_search(conn, query, limit=limit)
-        lessons = []
-        for lesson_id in lesson_ids:
-            text = memory_store.get_lesson_text(conn, lesson_id)
-            if text:
-                lessons.append({"id": lesson_id, "text": text})
-        current, instants = memory_store.current_fact_params()  # expired facts stay out
-        facts = [dict(r) for r in conn.execute(
-            "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' AND "
-            + current + " ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, *instants, limit),
-        ).fetchall()]
-        preferences = [dict(r) for r in conn.execute(
-            "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "
-            "WHERE text LIKE ? ESCAPE '\\' AND enabled=1 "
-            "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?",
-            (like, limit),
-        ).fetchall()]
-        sessions = [dict(r) for r in conn.execute(
-            "SELECT session_id, title, summary, project FROM sessions "
-            "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
-            "ORDER BY updated_ts DESC, rowid DESC LIMIT ?",
-            (like, like, limit),
-        ).fetchall()]
-        interactions = [dict(r) for r in conn.execute(
-            "SELECT id, task, response, tier, session_id, ts FROM interactions "
-            "WHERE task LIKE ? ESCAPE '\\' OR response LIKE ? ESCAPE '\\' "
-            "ORDER BY ts DESC, rowid DESC LIMIT ?",
-            (like, like, limit),
-        ).fetchall()]
+        return search_memory(conn, memory_store, query, limit, bound_project=bound_project)
     finally:
         conn.close()
-
-    lines = ["memory search: %r" % query]
-    lines.append("lessons (%d):" % len(lessons))
-    lines.extend(
-        "  - %s: %s" % (lesson["id"], lesson["text"][:220])
-        for lesson in lessons
-    )
-    lines.append("facts (%d):" % len(facts))
-    lines.extend("  - %s/%s: %s" % (f["project"], f["id"], f["text"][:220]) for f in facts)
-    lines.append("preferences (%d):" % len(preferences))
-    lines.extend("  - %s/%s: %s" % (
-        p["scope"], p["id"], p["text"][:220],
-    ) for p in preferences)
-    lines.append("sessions (%d):" % len(sessions))
-    lines.extend("  - %s [%s]: %s" % (
-        s["session_id"], s.get("project") or "default",
-        (s.get("title") or s.get("summary") or "(untitled)")[:220],
-    ) for s in sessions)
-    lines.append("interactions (%d):" % len(interactions))
-    lines.extend("  - %s [%s]: %s" % (
-        i["id"], i.get("tier") or "?",
-        (i.get("task") or "")[:220],
-    ) for i in interactions)
-    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -16711,7 +16749,7 @@ def memory_export(limit: int = 50, include_interactions: bool = False) -> str:
 
 @mcp.tool()
 def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
-    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON)."""
+    """Export a remembered conversation session as readable transcript text (format="atif": ATIF-v1.7 JSON). `session` may be an id, a sonder:chat/<id> code or a /app/#/c/<id> chat link."""
     _maybe_live_reload()
     export_format = "text"
     if str(format or "").strip():  # the default text path stays import-free
@@ -16719,7 +16757,7 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         export_format = atif_export.normalize_session_export_format(format)
         if export_format is None:
             raise InvalidInput("unknown session_export format (use 'text' or 'atif')")
-    session_id = _resolve_session(session)
+    session_id = _resolve_session(parse_session_ref(session) or session)
     if not session_id:
         return "ERROR: session='none' has no stored transcript."
     limit = _safe_limit_policy(limit, 50, 200)
@@ -17510,7 +17548,7 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 refusal = "ERROR: agent project path rejected: %s uses a %s" % (
                     label, _network_spelling.REFUSAL)
                 return refusal
-            target = Path(raw).expanduser()
+            target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
             if not target.is_absolute():
                 target = root / target
             if label == "diff path":
@@ -17531,166 +17569,178 @@ def _repository_scope_path_error(tool_name, args, project_root):
     return ""
 
 
-def _agent_project_execution_argument_error(tool_name, args, project_root):
-    """Reject explicit project-execution escape paths and inline interpreters.
+_INLINE_INTERPRETER_REFUSAL = (
+    "ERROR: agent project execution rejected: inline interpreter "
+    "commands are outside the project path guard"
+)
+_STDIN_INTERPRETER_REFUSAL = (
+    "ERROR: agent project execution rejected: interpreter code via "
+    "stdin is outside the project path guard"
+)
+# %s is the parser's reason (quotes, carets, expansion, control characters,
+# non-ASCII whitespace, for loops) for a build_run command it cannot read.
+_BUILD_RUN_OPAQUE_REFUSAL = "ERROR: agent project execution rejected: %s"
+_COMMAND_STRING_LAUNCHER_REFUSAL = (
+    "ERROR: agent project execution rejected: %s is a command-string "
+    "launcher (it decodes and runs a command line of its own), which is "
+    "outside the project path guard"
+)
 
-    This is a host argument guard, not an OS sandbox: an allowed project
-    program can still access resources available to the user account.  Keep
-    that limitation explicit while blocking the direct escape forms a model
-    can otherwise express in workspace/script argv.
 
-    build_run is covered too.  It forwards a caller-supplied `command` verbatim
-    to a child process (harness_tools.py:657-663), so leaving it outside this
-    guard would make it the one reachable execution route that accepts exactly
-    the inline-interpreter forms workspace_run refuses.
-    """
+_ARGV_OUTSIDE_ROOT_REFUSAL = (
+    "ERROR: agent project execution rejected: argv path is outside "
+    "the host-selected project root"
+)
+_NETWORK_EXEC_PATH_REFUSAL = (
+    "ERROR: agent project execution rejected: %s uses a "
+    + _network_spelling.REFUSAL
+)
+_PROJECT_EXECUTION_GUARDED_TOOLS = frozenset({"ensemble_codegen_build_loop"})
+
+
+def _argv_value_outside_root(raw, base, root):
+    """Whether one argv value names a path outside ``root``."""
+    drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
+    if drive_match:
+        raw = raw[drive_match.start():]
     if (
-        not project_root
-        or tool_name not in (
-            _PROJECT_SCOPED_EXECUTION_TOOLS | _PROJECT_SCOPED_COMMAND_TOOLS
-        )
-        or not isinstance(args, dict)
+        (os.name == "nt" and re.fullmatch(r"/[A-Za-z][A-Za-z0-9:+\-]*", raw) and not os.path.lexists(str(base / raw)))
+        or (os.name != "nt" and ".." not in raw and re.fullmatch(r"/[A-Za-z][A-Za-z0-9+\-]*:[A-Za-z0-9_.=+\-]+", raw) and not os.path.lexists(raw))
     ):
+        return False
+    drive_relative = os.name == "nt" and bool(re.fullmatch(r"[A-Za-z]:[^:=]+", raw))
+    path_like = (
+        drive_relative
+        or os.path.isabs(raw)
+        or raw.startswith((".", "~"))
+        or "/" in raw
+        or "\\" in raw
+        or bool(os.path.splitext(raw)[1])
+    )
+    if not path_like:
+        return False
+    target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
+def _program_token_escape_error(raw_program, base, root, *, check_outside):
+    """Reject UNC/device program paths and (for build_run) outside-root executables."""
+    token = str(raw_program or "").strip().strip('"\'').lstrip("@=,;")
+    if not token:
+        return ""
+    if _network_spelling.contains_network_spelling(token):
+        return _NETWORK_EXEC_PATH_REFUSAL % "the program path"
+    if not check_outside:
+        return ""
+    looks_like_path = (
+        token.startswith((".", "~"))
+        or "/" in token
+        or "\\" in token
+        or (os.name == "nt" and bool(re.match(r"^[A-Za-z]:", token)))
+    )
+    if not looks_like_path:
+        return ""
+    target = Path(token.replace("\\", "/") if os.name != "nt" else token).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    try:
+        resolved = target.resolve(strict=False)
+        if os.path.normcase(str(resolved)) == os.path.normcase(os.path.realpath(sys.executable)):
+            return ""
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return _ARGV_OUTSIDE_ROOT_REFUSAL
+    return ""
+
+
+def _agent_project_execution_argument_error(tool_name, args, project_root):
+    """Reject explicit project-execution escape paths and inline interpreters."""
+    guarded = (
+        _PROJECT_SCOPED_EXECUTION_TOOLS
+        | _PROJECT_SCOPED_COMMAND_TOOLS
+        | _PROJECT_EXECUTION_GUARDED_TOOLS
+    )
+    if not project_root or tool_name not in guarded or not isinstance(args, dict):
         return ""
     try:
         root = Path(str(project_root)).expanduser().resolve(strict=True)
     except (OSError, ValueError) as exc:
         refusal = "ERROR: agent project scope is invalid: %s" % exc
         return refusal
+    stdin_present = bool(str(args.get("stdin") or ""))
+    is_windows = os.name == "nt"
+    program_tokens = []
     if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
-        # harness_tools splits the command on whitespace and execs the result,
-        # so read the program and its argv exactly the way the child will.
-        command_argv = str(args.get("command") or "").split()
-        program = Path(command_argv[0]).name.casefold() if command_argv else ""
-        argv = command_argv[1:]
-    else:
-        argv = _agent_argv(args)
-        program = Path(str(args.get("program") or "")).name.casefold()
-    lowered = [item.casefold() for item in argv]
-    inline_flags = {
-        "python": {"-c"}, "python.exe": {"-c"},
-        "py": {"-c"}, "py.exe": {"-c"},
-        "node": {"-e", "--eval", "-p", "--print"},
-        "node.exe": {"-e", "--eval", "-p", "--print"},
-        "bash": {"-c"}, "bash.exe": {"-c"},
-        "sh": {"-c"}, "sh.exe": {"-c"},
-        "perl": {"-e"}, "perl.exe": {"-e"},
-        "ruby": {"-e"}, "ruby.exe": {"-e"},
-        "powershell": {"-command", "-c", "-encodedcommand", "-enc"},
-        "powershell.exe": {"-command", "-c", "-encodedcommand", "-enc"},
-        "pwsh": {"-command", "-c", "-encodedcommand", "-enc"},
-        "pwsh.exe": {"-command", "-c", "-encodedcommand", "-enc"},
-        "cmd": {"/c", "/k"}, "cmd.exe": {"/c", "/k"},
-    }
-    forbidden = inline_flags.get(program, set())
-    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
-        forbidden = {"-c"}
-    elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", program):
-        forbidden = {"-e", "--eval", "-p", "--print"}
-    if forbidden.intersection(lowered):
-        return (
-            "ERROR: agent project execution rejected: inline interpreter "
-            "commands are outside the project path guard"
+        plan = _interpreter_argv.analyze_build_command(
+            str(args.get("command") or ""),
+            stdin_present=stdin_present,
+            is_windows=is_windows,
         )
-    # Catch common launchers such as `uv run python3 -c ...` as well as a
-    # directly selected interpreter.
-    for index, token in enumerate(lowered[:-1]):
-        child = Path(token).name
-        child_flags = set()
-        if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
-            child_flags = {"-c"}
-        elif re.fullmatch(r"node(?:js)?(?:\d+(?:\.\d+)*)?(?:\.exe)?", child):
-            child_flags = {"-e", "--eval", "-p", "--print"}
-        if any(item in child_flags for item in lowered[index + 1:]):
-            return (
-                "ERROR: agent project execution rejected: inline interpreter "
-                "commands are outside the project path guard"
-            )
-    # An interpreter runs the program on its STDIN whenever argv names no
-    # script to run. `-` says so explicitly, but it is not the only way and was
-    # the only one checked here: `python`, `bash`, `sh` and `node` with EMPTY
-    # argv all read a program from stdin and execute it, so requiring "-" in
-    # argv let every inline-code control in this guard be walked around by
-    # simply omitting the dash.
-    #
-    # The operand test is what keeps this from over-blocking. `python script.py`
-    # with stdin attached is a program reading DATA, which is legitimate and
-    # must stay allowed; only an invocation with no operand -- bare, or
-    # flags-only like `python -u`, or an explicit `-` -- makes stdin the code.
-    # A token starting with "-" is a flag (or the dash itself), never an
-    # operand.
-    if forbidden and str(args.get("stdin") or ""):
-        has_script_operand = any(
-            token and not token.startswith("-") for token in lowered
-        )
-        if not has_script_operand:
-            return (
-                "ERROR: agent project execution rejected: interpreter code via "
-                "stdin is outside the project path guard"
-            )
-
-    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
-        # build_run runs the child with cwd=root, so relative argv entries
-        # resolve against root -- not against Sonder's own working directory.
+        if plan.opaque_reason:
+            return _BUILD_RUN_OPAQUE_REFUSAL % plan.opaque_reason
+        if plan.launcher:
+            return _COMMAND_STRING_LAUNCHER_REFUSAL % plan.launcher
+        if plan.inline_violation:
+            return _INLINE_INTERPRETER_REFUSAL
+        if plan.stdin_violation:
+            return _STDIN_INTERPRETER_REFUSAL
+        argv = list(plan.path_tokens)
+        program_tokens = list(plan.program_tokens)
         base_value = args.get("root") or "."
     else:
-        base_value = args.get("cwd") or (
-            os.path.dirname(str(args.get("path") or "")) if tool_name == "script_run" else "."
+        if tool_name == "ensemble_codegen_build_loop":
+            program_raw = str(args.get("build_program") or "")
+            argv = _agent_argv({"args_json": args.get("build_args_json", "[]")})
+            base_value = args.get("project_dir") or "."
+            stdin_present = False
+        else:
+            program_raw = str(args.get("program") or "")
+            argv = _agent_argv(args)
+            base_value = args.get("cwd") or (
+                os.path.dirname(str(args.get("path") or ""))
+                if tool_name == "script_run" else "."
+            )
+        if program_raw:
+            program_tokens = [program_raw]
+        verdict, detail = _interpreter_argv.analyze_argv_command(
+            program_raw, argv, stdin_present=stdin_present,
         )
-    network_refusal = (
-        "ERROR: agent project execution rejected: %s uses a "
-        + _network_spelling.REFUSAL
-    )
-    try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
+        if verdict == "launcher":
+            return _COMMAND_STRING_LAUNCHER_REFUSAL % detail
+        if verdict == "inline":
+            return _INLINE_INTERPRETER_REFUSAL
+        if verdict == "stdin":
+            return _STDIN_INTERPRETER_REFUSAL
+    try:
         base_value = file_ops._reject_network_path(str(base_value))
     except PermissionError:
-        return network_refusal % "the working directory"
+        return _NETWORK_EXEC_PATH_REFUSAL % "the working directory"
     try:
         base = Path(base_value).expanduser().resolve(strict=False)
     except (OSError, ValueError) as exc:
         refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
         return refusal
-    for raw_item in argv:
-        raw = str(raw_item or "").strip().strip('"\'')
-        if not raw:
-            continue
-        if "=" in raw and raw.startswith(("-", "/")):
-            raw = raw.split("=", 1)[1].strip().strip('"\'')
-        raw = raw.lstrip("@")
-        # A token naming or embedding a UNC/device path is refused whole;
-        # nothing of it is resolved.
-        if _network_spelling.contains_network_spelling(raw):
-            return network_refusal % "an argv path"
-        drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
-        if drive_match:
-            raw = raw[drive_match.start():]
-        # On Windows, /Zi and /W4 are compiler switches, not POSIX paths.
-        if (
-            os.name == "nt"
-            and raw.startswith("/")
-            and "\\" not in raw
-            and raw.count("/") == 1
-        ):
-            continue
-        path_like = (
-            os.path.isabs(raw)
-            or raw.startswith((".", "~"))
-            or "/" in raw
-            or "\\" in raw
-            or bool(os.path.splitext(raw)[1])
+    check_prog_outside = tool_name in _PROJECT_SCOPED_COMMAND_TOOLS
+    for prog_tok in program_tokens:
+        prog_err = _program_token_escape_error(
+            prog_tok, base, root, check_outside=check_prog_outside,
         )
-        if not path_like:
-            continue
-        target = Path(raw).expanduser()
-        if not target.is_absolute():
-            target = base / target
-        try:
-            target.resolve(strict=False).relative_to(root)
-        except (OSError, ValueError):
-            return (
-                "ERROR: agent project execution rejected: argv path is outside "
-                "the host-selected project root"
-            )
+        if prog_err:
+            return prog_err
+    for raw_item in argv:
+        net_bad, candidates = _interpreter_argv.expand_argv_path_candidates(
+            raw_item, is_windows=is_windows,
+        )
+        if net_bad:
+            return _NETWORK_EXEC_PATH_REFUSAL % "an argv path"
+        if any(_argv_value_outside_root(value, base, root) for value in candidates):
+            return _ARGV_OUTSIDE_ROOT_REFUSAL
     return ""
 
 
@@ -18299,6 +18349,12 @@ def _agent_dispatch(
     )
     if scope_error:
         return scope_error
+    if repository_extra_roots:
+        exec_error = _agent_project_execution_argument_error(
+            tool_name, args, repository_extra_roots,
+        )
+        if exec_error:
+            return exec_error
     if read_only:
         if repository_extra_roots:
             # Defense in depth for direct/internal dispatch callers.  The
@@ -18451,7 +18507,11 @@ def _agent_dispatch(
             )
         return approximate_location_lookup(bool(args.get("consent", False)))
     if tool_name == "memory_search":
-        return memory_search(args.get("query", ""), args.get("limit", 10))
+        # A project-bound run reads only its host-selected project's memory.
+        return _memory_search_scoped(
+            args.get("query", ""), args.get("limit", 10),
+            bound_project=repository_extra_roots,
+        )
     if tool_name == "file_policy":
         return file_policy(
             token=args.get("token", ""),
@@ -19137,6 +19197,10 @@ def _agent_dispatch(
             tier=args.get("tier", ""),
         )
     if tool_name in ("master_orchestrate", "master"):
+        # The agent model chose this project: it must stay inside the file roots.
+        project_refusal = served_project_refusal(args.get("project", ""))
+        if project_refusal:
+            return project_refusal
         return master_orchestrate(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
@@ -19173,6 +19237,20 @@ def _agent_dispatch(
             scope=args.get("scope", "global"),
         )
     if tool_name == "preferences_status":
+        if repository_extra_roots:
+            # A project-bound run lists only global and its own project's
+            # preferences; no fallback to the unscoped list.
+            _maybe_live_reload()
+            from sonder_runtime.adapters.preference_adapters import (
+                preferences_status_scoped,
+            )
+
+            return preferences_status_scoped(
+                _application(),
+                include_disabled=args.get("include_disabled", False),
+                limit=args.get("limit", 50),
+                bound_project=repository_extra_roots,
+            )
         return preferences_status(
             include_disabled=args.get("include_disabled", False),
             limit=args.get("limit", 50),
@@ -20165,8 +20243,13 @@ def _agent_batch_target_identity(raw):
     tools resolve them, and symlinks are followed, so ``src/a.py``, its
     absolute spelling and a symlink to it are one target.  When the
     filesystem cannot answer, the lexical absolute path is used instead.
+    A UNC or device spelling is never resolved (that would open it, SMB and
+    NTLM included, before file_ops refuses it): its lexical text is the
+    identity.
     """
     text = str(raw or "").strip()
+    if _is_network_spelling_raw(text):
+        return text
     try:
         candidate = Path(text).expanduser()
         if not candidate.is_absolute():
@@ -23288,7 +23371,8 @@ def _route_work_request(
             master_kwargs["worker_cap"] = explicit_worker_cap
         if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
             master_kwargs["project"] = resolved_project
-        output = master_orchestrate(**master_kwargs)
+        # Only HTTP chat reaches this route, so the project is a served caller's.
+        output = served_project_refusal(master_kwargs.get("project", "")) or master_orchestrate(**master_kwargs)
     elif mode == "workbench":
         _narration_reason(reason)
         output, selected_tier = _workbench_agent_escalating(
@@ -23346,11 +23430,17 @@ _PIN_CATALOG_TIMEOUT_SECONDS = 3
 _POOL_PIN_CATALOG = PoolCatalogCache()
 
 
+def _pin_endpoint_record(selector):
+    """Pin lookup tier one: the single pooled read (workers are the next tier)."""
+    wanted = str(selector or "").strip().casefold()
+    return _resolve_catalog_record(wanted, _catalog_records(_get("/api/tags"))) if wanted else None
+
+
 def _resolve_model_pin(selector):
     """Resolve a model pin against this host, then the pool's routable members."""
     return resolve_model_pin(
         selector,
-        endpoint_record=lambda s: resolve_discovered_model_record(s),
+        endpoint_record=lambda s: _pin_endpoint_record(s),
         pool=OLLAMA_POOL,
         fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
         nonchat_reason=lambda r: _fanout_nonchat_reason(r),
@@ -25282,6 +25372,8 @@ def improve_function(
     empty.
     """
     _maybe_live_reload()
+    if tier and (refusal := _tool_lane_guard.selector_refusal(tier, TIERS, _RUNTIME_POLICY)):
+        return refusal
     try:
         data = file_ops.read_file(path)
         source = data.get("text", "") if isinstance(data, dict) else str(data)

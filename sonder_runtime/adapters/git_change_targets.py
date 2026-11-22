@@ -117,6 +117,8 @@ def patch_refusal(operation: str, root: Path, top: Path | None, paths: Iterable[
                 or _operator_only.is_policy_file(spelled, policy)
                 or file_ops._git_metadata_component(spelled)
                 or file_ops._is_protected_mutation_path(candidate)
+                or file_ops._is_interpreter_environment_path(spelled)
+                or bool(file_ops._sensitive_mutation_component(candidate))
             ):
                 return _message(operation, relative)
     return ""

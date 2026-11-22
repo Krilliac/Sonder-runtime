@@ -4,11 +4,22 @@ Connect a Sonder coordinator to Ollama instances running on separate hosts.
 The coordinator routes inference through least-inflight selection across all
 healthy workers, with per-worker capability discovery and bounded failover.
 
+This runbook owns the **worker host setup** (Ollama on Linux or Windows, tier
+routing, optional signed external membership). The rest has one home each:
+
+- Pool topology, circuit breaker, coordinator pool settings, membership
+  lifecycle and verification: [multi-pc-ollama.md](multi-pc-ollama.md).
+- The TLS reverse proxy (Caddy) in front of each worker, and the coordinator
+  URL, consent and CA-trust rules: [remote-ollama-caddy.md](remote-ollama-caddy.md)
+  (see its "Coordinator settings" section).
+- Every `[ollama]` key, environment variable and bound:
+  [wiki 03 configuration](../wiki/03-configuration.md).
+
 ## Architecture
 
 ```text
 Coordinator: Sonder + local Ollama
-  [ollama].workers = ["https://node1:11443"]
+  [ollama].workers = ["https://<worker-host>:11443"]
         │ HTTPS over the private network
         ▼
 Worker: TLS proxy :11443 → Ollama 127.0.0.1:11434
@@ -31,9 +42,9 @@ request across nodes, or claim indefinite scaling.
 
 ## Prerequisites
 
-- Dedicated private network between nodes (e.g. 10.77.0.0/24).
-- Ollama installed on each worker, bound to `127.0.0.1:11434`, behind a TLS reverse proxy on an explicitly configured port (for example, 11443).
-- Worker TLS certificates trusted by the coordinator system trust store, with the worker hostname or IP in the certificate SAN.
+- Dedicated private network between nodes (e.g. 10.0.0.0/24).
+- Ollama installed on each worker, bound to `127.0.0.1:11434`, behind a TLS reverse proxy on an explicitly configured port (for example, 11443; the other runbooks use 443, and either works as long as the worker URL names the same port).
+- Worker TLS certificates the coordinator trusts, with the worker hostname or IP in the certificate SAN. The trust-anchor order (CA bundle setting, then process-wide bundle, then system store) is in [remote-ollama-caddy.md](remote-ollama-caddy.md#coordinator-settings).
 - Models pulled on each worker before the coordinator starts.
 
 ## 1. Configure the worker's Ollama
@@ -62,17 +73,15 @@ environment variables:
 |---|---|
 | `OLLAMA_HOST` | `127.0.0.1:11434` |
 | `OLLAMA_MODELS` | Path to your models directory (e.g. `C:\OllamaModels`) |
-| `OLLAMA_ORIGINS` | `*` |
 
 For auto-restart on crash or reboot, create a Windows scheduled task that
 runs a service host script at startup:
 
 ```powershell
 # ollama-service.ps1 — run as a scheduled task (SYSTEM or your user)
-$OllamaExe = 'C:\Users\<you>\AppData\Local\Programs\Ollama\ollama.exe'
+$OllamaExe = '<full-path-to>\ollama.exe'   # default install: %LOCALAPPDATA%\Programs\Ollama\ollama.exe, written out in full
 $env:OLLAMA_HOST = '127.0.0.1:11434'
 $env:OLLAMA_MODELS = 'C:\OllamaModels'
-$env:OLLAMA_ORIGINS = '*'
 
 $restartDelay = 5
 while ($true) {
@@ -87,15 +96,24 @@ while ($true) {
 
 > **Note:** If running as SYSTEM, `$env:LOCALAPPDATA` resolves to the
 > system profile — hardcode the full path to `ollama.exe` instead.
+> Sonder sends no browser `Origin` header, so leave `OLLAMA_ORIGINS` at its
+> default; do not set it to `*`.
 
 Disable any other auto-start mechanisms (Ollama startup folder shortcut,
 older scheduled tasks) to avoid port conflicts.
 
 If the worker also runs Sonder (as a compute node, not just an Ollama
-endpoint), use the same scheduled-task pattern for Sonder.  Override
-`OLLAMA_HOST=127.0.0.1:11434` in the Sonder service script — if
-`OLLAMA_HOST` is set to `0.0.0.0` at the machine level, Sonder picks
-it up and rejects it as non-loopback.
+endpoint), use the same scheduled-task pattern for Sonder.  Set
+`OLLAMA_HOST=127.0.0.1:11434` in the Sonder service script. Sonder reads
+`OLLAMA_HOST` too and requires an explicit port: a value with no port (for
+example a bare `127.0.0.1`) fails with `OLLAMA_HOST must include an explicit
+port` (`sonder_runtime/domain/ollama_policy.py:156-157`). A bare `0.0.0.0` (the common
+Ollama setting for "listen on all interfaces") fails the same explicit-port
+check. A value with a port, such as `0.0.0.0:11434` or
+`http://0.0.0.0:11434`, is accepted: Sonder rewrites it to `127.0.0.1` and logs
+a warning (`sonder_runtime/domain/ollama_policy.py:25-29`, `:92-97`, `:156-157`). Ollama
+itself would still listen on every interface, so keep the machine-level value
+on loopback.
 
 ### WSL2 — not recommended for workers
 
@@ -112,46 +130,38 @@ Hyper-V firewall rules.
 ### Verify from the coordinator
 
 ```bash
-curl --fail https://<worker-host>:11443/api/version
+curl --cacert <ca-file-given-to-sonder> https://<worker-host>:11443/api/version
 ```
+
+Use the same CA file you set in `[ollama].ca_bundle` (omit `--cacert` for a
+publicly trusted certificate) and `curl.exe` in PowerShell. Expected: a JSON
+body such as `{"version":"..."}`. A TLS error means the coordinator does not
+trust the proxy certificate. The full check list is
+[remote-ollama-caddy.md](remote-ollama-caddy.md#verify); fixes are under
+[Troubleshooting](remote-ollama-caddy.md#troubleshooting).
 
 ## 2. Configure the coordinator
 
-Edit `sonder.toml` on the coordinator (the machine running `sonder serve`):
+Coordinator pool settings (`[ollama].allow_remote`, `workers`, the tuning keys,
+the consent gate and the certificate-trust order) live in
+[multi-pc-ollama.md](multi-pc-ollama.md#configure-the-coordinator-pc) and
+[remote-ollama-caddy.md](remote-ollama-caddy.md#coordinator-settings). The full
+key, environment-variable and bounds table is
+[wiki 03](../wiki/03-configuration.md). Only these worker origins are needed
+here:
 
 ```toml
 [ollama]
-url = "http://127.0.0.1:11434"
-allow_remote = true
-workers = ["https://node1.example:11443"]
+workers = ["https://worker1.example:11443"]
 ```
 
-| Key | Purpose |
-|---|---|
-| `allow_remote` | Consent gate — must be `true` to reference non-loopback workers. |
-| `workers` | Additional explicitly configured Ollama origins. The coordinator probes their model capabilities and routes complete requests by least-inflight. |
-| `trusted_origins` | Legacy CIDR metadata, retained for configuration compatibility. It does not authorize remote HTTP or bypass TLS validation. |
-
-Alternatively, set via environment:
-
-```bash
-SONDER_ALLOW_REMOTE_OLLAMA=1
-SONDER_OLLAMA_WORKERS=https://node1.example:11443
-SONDER_OLLAMA_POOL_MAX_WORKERS=16
-SONDER_OLLAMA_WORKER_PROBE_PARALLELISM=4
-SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE=32
-SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE=32
-```
-
-Typed application construction leaves remote workers in probation and does
-not start membership I/O. An embedding owner explicitly calls
-`application.inference_membership.refresh(timeout_seconds=30)` to start the
-owned lifecycle and request its first refresh, or `start()` to opt into the
-periodic loop. Capability evidence is required before remote dispatch and
-expires independently of the snapshot. The owner must close the application
-providers on shutdown. The CLI, default status, app, and REPL do not start this
-lifecycle automatically; the worker-cache administration operation below does
-not retrieve or create membership. There is no membership-enrollment UI or CLI.
+Membership: `serve`, `repl` and `mcp` start the static membership controller at
+launch (`sonder_runtime/bootstrap/app.py:2330-2348`, called from `sonder_runtime/__main__.py:1292`, `:1419`,
+`:1470`, `:1524`), so configured workers leave `probation` without any extra
+call. A process that builds the application directly (an embedding owner)
+starts nothing until it calls `application.inference_membership.refresh(...)` or
+`start()`. External mode (`[membership] mode = "external"`) is never started
+automatically. There is no membership-enrollment UI or CLI.
 
 ## 3. Tier routing with remote models
 
@@ -207,30 +217,14 @@ to one administrator and roster generation. Invalid or stale cursors are
 rejected before any probe. Existing count-only version-1 readers remain
 compatible. These operations never create or discover membership.
 
-## 5. Tuning
+## 5. Tuning and security
 
-| Setting | Default | Notes |
-|---|---|---|
-| `worker_pool_max_workers` | 16 | Maximum unique primary-plus-worker roster held by one coordinator (1–256). This is a finite configuration bound, not a throughput guarantee. |
-| `worker_max_inflight` | 1 | Concurrent requests per worker.  Increase only if the worker has enough VRAM to serve multiple slots. |
-| `worker_queue_depth` | 32 | Bounded backpressure waiters across the whole pool. It is not multiplied by the number of workers. |
-| `worker_capability_probe_parallelism` | 4 | Maximum concurrent worker capability probes for this pool (1–8). |
-| `worker_capability_probe_batch_size` | 32 | Maximum stale workers selected by one fair refresh pass (1–128). |
-| `worker_status_page_size` | 32 | Default bounded cached worker-detail page size (1–128); one page is capped at 65,536 UTF-8 bytes. |
-| `worker_failure_threshold` | 3 | Consecutive failures before cooldown. |
-| `worker_cooldown_seconds` | 30 | Seconds a failed worker stays out of rotation. |
-| `worker_capability_ttl_seconds` | 300 | How often model lists are re-probed. |
-
-## Security considerations
-
-Every non-loopback Ollama endpoint requires explicit remote consent **and
-HTTPS**, including isolated private LANs. `trusted_origins` never disables
-TLS. Deploy a TLS reverse proxy in front of each worker (see
-[secure remote access](secure-remote-access.md)), keep Ollama on loopback, and
-restrict the proxy listener to the intended coordinator. Do not disable
-certificate verification. The coordinator uses its existing no-proxy,
-no-redirect, bounded-response transport and does not replay response-bearing
-model requests.
+Tuning keys, defaults and bounds are in
+[wiki 03](../wiki/03-configuration.md) (one home). Security rules for remote
+workers (HTTPS only, no insecure-skip-verify, proxy source-IP allowlist) are in
+[remote-ollama-caddy.md](remote-ollama-caddy.md) and
+[secure remote access](secure-remote-access.md). `trusted_origins` is legacy
+metadata and never disables TLS.
 
 ## Optional externally authenticated membership
 
@@ -253,7 +247,7 @@ issuer_id = "configured-registry"
 protocol_version = 1
 source_origin = "https://registry.example:443"
 source_tls_server_name = "registry.example"
-source_allowed_cidrs = ["10.77.0.0/24"]
+source_allowed_cidrs = ["10.0.0.0/24"]
 trust_anchor_file = "/private/config/inference-ca.pem"
 signature_public_key_file = "/private/config/membership-signer.pem"
 refresh_interval_seconds = 30
@@ -262,10 +256,10 @@ snapshot_max_bytes = 1048576
 local_fallback = false
 
 [[membership.member_policies]]
-member_id = "node1"
-origin = "https://node1.example:11443"
-tls_server_name = "node1.example"
-allowed_cidrs = ["10.77.0.0/24"]
+member_id = "worker1"
+origin = "https://worker1.example:11443"
+tls_server_name = "worker1.example"
+allowed_cidrs = ["10.0.0.0/24"]
 ```
 
 Use absolute file paths suitable for the coordinator OS. Set

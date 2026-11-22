@@ -52,7 +52,14 @@ with a single trailing slash (`http://127.0.0.1:11434/`) is accepted exactly as
 the configuration loader accepts it; any other path is still refused. A
 successful activation prints
 the warning through `status()` and `diagnostics()` and durably appends it to
-`$SONDER_HOME/audit/unsafe-lab.jsonl`. `SONDER_UNSAFE_LAB_AUDIT_PATH` may point
+`$SONDER_HOME/audit/unsafe-lab.jsonl`. Only the environment variable
+`SONDER_HOME` selects that folder; `SONDER_STATE_HOME` and `[state].home` do
+not. With `SONDER_HOME` unset the file is
+`%LOCALAPPDATA%\sonder\audit\unsafe-lab.jsonl` on Windows (falling back to
+`%USERPROFILE%`, then the working directory), `$XDG_STATE_HOME/sonder/unsafe-lab.jsonl`
+on POSIX when that is set, else `~/.local/state/sonder/unsafe-lab.jsonl`
+(`sonder_runtime/adapters/security/unsafe_lab.py:95-107`).
+`SONDER_UNSAFE_LAB_AUDIT_PATH` may point
 that record at a persistent evidence volume, but never at a host-mounted
 credential or source directory.
 

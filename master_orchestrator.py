@@ -867,7 +867,9 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
     may refine it to a file/subdirectory, but may never point outside it.  When
     no host scope is supplied, a labeled repository or absolute source file is
     required; silently falling back to Sonder's own cwd caused cross-repo fleet
-    evidence in live dogfood.
+    evidence in live dogfood.  A root taken from the task text alone must also
+    lie inside the configured file roots: the task text is caller- or
+    model-written, and the resolved root becomes the worker's read scope.
     """
     explicit_text = str(project or "").strip()
     explicit = canonical_project_root(explicit_text)
@@ -883,6 +885,10 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
             )
         return explicit
     if inferred:
+        # file_ops owns the allowed roots the file tools also enforce.
+        from sonder_runtime.adapters.filesystem.file_ops import inside_allowed_roots
+        if not inside_allowed_roots(inferred):
+            raise ValueError("task repository path is outside the configured file roots; add it to file_roots.local or SONDER_FILE_ROOTS, or select a project inside them")
         return inferred
     raise ValueError(
         "repository work requires an explicit existing project root; no cwd fallback is allowed. Name it with a 'Repository: <absolute path>' line or select a project inside the configured file roots"
@@ -1243,8 +1249,8 @@ def request_cancel(selector: str) -> dict:
 
 
 def current_worker_cancel_requested() -> bool:
-    """Whether the delegated worker bound to this thread was cancelled."""
-    agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
+    """Whether the worker bound to this thread (or, via its fence, this context) was cancelled."""
+    agent_id = getattr(_WORKER_LOCAL, "agent_id", None) or effect_fence.current_fleet_agent_id()
     return bool(agent_id and cancel_requested(agent_id))
 
 

@@ -171,7 +171,7 @@ _WHEEL_WORDS = re.compile(r"\b(?:cart)?wheels?\b|\b(?:axles?|tyres?|tires?|hubca
 # sentence does not count)
 _OTHER_WHEELS = re.compile(r"\b(?:steering|ship'?s?|helm|valve|hand|potter'?s?|spinning|mill|water|ferris|roulette|"
                            r"cog|gear|fly)[ -]?wheels?\b|\bwheel of fortune\b")
-_QUALIFIED_UNAVAILABLE = re.compile(r"(\w+)\.(\w+) is not available in build scripts")
+_QUALIFIED_UNAVAILABLE = re.compile(r"(\w{1,128})\.(\w{1,128}) is not available in build scripts")
 
 
 def orientation_guidance(issues) -> str:

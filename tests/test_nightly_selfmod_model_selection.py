@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import code_improve
 from scripts import nightly_selfmod, selfmod_host_grader
 from sonder_runtime.application.selfmod.candidate_isolation import IsolationAttestation
 
@@ -1013,7 +1014,7 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
     (workspace / "reflection.py").write_text(
         "def selected(value):\n    return value\n", encoding="utf-8",
     )
-    cancelled, discarded = [], []
+    cancelled, discarded, plans = [], [], []
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
     monkeypatch.setattr(
         nightly_selfmod.selfmod, "settings",
@@ -1029,7 +1030,7 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         nightly_selfmod.selfmod, "create_plan",
-        lambda *_args, **_kwargs: {"id": "run-rewrite-error"},
+        lambda *_args, **kwargs: plans.append(kwargs) or {"id": "run-rewrite-error"},
     )
     monkeypatch.setattr(nightly_selfmod.selfmod, "create_backup", lambda _run_id: None)
     monkeypatch.setattr(nightly_selfmod.selfmod, "verify_backup", lambda _run_id: None)
@@ -1055,6 +1056,8 @@ def test_run_cleans_plan_when_rewrite_request_raises(tmp_path, monkeypatch):
 
     assert result == "candidate rejected: rewrite request failed (RuntimeError)"
     assert cancelled == discarded == ["run-rewrite-error"]
+    # The loop tags its own runs so reclaim_orphans() never claims others.
+    assert [plan.get("created_by") for plan in plans] == [nightly_selfmod.LOOP_CREATOR]
     assert not workspace.exists()
 
 
@@ -1090,3 +1093,46 @@ def test_committed_bytes_mismatch_rejects_and_deletes_branch(tmp_path, monkeypat
     assert result.startswith("candidate rejected: committed bytes differ")
     assert ("branch", "-D", "selfmod/run-bind") in calls["git"]
     assert calls["reject"] and "after commit" in calls["reject"][0]
+
+
+def test_splice_function_unchanged_reply_is_byte_identical():
+    original = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
+    for name in ("a", "b"):
+        reply = code_improve.extract_function(original, name)
+        assert nightly_selfmod._splice_function(original, reply, expected_name=name) == original
+
+
+def test_splice_function_does_not_add_a_blank_line_or_final_newline():
+    original = "def a():\n    return 1\ndef b():\n    return 2"
+    edited = nightly_selfmod._splice_function(original, "def a():\n    return 3\n")
+    assert edited == "def a():\n    return 3\ndef b():\n    return 2"
+    edited = nightly_selfmod._splice_function(original, "def b():\n    return 4\n")
+    assert edited == "def a():\n    return 1\ndef b():\n    return 4"
+
+
+def test_splice_function_uses_ast_line_numbers_across_form_feeds():
+    original = "X = 1\n\x0c\ndef a():\n    return 1\n\n\ndef b():\n    return 2\n"
+    edited = nightly_selfmod._splice_function(original, "def b():\n    return 9\n")
+    assert edited == "X = 1\n\x0c\ndef a():\n    return 1\n\n\ndef b():\n    return 9\n"
+
+
+def test_splice_function_preserves_crlf_endings():
+    original = "def a():\r\n    return 1\r\n\r\ndef b():\r\n    return 2\r\n"
+    edited = nightly_selfmod._splice_function(original, "def a():\n    x = 1\n    return x\n")
+    assert edited == "def a():\r\n    x = 1\r\n    return x\r\n\r\ndef b():\r\n    return 2\r\n"
+
+
+def test_splice_function_rejects_a_result_that_does_not_parse(monkeypatch):
+    original = "def a():\n    return 1\n"
+    real_parse = nightly_selfmod.ast.parse
+    calls = []
+
+    def parse(source, *args, **kwargs):
+        calls.append(source)
+        if len(calls) > 2:
+            raise SyntaxError("spliced result is broken")
+        return real_parse(source, *args, **kwargs)
+
+    monkeypatch.setattr(nightly_selfmod.ast, "parse", parse)
+    assert nightly_selfmod._splice_function(original, "def a():\n    return 2\n") is None
+    assert len(calls) == 3

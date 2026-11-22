@@ -458,6 +458,7 @@ def test_serve_target_is_not_widened_to_the_pool_union(monkeypatch):
     monkeypatch.setattr(server, "_POOL_PIN_CATALOG", PoolCatalogCache())
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     monkeypatch.setattr(server, "_get", lambda path: TAGS[LOCAL])
+    monkeypatch.setattr(server, "BASE", LOCAL)  # _serve_target reads this host's own catalog
     monkeypatch.setattr(
         server, "_pool_member_tags",
         lambda origin, timeout=15: reads.append(origin) or TAGS[origin],
@@ -465,7 +466,7 @@ def test_serve_target_is_not_widened_to_the_pool_union(monkeypatch):
     assert server._serve_target(LOCAL_ONLY, None)[0] == LOCAL_ONLY  # endpoint hit still works
     model, _cloud, _augment, label = server._serve_target(WORKER_ONLY, None)
     assert (model, label) == (None, None), "worker-only names stay unknown to _serve_target"
-    assert reads == []
+    assert WORKER not in reads
 
 
 # ---- review fixes: malformed catalogs, stale-cache refusals ----------------
@@ -632,6 +633,7 @@ def text_rig(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
     monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
     monkeypatch.setattr(server, "_get", lambda path: TEXT_TAGS[LOCAL])
+    monkeypatch.setattr(server, "BASE", LOCAL)  # _serve_target reads this host's own catalog
     monkeypatch.setattr(
         server, "_pool_member_tags",
         lambda origin, timeout=15: r.reads.append(origin) or TEXT_TAGS[origin],
@@ -676,7 +678,7 @@ def test_lanes_that_run_output_do_not_gain_a_worker_only_name(text_rig):
     target = LegacyModelBootstrapAdapter(SimpleNamespace(_serve_target=server._serve_target)) \
         .resolve_target("worker-only:7b")
     assert (target.model, target.tier_label) == (None, None)
-    assert text_rig.reads == []
+    assert WORKER not in text_rig.reads
 
 
 @pytest.mark.parametrize("name", [LOCAL_DENIED, WORKER_DENIED])

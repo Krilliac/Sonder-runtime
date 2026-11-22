@@ -7,6 +7,47 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+
+# A regex check runs a caller-supplied pattern.  Python's ``re`` backtracks
+# without any step limit and cannot be interrupted from another thread, so a
+# pattern such as ``^(a+)+$`` would pin a CPU and stall the caller for minutes
+# or longer.  The match therefore runs in a short-lived child interpreter that
+# is killed at the deadline; the pattern length is capped as well.
+MAX_REGEX_PATTERN_CHARS = 2000
+REGEX_TIMEOUT_SECONDS = 5.0
+_REGEX_CHILD = (
+    "import json,re,sys;"
+    "d=json.loads(sys.stdin.buffer.read().decode('ascii'));"
+    "sys.stdout.write('1' if re.search(d['p'],d['t'],re.MULTILINE) else '0')"
+)
+
+
+def _regex_search(pattern, text):
+    """Return ``(matched, detail_suffix)``; ``matched`` is False on timeout or failure."""
+    if len(pattern) > MAX_REGEX_PATTERN_CHARS:
+        raise ValueError(
+            "regex pattern exceeds %d characters" % MAX_REGEX_PATTERN_CHARS
+        )
+    # Compile here so an invalid pattern still raises re.error to the caller.
+    re.compile(pattern, re.MULTILINE)
+    payload = json.dumps({"p": pattern, "t": text}).encode("ascii")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", _REGEX_CHILD],
+            input=payload,
+            capture_output=True,
+            timeout=REGEX_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, " (timed out after %gs)" % REGEX_TIMEOUT_SECONDS
+    output = completed.stdout.strip()
+    if completed.returncode != 0 or output not in (b"0", b"1"):
+        return False, " (regex worker failed)"
+    return output == b"1", ""
 
 
 def _as_text(value):
@@ -47,8 +88,8 @@ def evaluate(artifact, checks):
             detail = "does not contain %r" % needle
         elif kind == "regex":
             pattern = str(check.get("pattern", ""))
-            ok = bool(re.search(pattern, text, re.MULTILINE))
-            detail = "matches /%s/" % pattern
+            ok, suffix = _regex_search(pattern, text)
+            detail = "matches /%s/%s" % (pattern, suffix)
         elif kind == "exact":
             expected = str(check.get("text", ""))
             ok = text.strip() == expected.strip()

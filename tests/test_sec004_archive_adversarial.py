@@ -786,6 +786,173 @@ def test_zip_central_directory_size_is_checked_before_parsing(workspace, monkeyp
     assert parsed == [], "a ZIP reader parsed an oversized central directory"
 
 
+def _zip_understating_its_entry_count(path, entries: int, declared: int):
+    # A real archive of ``entries`` members whose EOCD claims only ``declared``.
+    # zipfile walks the central directory by its byte size, not the count.
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(entries):
+            archive.writestr("e%04d" % index, b"")
+    data = bytearray(path.read_bytes())
+    eocd = data.rfind(b"PK\x05\x06")
+    struct.pack_into("<HH", data, eocd + 8, declared, declared)
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_zip_entry_bound_counts_real_central_directory_records(workspace):
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+        zip_central_directory,
+    )
+
+    source = _zip_understating_its_entry_count(workspace / "liar.zip", 12_000, 200)
+    declared, size = zip_central_directory(source)
+    # The declared count and the per-entry size allowance both pass ...
+    assert declared == 200 and size <= 200 * 4096
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 12_000  # ... yet zipfile builds every ZipInfo.
+    with pytest.raises(ZipCentralDirectoryLimitError, match="more than 1000 entries"):
+        require_zip_entry_bound(source, 1000)
+    with pytest.raises(file_ops.ArchivePreviewRejected, match="central directory"):
+        file_ops._inspect_zip(source)
+
+
+def _zip64_understating_its_entry_count(path, entries: int, declared: int, pad: bytes = b""):
+    # Like ``_zip_understating_its_entry_count``, but the counts live in a ZIP64
+    # end record behind a locator, with the classic EOCD fields saturated.
+    # Where zipfile starts a ZIP64 directory differs between patch levels
+    # (with or without the CVE-2025-8291 fix), so this pins the walk to where
+    # the running zipfile starts.  ``pad`` goes right before the directory.
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(entries):
+            archive.writestr("e%04d" % index, b"")
+    data = path.read_bytes()
+    eocd = data.rfind(b"PK\x05\x06")
+    size, offset = struct.unpack_from("<LL", data, eocd + 12)
+    body = data[:offset] + pad + data[offset : offset + size]
+    zip64_end = struct.pack(
+        "<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, declared, declared, size,
+        offset + len(pad),
+    )
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, len(body), 1)
+    end = struct.pack(
+        "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+    )
+    path.write_bytes(body + zip64_end + locator + end)
+    return path
+
+
+def test_zip64_entry_bound_counts_real_central_directory_records(workspace):
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+        zip_central_directory,
+    )
+    from sonder_runtime.application.security.path_archive_safety import (
+        ArchiveLimitError,
+        ArchiveLimits,
+        inspect_zip,
+    )
+
+    source = _zip64_understating_its_entry_count(workspace / "liar64.zip", 12_000, 200)
+    declared, size = zip_central_directory(source)
+    assert declared == 200 and size <= 200 * 4096
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 12_000
+    with pytest.raises(ZipCentralDirectoryLimitError, match="more than 1000 entries"):
+        require_zip_entry_bound(source, 1000)
+    with pytest.raises(file_ops.ArchivePreviewRejected, match="central directory"):
+        file_ops._inspect_zip(source)
+    with pytest.raises(ArchiveLimitError, match="more than 1000 entries"):
+        inspect_zip(source, ArchiveLimits(max_entries=1000))
+
+
+def test_zip64_entry_bound_accepts_an_honest_zip64_archive(workspace):
+    from sonder_runtime.application.security.bounded_archives import require_zip_entry_bound
+
+    source = _zip64_understating_its_entry_count(workspace / "honest64.zip", 50, 50)
+    assert require_zip_entry_bound(source, 50) == 50
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 50
+
+
+def test_zip64_entry_bound_is_not_desynchronised_by_a_fake_record_before_the_directory(workspace):
+    # 76 bytes (ZIP64 end record + locator) of padding sit right before the
+    # real directory and hold one fake central-directory header whose name,
+    # extra and comment lengths skip the whole declared size.  A walk that
+    # starts 76 bytes early counts that single record and accepts the archive
+    # while zipfile builds a ZipInfo for every real record.
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+    )
+
+    entries = 3800
+    size = (zipfile.sizeCentralDir + len("e0000")) * entries
+    remaining = size - zipfile.sizeCentralDir
+    name_length = min(remaining, 0xFFFF)
+    extra_length = min(remaining - name_length, 0xFFFF)
+    comment_length = remaining - name_length - extra_length
+    assert comment_length <= 0xFFFF
+    fake = struct.pack(
+        zipfile.structCentralDir, b"PK\x01\x02", 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0,
+        name_length, extra_length, comment_length, 0, 0, 0, 0,
+    )
+    gap = zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+    source = _zip64_understating_its_entry_count(
+        workspace / "desync64.zip", entries, 200, fake + b"\0" * (gap - len(fake))
+    )
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == entries
+    with pytest.raises(ZipCentralDirectoryLimitError, match="more than 1000 entries"):
+        require_zip_entry_bound(source, 1000)
+
+
+def test_zip_entry_walk_fails_closed_when_it_disagrees_with_zipfile(workspace, monkeypatch):
+    # If the walk ever starts somewhere other than zipfile's start_dir, it must
+    # reject the archive rather than count nothing and accept it.
+    from sonder_runtime.application.security import bounded_archives
+
+    source = _zip_understating_its_entry_count(workspace / "shifted.zip", 12_000, 200)
+    real_start = bounded_archives._central_directory_start
+    monkeypatch.setattr(
+        bounded_archives,
+        "_central_directory_start",
+        lambda stream, record, size: real_start(stream, record, size) - 76,
+    )
+    with pytest.raises(bounded_archives.ZipCentralDirectoryLimitError, match="cannot be verified"):
+        bounded_archives.require_zip_entry_bound(source, 1000)
+
+
+def test_zip_entry_walk_rejects_a_corrupt_record_signature(workspace):
+    from sonder_runtime.application.security.bounded_archives import (
+        ZipCentralDirectoryLimitError,
+        require_zip_entry_bound,
+    )
+
+    source = _zip_with_large_central_directory(workspace / "corrupt.zip", 50, 10)
+    data = bytearray(source.read_bytes())
+    eocd = data.rfind(b"PK\x05\x06")
+    size, offset = struct.unpack_from("<LL", data, eocd + 12)
+    second = data.find(b"PK\x01\x02", offset + 1, offset + size)
+    data[second : second + 4] = b"XXXX"
+    source.write_bytes(bytes(data))
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(source)
+    with pytest.raises(ZipCentralDirectoryLimitError, match="bad central-directory record"):
+        require_zip_entry_bound(source, 50)
+
+
+def test_zip_entry_bound_accepts_an_honest_archive_at_the_limit(workspace):
+    from sonder_runtime.application.security.bounded_archives import require_zip_entry_bound
+
+    source = _zip_with_large_central_directory(workspace / "honest.zip", 50, 10)
+    assert require_zip_entry_bound(source, 50) == 50
+    with zipfile.ZipFile(source) as archive:
+        assert len(archive.infolist()) == 50
+
+
 # ---------------------------------------------------------------------------
 # Review round 4 (PR #548 @ 82daa944): reader-specific messages, deadline
 # ---------------------------------------------------------------------------

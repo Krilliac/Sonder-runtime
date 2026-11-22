@@ -39,8 +39,11 @@ from sonder_runtime.adapters.launcher_idempotency import (
     normalize_idempotency_key,
     valid_command_replay,
 )
+from sonder_runtime.adapters.launcher_probe import probe_error_state, settle_probe
 from sonder_runtime.adapters.launcher_output import (
+    BoundedOutputTail,
     bounded_seconds,
+    drain_process_output,
     output_text,
     retention_limit,
 )
@@ -51,6 +54,7 @@ from sonder_runtime.application.lifecycle import (
 )
 from sonder_runtime.platform.paths import state_path
 from sonder_runtime.platform.runtime_threads import run_bounded
+from sonder_runtime.adapters.web import deferred_tls
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY,
     host_decision,
@@ -90,6 +94,8 @@ _valid_command_replay = valid_command_replay
 _output_text = output_text
 _bounded_seconds = bounded_seconds
 _retention_limit = retention_limit
+_BoundedOutputTail = BoundedOutputTail
+_drain_process_output = drain_process_output
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -406,44 +412,6 @@ def _wait_until(predicate, timeout, interval=0.05):
         if remaining <= 0:
             return False
         time.sleep(min(interval, remaining))
-
-
-class _BoundedOutputTail:
-    """Thread-safe byte tail that never grows with command output volume."""
-
-    def __init__(self, limit=MAX_OPERATION_OUTPUT):
-        self.limit = max(256, int(limit))
-        self.data = bytearray()
-        self.truncated = False
-        self.lock = threading.Lock()
-
-    def append(self, chunk):
-        if not chunk:
-            return
-        if isinstance(chunk, str):
-            chunk = chunk.encode("utf-8", errors="replace")
-        with self.lock:
-            self.data.extend(chunk)
-            if len(self.data) > self.limit:
-                del self.data[:len(self.data) - self.limit]
-                self.truncated = True
-
-    def text(self):
-        with self.lock:
-            value = bytes(self.data).decode("utf-8", errors="replace")
-            truncated = self.truncated
-        return ("[output truncated]\n" + value) if truncated else value
-
-
-def _drain_process_output(pipe, tail):
-    try:
-        while True:
-            chunk = pipe.read(8192)
-            if not chunk:
-                return
-            tail.append(chunk)
-    except (OSError, ValueError):
-        return
 
 
 def _windows_process_table():
@@ -1319,7 +1287,7 @@ class LauncherController:
         return int(return_code), output, command
 
     def _server_state(self):
-        """Return healthy, stopped, or foreign_listener for the managed port."""
+        """Return healthy, stopped, foreign_listener or indeterminate (see launcher_probe)."""
         # The managed runtime may deliberately bind IPv6 loopback.  Probe the
         # controller's configured loopback host rather than silently checking
         # the IPv4 default, otherwise a healthy ``::1`` runtime is treated as
@@ -1341,8 +1309,8 @@ class LauncherController:
                 if response.status != 200:
                     return "foreign_listener"
                 raw = response.read(4097)
-        except (OSError, urllib.error.URLError, ValueError):
-            return "foreign_listener"
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            return probe_error_state(exc)
         if len(raw) > 4096:
             return "foreign_listener"
         try:
@@ -1813,8 +1781,8 @@ class LauncherController:
             if action not in {"start", "stop", "restart"}:
                 raise ValueError("unsupported launcher action")
             context_size = normalize_context_size(context_size)
-            initial_state = self._server_state()
-            if initial_state == "foreign_listener":
+            initial_state = settle_probe(self._server_state, POLL_INTERVAL_SECONDS)
+            if initial_state in ("foreign_listener", "indeterminate"):
                 failure = (
                     "the configured port is occupied by an unverified listener; "
                     "refusing to run launcher commands"
@@ -1945,7 +1913,7 @@ def parse_launcher_allowed_hosts(value):
     return tuple(dict.fromkeys(parsed))
 
 
-class LauncherServer(ThreadingHTTPServer):
+class LauncherServer(deferred_tls.DeferredTLSHandshakeMixin, ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
@@ -2425,7 +2393,7 @@ def serve(
         controller=controller or LauncherController(), token=token,
     )
     if context is not None:
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.socket = deferred_tls.wrap_listener(context, server.socket)  # no accept() stall
     warning = unauthenticated_loopback_warning(host, token)
     if warning:
         print(warning, file=sys.stderr, flush=True)

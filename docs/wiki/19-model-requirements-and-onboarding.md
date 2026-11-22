@@ -41,7 +41,13 @@ capability router degrades that work to a base tier.
 
 ## 2. Bootstrap and run
 
-### Bundled install
+Install the runtime first; the install steps (extracted bundle, from-source
+checkout, workstation/server profiles) live in one place:
+[setup-start-here](../runbooks/setup-start-here.md) and
+[install-workstation-local](../runbooks/install-workstation-local.md#extracted-local-system-bundle). This page only covers the model
+part.
+
+For an extracted bundle, the model step is `bootstrap-engine`, then the REPL:
 
 ```powershell
 # Windows PowerShell, from the extracted bundle
@@ -53,25 +59,33 @@ capability router degrades that work to a base tier.
 # Linux/macOS, from the extracted bundle
 ./bootstrap-engine.sh
 . ./sonder-runtime.sh
-"$SONDER_PYTHON" ./sonder_repl.py
+"$SONDER_PYTHON" -m sonder_runtime repl
 ```
+
+Expected: `bootstrap-engine` ends with `  alias: Created the sonder:latest alias.`
+and finishes with `Done. Verify with: ollama list` (`setup_alias.py:191`, `:310`).
+If the embedding pull failed (it is allowed to), a line starting
+`  note: core chat is ready; recall/lessons need an embedding model...` is printed
+between those two lines (`setup_alias.py:308-309`). The REPL then prints its banner. (`sonder_repl.py` no longer exists; `sonder.cmd` and the
+command above both run `-m sonder_runtime repl`.)
 
 `bootstrap-engine` detects host RAM/VRAM, picks a base model size, starts
 Ollama if it is not already running, and then runs `setup_alias.py`.
 
-### From source
-
-```bash
-git clone https://github.com/Krilliac/Sonder-runtime.git
-cd Sonder-runtime
-python3 -m venv venv
-./venv/bin/pip install -r requirements-runtime.txt
-./venv/bin/python setup_alias.py          # pull base model + create sonder:latest
-./venv/bin/python -m sonder_runtime repl
-```
-
-On Windows PowerShell use `.\venv\Scripts\python.exe` /
-`.\venv\Scripts\pip.exe` in place of the POSIX paths.
+A source checkout can run the same wrappers: `./bootstrap-engine.sh` or
+`.\bootstrap-engine.cmd` in the repository root work without an engine bundle
+(`bootstrap_engine.py` prints `bundle: none; using host runtimes`, installs
+`requirements-runtime.txt` into whichever Python `sonder-runtime.*` selects
+only when the MCP import probe fails or the bundle contract does not match
+(`bootstrap_engine.py:221-226`), detects hardware and then runs `setup_alias.py`).
+With no `venv` present, `sonder-runtime.sh` falls back to the system `python3`
+(`sonder-runtime.sh:61-63`), and pip installs binary wheels only into it; on
+distributions with an externally managed Python (PEP 668) that install fails, so
+create and use a virtual environment first. Alternatively skip bootstrap:
+after installing the requirements per the runbook above, create the model alias
+yourself with `python setup_alias.py` and start the REPL with
+`python -m sonder_runtime repl` (use the venv interpreter:
+`./venv/bin/python` or `.\venv\Scripts\python.exe`).
 
 ### What `setup_alias.py` actually does
 
@@ -87,6 +101,8 @@ On Windows PowerShell use `.\venv\Scripts\python.exe` /
 4. Creates the `sonder:latest` alias from the base model with Sonder's system
    prompt and `temperature 0.2`.
 
+The full launcher and setup-script flag table is in
+[CLI & Entry Point](04-cli-and-entrypoint.md#launchers-and-setup-scripts).
 Useful variants:
 
 ```bash
@@ -95,6 +111,49 @@ python setup_alias.py --offline               # never contact a registry
 python setup_alias.py --gguf /path/model.gguf # import a portable GGUF
 python setup_alias.py --from-usb              # discover a GGUF on removable media
 ```
+
+### Embedding model
+
+Semantic memory, lesson recall and vector search need an embedding model.
+Chat does not (see section 5 for what degrades).
+
+- **Default:** `nomic-embed-text`
+  (`default_embedding_model` in
+  [`model_lists.json`](../../sonder_runtime/adapters/data/model_lists.json)).
+- **Install:** `setup_alias.py` pulls it (step 3 above), or pull it yourself:
+
+  ```bash
+  ollama pull nomic-embed-text
+  ollama list                       # expected: nomic-embed-text:latest is listed
+  ```
+
+- **Skip:** `python setup_alias.py --no-embedding` for a chat-only install; add
+  one later with the `ollama pull` above and bind it.
+- **Choose a different one:** `setup_alias.py --embed-model <tag>` pulls that
+  tag instead. To bind it, either set `SONDER_EMBED_MODEL=<tag>` before the
+  first start (it seeds the policy file only the first time it is created,
+  see section 4) or, afterwards, `/runtime set embedding=<installed-embedding-model>`
+  then `/embeddings apply` to refresh stored vectors. The binding must be an
+  installed model that declares the embedding capability.
+- **Verify:** `/runtime` shows `semantic memory: ready (<model>)`. Plain
+  `/runtime` prints cached readiness (no model call), so right after
+  `ollama pull` it can still say `requires embedding model`; run
+  `/runtime status refresh` to re-probe.
+- **Embedder on another host:** set `SONDER_EMBED_BASE_URL` to a dedicated
+  Ollama origin so embeddings stop competing with the chat model for GPU
+  memory. The procedure, consent variables and failure modes are in
+  [multi-pc-ollama: Dedicated embedding host](../runbooks/multi-pc-ollama.md#dedicated-embedding-host);
+  the knob table (`SONDER_EMBED_FALLBACK`, `SONDER_EMBED_COOLDOWN_SECONDS`) is in
+  [Configuration](03-configuration.md).
+- **Non-Ollama chat backend:** the Sonder Inference, OpenRouter and Anthropic
+  gateways refuse embedding calls with
+  `...; set SONDER_EMBEDDING_PROVIDER=ollama` (the text before the semicolon
+  differs per gateway, for example `does not serve embeddings in API v1` for
+  Sonder Inference). If you
+  set `SONDER_MODEL_BACKEND` to one of them, also set
+  `SONDER_EMBEDDING_PROVIDER=ollama` (it otherwise inherits
+  `SONDER_MODEL_BACKEND`). See
+  [Model Tiers & Gateway](08-model-tiers-and-gateway.md).
 
 ## 3. Verify what is installed
 
@@ -232,7 +291,7 @@ In the order most installations want them:
    image analysis. `vision_analyze` requires a loopback Ollama endpoint and a
    model that explicitly declares the `vision` capability.
 5. **Hosted `cloud-*` tiers** — no local download, but see the consent gates
-   below.
+   in section 7.
 
 Sizing guidance per VRAM band lives in the
 [Model Catalog](18-model-catalog.md); the step-by-step build-out is the
@@ -245,18 +304,17 @@ Sizing guidance per VRAM band lives in the
 
 ## 7. Local by default; remote and cloud are separate opt-ins
 
-Two independent consent gates, neither on by default:
+Two independent consent gates, neither on by default (full description:
+[Model Tiers & Gateway](08-model-tiers-and-gateway.md#remote--cloud-opt-in)):
 
-- **Remote Ollama** — pointing `OLLAMA_HOST` (or `[ollama].url`) at a
-  non-loopback host is rejected unless `SONDER_ALLOW_REMOTE_OLLAMA=1` /
-  `[ollama].allow_remote = true`. A remote endpoint must additionally use
-  `https`, because prompts and embeddings would otherwise cross the network in
-  the clear. This is still *your* Ollama — it changes where inference runs, not
-  which vendor sees it.
+- **Remote Ollama** — a non-loopback `OLLAMA_HOST` is rejected unless
+  `SONDER_ALLOW_REMOTE_OLLAMA=1`, and a remote endpoint must use `https`.
+  Setup, including fronting Ollama with a Caddy reverse proxy:
+  [remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings).
 - **Hosted cloud tiers** — `cloud-code` and `cloud-general` run on Ollama's
-  servers. They are withheld from every selection surface until
-  `SONDER_ALLOW_CLOUD=1`, and prompts sent to them
-  leave this machine.
+  servers and are withheld from every selection surface until
+  `SONDER_ALLOW_CLOUD=1`; prompts sent to them leave this machine. Setup and
+  overrides: [assemble-model-collection](../runbooks/assemble-model-collection.md#hosted-cloud-tiers-optional).
 
 Cloud tiers need no local weights, so they are never a startup requirement.
 They answer without local-lesson injection, while grounded good outcomes are

@@ -163,10 +163,16 @@ count. Words and numbers inside the remaining sentence are unchanged.
 
 Ordinary multi-agent briefs start with the exact authoritative task and then
 include a deterministic `Angle k/N` suggestion (deliverable plus audience,
-constraint, or technique). The task remains authoritative. Single-worker
+constraint, or technique). The task remains authoritative. When the task
+itself lists two or more items (numbered or bulleted lines, inline `(1) ...
+(2) ...`, a semicolon list, or `Topic: a, b, and c` on one line), each brief
+also gets an `Assigned subtask k/N` line: the items are split across the
+workers in order (several items per worker when there are more items than
+workers, repeated round-robin when there are fewer), so workers cover the list
+instead of all answering the whole of it. Single-worker
 briefs and protected `[objective:...]` contracts retain their original bytes
-and do not receive angles. Angles encourage diversity; they do not guarantee
-different model outputs or grant tools.
+and receive neither angles nor subtasks. Angles encourage diversity; they do
+not guarantee different model outputs or grant tools.
 
 The start response shows queued agents, worker slots, and the stripped task.
 When agents outnumber slots, the estimated worker time is
@@ -221,8 +227,8 @@ marks or backticks, or a second worker count. This keeps a quoted or
 discussed count from starting a fleet. When a cue is ignored, the route
 header (and the console) prints a `note:` naming the word that disabled
 it; use `/master fleet <task>` to fan out explicitly.
-Statuses `queued → running → done | failed | cancelled | interrupted`, with
-`interrupted`/`failed`/`cancelled` re-dispatchable to `queued`. Claims use
+Statuses `queued → running → done | failed | task_drift | cancelled | interrupted`, with
+`interrupted`/`failed`/`task_drift`/`cancelled` re-dispatchable to `queued` (or marked `retried` after a successful replay). Claims use
 compare-and-set; heartbeats detect stale owners. Two model instances (e.g.
 two `facts.` sticks) roughly double fleet throughput.
 

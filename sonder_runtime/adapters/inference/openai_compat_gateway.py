@@ -17,7 +17,11 @@ into the domain error taxonomy — callers never see ``urllib`` or HTTP details.
 
 Configuration (resolved lazily at call time, never at import/construction):
 ``SONDER_OPENAI_BASE_URL``, ``SONDER_OPENAI_API_KEY``, ``SONDER_OPENAI_MODEL``,
-``SONDER_OPENAI_EMBED_MODEL``, ``SONDER_OPENAI_ALLOW_HTTP_NETWORKS``.
+``SONDER_OPENAI_EMBED_MODEL``, ``SONDER_OPENAI_ALLOW_HTTP_NETWORKS``,
+``SONDER_OPENAI_PRICE_USD_PER_MTOK`` (``<input>,<output>``),
+``SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK`` (``<input>``),
+``SONDER_OPENAI_DAILY_USD`` (default 10) and ``SONDER_OPENAI_MAX_TOKENS``
+(default 16000).
 
 Transport: a non-loopback endpoint must use ``https`` -- prompts and the
 bearer key never cross a network in plaintext -- unless its host is a private
@@ -27,6 +31,23 @@ private ranges are honoured, host names never are).  The default transports
 never follow a redirect, reach a loopback endpoint directly (an ambient
 ``http_proxy`` would otherwise receive the request), and read a successful
 body only up to a fixed byte ceiling.
+
+Spend cap: a **non-loopback** endpoint is metered unless the gateway was built
+with ``spend_ledger=None`` (the Sonder-Inference LAN host and OpenRouter, which
+has its own policy, are).  There is no built-in price table -- prices differ
+per provider and drift -- so the operator states them; an unpriced metered
+call is refused before it is sent, and ``0,0`` declares a free endpoint.  A
+persistent per-day total (``openai-spend.json`` in the state home, the same
+ledger as the Anthropic gateway) backs ``SONDER_OPENAI_DAILY_USD``: before each
+send the call's worst case (the request's byte length as input tokens plus
+``max_tokens`` of output, which is capped by ``SONDER_OPENAI_MAX_TOKENS``) is
+reserved, and the call is refused with :class:`OpenAIDailyCapReached` if that
+would take the day over the cap.  The real cost comes from the response's
+``usage``; a response with no usage, and any failure after the request was
+sent other than an HTTP error answer (timeout, reset, stall, cancellation,
+unusable body), is charged the worst case, so spend may be over-counted but
+never under-counted.  Loopback endpoints are never metered.  The ledger holds
+dollar totals and counts only -- never a key, a prompt or a reply.
 """
 from __future__ import annotations
 
@@ -43,9 +64,10 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from email.utils import format_datetime, parsedate_to_datetime
 from types import SimpleNamespace
-from typing import Sequence
+from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
@@ -88,6 +110,13 @@ from ...domain.common.errors import (
     SonderError,
 )
 from ...domain.gpu_admission import RefusalReason
+from ...domain.openai_spend_policy import (
+    ChatPrice,
+    OpenAISpendPolicyError,
+    cost_usd,
+    parse_chat_price,
+    parse_embed_price,
+)
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_EMBEDDINGS,
@@ -101,6 +130,7 @@ from ..model_request_admission import (
 from ..model_transport import ModelCallError
 from ..tls_contexts import default_https_context
 from ..provider_bindings import provider_id_for_label
+from .anthropic_spend import SpendLedger
 from .sse_stream import StreamTimeout, post_streaming, stall_limits
 from .telemetry import from_openai_compatible
 
@@ -119,6 +149,16 @@ ENV_STREAM_IDLE = "SONDER_OPENAI_STREAM_IDLE_TIMEOUT_SECONDS"
 ENV_STREAM_FIRST_CONTENT = "SONDER_OPENAI_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS"
 # Streaming stall limits (0 disables, the default): see sse_stream.
 MAX_STREAM_STALL_SECONDS = 86_400.0
+ENV_PRICE = "SONDER_OPENAI_PRICE_USD_PER_MTOK"
+ENV_EMBED_PRICE = "SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK"
+ENV_DAILY_USD = "SONDER_OPENAI_DAILY_USD"
+ENV_MAX_TOKENS = "SONDER_OPENAI_MAX_TOKENS"
+DEFAULT_DAILY_USD = Decimal(10)
+MAX_DAILY_USD = Decimal(1_000_000)
+DEFAULT_MAX_TOKENS_CEILING = 16_000
+MAX_TOKENS_LIMIT = 1_000_000
+SPEND_LEDGER_FILENAME = "openai-spend.json"
+SPEND_LEDGER_SCHEMA = "sonder.openai_spend.v1"
 _MALFORMED_BASE_URL = (
     "OpenAI-compatible base URL is not a valid http:// or https:// URL "
     "(check the host, the port, and for spaces or control characters)"
@@ -135,18 +175,28 @@ def shared_https_context() -> ssl.SSLContext:
     return default_https_context()
 
 
-def _opener_for(url: str):
-    """A non-redirecting opener; loopback URLs also bypass every proxy.
+def _bypasses_proxy(url: str) -> bool:
+    """True when ``url`` must never be sent through an ambient proxy.
 
-    urllib has no implicit loopback bypass: with ``http_proxy`` (or a system
-    proxy) set and no matching ``no_proxy`` entry, a request to
-    ``http://localhost`` -- prompt, bearer key and all -- goes to the proxy
-    host.  Remote endpoints keep proxy support (they are https, so the proxy
-    only sees a CONNECT tunnel).  Built per call so the proxy decision reflects
+    That is every plaintext ``http://`` URL (loopback or an operator-trusted
+    private IP) and every loopback URL.  An http request through a proxy is
+    sent to the proxy in clear -- prompt, bearer key and all -- and urllib has
+    no implicit loopback bypass.  Only remote https keeps proxy support: the
+    proxy then sees just a CONNECT tunnel.  Redirects are never followed, so
+    the URL's own scheme decides.
+    """
+    parts = urlsplit(url)
+    return (parts.scheme or "").lower() == "http" or (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+
+
+def _opener_for(url: str):
+    """A non-redirecting opener; plaintext and loopback URLs bypass every proxy.
+
+    See :func:`_bypasses_proxy`.  Built per call so the proxy decision reflects
     the current environment rather than the one at import time.
     """
     handlers: list = [_NoRedirect(), urllib.request.HTTPSHandler(context=shared_https_context())]
-    if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+    if _bypasses_proxy(url):
         handlers.append(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener(*handlers)
 
@@ -155,7 +205,7 @@ def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
     """``"stream": true`` POST: read the event stream into one completion.
 
     Reuses the Sonder Inference stream reader (:mod:`.sse_stream`) with this
-    module's opener policy (no redirects; loopback bypasses every proxy).  The
+    module's opener policy (no redirects; plaintext and loopback bypass every proxy).  The
     exchange helpers live in the leaf :mod:`.exchange_transport`, which both
     gateways import, so there is no import cycle; they are handed to
     ``post_streaming`` as a namespace.
@@ -183,7 +233,7 @@ def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
             _NoRedirect(),
             _BudgetedHTTPHandler(budget), _BudgetedHTTPSHandler(budget),
         ]
-        if (urlsplit(url).hostname or "").lower() in _LOOPBACK_HOSTS:
+        if _bypasses_proxy(url):
             handlers.append(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener(*handlers)
 
@@ -227,6 +277,33 @@ class BackendAdmissionRefused(CapacityExceeded):
         self.retry_after = retry_after
 
 
+class OpenAISpendUnpriced(Forbidden):
+    """A metered call was refused because no price was declared for it."""
+
+
+class OpenAIDailyCapReached(Forbidden):
+    """Today's local spend reached ``SONDER_OPENAI_DAILY_USD``."""
+
+    def __init__(self, message: str, *, cap_usd: Decimal, spent_usd: Decimal) -> None:
+        super().__init__(message)
+        self.cap_usd = cap_usd
+        self.spent_usd = spent_usd
+
+
+def _usd(value: Decimal) -> str:
+    return "$%s" % value.quantize(Decimal("0.0001"), rounding="ROUND_UP")
+
+
+class _DefaultLedger:
+    """Sentinel type: build the metered default ledger."""
+
+    def __repr__(self) -> str:
+        return "<default OpenAI spend ledger>"
+
+
+_DEFAULT_LEDGER = _DefaultLedger()
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     base_url: str
@@ -238,6 +315,12 @@ class OpenAICompatibleConfig:
     # Streaming stall limits in seconds (0 disables); inside the call budget.
     stream_idle_seconds: float = 0.0
     stream_first_content_seconds: float = 0.0
+    # Spend metering (used only for a metered gateway on a non-loopback
+    # endpoint).  ``price``/``embed_price`` None means unpriced: refused.
+    price: ChatPrice | None = None
+    embed_price: Decimal | None = None
+    daily_usd: Decimal = DEFAULT_DAILY_USD
+    max_tokens_ceiling: int = DEFAULT_MAX_TOKENS_CEILING
 
     def __post_init__(self) -> None:
         for value, name in ((self.stream_idle_seconds, ENV_STREAM_IDLE),
@@ -263,18 +346,154 @@ def _env_seconds(name: str) -> float:
     return value
 
 
-def _config_from_env() -> OpenAICompatibleConfig:
+def _env_base_url() -> str:
     import os
 
+    return os.environ.get("SONDER_OPENAI_BASE_URL", "").strip()
+
+
+def configured_endpoint_is_loopback() -> bool:
+    """``endpoint_is_loopback`` for a gateway built without a config (env-resolved)."""
+    base_url = _env_base_url()
+    return bool(base_url) and OpenAICompatibleGateway._is_loopback(base_url)
+
+
+def _env_price(name: str, parse: Callable[[str], Any]) -> Any:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return parse(raw)
+    except OpenAISpendPolicyError as exc:
+        raise InvalidInput("%s: %s" % (name, exc)) from exc
+
+
+def _env_daily_usd() -> Decimal:
+    import os
+
+    raw = os.environ.get(ENV_DAILY_USD, "").strip()
+    if not raw:
+        return DEFAULT_DAILY_USD
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise InvalidInput("%s must be a dollar amount" % ENV_DAILY_USD) from exc
+    if not value.is_finite() or not 0 <= value <= MAX_DAILY_USD:
+        raise InvalidInput("%s must be between 0 and %s" % (ENV_DAILY_USD, MAX_DAILY_USD))
+    return value
+
+
+def _env_max_tokens() -> int:
+    import os
+
+    raw = os.environ.get(ENV_MAX_TOKENS, "").strip()
+    if not raw:
+        return DEFAULT_MAX_TOKENS_CEILING
+    if not (raw.isascii() and raw.isdecimal()) or not 1 <= int(raw) <= MAX_TOKENS_LIMIT:
+        raise InvalidInput("%s must be an integer in [1, %d]" % (ENV_MAX_TOKENS, MAX_TOKENS_LIMIT))
+    return int(raw)
+
+
+def _config_from_env(*, metered: bool = True) -> OpenAICompatibleConfig:
+    """Resolve settings from the environment.
+
+    The spend settings are parsed only for a ``metered`` gateway on a
+    non-loopback endpoint, so a malformed price never breaks an unmetered one.
+    """
+    import os
+
+    base_url = _env_base_url()
+    spend: dict[str, object] = {}
+    if metered and not OpenAICompatibleGateway._is_loopback(base_url):
+        spend = {
+            "price": _env_price(ENV_PRICE, parse_chat_price),
+            "embed_price": _env_price(ENV_EMBED_PRICE, parse_embed_price),
+            "daily_usd": _env_daily_usd(),
+            "max_tokens_ceiling": _env_max_tokens(),
+        }
     return OpenAICompatibleConfig(
-        base_url=os.environ.get("SONDER_OPENAI_BASE_URL", "").strip(),
+        base_url=base_url,
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
         plaintext_networks=_split_networks(os.environ.get(ENV_ALLOW_HTTP_NETWORKS, "")),
         stream_idle_seconds=_env_seconds(ENV_STREAM_IDLE),
         stream_first_content_seconds=_env_seconds(ENV_STREAM_FIRST_CONTENT),
+        **spend,
     )
+
+
+class _SendTrace:
+    """What ``_post`` got as far as doing; read by the spend accounting."""
+
+    __slots__ = ("sent", "answered")
+
+    def __init__(self) -> None:
+        self.sent = False       # the transport was invoked: the request may be billed
+        self.answered = False   # the provider replied with an HTTP error status: not billed
+
+
+class _SpendCall:
+    """One metered call's reservation and its single accounting.
+
+    Owned by the thread running the call.  ``charge`` and ``charge_worst`` record
+    at most once; recording never raises (``SpendLedger.record`` guarantees it).
+    """
+
+    def __init__(self, ledger: SpendLedger, token: int, *, worst: Decimal,
+                 prompt_estimate: int, output_estimate: int,
+                 input_rate: Decimal, output_rate: Decimal) -> None:
+        self._ledger = ledger
+        self._token = token
+        self.worst = worst
+        self.prompt_estimate = prompt_estimate
+        self.output_estimate = output_estimate
+        self._input_rate = input_rate
+        self._output_rate = output_rate
+        self.charged = False
+
+    def charge(self, prompt_tokens: int | None, output_tokens: int | None) -> None:
+        """Record the real cost; a count the response did not report is charged at its worst case."""
+        if self.charged:
+            return
+        if prompt_tokens is None and output_tokens is None:
+            self.charge_worst("the response carried no token usage")
+            return
+        prompt = self.prompt_estimate if prompt_tokens is None else prompt_tokens
+        output = self.output_estimate if output_tokens is None else output_tokens
+        if prompt_tokens is None or output_tokens is None:
+            logger.warning(
+                "openai-compatible: response reported only part of its token usage; "
+                "the missing part was charged at its worst case"
+            )
+        usd = cost_usd(input_tokens=prompt, output_tokens=output,
+                       input_rate=self._input_rate, output_rate=self._output_rate)
+        self.charged = True
+        self._ledger.record(usd=usd, slot=1, input_tokens=prompt, output_tokens=output)
+
+    def charge_worst(self, reason: str) -> None:
+        if self.charged:
+            return
+        self.charged = True
+        logger.warning(
+            "openai-compatible: %s; the call's worst-case cost %s was charged against the cap",
+            reason, self.worst,
+        )
+        self._ledger.record(
+            usd=self.worst, slot=1,
+            input_tokens=self.prompt_estimate, output_tokens=self.output_estimate,
+        )
+
+    def release(self) -> None:
+        self._ledger.release(self._token)
+
+
+def _reported_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1_000_000_000:
+        return None
+    return value
 
 
 class OpenAICompatibleGateway:
@@ -309,7 +528,19 @@ class OpenAICompatibleGateway:
         http_error_classifier: HttpErrorClassifier | None = None,
         connect_error_classifier: ConnectErrorClassifier | None = None,
         get_transport: GetTransport | None = None,
+        spend_ledger: SpendLedger | None | _DefaultLedger = _DEFAULT_LEDGER,
     ):
+        # Sentinel: metered with the OpenAI ledger in the state home.  None:
+        # unmetered.  A SpendLedger: metered with that ledger.  Metering still
+        # applies only to a non-loopback endpoint.
+        if isinstance(spend_ledger, _DefaultLedger):
+            spend_ledger = SpendLedger(
+                filename=SPEND_LEDGER_FILENAME, schema=SPEND_LEDGER_SCHEMA,
+                label="OpenAI-compatible",
+            )
+        elif spend_ledger is not None and not isinstance(spend_ledger, SpendLedger):
+            raise TypeError("spend_ledger must be a SpendLedger or None")
+        self._spend_ledger: SpendLedger | None = spend_ledger
         self._provider_label = str(provider_label)
         # Fail at construction on a label that would not map to a provider id.
         self._provider_id = provider_id_for_label(self._provider_label)
@@ -347,7 +578,7 @@ class OpenAICompatibleGateway:
     # -- configuration & consent ------------------------------------------
 
     def _resolved_config(self) -> OpenAICompatibleConfig:
-        cfg = self._config or _config_from_env()
+        cfg = self._config or _config_from_env(metered=self._spend_ledger is not None)
         if not cfg.base_url:
             raise InvalidInput(
                 "no OpenAI-compatible endpoint configured "
@@ -358,9 +589,31 @@ class OpenAICompatibleGateway:
     @staticmethod
     def _is_loopback(base_url: str) -> bool:
         # Unparsable is never loopback; _require_secure_transport refuses it.
+        # Shared by the consent gate, the transport check and the hostedness
+        # probe: only a plain http(s) URL with no userinfo and a named loopback
+        # host counts (0.0.0.0 is the unspecified address, not loopback).
         parts = urlsplit_or_none(base_url)
-        host = (parts.hostname or "").lower() if parts is not None else ""
-        return host in _LOOPBACK_HOSTS
+        if parts is None or parts.scheme.lower() not in ("http", "https"):
+            return False
+        if "@" in parts.netloc:
+            return False
+        host = (parts.hostname or "").lower()
+        return host != "0.0.0.0" and host in _LOOPBACK_HOSTS
+
+    def endpoint_is_loopback(self) -> bool:
+        """Whether a call made now would send its prompt to a loopback endpoint.
+
+        The same test the consent gate applies, on the base URL a call would
+        resolve (the injected config, else ``SONDER_OPENAI_BASE_URL``).  No I/O;
+        an unset or unparsable endpoint is not loopback.
+        """
+        try:
+            # The hook subclasses override, so a subclass never reads this
+            # class's SONDER_OPENAI_BASE_URL for its own endpoint.
+            base_url = self._resolved_config().base_url
+        except InvalidInput:
+            return False
+        return self._is_loopback(base_url)
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
@@ -450,6 +703,132 @@ class OpenAICompatibleGateway:
             raise Cancelled(f"operation cancelled {phase}")
         return context.remaining_seconds
 
+    # -- spend cap -----------------------------------------------------------
+
+    def _metered(self, cfg: OpenAICompatibleConfig) -> bool:
+        return self._spend_ledger is not None and not self._is_loopback(cfg.base_url)
+
+    def spend_snapshot(self) -> dict[str, object] | None:
+        """Content-free totals for status surfaces; None when this gateway is not metered."""
+        if self._spend_ledger is None:
+            return None
+        return self._spend_ledger.snapshot()
+
+    def _reserve(
+        self, cfg: OpenAICompatibleConfig, *, prompt_estimate: int, output_estimate: int,
+        input_rate: Decimal, output_rate: Decimal,
+    ) -> _SpendCall:
+        """Refuse a call whose worst case would pass the cap; else reserve that cost."""
+        ledger = self._spend_ledger
+        if ledger is None:
+            raise InternalFailure("spend reservation requested on an unmetered gateway")
+        worst = cost_usd(input_tokens=prompt_estimate, output_tokens=output_estimate,
+                         input_rate=input_rate, output_rate=output_rate)
+        cap = cfg.daily_usd
+        if cap <= 0:
+            raise OpenAIDailyCapReached(
+                "OpenAI-compatible calls are disabled: the daily cap %s is 0, which "
+                "refuses every metered call; raise it to use this endpoint" % ENV_DAILY_USD,
+                cap_usd=cap, spent_usd=ledger.today_usd(),
+            )
+        token, spent, inflight = ledger.try_reserve(worst, cap)
+        if token is None:
+            if worst > cap:
+                raise OpenAIDailyCapReached(
+                    "OpenAI-compatible call refused: its worst-case cost %s (max_tokens of "
+                    "output plus the request size) is larger than the whole %s daily cap "
+                    "(%s); lower max_tokens, shorten the prompt, or raise the cap"
+                    % (_usd(worst), _usd(cap), ENV_DAILY_USD),
+                    cap_usd=cap, spent_usd=spent,
+                )
+            raise OpenAIDailyCapReached(
+                "OpenAI-compatible daily spend cap reached: %s spent today (UTC)%s, and "
+                "this call's worst-case cost %s would take the day over the %s cap (%s); "
+                "new calls resume after 00:00 UTC, or raise the cap"
+                % (_usd(spent), (" plus up to %s in flight" % _usd(inflight)) if inflight else "",
+                   _usd(worst), _usd(cap), ENV_DAILY_USD),
+                cap_usd=cap, spent_usd=spent,
+            )
+        return _SpendCall(
+            ledger, token, worst=worst, prompt_estimate=prompt_estimate,
+            output_estimate=output_estimate, input_rate=input_rate, output_rate=output_rate,
+        )
+
+    @staticmethod
+    def _unpriced(env_name: str, what: str, free: str) -> OpenAISpendUnpriced:
+        return OpenAISpendUnpriced(
+            "this OpenAI-compatible endpoint is metered but has no declared %s price, so "
+            "its spend could not be counted against %s: set %s (USD per 1M tokens; "
+            "\"%s\" declares a free endpoint)" % (what, ENV_DAILY_USD, env_name, free)
+        )
+
+    def _meter_chat_payload(
+        self, cfg: OpenAICompatibleConfig, payload: dict, num_predict: object,
+    ) -> ChatPrice | None:
+        """Set the payload's output limit; return the price when this call is metered.
+
+        Unmetered calls keep the caller's limit exactly.  A metered call is
+        refused when unpriced and is clamped to [1, ceiling] output tokens.
+        """
+        if not self._metered(cfg):
+            if num_predict is not None:
+                payload["max_tokens"] = int(num_predict)  # type: ignore[call-overload]
+            return None
+        # Transport policy refuses first: an unsafe endpoint is never a pricing question.
+        self._require_secure_transport(cfg)
+        if cfg.price is None:
+            raise self._unpriced(ENV_PRICE, "chat", "0,0")
+        ceiling = cfg.max_tokens_ceiling
+        payload["max_tokens"] = (
+            ceiling if num_predict is None
+            else max(1, min(int(num_predict), ceiling))  # type: ignore[call-overload]
+        )
+        return cfg.price
+
+    def _reserve_chat(
+        self, cfg: OpenAICompatibleConfig, price: ChatPrice, payload: dict,
+    ) -> _SpendCall:
+        return self._reserve(
+            cfg,
+            # A token is at least a byte, so the byte length bounds the input tokens.
+            prompt_estimate=len(json.dumps(payload["messages"]).encode("utf-8")),
+            output_estimate=int(payload["max_tokens"]),
+            input_rate=price.input, output_rate=price.output,
+        )
+
+    def _post_chat_accounted(
+        self, cfg: OpenAICompatibleConfig, payload: dict, timeout,
+        *, context: OperationContext, num_predict: int,
+    ) -> dict:
+        """POST one chat request with the same spend metering as ``generate``.
+
+        For callers that send chat requests without ``generate`` (the protocol
+        probe): price check, reservation, accounting and release.
+        """
+        price = self._meter_chat_payload(cfg, payload, num_predict)
+        if price is None:
+            return self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+        spend = self._reserve_chat(cfg, price, payload)
+        try:
+            data = self._post_metered(lambda trace: self._post(
+                "/v1/chat/completions", payload, cfg, timeout, context=context, trace=trace,
+            ), spend)
+            self._account_chat(data, spend)
+            return data
+        finally:
+            spend.release()
+
+    @staticmethod
+    def _post_metered(post: Callable[[_SendTrace], dict], spend: _SpendCall) -> dict:
+        """Run ``post``; a failure after the send other than an HTTP answer is charged."""
+        trace = _SendTrace()
+        try:
+            return post(trace)
+        except BaseException:
+            if trace.sent and not trace.answered:
+                spend.charge_worst("the request was sent but did not complete normally")
+            raise
+
     # -- generate ----------------------------------------------------------
 
     def generate(
@@ -482,15 +861,37 @@ class OpenAICompatibleGateway:
             raise InvalidInput(str(exc)) from exc
         if template_kwargs:
             payload["chat_template_kwargs"] = template_kwargs
-        if "num_predict" in options:
-            payload["max_tokens"] = int(options["num_predict"])
+        price = self._meter_chat_payload(cfg, payload, options.get("num_predict"))
 
+        spend: _SpendCall | None = None
+        try:
+            if price is not None:
+                spend = self._reserve_chat(cfg, price, payload)
+            return self._generate_sent(request, context, cfg, payload, model, timeout, spend)
+        finally:
+            if spend is not None:
+                spend.release()
+
+    def _generate_sent(
+        self, request: ModelRequest, context: OperationContext, cfg: OpenAICompatibleConfig,
+        payload: dict, model: str, timeout, spend: _SpendCall | None,
+    ) -> ModelResponse:
         started = time.monotonic()
-        with stall_limits(
-            cfg.stream_idle_seconds, cfg.stream_first_content_seconds,
-            idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
-        ):
-            data = self._post("/v1/chat/completions", payload, cfg, timeout, context=context)
+
+        def post(trace: _SendTrace | None) -> dict:
+            with stall_limits(
+                cfg.stream_idle_seconds, cfg.stream_first_content_seconds,
+                idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
+            ):
+                return self._post(
+                    "/v1/chat/completions", payload, cfg, timeout, context=context, trace=trace,
+                )
+
+        data = post(None) if spend is None else self._post_metered(post, spend)
+        if spend is not None:
+            # A completed response is billable even if the caller was cancelled:
+            # account before the liveness gate below, and before parsing it.
+            self._account_chat(data, spend)
         # urllib cannot observe a token while blocked.  A final liveness gate
         # prevents a response/cancellation race from publishing stale work.
         self._check_liveness(context, phase="during model call")
@@ -541,11 +942,59 @@ class OpenAICompatibleGateway:
         timeout = self._check_liveness(context)
         model = cfg.embed_model or "text-embedding-3-small"
         logger.debug(f"OpenAICompatibleGateway.embed: text_count={len(items)}, model={model!r}")
-        data = self._post(
-            "/v1/embeddings", {"model": model, "input": items}, cfg, timeout,
-            context=context,
+        if not self._metered(cfg):
+            data = self._post(
+                "/v1/embeddings", {"model": model, "input": items}, cfg, timeout,
+                context=context,
+            )
+            self._check_liveness(context, phase="during embedding call")
+            return self._embedding_results(data, items, model)
+        self._require_secure_transport(cfg)
+        if cfg.embed_price is None:
+            raise self._unpriced(ENV_EMBED_PRICE, "embedding", "0")
+        spend = self._reserve(
+            cfg, prompt_estimate=sum(len(str(item).encode("utf-8", "replace")) for item in items),
+            output_estimate=0, input_rate=cfg.embed_price, output_rate=Decimal(0),
         )
-        self._check_liveness(context, phase="during embedding call")
+        try:
+            data = self._post_metered(lambda trace: self._post(
+                "/v1/embeddings", {"model": model, "input": items}, cfg, timeout,
+                context=context, trace=trace,
+            ), spend)
+            self._account_embed(data, spend)
+            self._check_liveness(context, phase="during embedding call")
+        finally:
+            spend.release()
+        return self._embedding_results(data, items, model)
+
+    def _account_chat(self, data: dict, spend: _SpendCall) -> None:
+        usage = data.get("usage")
+        if usage is None:
+            usage = {}
+        if not isinstance(usage, dict):
+            spend.charge_worst("the response carried an invalid usage object")
+            return
+        timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+        prompt = usage.get("prompt_tokens")
+        if prompt is None:
+            prompt = timings.get("prompt_n")
+        output = usage.get("completion_tokens")
+        if output is None:
+            output = timings.get("predicted_n")
+        spend.charge(_reported_count(prompt), _reported_count(output))
+
+    def _account_embed(self, data: dict, spend: _SpendCall) -> None:
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            spend.charge_worst("the embedding response carried no usable usage object")
+            return
+        prompt = _reported_count(usage.get("prompt_tokens"))
+        if prompt is None:
+            spend.charge_worst("the embedding response reported no prompt tokens")
+            return
+        spend.charge(prompt, 0)
+
+    def _embedding_results(self, data: dict, items: list, model: str) -> Sequence[Embedding]:
         rows = data.get("data") or []
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise DependencyUnavailable("endpoint returned invalid embedding data")
@@ -684,7 +1133,7 @@ class OpenAICompatibleGateway:
 
     def _post(
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,
-        *, context: OperationContext | None = None,
+        *, context: OperationContext | None = None, trace: _SendTrace | None = None,
     ) -> dict:
         self._require_secure_transport(cfg)
         url = cfg.base_url.rstrip("/") + path
@@ -704,6 +1153,12 @@ class OpenAICompatibleGateway:
         http_cause: urllib.error.HTTPError | None = None
         cause: BaseException | None = None
         gate = self._backend_admission(path, payload, cfg, context)
+
+        def send() -> dict:
+            if trace is not None:
+                trace.sent = True  # from here on the provider may bill this request
+            return transport(url, payload, headers, timeout)
+
         try:
             with gate:
                 if context is not None:
@@ -716,10 +1171,10 @@ class OpenAICompatibleGateway:
                 if path == "/v1/chat/completions":
                     data = dispatch_provider(
                         self._provider_label, path, payload,
-                        lambda: transport(url, payload, headers, timeout),
+                        send,
                     )
                 else:
-                    data = transport(url, payload, headers, timeout)
+                    data = send()
         except gpu_admission.GpuAdmissionRefused as exc:
             # A typed refusal, not a transport failure; it must stay ahead of
             # the URLError clause because it is one.
@@ -733,6 +1188,8 @@ class OpenAICompatibleGateway:
                     % (refusal.reason.value, refusal.detail),
                     reason=refusal.reason.value, retry_after=exc.retry_after_seconds)
         except urllib.error.HTTPError as exc:
+            if trace is not None:
+                trace.answered = True  # the provider answered with an error status: not billed
             code = getattr(exc, "code", 0)
             retry_after = next((value for key, value in (exc.headers or {}).items()
                                 if str(key).lower() == "retry-after"), None)

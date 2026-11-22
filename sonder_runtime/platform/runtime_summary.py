@@ -1,7 +1,15 @@
 """Pure projections for local runtime configuration summaries."""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
-def local_runtime_summary(options, requested_context):
+def local_runtime_summary(
+    options: Mapping[str, object], requested_context: int
+) -> dict[str, object]:
     """Return the stable public summary projection for local model options.
 
     The option builder and context policy stay injectable at the caller

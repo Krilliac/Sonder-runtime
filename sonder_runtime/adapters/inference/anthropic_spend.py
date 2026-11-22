@@ -50,19 +50,19 @@ def utc_day(now: float) -> str:
     return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
-def _default_path() -> Path:
+def _default_path(filename: str = FILENAME) -> Path:
     from ...platform.paths import state_path
 
-    return Path(state_path(FILENAME))
+    return Path(state_path(filename))
 
 
-def _decimal(value: object) -> Decimal:
+def _decimal(value: object, label: str = "Anthropic") -> Decimal:
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise SpendLedgerUnreadable("Anthropic spend ledger has an invalid amount") from exc
+        raise SpendLedgerUnreadable("%s spend ledger has an invalid amount" % label) from exc
     if not number.is_finite() or number < 0 or number > _MAX_USD:
-        raise SpendLedgerUnreadable("Anthropic spend ledger has an out-of-range amount")
+        raise SpendLedgerUnreadable("%s spend ledger has an out-of-range amount" % label)
     return number
 
 
@@ -72,8 +72,12 @@ class SpendLedger:
     def __init__(
         self, path: Path | str | Callable[[], Path | str] | None = None,
         *, clock: Callable[[], float] = time.time,
+        filename: str = FILENAME, schema: str = SCHEMA, label: str = "Anthropic",
     ) -> None:
         self._path_source = path
+        self._filename = filename
+        self._schema = schema
+        self._label = label
         self._clock = clock
         self._thread_lock = threading.Lock()
         # Spend that could not be persisted, by day: still counted in-process.
@@ -86,26 +90,26 @@ class SpendLedger:
     def path(self) -> Path:
         source = self._path_source
         if source is None:
-            return _default_path()
+            return _default_path(self._filename)
         return Path(source() if callable(source) else source)
 
     def _read(self, path: Path) -> dict[str, Any]:
         if not path.exists():
-            return {"schema": SCHEMA, "days": {}}
+            return {"schema": self._schema, "days": {}}
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError) as exc:
             raise SpendLedgerUnreadable(
-                "the Anthropic spend ledger %s cannot be read; repair or remove it "
-                "to resume Anthropic calls" % path.name
+                "the %s spend ledger %s cannot be read; repair or remove it "
+                "to resume %s calls" % (self._label, path.name, self._label)
             ) from exc
         days = document.get("days") if isinstance(document, dict) else None
         if not isinstance(days, dict):
             raise SpendLedgerUnreadable(
-                "the Anthropic spend ledger %s is not a valid ledger; repair or "
-                "remove it to resume Anthropic calls" % path.name
+                "the %s spend ledger %s is not a valid ledger; repair or "
+                "remove it to resume %s calls" % (self._label, path.name, self._label)
             )
-        return {"schema": SCHEMA, "days": days}
+        return {"schema": self._schema, "days": days}
 
     def _day_entry(self, document: dict[str, Any], day: str) -> dict[str, Any]:
         entry = document["days"].get(day)
@@ -116,7 +120,7 @@ class SpendLedger:
         day = utc_day(self._clock())
         path = self.path
         with file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            stored = _decimal(self._day_entry(self._read(path), day).get("usd", "0"))
+            stored = _decimal(self._day_entry(self._read(path), day).get("usd", "0"), self._label)
         return stored + self._unpersisted.get(day, Decimal(0))
 
     def today_usd(self) -> Decimal:
@@ -156,7 +160,7 @@ class SpendLedger:
             extra = self._unpersisted.get(day, Decimal(0))
         return {
             "day_utc": day,
-            "usd": str(_decimal(entry.get("usd", "0")) + extra),
+            "usd": str(_decimal(entry.get("usd", "0"), self._label) + extra),
             "calls": int(entry.get("calls", 0) or 0),
             "key_slot_calls": {
                 "1": int(entry.get("slot_1_calls", 0) or 0),
@@ -177,7 +181,7 @@ class SpendLedger:
                     document = self._read(path)
                     days = document["days"]
                     entry = dict(self._day_entry(document, day))
-                    entry["usd"] = str(_decimal(entry.get("usd", "0")) + amount)
+                    entry["usd"] = str(_decimal(entry.get("usd", "0"), self._label) + amount)
                     entry["calls"] = int(entry.get("calls", 0) or 0) + 1
                     slot_key = "slot_%d_calls" % (2 if slot == 2 else 1)
                     entry[slot_key] = int(entry.get(slot_key, 0) or 0) + 1
@@ -191,8 +195,8 @@ class SpendLedger:
             with self._thread_lock:
                 self._unpersisted[day] = self._unpersisted.get(day, Decimal(0)) + amount
             logger.error(
-                "anthropic: could not persist %s USD of spend (%s); counted in memory only",
-                amount, type(exc).__name__,
+                "%s: could not persist %s USD of spend (%s); counted in memory only",
+                self._label.lower(), amount, type(exc).__name__,
             )
 
 

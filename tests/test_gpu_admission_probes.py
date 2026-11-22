@@ -49,10 +49,13 @@ def test_concurrent_probes_never_overlap_and_the_overflow_gets_probe_busy(
     fake.show_gate.set()
     for thread in (first, second, refresh):
         thread.join(5)
+    wait_show_fill = getattr(pool._capability_prober, "wait_show_fill", None)
+    if callable(wait_show_fill):
+        wait_show_fill(5.0)
 
     assert fake.max_probe_active == 1
     assert errors == []
-    assert fake.count("/api/show") == 2
+    assert sum(1 for _, path, body in fake.requests if path == "/api/show" and (body or {}).get("model") == "m") == 2
 
     # With the gate held longer than probe_wait_ms, the next probe is refused.
     fake.show_gate = threading.Event()

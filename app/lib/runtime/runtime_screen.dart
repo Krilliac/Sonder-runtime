@@ -246,6 +246,10 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   ModelCatalog? _modelCatalog;
   Object? _ecosystemError;
   bool _loadingExtras = false;
+
+  /// Bumped when the server, key or account changes. An extras load that
+  /// started under an older generation is discarded silently.
+  int _extrasGeneration = 0;
   PermissionMode? _mode;
   Object? _modeError;
   bool _modeLoaded = false;
@@ -318,6 +322,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _mode = null;
       _modeError = null;
       _modeLoaded = false;
+      _loadingExtras = false;
+      _extrasGeneration++;
       unawaited(_loadExtras());
     }
   }
@@ -360,6 +366,9 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       if (widget.liveUpdates && !_loading) unawaited(_refresh());
       return;
     }
+    // `inactive` is a transient focus loss (a dialog, a window switch), not a
+    // backgrounding: it must not cancel launcher waits as failures.
+    if (state == AppLifecycleState.inactive) return;
     _appActive = false;
     _stopLauncherWait = true;
     _launcherActionEpoch += 1;
@@ -374,6 +383,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   /// permission mode: the reads beyond `/v1/sonder/status` on each cycle.
   Future<void> _loadExtras() async {
     if (_loadingExtras) return;
+    final generation = _extrasGeneration;
     setState(() => _loadingExtras = true);
     List<WorkRun>? runs;
     Object? runsError;
@@ -431,7 +441,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       readCatalog(),
       readMode(),
     ]);
-    if (!mounted) return;
+    if (!mounted || generation != _extrasGeneration) return;
     setState(() {
       _loadingExtras = false;
       _workRuns = runs ??
@@ -814,6 +824,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } on SonderException catch (error) {
       if (error.code == ApprovalsApi.unavailableCode) {
         outcome = _consoleApproval(id);
+      } else if (localOpenRefusalCodes.contains(error.code)) {
+        // A local-open server refuses the approval whoever is signed in, so
+        // the account advice below would be wrong: show the server's words.
+        outcome = ActionOutcome.failed('The approval was not recorded',
+            detail: error.message);
       } else if (const {401, 403}.contains(error.httpStatus)) {
         outcome = const ActionOutcome(
             StatusKind.warn, SonderStrings.approvalsNeedRole);
@@ -1125,6 +1140,16 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           _tracked['server'] = _Tracked.done(outcome ??
               const ActionOutcome(
                   StatusKind.unknown, 'Stopped following the host operation.'));
+        });
+      } else if (mounted &&
+          !_waitingForLauncherOperation &&
+          !_launcherActionInFlight &&
+          _busy('server')) {
+        // The epoch moved on (the app went to the background) and nothing
+        // newer owns the server controls: leave them usable, not busy.
+        setState(() {
+          _tracked['server'] = const _Tracked.done(ActionOutcome(
+              StatusKind.unknown, 'Stopped following the host operation.'));
         });
       }
     }

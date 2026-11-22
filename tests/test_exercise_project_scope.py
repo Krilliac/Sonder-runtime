@@ -58,10 +58,11 @@ def _repo_dir(tmp_path, name="pkg"):
 
 # ---------------------------------------------------------------- MA-07 (a)
 
-def test_directory_in_review_prompt_requires_repository_tools(tmp_path):
+def test_directory_in_review_prompt_requires_repository_tools(monkeypatch, isolated_roots):
     # Decision D1 option B: the role-blind resolver never probes a bare
     # directory named in prose; a label line or a selected project names it.
-    repo = _repo_dir(tmp_path)
+    repo = _repo_dir(isolated_roots)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(repo))
     prompt = "Review the modules in %s for defects" % repo
     assert mo.requires_repository_tools(prompt) is True
     assert mo.repository_project_root(prompt) == ""
@@ -118,6 +119,193 @@ def test_unlabelled_directory_is_refused_identically_whether_or_not_it_exists(
         assert "Repository: <absolute path>" in reply
         replies.append(reply.replace(str(folder), "<dir>"))
     assert replies[0] == replies[1]
+
+
+def test_task_text_root_outside_the_file_roots_is_refused(monkeypatch, isolated_roots):
+    # G0305: a 'Repository:' label (or an absolute source path) is caller- or
+    # model-written text; with no selected project it must not pick a read
+    # scope outside the roots the deployment already exposes.
+    repo = _repo_dir(isolated_roots)
+    labelled = "Repository: %s\nReview the modules for defects" % repo
+    source = "Summarize the file %s" % (repo / "auth.py")
+    for task in (labelled, source):
+        with pytest.raises(ValueError, match="outside the configured file roots"):
+            mo.resolve_repository_project_root(task)
+    # Inside a configured root the same tasks resolve.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    for task in (labelled, source):
+        assert mo.resolve_repository_project_root(task) == str(repo.resolve())
+
+
+def test_task_text_root_through_a_link_is_judged_by_its_target(monkeypatch, isolated_roots):
+    # The label is realpath'd first, so a link inside a root that points
+    # outside every root is still refused.
+    outside = _repo_dir(isolated_roots, "outside")
+    inside = isolated_roots / "inside"
+    inside.mkdir()
+    link = inside / "link"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a directory symlink")
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(inside))
+    with pytest.raises(ValueError, match="outside the configured file roots"):
+        mo.resolve_repository_project_root("Repository: %s\nReview it" % link)
+
+
+def test_master_orchestrate_refuses_a_task_text_root_outside_the_file_roots(
+    monkeypatch, isolated_roots,
+):
+    import server
+    monkeypatch.setattr(
+        server, "_orchestrator_agent_worker",
+        lambda *a, **kw: pytest.fail("a refused task started a fleet worker"),
+    )
+    repo = _repo_dir(isolated_roots, "outside")
+    reply = server.master_orchestrate(
+        task="Repository: %s\nReview the modules for defects" % repo,
+        mode="fleet", agents=2,
+    )
+    assert "outside the configured file roots" in reply
+
+
+def test_served_fleet_route_refuses_a_project_outside_the_file_roots(
+    monkeypatch, isolated_roots,
+):
+    import server
+    calls = []
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kw: calls.append(kw) or "fleet complete")
+    repo = _repo_dir(isolated_roots, "outside")
+    prompt = "Spawn as many parallel agents as the hardware allows to audit this repo."
+    output = server.route_work_request(prompt, project=str(repo))
+    assert "outside the allowed workspace roots" in output
+    assert calls == []
+    # The same directory inside a configured root reaches the fleet.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    output = server.route_work_request(prompt, project=str(repo))
+    assert "fleet complete" in output
+    assert [call.get("project") for call in calls] == [str(repo)]
+
+
+@pytest.mark.parametrize("tool_name", ["master_orchestrate", "master"])
+def test_agent_dispatch_refuses_a_model_chosen_project_outside_the_file_roots(
+    monkeypatch, isolated_roots, tool_name,
+):
+    # G0305: the agent model, not the operator, picks ``project`` here.
+    import server
+    monkeypatch.setattr(server, "_require_managed_agent_admission", lambda: None)
+    monkeypatch.setattr(
+        server, "_orchestrator_agent_worker",
+        lambda *a, **kw: pytest.fail("a refused project started a fleet worker"),
+    )
+    calls = []
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kw: calls.append(kw) or "started")
+    repo = _repo_dir(isolated_roots, "outside")
+    args = {"task": "Review the modules for defects", "mode": "fleet", "project": str(repo)}
+    reply = server._agent_dispatch(tool_name, dict(args))
+    assert "outside the allowed workspace roots" in reply
+    assert calls == []
+    # The same directory inside a configured root reaches the fleet.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    assert server._agent_dispatch(tool_name, dict(args)) == "started"
+    assert [call["project"] for call in calls] == [str(repo)]
+
+
+@pytest.mark.parametrize("action_type", ["master_orchestrate", "master"])
+def test_loop_master_action_refuses_a_project_outside_the_file_roots(
+    monkeypatch, isolated_roots, action_type,
+):
+    # The loop action's project is model- or caller-written, also over HTTP /loop.
+    import server
+    monkeypatch.setattr(server, "_loop_permission_refusal", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        server, "_orchestrator_agent_worker",
+        lambda *a, **kw: pytest.fail("a refused project started a fleet worker"),
+    )
+    calls = []
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kw: calls.append(kw) or "started")
+    repo = _repo_dir(isolated_roots, "outside")
+    action = {"type": action_type, "task": "Review the modules", "mode": "fleet", "project": str(repo)}
+    result = server._loop_dispatch(dict(action))
+    assert result["ok"] is False
+    assert "outside the allowed workspace roots" in result["output"]
+    assert calls == []
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    server._loop_dispatch(dict(action))
+    assert [call["project"] for call in calls] == [str(repo)]
+
+
+def test_loop_sonder_master_command_refuses_a_project_outside_the_file_roots(
+    monkeypatch, isolated_roots,
+):
+    # The ``sonder`` action hands its project to control_command, whose
+    # ``/master`` branch roots a fleet there: the same side door as ``master``.
+    import server
+    monkeypatch.setattr(server, "_loop_permission_refusal", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        server, "_orchestrator_agent_worker",
+        lambda *a, **kw: pytest.fail("a refused project started a fleet worker"),
+    )
+    calls = []
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kw: calls.append(kw) or "started")
+    repo = _repo_dir(isolated_roots, "outside")
+    action = {"type": "sonder", "prompt": "/master fleet 2 Review the modules", "project": str(repo)}
+    result = server._loop_dispatch(dict(action))
+    assert result["ok"] is False
+    assert "outside the allowed workspace roots" in result["output"]
+    assert calls == []
+    # Inside a configured root the same action reaches the fleet with that project.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    server._loop_dispatch(dict(action))
+    assert [call["project"] for call in calls] == [str(repo)]
+
+
+def test_http_sonder_tool_refuses_a_project_outside_the_file_roots(
+    monkeypatch, isolated_roots,
+):
+    # ``/sonder project=<dir> /master ...`` reaches control_command's ``/master``.
+    monkeypatch.setattr(serve, "_account_task_boundary_refusal", lambda *a, **kw: "")
+    monkeypatch.setattr(serve, "_http_tool_refusal", lambda *a, **kw: "")
+    ran = []
+    repo = _repo_dir(isolated_roots, "outside")
+    kwargs = {"prompt": "/master fleet 2 review the repo", "project": str(repo)}
+
+    def run():
+        return serve._run_catalogued_tool_gated(
+            "/sonder", "sonder", dict(kwargs),
+            lambda **kw: ran.append(kw) or "started",
+            state=serve.ConversationState(), context=None,
+        )
+
+    assert "outside the allowed workspace roots" in run()
+    assert ran == []
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(isolated_roots))
+    assert run() == "started"
+    assert [call["project"] for call in ran] == [str(repo)]
+
+
+def test_http_master_spellings_refuse_a_project_outside_the_file_roots(
+    monkeypatch, isolated_roots,
+):
+    import server
+    monkeypatch.setattr(serve, "_http_slash_refusal", lambda *a, **kw: "")
+    monkeypatch.setattr(serve, "_account_task_boundary_refusal", lambda *a, **kw: "")
+    monkeypatch.setattr(serve, "_http_tool_refusal", lambda *a, **kw: "")
+    started = []
+    monkeypatch.setattr(server, "master_orchestrate", lambda **kw: started.append(kw) or "started")
+    repo = _repo_dir(isolated_roots, "outside")
+    reply = serve._handle_slash(
+        "/master fleet 2 review the repo", project="storage", workspace_project=str(repo),
+    )
+    assert "outside the allowed workspace roots" in reply
+    reply = serve._run_catalogued_tool_gated(
+        "/master_orchestrate", "master_orchestrate",
+        {"task": "review the repo", "mode": "fleet", "project": str(repo)},
+        lambda **kw: started.append(kw) or "started",
+        state=serve.ConversationState(), context=None,
+    )
+    assert "outside the allowed workspace roots" in reply
+    assert started == []
 
 
 # ---------------------------------------------------------------- MA-11 (b)
@@ -527,6 +715,7 @@ def test_master_ack_receives_the_parsed_agent_count(monkeypatch):
     monkeypatch.setattr(serve, "_account_task_boundary_refusal", lambda *a, **kw: "")
     monkeypatch.setattr(serve, "_LEGACY_RUNTIME", SimpleNamespace(
         master_orchestrator=SimpleNamespace(capacity=lambda: {"worker_slots": 1}),
+        served_project_refusal=lambda project: "",
         master_orchestrate=lambda **kw: "started",
         _http_chat_tools=lambda: SimpleNamespace(slash_run_arguments=lambda *a, **k: None),
     ))

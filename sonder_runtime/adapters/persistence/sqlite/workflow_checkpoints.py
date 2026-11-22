@@ -1,5 +1,5 @@
 """SQLite adapter for the typed SEAM-010 workflow checkpoint port."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from contextlib import contextmanager
 
@@ -9,8 +9,13 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
+from typing import TYPE_CHECKING
 
 from ....application.ports.jobs import WorkflowCheckpoint, WorkflowRepository
+
+if TYPE_CHECKING:
+    import os
+    from collections.abc import Iterator
 
 
 _DDL = """
@@ -27,7 +32,7 @@ CREATE TABLE IF NOT EXISTS durable_workflow_checkpoint (
 class SQLiteWorkflowCheckpointRepository(WorkflowRepository):
     """Durable monotonic checkpoint store sharing the job-registry database."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
@@ -35,21 +40,23 @@ class SQLiteWorkflowCheckpointRepository(WorkflowRepository):
             connection.executescript(_DDL)
 
     @contextmanager
-    def _connect(self):
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
             connection.execute("PRAGMA busy_timeout=5000")
             yield connection
 
     @staticmethod
-    def _decode(row: tuple[object, ...] | None) -> WorkflowCheckpoint | None:
+    def _decode(
+        row: tuple[str, int, int, str, str | None] | None,
+    ) -> WorkflowCheckpoint | None:
         if row is None:
             return None
         job_id, sequence, next_step, state_json, completed_step_id = row
         state = json.loads(str(state_json))
         if not isinstance(state, dict):
-            raise ValueError("workflow checkpoint state must be an object")
+            raise ValueError("workflow checkpoint state must be an object")  # noqa: TRY004
         return WorkflowCheckpoint(
-            str(job_id), int(sequence), int(next_step), state,  # type: ignore[arg-type]
+            str(job_id), int(sequence), int(next_step), state,
             None if completed_step_id is None else str(completed_step_id),
         )
 

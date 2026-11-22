@@ -79,6 +79,7 @@ blind spot here would remove capability the caller legitimately has:
 """
 import collections
 import json
+import math
 import re
 
 Verdict = collections.namedtuple("Verdict", ["passed", "reason", "detail"])
@@ -527,6 +528,15 @@ def _validate_number(value, schema, path, ctx):
             return None
         return limit
 
+    if (isinstance(value, float) and not math.isfinite(value)
+            and any(keyword in schema for keyword in _NUMBER_KEYWORDS)):
+        # NaN compares false against everything, so it used to slide through
+        # every bound, and Infinity made multipleOf raise. A non-finite value
+        # is not a number any numeric keyword can vouch for.
+        ctx.errors.append('%s: %s is not a finite number, so the numeric keywords '
+                          'cannot be satisfied' % (path, _show(value)))
+        return
+
     limit = _bound("minimum")
     if limit is not None and value < limit:
         ctx.errors.append('%s: %s is below "minimum" %s' % (path, _show(value), limit))
@@ -545,11 +555,29 @@ def _validate_number(value, schema, path, ctx):
     if limit is not None:
         if limit <= 0:
             _malformed(ctx, path, "multipleOf", "must be positive, got %s" % _show(limit))
-        else:
-            quotient = value / limit
-            if abs(quotient - round(quotient)) > 1e-9:
+        elif isinstance(limit, float) and not math.isfinite(limit):
+            _malformed(ctx, path, "multipleOf", "must be finite, got %s" % _show(limit))
+        elif (isinstance(value, int)
+              and (isinstance(limit, int) or limit.is_integer())):
+            # An integral float limit (2.0) is still an exact integer limit:
+            # routing it through float division loses the low bits of a large
+            # int value and passes 100000000000000001 as a multiple of 2.0.
+            if value % int(limit) != 0:
                 ctx.errors.append('%s: %s is not a multiple of %s'
                                   % (path, _show(value), limit))
+        else:
+            try:
+                quotient = value / limit
+                off = abs(quotient - round(quotient)) > 1e-9
+            except (OverflowError, ValueError):
+                # A limit of this checker, not a violation by the data.
+                _uncheckable(ctx, path, "multipleOf",
+                             "cannot be evaluated for %s (out of range for a %s limit)"
+                             % (_show(value), limit))
+            else:
+                if off:
+                    ctx.errors.append('%s: %s is not a multiple of %s'
+                                      % (path, _show(value), limit))
 
 
 def _validate(value, schema, path, ctx):
@@ -745,7 +773,10 @@ def json_schema_verify(artifact, spec=None):
 
     try:
         data = json.loads(artifact)
-    except json.JSONDecodeError as e:
+    except (ValueError, RecursionError) as e:
+        # JSONDecodeError is a ValueError; so is the int-digit-limit error for
+        # a >4300-digit integer. A document too deep for the parser raises
+        # RecursionError.
         return Verdict(False, "invalid json: %s" % e, str(e))
 
     errors, unchecked = check(data, schema)

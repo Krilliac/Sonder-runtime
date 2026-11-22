@@ -197,15 +197,18 @@ def test_line_boundaries_and_partial_last_line_survive_batching(tmp_path):
     assert [d for _, s, d in events if s is STDERR] == ["to stderr\n"]
 
 
-def test_invalid_utf8_keeps_todays_behaviour(tmp_path):
+def test_invalid_utf8_is_replaced_and_reading_continues(tmp_path):
     waited, events = _run_with_policy(
         tmp_path, "bad", _INVALID_UTF8_CHILD,
         OutputBatchPolicy(max_lines=1024, max_bytes=1 << 20, max_delay_seconds=30),
     )
-    # The text-mode reader stops at the undecodable line (a ValueError ends
-    # output quietly); the job still succeeds and earlier lines persist.
+    # The text-mode reader decodes with errors="replace": undecodable bytes
+    # become U+FFFD and the reader keeps draining the pipe, so later lines
+    # persist too (a strict decoder would stop and leave the pipe undrained).
     assert waited.record.status is JobStatus.SUCCEEDED
-    assert [d for _, _, d in events] == ["good one\n"]
+    assert [d for _, _, d in events] == [
+        "good one\n", "bad �� bytes\n", "after bad\n",
+    ]
 
 
 # -- registry batch API ---------------------------------------------------------

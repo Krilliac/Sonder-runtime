@@ -13,21 +13,24 @@ that policy.
 from __future__ import annotations
 
 from sonder_runtime.platform.runtime_threads import (
+    Thread as owned_runtime_thread,
     ThreadPoolExecutor as owned_runtime_pool,
     run_bounded,
 )
 
 import base64
+from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 import contextvars
 import hashlib
 import hmac
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import http.client
 import importlib
 import ipaddress
+import itertools
 import json
 import math
 import os
@@ -35,7 +38,8 @@ import re
 import ssl
 import threading
 import time
-from typing import Callable, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 import urllib.error
 import urllib.request
@@ -89,6 +93,10 @@ _LOCAL_CALLERS = frozenset({"agent", "autopilot", "fleet", "local"})
 _LOCAL_ADMISSION_SCOPE = contextvars.ContextVar(
     "sonder_ollama_local_admission", default=None,
 )
+# ``(pool, lease)`` while ``OllamaWorkerPool.request`` runs a sender, so
+# ``admitted()`` can attribute the GPU-admission phase to the held slot.
+_ACTIVE_LEASE = contextvars.ContextVar("sonder_ollama_active_lease", default=None)
+_DEFAULT_LEASE_WARN_AFTER_SECONDS = 120.0
 _MAX_FAILURE_THRESHOLD = 100
 _MAX_COOLDOWN_SECONDS = 3600.0
 _MAX_CAPABILITY_TTL_SECONDS = 86_400.0
@@ -119,7 +127,15 @@ _configured_pool = None
 
 
 class WorkerPoolError(urllib.error.URLError):
-    """Base for privacy-safe pool admission and availability failures."""
+    """Base for privacy-safe pool admission and availability failures.
+
+    ``retry_after_seconds`` is the pool's estimate of when to ask again, when
+    it has one (a cooldown); ``pool_refusal_reply`` shows it to the user.
+    """
+
+    def __init__(self, reason, *, retry_after_seconds: float | None = None):
+        super().__init__(reason)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class CapabilityProbeDeferred(Exception):
@@ -195,6 +211,16 @@ def local_agent_admission(
         _LOCAL_ADMISSION_SCOPE.reset(token)
 
 
+def _active_lease(pool, origin: str):
+    """The lease ``pool.request`` holds on ``origin`` for this sender, if any."""
+    active = _ACTIVE_LEASE.get()
+    if active is None or active[0] is not pool:
+        return None
+    lease = active[1]
+    return lease if lease.state.endpoint.origin == origin else None
+
+
+@contextmanager
 def admitted(pool, path: str, payload, origin: str, *, deadline: float | None = None):
     """Context manager that admits one request to ``origin`` through ``pool``.
 
@@ -202,15 +228,36 @@ def admitted(pool, path: str, payload, origin: str, *, deadline: float | None = 
     ``gpu_admission`` decides lane, queue place, ``num_ctx`` and host memory.
     A pool without that service (a test double) admits everything unchanged.
     The caller class comes from ``local_agent_admission`` when one is active.
+    When ``pool.request`` holds a lease for this send, its phase records
+    whether the slot is waiting in GPU admission or in the transport, and a
+    request that queues in GPU admission returns its pool slot while it waits
+    (so it cannot starve work that needs no GPU) and takes one back, ahead of
+    fresh requests, once admitted.
     """
     service = getattr(pool, "gpu_admission", None)
     if service is None:
-        return nullcontext(gpu_admission_module.passthrough_ticket(payload))
+        with nullcontext(gpu_admission_module.passthrough_ticket(payload)) as ticket:
+            yield ticket
+        return
     scope = _LOCAL_ADMISSION_SCOPE.get()
-    return service.admit(
+    lease = _active_lease(pool, origin)
+    extra = {}
+    if lease is not None:
+        lease.phase = "gpu_admission"
+        if getattr(service, "accepts_queue_callback", False) is True:
+            extra["on_queue"] = lambda: pool._park_lease(lease)
+    entered = pool._clock() if lease is not None else 0.0
+    with service.admit(
         path, payload, origin=origin, deadline=deadline,
         caller=scope[0] if scope else "interactive", prewarm=prewarm_gate.is_prewarm(),
-    )
+        **extra,
+    ) as ticket:
+        if lease is not None:
+            if not lease.counted:
+                pool._unpark_lease(lease, deadline)
+            lease.admission_seconds += max(0.0, pool._clock() - entered)
+            lease.phase = "transport"
+        yield ticket
 
 
 @contextmanager
@@ -227,6 +274,11 @@ def admitted_get(pool, origin: str, path: str, *, timeout: float):
 
 def _safe_error(error: BaseException) -> str:
     """Return bounded single-line diagnostics without response bodies."""
+    if isinstance(error, gpu_admission_module.GpuAdmissionRefused):
+        # A refusal is a ``URLError``; keep its typed reason, not "transport unavailable".
+        reason = getattr(getattr(error, "refusal", None), "reason", None)
+        return "GpuAdmissionRefused: %s" % _safe_scalar(
+            getattr(reason, "value", reason), limit=64)
     if isinstance(error, urllib.error.HTTPError):
         return "HTTPError: HTTP %d" % int(error.code or 0)
     if isinstance(error, urllib.error.URLError):
@@ -243,6 +295,35 @@ def _safe_error(error: BaseException) -> str:
     text = str(getattr(error, "reason", error) or type(error).__name__)
     text = " ".join(text.replace("\x00", "").split())
     return "%s: %s" % (type(error).__name__, text[:200])
+
+
+_DEFAULT_POOL_RETRY_SECONDS = 5
+
+
+def pool_refusal_reply(error: BaseException) -> str | None:
+    """The chat reply for a pool refusal, or ``None`` for any other error.
+
+    A refusal means Sonder's own pool had no slot or worker for the request,
+    not that Ollama is down, so it must not read as a connection failure.
+    The ``ERROR contacting`` prefix keeps it a failed turn for telemetry.
+    """
+    if not isinstance(error, WorkerPoolError):
+        return None
+    hint = getattr(error, "retry_after_seconds", None)
+    seconds = (
+        max(1, math.ceil(hint)) if isinstance(hint, (int, float)) and math.isfinite(hint) and hint > 0
+        else _DEFAULT_POOL_RETRY_SECONDS
+    )
+    if isinstance(error, WorkerPoolDraining):
+        return "ERROR contacting Sonder's model pool: it is shutting down; retry in a few seconds."
+    if isinstance(error, WorkerPoolBackpressure):
+        return "ERROR contacting Sonder's model pool: it is busy; retry in %ds." % seconds
+    if isinstance(error, WorkerPoolUnavailable):
+        return (
+            "ERROR contacting Sonder's model pool: no model worker is available right now; "
+            "retry in %ds." % seconds
+        )
+    return None
 
 
 def _safe_scalar(value: object, *, limit: int) -> str:
@@ -515,6 +596,40 @@ class WorkerCapabilities:
     models: tuple[str, ...]
     observed_at: float
     effective_max_inflight: int
+    model_contexts: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    loaded_models: tuple[str, ...] = ()
+    vram_bytes: int | None = None
+    ram_bytes: int | None = None
+    kv_cache_type: str | None = None
+    supports_tools: Mapping[str, bool] = field(default_factory=lambda: MappingProxyType({}))
+    model_active_billions: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    model_metadata: Mapping[str, Mapping[str, Any]] = field(default_factory=lambda: MappingProxyType({}))
+
+    @staticmethod
+    def _lookup_mapping(mapping: Mapping[str, Any], model: str | None):
+        if not model or not mapping:
+            return None
+        if model in mapping:
+            return mapping[model]
+        target = _model_key(model)
+        for candidate, value in mapping.items():
+            if _model_key(candidate) == target:
+                return value
+        return None
+
+    def context_for(self, model: str | None) -> int | None:
+        value = self._lookup_mapping(self.model_contexts, model)
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+    def model_supports_tools(self, model: str | None) -> bool | None:
+        value = self._lookup_mapping(self.supports_tools, model)
+        return value if isinstance(value, bool) else None
+
+    def active_billions_for(self, model: str | None) -> float | None:
+        value = self._lookup_mapping(self.model_active_billions, model)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+            return float(value)
+        return None
 
 
 @dataclass(frozen=True)
@@ -536,6 +651,15 @@ class WorkerSnapshot:
     cooldown_until: float = 0.0
     trips: int = 0
     probing: bool = False
+    inference_ewma_ms: float | None = None
+    model_contexts: dict[str, int] = field(default_factory=dict)
+    loaded_models: tuple[str, ...] = ()
+    vram_bytes: int | None = None
+    ram_bytes: int | None = None
+    kv_cache_type: str | None = None
+    supports_tools: dict[str, bool] = field(default_factory=dict)
+    model_active_billions: dict[str, float] = field(default_factory=dict)
+    model_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def ewma_latency_ms(self):
@@ -561,6 +685,15 @@ class WorkerSnapshot:
             "trips": self.trips,
             "probing": self.probing,
             "ewma_latency_ms": self.latency_ewma_ms or 0.0,
+            "inference_ewma_ms": self.inference_ewma_ms,
+            "model_contexts": dict(self.model_contexts),
+            "loaded_models": list(self.loaded_models),
+            "vram_bytes": self.vram_bytes,
+            "ram_bytes": self.ram_bytes,
+            "kv_cache_type": self.kv_cache_type,
+            "supports_tools": dict(self.supports_tools),
+            "model_active_billions": dict(self.model_active_billions),
+            "model_metadata": dict(self.model_metadata),
         }
 
 
@@ -573,7 +706,15 @@ class _WorkerState:
     last_error: str = ""
     cooldown_until: float = 0.0
     half_open_inflight: bool = False
+    # Lease id of the request holding the half-open probe (``None`` for a bare
+    # ``_acquire`` or none); only that lease's end, or a success, ends it.
+    half_open_owner: int | None = None
+    # Control-plane RTT: capability probes and model-less requests. Ranks
+    # model-less reads, and inference until every candidate has an
+    # ``inference_ewma_ms`` (the two are never compared with each other).
     latency_ewma_ms: float | None = None
+    # Model-pinned request time, excluding time spent in GPU admission.
+    inference_ewma_ms: float | None = None
     capabilities: WorkerCapabilities | None = None
     compatibility_error: str = ""
     capability_probe_failed: bool = False
@@ -586,6 +727,40 @@ class _WorkerState:
     membership_expires_at: datetime | None = None
     membership_evidence: CapabilityEvidence | None = None
     capability_checked_at: datetime | None = None
+    # Requests returning from a GPU-admission queue that wait for a slot here;
+    # fresh requests do not take this worker while any wait (``_choose``).
+    unpark_waiters: int = 0
+
+
+@dataclass(eq=False)
+class _PoolLease:
+    """One request's hold on one worker slot, from ``_acquire`` to its close.
+
+    Owned by the pool that opened it and mutated under that pool's
+    ``_condition``; ``phase`` alone is a single attribute store made by the
+    owning request thread for diagnostics. While ``counted`` the lease is one
+    unit of ``state.inflight``; ``closed`` is set once, by the first close.
+    """
+
+    id: int
+    state: _WorkerState
+    worker_id: str
+    model: str
+    caller: str
+    thread: threading.Thread
+    started: float
+    phase: str = "dispatching"  # dispatching | gpu_admission | transport
+    counted: bool = True
+    closed: bool = False
+    warned: bool = False
+    # Pool-clock seconds this request spent inside GPU admission (queue and
+    # unpark wait); excluded from the worker's inference latency.
+    admission_seconds: float = 0.0
+
+    @property
+    def half_open(self) -> bool:
+        """Whether this lease holds its worker's half-open probe."""
+        return self.state.half_open_inflight and self.state.half_open_owner == self.id
 
 
 def _worker_id(origin: str) -> str:
@@ -608,17 +783,183 @@ def _model_names(payload) -> tuple[str, ...]:
     return tuple(sorted(set(names)))
 
 
+_SHOW_CACHE_LIMIT = 512
+_SHOW_FETCHES_PER_PROBE = 8
+_SHOW_BACKOFF_BASE_SECONDS = 30.0
+_SHOW_BACKOFF_MAX_SECONDS = 600.0
+_KV_CACHE_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"})
+
+
+def _positive_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and value > 0:
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            parsed = int(text)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _parse_billions(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+        if not math.isfinite(num) or num <= 0:
+            return None
+        return round(num / 1e9, 3) if num >= 1_000_000 else round(num, 3)
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([BM]?)$", text)
+    if not match:
+        return None
+    num = float(match.group(1))
+    unit = match.group(2)
+    if not math.isfinite(num) or num <= 0:
+        return None
+    if unit == "M":
+        return round(num / 1000.0, 3)
+    return round(num, 3)
+
+
+def _parse_moe_active_billions(
+    model_name: str,
+    details: Mapping[str, Any] | None,
+    model_info: Mapping[str, Any] | None,
+) -> float | None:
+    if isinstance(model_info, Mapping):
+        for key, raw in model_info.items():
+            lowered = str(key).casefold()
+            if lowered.endswith((".active_parameters", ".active_parameter_count", ".active_billions")):
+                parsed = _parse_billions(raw)
+                if parsed is not None:
+                    return parsed
+    if isinstance(details, Mapping):
+        parsed = _parse_billions(details.get("active_parameter_size"))
+        if parsed is not None:
+            return parsed
+    moe_tag = re.search(r"(?:^|[:\-_])a(\d+(?:\.\d+)?)b(?=$|[:\-_])", str(model_name or ""), re.IGNORECASE)
+    if moe_tag:
+        parsed = _parse_billions(moe_tag.group(1))
+        if parsed is not None:
+            return parsed
+    if isinstance(model_info, Mapping) and isinstance(details, Mapping):
+        expert_count = None
+        expert_used = None
+        for key, raw in model_info.items():
+            lowered = str(key).casefold()
+            if lowered.endswith(".expert_count"):
+                expert_count = _positive_int_value(raw)
+            elif lowered.endswith(".expert_used_count"):
+                expert_used = _positive_int_value(raw)
+        total = _parse_billions(details.get("parameter_size"))
+        if expert_count and expert_used and expert_count > 1 and total:
+            return round(max(0.5, total * (expert_used / expert_count)), 3)
+    return None
+
+
+def _parse_show_context_length(show_payload: Mapping[str, Any]) -> int | None:
+    model_info = show_payload.get("model_info")
+    if isinstance(model_info, Mapping):
+        for key, raw in model_info.items():
+            if str(key).casefold().endswith(".context_length"):
+                parsed = _positive_int_value(raw)
+                if parsed is not None:
+                    return parsed
+    parameters = show_payload.get("parameters")
+    if isinstance(parameters, str):
+        for line in parameters.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[0].casefold() == "num_ctx":
+                parsed = _positive_int_value(parts[1])
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def _extract_show_metadata(
+    model_name: str,
+    tag_entry: Mapping[str, Any] | None,
+    show_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    details = {}
+    if isinstance(tag_entry, Mapping) and isinstance(tag_entry.get("details"), Mapping):
+        details.update(tag_entry["details"])
+    if isinstance(show_payload, Mapping) and isinstance(show_payload.get("details"), Mapping):
+        details.update(show_payload["details"])
+    model_info = show_payload.get("model_info") if isinstance(show_payload, Mapping) else None
+    capabilities_raw = show_payload.get("capabilities") if isinstance(show_payload, Mapping) else None
+    capabilities = tuple(
+        sorted({str(item).strip().casefold() for item in capabilities_raw if str(item).strip()})
+    ) if isinstance(capabilities_raw, (list, tuple, set, frozenset)) else ()
+    supports_tools: bool | None = ("tools" in capabilities) if capabilities else None
+    context_length = _parse_show_context_length(show_payload) if isinstance(show_payload, Mapping) else None
+    parameter_billions = _parse_billions(details.get("parameter_size"))
+    active_billions = _parse_moe_active_billions(model_name, details, model_info)
+    meta: dict[str, Any] = {}
+    if context_length is not None:
+        meta["context_length"] = context_length
+    if supports_tools is not None:
+        meta["supports_tools"] = supports_tools
+    if capabilities:
+        meta["capabilities"] = list(capabilities)
+    if parameter_billions is not None:
+        meta["parameter_billions"] = parameter_billions
+    if active_billions is not None:
+        meta["active_billions"] = active_billions
+    digest = str(tag_entry.get("digest") or "").strip() if isinstance(tag_entry, Mapping) else ""
+    if digest:
+        meta["digest"] = digest[:96]
+    return meta
+
+
 def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open_url=None):
-    """Build a bounded prober using the same no-proxy/no-redirect transport."""
+    """Build a bounded prober using the same no-proxy/no-redirect transport.
+
+    Reads ``/api/version``, ``/api/tags``, best-effort ``/api/ps`` and
+    per-``(origin, model, digest)`` cached ``/api/show`` metadata without
+    failing if optional endpoints are unavailable.  The probe itself never calls ``/api/show``: it
+    reports whatever is cached and starts at most one background filler per
+    origin that fetches up to ``_SHOW_FETCHES_PER_PROBE`` uncached models, so a
+    slow or hanging ``/api/show`` cannot fail the capability probe, and large
+    inventories fill in over successive probes.  A failed ``/api/show`` is
+    remembered per ``(origin, model, digest)`` with exponential backoff.  For a
+    model that is loaded, ``/api/ps`` ``context_length`` (the runtime context)
+    wins over the trained maximum from ``/api/show``.  Stock
+    Ollama exposes no host VRAM, host RAM or KV-cache type, so the report never
+    carries those fields.
+    """
     ollama_endpoint = importlib.import_module(
         "sonder_runtime.adapters.inference.ollama_endpoint"
     )
+    show_cache: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
+    show_lock = threading.Lock()
+    show_failures: dict[tuple[str, str, str], tuple[float, int]] = {}
+    fillers: dict[str, threading.Thread] = {}
+    show_timeout = max(float(timeout), 5.0)
 
-    def read(origin: str, path: str) -> dict:
+    def read(
+        origin: str,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Mapping[str, Any] | None = None,
+        request_timeout: float | None = None,
+    ) -> dict:
         transport = open_url or ollama_endpoint.open_url
-        request = urllib.request.Request(origin + path, method="GET")
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Content-Type": "application/json"} if data is not None else {}
+        request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
-            request, timeout=timeout, allow_remote=allow_remote,
+            request,
+            timeout=timeout if request_timeout is None else request_timeout,
+            allow_remote=allow_remote,
         ) as response:
             raw = response.read(_PROBE_RESPONSE_LIMIT + 1)
         if not isinstance(raw, bytes):
@@ -630,6 +971,111 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             raise ValueError("capability response must be an object")
         return payload
 
+    def show_is_cached(origin: str, model_name: str, digest: str) -> bool:
+        with show_lock:
+            return (origin, model_name, digest) in show_cache
+
+    def read_show_cached(
+        origin: str,
+        model_name: str,
+        *,
+        digest: str = "",
+        tag_entry: Mapping[str, Any] | None = None,
+        allow_fetch: bool = True,
+    ) -> dict[str, Any]:
+        cache_key = (origin, model_name, digest)
+        with show_lock:
+            cached = show_cache.get(cache_key)
+            if cached is not None:
+                show_cache.move_to_end(cache_key)
+                return dict(cached)
+        if not allow_fetch:
+            return _extract_show_metadata(model_name, tag_entry, None)
+        show_payload: dict | None = None
+        try:
+            show_payload = read(
+                origin, "/api/show", method="POST", body={"model": model_name},
+                request_timeout=show_timeout,
+            )
+        except Exception:
+            show_payload = None
+        meta = _extract_show_metadata(model_name, tag_entry, show_payload)
+        if show_payload is None:
+            with show_lock:
+                failures = show_failures.get(cache_key, (0.0, 0))[1] + 1
+                delay = min(_SHOW_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+                            _SHOW_BACKOFF_MAX_SECONDS)
+                show_failures[cache_key] = (time.monotonic() + delay, failures)
+                while len(show_failures) > _SHOW_CACHE_LIMIT:
+                    show_failures.pop(next(iter(show_failures)))
+        else:
+            with show_lock:
+                show_failures.pop(cache_key, None)
+                show_cache[cache_key] = dict(meta)
+                show_cache.move_to_end(cache_key)
+                while len(show_cache) > _SHOW_CACHE_LIMIT:
+                    show_cache.popitem(last=False)
+        return meta
+
+    def show_is_backed_off(origin: str, model_name: str, digest: str) -> bool:
+        with show_lock:
+            entry = show_failures.get((origin, model_name, digest))
+        return entry is not None and time.monotonic() < entry[0]
+
+    probe_gate_ref: list[Callable[[str], Callable[[], None]] | None] = [None]
+
+    def fill_show_cache(origin: str, pending: list[tuple[str, str]]) -> None:
+        try:
+            for name, digest in pending:
+                if show_is_cached(origin, name, digest):
+                    continue
+                gate = probe_gate_ref[0]
+                release: Callable[[], None] = lambda: None
+                if gate is not None:
+                    try:
+                        release = gate(origin)
+                    except (gpu_admission_module.GpuAdmissionRefused, CapabilityProbeDeferred):
+                        return
+                try:
+                    read_show_cached(origin, name, digest=digest)
+                finally:
+                    release()
+                if show_is_backed_off(origin, name, digest):
+                    # One failing /api/show ends this pass; the backoff keeps
+                    # the model out of later passes until it expires.
+                    return
+        finally:
+            with show_lock:
+                if fillers.get(origin) is threading.current_thread():
+                    fillers.pop(origin, None)
+
+    def start_show_fill(origin: str, pending: list[tuple[str, str]]) -> None:
+        if not pending:
+            return
+        with show_lock:
+            if origin in fillers:
+                return
+            thread = owned_runtime_thread(
+                target=fill_show_cache,
+                args=(origin, pending),
+                name="sonder-ollama-show-fill",
+                daemon=True,
+            )
+            fillers[origin] = thread
+        thread.start()
+
+    def wait_show_fill(wait_timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(wait_timeout))
+        while True:
+            with show_lock:
+                threads = list(fillers.values())
+            if not threads:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            threads[0].join(remaining)
+
     def probe(origin: str) -> dict:
         try:
             version = read(origin, "/api/version")
@@ -640,12 +1086,102 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
                 raise
             version = {"version": "unknown"}
         tags = read(origin, "/api/tags")
-        return {
+        models = _model_names(tags)
+        tag_entries: dict[str, Mapping[str, Any]] = {}
+        raw_tags = tags.get("models") if isinstance(tags, Mapping) else None
+        if isinstance(raw_tags, list):
+            for entry in raw_tags:
+                if isinstance(entry, Mapping):
+                    name = str(entry.get("name") or entry.get("model") or "").strip()
+                    if name and name not in tag_entries:
+                        tag_entries[name] = entry
+
+        ps_payload: Mapping[str, Any] | None = None
+        try:
+            ps_payload = read(origin, "/api/ps")
+        except Exception:
+            ps_payload = None
+
+        loaded_models: list[str] = []
+        ps_contexts: dict[str, int] = {}
+        if isinstance(ps_payload, Mapping):
+            ps_rows = ps_payload.get("models")
+            if isinstance(ps_rows, list):
+                for row in ps_rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    name = str(row.get("name") or row.get("model") or "").strip()[:256]
+                    if name:
+                        loaded_models.append(name)
+                        ctx = _positive_int_value(row.get("context_length"))
+                        if ctx is not None:
+                            ps_contexts[name] = ctx
+
+        model_contexts: dict[str, int] = dict(ps_contexts)
+        supports_tools: dict[str, bool] = {}
+        model_active_billions: dict[str, float] = {}
+        model_metadata: dict[str, dict[str, Any]] = {}
+        pending: list[tuple[str, str]] = []
+        for name in models:
+            tag_entry = tag_entries.get(name)
+            digest = str(tag_entry.get("digest") or "").strip() if tag_entry else ""
+            # The probe only reads the /api/show cache; uncached models are
+            # filled in the background (bounded count, failures backed off).
+            if (
+                len(pending) < _SHOW_FETCHES_PER_PROBE
+                and not show_is_cached(origin, name, digest)
+                and not show_is_backed_off(origin, name, digest)
+            ):
+                pending.append((name, digest))
+            meta = read_show_cached(
+                origin,
+                name,
+                digest=digest,
+                tag_entry=tag_entry,
+                allow_fetch=False,
+            )
+            if meta:
+                model_metadata[name] = meta
+            # Loaded models keep the runtime context from /api/ps; the
+            # trained maximum from /api/show only fills models not loaded.
+            if name not in ps_contexts and isinstance(meta.get("context_length"), int):
+                model_contexts[name] = meta["context_length"]
+            if isinstance(meta.get("supports_tools"), bool):
+                supports_tools[name] = meta["supports_tools"]
+            if isinstance(meta.get("active_billions"), (int, float)):
+                model_active_billions[name] = float(meta["active_billions"])
+
+        start_show_fill(origin, pending)
+        report: dict[str, Any] = {
             "protocol": _PROTOCOL,
             "version": str(version.get("version") or "unknown")[:80],
-            "models": _model_names(tags),
+            "models": models,
         }
+        if model_contexts:
+            report["model_contexts"] = model_contexts
+        if loaded_models:
+            report["loaded_models"] = tuple(sorted(set(loaded_models)))
+        if supports_tools:
+            report["supports_tools"] = supports_tools
+        if model_active_billions:
+            report["model_active_billions"] = model_active_billions
+        if model_metadata:
+            report["model_metadata"] = model_metadata
+        return report
 
+    def show(origin: str, model_name: str, *, digest: str = "") -> dict[str, Any]:
+        return read_show_cached(origin, model_name, digest=digest, allow_fetch=True)
+
+    def clear_show_cache() -> None:
+        with show_lock:
+            show_cache.clear()
+            show_failures.clear()
+
+    probe.show = show  # type: ignore[attr-defined]
+    probe.clear_show_cache = clear_show_cache  # type: ignore[attr-defined]
+    probe.wait_show_fill = wait_show_fill  # type: ignore[attr-defined]
+    probe.bind_probe_gate = lambda fn: probe_gate_ref.__setitem__(0, fn)  # type: ignore[attr-defined]
+    probe._sonder_default_allow_remote = allow_remote  # type: ignore[attr-defined]
     return probe
 
 
@@ -689,6 +1225,7 @@ class OllamaWorkerPool:
         capability_probe_batch_size: int = _DEFAULT_CAPABILITY_PROBE_BATCH_SIZE,
         capability_probe_timeout_seconds: float = 2.0,
         status_page_size: int = _DEFAULT_STATUS_PAGE_SIZE,
+        lease_warn_after_seconds: float = _DEFAULT_LEASE_WARN_AFTER_SECONDS,
         gpu_admission=None,
         capability_prober: Callable[[str], object] | None = None,
         recent_evidence=None,
@@ -723,6 +1260,9 @@ class OllamaWorkerPool:
             raise ValueError("capability probe timeout must be within (0, 30] seconds")
         if not 1 <= status_page_size <= _MAX_STATUS_PAGE_SIZE:
             raise ValueError("status page size must be within 1..128")
+        lease_warn_after_seconds = float(lease_warn_after_seconds)
+        if not (math.isfinite(lease_warn_after_seconds) and lease_warn_after_seconds > 0):
+            raise ValueError("lease warn-after must be a finite value > 0 seconds")
         capability_routing = str(capability_routing or "advisory").strip().casefold()
         if capability_routing not in {"advisory", "strict", "off"}:
             raise ValueError("capability routing must be advisory, strict, or off")
@@ -767,6 +1307,8 @@ class OllamaWorkerPool:
             f"max_inflight={max_inflight_per_worker}, queue_depth={queue_depth}"
         )
         # Startup authority is independent of the live, drainable roster.
+        self._allow_remote = bool(allow_remote)
+        self._trusted_origins = tuple(trusted_origins)
         self._configured_origins = tuple(normalized_origins)
         self._local_origins = all(_is_local_origin(origin) for origin in normalized_origins)
         self._states = states
@@ -786,6 +1328,9 @@ class OllamaWorkerPool:
         self.gpu_admission = (
             gpu_admission if gpu_admission is not None else gpu_admission_module.process_service()
         )
+        bind_gate = getattr(self._capability_prober, "bind_probe_gate", None)
+        if callable(bind_gate):
+            bind_gate(self._show_probe_permit)
         self._recent_evidence = recent_evidence
         self._identity_for = identity_for
         self._capability_routing = capability_routing
@@ -797,6 +1342,11 @@ class OllamaWorkerPool:
         self._waiters = 0
         self._draining = False
         self._condition = threading.Condition(threading.RLock())
+        # Open slot leases by id; guarded by ``_condition`` (see ``_PoolLease``).
+        self._leases: dict[int, _PoolLease] = {}
+        self._lease_ids = itertools.count(1)
+        self._leases_reclaimed = 0
+        self._lease_warn_after = lease_warn_after_seconds
         self._probe_lock = threading.Lock()
         self._identity_cache = IdentityObservationCache(clock=self._clock)
         self._metrics = {
@@ -950,7 +1500,7 @@ class OllamaWorkerPool:
                     existing[key] = state
                 else:
                     state.membership_state = "draining"
-                    if state.inflight or state.capability_probe_inflight:
+                    if self._keeps_draining_state_locked(state):
                         retained.append(state)
                     if state.capability_probe_inflight:
                         unresolved_by_origin[state.endpoint.origin] = state
@@ -1009,10 +1559,21 @@ class OllamaWorkerPool:
             self._prune_drained()
             self._condition.notify_all()
 
+    def _keeps_draining_state_locked(self, state: _WorkerState) -> bool:
+        """Whether a draining ``state`` must stay in the roster for now.
+
+        In-flight work and probes return to it, and so does a lease parked in
+        GPU admission (it holds no slot, so ``inflight`` does not show it).
+        """
+        return bool(
+            state.inflight or state.capability_probe_inflight
+            or any(lease.state is state for lease in self._leases.values())
+        )
+
     def _prune_drained(self) -> None:
         remaining = [state for state in self._states
                      if (state.membership_state != "draining"
-                         or state.inflight or state.capability_probe_inflight)]
+                         or self._keeps_draining_state_locked(state))]
         if len(remaining) != len(self._states):
             self._states = remaining
             self._roster_generation += 1
@@ -1117,6 +1678,13 @@ class OllamaWorkerPool:
             raise CapabilityProbeDeferred(
                 "capability probe deferred: %s" % refused.refusal.reason.value) from None
 
+    def _show_probe_permit(self, origin: str) -> Callable[[], None]:
+        """Take the PROBE admission for one background /api/show metadata fetch."""
+        acquire = getattr(self.gpu_admission, "acquire_probe", None)
+        if acquire is None:
+            return lambda: None
+        return acquire("/api/show", origin=origin)
+
     @staticmethod
     def _retryable(error: BaseException) -> bool:
         if isinstance(error, gpu_admission_module.GpuAdmissionRefused):
@@ -1153,11 +1721,28 @@ class OllamaWorkerPool:
     def _normalize_capabilities(
         self, payload: object, *, now: float, measured_ms: float,
     ) -> tuple[WorkerCapabilities, float]:
+        model_contexts: dict[str, int] = {}
+        loaded_models: tuple[str, ...] = ()
+        vram_bytes: int | None = None
+        ram_bytes: int | None = None
+        kv_cache_type: str | None = None
+        supports_tools: dict[str, bool] = {}
+        model_active_billions: dict[str, float] = {}
+        model_metadata: dict[str, dict[str, Any]] = {}
+
         if isinstance(payload, WorkerCapabilities):
             protocol = payload.protocol
             version = payload.version
             models = payload.models
             advertised = payload.effective_max_inflight
+            model_contexts = dict(payload.model_contexts)
+            loaded_models = tuple(payload.loaded_models)
+            vram_bytes = payload.vram_bytes
+            ram_bytes = payload.ram_bytes
+            kv_cache_type = payload.kv_cache_type
+            supports_tools = dict(payload.supports_tools)
+            model_active_billions = dict(payload.model_active_billions)
+            model_metadata = {k: dict(v) for k, v in payload.model_metadata.items()}
         elif isinstance(payload, Mapping):
             protocol = str(payload.get("protocol") or _PROTOCOL)
             version = _safe_scalar(payload.get("version"), limit=80)
@@ -1183,6 +1768,46 @@ class OllamaWorkerPool:
                 reported_latency = measured_ms
             if math.isfinite(reported_latency) and reported_latency >= 0:
                 measured_ms = reported_latency
+            raw_contexts = payload.get("model_contexts")
+            if isinstance(raw_contexts, Mapping):
+                for name, ctx in list(raw_contexts.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    parsed_ctx = _positive_int_value(ctx)
+                    if clean_name and parsed_ctx is not None:
+                        model_contexts[clean_name] = parsed_ctx
+            raw_loaded = payload.get("loaded_models")
+            if isinstance(raw_loaded, (list, tuple, set, frozenset)):
+                loaded_models = tuple(
+                    sorted({
+                        str(name).strip()[:256]
+                        for name in raw_loaded
+                        if str(name).strip()
+                    })
+                )[:_MAX_MODELS_PER_WORKER]
+            vram_bytes = _positive_int_value(payload.get("vram_bytes"))
+            ram_bytes = _positive_int_value(payload.get("ram_bytes"))
+            raw_kv = str(payload.get("kv_cache_type") or "").strip().lower()
+            if raw_kv in _KV_CACHE_TYPES:
+                kv_cache_type = raw_kv
+            raw_tools = payload.get("supports_tools")
+            if isinstance(raw_tools, Mapping):
+                for name, supported in list(raw_tools.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    if clean_name and isinstance(supported, bool):
+                        supports_tools[clean_name] = supported
+            raw_active = payload.get("model_active_billions")
+            if isinstance(raw_active, Mapping):
+                for name, active_val in list(raw_active.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    parsed_active = _parse_billions(active_val)
+                    if clean_name and parsed_active is not None:
+                        model_active_billions[clean_name] = parsed_active
+            raw_meta = payload.get("model_metadata")
+            if isinstance(raw_meta, Mapping):
+                for name, meta_val in list(raw_meta.items())[:_MAX_MODELS_PER_WORKER]:
+                    clean_name = str(name or "").strip()[:256]
+                    if clean_name and isinstance(meta_val, Mapping):
+                        model_metadata[clean_name] = dict(meta_val)
         else:
             raise ValueError("capability prober returned an invalid report")
         if protocol != _PROTOCOL:
@@ -1197,7 +1822,86 @@ class OllamaWorkerPool:
             models=models,
             observed_at=now,
             effective_max_inflight=min(self._max_inflight, advertised),
+            model_contexts=MappingProxyType(model_contexts),
+            loaded_models=loaded_models,
+            vram_bytes=vram_bytes,
+            ram_bytes=ram_bytes,
+            kv_cache_type=kv_cache_type,
+            supports_tools=MappingProxyType(supports_tools),
+            model_active_billions=MappingProxyType(model_active_billions),
+            model_metadata=MappingProxyType({
+                k: MappingProxyType(v) for k, v in model_metadata.items()
+            }),
         ), round(measured_ms, 3)
+
+    def register_worker(
+        self,
+        origin: str,
+        *,
+        allow_remote: bool | None = None,
+        trusted_origins: tuple[str, ...] | None = None,
+        refresh: bool = True,
+    ) -> WorkerSnapshot:
+        """Dynamically register or refresh a worker endpoint on the live pool.
+
+        Allows connecting a worker (for example a second PC over private
+        HTTPS) at runtime without recreating the pool, probing its
+        capabilities and pooling its discovered models when ``refresh`` is
+        true.  The origin passes the same trust policy as a configured worker:
+        a remote origin needs explicit remote consent (``allow_remote`` here,
+        or the pool's own) and HTTPS.  A pool whose roster is owned by a
+        membership controller or an external membership source refuses:
+        only that authority may add members.
+        """
+        effective_allow_remote = self._allow_remote if allow_remote is None else bool(allow_remote)
+        effective_trusted = self._trusted_origins if trusted_origins is None else tuple(trusted_origins)
+        normalized = validate_worker_origin(
+            origin,
+            allow_remote=effective_allow_remote,
+            trusted_origins=effective_trusted,
+        )
+        with self._condition:
+            if self._membership_authority is not None or self._external_source is not None:
+                raise ValueError(
+                    "worker roster is owned by membership; register_worker is refused"
+                )
+            existing = next(
+                (item for item in self._states if item.endpoint.origin == normalized),
+                None,
+            )
+            if existing is None:
+                if len(self._states) >= self._max_workers:
+                    raise ValueError(
+                        "at most %d Ollama workers are supported" % self._max_workers
+                    )
+                existing = _WorkerState(
+                    WorkerEndpoint(normalized, _worker_id(normalized), _metric_label(len(self._states)))
+                )
+                self._states.append(existing)
+                self._roster_generation += 1
+                self._local_origins = all(
+                    _is_local_origin(item.endpoint.origin) for item in self._states
+                )
+                if _is_loopback(normalized):
+                    # Keeps ``membership_limit`` within ``max_workers``.
+                    self._local_worker_count += 1
+                else:
+                    self._configured_remote_origins = self._configured_remote_origins | {normalized}
+                    self._allow_remote = self._allow_remote or effective_allow_remote
+                if (
+                    effective_allow_remote
+                    and self._capability_prober is not None
+                    and getattr(self._capability_prober, "_sonder_default_allow_remote", None) is False
+                ):
+                    self._capability_prober = _default_capability_prober(
+                        allow_remote=True, timeout=self._probe_timeout,
+                    )
+                self._condition.notify_all()
+            target_id = id(existing)
+        if refresh and self._capability_prober is not None:
+            self._refresh_capabilities(force=True, _targets=frozenset({target_id}))
+        with self._condition:
+            return self._snapshot(existing, self._clock())
 
     def _worker_metric_label(self, state: _WorkerState) -> str:
         # Reserve only when observed: provisional configured endpoints must
@@ -1269,7 +1973,9 @@ class OllamaWorkerPool:
                     worker=self._worker_metric_label(state), state="open"
                 )
 
-    def _record_success(self, state: _WorkerState, latency_ms: float) -> None:
+    def _record_success(
+        self, state: _WorkerState, latency_ms: float, *, inference: bool = False,
+    ) -> None:
         reconnect = state.consecutive_failures >= self._failure_threshold
         if reconnect:
             logger.debug(f"worker {state.endpoint.worker_id} reconnected after {state.consecutive_failures} failures")
@@ -1283,7 +1989,13 @@ class OllamaWorkerPool:
         state.cooldown_until = 0.0
         state.trips = 0
         state.half_open_inflight = False
-        if state.latency_ewma_ms is None:
+        state.half_open_owner = None
+        if inference:
+            state.inference_ewma_ms = (
+                latency_ms if state.inference_ewma_ms is None
+                else 0.25 * latency_ms + 0.75 * state.inference_ewma_ms
+            )
+        elif state.latency_ewma_ms is None:
             state.latency_ewma_ms = latency_ms
         else:
             state.latency_ewma_ms = 0.25 * latency_ms + 0.75 * state.latency_ewma_ms
@@ -1712,6 +2424,22 @@ class OllamaWorkerPool:
                 results[endpoint.worker_id] = "error: %s" % _safe_error(error)
         return results
 
+    def catalog_member(self, origin: str) -> bool:
+        """Whether ``origin`` is a member ``catalog_union`` would read right now.
+
+        That is the admissibility ``_choose`` applies (membership, no
+        compatibility error), ignoring load and cooldown.  An external roster
+        without ``local_fallback`` never admits the loopback primary.
+        """
+        wanted = str(origin or "").rstrip("/")
+        with self._condition:
+            now = self._clock()
+            return any(
+                state.endpoint.origin == wanted and self._membership_admissible(state, now)
+                and not state.compatibility_error
+                for state in self._states
+            )
+
     def catalog_union(
         self, fetch_tags: Callable[[str], object], *, routable_only: bool = False,
     ) -> dict:
@@ -1772,6 +2500,7 @@ class OllamaWorkerPool:
     def _choose(
         self, *, model: str | None, excluded: set[str], now: float,
         evidence_allowed: set[str] | None = None,
+        required_num_ctx: int | None = None,
     ) -> _WorkerState | None:
         candidates = [
             state for state in self._states
@@ -1782,6 +2511,7 @@ class OllamaWorkerPool:
             and (evidence_allowed is None or state.endpoint.worker_id in evidence_allowed)
             and state.cooldown_until <= now
             and not state.half_open_inflight
+            and state.unpark_waiters == 0
             and state.inflight < self._capacity(state)
         ]
         if not candidates:
@@ -1796,16 +2526,47 @@ class OllamaWorkerPool:
         start = self._cursor % len(candidates)
         self._cursor += 1
         rotated = candidates[start:] + candidates[:start]
+        # Model-less reads rank by control-plane RTT. Inference ranks by
+        # inference time only once every candidate has one; until then it
+        # uses control-plane RTT for all, so the two scales never mix.
+        by_inference = model is not None and all(
+            state.inference_ewma_ms is not None for state in candidates
+        )
+        target_model_key = _model_key(model) if model else ""
+        wanted_ctx = (
+            int(required_num_ctx)
+            if isinstance(required_num_ctx, int)
+            and not isinstance(required_num_ctx, bool)
+            and required_num_ctx > 0
+            else None
+        )
 
         def score(state: _WorkerState):
-            latency = state.latency_ewma_ms
+            latency = state.inference_ewma_ms if by_inference else state.latency_ewma_ms
             if latency is None:
                 latency = 1000.0
             lacks_model = (
                 1 if model and state.known_models is not None
-                and _model_key(model) not in state.known_models else 0
+                and target_model_key not in state.known_models else 0
             )
-            return (lacks_model, (state.inflight + 1) * latency, state.inflight)
+            caps = state.capabilities
+            if model and caps is not None:
+                loaded_keys = {_model_key(item) for item in caps.loaded_models}
+                not_resident = 0 if target_model_key in loaded_keys else 1
+                worker_ctx = caps.context_for(model)
+                ctx_headroom_miss = (
+                    1 if wanted_ctx is not None and worker_ctx is not None and worker_ctx < wanted_ctx else 0
+                )
+            else:
+                not_resident = 0
+                ctx_headroom_miss = 0
+            return (
+                lacks_model,
+                not_resident,
+                ctx_headroom_miss,
+                (state.inflight + 1) * latency,
+                state.inflight,
+            )
 
         chosen = min(rotated, key=score)
         logger.debug(
@@ -1823,7 +2584,16 @@ class OllamaWorkerPool:
         admission_timeout: float,
         evidence_allowed: set[str] | None = None,
         evidence_reason: str = "",
+        required_num_ctx: int | None = None,
+        _lease_box: list | None = None,
+        _lease_caller: str = "",
     ) -> _WorkerState:
+        """Count one slot on a chosen worker and return that worker.
+
+        With ``_lease_box``, the slot's lease is opened and appended to it in
+        the same critical section as the count, so no exit path between the
+        two can leave a slot counted without a lease to close it.
+        """
         logger.debug(f"_acquire: model={model!r}, excluded={excluded}, timeout={admission_timeout:.3f}s")
         deadline = time.monotonic() + admission_timeout
         queued = False
@@ -1836,13 +2606,22 @@ class OllamaWorkerPool:
                     raise WorkerPoolDraining("Ollama worker pool is draining")
                 now = self._clock()
                 state = self._choose(model=model, excluded=excluded, now=now,
-                                     evidence_allowed=evidence_allowed)
+                                     evidence_allowed=evidence_allowed,
+                                     required_num_ctx=required_num_ctx)
                 if state is not None:
                     if self._metrics_observer is not None:
                         self._worker_metric_label(state)
+                    half_open = state.consecutive_failures >= self._failure_threshold
+                    lease = None
+                    if _lease_box is not None:
+                        lease = self._new_lease(state, model=model, caller=_lease_caller)
                     state.inflight += 1
-                    if state.consecutive_failures >= self._failure_threshold:
+                    if lease is not None:
+                        self._leases[lease.id] = lease
+                        _lease_box.append(lease)
+                    if half_open:
                         state.half_open_inflight = True
+                        state.half_open_owner = lease.id if lease is not None else None
                     if queued:
                         self._waiters -= 1
                     return state
@@ -1873,7 +2652,7 @@ class OllamaWorkerPool:
 
                 saturated = any(
                     state.cooldown_until <= now
-                    and state.inflight >= self._capacity(state)
+                    and (state.inflight >= self._capacity(state) or state.unpark_waiters)
                     for state in remaining_states
                 )
                 if not saturated:
@@ -1885,7 +2664,7 @@ class OllamaWorkerPool:
                     )
                     raise WorkerPoolUnavailable(
                         "all Ollama workers are unavailable; retry after %.3fs"
-                        % retry_after
+                        % retry_after, retry_after_seconds=retry_after,
                     )
                 if not queued:
                     if self._waiters >= self._queue_depth:
@@ -1906,12 +2685,17 @@ class OllamaWorkerPool:
                     logger.debug(f"_acquire: queued for capacity, waiters={self._waiters}/{self._queue_depth}")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    reclaimed = self._leases_reclaimed
+                    self._reconcile_leases_locked(now)
+                    if self._leases_reclaimed != reclaimed:
+                        continue  # a dead holder's slot was just returned
                     self._waiters -= 1
                     self._metrics["backpressure_rejections"] += 1
+                    holder = self._lease_holder_note_locked(remaining_states, now)
                     logger.warning(
                         f"admission timeout after {admission_timeout:.3f}s "
                         f"waiting for worker capacity, model={model!r}, "
-                        f"waiters={self._waiters}/{self._queue_depth}"
+                        f"waiters={self._waiters}/{self._queue_depth}{holder}"
                     )
                     raise WorkerPoolBackpressure(
                         "timed out waiting for Ollama worker capacity"
@@ -1926,14 +2710,30 @@ class OllamaWorkerPool:
         *,
         latency_ms: float | None = None,
         count_failure: bool = True,
+        _lease: _PoolLease | None = None,
     ) -> None:
         if latency_ms is None:
             latency_ms = max(0.0, float(elapsed or 0.0) * 1000.0)
         with self._condition:
-            state.inflight = max(0, state.inflight - 1)
-            state.half_open_inflight = False
+            # A lease parked in GPU admission already returned its slot.
+            if _lease is None or _lease.counted:
+                state.inflight = max(0, state.inflight - 1)
+            if _lease is not None:
+                _lease.counted = False
+                _lease.closed = True
+                self._leases.pop(_lease.id, None)
+            if _lease is None or state.half_open_owner == _lease.id:
+                # Only the request that holds the half-open probe ends it; a
+                # success below also closes it (the worker answered).
+                state.half_open_inflight = False
+                state.half_open_owner = None
             if error is None:
-                self._record_success(state, latency_ms)
+                if _lease is not None and _lease.model:
+                    self._record_success(state, max(
+                        0.0, latency_ms - _lease.admission_seconds * 1000.0,
+                    ), inference=True)
+                else:
+                    self._record_success(state, latency_ms)
                 result = "ok"
             elif count_failure and self._retryable(error):
                 self._record_transport_failure(state, error)
@@ -1949,6 +2749,214 @@ class OllamaWorkerPool:
                 )
             self._prune_drained()
             self._condition.notify_all()
+
+    # -- slot leases --------------------------------------------------------------
+    def _new_lease(self, state: _WorkerState, *, model: str | None, caller: str) -> _PoolLease:
+        """An unregistered lease on ``state`` owned by the calling thread."""
+        return _PoolLease(
+            id=next(self._lease_ids), state=state,
+            worker_id=state.endpoint.worker_id,
+            model=str(model or "")[:128], caller=str(caller or "")[:32],
+            thread=threading.current_thread(), started=self._clock(),
+        )
+
+    def _close_lease(
+        self,
+        lease: _PoolLease,
+        error: BaseException | None = None,
+        *,
+        latency_ms: float | None = None,
+        count_failure: bool = True,
+    ) -> bool:
+        """Finish ``lease`` once; the first close wins and later ones are no-ops."""
+        with self._condition:
+            if lease.closed:
+                return False
+            self._finish(
+                lease.state, error, latency_ms=latency_ms,
+                count_failure=count_failure, _lease=lease,
+            )
+            return True
+
+    def _abandon_lease(self, lease: _PoolLease, error: BaseException | None) -> None:
+        """Close a lease its request left open, without blaming the worker."""
+        with self._condition:
+            phase = lease.phase
+            held = max(0.0, self._clock() - lease.started)
+            closed = self._close_lease(
+                lease, error if error is not None else WorkerPoolError("pool lease abandoned"),
+                count_failure=False,
+            )
+        if closed:
+            logger.warning(
+                "Ollama pool lease #%d released on abnormal exit: worker=%s caller=%s "
+                "model=%s phase=%s held=%.3fs exception=%s",
+                lease.id, lease.worker_id, lease.caller, lease.model, phase, held,
+                type(error).__name__ if error is not None else "none",
+            )
+
+    def _reconcile_leases_locked(self, now: float) -> None:
+        """Warn once about long-held leases; reclaim leases whose thread died.
+
+        This "watchdog" is passive: there is no timer or thread. It runs only
+        when ``summary()``, ``status()`` or an ``_acquire`` admission timeout
+        calls it, so an idle pool reclaims nothing until one of those runs.
+        Caller holds ``_condition``. A reclaim restores the invariant that
+        ``state.inflight`` equals the open, counted leases on that state.
+        """
+        for lease in tuple(self._leases.values()):
+            age = max(0.0, now - lease.started)
+            try:
+                alive = bool(lease.thread.is_alive())
+            except RuntimeError:
+                # Python 3.14's ``_DummyThread.is_alive()`` raises once the
+                # foreign thread is gone; that thread can no longer close it.
+                alive = False
+            thread_name = _safe_scalar(getattr(lease.thread, "name", ""), limit=80)
+            if not alive:
+                logger.error(
+                    "Ollama pool lease #%d reclaimed: thread %s exited without "
+                    "releasing it; worker=%s caller=%s model=%s phase=%s age=%.1fs",
+                    lease.id, thread_name, lease.worker_id, lease.caller,
+                    lease.model, lease.phase, age,
+                )
+                state = lease.state
+                if lease.counted:
+                    state.inflight = max(0, state.inflight - 1)
+                lease.counted = False
+                lease.closed = True
+                del self._leases[lease.id]
+                if state.half_open_owner == lease.id or not any(
+                    other.state is state for other in self._leases.values()
+                ):
+                    # The dead lease owned the half-open probe, or no live
+                    # request on this worker can own it.
+                    state.half_open_inflight = False
+                    state.half_open_owner = None
+                self._leases_reclaimed += 1
+                self._condition.notify_all()
+                continue
+            if not lease.warned and age >= self._lease_warn_after:
+                lease.warned = True
+                logger.warning(
+                    "Ollama pool lease #%d held for %.1fs: worker=%s caller=%s model=%s "
+                    "phase=%s thread=%s alive=%s",
+                    lease.id, age, lease.worker_id, lease.caller, lease.model,
+                    lease.phase, thread_name, alive,
+                )
+
+    def _lease_holder_note_locked(self, states, now: float) -> str:
+        """``; held by lease #N ...`` for the oldest lease on saturated ``states``."""
+        saturated = {
+            id(state) for state in states
+            if state.cooldown_until <= now and state.inflight >= self._capacity(state)
+        }
+        holders = [lease for lease in self._leases.values()
+                   if lease.counted and id(lease.state) in saturated]
+        if not holders:
+            return ""
+        oldest = min(holders, key=lambda lease: lease.started)
+        return "; held by lease #%d caller=%s model=%s phase=%s age=%.1fs" % (
+            oldest.id, oldest.caller, oldest.model, oldest.phase,
+            max(0.0, now - oldest.started),
+        )
+
+    def _lease_summary_locked(self, now: float) -> dict:
+        oldest = min(self._leases.values(), key=lambda lease: lease.started, default=None)
+        return {
+            "held": len(self._leases),
+            "oldest_age_seconds": (
+                None if oldest is None else round(max(0.0, now - oldest.started), 3)
+            ),
+            "oldest_phase": None if oldest is None else oldest.phase,
+            "reclaimed": self._leases_reclaimed,
+        }
+
+    def _park_lease(self, lease: _PoolLease) -> None:
+        """Return ``lease``'s slot while its request waits in GPU admission.
+
+        GPU admission calls this (through ``admitted``) on the request thread,
+        holding none of its own locks, just before the request first queues.
+        The lease stays open and attributable; ``_unpark_lease`` counts it again.
+        """
+        with self._condition:
+            if lease.closed or not lease.counted:
+                return
+            lease.state.inflight = max(0, lease.state.inflight - 1)
+            lease.counted = False
+            self._condition.notify_all()
+        logger.debug(
+            "pool lease #%d parked during GPU admission: worker=%s model=%s",
+            lease.id, lease.worker_id, lease.model,
+        )
+
+    def _unpark_lease(self, lease: _PoolLease, deadline: float | None) -> None:
+        """Count a parked lease again once its worker has a free slot.
+
+        Runs inside GPU admission's context while the request holds a GPU
+        slot, so the wait is capped at the local admission timeout (or
+        ``deadline``, absolute ``time.monotonic()``, if sooner): a GPU slot
+        must not sit unused for the rest of another request's run, and the
+        host-memory decision behind it goes stale. Any raise here releases the
+        GPU ticket. Fresh requests do not take the worker while this waits.
+
+        Raises ``WorkerPoolDraining`` when the pool drains,
+        ``WorkerPoolUnavailable`` if the worker entered cooldown or another
+        request holds its half-open probe (nothing was sent; the caller may
+        retry), and ``WorkerPoolBackpressure`` at the cap (the same refusal
+        as a pool queue timeout; the caller may retry).
+        """
+        cap = time.monotonic() + self._local_admission_timeout
+        if deadline is not None:
+            cap = min(cap, deadline)
+        state = lease.state
+        with self._condition:
+            if lease.closed or lease.counted:
+                return
+            state.unpark_waiters += 1
+            try:
+                while True:
+                    if self._draining:
+                        self._metrics["drain_rejections"] += 1
+                        raise WorkerPoolDraining("Ollama worker pool is draining")
+                    now = self._clock()
+                    if state.cooldown_until > now or (
+                        state.half_open_inflight and state.half_open_owner != lease.id
+                    ):
+                        retry_after = max(0.0, state.cooldown_until - now)
+                        raise WorkerPoolUnavailable(
+                            "Ollama worker %s became unavailable while the request waited "
+                            "in GPU admission; retry after %.3fs" % (lease.worker_id, retry_after),
+                            retry_after_seconds=retry_after,
+                        )
+                    remaining = cap - time.monotonic()
+                    # A request whose own deadline has passed would only time
+                    # out in the transport and be charged to the worker.
+                    expired = deadline is not None and deadline <= time.monotonic()
+                    if state.inflight < self._capacity(state) and not expired:
+                        state.inflight += 1
+                        lease.counted = True
+                        if state.consecutive_failures >= self._failure_threshold:
+                            state.half_open_inflight = True
+                            state.half_open_owner = lease.id
+                        return
+                    if remaining <= 0 or expired:
+                        self._metrics["backpressure_rejections"] += 1
+                        logger.warning(
+                            "pool lease #%d timed out resuming worker %s after GPU "
+                            "admission, model=%s%s",
+                            lease.id, lease.worker_id, lease.model,
+                            self._lease_holder_note_locked((state,), self._clock()),
+                        )
+                        raise WorkerPoolBackpressure(
+                            "timed out waiting for Ollama worker capacity after GPU "
+                            "admission; GPU slot released, retry"
+                        )
+                    self._condition.wait(timeout=remaining)
+            finally:
+                state.unpark_waiters -= 1
+                # Fresh requests queued behind this one may now be eligible.
+                self._condition.notify_all()
 
     def request_primary(self, sender, *, model=None, payload=None, origin=None):
         """Gate the single-host/local-only path without enabling remote failover.
@@ -2019,9 +3027,15 @@ class OllamaWorkerPool:
         has_image=False,
         approx_tokens=0,
         long_context=False,
+        required_num_ctx: int | None = None,
     ):
         """Admit and send one logical request with pre-response failover only."""
         model = str(model or "").strip() or None
+        effective_num_ctx = required_num_ctx
+        if effective_num_ctx is None and isinstance(payload, Mapping):
+            opts = payload.get("options")
+            if isinstance(opts, Mapping):
+                effective_num_ctx = _positive_int_value(opts.get("num_ctx"))
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
@@ -2145,154 +3159,179 @@ class OllamaWorkerPool:
             if len(attempted) >= self._max_workers:
                 # Reconciliation cannot grow one logical request's retry set.
                 raise last_error or WorkerPoolUnavailable("Ollama worker attempt limit reached")
+            # ``_acquire`` opens the lease into ``leases`` under its lock, and
+            # this ``try`` already covers the call, so every exit closes it.
+            leases: list[_PoolLease] = []
+            abandoned_by = None
             try:
-                state = self._acquire(
-                    model=model,
-                    excluded=attempted,
-                    admission_timeout=max(
-                        0.0, admission_deadline - time.monotonic(),
-                    ),
-                    evidence_allowed=evidence_allowed,
-                    evidence_reason=evidence_reason,
-                )
-            except (WorkerPoolUnavailable, WorkerCapabilityUnavailable):
-                if last_error is not None:
-                    logger.error(
-                        f"all attempted workers failed for model={model!r}, "
-                        f"attempted={attempted}, last_error={_safe_error(last_error)!r}"
-                    )
-                    raise last_error
-                raise
-            with self._condition:
-                if attempted:
-                    self._metrics["failovers"] += 1
-                    logger.warning(
-                        f"failing over to worker {state.endpoint.worker_id} "
-                        f"(attempt #{len(attempted) + 1}, model={model!r}), "
-                        f"previous worker(s) failed: {attempted}"
-                    )
-                self._metrics["dispatches"] += 1
-            attempted.add(state.endpoint.worker_id)
-            logger.debug(f"pool.request: dispatching to {state.endpoint.worker_id}, model={model!r}")
-            identity = None
-            if check_evidence is not None and required:
                 try:
-                    should_observe = self._capability_routing == "strict"
-                    if self._capability_routing == "advisory":
-                        should_observe = self._recent_evidence.has_fresh_failure(
-                            "ollama", model, required,
-                        )
-                    if should_observe:
-                        identity = self._observe_identity_cached(
-                            state.endpoint.origin, model, payload,
-                        )
-                    still_allowed, why = check_evidence(
-                        self._recent_evidence, model, required,
-                        backend="ollama", identity=identity,
-                        mode=self._capability_routing,
-                    )
-                except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
-                    if self._capability_routing == "advisory":
-                        still_allowed, why = True, "unverified: recent capability evidence unavailable"
-                    else:
-                        still_allowed, why = False, "recent capability evidence unavailable"
-                if not still_allowed:
-                    if self._capability_routing == "advisory":
-                        alternatives = (evidence_allowed or set()) - attempted
-                        if alternatives:
-                            evidence_allowed.discard(state.endpoint.worker_id)
-                            self._finish(
-                                state,
-                                error=WorkerCapabilityUnavailable(
-                                    f"worker capability evidence changed: {why}"
-                                ),
-                                count_failure=False,
-                            )
-                            evidence_reason = why
-                            continue
-                        logger.warning(
-                            "fallback_used: capability evidence refused worker %s: %s",
-                            state.endpoint.worker_id, why,
-                        )
-                        evidence_allowed = None
-                    else:
-                        evidence_allowed.discard(state.endpoint.worker_id)
-                if not still_allowed and self._capability_routing == "strict":
-                    self._finish(
-                        state,
-                        error=WorkerCapabilityUnavailable(
-                            f"worker capability evidence changed: {why}"
+                    state = self._acquire(
+                        model=model,
+                        excluded=attempted,
+                        admission_timeout=max(
+                            0.0, admission_deadline - time.monotonic(),
                         ),
-                        count_failure=False,
+                        evidence_allowed=evidence_allowed,
+                        evidence_reason=evidence_reason,
+                        required_num_ctx=effective_num_ctx,
+                        _lease_box=leases,
+                        _lease_caller=caller,
                     )
-                    evidence_reason = why
-                    continue
-            started = self._clock()
-            dispatch_identity = identity
-            try:
-                result = sender(state.endpoint.origin)
-            except Exception as error:
-                latency_ms = max(0.0, (self._clock() - started) * 1000.0)
-                retryable = self._retryable(error)
-                logger.debug(
-                    f"pool.request: error from {state.endpoint.worker_id} after {latency_ms:.1f}ms, "
-                    f"retryable={retryable}: {_safe_error(error)}"
-                )
-                self._finish(
-                    state, error=error, latency_ms=latency_ms,
-                    count_failure=retryable,
-                )
-                if not idempotent or not retryable:
-                    raise
-                logger.error(
-                    f"worker {state.endpoint.worker_id} inference request failed, "
-                    f"failing over to next worker, model={model!r}, "
-                    f"elapsed_ms={latency_ms:.1f}, error={_safe_error(error)!r}",
-                    exc_info=True,
-                )
-                last_error = error
-                continue
-            latency_ms = max(0.0, (self._clock() - started) * 1000.0)
-            logger.debug(f"pool.request: success from {state.endpoint.worker_id} in {latency_ms:.1f}ms")
-            if check_evidence is not None and required:
-                try:
-                    if self._capability_routing == "strict":
-                        identity = self._observe_identity_cached(
-                            state.endpoint.origin, model, payload,
+                except (WorkerPoolUnavailable, WorkerCapabilityUnavailable):
+                    if last_error is not None:
+                        logger.error(
+                            f"all attempted workers failed for model={model!r}, "
+                            f"attempted={attempted}, last_error={_safe_error(last_error)!r}"
                         )
+                        raise last_error
+                    raise
+                lease = leases[0]
+                with self._condition:
+                    if attempted:
+                        self._metrics["failovers"] += 1
+                        logger.warning(
+                            f"failing over to worker {state.endpoint.worker_id} "
+                            f"(attempt #{len(attempted) + 1}, model={model!r}), "
+                            f"previous worker(s) failed: {attempted}"
+                        )
+                    self._metrics["dispatches"] += 1
+                attempted.add(state.endpoint.worker_id)
+                logger.debug(f"pool.request: dispatching to {state.endpoint.worker_id}, model={model!r}")
+                identity = None
+                if check_evidence is not None and required:
+                    try:
+                        should_observe = self._capability_routing == "strict"
+                        if self._capability_routing == "advisory":
+                            should_observe = self._recent_evidence.has_fresh_failure(
+                                "ollama", model, required,
+                            )
+                        if should_observe:
+                            identity = self._observe_identity_cached(
+                                state.endpoint.origin, model, payload,
+                            )
                         still_allowed, why = check_evidence(
                             self._recent_evidence, model, required,
                             backend="ollama", identity=identity,
                             mode=self._capability_routing,
                         )
-                    else:
-                        # Advisory mode intentionally has no post-dispatch identity
-                        # observation.  A failed preflight remains a conservative
-                        # routing hint; dispatch itself is already complete.
-                        still_allowed, why = True, "unverified" if identity is None else ""
-                    if identity != dispatch_identity and (
-                        self._capability_routing == "strict"
-                        or identity is not None and dispatch_identity is not None
-                    ):
-                        still_allowed, why = False, "backend_identity_changed"
-                except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
-                    still_allowed = self._capability_routing == "advisory"
-                    why = "unverified: recent capability evidence unavailable"
-                if still_allowed and why:
-                    logger.info("worker %s capability route after response: %s", state.endpoint.worker_id, why)
-                if not still_allowed:
-                    self._finish(
-                        state,
-                        error=WorkerCapabilityUnavailable(
+                    except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
+                        if self._capability_routing == "advisory":
+                            still_allowed, why = True, "unverified: recent capability evidence unavailable"
+                        else:
+                            still_allowed, why = False, "recent capability evidence unavailable"
+                    if not still_allowed:
+                        if self._capability_routing == "advisory":
+                            alternatives = (evidence_allowed or set()) - attempted
+                            if alternatives:
+                                evidence_allowed.discard(state.endpoint.worker_id)
+                                self._close_lease(
+                                    lease,
+                                    error=WorkerCapabilityUnavailable(
+                                        f"worker capability evidence changed: {why}"
+                                    ),
+                                    count_failure=False,
+                                )
+                                evidence_reason = why
+                                continue
+                            logger.warning(
+                                "fallback_used: capability evidence refused worker %s: %s",
+                                state.endpoint.worker_id, why,
+                            )
+                            evidence_allowed = None
+                        else:
+                            evidence_allowed.discard(state.endpoint.worker_id)
+                    if not still_allowed and self._capability_routing == "strict":
+                        self._close_lease(
+                            lease,
+                            error=WorkerCapabilityUnavailable(
+                                f"worker capability evidence changed: {why}"
+                            ),
+                            count_failure=False,
+                        )
+                        evidence_reason = why
+                        continue
+                started = self._clock()
+                dispatch_identity = identity
+                try:
+                    # ``admitted()`` reads this to attribute (and in GPU
+                    # admission, park) the slot this sender is using.
+                    token = _ACTIVE_LEASE.set((self, lease))
+                    try:
+                        result = sender(state.endpoint.origin)
+                    finally:
+                        _ACTIVE_LEASE.reset(token)
+                except Exception as error:
+                    latency_ms = max(0.0, (self._clock() - started) * 1000.0)
+                    retryable = self._retryable(error)
+                    logger.debug(
+                        f"pool.request: error from {state.endpoint.worker_id} after {latency_ms:.1f}ms, "
+                        f"retryable={retryable}: {_safe_error(error)}"
+                    )
+                    self._close_lease(
+                        lease, error=error, latency_ms=latency_ms,
+                        count_failure=retryable,
+                    )
+                    if not idempotent or not retryable:
+                        raise
+                    logger.error(
+                        f"worker {state.endpoint.worker_id} inference request failed, "
+                        f"failing over to next worker, model={model!r}, "
+                        f"elapsed_ms={latency_ms:.1f}, error={_safe_error(error)!r}",
+                        exc_info=True,
+                    )
+                    last_error = error
+                    continue
+                latency_ms = max(0.0, (self._clock() - started) * 1000.0)
+                logger.debug(f"pool.request: success from {state.endpoint.worker_id} in {latency_ms:.1f}ms")
+                if check_evidence is not None and required:
+                    try:
+                        if self._capability_routing == "strict":
+                            identity = self._observe_identity_cached(
+                                state.endpoint.origin, model, payload,
+                            )
+                            still_allowed, why = check_evidence(
+                                self._recent_evidence, model, required,
+                                backend="ollama", identity=identity,
+                                mode=self._capability_routing,
+                            )
+                        else:
+                            # Advisory mode intentionally has no post-dispatch identity
+                            # observation.  A failed preflight remains a conservative
+                            # routing hint; dispatch itself is already complete.
+                            still_allowed, why = True, "unverified" if identity is None else ""
+                        if identity != dispatch_identity and (
+                            self._capability_routing == "strict"
+                            or identity is not None and dispatch_identity is not None
+                        ):
+                            still_allowed, why = False, "backend_identity_changed"
+                    except (AttributeError, TypeError, ValueError, OSError, RuntimeError):
+                        still_allowed = self._capability_routing == "advisory"
+                        why = "unverified: recent capability evidence unavailable"
+                    if still_allowed and why:
+                        logger.info("worker %s capability route after response: %s", state.endpoint.worker_id, why)
+                    if not still_allowed:
+                        self._close_lease(
+                            lease,
+                            error=WorkerCapabilityUnavailable(
+                                f"worker capability evidence changed after response: {why}"
+                            ),
+                            count_failure=False,
+                        )
+                        raise WorkerCapabilityUnavailable(
                             f"worker capability evidence changed after response: {why}"
-                        ),
-                        count_failure=False,
-                    )
-                    raise WorkerCapabilityUnavailable(
-                        f"worker capability evidence changed after response: {why}"
-                    )
-            self._finish(state, error=None, latency_ms=latency_ms)
-            return result
+                        )
+                self._close_lease(lease, error=None, latency_ms=latency_ms)
+                return result
+            except BaseException as error:
+                abandoned_by = error
+                raise
+            finally:
+                # Any exit that did not close the lease (a BaseException, or
+                # an evidence check raising outside its caught tuple) must
+                # still return the slot, or the worker is lost until restart.
+                for opened in leases:
+                    if not opened.closed:
+                        self._abandon_lease(opened, abandoned_by)
 
     def drain(self, *, timeout_seconds: float = 5.0) -> bool:
         """Stop admission and wait a bounded interval for in-flight calls."""
@@ -2414,6 +3453,20 @@ class OllamaWorkerPool:
             cooldown_until=state.cooldown_until,
             trips=state.trips,
             probing=state.half_open_inflight or state.capability_probe_inflight,
+            inference_ewma_ms=(
+                None if state.inference_ewma_ms is None
+                else round(state.inference_ewma_ms, 3)
+            ),
+            model_contexts=dict(capabilities.model_contexts) if capabilities else {},
+            loaded_models=capabilities.loaded_models if capabilities else (),
+            vram_bytes=capabilities.vram_bytes if capabilities else None,
+            ram_bytes=capabilities.ram_bytes if capabilities else None,
+            kv_cache_type=capabilities.kv_cache_type if capabilities else None,
+            supports_tools=dict(capabilities.supports_tools) if capabilities else {},
+            model_active_billions=dict(capabilities.model_active_billions) if capabilities else {},
+            model_metadata={
+                k: dict(v) for k, v in capabilities.model_metadata.items()
+            } if capabilities else {},
         )
 
     def _encode_status_cursor(self, offset: int, principal: str) -> str:
@@ -2486,9 +3539,14 @@ class OllamaWorkerPool:
             "trips": snapshot.trips,
             "probing": snapshot.probing,
             "ewma_latency_ms": snapshot.ewma_latency_ms or 0.0,
+            "inference_ewma_ms": snapshot.inference_ewma_ms,
             "error_category": OllamaWorkerPool._status_error_category(snapshot),
             "model_count": len(snapshot.models),
             "model_preview": list(previews),
+            "loaded_model_count": len(snapshot.loaded_models),
+            "vram_bytes": snapshot.vram_bytes,
+            "ram_bytes": snapshot.ram_bytes,
+            "kv_cache_type": snapshot.kv_cache_type,
         }
 
     @staticmethod
@@ -2574,6 +3632,7 @@ class OllamaWorkerPool:
             "request_placement": "whole-worker; no model sharding",
             "model_sharding": False,
             "indefinite_scale": False,
+            "leases": self._lease_summary_locked(now),
             **self._gpu_admission_summary(),
         }
 
@@ -2587,7 +3646,169 @@ class OllamaWorkerPool:
     def summary(self) -> dict:
         """Return cached aggregate state only; never probe or construct detail."""
         with self._condition:
-            return self._summary_locked(self._clock())
+            now = self._clock()
+            self._reconcile_leases_locked(now)
+            return self._summary_locked(now)
+
+    def pool_capacity_summary(self) -> dict[str, Any]:
+        """Return cached pool-wide worker resource, residency, and context summary."""
+        now = self._clock()
+        with self._condition:
+            self._reconcile_leases_locked(now)
+            worker_rows: list[dict[str, Any]] = []
+            available_models: set[str] = set()
+            resident_models: set[str] = set()
+            model_contexts: dict[str, int] = {}
+            tool_capable_models: set[str] = set()
+            total_slots = 0
+            available_slots = 0
+            healthy_count = 0
+            vram_values: list[int] = []
+            ram_values: list[int] = []
+            for state in self._states:
+                snap = self._snapshot(state, now)
+                free_slots = max(0, snap.capacity - snap.inflight) if snap.healthy and not self._draining else 0
+                if snap.healthy:
+                    healthy_count += 1
+                    total_slots += snap.capacity
+                    available_slots += free_slots
+                    available_models.update(snap.models)
+                    resident_models.update(snap.loaded_models)
+                    for model_name, ctx in snap.model_contexts.items():
+                        prev = model_contexts.get(model_name)
+                        if prev is None or ctx > prev:
+                            model_contexts[model_name] = ctx
+                    for model_name, supported in snap.supports_tools.items():
+                        if supported:
+                            tool_capable_models.add(model_name)
+                    if snap.vram_bytes is not None:
+                        vram_values.append(snap.vram_bytes)
+                    if snap.ram_bytes is not None:
+                        ram_values.append(snap.ram_bytes)
+                worker_rows.append({
+                    "worker_id": snap.worker_id,
+                    "origin": snap.origin,
+                    "state": snap.state,
+                    "healthy": snap.healthy,
+                    "inflight": snap.inflight,
+                    "capacity": snap.capacity,
+                    "free_slots": free_slots,
+                    "vram_bytes": snap.vram_bytes,
+                    "ram_bytes": snap.ram_bytes,
+                    "kv_cache_type": snap.kv_cache_type,
+                    "loaded_models": list(snap.loaded_models),
+                    "model_count": len(snap.models),
+                    "model_contexts": dict(snap.model_contexts),
+                })
+        return {
+            "worker_count": len(worker_rows),
+            "healthy_worker_count": healthy_count,
+            "total_slots": total_slots,
+            "available_slots": available_slots,
+            "total_vram_bytes": sum(vram_values) if vram_values else None,
+            "total_ram_bytes": sum(ram_values) if ram_values else None,
+            "resident_models": sorted(resident_models),
+            "available_models": sorted(available_models),
+            "model_contexts": dict(sorted(model_contexts.items())),
+            "tool_capable_models": sorted(tool_capable_models),
+            "workers": worker_rows,
+        }
+
+    def aggregate_context_budget(self, model: str | None = None) -> dict[str, Any]:
+        """Summarize context and residency budgets across healthy pool workers.
+
+        When ``model`` is supplied, restricts per-worker context headroom,
+        residency, tool capability, and MoE active-parameter metadata to
+        healthy admissible workers serving that model. When omitted, returns
+        the pool-wide ``pool_capacity_summary()`` with ``max_context``.
+        """
+        if not model or not str(model).strip():
+            capacity = self.pool_capacity_summary()
+            contexts = list(capacity["model_contexts"].values())
+            capacity["max_context"] = max(contexts) if contexts else None
+            return capacity
+
+        target = str(model).strip()
+        target_key = _model_key(target)
+        now = self._clock()
+        with self._condition:
+            self._reconcile_leases_locked(now)
+            candidates: list[tuple[tuple[int, int, float, int], _WorkerState, WorkerSnapshot]] = []
+            per_worker: dict[str, dict[str, Any]] = {}
+            resident_origins: list[str] = []
+            contexts: list[int] = []
+            kv_cache_types: dict[str, str] = {}
+            tool_flags: list[bool] = []
+            active_billions_val: float | None = None
+
+            for state in self._states:
+                if not (
+                    self._membership_admissible(state, now)
+                    and not state.compatibility_error
+                    and state.cooldown_until <= now
+                    and self._supports_model(state, target)
+                ):
+                    continue
+                snap = self._snapshot(state, now)
+                caps = state.capabilities
+                ctx = caps.context_for(target) if caps is not None else None
+                resident = (
+                    target_key in {_model_key(m) for m in caps.loaded_models}
+                    if caps is not None
+                    else False
+                )
+                supports_tools_val = caps.model_supports_tools(target) if caps is not None else None
+                active_b = caps.active_billions_for(target) if caps is not None else None
+                if active_billions_val is None and active_b is not None:
+                    active_billions_val = active_b
+                if supports_tools_val is not None:
+                    tool_flags.append(supports_tools_val)
+                if ctx is not None:
+                    contexts.append(ctx)
+                if resident:
+                    resident_origins.append(snap.origin)
+                if snap.kv_cache_type:
+                    kv_cache_types[snap.origin] = snap.kv_cache_type
+                free_slots = max(0, snap.capacity - snap.inflight) if snap.healthy and not self._draining else 0
+                per_worker[snap.origin] = {
+                    "worker_id": snap.worker_id,
+                    "healthy": snap.healthy,
+                    "free_slots": free_slots,
+                    "context": ctx,
+                    "resident": resident,
+                    "vram_bytes": snap.vram_bytes,
+                    "ram_bytes": snap.ram_bytes,
+                    "kv_cache_type": snap.kv_cache_type,
+                    "supports_tools": supports_tools_val,
+                    "active_billions": active_b,
+                }
+                if snap.healthy:
+                    latency = state.inference_ewma_ms if state.inference_ewma_ms is not None else (
+                        state.latency_ewma_ms if state.latency_ewma_ms is not None else 1000.0
+                    )
+                    lacks = 1 if state.known_models is not None and target_key not in state.known_models else 0
+                    candidates.append((
+                        (lacks, 0 if resident else 1, (state.inflight + 1) * latency, state.inflight),
+                        state,
+                        snap,
+                    ))
+
+        recommended_origin = min(candidates, key=lambda item: item[0])[2].origin if candidates else None
+        supports_tools_agg: bool | None = None
+        if tool_flags:
+            supports_tools_agg = any(tool_flags)
+        return {
+            "model": target,
+            "eligible_workers": len(per_worker),
+            "max_context": max(contexts) if contexts else None,
+            "min_context": min(contexts) if contexts else None,
+            "recommended_worker_origin": recommended_origin,
+            "resident_origins": resident_origins,
+            "supports_tools": supports_tools_agg,
+            "active_billions": active_billions_val,
+            "kv_cache_types": kv_cache_types,
+            "per_worker": per_worker,
+        }
 
     def status(
         self, *, cursor: str | None = None, page_size: int | None = None,
@@ -2599,6 +3820,7 @@ class OllamaWorkerPool:
                 cursor=cursor, page_size=page_size, principal=principal,
             )
             now = self._clock()
+            self._reconcile_leases_locked(now)
             common = self._summary_locked(now)
             total_count = len(self._states)
             # Snapshot only this requested page. Models are immutable tuples;

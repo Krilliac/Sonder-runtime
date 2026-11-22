@@ -329,3 +329,47 @@ def test_the_selfmod_editor_runs_under_the_run_fence(monkeypatch):
     assert out.startswith("ERROR: selfmod run failed closed: stop here")
     assert seen["fence"].label == "selfmod:run-9"
     assert effect_fence.current() is None
+
+
+# -- the fleet agent behind the current fence (read by the cancel watcher) --
+
+
+def test_fleet_fence_names_its_agent_and_other_fences_do_not():
+    fleet = effect_fence.Fence("fleet:a1", lambda: "", fleet_agent_id="a1")
+    assert effect_fence.current_fleet_agent_id() == ""
+    with effect_fence.held(fleet):
+        assert effect_fence.current_fleet_agent_id() == "a1"
+    assert effect_fence.current_fleet_agent_id() == ""
+    assert effect_fence.fleet_fence("a2", "owner").fleet_agent_id == "a2"
+    assert effect_fence.autopilot_fence("run-1", "owner").fleet_agent_id == ""
+
+
+def test_fleet_fence_under_a_nested_non_fleet_fence_is_found():
+    fleet = effect_fence.Fence("fleet:a1", lambda: "", fleet_agent_id="a1")
+    inner = effect_fence.Fence("autopilot:x", lambda: "")
+    with effect_fence.held(fleet):
+        with effect_fence.held(inner):
+            assert effect_fence.current() is inner
+            assert effect_fence.current_fleet_agent_id() == "a1"
+        assert effect_fence.current_fleet_agent_id() == "a1"
+    assert effect_fence.current_fleet_agent_id() == ""
+
+
+def test_innermost_fleet_fence_wins_over_an_outer_one():
+    outer = effect_fence.Fence("fleet:o", lambda: "", fleet_agent_id="outer")
+    inner = effect_fence.Fence("fleet:i", lambda: "", fleet_agent_id="inner")
+    with effect_fence.held(outer), effect_fence.held(inner):
+        assert effect_fence.current_fleet_agent_id() == "inner"
+
+
+def test_fleet_fence_is_visible_in_a_copied_context_on_another_thread():
+    import contextvars
+    import threading
+
+    seen = []
+    with effect_fence.held(effect_fence.Fence("fleet:a1", lambda: "", fleet_agent_id="a1")):
+        ctx = contextvars.copy_context()
+    thread = threading.Thread(target=ctx.run, args=(lambda: seen.append(effect_fence.current_fleet_agent_id()),))
+    thread.start()
+    thread.join(5)
+    assert seen == ["a1"]

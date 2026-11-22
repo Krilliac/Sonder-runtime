@@ -33,6 +33,7 @@ export 'api/transport.dart'
         SonderEndpoint,
         CleartextKeyPolicy,
         describeServerError,
+        localOpenRefusalCodes,
         responseException,
         isPreRequestConnectFailure,
         newIdempotencyKey;
@@ -805,11 +806,26 @@ class SonderApi implements SonderApiPort {
     final command = normalizedKind == 'fleet'
         ? '/agentcancel $normalizedId'
         : '/autopilot cancel $normalizedId';
-    final reply = await chatDetailed(
-      [ChatMessage(role: Role.user, content: command)],
-      model: 'sonder',
-      project: project,
-    );
+    // Never fall back to the local server: a cancel must reach the server that
+    // owns the work, and a fallback reply carries a warning prefix that would
+    // defeat the refusal check below.
+    final token = CancelToken();
+    _activeTurns.add(token);
+    final ChatReply reply;
+    try {
+      reply = await _chatOnce(
+        [ChatMessage(role: Role.user, content: command)],
+        model: 'sonder',
+        contextSize: '8192',
+        sessionId: '',
+        project: project,
+        allowApproximateLocation: false,
+        cancel: token,
+        allowFallback: false,
+      );
+    } finally {
+      _activeTurns.remove(token);
+    }
     if (reply.refusal != null ||
         RegExp(
           r'^\s*(?:refused|error|could not|usage:)',
@@ -1372,11 +1388,16 @@ class SonderApi implements SonderApiPort {
   /// the server reports afterwards, so the UI shows what actually took effect
   /// rather than what was requested.
   ///
-  /// The server treats this authenticated POST as the attended confirmation
-  /// for raising the mode, so callers must confirm a raise with the person
-  /// first (plan P0-4). Each call carries a fresh `Idempotency-Key`: a
-  /// retried network send cannot switch twice. A 403 becomes "Only an
-  /// administrator can change the permission mode." (code `FORBIDDEN`).
+  /// The server treats this POST, sent with an API key or administrator
+  /// account, as the attended confirmation for raising the mode, so callers
+  /// must confirm a raise with the person first (plan P0-4). A local-open
+  /// server (no API key, no account requirement) refuses any raise with a
+  /// 403 `PERMISSION_MODE_ESCALATION_REFUSED`, whoever is signed in; that
+  /// exception keeps the server's message, which names the console command
+  /// and the restart that lifts it, and an empty remedy. Lowering the mode
+  /// still works there. Any other 403 becomes "Only an administrator can
+  /// change the permission mode." Each call carries a fresh
+  /// `Idempotency-Key`: a retried network send cannot switch twice.
   @override
   Future<PermissionMode> setPermissionMode(String mode,
       {String? idempotencyKey}) async {

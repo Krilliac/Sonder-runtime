@@ -1261,6 +1261,7 @@ _HEAD_FOLD_SOURCES = (
     "server.py",
     "intents.py",
     "sonder_runtime/interfaces/http/serve.py",
+    "sonder_runtime/interfaces/http/authority_contract.py",
     "sonder_runtime/interfaces/http/facades/developer_chat.py",
     "sonder_runtime/interfaces/repl/repl.py",
     "sonder_runtime/interfaces/repl/handler.py",
@@ -1286,7 +1287,7 @@ _NOT_A_HEAD = {
     # dispatcher (server.py control_command) uses casefold() and "_" -> "-", so
     # "/stash save_untracked" reads as non-dangerous here. Pre-existing on main;
     # the admin binding of runtime_source_stash still refuses non-admins.
-    ("sonder_runtime/interfaces/http/serve.py", "action = parts[0].lower() if parts else \"\""):
+    ("sonder_runtime/interfaces/http/authority_contract.py", "action = parts[0].lower() if parts else \"\""):
         "sub-action of /runtime, /update and /stash (see the /stash note above)",
     ("sonder_runtime/interfaces/repl/command_router.py", "if _norm_token(parts[0].lower()) not in _ARG_FILLERS:"):
         "filler word before a one-word argument, compared with ASCII fillers",

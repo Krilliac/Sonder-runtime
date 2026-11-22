@@ -242,6 +242,158 @@ def _scratch_cwd():
     return tempfile.mkdtemp(prefix="sonder-gen-")
 
 
+_DRAIN_GRACE = 5
+
+
+class _WindowsJob:
+    """Kill-on-close Job Object holding one child and all its descendants."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _Basic),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        ]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._k32 = k32
+        self._handle = k32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise OSError("CreateJobObjectW failed")
+        info = _Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(
+            self._handle, 9, ctypes.byref(info), ctypes.sizeof(info),
+        ):
+            self.close()
+            raise OSError("SetInformationJobObject failed")
+
+    def assign(self, proc):
+        return bool(self._k32.AssignProcessToJobObject(
+            self._handle, int(proc._handle),
+        ))
+
+    def terminate(self):
+        self._k32.TerminateJobObject(self._handle, 1)
+
+    def close(self):
+        if self._handle:
+            self._k32.CloseHandle(self._handle)
+            self._handle = None
+
+
+def _kill_tree(proc, job):
+    """Kill the child and every descendant, including orphaned grandchildren."""
+    if os.name == "nt":
+        if job is not None:
+            job.terminate()
+        else:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                )
+    else:
+        import signal
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def _run_tree(command, input_text=None, timeout=DEFAULT_TIMEOUT, cwd=None, env=None):
+    """Run ``command`` and return a CompletedProcess, bounded by ``timeout``.
+
+    The child runs in its own Job Object (Windows) or session (POSIX). On
+    timeout the whole tree is killed and the pipes are drained for at most
+    a few seconds, so a grandchild that inherited the pipes cannot stall the
+    caller past the bound (on Windows the pipe reader threads are abandoned
+    rather than closed, since closing would block on them). Raises subprocess.TimeoutExpired carrying the
+    partial output; spawn failures propagate unchanged.
+    """
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+        **kwargs,
+    )
+    job = None
+    if os.name == "nt":
+        try:
+            job = _WindowsJob()
+            if not job.assign(proc):
+                job.close()
+                job = None
+        except OSError:
+            job = None
+    try:
+        try:
+            out, err = proc.communicate(input=input_text, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            out, err = exc.stdout, exc.stderr
+            _kill_tree(proc, job)
+            try:
+                out, err = proc.communicate(timeout=_DRAIN_GRACE)
+            except subprocess.TimeoutExpired as drain:
+                out = drain.stdout if drain.stdout is not None else out
+                err = drain.stderr if drain.stderr is not None else err
+                if os.name != "nt":
+                    # On Windows communicate() reads the pipes in daemon
+                    # threads that hold the BufferedReader lock while blocked,
+                    # so close() here would block until the grandchild exits.
+                    # Those threads are left behind instead.
+                    for stream in (proc.stdout, proc.stderr):
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
+            raise subprocess.TimeoutExpired(
+                command, timeout, output=out, stderr=err,
+            ) from None
+        return subprocess.CompletedProcess(command, proc.returncode, out, err)
+    finally:
+        if job is not None:
+            job.terminate()
+            job.close()
+        elif proc.poll() is None:
+            _kill_tree(proc, None)
+
+
 def run_code_detail(
     code,
     extra="",
@@ -297,11 +449,9 @@ def run_code_detail(
                 with os.fdopen(rfd, "w", encoding="utf-8") as rf:
                     rf.write(runner)
                 command = [interp, runner_path]
-            p = subprocess.run(
+            p = _run_tree(
                 command,
-                input=stdin or "",
-                capture_output=True,
-                text=True,
+                input_text=stdin or "",
                 timeout=timeout,
                 cwd=scratch,
                 env=sonder_logging.child_environment(),
@@ -452,9 +602,8 @@ def _missing(exe):
 def _run_cmd(cmd, timeout, cwd=None):
     disposable = _scratch_cwd() if cwd is None else ""
     try:
-        p = subprocess.run(
-            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=timeout, cwd=cwd or disposable,
+        p = _run_tree(
+            cmd, timeout=timeout, cwd=cwd or disposable,
             env=sonder_logging.child_environment(),
         )
         return p.returncode == 0, _combine(p)

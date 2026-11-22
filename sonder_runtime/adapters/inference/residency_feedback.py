@@ -73,7 +73,7 @@ class _ModelState:
 
 
 class ResidencyFeedback:
-    """Thread-safe per-model spill tracker feeding ``residency_ceiling``."""
+    """Thread-safe per-(origin, model) spill tracker feeding ``residency_ceiling``."""
 
     def __init__(
         self,
@@ -81,6 +81,7 @@ class ResidencyFeedback:
         *,
         minimum_context: int,
         origin: str = "",
+        fetch_ps_for_origin: Callable[[str], Mapping[str, Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         check_interval: float = DEFAULT_CHECK_INTERVAL_SECONDS,
         ceiling_ttl: float = DEFAULT_CEILING_TTL_SECONDS,
@@ -88,7 +89,8 @@ class ResidencyFeedback:
         if check_interval < 0 or ceiling_ttl <= 0:
             raise ValueError("check_interval must be >= 0 and ceiling_ttl > 0")
         self._fetch_ps = fetch_ps
-        self.origin = origin
+        self._fetch_ps_for_origin = fetch_ps_for_origin
+        self.origin = self._normalize_origin(origin)
         self._minimum = max(1, int(minimum_context))
         self._clock = clock
         self._interval = float(check_interval)
@@ -97,18 +99,31 @@ class ResidencyFeedback:
         # Serializes probes so concurrent requests cannot issue parallel
         # /api/ps calls for the same stale entry.
         self._probe_lock = threading.Lock()
-        self._states: dict[str, _ModelState] = {}
+        self._states: dict[tuple[str, str], _ModelState] = {}
+
+    @staticmethod
+    def _normalize_origin(origin: str | None) -> str:
+        return str(origin or "").strip().rstrip("/").casefold()
 
     @staticmethod
     def _key(model: str) -> str:
         return str(model or "").strip().casefold()
 
-    def ceiling(self, model: str) -> int | None:
-        """Return the unexpired measured ceiling for ``model``, if any."""
-        key = self._key(model)
+    def _state_key(self, model: str, origin: str | None = None) -> tuple[str, str] | None:
+        model_key = self._key(model)
+        if not model_key:
+            return None
+        origin_key = self.origin if origin is None else self._normalize_origin(origin)
+        return (origin_key, model_key)
+
+    def ceiling(self, model: str, *, origin: str | None = None) -> int | None:
+        """Return the unexpired measured ceiling for ``(origin, model)``, if any."""
+        state_key = self._state_key(model, origin)
+        if state_key is None:
+            return None
         now = self._clock()
         with self._lock:
-            state = self._states.get(key)
+            state = self._states.get(state_key)
             if state is None or state.ceiling is None:
                 return None
             if now >= state.ceiling_expires:
@@ -116,23 +131,29 @@ class ResidencyFeedback:
                 return None
             return state.ceiling
 
-    def note_selection(self, model: str, context: int) -> None:
+    def note_selection(self, model: str, context: int, *, origin: str | None = None) -> None:
         """Record a dispatched window; planning-only calls must not use this."""
-        key = self._key(model)
-        if not key:
+        state_key = self._state_key(model, origin)
+        if state_key is None:
             return
         with self._lock:
-            self._states.setdefault(key, _ModelState()).last_selected = int(context)
+            self._states.setdefault(state_key, _ModelState()).last_selected = int(context)
 
-    def verdict(self, model: str) -> ResidencyVerdict | None:
+    def verdict(self, model: str, *, origin: str | None = None) -> ResidencyVerdict | None:
+        state_key = self._state_key(model, origin)
+        if state_key is None:
+            return None
         with self._lock:
-            state = self._states.get(self._key(model))
+            state = self._states.get(state_key)
             return state.verdict if state else None
 
-    def forget_selection(self, model: str) -> None:
+    def forget_selection(self, model: str, *, origin: str | None = None) -> None:
         """Discard attribution and stale measurements for an unknown-window load."""
+        state_key = self._state_key(model, origin)
+        if state_key is None:
+            return
         with self._lock:
-            self._states.pop(self._key(model), None)
+            self._states.pop(state_key, None)
 
     def refresh(
         self,
@@ -140,20 +161,22 @@ class ResidencyFeedback:
         *,
         geometry: ModelGeometry | None,
         kv_type: str,
+        origin: str | None = None,
     ) -> ResidencyVerdict | None:
-        """Probe ``/api/ps`` if due and update the ceiling for ``model``.
+        """Probe ``/api/ps`` if due and update the ceiling for ``(origin, model)``.
 
         Returns the new verdict, or ``None`` when no probe was due, the model
         is not loaded, nothing was ever selected for it, or the transport
         failed.  Failures are logged and never propagate: residency feedback
         is an optimization and must not make a model unusable.
         """
-        key = self._key(model)
-        if not key:
+        state_key = self._state_key(model, origin)
+        if state_key is None:
             return None
+        origin_key, model_key = state_key
         now = self._clock()
         with self._lock:
-            state = self._states.get(key)
+            state = self._states.get(state_key)
             if state is None or state.last_selected is None:
                 return None
             if state.last_checked is not None and now - state.last_checked < self._interval:
@@ -168,7 +191,7 @@ class ResidencyFeedback:
             # Recheck under the state lock because another caller may have
             # completed a probe while this caller waited for the slot.
             with self._lock:
-                state = self._states.get(key)
+                state = self._states.get(state_key)
                 now = self._clock()
                 if state is None or state.last_selected is None:
                     return None
@@ -176,16 +199,19 @@ class ResidencyFeedback:
                     return None
                 state.last_checked = now
                 selected = state.last_selected
-            reading = self._read(key)
+            reading = self._read(model_key, origin=origin_key)
         finally:
             self._probe_lock.release()
         if reading is None:
             return None
-        return self._apply(key, reading, selected, geometry, kv_type, now, state)
+        return self._apply(state_key, reading, selected, geometry, kv_type, now, state)
 
-    def _read(self, key: str) -> ResidencyReading | None:
+    def _read(self, key: str, *, origin: str = "") -> ResidencyReading | None:
         try:
-            payload = self._fetch_ps()
+            if self._fetch_ps_for_origin is not None and origin:
+                payload = self._fetch_ps_for_origin(origin)
+            else:
+                payload = self._fetch_ps()
         except Exception:
             logger.debug("residency probe failed", exc_info=True)
             return None
@@ -201,7 +227,7 @@ class ResidencyFeedback:
 
     def _apply(
         self,
-        key: str,
+        key: tuple[str, str],
         reading: ResidencyReading,
         selected: int,
         geometry: ModelGeometry | None,
@@ -259,7 +285,9 @@ class ResidencyFeedback:
         return verdict
 
 
-def record_dispatched_context(path, payload, feedback_provider, is_cloud_model):
+def record_dispatched_context(
+    path, payload, feedback_provider, is_cloud_model, *, origin: str | None = None,
+):
     """Attribute only an actual model request's serialized context window.
 
     The transport invokes this after opening the response, inside provider
@@ -279,9 +307,15 @@ def record_dispatched_context(path, payload, feedback_provider, is_cloud_model):
         feedback = feedback_provider()
         if feedback is not None:
             if type(context) is int and context > 0:
-                feedback.note_selection(model, context)
+                if origin is not None:
+                    feedback.note_selection(model, context, origin=origin)
+                else:
+                    feedback.note_selection(model, context)
             else:
-                feedback.forget_selection(model)
+                if origin is not None:
+                    feedback.forget_selection(model, origin=origin)
+                else:
+                    feedback.forget_selection(model)
     except Exception:
         logger.debug("residency dispatch attribution failed", exc_info=True)
 

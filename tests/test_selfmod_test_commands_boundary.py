@@ -44,3 +44,30 @@ def test_empty_file_list_refuses():
     commands = selfmod_test_commands.selfmod_test_commands(run, [])
     syntax_cmd = [cmd for name, cmd in commands if name == "syntax"][0]
     assert "refusal" in " ".join(syntax_cmd).lower() or "empty target" in " ".join(syntax_cmd).lower()
+
+
+def _held_out_pytest_argv():
+    import ast
+
+    from scripts import nightly_selfmod
+
+    tree = ast.parse(nightly_selfmod._HELD_OUT_RUNNER)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List):
+            items = [e.value for e in node.elts if isinstance(e, ast.Constant)]
+            if "pytest" in items and "--rootdir" in items:
+                return items
+    raise AssertionError("held-out pytest command not found in the runner")
+
+
+def test_low_integrity_pytest_commands_disable_the_cache_provider(monkeypatch):
+    from scripts import nightly_selfmod
+
+    monkeypatch.setattr(nightly_selfmod.subprocess, "run", lambda *a, **k: type(
+        "Result", (), {"returncode": 1}
+    )())
+    regression = nightly_selfmod._regression_command("python", workers=1)
+    held_out = _held_out_pytest_argv()
+    for command in (regression, held_out):
+        index = command.index("-p")
+        assert command[index + 1] == "no:cacheprovider", command

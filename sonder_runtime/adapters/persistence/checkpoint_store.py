@@ -5,16 +5,20 @@ that sqlite3.connect calls live only in the adapters layer.
 """
 from __future__ import annotations
 
-from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction
+from sonder_runtime.adapters.persistence.owned_sqlite import transaction as owned_sqlite_transaction  # isort: skip
 
-from contextlib import contextmanager
+from contextlib import contextmanager  # isort: skip
 import json
 import logging
 import sqlite3
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sonder_runtime.domain.automation.checkpoint import Checkpoint
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +47,10 @@ class CheckpointStore:
         self._db_path = str(db_path)
         self._max_checkpoints = max(1, max_checkpoints)
         self._lock = threading.Lock()
-        self._memory_rows: tuple[tuple, ...] = ()
+        self._memory_rows: tuple[tuple[object, ...], ...] = ()
 
     @contextmanager
-    def _connection(self):
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         path = self._db_path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)

@@ -290,3 +290,15 @@ def test_a_project_local_windows_path_entry_is_dropped(tmp_path):
         project_local=lambda path: path.lower().startswith("d:\\proj"))
     path = dict(provider.environment(system="msbuild", family="").pairs)["PATH"].split(";")
     assert r"C:\Tools\cmake\bin" in path and r"D:\proj\tools" not in path
+
+
+def test_the_default_windows_project_local_guard_is_installed(monkeypatch):
+    from sonder_runtime.adapters.host_tools import guards
+
+    monkeypatch.setattr(guards, "project_local", lambda path: path.lower().startswith(r"d:\proj"))
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "nt")  # the default guard only applies on a Windows host
+        provider = ScrubbedEnvironmentProvider(
+            host="windows", source=lambda: dict(HOST_ENV, PATH=r"C:\Tools\cmake\bin;D:\proj\tools"))
+    path = dict(provider.environment(system="msbuild", family="").pairs)["PATH"].split(";")
+    assert r"C:\Tools\cmake\bin" in path and r"D:\proj\tools" not in path

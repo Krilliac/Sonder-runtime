@@ -285,3 +285,32 @@ def test_terminal_scalar_cannot_hide_unfinished_binding_work(state):
     )
     with pytest.raises(StoreUnavailable):
         store.atomic(lambda tx: tx.prepare_work(next_work))
+
+
+def test_unknown_recording_survives_preparation_expiry_for_admitted_work(request):
+    from sonder_runtime.application.ports.app_managed_work import WorkInterruption as _Interruption
+
+    store, work = preparation(request.getfixturevalue("state"))
+    store.atomic(lambda tx: tx.prepare_work(work))
+    admit(store)
+    scope = dict(
+        principal_id=OWNER,
+        control_session_id="session1",
+        work_id="work1",
+        dispatch_id="dispatch1",
+        process_incarnation="process1",
+    )
+    store.atomic(lambda tx: tx.bind_work_run(**scope, expected_revision=2, run_id="run1"))
+    link = ManagedHostTurnLink(
+        "continuation1", "parent1", work.binding.canonical_host_id, OWNER, "run1", 1
+    )
+    store.atomic(lambda tx: tx.bind_work_host(**scope, expected_revision=3, host_turn=link))
+    store.clock = lambda: work.expires_at + 1
+    unknown = store.atomic(
+        lambda tx: tx.mark_work_unknown(
+            **scope,
+            expected_revision=4,
+            interruption=_Interruption("running", "FINAL_PUBLICATION_UNKNOWN", "a" * 64),
+        )
+    )
+    assert unknown.state == "unknown"

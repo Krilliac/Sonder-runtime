@@ -128,3 +128,24 @@ def test_audit_file_is_owner_only(tmp_path):
     finally:
         os.umask(previous)
     assert stat.S_IMODE(os.stat(repository.path).st_mode) == 0o600
+
+
+def test_append_never_truncates_existing_audit_file(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    repository = DurableToolAuditRepository(tmp_path / "tool-audit.jsonl")
+    gateway = _gateway(repository, _Receipts())
+    gateway.execute(_request())
+    modes = []
+    real_open = Path.open
+
+    def spy(self, mode="r", *args, **kwargs):
+        if self == repository.path:
+            modes.append(mode)
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy)
+    gateway.execute(_request())
+    assert "wb" not in modes and "ab" in modes
+    assert len(repository.read()) == 2
+    repository.verify()

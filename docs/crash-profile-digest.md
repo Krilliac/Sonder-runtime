@@ -121,9 +121,15 @@ under `auto`. That refusal names no call, so to approve one capture by its
 2. Optional: the **Windows Performance Toolkit** (`xperf`, `wpr`,
    `wpaexporter`) for ETL captures. xperf support is experimental.
 3. Run `/tools refresh` and check that `cdb` is listed.
-4. Point `--sym` at your local PDB directories, for example the build tree
-   `out\build\x64-RelWithDebInfo`. Up to 8 directories. Mapped network drives
-   and UNC paths are refused as symbol directories.
+4. Point `--sym` at the directories that hold your PDBs, for example the
+   build tree `out\build\x64-RelWithDebInfo`. Up to 8 directories. Mapped
+   network drives and UNC paths are refused as symbol directories. cdb never
+   sees these directories: Sonder looks for each module's PDB by its
+   CodeView file name in the top level of each directory (no subdirectories,
+   no symstore layout), and copies it flat into the run directory only when
+   its GUID and age match the module's CodeView record. At most 16 PDBs are
+   copied, project modules first. Images (`.exe`, `.dll`) in `--sym` are
+   never given to cdb.
 5. Studio symbol shares: set `SONDER_SYMBOL_STORES` to a `|`-separated list of
    at most 4 stores. Each is an `https://` URL (no port, or 443) or a UNC
    symstore share. Stores come from configuration only, never from a tool
@@ -143,7 +149,11 @@ What cdb is told, and why:
   dump (they can be UNC, which is SMB egress), no prompts, deferred loads,
   line info. `LOAD_ANYTHING` is not set, so a PDB from a different build shows
   as `symbols=mismatch` instead of wrong frames.
-- The image path is only your `--sym` directories.
+- The image path (`-i`) is an empty directory in the run directory. From
+  `--sym`, the symbol path (`-y`) gets only the GUID/age-matched PDBs copied
+  flat into the run directory, never the `--sym` directories themselves.
+  Those directories can be written by an agent, and dbgeng can load
+  executable images (a DAC among them) from its symbol and image paths.
 - Managed dumps (clr.dll, coreclr.dll or mscorwks.dll loaded) are refused for
   cdb (`ENGINE_REFUSED_MANAGED_DUMP`): dbgeng would load a DAC, which is code.
 

@@ -53,6 +53,40 @@ def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | N
     return provider if provider_bridge.is_bridged(provider) else None
 
 
+def endpoint_is_loopback(provider: str, graph: object) -> bool:
+    """``provider_bridge``'s endpoint locality probe for the live graph.
+
+    Asks the gateway the graph binds for ``provider`` (through tier dispatch
+    and a pre-send fallback's primary).  Before a graph exists, the env
+    configuration a default-built OpenAI-compatible gateway would read
+    decides.  A gateway this cannot identify is not verified loopback.
+    """
+    from .provider_dispatch.fallback import PreSendFallbackGateway
+    from .provider_dispatch.gateway import ProviderDispatchGateway
+
+    gateway = getattr(graph, "model_gateway", None)
+    if gateway is None:
+        if provider != "openai_compatible":
+            return False
+        from .inference.openai_compat_gateway import configured_endpoint_is_loopback
+
+        return configured_endpoint_is_loopback()
+    bindings = getattr(graph, "provider_bindings", None)
+    if bindings is not None and provider not in bindings.bound_providers:
+        return False  # no gateway is bound for this provider
+    seen: set[int] = set()
+    while gateway is not None and id(gateway) not in seen:
+        seen.add(id(gateway))
+        if isinstance(gateway, ProviderDispatchGateway):
+            gateway = gateway._providers.get(provider)
+        elif isinstance(gateway, PreSendFallbackGateway):
+            gateway = gateway.primary
+        else:
+            probe = getattr(gateway, "endpoint_is_loopback", None)
+            return callable(probe) and probe() is True
+    return False
+
+
 def prompt_identity_model(model: str, tier_label: object, provider: str | None,
                           graph: object) -> str:
     """Only name a serving model when the bound provider cannot fall back."""

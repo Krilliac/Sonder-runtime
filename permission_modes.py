@@ -209,6 +209,16 @@ everywhere. The attended surfaces are the console's ``/mode`` and Shift+Tab
 surface is unattended until it says otherwise: that is the fail-closed
 default.
 
+Under ``local-open`` that endpoint has no administrator to authorize: every
+local process passes its authority check, with no secret at all. There it
+calls ``set_mode_without_escalation`` and answers 403
+``PERMISSION_MODE_ESCALATION_REFUSED`` for a raise, so a raise is never made
+or saved by a credential-less caller; lowering stays allowed. An API key or an
+admin account restores the attended raise. ``POST /v1/approvals/<call_id>``
+follows the same line: under ``local-open`` it refuses to approve a call
+(403 ``APPROVAL_REQUIRES_AUTHENTICATED_ADMIN``) and still revokes one; the
+console's ``/approve`` is unchanged.
+
 Rules and modes compose; they do not race
 -------------------------------------------
 ``permission_rules`` shipped its own per-tool ``allow``/``ask``/``deny`` rules
@@ -475,6 +485,16 @@ BULK_ARGUMENTS = frozenset({
 
 CALL_ID_CHARS = 16
 
+# The longest line ``argument_preview`` returns; the same bound as the approval
+# ledger's ``MAX_PREVIEW_CHARS``. Values are not cut one by one: an operator
+# approving a call by its id must be able to read every non-bulk argument it
+# binds (a command padded past a per-value cut once hid its harmful tail). A
+# longer line is cut, ends in the ledger's ``PREVIEW_TRUNCATED`` and is led by
+# its ``PREVIEW_INCOMPLETE`` mark. The ledger redacts what it stores, so the
+# stored preview can show less than this line; it then carries the same mark
+# and the call is approvable only with its full arguments.
+PREVIEW_CHARS = 2000
+
 
 def _call_body(arguments) -> dict | None:
     if arguments is None:
@@ -513,17 +533,19 @@ def call_id(digest: str) -> str:
     return str(digest or "")[:CALL_ID_CHARS]
 
 
-def argument_preview(arguments, limit: int = 200) -> str:
-    """A bounded, content-free line naming what a call was about.
+def preview_fields(arguments) -> list[tuple[str, str, bool]]:
+    """``(key, value, literal)`` for every argument a call binds, sorted.
 
-    Keys and short scalar values, credential knobs omitted, bulk payloads
-    shown only by their length. This is what ``/approvals`` shows an operator
-    next to a call id; it identifies the call without reproducing it.
+    Credential knobs omitted; bulk payloads given only by their length; other
+    values in full -- strings as they are, anything else as JSON (``literal``,
+    shown unquoted). This is what the approval ledger stores as a pending
+    call's preview (``approval_ledger.render_preview``), redacting each
+    ``key=value`` field as one unit.
     """
     body = _call_body(arguments)
     if not body:
-        return ""
-    parts = []
+        return []
+    fields = []
     for key in sorted(body):
         value = body[key]
         if key in BULK_ARGUMENTS:
@@ -531,22 +553,31 @@ def argument_preview(arguments, limit: int = 200) -> str:
                 size = len(value) if isinstance(value, (str, bytes, list, tuple, dict)) else len(str(value))
             except Exception:
                 size = 0
-            parts.append("%s=<%d chars>" % (key, size) if isinstance(value, str)
-                         else "%s=<%d items>" % (key, size))
+            fields.append((key, ("<%d chars>" if isinstance(value, str) else "<%d items>") % size, True))
             continue
         if isinstance(value, str):
-            text = value
-        else:
-            try:
-                text = json.dumps(value, sort_keys=True, default=str, ensure_ascii=True)
-            except (TypeError, ValueError):
-                text = str(value)
-        text = text.replace("\r", " ").replace("\n", " ")
-        if len(text) > 40:
-            text = text[:37] + "..."
-        parts.append("%s=%s" % (key, text))
-    line = " ".join(parts)
-    return line if len(line) <= limit else line[:limit - 3] + "..."
+            fields.append((key, value, False))
+            continue
+        try:
+            fields.append((key, json.dumps(value, sort_keys=True, default=str, ensure_ascii=True), True))
+        except (TypeError, ValueError):
+            fields.append((key, str(value), False))
+    return fields
+
+
+def argument_preview(arguments, limit: int = PREVIEW_CHARS) -> str:
+    """``preview_fields`` as one bounded, unredacted ``key=value`` line.
+
+    Keys and string values are shown bare only when they are a single plain
+    token, JSON-quoted (control, bidi and other non-ASCII characters escaped)
+    otherwise. A line over ``limit`` is cut, ends in ``PREVIEW_TRUNCATED`` and
+    starts with ``PREVIEW_INCOMPLETE`` (both the ledger's). What the ledger
+    stores and ``/approvals`` shows is this line after redaction, which may
+    show less (and is then marked the same way).
+    """
+    from sonder_runtime.adapters.security import approval_ledger
+
+    return approval_ledger.render_preview(preview_fields(arguments), limit=limit)
 
 # Read-only branches of a slash command that fronts a dangerous tool, graded
 # because they were declared. ``/selfmod status`` reads
@@ -1000,9 +1031,11 @@ def unattended_escalation_refusal(target_name: str) -> str:
         "refused: raising the permission mode from %s to %s needs a person to "
         "confirm it, and this caller is unattended (an MCP client, the HTTP "
         "chat, or a control command). Run /mode %s at the Sonder console, or "
-        "have an administrator use the app's permission-mode control "
-        "(POST /v1/permission-mode). Lowering the mode, or returning from plan "
-        "to manual, is allowed here." % (current, target, target)
+        "have an administrator send POST /v1/permission-mode with the "
+        "server's API key (SONDER_API_KEY) or an admin account token "
+        "(SONDER_REQUIRE_ACCOUNT=1); a server in local-open mode, with "
+        "neither configured, refuses that raise. Lowering the mode, or "
+        "returning from plan to manual, is allowed here." % (current, target, target)
     )
 
 
@@ -1041,6 +1074,44 @@ def set_mode(name: str) -> str:
         _STATE["mode"] = match
         _save(previous)
     return match
+
+
+class ModeEscalationRefused(ValueError):
+    """A caller without mode-raising authority asked for more autonomy.
+
+    Raised by ``set_mode_without_escalation`` before any state changes or is
+    saved. ``current`` and ``target`` are the exact mode names compared.
+    """
+
+    def __init__(self, current: str, target: str):
+        super().__init__(
+            "permission mode not changed: raising it from %s to %s is refused "
+            "for this caller; it may only lower the mode or return from plan "
+            "to manual" % (current, target)
+        )
+        self.current = current
+        self.target = target
+
+
+def set_mode_without_escalation(name: str) -> str:
+    """``set_mode`` for a caller that may never raise autonomy.
+
+    The escalation check and the change happen under one hold of ``_LOCK``
+    (re-entrant, so ``set_mode`` takes it again), so a concurrent lowering at
+    the console cannot slip between the check and the write and be undone.
+    Raises ``ModeEscalationRefused`` (nothing changed, nothing saved) when
+    *name* is more autonomous than both the current mode and ``manual``;
+    ``ValueError`` for an unknown mode, like ``set_mode``. Ignores
+    ``attended_mode_change()``: the caller has already decided it holds no
+    attended authority.
+    """
+    _load()
+    target = resolve_mode(name)
+    with _LOCK:
+        current = _STATE["mode"]
+        if is_unattended_escalation(current, target):
+            raise ModeEscalationRefused(current, target)
+        return set_mode(target)
 
 
 def cycle_mode(step: int = 1) -> str:
@@ -1720,7 +1791,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                 try:
                     ledger.record_pending(
                         name, digest, surface=surface,
-                        preview=argument_preview(arguments),
+                        preview=preview_fields(arguments),
                     )
                 except Exception:
                     # The ledger is a route out, not the gate: a ledger that

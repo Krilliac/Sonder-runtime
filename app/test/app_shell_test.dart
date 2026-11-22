@@ -794,7 +794,8 @@ void main() {
       });
     }
 
-    testWidgets('touch: the open chat shows Delete; long press reveals others',
+    testWidgets(
+        'touch: the open chat shows Delete; long press opens a menu with it',
         (tester) async {
       await pumpShell(tester, FakeChatBackend(),
           size: _phone, prefs: _seed(), clock: _clock);
@@ -808,8 +809,8 @@ void main() {
       expect(deleteIn('c'), findsNothing);
       await tester.longPress(find.byKey(const ValueKey('c')));
       await _settle(tester);
-      expect(deleteIn('c'), findsOneWidget);
-      await tester.tap(deleteIn('c'));
+      expect(find.text('Copy link'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('thread-menu-delete')));
       await _settle(tester);
       expect(find.byKey(const ValueKey('c')), findsNothing);
       expect(find.text('Chat deleted.'), findsOneWidget);

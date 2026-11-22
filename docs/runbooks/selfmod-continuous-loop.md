@@ -14,8 +14,9 @@ checking on, and unsticking it.
 powershell -NoProfile -File scripts\start-selfmod.ps1 -Status
 ```
 
-This reports the PID (from `Win32_Process` filtered on `selfmod_forever` in
-its command line) and the last 12 lines of
+This reports the PID (revalidated from the state record at
+`%LOCALAPPDATA%\sonder\selfmod-continuous.json` — PID, creation time,
+executable, repo, script path, and script SHA-256) and the last 12 lines of
 `%LOCALAPPDATA%\sonder\selfmod-continuous.log`. Tail the full log for detail:
 
 ```powershell
@@ -27,7 +28,7 @@ Get-Content "$env:LOCALAPPDATA\sonder\selfmod-continuous.log" -Tail 80 -Wait
 `start-selfmod.ps1` fails fast, before spawning anything, on three conditions
 — fix the one it names and rerun:
 
-- **"a selfmod loop is already running"** — only one loop may run at a time
+- **"a verified selfmod loop is already running"** — only one loop may run at a time
   (two running concurrently once raced on the same run state and deployment
   lock). Run `-Status` to see the PID, or `-Stop` to end it first.
 - **"working tree is dirty (N path(s))"** — every pass commits inside an

@@ -279,6 +279,11 @@ def capture_host_final(bound, admission, output, facts, ledger):
         raise TypeError('exact host final facts required')
     facts.__post_init__()
     encoded_facts = json.loads(json.dumps(asdict(facts)))
+    # An absent host fact claim keeps the pre-claim receipt shape, so the
+    # final binding digest of every claim-free turn is unchanged.
+    for key in ('verified_fact_claim', 'verified_fact_claim_digest'):
+        if encoded_facts.get(key) is None:
+            encoded_facts.pop(key, None)
     codec = bound._service.projection_codec
     with bound._scope() as context:
         with bound._service._transaction(context) as tx:

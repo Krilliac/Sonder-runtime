@@ -30,7 +30,7 @@ issuer_id = "issuer"
 protocol_version = 1
 source_origin = "https://registry.example:443"
 source_tls_server_name = "registry.example"
-source_allowed_cidrs = ["10.77.0.0/24"]
+source_allowed_cidrs = ["192.0.2.0/24"]
 trust_anchor_file = "{tmp_path.as_posix()}/private-ca.pem"
 signature_public_key_file = "{tmp_path.as_posix()}/membership-signer.pem"
 refresh_interval_seconds = 30
@@ -41,7 +41,7 @@ local_fallback = false
 member_id = "worker"
 origin = "https://worker.example:11434"
 tls_server_name = "worker.example"
-allowed_cidrs = ["10.77.0.0/24"]
+allowed_cidrs = ["192.0.2.0/24"]
 '''
 
 
@@ -58,7 +58,7 @@ def test_external_membership_is_explicit_and_secrets_are_redacted(tmp_path):
     assert "registry.example" not in rendered and "worker.example" not in rendered
     for rendered in (repr(config.membership), repr(config.membership.member_policies[0]), repr(config)):
         for private in ("registry.example", "worker.example", "private-ca.pem", "membership-signer.pem",
-                        "private-client.pem", "private-key.pem", "10.77.0.0/24"):
+                        "private-client.pem", "private-key.pem", "192.0.2.0/24"):
             assert private not in rendered
 
 
@@ -66,7 +66,7 @@ def test_external_membership_is_explicit_and_secrets_are_redacted(tmp_path):
     ('tls_server_name = "worker.example"', 'tls_server_name = "*.example"'),
     ('tls_server_name = "worker.example"', 'tls_server_name = ".example"'),
     ('origin = "https://worker.example:11434"', 'origin = "http://worker.example:11434"'),
-    ('allowed_cidrs = ["10.77.0.0/24"]', 'allowed_cidrs = ["invalid"]'),
+    ('allowed_cidrs = ["192.0.2.0/24"]', 'allowed_cidrs = ["invalid"]'),
     ('snapshot_max_advertisements = 4096', 'snapshot_max_advertisements = 4097'),
     ('snapshot_max_bytes = 1048576', 'snapshot_max_bytes = 1048577'),
     ('protocol_version = 1', 'protocol_version = 2'),
@@ -112,9 +112,9 @@ def test_external_policy_and_credential_input_fails_privately(tmp_path, change):
 def test_trusted_cidr_does_not_allow_remote_http(tmp_path, remote_primary):
     toml = tmp_path / "sonder.toml"
     toml.write_text(
-        '[ollama]\nallow_remote = true\ntrusted_origins = ["10.77.0.0/24"]\n'
-        + ('url = "http://10.77.0.2:11434"\n' if remote_primary
-           else 'workers = ["http://10.77.0.2:11434"]\n'), encoding="utf-8",
+        '[ollama]\nallow_remote = true\ntrusted_origins = ["192.0.2.0/24"]\n'
+        + ('url = "http://192.0.2.2:11434"\n' if remote_primary
+           else 'workers = ["http://192.0.2.2:11434"]\n'), encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="https"):
         load_config(toml, env={})

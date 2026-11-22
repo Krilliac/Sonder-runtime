@@ -1,5 +1,5 @@
 """SQLite adapter for durable loop idempotency and retry evidence."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from contextlib import contextmanager
 
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING
 
 from sonder_runtime.application.loop.durable_control import RetryEvidence
 from sonder_runtime.application.persistence.outbox_cas import (
@@ -21,6 +21,10 @@ from sonder_runtime.application.persistence.outbox_cas import (
     TransactionNeutralRecord,
 )
 from sonder_runtime.domain.loop_retry_policy import RetryDecision
+
+if TYPE_CHECKING:
+    import os
+    from collections.abc import Callable, Iterator
 
 
 _DDL = """
@@ -56,12 +60,12 @@ ON loop_retry_evidence(operation_id, evidence_id);
 """
 
 
-def _digest(value: Mapping[str, Any]) -> str:
+def _digest(value: Mapping[str, object]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: object) -> object:
     """Convert persistence-port immutable containers back to JSON values."""
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -73,7 +77,7 @@ def _jsonable(value: Any) -> Any:
 class SQLiteLoopStateRepository(OutboxCASRepository):
     """Durable CAS/outbox adapter consumed by ``OutboxIdempotencyStore``."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | os.PathLike[str]) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
@@ -81,13 +85,13 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
             connection.executescript(_DDL)
 
     @contextmanager
-    def _connect(self):
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
             connection.execute("PRAGMA busy_timeout=5000")
             yield connection
 
     @staticmethod
-    def _record(row: tuple[Any, ...] | None) -> TransactionNeutralRecord | None:
+    def _record(row: tuple[str, int, int, str] | None) -> TransactionNeutralRecord | None:
         if row is None:
             return None
         aggregate_id, revision, schema_version, payload = row
@@ -96,7 +100,7 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
         )
 
     @staticmethod
-    def _event(row: tuple[Any, ...]) -> OutboxEvent:
+    def _event(row: tuple[str, str, str, int, int, str, str]) -> OutboxEvent:
         event_id, aggregate_id, event_type, revision, schema_version, payload, occurred_at = row
         return OutboxEvent(
             event_id, aggregate_id, event_type, revision, json.loads(payload), occurred_at,
@@ -164,7 +168,13 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
 class SQLiteRetryEvidenceLedger:
     """Bounded durable implementation of the loop retry evidence ledger."""
 
-    def __init__(self, db_path: str | Path, *, max_records: int = 256, clock=None) -> None:
+    def __init__(
+        self,
+        db_path: str | os.PathLike[str],
+        *,
+        max_records: int = 256,
+        clock: Callable[[], str] | None = None,
+    ) -> None:
         if isinstance(max_records, bool) or max_records < 1:
             raise ValueError("max_records must be positive")
         self._path = Path(db_path)
@@ -216,7 +226,10 @@ class SQLiteRetryEvidenceLedger:
                 "SELECT operation_id,attempt,failure_code,action,classification,delay_cap_seconds,"
                 "side_effect,evidence_digest,recorded_at FROM loop_retry_evidence ORDER BY evidence_id"
             ).fetchall()
-        from sonder_runtime.domain.loop_retry_policy import ReplayAction, SideEffectClass
+        from sonder_runtime.domain.loop_retry_policy import (
+            ReplayAction,
+            SideEffectClass,
+        )
         return tuple(RetryEvidence(
             operation_id, attempt, failure_code, ReplayAction(action), classification,
             delay, SideEffectClass(side_effect), digest, recorded_at,

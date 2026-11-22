@@ -6,7 +6,7 @@ import 'package:sonder_runtime/models.dart';
 import 'chat_fakes.dart';
 
 const _switched = 'long-context overflow: switched to qwen3.6:35b on '
-    '10.77.0.2:8443 — context 41.2k tokens > 32.8k threshold';
+    '192.0.2.2:8443 — context 41.2k tokens > 32.8k threshold';
 const _stayed = 'long-context overflow (qwen3.6:35b) unavailable, stayed on '
     'dense:27b: no eligible Ollama pool worker advertises qwen3.6:35b '
     '— context 41.2k tokens > 32.8k threshold';

@@ -101,7 +101,17 @@ class _Places:
         self.whole = {file_ops._resolve_best_effort(file_ops.RUNTIME_PACKAGE_DATA_DIR)}
         self.whole.update(Path(directory) for directory in inventory.owned_directories)
         self.whole.update(
-            root / name for name in (*file_ops.FIRST_PARTY_CODE_DIRS, *file_ops.RUNTIME_PACKAGE_DIRS)
+            root / name
+            for name in (
+                *file_ops.FIRST_PARTY_CODE_DIRS,
+                *file_ops.RUNTIME_PACKAGE_DIRS,
+                *file_ops.INTERPRETER_ENVIRONMENT_DIRS,
+            )
+        )
+        self.whole.update(
+            place
+            for place in file_ops._interpreter_library_dirs()
+            if not file_ops._is_inside(root, place)
         )
 
     def reached_from(self, place: Path) -> bool:
@@ -122,11 +132,15 @@ def _is_link(entry: os.DirEntry[str]) -> bool:
     return bool(attributes & _REPARSE_POINT)
 
 
-def _links_under(scope: Path) -> Iterator[Path]:
-    """Every symbolic link or junction under ``scope`` (not followed); raises :class:`_ScopeUnchecked`."""
+def _links_and_sensitive_under(scope: Path) -> tuple[list[Path], Path | None]:
+    """Every symbolic link/junction under ``scope``, plus the first non-git sensitive dir if any."""
     pending = [scope]
     seen = 0
+    links: list[Path] = []
     git_metadata = {name.casefold() for name in file_ops.GIT_METADATA_DIRECTORIES}
+    sensitive_dirs = {
+        name.casefold() for name in file_ops.SENSITIVE_READ_DIRECTORIES
+    } - git_metadata
     while pending:
         current = pending.pop()
         try:
@@ -140,11 +154,24 @@ def _links_under(scope: Path) -> Iterator[Path]:
                 raise _ScopeUnchecked("more than %d entries" % MAX_SCOPE_ENTRIES)
             try:
                 if _is_link(entry):
-                    yield Path(entry.path)
-                elif entry.is_dir(follow_symlinks=False) and entry.name.casefold() not in git_metadata:
-                    pending.append(Path(entry.path))
+                    links.append(Path(entry.path))
+                elif entry.is_dir(follow_symlinks=False):
+                    folded = entry.name.casefold()
+                    if folded in git_metadata:
+                        continue
+                    child = Path(entry.path)
+                    if folded in sensitive_dirs and file_ops._sensitive_dir_component(child):
+                        return links, child
+                    pending.append(child)
             except OSError as exc:
                 raise _ScopeUnchecked("could not inspect %s (%s)" % (entry.name, type(exc).__name__)) from exc
+    return links, None
+
+
+def _links_under(scope: Path) -> Iterator[Path]:
+    """Every symbolic link or junction under ``scope`` (not followed); raises :class:`_ScopeUnchecked`."""
+    links, _sensitive = _links_and_sensitive_under(scope)
+    yield from links
 
 
 def _linked_protected_stats(places: _Places) -> list[os.stat_result]:
@@ -215,9 +242,18 @@ def scope_refusal(operation: str, root: Path, scope: Path) -> str:
     if not spelled.is_dir():
         return ""
     try:
-        for link in _links_under(spelled):
+        links, sensitive = _links_and_sensitive_under(spelled)
+        if sensitive is not None:
+            return _message(operation, _relative(root, sensitive))
+        for link in links:
             target = _spelled(link)
-            if target is None or file_ops._is_protected_mutation_path(target) or places.reached_from(target):
+            if (
+                target is None
+                or file_ops._is_protected_mutation_path(target)
+                or file_ops._is_interpreter_environment_path(target)
+                or bool(file_ops._sensitive_mutation_component(target))
+                or places.reached_from(target)
+            ):
                 return _message(operation, _relative(root, link))
         linked = _linked_protected_stats(places)
         if linked:

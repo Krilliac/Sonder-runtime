@@ -15,6 +15,10 @@ import enum
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class ProcessState(enum.Enum):
@@ -103,7 +107,7 @@ class StateSnapshot:
     def serving(self) -> bool:
         return self.process in SERVING_STATES
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         return {
             "process_state": self.process.value,
             "reason": self.reason,
@@ -127,7 +131,7 @@ class ServiceStateTracker:
         self._since = time.monotonic()
         self._reason = "process starting"
         self._dependencies: dict[str, _Dependency] = {}
-        self._listeners: list = []
+        self._listeners: list[Callable[[StateSnapshot], object]] = []
 
     # -- process state -----------------------------------------------------
 
@@ -159,7 +163,9 @@ class ServiceStateTracker:
             listener(snapshot)
         return snapshot
 
-    def add_listener(self, callback) -> None:
+    def add_listener(
+        self, callback: Callable[[StateSnapshot], object]
+    ) -> None:
         """Register a callback invoked with each new StateSnapshot."""
         with self._lock:
             self._listeners.append(callback)

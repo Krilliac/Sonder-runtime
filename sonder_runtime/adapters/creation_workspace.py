@@ -25,6 +25,11 @@ import re
 from pathlib import Path
 
 from sonder_runtime.platform import paths
+from sonder_runtime.platform.policy_roots import (
+    PolicyRootError,
+    parse_policy_root,
+    try_parse_policy_root,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -208,16 +213,25 @@ def default_workspace_root(
     ``CreationWorkspaceError`` naming the check that failed.
     """
     text = str(configured or "").strip()
+    if text:
+        candidate = text
+    else:
+        default_path = paths.default_workspace_root()
+        if default_path is None:
+            raise CreationWorkspaceError(
+                "no user home is known to hold it; set [state].default_workspace_root"
+            )
+        candidate = str(default_path)
     try:
-        raw = Path(text).expanduser() if text else paths.default_workspace_root()
-    except RuntimeError:
-        raw = None
-    if raw is None:
+        raw = parse_policy_root(candidate, expand_user=True)
+    except PolicyRootError as exc:
+        if "no home directory" in str(exc):
+            raise CreationWorkspaceError(
+                "no user home is known to hold it; set [state].default_workspace_root"
+            ) from None
         raise CreationWorkspaceError(
-            "no user home is known to hold it; set [state].default_workspace_root"
-        )
-    if not raw.is_absolute() or not raw.name:
-        raise CreationWorkspaceError("%s must be an absolute folder path: %s" % (_ROOT_LABEL, raw))
+            "%s must be an absolute folder path (%s): %s" % (_ROOT_LABEL, exc, candidate)
+        ) from None
     is_junction = getattr(os.path, "isjunction", lambda value: False)
     try:
         if raw.is_symlink() or is_junction(str(raw)):
@@ -227,6 +241,10 @@ def default_workspace_root(
         raise
     except OSError as exc:
         raise CreationWorkspaceError("%s cannot be resolved: %s" % (_ROOT_LABEL, raw)) from exc
+    if try_parse_policy_root(str(resolved), expand_user=False) is None:
+        raise CreationWorkspaceError(
+            "%s must be an absolute folder path: %s" % (_ROOT_LABEL, resolved)
+        )
     if _under_source_checkout(resolved, Path(source_root) if source_root else None):
         raise CreationWorkspaceError(
             "%s cannot be inside a Sonder source checkout: %s" % (_ROOT_LABEL, resolved)

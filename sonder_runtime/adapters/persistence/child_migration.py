@@ -320,9 +320,14 @@ class SQLiteChildMigrationStore:
                 int(child.recovery_required),
                 int(child.cancellation_requested),
                 child.cancellation_reason,
+                request.resume_key,
+                request.idempotency_key,
+                json.dumps(
+                    child.terminal_verification, sort_keys=True, separators=(",", ":")
+                ),
             )
             connection.execute(
-                "INSERT INTO durable_child_session(rowid,child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,recovery_required,cancellation_requested,cancellation_reason) VALUES("
+                "INSERT INTO durable_child_session(rowid,child_id,parent_id,ancestors_json,prompt,budget_json,metadata_json,status,checkpoint_sequence,checkpoint_state_json,checkpoint_cursor,revision,usage_json,result_json,recovery_required,cancellation_requested,cancellation_reason,resume_key,idempotency_key,terminal_verification_json) VALUES("
                 + ",".join("?" for _ in values)
                 + ")",
                 values,

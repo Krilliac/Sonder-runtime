@@ -180,6 +180,28 @@ def _listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
     return listeners[0] if listeners else None
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _proc_cmdline_bytes(pid: int) -> bytes:
+    """Raw NUL-separated ``/proc/<pid>/cmdline`` (POSIX); empty when unreadable."""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes()
+    except OSError:
+        return b""
+
+
+def _pid_argv(pid: int) -> list[str]:
+    """Exact argv of ``pid`` on POSIX, so paths containing spaces stay intact."""
+    raw = _proc_cmdline_bytes(pid)
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
+
+
 def _pid_command_line(pid: int) -> str:
     if os.name == "nt":
         command = (
@@ -234,6 +256,43 @@ def _is_sonder_server_for_port(pid: int, port: int) -> bool:
     if match:
         return int(match.group(1)) == int(port)
     return int(port) == DEFAULT_PORT
+
+
+def _is_ollama_server_pid(pid: int) -> bool:
+    """Return whether ``pid`` is an ``ollama serve`` process like ``start_ollama``'s.
+
+    ``ollama.pid`` can outlive the daemon (crash, reboot) and the OS may later
+    reuse that PID for an unrelated program.  ``stop`` force-kills the whole
+    process tree, so it must prove the identity first, exactly as it already
+    does for ``sonder_serve``.
+    """
+    posix_argv = [] if _is_windows() else _pid_argv(pid)
+    command = "" if posix_argv else _pid_command_line(pid).strip().lower()
+    if not posix_argv and not command:
+        return False
+    names = {"ollama"}
+    configured = ollama_exe()
+    if configured:
+        base = re.split(r"[\\/]", configured.strip().strip('"'))[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        if base:
+            names.add(base)
+    if posix_argv:
+        # POSIX: argv is exact, so a path with spaces needs no quoting heuristics.
+        base = re.split(r"[\/]", posix_argv[0])[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        return base in names and len(posix_argv) > 1 and posix_argv[1] == "serve"
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    # Anchor to the executable token so an unrelated process that merely
+    # mentions "ollama serve" in its arguments is not mistaken for the daemon.
+    return bool(re.match(
+        r'\s*(?:"(?:(?:[a-z]:|\\|/)[^"]*[\\/])?(?:%(n)s)(?:\.exe)?"'
+        r'|(?:[^\s"]*[\\/])?(?:%(n)s)(?:\.exe)?)'
+        r'\s+serve(?:\s|$)' % {"n": alternatives},
+        command,
+    ))
 
 
 def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
@@ -464,8 +523,11 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
         merged_env[sonder_health.ROLE_ENV] = runtime_role
     else:
         merged_env.pop(sonder_health.ROLE_ENV, None)
-    merged_env.setdefault("SONDER_HOST", host)
-    merged_env.setdefault("SONDER_PORT", str(port))
+    # The explicit launcher arguments are what ``_require_safe_unsafe_lab_start``
+    # validated and what readiness probes below; an inherited parent
+    # SONDER_HOST/SONDER_PORT must never make the child bind elsewhere.
+    merged_env["SONDER_HOST"] = str(host)
+    merged_env["SONDER_PORT"] = str(port)
     pid = _popen(cmd, "sonder_serve", env=merged_env)
     # ``wait_until`` can expire at the same instant the child binds the port;
     # perform one final direct probe before reporting a failed startup.  The
@@ -483,30 +545,57 @@ def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
 
 def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
     recorded = _read_pid(name)
+    recorded_for_other_port = False
     if name == "sonder_serve":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        # A live recorded PID that is not a Sonder server is a reused PID: the
+        # pidfile is stale and the stranger is never killed, but the real
+        # listener on this port must still be found and stopped.
+        recorded_is_stranger = recorded_alive and not _is_sonder_server_pid(recorded)
         recorded_for_other_port = bool(
-            recorded and pid_alive(recorded)
+            recorded_alive
+            and not recorded_is_stranger
             and not _is_sonder_server_for_port(recorded, port)
         )
-        candidates = ([] if recorded_for_other_port else [recorded]) + _listener_pids(host, port)
+        candidates = ([] if recorded_for_other_port or recorded_is_stranger else [recorded]) + _listener_pids(host, port)
         pids = [
             pid for index, pid in enumerate(candidates)
             if pid and pid not in candidates[:index] and pid_alive(pid)
             and _is_sonder_server_for_port(pid, port)
         ]
+    elif name == "ollama":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        if recorded_alive and not _is_ollama_server_pid(recorded):
+            # A reused PID: the pidfile is stale, but never kill the stranger.
+            try:
+                pid_file(name).unlink()
+            except OSError:
+                pass
+            return (
+                "%s: recorded pid %s is not an Ollama server; not stopped"
+                % (name, recorded)
+            )
+        pids = [recorded] if recorded_alive else []
     else:
         pids = [recorded] if recorded and pid_alive(recorded) else []
     if not pids:
+        if recorded_for_other_port:
+            # The pidfile belongs to the live instance on another port; keep it
+            # so a later ``stop`` for that port can still find the server.
+            return (
+                "%s: recorded pid %s is not for port %s; not stopped"
+                % (name, recorded, port)
+            )
         try:
             pid_file(name).unlink()
         except OSError:
             pass
+        if name == "sonder_serve" and recorded_is_stranger:
+            return (
+                "%s: recorded pid %s is not a Sonder server; not stopped"
+                % (name, recorded)
+            )
         if recorded:
-            if name == "sonder_serve" and recorded_for_other_port:
-                return (
-                    "%s: recorded pid %s is not for port %s; not stopped"
-                    % (name, recorded, port)
-                )
             return "%s: pid %s is not running" % (name, recorded)
         return "%s: no pid file" % name
     try:

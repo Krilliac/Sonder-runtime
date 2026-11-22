@@ -52,9 +52,24 @@ def _semantic_tokens(text: str) -> tuple[str, ...]:
     return tuple(re.findall(r"\w+", folded, flags=re.UNICODE))
 
 
+AUTHORITATIVE_SECTIONS = frozenset({
+    "stable_instructions", "project_rules", "policy", "corrections", "verifier",
+})
+"""Sections whose records carry instruction or verdict authority.
+
+Approximate text similarity never establishes equivalence for these: one
+changed word ("Always" vs "Never") can invert an instruction.
+"""
+
+
 @dataclass(frozen=True)
 class ContextRecord:
-    """A rendered context item and its producer provenance."""
+    """A rendered context item and its producer provenance.
+
+    ``authoritative`` marks a record as an instruction, constraint,
+    correction or verifier result regardless of its section.  Stable records
+    and records in :data:`AUTHORITATIVE_SECTIONS` are protected as well.
+    """
 
     item_id: str
     section: str
@@ -62,6 +77,7 @@ class ContextRecord:
     source: str
     ordinal: int = 0
     stable: bool = False
+    authoritative: bool = False
 
     def __post_init__(self) -> None:
         if not self.item_id or not self.section or not self.source:
@@ -70,6 +86,13 @@ class ContextRecord:
             raise TypeError("content must be a string")
         if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 0:
             raise ValueError("ordinal must be a non-negative integer")
+        if type(self.authoritative) is not bool:
+            raise TypeError("authoritative must be a bool")
+
+    @property
+    def protected(self) -> bool:
+        """Whether only exact text equality may merge this record."""
+        return self.authoritative or bool(self.stable) or self.section in AUTHORITATIVE_SECTIONS
 
     @property
     def content_digest(self) -> str:
@@ -90,6 +113,8 @@ class DedupProvenance:
     similarity: float
     removed_source: str
     retained_source: str
+    removed_section: str
+    retained_section: str
 
 
 @dataclass(frozen=True)
@@ -109,44 +134,67 @@ def _similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
     return (2.0 * overlap) / (sum(a.values()) + sum(b.values()))
 
 
+def _dedup_order(item: ContextRecord) -> tuple[int, str]:
+    return (item.ordinal, item.item_id)
+
+
 def deduplicate_context(
     records: Sequence[ContextRecord], *, semantic_threshold: float = 0.90
 ) -> DeduplicationResult:
-    """Remove exact, then semantic, duplicates in deterministic producer order.
+    """Group exact, then semantic, duplicates deterministically.
 
-    First occurrence wins (ordinal, then item id), so provenance is stable even
-    when callers provide records in a different order.  Exact comparison keeps
-    line endings canonical but otherwise preserves content; semantic comparison
-    is a bounded token Dice similarity and is intentionally explainable.
+    Exact comparison keeps line endings canonical but otherwise preserves
+    content; it may merge any two records, and a protected copy always wins
+    over an unprotected one whatever the input order.  Semantic comparison is
+    a bounded token Dice similarity and only groups two unprotected records
+    in the same section: it never decides equivalence for instructions,
+    constraints, corrections or verifier results.  Otherwise first occurrence
+    wins (ordinal, then item id), so provenance is stable when callers supply
+    records in a different order.
+
+    The result describes evidence grouping only.  Callers that render every
+    record must keep every record in their replay evidence and attach
+    ``provenance`` as the removed-to-retained mapping.
     """
     if not 0.0 <= semantic_threshold <= 1.0:
         raise ValueError("semantic_threshold must be between 0 and 1")
     candidates = tuple(records)
     if any(not isinstance(item, ContextRecord) for item in candidates):
         raise TypeError("records must contain ContextRecord values")
-    ordered = tuple(sorted(candidates, key=lambda item: (item.ordinal, item.item_id)))
+    # Protected records are considered first so an exact merge can never
+    # drop protection; ordinal order holds within each group.
+    ordered = tuple(sorted(candidates, key=lambda item: (not item.protected, *_dedup_order(item))))
     retained: list[ContextRecord] = []
     removed: list[ContextRecord] = []
-    provenance: list[DedupProvenance] = []
+    provenance: list[tuple[ContextRecord, DedupProvenance]] = []
     exact: dict[str, ContextRecord] = {}
     for record in ordered:
         exact_key = record.content.replace("\r\n", "\n").replace("\r", "\n")
         winner = exact.get(exact_key)
         reason = "exact"
         similarity = 1.0
-        if winner is None:
+        if winner is None and not record.protected:
             for candidate in retained:
+                if candidate.protected or candidate.section != record.section:
+                    continue
                 score = _similarity(record.semantic_key, candidate.semantic_key)
                 if score >= semantic_threshold:
                     winner, similarity, reason = candidate, score, "semantic"
                     break
         if winner is not None:
             removed.append(record)
-            provenance.append(DedupProvenance(record.item_id, winner.item_id, reason, similarity, record.source, winner.source))
+            provenance.append((record, DedupProvenance(
+                record.item_id, winner.item_id, reason, similarity,
+                record.source, winner.source, record.section, winner.section,
+            )))
             continue
         exact[exact_key] = record
         retained.append(record)
-    return DeduplicationResult(tuple(retained), tuple(removed), tuple(provenance))
+    return DeduplicationResult(
+        tuple(sorted(retained, key=_dedup_order)),
+        tuple(sorted(removed, key=_dedup_order)),
+        tuple(entry for _record, entry in sorted(provenance, key=lambda pair: _dedup_order(pair[0]))),
+    )
 
 
 @dataclass(frozen=True)
@@ -406,7 +454,7 @@ def build_replay_manifest(
 
 
 __all__ = [
-    "ContextRecord", "DedupProvenance", "DeduplicationResult", "deduplicate_context",
+    "AUTHORITATIVE_SECTIONS", "ContextRecord", "DedupProvenance", "DeduplicationResult", "deduplicate_context",
     "Snapshot", "LastGoodSnapshot", "PrefixManifest", "PrefixIdentity", "PrefixCacheTelemetry", "PrefixManifestCache",
     "PrefixCacheObservation",
     "ReplaySection", "ReplayManifest", "build_prefix_manifest", "build_replay_manifest",

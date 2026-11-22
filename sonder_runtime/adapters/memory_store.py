@@ -1438,15 +1438,22 @@ def record_outcome_and_claim_lesson_distillation(
             has_good, has_contradiction = _distillation_evidence(
                 conn, interaction_id,
             )
-            if not has_good or has_contradiction:
-                _cancel_live_distillation(
-                    conn, interaction_id, signal,
-                    "contradictory outcome evidence",
-                )
-            else:
+            if has_good and not has_contradiction:
                 claimed = _claim_distillation(
                     conn, interaction_id, signal, claim_token, owner,
                     owner_probe, claimed_at,
+                )
+            elif has_contradiction or (
+                _distillation_row(conn, interaction_id) is not None
+            ):
+                # Evidence that is merely not-yet-good (a weak positive, or
+                # only `attributed` good rows) must not write a terminal
+                # 'cancelled' row for an interaction that has no job yet:
+                # that would block the later grounded outcome from ever
+                # claiming. It may still cancel an existing live job.
+                _cancel_live_distillation(
+                    conn, interaction_id, signal,
+                    "contradictory outcome evidence",
                 )
         row = _distillation_row(conn, interaction_id)
         conn.commit()
@@ -3001,6 +3008,10 @@ def create_task(conn, title, detail="", status="pending", priority=2,
     return get_task(conn, task_id, account_scope=scope)
 
 
+def _escape_like(value):
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def resolve_task_id(conn, task_id, account_scope=None):
     value = (task_id or "").strip()
     if not value:
@@ -3014,9 +3025,9 @@ def resolve_task_id(conn, task_id, account_scope=None):
     if row:
         return row["id"]
     rows = conn.execute(
-        "SELECT id FROM tasks WHERE id LIKE ?%s "
+        "SELECT id FROM tasks WHERE id LIKE ? ESCAPE '\\'%s "
         "ORDER BY updated_ts DESC, rowid DESC LIMIT 2" % where_scope,
-        tuple([value + "%"] + scope_values),
+        tuple([_escape_like(value) + "%"] + scope_values),
     ).fetchall()
     if len(rows) == 1:
         return rows[0]["id"]
@@ -3204,18 +3215,22 @@ def list_sessions(conn, limit=20):
 
 
 def find_session(conn, prefix):
-    """Resolve a session by exact id, then by a case-insensitive title prefix."""
+    """Resolve a session by exact id, then by a unique case-insensitive title prefix."""
+    if not prefix:
+        return None
     row = conn.execute(
         "SELECT session_id FROM sessions WHERE session_id=?", (prefix,)
     ).fetchone()
     if row:
         return row[0]
-    row = conn.execute(
-        "SELECT session_id FROM sessions WHERE lower(title) LIKE lower(?) "
-        "ORDER BY updated_ts DESC LIMIT 1",
-        (prefix + "%",),
-    ).fetchone()
-    return row[0] if row else None
+    rows = conn.execute(
+        "SELECT session_id FROM sessions WHERE lower(title) LIKE lower(?) ESCAPE '\\' "
+        "ORDER BY updated_ts DESC LIMIT 2",
+        (_escape_like(prefix) + "%",),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    return None
 
 
 # --- semantic recall over past interactions --------------------------------
@@ -4056,8 +4071,34 @@ def task_progress(conn, project="", account_scope=None):
     }
 
 
-def all_preferences(conn, limit=50, include_disabled=False):
-    where = "" if include_disabled else "WHERE enabled=1"
+def all_preferences(conn, limit=50, include_disabled=False, bound_project=""):
+    """List preferences; ``bound_project`` confines them to one project.
+
+    A bound list holds ``global`` plus the project's own scopes (``<root>``
+    and ``project:<root>``), matched lexically by
+    :func:`sonder_runtime.adapters.memory_search.bound_project_matcher`, and
+    the limit counts only those rows.  ``bound_project`` is the host-selected
+    root of a bound agent, never a model argument; empty is the operator view.
+    """
+    if bound_project and not isinstance(bound_project, str):
+        # Fail closed: a bound scope must never degrade to the global view.
+        raise TypeError("bound_project must be a project root path string")
+    clauses = [] if include_disabled else ["enabled=1"]
+    if bound_project:
+        from sonder_runtime.adapters.memory_search import (
+            _MATCH_FUNCTION,
+            bound_project_matcher,
+        )
+
+        conn.create_function(
+            _MATCH_FUNCTION, 1, bound_project_matcher(bound_project),
+            deterministic=True,
+        )
+        clauses.append(
+            "(scope='global' OR %s(scope) OR (substr(scope, 1, 8)='project:' "
+            "AND %s(substr(scope, 9))))" % (_MATCH_FUNCTION, _MATCH_FUNCTION)
+        )
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         "SELECT id, scope, key, text, source_interaction, confidence, "
         "evidence_count, enabled, revision, created_ts, updated_ts "

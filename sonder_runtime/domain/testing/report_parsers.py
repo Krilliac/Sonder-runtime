@@ -7,6 +7,8 @@ case counts are capped, and every string is cut to a single bounded line.
 """
 from __future__ import annotations
 
+import bisect
+import collections
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -21,11 +23,31 @@ MAX_TESTCASES = 20_000
 MAX_JSON_LINES = 200_000
 MAX_TEXT_CHARS = 16 * 1024 * 1024
 _PY_LOCATION = re.compile(r"^(?P<file>[^\s:][^:\n]*?\.py):(?P<line>\d+): ", re.MULTILINE)
+LOCATION_SCAN_CHARS = 16 * 1024
+# The path starts where its run of path characters starts, so a long run has a single
+# start (a start per character was quadratic) and the whole path is returned.
 _GENERIC_LOCATION = re.compile(
-    r"(?P<file>[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
+    r"(?<![A-Za-z0-9_./\\-])(?P<file>[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{1,8}):(?:line )?(?P<line>\d+)")
 _GO_OUTPUT_LOCATION = re.compile(r"^\s+(?P<file>[^\s:]+\.go):(?P<line>\d+): ?(?P<msg>.*)$")
 _JVM_LOCATION = re.compile(r"\((?P<file>[A-Za-z0-9_$]+\.(?:java|kt|groovy|scala)):(?P<line>\d+)\)")
-_TRX_LOCATION =re.compile(r"in (?P<file>[^\n]+?):line (?P<line>\d+)")
+_TRX_LINE_MARK = re.compile(r":line (\d+)")
+
+
+def _trx_location(stack: str) -> tuple[str, int | None] | None:
+    """File and line of the first ``in <file>:line <n>`` on any line of *stack*.
+
+    Same result as ``in (?P<file>[^\\n]+?):line (?P<line>\\d+)`` searched over the text, but
+    linear: on a line the leftmost "in " wins, and when no ``:line <n>`` follows it no
+    later "in " can match either, so each line is scanned once.
+    """
+    for line in stack.split("\n"):
+        start = line.find("in ")
+        if start < 0:
+            continue
+        mark = _TRX_LINE_MARK.search(line, start + 4)
+        if mark:
+            return line[start + 3:mark.start()], _int(mark.group(1))
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +140,7 @@ def _case_identity(case: ET.Element, detail_text: str, strip_prefix: str) -> tup
                 rest = "::".join(parts[cut:])
                 return "%s::%s%s" % (file, rest + "::" if rest else "", name), file, found_line
     if not classname or classname == name:
-        location = _GENERIC_LOCATION.search(detail_text or "")
+        location = _GENERIC_LOCATION.search((detail_text or "")[:LOCATION_SCAN_CHARS])
         if location:
             return name, _relative(location.group("file"), strip_prefix), _int(location.group("line"))
         return name, "", None
@@ -258,12 +280,23 @@ def parse_go_test_json(text: str) -> ParsedResults:
         elif action == "fail":
             package_failed[package] = True
     failures: list[TestFailure] = []
+    # Failing names per package, sorted once: every subtest of ``test`` sorts
+    # contiguously from ``test + "/"``, so the parent check is one bisect, not a
+    # scan of every failing test (O(n^2) over 200k hostile events).
+    failing_names: dict[str, list[str]] = {}
+    for package, test in failing:
+        failing_names.setdefault(package, []).append(test)
+    for names in failing_names.values():
+        names.sort()
     for package, test in failing:
         if len(failures) >= MAX_FAILURES:
             truncated = True
             break
         # A parent test fails when a subtest fails; report the leaf only.
-        if any(other_pkg == package and other.startswith(test + "/") for other_pkg, other in failing):
+        names = failing_names[package]
+        prefix = test + "/"
+        index = bisect.bisect_left(names, prefix)
+        if index < len(names) and names[index].startswith(prefix):
             continue
         file, line_no, message = "", None, ""
         for chunk in outputs.get((package, test), ()):
@@ -352,11 +385,11 @@ def parse_trx(data: bytes) -> ParsedResults:
                 message = child.text or ""
             elif tag == "StackTrace" and not stack:
                 stack = child.text or ""
-        location = _TRX_LOCATION.search(stack)
+        location = _trx_location(stack)
         failures.append(TestFailure.bounded(
             element.get("testName", ""),
-            location.group("file") if location else "",
-            _int(location.group("line")) if location else None,
+            location[0] if location else "",
+            location[1] if location else None,
             "failure" if outcome == "failed" else "error",
             _first_line(message),
         ))
@@ -424,7 +457,27 @@ _LIBTEST_RESULT = re.compile(
     r"(?P<ignored>\d+) ignored")
 _LIBTEST_BLOCK = re.compile(r"^---- (?P<name>\S+) stdout ----$")
 _LIBTEST_PANIC_NEW = re.compile(r"panicked at (?P<file>[^\s:]+):(?P<line>\d+):(?P<col>\d+):$")
-_LIBTEST_PANIC_OLD = re.compile(r"panicked at '(?P<msg>.*)', (?P<file>[^\s:]+):(?P<line>\d+):(?P<col>\d+)")
+_LIBTEST_PANIC_OLD_HEAD = "panicked at '"
+_LIBTEST_PANIC_OLD_TAIL = re.compile(r"', (?P<file>[^\s:]+):(?P<line>\d+):(?P<col>\d+)")
+
+
+def _libtest_panic_old(candidate: str) -> tuple[str, str, int | None] | None:
+    """``(msg, file, line)`` of an old-style ``panicked at 'msg', file:line:col`` line.
+
+    Same result as ``panicked at '(?P<msg>.*)', (?P<file>[^\\s:]+):(?P<line>\\d+):(?P<col>\\d+)``
+    searched over the text (greedy message, so the last location tail wins), but linear:
+    only the first head can start a match, since a later head has a subset of its tails.
+    Tails cannot overlap (the file part holds no whitespace), so one scan finds them all.
+    """
+    head = candidate.find(_LIBTEST_PANIC_OLD_HEAD)
+    if head < 0:
+        return None
+    body = head + len(_LIBTEST_PANIC_OLD_HEAD)
+    tails = collections.deque(_LIBTEST_PANIC_OLD_TAIL.finditer(candidate, body), maxlen=1)
+    if not tails:
+        return None
+    last = tails[0]
+    return candidate[body:last.start()], last.group("file"), _int(last.group("line"))
 
 
 def _lines(text: str) -> Iterable[str]:
@@ -468,9 +521,9 @@ def parse_libtest_text(text: str) -> ParsedResults:
                 if index + offset + 1 < len(lines):
                     message = lines[index + offset + 1].strip()
                 break
-            old = _LIBTEST_PANIC_OLD.search(candidate)
+            old = _libtest_panic_old(candidate)
             if old:
-                file, line_no, message = old.group("file"), _int(old.group("line")), old.group("msg")
+                message, file, line_no = old
                 break
         failures.append(TestFailure.bounded(block.group("name"), file, line_no, "failure", message))
     return ParsedResults(TestTotals(passed, failed, skipped, 0, passed + failed + skipped),

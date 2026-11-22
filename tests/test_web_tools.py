@@ -72,9 +72,10 @@ def test_web_search_falls_back_to_mojeek(monkeypatch):
     results = web_tools.web_search("Open-Meteo documentation")
 
     assert len(requested) == 3
-    assert "duckduckgo.com" in requested[0]
-    assert "mojeek.com" in requested[1]
-    assert "mojeek.com" in requested[2]
+    assert [urllib.parse.urlsplit(url).hostname for url in requested] == [
+        "duckduckgo.com", "www.mojeek.com", "www.mojeek.com",
+    ]
+    assert all(urllib.parse.urlsplit(url).scheme == "https" for url in requested)
     assert "q=Open-Meteo" in requested[2]
     assert results == [{
         "title": "Open-Meteo Weather Forecast API",
@@ -90,6 +91,61 @@ def test_bing_redirect_decoder_recovers_direct_result_url():
     assert web_tools._clean_bing_result_url(
         "https://www.bing.com/ck/a?u=a1%s" % encoded
     ) == target
+
+
+@pytest.mark.parametrize(
+    "host", ["bing.com", "www.bing.com", "WWW.BING.COM", "cn.bing.com"],
+)
+def test_bing_search_parser_is_selected_for_bing_domain_hosts(host):
+    target = "https://example.com/result"
+    encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+    page = (
+        f'<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1{encoded}">'
+        'Result</a></h2></li>'
+    )
+
+    assert web_tools._search_rows(page, f"https://{host}/search?q=result", 5) == [
+        {"title": "Result", "url": target, "snippet": ""},
+    ]
+
+
+@pytest.mark.parametrize("host", ["evilbing.com", "bing.com.evil.net"])
+def test_bing_lookalike_hosts_do_not_select_bing_parser(host):
+    target = "https://example.com/result"
+    encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+    page = (
+        f'<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1{encoded}">'
+        'Result</a></h2></li>'
+    )
+
+    assert web_tools._search_rows(page, f"https://{host}/search?q=result", 5) == []
+
+
+@pytest.mark.parametrize(
+    "host", ["mojeek.com", "www.mojeek.com", "WWW.MOJEEK.COM", "eu.mojeek.com"],
+)
+def test_mojeek_search_parser_is_selected_for_mojeek_domain_hosts(host):
+    page = (
+        '<a href="https://example.com/other">Other</a>'
+        '<a class="title" href="https://example.com/result">Result</a>'
+    )
+
+    assert web_tools._search_rows(page, f"https://{host}/search?q=result", 5) == [
+        {"title": "Result", "url": "https://example.com/result", "snippet": ""},
+    ]
+
+
+@pytest.mark.parametrize("host", ["evilmojeek.com", "mojeek.com.evil.net"])
+def test_mojeek_lookalike_hosts_do_not_select_mojeek_parser(host):
+    page = (
+        '<a href="https://example.com/other">Other</a>'
+        '<a class="title" href="https://example.com/result">Result</a>'
+    )
+
+    assert web_tools._search_rows(page, f"https://{host}/search?q=result", 5) == [
+        {"title": "Other", "url": "https://example.com/other", "snippet": ""},
+        {"title": "Result", "url": "https://example.com/result", "snippet": ""},
+    ]
 
 
 def test_search_rss_parser_returns_direct_links_and_plain_snippets():
@@ -146,9 +202,11 @@ def test_web_search_retries_distinctive_query_after_blocks_and_irrelevant_rows(
 
     def fake_request(url, timeout=10):
         requested.append(url)
-        if "duckduckgo.com" in url:
+        parsed = urllib.parse.urlsplit(url)
+        assert parsed.scheme == "https"
+        if parsed.hostname == "duckduckgo.com":
             return b'<form id="challenge-form"></form>', "text/html"
-        if "mojeek.com" in url:
+        if parsed.hostname == "www.mojeek.com":
             return b'<title>403 - Forbidden</title> automated queries', "text/html"
         encoded = target_encoded if "q=Open-Meteo" in url else dictionary_encoded
         title = "Open-Meteo Docs" if encoded == target_encoded else "Official Definition"
@@ -165,6 +223,10 @@ def test_web_search_retries_distinctive_query_after_blocks_and_irrelevant_rows(
     )
 
     assert len(requested) == 4
+    # Also checked after the call: search_raw turns any exception from _request
+    # (an AssertionError included) into a provider failure, so the assert
+    # inside fake_request cannot fail this test on its own.
+    assert all(urllib.parse.urlsplit(url).scheme == "https" for url in requested)
     assert "q=Open-Meteo" in requested[-1]
     assert results[0]["url"] == target
 

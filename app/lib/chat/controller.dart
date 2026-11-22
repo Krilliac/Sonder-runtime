@@ -153,6 +153,14 @@ class ChatController extends ChangeNotifier {
   bool _loadingThreads = true;
   bool get loadingThreads => _loadingThreads;
 
+  /// True while chat history could not be written (quota, disk): the UI
+  /// warns that chats are not being saved.
+  ValueListenable<bool> get persistFailed => ChatStore.persistFailed;
+
+  /// True when saved chats could not be read at all this session (so the
+  /// warning is about unread history, not a refused write).
+  bool get historyUnread => ChatStore.keepUnknownFiles;
+
   Map<String, int> _sessions = <String, int>{};
 
   // -- Turn ---------------------------------------------------------------
@@ -463,6 +471,11 @@ class ChatController extends ChangeNotifier {
         return (ModeChangeOutcome.changed, '');
       }
       final err = normalizeModeError(e);
+      if (localOpenRefusalCodes.contains(err.code)) {
+        // Nothing changed on the server and lowering is still allowed, so
+        // the chip stays writable and shows the mode it already had.
+        return (ModeChangeOutcome.failed, err.message);
+      }
       if (err.httpStatus == 403 || err.code == 'FORBIDDEN') {
         _modeReadOnly = true;
         return (ModeChangeOutcome.readOnly, modeReadOnlyText);
@@ -503,8 +516,18 @@ class ChatController extends ChangeNotifier {
       );
 
   Future<void> loadThreads() async {
-    final loaded = await ChatStore.load();
-    _sessions = await ChatStore.loadSessions();
+    List<ChatThread> loaded;
+    try {
+      loaded = await ChatStore.load();
+      _sessions = await ChatStore.loadSessions();
+    } catch (e) {
+      // History could not be read at all: start fresh rather than leave the
+      // chat stuck loading, and say so.
+      debugPrint('Chat history could not be loaded: $e');
+      loaded = [ChatThread.fresh()];
+      ChatStore.persistFailed.value = true;
+      ChatStore.keepUnknownFiles = true;
+    }
     if (_disposed) return;
     final current = loaded.first;
     _threads = loaded;
@@ -609,10 +632,16 @@ class ChatController extends ChangeNotifier {
     final next = placeholder == null ? remaining : [placeholder];
     final wasCurrent = thread.id == _currentThreadId;
     final current = wasCurrent ? next.first : currentThread;
+    final currentChanged = current.id != _currentThreadId;
     _threads = next;
     _currentThreadId = current.id;
     _project = current.project;
-    _setEntries(current.messages);
+    // Rebuilding gives every row a fresh id and drops the pending row, so
+    // only do it when the visible thread actually changes.
+    if (currentChanged) {
+      _setEntries(current.messages);
+      if (sending && _turnThreadId == _currentThreadId) _restorePendingRow();
+    }
     final session = _sessions.remove(thread.id);
     _notify();
     await ChatStore.save(next);
@@ -653,6 +682,17 @@ class ChatController extends ChangeNotifier {
 
   bool _rotated(String threadId) => (_sessions[threadId] ?? 0) > 0;
 
+  /// The loaded conversation whose thread id or server session id is
+  /// [sessionId] (a shared link or code names the session), else null.
+  ChatThread? threadForSession(String sessionId) {
+    for (final thread in _threads) {
+      if (thread.id == sessionId || sessionFor(thread.id) == sessionId) {
+        return thread;
+      }
+    }
+    return null;
+  }
+
   Future<void> _rotateSession(String threadId) async {
     _sessions[threadId] = (_sessions[threadId] ?? 0) + 1;
     try {
@@ -675,11 +715,9 @@ class ChatController extends ChangeNotifier {
         s.contains('disable') ||
         s.contains('hide') ||
         s.contains('turn off');
-    final isVerboseTopic = t.startsWith('/verbose') ||
-        t.startsWith('/errors') ||
-        (RegExp(r'\b(raw|verbose|full|detailed)\b').hasMatch(t) &&
-            RegExp(r'\b(error|errors|exception|exceptions|traceback)\b')
-                .hasMatch(t));
+    // Only the explicit slash commands are local: ordinary prose that merely
+    // mentions errors or tracebacks must reach the server.
+    final isVerboseTopic = RegExp(r'^/(?:verbose|errors)(?:\s|$)').hasMatch(t);
     if (!isVerboseTopic) return null;
     if (wantsOff(t)) {
       verboseErrors = false;
@@ -689,11 +727,10 @@ class ChatController extends ChangeNotifier {
     if (wantsOn(t) || t == '/verbose' || t == '/errors') {
       verboseErrors = true;
       return 'Verbose errors are **on**. Failures will show the original '
-          'exception under the explanation.\n\nTurn it off with `/verbose off` '
-          '(or just ask).';
+          'exception under the explanation.\n\nTurn it off with `/verbose off`.';
     }
     return 'Verbose errors are currently **${verboseErrors ? "on" : "off"}**. '
-        'Say `/verbose on` or `/verbose off` — plain English works too.';
+        'Say `/verbose on` or `/verbose off`.';
   }
 
   // -- Send / cancel -------------------------------------------------------
@@ -984,9 +1021,22 @@ class ChatController extends ChangeNotifier {
       }
       _entries.removeWhere((e) => e.id == _pendingId || e.id == _userId);
     }
+    // The turn's thread is not on screen: its user row is the stored
+    // thread's last message, and must go the same way.
+    List<ChatMessage>? storedKept;
+    if (!isCurrent) {
+      final stored = _threads.where((t) => t.id == threadId).firstOrNull;
+      final rows = stored?.messages ?? const <ChatMessage>[];
+      if (rows.isNotEmpty && rows.last.role == Role.user) {
+        final userIndex = rows.length - 1;
+        firstTurn = !rows.take(userIndex).any((m) => !m.pending && !m.error);
+        storedKept = rows.sublist(0, userIndex);
+      }
+    }
     _endTurn();
     if (firstTurn) unawaited(_rotateSession(threadId));
     if (isCurrent) unawaited(_saveThread(threadId, messages));
+    if (storedKept != null) unawaited(_saveThread(threadId, storedKept));
     _notify();
     return text;
   }

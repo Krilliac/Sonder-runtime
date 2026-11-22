@@ -206,6 +206,37 @@ def test_local_log_dashboard_requires_direct_loopback_and_no_tls_proxy(monkeypat
     assert ts._local_log_dashboard_allowed("127.0.0.1") is False
 
 
+def _lifecycle_handler(peer, *, host_trusted=True):
+    handler = ts.Handler.__new__(ts.Handler)
+    handler.client_address = (peer, 50000)
+    handler._host_trusted = host_trusted
+    handler.headers = {}
+    events = []
+    handler._auth_rate_limited = lambda: False
+    handler._request_auth_context = lambda: {"authorized": False}
+    handler._send_auth_error = lambda: events.append("401")
+    handler._send_json_payload = lambda payload, status=200: events.append(status)
+    return handler, events
+
+
+def test_lifecycle_loopback_bypass_is_off_behind_a_declared_proxy(monkeypatch):
+    """G1464: behind a loopback reverse proxy every peer is 127.0.0.1."""
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
+    direct, events = _lifecycle_handler("127.0.0.1")
+    assert direct._peer_is_loopback() is True
+    assert direct._handle_lifecycle_get("/version") is True
+    assert events == [200]
+    untrusted_host, _ = _lifecycle_handler("127.0.0.1", host_trusted=False)
+    assert untrusted_host._peer_is_loopback() is False
+
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", True)
+    for path in ("/ready", "/health", "/version"):
+        proxied, events = _lifecycle_handler("127.0.0.1")
+        assert proxied._peer_is_loopback() is False
+        assert proxied._handle_lifecycle_get(path) is True
+        assert events == ["401"], path
+
+
 def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
@@ -3536,6 +3567,9 @@ def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, 
     monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # local-open is held to non-escalating changes (see test_permission_mode_local_open).
+    monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
+                        lambda mode: applied.append(mode))
     body = b'{"mode":"plan"}'
     with _http_server(monkeypatch) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -3578,6 +3612,9 @@ def test_bounded_idempotency_key_still_replays(
     monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    # local-open is held to non-escalating changes (see test_permission_mode_local_open).
+    monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
+                        lambda mode: applied.append(mode))
     headers = {"Content-Type": "application/json", "Idempotency-Key": "b" * 512}
     try:
         with _http_server(monkeypatch) as port:
@@ -3636,3 +3673,244 @@ def test_http_register_forwards_hosted_bootstrap_policy(monkeypatch, tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# --- http-auth-routing lane ---------------------------------------------------
+
+
+def _spy_auth_limiter(monkeypatch, *, reserve=True):
+    """Replace the live lifecycle's limiter calls with recorders.
+
+    The process lifecycle's buckets are shared across tests; spying keeps this
+    test from depending on, or draining, another test's budget.
+    """
+    lifecycle = ts.sonder_lifecycle.get()
+    calls = {"failures": [], "reserved": 0, "refunded": 0}
+
+    def record(peer, reason, *, charge=True):
+        calls["failures"].append((reason, charge))
+
+    def reserve_attempt(peer):
+        calls["reserved"] += 1
+        return reserve
+
+    def refund(peer):
+        calls["refunded"] += 1
+
+    monkeypatch.setattr(lifecycle, "record_auth_failure", record)
+    monkeypatch.setattr(lifecycle, "reserve_auth_attempt", reserve_attempt)
+    monkeypatch.setattr(lifecycle, "refund_auth_attempt", refund)
+    return calls
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_pool_admin_bad_credentials_are_counted_and_throttled(monkeypatch, method):
+    """G1468/G1469: the pool route is dispatched before the general limiter,
+    so it must throttle and count failed credentials itself."""
+    calls = _spy_auth_limiter(monkeypatch)
+    context = {"mode": "api-key", "authorized": False, "api_key": False, "account": None}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    body = '{"page_size":1}' if method == "POST" else None
+    headers = {"Content-Type": "application/json"} if method == "POST" else {}
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(port, method, "/v1/sonder/ollama-pool",
+                                      body=body, headers=headers)
+        assert status == 401, payload
+        assert calls["failures"] == [("invalid-credentials", True)]
+
+        def throttled(self):
+            ts.login_throttle_http.send_throttled(self)
+            return True
+
+        monkeypatch.setattr(ts.Handler, "_auth_rate_limited", throttled)
+        monkeypatch.setattr(ts.Handler, "_request_auth_context",
+                            lambda self: pytest.fail("credential checked while throttled"))
+        status, _, payload = _request(port, method, "/v1/sonder/ollama-pool",
+                                      body=body, headers=headers)
+        assert status == 429, payload
+
+
+def test_logout_deployment_key_check_reserves_and_counts_failures(monkeypatch):
+    """G1473: a wrong deployment key on logout is a counted, throttled failure."""
+    monkeypatch.setattr(ts, "AUTH_MODE", "both")
+    monkeypatch.setattr(ts, "API_KEY", "deployment-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts, "_auth_account", lambda header: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "_open_db",
+                        lambda: pytest.fail("must not open revocation store"))
+    calls = _spy_auth_limiter(monkeypatch)
+    base = {"Content-Type": "application/json", "X-Sonder-Account-Token": "session"}
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(port, "POST", "/v1/sonder/logout", body="{}",
+                                headers={**base, "Authorization": "Bearer wrong-key"})
+        assert status == 401
+        assert calls["reserved"] == 1
+        assert calls["failures"] == [("invalid-credentials", False)]
+        assert calls["refunded"] == 0
+
+        # A matching key refunds its reservation (the body is then refused).
+        status, _, _ = _request(port, "POST", "/v1/sonder/logout",
+                                body='{"token":"other"}',
+                                headers={**base, "Authorization": "Bearer deployment-key"})
+        assert status == 400
+        assert calls["reserved"] == 2
+        assert calls["refunded"] == 1
+        assert len(calls["failures"]) == 1
+
+    calls = _spy_auth_limiter(monkeypatch, reserve=False)
+    monkeypatch.setattr(ts, "check_auth", lambda *a: pytest.fail("key checked while throttled"))
+    with _http_server(monkeypatch) as port:
+        status, _, _ = _request(port, "POST", "/v1/sonder/logout", body="{}",
+                                headers={**base, "Authorization": "Bearer guess"})
+        assert status == 429
+        assert calls["failures"] == []
+
+
+@pytest.mark.parametrize("role", ["user", "developer", "admin"])
+@pytest.mark.parametrize("action_type", ["memory_search", "learning_health", "apply_learned"])
+def test_loop_global_memory_actions_refused_for_hosted_accounts(role, action_type):
+    """G1443: the /loop spelling meets the same global-memory account check
+    as the /<tool> spelling, for every account role."""
+    account = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": role, "role": role}}
+    local = {"mode": "local-open", "authorized": True, "api_key": False, "account": None}
+    payload = json.dumps([{"type": action_type}])
+    refused = ts._loop_global_operation_refusal(payload, account)
+    assert refused.startswith("refused /loop")
+    assert "global memory tool is local-operator only" in refused
+    assert ts._loop_global_operation_refusal(payload, local) == ""
+
+
+class _ThinHandlerSpy:
+    def __init__(self):
+        self.bodies = []
+
+    def handle(self, request):
+        from sonder_runtime.interfaces.http.handlers import Response
+        self.bodies.append(json.loads(request.body))
+        return Response(200, {"ok": True})
+
+
+@pytest.mark.parametrize("path", ["/v1/recall", "/v1/outcome", "/v1/thin-extension"])
+def test_thin_handlers_apply_per_tool_account_checks(monkeypatch, path):
+    """G1478: thin handlers run against the shared memory corpus, so a hosted
+    account is refused like /recall and /record_outcome; an unmapped handler
+    requires administrator authority."""
+    spy = _ThinHandlerSpy()
+    monkeypatch.setattr(ts, "_THIN_HANDLERS", {path: spy})
+    context = {"mode": "account", "authorized": True, "api_key": False,
+               "account": {"username": "dev", "role": "developer"}}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(port, "POST", path, body='{"task":"x"}',
+                                      headers={"Content-Type": "application/json"})
+    assert status == 403, payload
+    assert json.loads(payload)["error"]["code"] == "FORBIDDEN"
+    assert spy.bodies == []
+
+
+def test_thin_handler_receives_already_parsed_body_without_rereading(monkeypatch):
+    """G1478: the POST path has already consumed the body via _read_json; the
+    thin handler must get that body instead of blocking on a second read."""
+    spy = _ThinHandlerSpy()
+    monkeypatch.setattr(ts, "_THIN_HANDLERS", {"/v1/recall": spy})
+    context = {"mode": "local-open", "authorized": True, "api_key": False, "account": None}
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda self: context)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(port, "POST", "/v1/recall",
+                                      body='{"task":"find it","k":3}',
+                                      headers={"Content-Type": "application/json"})
+    assert status == 200, payload
+    assert spy.bodies == [{"task": "find it", "k": 3}]
+
+
+def _plan_mode_decisions(monkeypatch):
+    import permission_modes
+
+    def decide(tool, **kwargs):
+        return permission_modes.decide(
+            tool, mode=permission_modes.PLAN, interactive=False, record=False,
+            arguments=kwargs.get("arguments"), rule_lookup=lambda name: None,
+        )
+
+    monkeypatch.setattr(ts.permission_policy, "decide_for_caller", decide)
+
+
+@pytest.mark.parametrize("intent,slash", [({"train": 3}, "/train 3"), ({"run": True}, "/run")])
+def test_natural_language_intents_meet_the_slash_permission_gate(monkeypatch, intent, slash):
+    """G1458: "practice 3 tasks" / "run it" must be refused wherever /train
+    and /run are, and the gate must see the caller's auth context."""
+    _plan_mode_decisions(monkeypatch)
+    monkeypatch.setattr(ts.intents, "classify", lambda value: dict(intent))
+    monkeypatch.setattr(ts, "_do_train", lambda n: pytest.fail("train ran under plan"))
+    monkeypatch.setattr(ts.code_runner, "run_code",
+                        lambda *a, **k: pytest.fail("code ran under plan"))
+    seen = []
+    real_refusal = ts._http_slash_refusal
+
+    def recording_refusal(cmd, argument="", context=None, arguments=None):
+        seen.append((cmd, context))
+        return real_refusal(cmd, argument, context=context, arguments=arguments)
+
+    monkeypatch.setattr(ts, "_http_slash_refusal", recording_refusal)
+    context = {"mode": "api-key", "authorized": True, "api_key": True, "account": None}
+    messages = [{"role": "assistant", "content": "```python\nprint(1)\n```"}]
+    slash_refusal = ts._handle_slash(slash, messages=messages, context=context)
+    assert slash_refusal.startswith("refused /")
+    # The mode gate holds whoever the caller is.
+    assert ts._handle_intent("do it", messages=messages).startswith("refused /")
+    seen.clear()
+    output = ts._handle_intent("do it", messages=messages, context=context)
+    assert output == slash_refusal
+    assert seen == [(slash.split()[0], context)]
+
+
+def test_responses_endpoint_does_not_execute_slash_control_commands(monkeypatch):
+    """POST /v1/responses is model-only and must not reach control_command via answer_with_history."""
+    import selfmod
+    import server as srv
+    import permission_modes
+
+    orig_rule = permission_modes._rule_action_for
+    monkeypatch.setattr(
+        permission_modes, "_rule_action_for",
+        lambda tool, args=None: (permission_modes.ALLOW, "allow") if tool == "selfmod" else orig_rule(tool, args),
+    )
+    mutated = []
+    monkeypatch.setattr(
+        selfmod, "set_enabled",
+        lambda flag: mutated.append(flag) or {"enabled": flag},
+    )
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: developer)
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **kw: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "route_computer_use", lambda *a, **kw: None)
+
+    seen_prompts = []
+
+    def fake_answer(prompt, history, **kwargs):
+        # Invoke real control_command the same way _answer_with_history_impl does.
+        cmd = srv.control_command(prompt)
+        if cmd is not None:
+            return cmd
+        seen_prompts.append(prompt)
+        return "model-reply"
+
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
+    body = json.dumps({"model": "sonder", "input": "/selfmod disable"}).encode("utf-8")
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(
+            port, "POST", "/v1/responses", body=body,
+            headers={"Content-Type": "application/json"},
+        )
+    assert status == 200, payload
+    assert mutated == []
+    assert seen_prompts == ["/selfmod disable"]
+

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -325,3 +326,44 @@ class TestCrashRecovery:
                 f"{name} should carry exactly one epoch-{EPOCH} ledger row "
                 "after a crash and resume"
             )
+
+
+def test_backup_db_includes_uncheckpointed_wal_frames(tmp_path):
+    from sonder_runtime.adapters.persistence.sqlite.bridge_migration import _backup_db
+
+    db = tmp_path / "memory.db"
+    holder = sqlite3.connect(str(db))
+    try:
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("PRAGMA wal_autocheckpoint=0")
+        holder.execute("CREATE TABLE t(v INTEGER)")
+        holder.commit()
+        holder.execute("INSERT INTO t VALUES (42)")
+        holder.commit()
+        assert (tmp_path / "memory.db-wal").stat().st_size > 0
+        dest = _backup_db(db, tmp_path / "backup")
+    finally:
+        holder.close()
+    assert dest is not None
+    copy = sqlite3.connect(str(dest))
+    try:
+        assert copy.execute("SELECT v FROM t").fetchall() == [(42,)]
+    finally:
+        copy.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_backup_db_creates_owner_only_copy(tmp_path):
+    from sonder_runtime.adapters.persistence.sqlite.bridge_migration import _backup_db
+
+    db = tmp_path / "memory.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE t(v INTEGER)")
+    conn.commit()
+    conn.close()
+    old = os.umask(0o022)
+    try:
+        dest = _backup_db(db, tmp_path / "backup")
+    finally:
+        os.umask(old)
+    assert dest is not None and (dest.stat().st_mode & 0o077) == 0

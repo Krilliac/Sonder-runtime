@@ -833,7 +833,21 @@ def _partial_cost():
     return anthropic_policy.usage_cost_usd("claude-opus-5-5", input_tokens=100, output_tokens=7)
 
 
-def test_an_abandoned_stream_records_the_usage_it_had_consumed(ledger):
+def _capture_reservations(ledger, monkeypatch):
+    """Record every worst-case amount the gateway reserves on ``ledger``."""
+    amounts = []
+    original = ledger.try_reserve
+
+    def try_reserve(amount, cap):
+        amounts.append(amount)
+        return original(amount, cap)
+
+    monkeypatch.setattr(ledger, "try_reserve", try_reserve)
+    return amounts
+
+
+def test_an_abandoned_stream_is_charged_its_worst_case_not_the_stale_snapshot(ledger, monkeypatch):
+    reserved = _capture_reservations(ledger, monkeypatch)
     gate = threading.Event()
     sdk = FakeSdk(lambda k, p: _message(
         text="hello world", input_tokens=100, output_tokens=7, plan={"gate": gate}))
@@ -843,7 +857,9 @@ def test_an_abandoned_stream_records_the_usage_it_had_consumed(ledger):
     stream.close()          # the consumer walks away mid-stream
     gate.set()              # the SDK stream then yields again and finds the stop flag
     assert _wait_for(lambda: ledger.snapshot()["calls"] == 1)
-    assert Decimal(ledger.snapshot()["usd"]) == _partial_cost()
+    (worst,) = reserved
+    assert worst > _partial_cost()  # the snapshot's output count would understate it
+    assert Decimal(ledger.snapshot()["usd"]) == worst
     assert ledger.snapshot()["calls"] == 1  # recorded exactly once
 
 
@@ -851,20 +867,159 @@ def test_an_abandoned_stream_records_the_usage_it_had_consumed(ledger):
     (FakeApiError(500, "stream broke"), DependencyUnavailable),
     (APITimeoutError("read timeout"), DeadlineExceeded),
 ], ids=["mid_stream_error", "timeout_after_message_start"])
-def test_a_stream_that_fails_after_message_start_records_partial_usage(ledger, error, expected):
+def test_a_stream_that_fails_after_message_start_is_charged_its_worst_case(
+        ledger, monkeypatch, error, expected):
+    reserved = _capture_reservations(ledger, monkeypatch)
     sdk = FakeSdk(lambda k, p: _message(
         text="hello world", input_tokens=100, output_tokens=7, plan={"fail": error}))
     with pytest.raises(expected):
         list(_gateway(sdk, ledger).stream(_request(), _context()))
     assert ledger.snapshot()["calls"] == 1
-    assert Decimal(ledger.snapshot()["usd"]) == _partial_cost()
+    (worst,) = reserved
+    assert Decimal(ledger.snapshot()["usd"]) == worst > _partial_cost()
+    assert ledger._inflight == {}
 
 
-def test_a_stream_that_fails_before_message_start_records_nothing(ledger):
-    sdk = FakeSdk(lambda k, p: _message(plan={"fail": APITimeoutError("t"), "before_start": True}))
+def test_an_unfinished_stream_whose_snapshot_exceeds_the_worst_case_keeps_the_snapshot(ledger):
+    error = APITimeoutError("read timeout")
+    sdk = FakeSdk(lambda k, p: _message(
+        text="hello world", input_tokens=500_000, output_tokens=7, plan={"fail": error}))
     with pytest.raises(DeadlineExceeded):
+        list(_gateway(sdk, ledger, _settings(daily_usd=Decimal(100))).stream(
+            _request(), _context()))
+    expected = anthropic_policy.usage_cost_usd(
+        "claude-opus-5-5", input_tokens=500_000, output_tokens=7)
+    assert Decimal(ledger.snapshot()["usd"]) == expected
+
+
+# -- non-streaming calls that fail after the request was sent -------------------------------
+
+
+@pytest.mark.parametrize("error", [
+    APITimeoutError("read timeout"), ConnectionResetError("dropped"), TimeoutError("slow"),
+], ids=["sdk_timeout", "connection_reset", "socket_timeout"])
+def test_a_generate_that_fails_after_send_is_charged_its_worst_case(ledger, monkeypatch, error):
+    reserved = _capture_reservations(ledger, monkeypatch)
+    sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(error))
+    with pytest.raises((DeadlineExceeded, DependencyUnavailable)):
+        _gateway(sdk, ledger).generate(_request(options={"num_predict": 1000}), _context())
+    (worst,) = reserved
+    assert worst > 0
+    assert ledger.snapshot()["calls"] == 1
+    assert Decimal(ledger.snapshot()["usd"]) == worst
+    assert ledger._inflight == {}  # the reservation became spend, it is not double-held
+
+
+def test_repeated_timeouts_reach_the_daily_cap(ledger):
+    sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(APITimeoutError("t")))
+    # opus 5.5 worst case for max_tokens 1000 is about $0.0223: two fit a $0.05 cap.
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.05")))
+    for _ in range(2):
+        with pytest.raises(DeadlineExceeded):
+            gateway.generate(_request(options={"num_predict": 1000}), _context())
+    with pytest.raises(AnthropicDailyCapReached):
+        gateway.generate(_request(options={"num_predict": 1000}), _context())
+    assert len(sdk.calls) == 2
+
+
+class ConnectError(Exception):
+    """Same class name as httpx2's connect-phase error."""
+
+
+class APIConnectionError(Exception):
+    """Same class name as the SDK's connection error; no status code."""
+
+
+def _wrapped_connect_error():
+    try:
+        raise ConnectError("refused")
+    except ConnectError as cause:
+        error = APIConnectionError("Connection error.")
+        error.__cause__ = cause
+        return error
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda: ConnectionRefusedError("refused"), _wrapped_connect_error,
+], ids=["refused", "sdk_wrapped_connect_error"])
+def test_a_generate_whose_connection_never_opened_is_not_charged(ledger, make_error):
+    sdk = FakeSdk(lambda k, p: (_ for _ in ()).throw(make_error()))
+    with pytest.raises(DependencyUnavailable):
+        _gateway(sdk, ledger).generate(_request(), _context())
+    assert ledger.snapshot()["calls"] == 0
+    assert ledger._inflight == {}
+
+
+def test_a_client_that_cannot_be_built_is_not_charged(ledger):
+    def factory(key, timeout):
+        raise APITimeoutError("t")
+
+    gateway = AnthropicGateway(
+        _settings(), client_factory=factory, spend_ledger=ledger,
+        request_admission=HostModelRequestAdmission(),
+    )
+    with pytest.raises(DeadlineExceeded):
+        gateway.generate(_request(), _context())
+    assert ledger.snapshot()["calls"] == 0
+
+
+def test_real_sdk_transport_errors_are_charged_only_after_send(ledger):
+    anthropic = pytest.importorskip("anthropic", reason="the optional anthropic SDK is not installed")
+    httpx = pytest.importorskip("httpx2", reason="httpx2 comes with the anthropic SDK")
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    def raising(sdk_error, cause):
+        def behave(key, params):
+            raise sdk_error from cause
+        return behave
+
+    read_timeout = raising(anthropic.APITimeoutError(request=request),
+                           httpx.ReadTimeout("read", request=request))
+    with pytest.raises(DeadlineExceeded):
+        _gateway(FakeSdk(read_timeout), ledger).generate(_request(), _context())
+    assert ledger.snapshot()["calls"] == 1
+    for cause in (httpx.ConnectError("refused", request=request),
+                  httpx.ConnectTimeout("connect", request=request),
+                  httpx.PoolTimeout("pool", request=request)):
+        error_type = (anthropic.APITimeoutError if isinstance(cause, httpx.TimeoutException)
+                      else anthropic.APIConnectionError)
+        sdk_error = error_type(request=request)
+        with pytest.raises((DeadlineExceeded, DependencyUnavailable)):
+            _gateway(FakeSdk(raising(sdk_error, cause)), ledger).generate(_request(), _context())
+    assert ledger.snapshot()["calls"] == 1  # none of the never-sent failures was charged
+
+
+@pytest.mark.parametrize("make_error", [
+    lambda: APITimeoutError("t"), lambda: ConnectionResetError("dropped"),
+], ids=["sdk_timeout", "connection_reset"])
+def test_a_stream_that_fails_before_message_start_is_charged_its_worst_case(ledger, monkeypatch, make_error):
+    reserved = _capture_reservations(ledger, monkeypatch)
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": make_error(), "before_start": True}))
+    with pytest.raises((DeadlineExceeded, DependencyUnavailable)):
+        list(_gateway(sdk, ledger).stream(_request(options={"num_predict": 1000}), _context()))
+    (worst,) = reserved
+    assert ledger.snapshot()["calls"] == 1
+    assert Decimal(ledger.snapshot()["usd"]) == worst
+    assert ledger._inflight == {}
+
+
+def test_a_stream_whose_connection_never_opened_is_not_charged(ledger):
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": _wrapped_connect_error(), "before_start": True}))
+    with pytest.raises(DependencyUnavailable):
         list(_gateway(sdk, ledger).stream(_request(), _context()))
     assert ledger.snapshot()["calls"] == 0
+    assert ledger._inflight == {}
+
+
+def test_repeated_stream_timeouts_reach_the_daily_cap(ledger):
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": APITimeoutError("t"), "before_start": True}))
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.05")))
+    for _ in range(2):
+        with pytest.raises(DeadlineExceeded):
+            list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    with pytest.raises(AnthropicDailyCapReached):
+        list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    assert len(sdk.calls) == 2
 
 
 def test_a_completed_stream_is_recorded_once_not_twice(ledger):
@@ -1188,7 +1343,9 @@ def test_a_completed_stream_releases_its_reservation(ledger):
 def test_a_stream_that_fails_midway_releases_its_reservation(ledger):
     sdk = FakeSdk(lambda k, p: _message(
         text="hello world", plan={"fail": FakeApiError(500, "stream broke")}))
-    gateway = _near_cap_gateway(sdk, ledger)
+    # The unfinished stream is charged its worst case (~$0.0223).  A $0.05 cap then
+    # admits one more such call, but not while the failed call's reservation is held.
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.05")))
     with pytest.raises(DependencyUnavailable):
         list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
     assert ledger._inflight == {}

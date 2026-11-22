@@ -1,6 +1,7 @@
 """In-memory reference implementation of snapshot-plus-event resumable streams."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import json
 from threading import RLock
@@ -37,6 +38,9 @@ class ResumableStream:
         self._snapshot: Snapshot | None = None
         self._events: list[EventEnvelope] = []
         self._event_ids: dict[str, EventEnvelope] = {}
+        # Bounded FIFO of ids pruned by snapshots (at most ``capacity`` entries),
+        # so a redelivered id inside that window still returns its original envelope.
+        self._pruned_ids: OrderedDict[str, EventEnvelope] = OrderedDict()
         self._next_sequence = 1
         self._lock = RLock()
 
@@ -50,10 +54,19 @@ class ResumableStream:
             if not isinstance(state, dict):
                 raise TypeError("snapshot state must be a dict")
             point = self.watermark if watermark is None else watermark
-            if point < 0 or point > self.watermark:
+            if isinstance(point, bool) or not isinstance(point, int) or point < 0 or point > self.watermark:
                 raise ValueError("snapshot watermark must be within stream history")
+            if self._snapshot is not None and point < self._snapshot.watermark:
+                raise ValueError("snapshot watermark cannot regress below existing snapshot")
             self._snapshot = Snapshot(self.stream_id, point, dict(state))
-            self._events = [event for event in self._events if event.sequence > point]
+            kept = [event for event in self._events if event.sequence > point]
+            for event in self._events:
+                if event.sequence <= point:
+                    self._pruned_ids[event.event_id] = event
+            while len(self._pruned_ids) > self.capacity:
+                self._pruned_ids.popitem(last=False)
+            self._events = kept
+            self._event_ids = {event.event_id: event for event in kept}
             return self._snapshot
 
     def publish(self, event_type: str, payload: dict, *, event_id: str, sequence: int | None = None) -> EventEnvelope:
@@ -72,6 +85,8 @@ class ResumableStream:
                 raise ValueError("event payload exceeds 256 KiB")
             if event_id in self._event_ids:
                 return self._event_ids[event_id]
+            if event_id in self._pruned_ids:
+                return self._pruned_ids[event_id]
             point = self._next_sequence if sequence is None else sequence
             if point != self._next_sequence:
                 raise ValueError(f"expected sequence {self._next_sequence}, got {point}")

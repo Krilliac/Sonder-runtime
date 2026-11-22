@@ -277,6 +277,49 @@ def test_output_rejects_path_escape(monkeypatch, tmp_path):
         assetgen.generate_artifacts("../escape", "icon")
 
 
+def test_output_outside_asset_root_is_refused_and_untouched(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    project = tmp_path / "app" / "web"
+    project.mkdir(parents=True)
+    (project / "manifest.json").write_text('{"name": "my-web-app"}', encoding="utf-8")
+    (project / "data.json").write_text('{"keep": true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="asset root"):
+        assetgen.generate_artifacts("web", "icon", kinds="icon", output_dir="app")
+
+    assert (project / "manifest.json").read_text(encoding="utf-8") == '{"name": "my-web-app"}'
+    assert (project / "data.json").read_text(encoding="utf-8") == '{"keep": true}'
+    assert not (project / "icon.png").exists()
+
+
+def test_output_dir_inside_asset_root_is_accepted(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+
+    result = assetgen.generate_artifacts(
+        "team-kit", "icon", kinds="icon", output_dir=os.path.join("artifacts", "generated", "team"),
+    )
+
+    expected = tmp_path / "artifacts" / "generated" / "team" / "team-kit"
+    assert os.path.realpath(result["root"]) == os.path.realpath(str(expected))
+    assert assetgen.verify_pack(result["root"])["ok"]
+
+
+def test_regeneration_refuses_directory_without_generator_manifest(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    foreign = tmp_path / "artifacts" / "generated" / "notes"
+    foreign.mkdir(parents=True)
+    (foreign / "data.json").write_text('{"user": 1}', encoding="utf-8")
+    (foreign / "manifest.json").write_text(
+        '{"generator": "someone-else"}', encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not a generated artifact pack"):
+        assetgen.generate_artifacts("notes", "icon", kinds="icon")
+
+    assert (foreign / "data.json").read_text(encoding="utf-8") == '{"user": 1}'
+    assert (foreign / "manifest.json").read_text(encoding="utf-8") == '{"generator": "someone-else"}'
+
+
 def test_manifest_is_machine_readable(monkeypatch, tmp_path):
     _local_root(monkeypatch, tmp_path)
     pack = assetgen.generate_artifacts("diagram", "architecture diagram preview")
@@ -288,6 +331,27 @@ def test_manifest_is_machine_readable(monkeypatch, tmp_path):
     assert "preview" in manifest["kinds"]
     assert manifest["validation"]["recipe"] == "bundle"
     assert manifest["validation"]["failed_checks"] == 0
+
+
+def test_generated_artifacts_redact_credentials_in_brief(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    secret_value = "example-secret-value"
+    pack = assetgen.generate_artifacts(
+        "redacted-brief",
+        "Brand launch with api_key=" + secret_value,
+        kinds="vector,diagram,document,web,data",
+    )
+
+    for filename in (
+        "vector.svg", "diagram.svg", "brief.md", "preview.html",
+        "data.json", "request.json", "manifest.json",
+    ):
+        with open(os.path.join(pack["root"], filename), encoding="utf-8") as handle:
+            output = handle.read()
+        assert secret_value not in output, filename
+        assert "api_key=[REDACTED]" in output, filename
+    assert pack["brief"] == "Brand launch with api_key=[REDACTED]"
+    assert assetgen.verify_pack(pack["root"])["ok"]
 
 
 def test_non_game_request_emits_general_open_formats(monkeypatch, tmp_path):
@@ -378,3 +442,44 @@ def test_regeneration_removes_stale_generator_outputs(monkeypatch, tmp_path):
     paths = {row["path"] for row in second["files"]}
     assert paths == {"icon.png", "request.json"}
     assert not os.path.exists(os.path.join(second["root"], "theme.wav"))
+
+
+@pytest.mark.parametrize("spelling", ["unc", "slashes", "extended", "device"])
+def test_network_output_dir_is_refused_before_any_resolve(monkeypatch, tmp_path, spelling):
+    _local_root(monkeypatch, tmp_path)
+    bs = chr(92)
+    raw = {
+        "unc": bs * 2 + "attacker-host" + bs + "share" + bs + "assets",
+        "slashes": "//attacker-host/share/assets",
+        "extended": bs * 2 + "?" + bs + "UNC" + bs + "attacker-host" + bs + "share",
+        "device": bs * 2 + "." + bs + "pipe" + bs + "x",
+    }[spelling]
+    seen = []
+    real = os.path.realpath
+
+    def spy(p, *a, **k):
+        seen.append(str(p))
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(os.path, "realpath", spy)
+    with pytest.raises(PermissionError):
+        assetgen.resolve_pack_dir("demo", raw)
+    with pytest.raises(PermissionError):
+        assetgen.verify_pack(raw)
+    leaked = [p for p in seen if "attacker-host" in p or "pipe" in p]
+    assert leaked == []
+
+
+def test_directory_named_like_owned_file_aborts_before_any_deletion(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    first = assetgen.generate_artifacts("pk", "icon", kinds="icon,data")
+    root = first["root"]
+    os.remove(os.path.join(root, "data.json"))
+    os.mkdir(os.path.join(root, "data.json"))
+    before = sorted(os.listdir(root))
+
+    with pytest.raises(ValueError, match="unexpectedly a directory"):
+        assetgen.generate_artifacts("pk", "icon", kinds="icon,data")
+
+    assert sorted(os.listdir(root)) == before
+

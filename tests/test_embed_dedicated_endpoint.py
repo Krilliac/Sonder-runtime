@@ -17,7 +17,7 @@ import pytest
 
 from sonder_runtime.adapters import embeddings
 
-NODE = "https://10.77.0.2:8443"
+NODE = "https://192.0.2.2:8443"
 LOCAL = "http://127.0.0.1:11434"
 
 
@@ -120,7 +120,7 @@ def test_remote_dedicated_endpoint_still_needs_explicit_consent(monkeypatch):
 
 
 def test_plain_http_remote_is_refused_even_with_consent(monkeypatch):
-    monkeypatch.setenv("SONDER_EMBED_BASE_URL", "http://10.77.0.2:11434")
+    monkeypatch.setenv("SONDER_EMBED_BASE_URL", "http://192.0.2.2:11434")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     embeddings.configure_typed_endpoint(None)
     calls = []
@@ -193,7 +193,7 @@ def test_circuit_recovers_after_cooldown(monkeypatch):
 
 def test_fallback_is_never_a_second_remote(monkeypatch):
     _dedicate(monkeypatch, fallback="local")
-    monkeypatch.setenv("OLLAMA_HOST", "https://10.77.0.9:8443")
+    monkeypatch.setenv("OLLAMA_HOST", "https://192.0.2.9:8443")
     assert embeddings.embedding_route()["fallback"] is None
 
 
@@ -216,7 +216,7 @@ def test_keep_alive_is_opt_in_and_validated(monkeypatch, value, sent):
     ("0", "absent"), ("-1", "absent"),
 ])
 def test_num_ctx_is_opt_in_and_validated(monkeypatch, value, sent):
-    # Measured 2026-09-30 on Node1 (Ollama 0.33, 31.8 GiB Vulkan budget): an
+    # Measured 2026-09-30 on a compute node (Ollama 0.33, 31.8 GiB Vulkan budget): an
     # embed request without num_ctx loads qwen3-embedding:4b with the server's
     # default 32k context, a 10.8 GB runner for a 4 GB model, so it could never
     # stay resident next to the 22 GB reasoning model. A bounded num_ctx keeps
@@ -268,7 +268,7 @@ def _doctor(monkeypatch, tags_by_origin):
 
 
 def test_doctor_warns_when_the_embedder_is_not_installed_where_it_is_sent(monkeypatch):
-    # The live-stack failure this check exists for: model pulled on Node1,
+    # The live-stack failure this check exists for: model pulled on a compute node,
     # embeddings still sent to the primary, every recall silently lexical.
     result = _doctor(monkeypatch, {LOCAL: ["qwen3.8:27b"]})
     assert result["status"] == "warn"
@@ -281,7 +281,7 @@ def test_doctor_reports_dedicated_endpoint_and_ready_fallback(monkeypatch):
     result = _doctor(monkeypatch, {NODE: ["nomic-embed-text:latest"],
                                    LOCAL: ["nomic-embed-text"]})
     assert result["status"] == "ok"
-    assert "10.77.0.2 (dedicated)" in result["detail"]
+    assert "192.0.2.2 (dedicated)" in result["detail"]
     assert "local-CPU fallback ready" in result["detail"]
 
 

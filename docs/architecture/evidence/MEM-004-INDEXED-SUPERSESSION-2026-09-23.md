@@ -23,3 +23,7 @@ present-state materializations with validity-time filtering; a later
 tombstone does not reconstruct a historical snapshot. Contradiction handling,
 source-trust scoring, decay, explicit revalidation, semantic promotion, and
 live database adoption remain open under MEM-004 and issues #513/#514.
+(Receipt-bound promotion of an explicit host fact claim now exists; see the
+"Explicit host fact claims" section of
+`MEM-003-RECEIPT-AUTHORITY-2026-09-23.md`. No live host verifier supplies
+such a claim yet.)

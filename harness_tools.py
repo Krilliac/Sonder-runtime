@@ -12,12 +12,14 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+import sonder_runtime.adapters.secret_scan as secret_scan_adapter
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
@@ -1376,42 +1378,77 @@ def secret_scan(root=".", timeout=30, extra_roots=""):
     # does, so a caller never mistakes a cut-short scan for a clean one.
     deadline = time.monotonic() + timeout
     timed_out = False
-    for path in root.rglob("*"):
+    credential_files_skipped = 0
+    links_skipped = 0
+    # The packaged adapter's confined walk, check for check: os.walk with
+    # followlinks=False, every directory re-checked before it is entered and
+    # every file before it is opened. ``root.rglob`` descended Windows
+    # junctions (a junction loop filled the finding cap), and is_file/read_text
+    # followed a file symlink to a credential store or out of the allowed
+    # roots. A credential store is counted, never opened.
+    for base, dirs, files in os.walk(root, followlinks=False):
         if time.monotonic() >= deadline:
             timed_out = True
             break
-        if not path.is_file() or path.stat().st_size > 1_000_000:
-            continue
-        rel = str(path.relative_to(root))
-        if any(part.startswith(".") and part != "." for part in Path(rel).parts):
-            if not rel.startswith(".env"):
+        base_path = Path(base)
+        entered = []
+        for name in sorted(dirs):
+            if secret_scan_adapter.confined_path(base_path / name, root) is None:
+                links_skipped += 1
                 continue
-        if path.suffix.lower() in (".pyc", ".pyo", ".exe", ".dll", ".so", ".png", ".jpg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".jar"):
-            continue
-        scanned += 1
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        for pattern_str, label in secret_patterns:
+            entered.append(name)
+        dirs[:] = entered
+        for name in sorted(files):
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
-            for m in re.finditer(pattern_str, content):
-                line_no = content[:m.start()].count("\n") + 1
-                # Never echo the matched text: a 40-character prefix of a
-                # credential is usually the whole credential, and callers
-                # render and durably record this field. Same placeholder as
-                # the packaged scanner (adapters/secret_scan.py).
-                findings.append({
-                    "file": rel, "line": line_no, "type": label,
-                    "match": _REDACTED_CREDENTIAL,
-                })
-                if len(findings) >= 100:
-                    return {"ok": True, "findings": findings, "files_scanned": scanned,
-                            "truncated": True, "timed_out": False}
+            path = base_path / name
+            rel = str(path.relative_to(root))
+            if any(part.startswith(".") and part != "." for part in Path(rel).parts):
+                if not rel.startswith(".env"):
+                    continue
+            if path.suffix.lower() in (".pyc", ".pyo", ".exe", ".dll", ".so", ".png", ".jpg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".zip", ".gz", ".tar", ".jar"):
+                continue
+            real = secret_scan_adapter.confined_path(path, root)
+            if real is None:
+                links_skipped += 1
+                continue
+            if file_ops.is_credential_store(path) or file_ops.is_credential_store(real):
+                credential_files_skipped += 1
+                continue
+            try:
+                info = real.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 1_000_000:
+                    continue
+                scanned += 1
+                content = real.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for pattern_str, label in secret_patterns:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                for m in re.finditer(pattern_str, content):
+                    line_no = content[:m.start()].count("\n") + 1
+                    # Never echo the matched text: a 40-character prefix of a
+                    # credential is usually the whole credential, and callers
+                    # render and durably record this field. Same placeholder as
+                    # the packaged scanner (adapters/secret_scan.py).
+                    findings.append({
+                        "file": rel, "line": line_no, "type": label,
+                        "match": _REDACTED_CREDENTIAL,
+                    })
+                    if len(findings) >= 100:
+                        return {"ok": True, "findings": findings, "files_scanned": scanned,
+                                "truncated": True, "timed_out": False,
+                                "credential_files_skipped": credential_files_skipped,
+                                "links_skipped": links_skipped}
+            if timed_out:
+                break
         if timed_out:
             break
 
     return {"ok": True, "findings": findings, "files_scanned": scanned,
-            "truncated": timed_out, "timed_out": timed_out, "timeout": timeout}
+            "truncated": timed_out, "timed_out": timed_out, "timeout": timeout,
+            "credential_files_skipped": credential_files_skipped,
+            "links_skipped": links_skipped}

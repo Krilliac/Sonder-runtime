@@ -1025,8 +1025,20 @@ class RuntimeLifecycle:
                     )
                 self._acquired = True
                 lifecycle.metrics.active_requests.inc()
-                if mutating and lifecycle.coordinator.begin_mutation():
-                    self._counted_mutation = True
+                if mutating:
+                    if lifecycle.coordinator.begin_mutation():
+                        self._counted_mutation = True
+                    else:
+                        # Lost the drain race while queued for a slot: give
+                        # the slot and owner count back and reject, rather
+                        # than run a mutation the drain barriers cannot see.
+                        self.__exit__(None, None, None)
+                        raise self._rejection(
+                            503,
+                            "DRAINING",
+                            "the runtime is draining for shutdown",
+                            retryable=True,
+                        )
                 return self
 
             def __exit__(self, exc_type, exc, tb):

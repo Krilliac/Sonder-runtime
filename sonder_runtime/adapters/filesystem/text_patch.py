@@ -64,6 +64,11 @@ def _patch_path(value: str, *, prefix: str) -> str | None:
     return "/".join(parts)
 
 
+def _split_lines(text: str) -> list[str]:
+    """Split on LF only (keeping terminators); form feed, U+2028 etc. stay in-line."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
 def _parse(patch: str) -> list[dict]:
     if not isinstance(patch, str) or not patch:
         raise ValueError("patch must be a non-empty string")
@@ -71,7 +76,7 @@ def _parse(patch: str) -> list[dict]:
         raise ValueError("patch contains NUL/binary data")
     if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
         raise ValueError("patch exceeds max patch bytes")
-    lines = patch.splitlines(keepends=True)
+    lines = _split_lines(patch)
     if len(lines) > MAX_PATCH_LINES:
         raise ValueError("patch exceeds max patch lines")
     files, i, hunk_count = [], 0, 0
@@ -141,7 +146,7 @@ def _parse(patch: str) -> list[dict]:
 
 
 def _apply_hunks(source: str, hunks: list, *, create: bool) -> tuple[str, int, int]:
-    source_lines = source.splitlines(keepends=True)
+    source_lines = _split_lines(source)
     # Unified diffs conventionally use LF even when the target is CRLF. Treat
     # line terminators as transport syntax while preserving the target's
     # established newline convention; all non-newline text remains exact.

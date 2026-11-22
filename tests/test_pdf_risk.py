@@ -202,3 +202,179 @@ def test_json_format_is_transport_safe(project):
     encoded = pdf_risk.format_result(pdf_risk.inspect_pdf(path))
     assert json.loads(encoded)["risk"] == "none_detected"
     encoded.encode("ascii")
+
+
+def _hidden_javascript_stream(dictionary, separator=b"\n"):
+    compressed = zlib.compress(b"2 0 obj << /S /JavaScript /JS (hidden) >> endobj")
+    return dictionary + separator + b"stream\n" + compressed + b"\nendstream"
+
+
+def test_stream_keyword_directly_after_dictionary_is_decoded(project):
+    path = project / "no-eol.pdf"
+    path.write_bytes(_pdf(_hidden_javascript_stream(b"<< /Filter /FlateDecode >>", b"")))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_decoded"] == 1
+    assert result["risk"] == "high"
+    assert _features(result)["javascript"]["locations"] == ["decoded_stream"]
+
+
+def test_nested_decode_parms_dictionary_keeps_filter(project):
+    path = project / "nested.pdf"
+    path.write_bytes(_pdf(_hidden_javascript_stream(
+        b"<< /Filter /FlateDecode /DecodeParms << /Columns 4 >> /Length 99 >>"
+    )))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_decoded"] == 1
+    assert result["risk"] == "high"
+    assert _features(result)["javascript"]["locations"] == ["decoded_stream"]
+
+
+def test_literal_string_delimiters_do_not_misplace_dictionary(project):
+    path = project / "string.pdf"
+    path.write_bytes(_pdf(_hidden_javascript_stream(
+        b"<< /Filter /FlateDecode /T (a << b \\) c) /Length 99 >>"
+    )))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_decoded"] == 1
+    assert result["risk"] == "high"
+
+
+@pytest.mark.parametrize("dictionary", [
+    b"",
+    b"<< /Filter /FlateDecode %<<\n /Length 99 >>",
+    b"<< /Filter /FlateDecode /DecodeParms << %<<\n >> >>",
+    b"/Filter /FlateDecode /Length 99 >>",
+    b"<< /X << /Filter /FlateDecode >> /Filter [/FlateDecode /FlateDecode] >>",
+])
+def test_unlocatable_stream_dictionary_never_reports_clean(project, dictionary):
+    compressed = zlib.compress(b"benign")
+    path = project / "ambiguous.pdf"
+    path.write_bytes(_pdf(dictionary + b"\nstream\n" + compressed + b"\nendstream"))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert "ambiguous_stream_dictionary" in result["incomplete_reasons"]
+
+
+def test_invalid_zlib_header_is_reported_as_malformed_stream(project):
+    path = project / "bad-zlib.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /FlateDecode >>\nstream\nnot zlib data at all\nendstream"
+    ))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert result["malformed_streams"] == 1
+    assert "malformed_flate_stream" in result["incomplete_reasons"]
+
+
+def test_many_unterminated_stream_keywords_scan_linearly(project):
+    path = project / "unterminated.pdf"
+    path.write_bytes(b"%PDF-1.7\n" + b"<< >>\nstream\n" * 16384)
+    started = time.monotonic()
+    result = pdf_risk.inspect_pdf(path, max_seconds=15)
+    assert time.monotonic() - started < 3.0
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert "unterminated_stream" in result["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("after_keyword", [b" \n", b"\t\r\n", b" \x00\x0c\r"])
+def test_whitespace_between_stream_keyword_and_eol_is_skipped(project, after_keyword):
+    compressed = zlib.compress(b"2 0 obj << /S /JavaScript /JS (hidden) >> endobj")
+    path = project / "trailing-space.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /FlateDecode >>\nstream" + after_keyword + compressed + b"\nendstream"
+    ))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_decoded"] == 1
+    assert result["risk"] == "high"
+    assert _features(result)["javascript"]["locations"] == ["decoded_stream"]
+
+
+@pytest.mark.parametrize("after_keyword", [b"", b" ", b"x\n"])
+def test_stream_keyword_without_eol_never_reports_clean(project, after_keyword):
+    compressed = zlib.compress(b"benign")
+    path = project / "no-trailing-eol.pdf"
+    path.write_bytes(_pdf(
+        b"<< /Filter /FlateDecode >>\nstream" + after_keyword + compressed + b"\nendstream"
+    ))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert "stream_keyword_without_eol" in result["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("separator", [
+    b" " * 9000,
+    b"\x00" * 9000,
+    b"\n" * 9000 + b" ",
+    b" %c\n ",
+    b"\n%c\n\t",
+])
+def test_stream_keyword_without_locatable_dictionary_is_not_dropped(project, separator):
+    path = project / "separated.pdf"
+    path.write_bytes(_pdf(_hidden_javascript_stream(b"<< /Filter /FlateDecode >>", separator)))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_seen"] == 1
+    assert result["scan_complete"] is False
+    assert result["risk"] == "unknown"
+    assert "ambiguous_stream_dictionary" in result["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("text", [b"/stream", b"%stream", b"(upstream)", b"(streamline)"])
+def test_stream_inside_other_tokens_is_not_a_keyword(project, text):
+    path = project / "token.pdf"
+    path.write_bytes(_pdf(b"<< /T " + text + b" >>"))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["streams_seen"] == 0
+    assert result["scan_complete"] is True
+    assert result["risk"] == "none_detected"
+
+
+def _flate_js_obj(dictionary):
+    data = zlib.compress(b"<< /S /JavaScript /JS (app.alert(1)) >>")
+    return b"2 0 obj\n" + dictionary + b"\nstream\n" + data + b"\nendstream\nendobj"
+
+
+@pytest.mark.parametrize("decoy", [b"(\n<< >>\nstream\n)", b"(<< >> stream\n)"])
+def test_stream_keyword_inside_literal_string_does_not_hide_next_stream(project, decoy):
+    path = project / "decoy.pdf"
+    body = b"<< /Info " + decoy + b" >>\nendobj\n" + _flate_js_obj(b"<< /Filter /FlateDecode >>")
+    path.write_bytes(_pdf(body))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["risk"] in ("high", "unknown")
+    assert result["scan_complete"] is False or "javascript" in _features(result)
+
+
+@pytest.mark.parametrize("dictionary", [
+    b"<< /Filter 5 0 R >>",
+    b"<< /Filter\x00/FlateDecode >>",
+    b"<< /Filter\x00[/FlateDecode] >>",
+])
+def test_indirect_or_nul_separated_filter_never_reports_clean(project, dictionary):
+    path = project / "filter.pdf"
+    path.write_bytes(_pdf(_flate_js_obj(dictionary)))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["risk"] in ("high", "unknown")
+    assert result["scan_complete"] is False or "javascript" in _features(result)
+
+
+def _hex_flate_obj(dictionary):
+    hexed = b"".join(b"%02x" % b for b in b"<< /S /JavaScript /JS (app.alert(1)) >>") + b">"
+    data = zlib.compress(hexed)
+    return b"2 0 obj\n" + dictionary + b"\nstream\n" + data + b"\nendstream\nendobj"
+
+
+@pytest.mark.parametrize("dictionary", [
+    b"<< /Filter [/FlateDecode 7 0 R] >>",
+    b"<< /Filter [7 0 R /FlateDecode] >>",
+    b"<< /X << /Filter /FlateDecode >> /Filter 5 0 R >>",
+])
+def test_indirect_filter_in_array_or_behind_nested_filter_is_flagged(project, dictionary):
+    path = project / "arrayfilter.pdf"
+    path.write_bytes(_pdf(_hex_flate_obj(dictionary)))
+    result = pdf_risk.inspect_pdf(path)
+    assert result["scan_complete"] is False
+    assert result["risk"] != "none_detected"
+    assert set(result["incomplete_reasons"]) & {"unsupported_stream_filter", "ambiguous_stream_dictionary"}

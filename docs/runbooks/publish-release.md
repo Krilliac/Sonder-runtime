@@ -61,9 +61,8 @@ freshness role, published last. It lays out `/publish/1.4.0/` with
 ```bash
 # Confirm a client accepts it through the real trust path (no unsigned gate):
 python - <<'PY'
-import sys; sys.path.insert(0, "tools")
 from pathlib import Path
-from sonder_updates import BundleManifest, verify_bundle_trust
+from sonder_runtime.adapters.updates.service import BundleManifest, verify_bundle_trust
 b = Path("/publish/1.4.0")
 print(verify_bundle_trust(b, BundleManifest.load(b / "manifest.json"),
                           allow_unverified=False))  # must print: tuf
@@ -86,8 +85,8 @@ manifest (including the nested `local-system.zip` in Flutter assets). It also
 checks the bundled build stamp against the tag's runtime version and full SHA.
 The macOS bundle contains valid framework symlinks; their targets must stay
 within the application bundle. The release job requires this integrity job,
-Flutter analysis/tests, and the reusable Python CI job at the tag's exact
-commit. Python CI runs the version-policy plus runtime smoke gate on tags,
+Flutter analysis/tests, the reusable Python CI job, and the reusable Windows
+managed-runtime-profile job at the tag's exact commit. Python CI runs the version-policy plus runtime smoke gate on tags,
 followed by the normal documentation, evaluation, and test gates; its separate
 Windows job checks managed runtime ownership, artifact verification, lifecycle
 regressions, and native low-integrity selfmod canaries in a fresh environment.

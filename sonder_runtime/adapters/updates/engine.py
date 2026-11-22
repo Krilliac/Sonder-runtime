@@ -9,6 +9,7 @@ failure.  Every step lands in the durable update journal.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -35,6 +36,8 @@ from .service import (
     verify_bundle_trust,
     _sha256_file,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def default_releases_dir() -> Path:
@@ -374,6 +377,8 @@ class UpdateManager:
             )
         step = 0
         staging: Path | None = None
+        final_dir: Path | None = None
+        activation_begun = False
         try:
             # downloading/verified/staged: offline bundles are already local;
             # the states still advance so the journal is uniform.
@@ -518,10 +523,21 @@ class UpdateManager:
 
             # Run migrations using the target release's code (R-M9).
             step += 1
-            migrate_result = self._run_in_release(
-                final_dir, ["-m", "sonder_runtime", "migrate", "--json"],
-                timeout=self._health_timeout,
-            )
+            try:
+                migrate_result = self._run_in_release(
+                    final_dir, ["-m", "sonder_runtime", "migrate", "--json"],
+                    timeout=self._health_timeout,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.repository.record_step(
+                    update_id, step, "migrate", "failed",
+                    error_code="MIGRATION_FAILED",
+                    evidence={"error": type(exc).__name__},
+                )
+                return self._roll_back_activation(
+                    plan, final_dir, step,
+                    error_code="MIGRATION_FAILED",
+                )
             if migrate_result.returncode != 0:
                 self.repository.record_step(
                     update_id, step, "migrate", "failed",
@@ -590,6 +606,9 @@ class UpdateManager:
             step += 1
             active = self.repository.release_by_status("active")
             release_id = f"rel_{plan['update_id'][4:]}"
+            # From here the activation intent owns recovery (reconcile); the
+            # failure handler below must not roll back underneath it.
+            activation_begun = True
             self._write_activation_intent({
                 "kind": "install", "update_id": update_id,
                 "from_release_id": active["release_id"] if active else None,
@@ -629,11 +648,48 @@ class UpdateManager:
             if self._restart_hook is not None:
                 self._restart_hook()
             return plan
+        except Exception as exc:
+            if not activation_begun:
+                self._settle_failed_install(update_id, final_dir, step, exc)
+            raise
         finally:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
             if ops is not None:
                 ops.release_maintenance_lock("update", owner_id=owner)
+
+    def _settle_failed_install(
+        self, update_id: str, final_dir: Path | None, step: int, exc: Exception
+    ) -> None:
+        """Drive a plan stranded by an unexpected pre-activation exception to
+        a terminal state.  Best effort: the original exception is re-raised by
+        the caller, so a secondary failure here must not mask it."""
+        try:
+            plan = self.repository.get_plan(update_id)
+            status = plan["status"]
+            detail = type(exc).__name__
+            if status in {"installing", "migrating", "health_check"} and final_dir is not None:
+                code = {
+                    "installing": "INSTALL_FAILED",
+                    "migrating": "MIGRATION_FAILED",
+                    "health_check": "HEALTH_FAILED",
+                }[status]
+                self.repository.record_step(
+                    update_id, step + 1, "install-exception", "failed",
+                    error_code=code, evidence={"error": detail},
+                )
+                self._roll_back_activation(plan, final_dir, step + 1, error_code=code)
+            elif status == "draining":
+                self.repository.record_step(
+                    update_id, step, "drain", "failed", error_code="DRAIN_FAILED",
+                )
+                self.repository.advance(
+                    plan, "failed", error_code="DRAIN_FAILED", error_detail=detail,
+                )
+            elif status == "rolling_back":
+                self.repository.advance(plan, "failed", error_detail=detail)
+        except Exception:
+            logger.exception("could not settle update %s after %s", update_id, type(exc).__name__)
 
     def _roll_back_activation(
         self, plan: dict, failed_dir: Path, step: int, *, error_code: str
