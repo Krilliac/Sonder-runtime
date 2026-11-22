@@ -504,9 +504,15 @@ def named_directory(text: str, roots: "tuple[object, ...] | list[object]" = ()) 
 
 
 def bypass_enabled() -> bool:
-    return os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
+    if os.environ.get("SONDER_FILE_BYPASS", "").strip().lower() in (
         "1", "true", "yes", "on"
-    )
+    ):
+        return True
+    try:
+        from sonder_runtime.adapters.security.permission_policy import permission_policy
+        return bool(permission_policy.bypass_root_containment_active())
+    except Exception:
+        return False
 
 
 def _normalized_absolute(path: Path) -> Path:
@@ -1395,7 +1401,8 @@ def _reject_network_path(path: str) -> str:
     return path
 
 
-def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> Path:
+def resolve_path(path: str, *, extra_roots: str = "", bypass: bool | None = None) -> Path:
+    effective_bypass = bypass_enabled() if bypass is None else bool(bypass)
     if not (path or "").strip():
         raise ValueError("empty path")
     path = _reject_network_path(path)
@@ -1407,8 +1414,8 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool = False) -> P
         resolved = candidate.resolve()
     except OSError:
         resolved = _normalized_absolute(candidate)
-    roots = allowed_roots(extra_roots if bypass else "")
-    if bypass and not _MANAGED_ROOTS.get():
+    roots = allowed_roots(extra_roots if effective_bypass else "")
+    if effective_bypass and not _MANAGED_ROOTS.get():
         return resolved
     if any(_is_inside(resolved, root) for root in roots):
         return resolved
@@ -1421,7 +1428,7 @@ def resolve_mutation_path(
     path: str,
     *,
     extra_roots: str = "",
-    bypass: bool = False,
+    bypass: bool | None = None,
 ) -> Path:
     """Resolve a mutation target without accepting a reparse-point spelling.
 

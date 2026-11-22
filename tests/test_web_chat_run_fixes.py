@@ -16,10 +16,13 @@ def _no_model_discovery(monkeypatch, _configure_http_legacy_boundary):
     monkeypatch.setattr(legacy_server, "discovered_model_records", lambda: [])
 
 
+_TEST_API_KEY = "k" * 40
+
+
 @pytest.fixture
 def http_port(monkeypatch):
-    monkeypatch.setattr(ts, "API_KEY", "")
-    monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
+    monkeypatch.setattr(ts, "API_KEY", _TEST_API_KEY)
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_maybe_live_reload", lambda: None)
     ts._live_telemetry_application(build=True)
@@ -40,7 +43,11 @@ def _post(port, payload, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
     conn.request(
         "POST", "/v1/chat/completions", body=json.dumps(payload),
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + _TEST_API_KEY,
+            **(headers or {}),
+        },
     )
     response = conn.getresponse()
     body = response.read()
@@ -50,7 +57,7 @@ def _post(port, payload, headers=None):
 
 def _get(port, path):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
-    conn.request("GET", path)
+    conn.request("GET", path, headers={"Authorization": "Bearer " + _TEST_API_KEY})
     response = conn.getresponse()
     body = response.read()
     conn.close()

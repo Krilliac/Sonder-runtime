@@ -1,4 +1,4 @@
-"""HTTP approval routes: list refused calls, approve one once, deny, revoke.
+"""HTTP approval routes: list refused calls, approve one once, revoke.
 
 * ``GET /v1/approvals`` -- refused calls waiting for approval, and approvals;
 * ``POST /v1/approvals/<call_id>`` -- approve one refused call once;
@@ -6,10 +6,10 @@
 * ``POST /v1/approvals/deny/<call_id>`` -- decline one refused call (authorises
   nothing; revokes its open approval and lets a waiting turn see the refusal).
 
-Reviewing the list needs a developer or administrator. Approving, denying or
-revoking issues or changes authority another caller spends later, so it needs
-exactly what the ``permission_approve`` tool needs on the chat ``/<tool>``
-path: the administrator role its system operation is bound to (the single-user
+Reviewing the list needs a developer or administrator. Approving or revoking
+issues authority another caller spends later, so it needs exactly what the
+``permission_approve`` tool needs on the chat ``/<tool>`` path: the
+administrator role its system operation is bound to (the single-user
 local-open listener and the deployment API key count, exactly as for
 ``/v1/permission-mode``). The ledger semantics live in ``approvals.py``.
 
@@ -22,7 +22,9 @@ label, the audit record and the logger -- arrives as
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -30,6 +32,15 @@ from .approvals import approvals_payload, approve_call, deny_call, revoke_approv
 
 ROUTE = "/v1/approvals"
 _SINGLE_OWNER_MODES = frozenset({"local-open", "api-key"})
+
+APPROVE_HTTP_LOCAL_OPEN_REFUSAL = (
+    "approving a refused call over HTTP needs an authenticated administrator; "
+    "this server's auth is local-open, so every local process reaches it "
+    "unauthenticated as the same caller and could approve its own call. Set "
+    "SONDER_API_KEY or SONDER_REQUIRE_ACCOUNT=1 and approve as an "
+    "administrator, or approve at the attended Sonder console "
+    "(/approve <call id>). Denying and revoking stay available here."
+)
 
 
 def _unavailable() -> dict:
@@ -50,6 +61,8 @@ class HttpApprovalPorts:
     audit: Callable[[str, Any, float], None]
     clock: Callable[[], float]
     log: Any
+    # Percent-decodes one path segment; raises ValueError for one that is not UTF-8.
+    unquote: Callable[[str], str]
 
 
 def approver_label(context: Any) -> str:
@@ -117,6 +130,47 @@ def _access(handler: Any, context: Any, ports: HttpApprovalPorts, *,
     return ledger, False
 
 
+def _approval_owner_for_context(context: Any) -> str:
+    account = (context or {}).get("account") or {}
+    username = str(account.get("username") or account.get("id") or "").strip()
+    if not username:
+        return ""
+    principal = "account:%s" % username
+    return "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+
+
+def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
+    """Split the raw path on '/' first, then percent-decode each segment once.
+
+    A client that encodes the '@' of a call reference (``%40``) names the same
+    row as a raw '@'. A segment that still holds '%' after one decode (a
+    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
+    """
+    segments = []
+    for segment in raw.split("/"):
+        try:
+            decoded = unquote(segment)
+        except ValueError:
+            return None
+        if "%" in decoded:
+            return None
+        segments.append(decoded)
+    return segments
+
+
+def _approval_role(context: Any) -> str:
+    """The account's role here: an account's API key never holds admin
+    (``admin_auth.require``), so an admin account's key counts as a developer."""
+    account = (context or {}).get("account") or {}
+    role = str(account.get("role") or "").strip().lower()
+    return "developer" if role == "admin" and account.get("via_api_key") else role
+
+
+def _approval_include_unowned(context: Any) -> bool:
+    return (_approval_role(context) in ("developer", "admin")
+            or (context or {}).get("mode") in _SINGLE_OWNER_MODES)
+
+
 def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
               ports: HttpApprovalPorts) -> bool:
     """``GET /v1/approvals``; ``False`` for another route."""
@@ -138,13 +192,24 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
         return True
     include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
     try:
-        # The ledger is not scoped by owner, so in any mode with accounts the
-        # exact code of someone else's pending call stays hidden until approvals
-        # are bound to the turn's owner (design D7).
-        payload = approvals_payload(
-            ledger, limit=limit, include_spent=include_spent,
-            show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+        # Scope ledger queries to the authenticated account's owner key.
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            scope_fn(
+                _approval_owner_for_context(context),
+                include_unowned=_approval_include_unowned(context),
+                # An administrator (the local-open listener and the deployment
+                # key count) is the operator: it sees every owner's calls.
+                all_owners=not ports.approve_authority_error(context),
+            )
+            if callable(scope_fn)
+            else nullcontext()
         )
+        with scope_ctx:
+            payload = approvals_payload(
+                ledger, limit=limit, include_spent=include_spent,
+                show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+            )
     except Exception:
         ports.log.error("approval ledger read failed", exc_info=True)
         handler._send_json_payload(_unavailable(), status=503)
@@ -155,14 +220,23 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
 
 def serve_post(handler: Any, path: str, req: Any, context: Any,
                ports: HttpApprovalPorts) -> None:
-    """``POST /v1/approvals/<call_id>``, ``POST /v1/approvals/deny/<call_id>``
-    and ``POST /v1/approvals/revoke/<nonce>``.
+    """``POST /v1/approvals/<call_id>`` and ``POST /v1/approvals/revoke/<nonce>``.
 
     The approval is bound to that call's digest, single-use and expiring,
     recorded as the caller's approver label with surface ``http``, and
-    audited on the direct-tool path as ``permission_approve``.
+    audited on the direct-tool path as ``permission_approve``. Each path
+    segment is percent-decoded exactly once (``_decoded_segments``).
     """
-    parts = path[len(ROUTE):].strip("/").split("/")
+    parts = _decoded_segments(path[len(ROUTE):].strip("/"), ports.unquote)
+    if parts is None:
+        handler._send_json_payload(
+            {"error": {"message": "the path is percent-decoded exactly once; a segment "
+                                  "still holding '%' after that, or one that is not "
+                                  "UTF-8, is refused",
+                       "type": "invalid_request", "code": "INVALID_PATH"}},
+            status=400,
+        )
+        return
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
         action, target = "revoke", parts[1]
     elif len(parts) == 2 and parts[0] == "deny" and parts[1]:
@@ -175,15 +249,39 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     ledger, done = _access(handler, context, ports, issuing=True)
     if done:
         return
+    if action == "approve":
+        from sonder_runtime.interfaces.http.chat_tool_stream import is_local_open_context
+
+        if is_local_open_context(context):
+            handler._send_json_payload(
+                {"error": {"message": APPROVE_HTTP_LOCAL_OPEN_REFUSAL,
+                           "type": "forbidden",
+                           "code": "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN",
+                           "correlation_id": handler._correlation(),
+                           "retryable": False}},
+                status=403,
+            )
+            return
     approver = ports.approver_of(context)
     started = ports.clock()
+    owner_key = _approval_owner_for_context(context)
+    include_unowned = _approval_include_unowned(context)
 
     def run():
-        if action == "revoke":
-            return revoke_approval(ledger, target)
-        if action == "deny":
-            return deny_call(ledger, target, req)
-        return approve_call(ledger, target, req, approver=approver, surface="http")
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            # Every caller here passed the administrator check in _access
+            # (issuing=True), so it approves, denies and revokes any owner's call.
+            scope_fn(owner_key, include_unowned=include_unowned, all_owners=True)
+            if callable(scope_fn)
+            else nullcontext()
+        )
+        with scope_ctx:
+            if action == "revoke":
+                return revoke_approval(ledger, target)
+            if action == "deny":
+                return deny_call(ledger, target, req)
+            return approve_call(ledger, target, req, approver=approver, surface="http")
 
     action_text = "approval\0%s\0%s\0%s" % (
         action, target.lower(), json.dumps(req, sort_keys=True, default=str),
@@ -202,7 +300,10 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
         body = result.body or {}
         approval = {**(body.get("approval") or body.get("denial") or {}), "actor": approver}
         ports.audit(action, approval, started)
+        from sonder_runtime.interfaces.http.chat_tool_stream import notify_call_decision
+
+        notify_call_decision(str(approval.get("call_id") or target))
     handler._send_json_payload(dict(result.body), status=result.status)
 
 
-__all__ = ["HttpApprovalPorts", "ROUTE", "approver_label", "serve_get", "serve_post"]
+__all__ = ["APPROVE_HTTP_LOCAL_OPEN_REFUSAL", "HttpApprovalPorts", "ROUTE", "approver_label", "serve_get", "serve_post"]

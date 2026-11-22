@@ -1041,12 +1041,11 @@ def _default_route_plan(prompt, start, *, has_image=False):
 
 def _gate_answer_code(response, *, iid, prompt, history, model, system,
                       temperature, num_predict, num_ctx, cloud, tier_label):
-    """Run the code gate on one chat answer with a repair bound to its model.
-
-    Returns ``(response, verified, repaired, repair_usage)`` so the caller can
-    persist a verified repair or, when the code still fails, step to the
-    next rung.
-    """
+    """Run the code gate on one chat answer with a repair bound to its model."""
+    from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
+    active_turn = _chat_tool_loop.current_turn()
+    if active_turn is not None and active_turn.manifest.tools:
+        return response, None, False, {}
     if _tool_lane_guard.denied(model, tier_label, _RUNTIME_POLICY):  # never auto-run; a user's /run or /runproject is their explicit approval
         return response, None, False, {}  # a blocked model's reply is never run or repaired
     captured = response
@@ -3771,7 +3770,7 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/selfmod", "/selfmodify"):
         return _selfmod_command(arg, operator_approved=operator_approved)
     if cmd == "/approvals":
-        return permission_approvals(limit=_approvals_limit(arg))
+        return permission_approvals(limit=_approvals_limit(arg), token=_OPERATOR_ATTENDED if operator_approved else "")
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
@@ -4171,6 +4170,15 @@ def _answer(conn, prompt, model, effective_system, temperature, num_predict,
                  answers clean), but the turn is still captured (with its task
                  embedding) so record_outcome can ground and distill it.
     """
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    handled, tool_reply = _chat_run_backend.maybe_answer_chat_tools(
+        chat_request=_chat_request, model=model, cloud=cloud, temperature=temperature,
+        num_predict=num_predict, num_ctx=num_ctx, keep_alive=_keep_alive_for(model),
+        local_options_fn=lambda t, np, nc: _platform_local_model_options(t, np, nc, native_context=context_policy.native, environ=os.environ),
+        system=effective_system, prompt=prompt, history=history,
+    )
+    if handled:
+        return tool_reply, None, None
     effective_system, playbook_selection = _chat_tool_manifest.manifest_last(effective_system, playbook_context.augment(  # the turn's own tools block stays last
         effective_system, prompt, cloud=cloud or _is_cloud_model_name(model) or _provider_bridge.hosted_rung_active() or not augment or _reference_lookup_lanes.lookup_turn(model),
     ))
@@ -5233,7 +5241,10 @@ def _chat_request(
     _reasoning_deadline: float | None = None,
     text_only: bool = False,
     _caller_payload: dict | None = None,
-) -> tuple[dict, str]:
+    tools: list | None = None,
+    tool_choice: str | dict | None = None,
+    return_message: bool = False,
+):
     if not isinstance(reasoning_continuation, bool):
         raise ValueError("reasoning_continuation must be a boolean")
     if single_send and (cloud or reasoning_continuation or payload.get("think") is not False):
@@ -5302,6 +5313,10 @@ def _chat_request(
             and _think_option_supported(model)
         ):
             payload["think"] = True
+    if tools and not text_only:
+        payload = {**payload, "tools": list(tools)}
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     out, attempts = _post_model(
         "/api/chat",
         payload,
@@ -5339,6 +5354,8 @@ def _chat_request(
     if inline_thinking:
         _remember_thinking_model(model)
     if not isinstance(content, str) or not content.strip():
+        if return_message and isinstance(message, dict) and message.get("tool_calls"):
+            return out, message
         if accept_native_tool_calls:
             native_decision = _native_tool_call_decision(message)
             if native_decision is not None:
@@ -5530,6 +5547,8 @@ def _chat_request(
             cloud=cloud,
         )
     _model_pace.note_reply(model, out, thinking_requested=not cloud and not reasoning_continuation and payload.get("think") is not False)
+    if return_message:
+        return out, (message if isinstance(message, dict) else {"role": "assistant", "content": content})
     return out, content
 
 
@@ -6804,6 +6823,13 @@ def _sonder_impl_serialized(
             rung_scope.close()
             provider = None if model_override else _bridge_provider_for_tier(tier_label, cloud)
             rung_scope.enter_context(_provider_bridge.bind_rung(provider, tier_label))
+            from sonder_runtime.bootstrap import chat_tools_wiring as _chat_tools_wiring
+            from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
+            _mcp_turn = _chat_tools_wiring.maybe_open_mcp_chat_tool_turn(
+                server=sys.modules[__name__], permission_policy=permission_modes,
+                model=tgt_model, cloud=cloud, project=project,
+            )
+            rung_scope.enter_context(_chat_tool_loop.bind_turn(_mcp_turn))
             effective_system, num_ctx_eff = _generation_context(rung)
             following = escalation_plan.next_rung(attempt)
             detail = ""
@@ -7175,13 +7201,16 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
+            from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
             from sonder_runtime.application.chat.honesty import no_verification_claims_system
-            # A served chat turn calls no tools, on every route and model; one tools block stays last.
-            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(
-                no_verification_claims_system(_build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                    _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))),
-                prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, ""),
-            ))
+            _active_tool_turn = _chat_tool_loop.current_turn()
+            _has_chat_tools = _active_tool_turn is not None and bool(_active_tool_turn.manifest.tools)
+            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+            if not _has_chat_tools:
+                effective_system = no_verification_claims_system(effective_system)
+            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
+                effective_system, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, "")))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
@@ -7194,7 +7223,16 @@ def _answer_with_history_impl(
             req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
             reply_num_predict = _chat_reply_num_predict(explicit=_explicit_serve_selection(tier, ""))
             try:
-                if learn:
+                from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+                _handled_tools, _tool_resp = _chat_run_backend.maybe_answer_chat_tools(
+                    chat_request=_chat_request, model=model, cloud=cloud, temperature=temperature,
+                    num_predict=reply_num_predict, num_ctx=req_ctx, keep_alive=_keep_alive_for(model),
+                    local_options_fn=lambda t, np, nc: _platform_local_model_options(t, np, nc, native_context=context_policy.native, environ=os.environ),
+                    system=effective_system, prompt=prompt, history=history,
+                )
+                if _handled_tools:
+                    response, iid, trace_ctx = _tool_resp, None, None
+                elif learn:
                     # Augmentation policy controls what the model sees, not provenance.
                     # Even clean/cloud teacher turns retain their explicit project so a
                     # later grounded outcome cannot become an unscoped raw recall.
@@ -8943,47 +8981,15 @@ def context_compaction_plan(session: str = "", project: str = "") -> str:
 def _permission_mode_context(mode: str) -> str:
     """The state a rule table cannot show: which mode is in force, and privilege."""
     return _render_permission_mode_context(
-        mode,
-        permission_modes.MODE_LABELS,
-        permission_modes.MODE_BLURBS,
-        permission_modes.ASK_CAVEAT,
-        _elevation_status_text(),
+        mode, permission_modes.MODE_LABELS, permission_modes.MODE_BLURBS,
+        permission_modes.ASK_CAVEAT, _elevation_status_text(),
     )
 
 
 def _permission_policy_text(tool_name: str = "") -> str:
-    """The effective policy: the rule, the mode, and which one governs.
-
-    Printing the rule alone was honest only while nothing enforced it. Now that
-    ``permission_modes.decide()`` combines rules with a mode, the rule column
-    can disagree with what happens -- ``status`` shows ``allow`` while ``plan``
-    is in force, and a ``deny`` rule beats ``auto``. So the mode is pinned and
-    the rules loaded exactly once here, and both are pushed into the renderer:
-
-    * once, so the whole table describes one consistent policy rather than
-      re-reading a file that can change between rows, and
-    * injected, so the render honours *this* home instead of the one
-      ``decide()``'s default lookup would resolve for itself.
-
-    ``interactive=True`` is the operator's view: ``ask`` means "you will be
-    asked". The line under the mode says what a caller with nobody to ask gets
-    instead, rather than silently rendering that caller's answer here.
-    """
-    home = sonder_paths.default_home()
-    rules, report = permission_rules.load_report(home)
-    mode = permission_modes.current_mode()
-    lookup = permission_rules.rule_lookup(rules)
-
-    def decide(name: str):
-        return permission_modes.decide(
-            name, interactive=True, mode=mode, rule_lookup=lookup,
-        )
-
-    table = permission_rules.format_policy(
-        home, tool_name, decide=decide, snapshot=(rules, report),
-    )
-    return "%s\n\n%s\n  %s" % (
-        table, _permission_mode_context(mode), permission_modes.unattended_summary(),
+    """The effective policy: the rule, the mode, and which one governs."""
+    return permission_modes.render_policy_text(
+        sonder_paths.default_home(), tool_name, _permission_mode_context, permission_rules,
     )
 
 
@@ -9016,9 +9022,11 @@ def policy_explain(tool_name: str) -> str:
     # choke point.  It deliberately does not call the target, inspect target
     # arguments, or echo operator-authored rule notes (which are not needed to
     # explain the governing policy and could carry sensitive prose).
+    consent_tool = name in permission_modes.UNATTENDED_CONSENT_TOOLS  # see CONSENT_PREFLIGHT_NOTE
     decision = permission_modes.decide_for_caller(
         name, interactive=False, gate_control_exempt=True,
         surface="preflight", record=False,
+        arguments={"action": "status"} if consent_tool else None,
     )
     if decision is None:
         return "\n".join([
@@ -9048,6 +9056,7 @@ def policy_explain(tool_name: str) -> str:
         "  risk: %s" % decision.risk,
         "  gate result: %s" % decision.action,
         "  governed by: %s" % source,
+        *([permission_modes.CONSENT_PREFLIGHT_NOTE] if consent_tool else []),
         "  will execute: no",
         "  scope: this reports only the permission-mode gate; target-specific "
         "authorization and argument validation still run on a real call.",
@@ -9114,6 +9123,11 @@ def _approval_authority(token) -> tuple[str, str]:
     )
 
 
+def _approval_view(token):
+    """All owners' calls only after an admin-level check (attended console, admin session token)."""
+    admin = token is _OPERATOR_ATTENDED or (isinstance(token, str) and bool(token) and _admin_require(token)[0])
+    return approval_ledger_module.operator_scope() if admin else contextlib.nullcontext()
+
 
 def _approve_command(arg: str, *, operator_approved: bool = False) -> str:
     """``/approve <call id> [ttl]`` | ``/approve revoke <nonce>`` | ``/approve call <tool> <json>``."""
@@ -9168,68 +9182,73 @@ def permission_approve(
         error = "ERROR: one-shot approvals are not available in this process."
         return error
     surface = "console" if token is _OPERATOR_ATTENDED else "tool"
-    if revoke:
-        approval = ledger.revoke(revoke)
-        if approval is None:
-            error = (
-                "ERROR: no open approval %s (it may be spent, expired, already "
-                "revoked, or mistyped; see /approvals)." % revoke
+    with _approval_view(token):
+        if revoke:
+            approval = ledger.revoke(revoke)
+            if approval is None:
+                error = (
+                    "ERROR: no open approval %s (it may be spent, expired, already "
+                    "revoked, or mistyped; see /approvals)." % revoke
+                )
+                return error
+            ref = approval_ledger_module.call_ref(approval.digest, approval.owner)
+            _record_direct_tool(  # the owner tag (after '@') names whose approval it was
+                "permission_approve", {"revoke": approval.nonce, "owner": ref.split("@", 1)[1]},
+                ok=True, started=started, summary="revoked %s call %s" % (approval.tool, ref),
             )
+            return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, ref)
+        try:
+            if call_id:
+                pending = ledger.resolve_call(call_id)  # exactly one row: its owner, never a guess
+                target, digest, preview, owner = pending.tool, pending.digest, pending.preview, pending.owner
+            elif tool and arguments_json:
+                try:
+                    arguments = json.loads(arguments_json)
+                except ValueError as exc:
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "arguments_json must be a JSON object: %s" % exc
+                    )
+                if not isinstance(arguments, dict):
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "arguments_json must be a JSON object"
+                    )
+                # owner None: the ledger binds the one owner with it pending, or refuses.
+                target, owner = str(tool or "").strip().lstrip("/"), None
+                digest = permission_modes.call_digest(target, arguments)
+                preview = permission_modes.argument_preview(arguments)
+                if not digest:
+                    raise approval_ledger_module.ApprovalLedgerError(
+                        "that call has no canonical form and cannot be approved"
+                    )
+            else:
+                raise approval_ledger_module.ApprovalLedgerError(
+                    "give a call id from /approvals, or a tool with its arguments_json"
+                )
+            approval = ledger.issue(  # only the console may knowingly override a denial
+                target, digest, approver=approver, surface=surface,
+                ttl_seconds=ttl_seconds, preview=preview,
+                override_denial=surface == "console", owner=owner,
+            )
+            overrode = approval.overrode_denial  # the row issue() matched, not the bound owner
+        except approval_ledger_module.ApprovalLedgerError as exc:
+            error = "ERROR: %s" % exc
             return error
-        _record_direct_tool(
-            "permission_approve", {"revoke": approval.nonce}, ok=True, started=started,
-            summary="revoked %s call %s" % (approval.tool, approval.call_id),
-        )
-        return "revoked %s (%s call %s)." % (approval.nonce, approval.tool, approval.call_id)
-    try:
-        if call_id:
-            pending = ledger.resolve_call(call_id)
-            target, digest, preview = pending.tool, pending.digest, pending.preview
-        elif tool and arguments_json:
-            try:
-                arguments = json.loads(arguments_json)
-            except ValueError as exc:
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "arguments_json must be a JSON object: %s" % exc
-                )
-            if not isinstance(arguments, dict):
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "arguments_json must be a JSON object"
-                )
-            target = str(tool or "").strip().lstrip("/")
-            digest = permission_modes.call_digest(target, arguments)
-            preview = permission_modes.argument_preview(arguments)
-            if not digest:
-                raise approval_ledger_module.ApprovalLedgerError(
-                    "that call has no canonical form and cannot be approved"
-                )
-        else:
-            raise approval_ledger_module.ApprovalLedgerError(
-                "give a call id from /approvals, or a tool with its arguments_json"
-            )
-        # Only the console may knowingly approve a call an operator denied.
-        overrode = surface == "console" and ledger.denied_for(target, digest)
-        approval = ledger.issue(
-            target, digest, approver=approver, surface=surface,
-            ttl_seconds=ttl_seconds, preview=preview,
-            override_denial=surface == "console",
-        )
-    except approval_ledger_module.ApprovalLedgerError as exc:
-        error = "ERROR: %s" % exc
-        return error
-    _record_direct_tool(
+    _record_direct_tool(  # the owner tag names whose call this approval is bound to
         "permission_approve",
         {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         "owner": approval_ledger_module.owner_tag(approval.owner),
          **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
         ("overrode a denial: " if overrode else "")
-        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        + "approved %s call %s once%s: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (
-            approval.tool, approval.call_id, approval.nonce, approval.approver,
+            approval.tool, approval.call_id,
+            " for owner " + approval_ledger_module.owner_tag(approval.owner) if approval.owner else "",
+            approval.nonce, approval.approver,
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(approval.expires_ts)),
             approval.tool, approval.nonce,
         )
@@ -9237,13 +9256,14 @@ def permission_approve(
 
 
 @mcp.tool()
-def permission_approvals(limit: int = 20) -> str:
-    """List calls refused unattended (approvable by call id) and the one-shot approvals issued."""
+def permission_approvals(limit: int = 20, token: str = "") -> str:
+    """List calls refused unattended (approvable by call id) and the one-shot approvals issued (all owners' with an admin token)."""
     _maybe_live_reload()
     ledger = permission_modes.approval_ledger()
     if ledger is None:
         return "one-shot approvals are not available in this process."
-    return ledger.format_status(_safe_limit_policy(limit, 20, 200))
+    with _approval_view(token):
+        return ledger.format_status(_safe_limit_policy(limit, 20, 200))
 
 
 @mcp.tool()
@@ -11430,8 +11450,15 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
                     summary="unattended escalation refused",
                 )
                 return refusal
-            permission_modes.set_mode(wanted)
+            previous = permission_modes.current_mode()
+            new_mode = permission_modes.set_mode(wanted)
             output = permission_modes.describe()
+            if previous != new_mode and (previous == "bypass" or new_mode == "bypass"):
+                from sonder_runtime.adapters.security import permission_receipts
+                permission_receipts.emit_mode_transition(
+                    previous, new_mode, surface="console", actor="operator",
+                    confirmed=(new_mode == "bypass"),
+                )
     except ValueError as exc:
         _record_direct_tool(
             "permission_mode", {"mode": wanted}, ok=False, started=started,
@@ -17316,34 +17343,31 @@ or
 def _agent_tool_help(
     read_only=False, cloud=False, unsafe=False,
     project_bound=False, allow_web=True, allow_location=False,
-    allowlist=None, kind=None,
+    allowlist=None, kind=None, num_ctx=0,
 ):
-    """Advertise the run's admitted tools, sized by task kind when allowlisted."""
-    from sonder_runtime.domain.agents.tool_help import render_tool_help
+    """Advertise the run's admitted tools, compacting for small context windows."""
+    from sonder_runtime.domain.agents.tool_help import build_agent_tool_help
     help_text = REPOSITORY_AGENT_TOOL_HELP if read_only else AGENT_TOOL_HELP
     existing = _agent_help_advertised_tools(help_text)
     generated = _generic_agent_dispatch.generated_help_lines(mcp, existing, _AGENT_SYSTEM_OPERATOR_TOOLS)
-    help_text = help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
-    denied = frozenset(
-        name for name in _agent_help_advertised_tools(help_text)
+    advertised = _agent_help_advertised_tools(
+        help_text.rstrip() + "\n" + "\n".join(generated) + "\n" if generated else help_text
+    )
+
+    def _refused(name):
         if _agent_run_tool_refusal(
-            name,
-            read_only=read_only,
-            cloud=cloud,
-            unsafe=unsafe,
-            project_bound=project_bound,
-            allow_web=allow_web,
-            allow_location=allow_location,
-        )
+            name, read_only=read_only, cloud=cloud, unsafe=unsafe,
+            project_bound=project_bound, allow_web=allow_web, allow_location=allow_location,
+        ) or _role_tool_policy.agent_refusal(name):
+            return True
+        decision = permission_modes.decide(name, interactive=False, record=False)
+        return not decision.allowed and decision.source in ("mode", "rule")
+
+    return build_agent_tool_help(
+        help_text, generated_lines=generated, advertised_names=advertised,
+        is_refused=_refused, allowlist=allowlist, task_kind=kind,
+        catalog=_agent_help_tools.catalog_for(mcp), num_ctx=num_ctx,
     )
-    filtered = help_text if not denied else "\n".join(
-        line for line in help_text.splitlines()
-        if not any(
-            line.lstrip().startswith("- %s:" % name)
-            for name in denied
-        )
-    )
-    return render_tool_help(filtered, allowlist=None if allowlist is None else set(allowlist) - denied, task_kind=kind, catalog=_agent_help_tools.catalog_for(mcp))
 
 
 def _tool_capability_shadow_surfaces():
@@ -18114,81 +18138,37 @@ def _agent_negative_claim_review(
 
 def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup=None,
                                  record=True):
-    """Refusal text when the operator's permission gate forbids this dispatch.
-
-    ``args`` are the proposed call's own arguments. They reach the decider
-    and are never stored: an unattended refusal of an effect class names the
-    call (a call id an operator can approve exactly once with ``/approve``),
-    and such an approval answers the next unchanged proposal. The current
-    effect fence, if this thread is an autopilot worker's, is consulted too:
-    a worker whose lease is gone is refused every effect, whatever the mode.
-
-    ``mode``, ``rule_lookup`` and ``record`` are per-call overrides for the
-    evaluation lane (``eval_harness`` ``tool_policy`` scenarios), which asks
-    this gate what an agent would get under a stated mode and rule set
-    without changing the operator's own and without leaving a receipt. The
-    agent loop never passes them.
-
-    ``permission_modes.decide()`` was written as a pure function that call
-    sites opt into, and until now nothing did: the mode matrix and the
-    per-tool ``permission_rules`` policy both decided nothing. This is the
-    opt-in for the agent/workbench/autopilot path.
-
-    ``interactive=False`` is the whole reason this does not break flows that
-    have always worked. Nobody is at a keyboard behind an autonomous run, so
-    ``decide()`` degrades ``ask`` to ``allow`` here -- which means the default
-    ``manual`` mode refuses nothing it did not refuse yesterday. Only two
-    things can actually stop a dispatch: ``plan`` mode (whose entire purpose
-    is to hold still) and an explicit per-tool ``deny`` rule. Both are a
-    deliberate, written-down operator decision.
-
-    ``decide()`` never returns ``ask`` when ``interactive=False``: with no
-    human attached, file changes, host programs and destructive tools are
-    refused unless a rule or the mode allows them, and ask-class tools
-    proceed on the record. The answer to "what should ``ask`` mean with no
-    human attached?" is therefore refusal, never silent self-approval by the
-    loop.
-
-    This gate is additional to -- never a replacement for -- the read-only
-    filter, the project-bound tool set and the cloud/host policies below it.
-    The refusal is shaped like the loop's other ``HOST POLICY`` observations
-    so ``_agent_observation_ok`` counts it as a failed step and the model is
-    told to change course rather than retry.
-    """
+    """Refusal text when the operator's permission gate forbids this dispatch."""
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    from sonder_runtime.bootstrap import chat_tools_wiring as _chat_tools_wiring
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
-    if role_refusal := _role_tool_policy.agent_refusal(name):  # an HTTP caller's role binds every agent dispatch
+    if role_refusal := _role_tool_policy.agent_refusal(name):
         return role_refusal
+    call_args = args if isinstance(args, dict) else None
     decision = permission_modes.decide(
         name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
-        record=record, arguments=args if isinstance(args, dict) else None, fence=effect_fence.current())
+        record=record, arguments=call_args, fence=effect_fence.current())
     if decision.allowed:
         return ""
-    # Assigned rather than returned as a literal: scripts/check_error_signals.py
-    # ratchets new literal-prefixed ``ERROR:`` *returns*, and the agent loop's
-    # own policy chain builds its HOST POLICY strings the same way.
-    if decision.source == "fence":
-        refusal = (
-            "ERROR: HOST POLICY: tool '%s' is refused because this worker's "
-            "authority to produce effects is gone (%s). Stop and report what "
-            "was and was not done; do not retry."
-            % (name, decision.reason)
+    if record and decision.source == "unattended" and decision.call_id:
+        from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt as _refusal_receipt
+        from sonder_runtime.interfaces.http.work_runs import current_run_id as _current_work_run_id
+        run_id = _current_work_run_id()
+        _chat_tools_wiring.record_work_run_pending_refusal(
+            run_id, decision, name, call_args,
+            refusal_receipt_fn=_refusal_receipt,
+            mode_label=permission_modes.mode_label(decision.mode),
+            modes_allowing=permission_modes._modes_allowing(decision.risk),
         )
-        return refusal
-    remedy = ""
-    if decision.call_id and decision.source == "unattended":
-        remedy = (
-            " This exact call is recorded as pending call %s; an operator can "
-            "approve it once at the console (/approve %s), after which one "
-            "unchanged retry runs." % (decision.call_id, decision.call_id)
-        )
-    refusal = (
-        "ERROR: HOST POLICY: tool '%s' is refused by the active permission "
-        "gate (%s, mode=%s, risk=%s). This is the host's standing policy, not "
-        "a transient failure: retrying it unchanged will be refused again. "
-        "Choose a different tool or finalize with what you have.%s"
-        % (name, decision.reason, decision.mode, decision.risk, remedy)
-    )
-    return refusal
+        hook = permission_modes.current_agent_approval_hook()
+        if hook is not None and hook(decision, name, call_args) == "approved":
+            decision = permission_modes.decide(
+                name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
+                record=record, arguments=call_args, fence=effect_fence.current())
+            if decision.allowed:
+                _chat_tools_wiring.clear_work_run_pending_refusal(run_id)
+                return ""
+    return _chat_run_backend.format_agent_gate_refusal(name, decision)
 
 
 def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots):
@@ -18386,8 +18366,9 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
-    if tool_name == "tool_help":
-        return _agent_help_tools.dispatch_tool_help(mcp, args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
+    if tool_name in ("tool_help", "tool_search"):
+        search_args = {**args, "query": args.get("q", "")} if ("query" not in args and "q" in args) else args
+        return _agent_help_tools.dispatch_tool_help(mcp, search_args, _agent_help_advertised_tools(_agent_tool_help(read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location)))
     if tool_name == "file_check":
         from sonder_runtime.bootstrap.code_check_agent_tools import dispatch_file_check
         return dispatch_file_check(args.get("path", ""), args.get("max_items", 30), project_root=repository_extra_roots or None)
@@ -20316,32 +20297,15 @@ def _local_agent_brief(project_scope: str = "") -> str:
         return environment_probe.agent_brief()
 
 
+def _http_chat_tools():
+    from sonder_runtime.bootstrap import chat_tools_wiring
+    return chat_tools_wiring
+
+
 def _agent_project_scope(project):
     """Resolve a project directory while preserving bare checklist namespaces."""
-    text = str(project or "").strip()
-    if not text:
-        return "", ""
-    try:
-        expanded = os.path.expanduser(text)
-        candidate = os.path.realpath(os.path.abspath(expanded))
-        if os.path.isdir(candidate):
-            return candidate, ""
-        path_like = (
-            os.path.isabs(expanded)
-            or bool(re.match(r"^[A-Za-z]:", expanded))
-            or expanded.startswith((".", "~"))
-            or "/" in expanded
-            or "\\" in expanded
-            or os.path.exists(candidate)
-        )
-        if path_like:
-            return "", (
-                "ERROR: invalid agent project root: path does not name an "
-                "existing directory: %s" % candidate
-            )
-    except (OSError, ValueError) as exc:
-        return "", "ERROR: invalid agent project root: %s" % exc
-    return "", ""
+    from sonder_runtime.adapters import chat_run_backend as _chat_run_backend
+    return _chat_run_backend.resolve_agent_project_scope(project)
 
 
 def _start_agent_checklist(prompt: str, project: str, read_only: bool):
@@ -20473,6 +20437,8 @@ def _agent_turn(
     pre_model_context=None,
     require_guarded_project: bool = False,
     tool_help_kind=None, restricted_lane=None,
+    cwd: str = "",
+    strict_project_tools: bool = True,
 ) -> str:
     """Run a Claude-like local agent loop that can call tools.
 
@@ -20539,8 +20505,10 @@ def _agent_turn(
     controller = _standalone_lanes.current()
     if controller is not None:
         controller.restrict(read_only=lane_read_only, cloud=cloud)
-    project, project_error = prepare_loop_project(project, writing=not (read_only or cloud), task=prompt)
-    project_scope, scope_error = _agent_project_scope(project)
+    work_root = cwd or project
+    work_root, project_error = prepare_loop_project(work_root, writing=not (read_only or cloud), task=prompt)
+    project_scope, scope_error = _agent_project_scope(work_root)
+    project_bound = bool(project_scope) and bool(strict_project_tools) and not (bool(cwd) and not bool(project))
     project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
@@ -20770,10 +20738,11 @@ def _agent_turn(
             read_only=read_only,
             cloud=cloud,
             unsafe=unsafe,
-            project_bound=bool(project_scope),
+            project_bound=project_bound,
             allow_web=allow_web,
             allow_location=allow_location,
             allowlist=allowed_tools, kind=tool_help_kind,
+            num_ctx=agent_num_ctx or (0 if cloud else _auto_model_context(model)),
         ),
     )
     if unsafe:
@@ -21429,7 +21398,7 @@ def _agent_turn(
             policy_error = _repository_scope_path_error(
                 tool_name, policy_tool_args, project_scope,
             )
-        if not policy_error and project_scope and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
+        if not policy_error and project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
             policy_error = (
                 "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
                 "contract and is disabled for a project-bound agent."
@@ -22002,6 +21971,8 @@ def agent(
     checklist: bool = True,
     allow_location: bool = False,
     session: str | None = None,
+    cwd: str = "",
+    strict_project_tools: bool = True,
 ) -> str:
     """Run a visible local tool-using agent loop with checklist/reporting.
 
@@ -22036,6 +22007,8 @@ def agent(
                 allow_location=bool(allow_location),
                 session=session,
                 restricted_lane=restricted_lane,
+                cwd=cwd,
+                strict_project_tools=bool(strict_project_tools),
             )
     # Keep the report bound to this invocation's span.  Once an outer span
     # closes, ``latest()`` is a process-global last-completed value; another

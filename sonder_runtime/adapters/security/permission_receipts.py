@@ -63,6 +63,36 @@ def emit(sink, decision, surface: str) -> None:
     )
 
 
+def emit_mode_transition(previous: str, current: str, *, surface: str, actor: str = "",
+                         confirmed: bool = False) -> None:
+    """Record a transition into or out of ``bypass`` (or mode changes) in ``operations.db``."""
+    try:
+        with _LOCK:
+            provider = _STATE.get("provider")
+        if provider is None:
+            from ..operations_event_sink import OperationsEventSink
+            sink = OperationsEventSink()
+        else:
+            sink = provider()
+        if sink is None:
+            return
+        sink.emit(
+            "permission.mode_change",
+            summary="permission mode %s -> %s via %s" % (previous or "?", current, surface),
+            detail={
+                "category": "permission",
+                "previous_mode": str(previous or ""),
+                "mode": str(current or ""),
+                "surface": str(surface or ""),
+                "actor": str(actor or ""),
+                "bypass_confirmed": bool(confirmed),
+            },
+            severity="WARNING" if current == "bypass" else "INFO",
+        )
+    except Exception:
+        return
+
+
 def install(sink_provider: Callable[[], object]) -> None:
     """Route unattended decisions to ``sink_provider()``; replaces any earlier install."""
     if not callable(sink_provider):
