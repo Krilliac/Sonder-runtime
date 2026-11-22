@@ -53,7 +53,7 @@ task does not switch thinking or sampling modes between decisions.
 | `SONDER_INFERENCE_TIER_MODELS` | unset | `fast=a,general=b`; keys must be provider tiers. |
 | `SONDER_INFERENCE_API_KEY` | unset | Sent as `Authorization: Bearer`; in the log redaction set. |
 | `SONDER_ALLOW_REMOTE_INFERENCE` | `0` | `1` permits a non-loopback base URL (see consent). |
-| `SONDER_INFERENCE_MAX_INFLIGHT` | `1` | The primary's parallel capacity for private-worker placement (1-16); unused without workers. |
+| `SONDER_INFERENCE_MAX_INFLIGHT` | `1` | The primary's parallel capacity (1-16): the most requests the runtime sends it at once. Further callers queue in the gateway for a free slot (cancellation and deadline still apply), with or without private workers. |
 | `SONDER_INFERENCE_PRIVATE_WORKERS` | unset | JSON array of approved private workers, `[{"url": "https://10.77.0.2:8443/sonder-inference", "ca_bundle": "C:/.../ca.pem", "token_env": "SONDER_INFERENCE_NODE1_TOKEN", "max_inflight": 2}]` (see Private workers). Requires `SONDER_ALLOW_REMOTE_INFERENCE=1`. |
 | `SONDER_INFERENCE_TIMEOUT_SECONDS` | `300` | Per-call ceiling, never beyond the operation deadline. |
 | `SONDER_INFERENCE_STREAM_IDLE_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no bytes (keep-alive comments count) arrive for this long once the response has started; `0`-`86400`. Inside the total timeout above. Off by default because a long prefill can legitimately be silent. The error names the idle timeout and the elapsed seconds. |
@@ -170,6 +170,10 @@ expected cost, `(in-flight + 1) / max_inflight` times its observed
 milliseconds per output token, among the primary and the workers that are not
 known to be down (fresh health) and serve the requested model; ties rotate.
 The primary's `max_inflight` is `SONDER_INFERENCE_MAX_INFLIGHT` (default 1).
+An endpoint at its `max_inflight` is not eligible; when every eligible
+endpoint is full the caller queues in the gateway until a slot is released,
+so no endpoint is sent more concurrent requests than it allows. A queued
+caller still honours cancellation and its deadline.
 The per-token estimate is an EWMA of successful calls with the queueing in
 front of each call divided out, and an idle endpoint that has never been
 measured is tried once first. A much slower worker therefore receives only
@@ -184,8 +188,12 @@ to its own model. Tiers whose model only the primary serves therefore stay
 on the primary. A non-loopback primary is a candidate only for calls whose
 context allows cloud (its own consent rule); other calls go to an approved
 worker, or get the primary's refusal when no worker can take them. A call moves to another endpoint
-only after `SonderInferenceUnreachable` (provably never executed there);
-timeouts, 4xx and 5xx are final, as on a single endpoint. When nothing is
+only after `SonderInferenceUnreachable` or a 503 `overloaded`
+(`SonderInferenceOverloaded`, a `CapacityExceeded`), both provably never
+executed there. A saturated endpoint (a timed-out readiness probe or 503
+`overloaded`) moves the call only to an endpoint with a free slot at that
+moment; otherwise the error is raised rather than queued behind a full
+endpoint. Send timeouts, 4xx and other 5xx are final, as on a single endpoint. When nothing is
 eligible the primary produces the refusal. `provider_status()` adds a
 `workers` list (scheme and host, state, models, in-flight; never a path or
 token), each response carries `endpoint`, and every placement is logged at
@@ -208,6 +216,13 @@ mapping, but injects its own GET and POST transports:
   health probe's 2 s, or the send timeout capped by the operation deadline. A
   watchdog shuts the socket down when the budget is spent, so a peer that
   trickles bytes cannot stretch a per-read timeout into minutes.
+- Each exchange also watches the operation's cancellation token (and a
+  per-request `cancel_token` / `cancel_event` option, which is never sent):
+  once it reports cancelled, the socket is closed at once and the call raises
+  `Cancelled`, never "unreachable", so it is not failed over or sent to the
+  fallback. An Event token is read every 50 ms; any other token (a property
+  or a callable that reads the fleet store) at most twice a second, with
+  backoff when a read fails.
 - Bodies are read with bounds (1 MiB for GET, 16 MiB for a chat completion,
   16 KiB for an error document). A peer that does not speak HTTP (for
   example an SSH banner on the port) is `DependencyUnavailable`, never a
@@ -276,11 +291,12 @@ Everything else maps like the OpenAI-compatible gateway and is never
 "unreachable": 400/404/405/411/413/501 → `InvalidInput`; 401/403 →
 `Forbidden` (401 `unauthorized` names `SONDER_INFERENCE_API_KEY`; 403
 `forbidden_host`/`forbidden_origin` names the base URL host instead, which a
-key cannot fix); 429 and 503 `overloaded` → `CapacityExceeded`; 3xx, 408,
+key cannot fix); 429 → `CapacityExceeded`; 503 `overloaded` →
+`SonderInferenceOverloaded` (a `CapacityExceeded`); 3xx, 408,
 500, 503 `backend_unavailable`, malformed HTTP and connection resets →
 `DependencyUnavailable`; timeouts → `DeadlineExceeded`. Calls are single-attempt, and deadline
 and cancellation are checked before the health probe, before the send and
-after the response.
+after the response, and a cancel during the send closes the connection.
 
 Before each send the gateway consults cached health (`GET /v1/sonder/health`,
 at most 2 s of wall-clock time, reused for the TTL). Concurrent callers that
