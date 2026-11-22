@@ -203,3 +203,72 @@ def test_file_roots_local_and_one_shot_extra_roots_still_refuse_sensitive_dirs(h
             str(kube_cfg), "clusters: []\n", extra_roots=str(home_root), bypass=True,
         )
     assert not kube_cfg.exists()
+
+
+@pytest.mark.parametrize("relative", [
+    ".ssh/authorized_keys",
+    ".ssh/config",
+    ".aws/config",
+    ".kube/config",
+    ".gnupg/gpg.conf",
+    ".gcloud/config",
+    ".docker/config.json",
+    ".config/gh/hosts.yml",
+    ".config/gcloud/credentials.db",
+])
+def test_patch_refusal_blocks_sensitive_dirs_and_credential_stores(home_root, relative):
+    from sonder_runtime.adapters import git_change_targets
+
+    assert git_change_targets.patch_refusal("apply_patch", home_root, home_root, [relative]), relative
+
+
+def test_archive_extract_blocks_gcloud_and_direct_credential_store_destinations(home_root):
+    import zipfile
+    from sonder_runtime.adapters.inspection import archive_tools
+
+    cases = [
+        ("drop_gcloud", ".gcloud/config"),
+        (".docker", "config.json"),
+        (".config", "gh/hosts.yml"),
+        (".config_gcloud", ".gcloud/credentials.db"),
+    ]
+    for idx, (dest_rel, member) in enumerate(cases):
+        archive = home_root / f"drop_{idx}.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(member, "secret\n")
+        dest = home_root / dest_rel
+        with pytest.raises(PermissionError, match="refusing to mutate"):
+            archive_tools.extract_archive(str(archive), str(dest))
+        assert not dest.exists()
+
+    # Direct .config destination with gcloud/credentials.db is also refused.
+    archive = home_root / "drop_cfg_gcloud.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("gcloud/credentials.db", "secret\n")
+    with pytest.raises(PermissionError, match="refusing to mutate"):
+        archive_tools.extract_archive(str(archive), str(home_root / ".config"))
+    assert not (home_root / ".config").exists()
+
+
+def test_batch_write_preflight_rejects_credential_store_without_writing_or_reading_size(home_root):
+    docker_cfg = home_root / ".docker" / "config.json"
+    docker_cfg.parent.mkdir(parents=True)
+    docker_cfg.write_text('{"auths":{"secret":"1234567890"}}\n', encoding="utf-8")
+    benign = home_root / "benign_batch.txt"
+    with pytest.raises(file_ops.BatchWriteError) as info:
+        file_ops.batch_write_files([
+            {"path": str(benign), "content": "hi\n", "mode": "create"},
+            {"path": str(docker_cfg), "content": "{}\n", "mode": "overwrite"},
+        ])
+    assert info.value.report["transaction"] == "not_started"
+    assert info.value.report["snapshot_bytes"] == 0
+    assert not benign.exists()
+
+
+def test_protected_write_scope_refuses_directory_containing_ssh(home_root):
+    from sonder_runtime.adapters import protected_write_scope
+
+    sub = home_root / "fmt_sub"
+    (sub / ".ssh").mkdir(parents=True)
+    (sub / ".ssh" / "config").write_text("Host *\n", encoding="utf-8")
+    assert protected_write_scope.scope_refusal("format_code", home_root, sub)
