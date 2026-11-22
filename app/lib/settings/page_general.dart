@@ -55,6 +55,29 @@ extension _GeneralPage on _SettingsScreenState {
           ],
         ),
       ),
+      SettingRow(
+        label: 'Temperature',
+        description: "Auto sends none, so the model's own sampling preset "
+            'applies. Lower is more focused, higher more varied.',
+        modified: _temperatureChanged,
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text('Auto', style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(width: SonderSpace.sm),
+          Semantics(
+            label: 'Automatic temperature',
+            child: Switch(
+              key: const Key('settings-temperature-auto'),
+              value: _temperature == null,
+              onChanged: (auto) =>
+                  _setTemperature(auto ? null : temperatureStart),
+            ),
+          ),
+        ]),
+        below: TemperatureSlider(
+          value: _temperature,
+          onChanged: _setTemperature,
+        ),
+      ),
     ]);
   }
 }

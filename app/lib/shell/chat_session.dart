@@ -44,6 +44,7 @@ class ChatSession {
     api = _apiFor(settings);
     chat = ChatController(_backendFor(settings), model: settings.model)
       ..contextSize = settings.contextSize
+      ..temperature = settings.temperature
       ..allowApproximateLocation = settings.allowApproximateLocation;
   }
 
@@ -114,6 +115,7 @@ class ChatSession {
     appControl.synchronize();
     chat
       ..contextSize = next.contextSize
+      ..temperature = next.temperature
       ..allowApproximateLocation = next.allowApproximateLocation;
     final identity = _identityOf(next);
     final changed = identity != _identity;

@@ -86,6 +86,8 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
+from sonder_runtime.interfaces.http.slash_call_arguments import slash_call_arguments
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -2897,7 +2899,7 @@ def _do_train(n):
     lines = []
     for t in tasks:
         lines.append("  practicing: %s ..." % t["name"])
-        resp = server.sonder(t["prompt"])
+        resp = server.sonder(t["prompt"], temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False
@@ -2994,33 +2996,8 @@ def _http_slash_refusal(cmd, argument="", context=None, arguments=None):
     # this chain and `server.control_command` cannot disagree about a read.
     tools = command_catalog.narrow_branch_tools(cmd, argument, tools)
     return _http_tool_refusal(
-        tools, cmd, context=context, arguments=arguments if arguments is not None else _slash_call_arguments(cmd, argument),
+        tools, cmd, context=context, arguments=arguments if arguments is not None else slash_call_arguments(cmd, argument),
     )
-
-
-def _slash_call_arguments(cmd, argument):
-    """The tool arguments a file-changing slash command will call with, or None.
-
-    Mirrors the branches of ``_handle_slash`` exactly (``/write`` and
-    ``/append`` call ``file_write``, ``/edit`` calls ``file_edit``), so an
-    unattended refusal names the call (a call id an operator can approve once)
-    and the same call digests identically whether it is typed ``/write a b``
-    or ``/file_write path=a content=b mode=create``. The caller's token is a
-    credential knob and never part of the digest.
-    """
-    text = str(argument or "")
-    if cmd in ("/write", "/append"):
-        parts = text.split(None, 1)
-        if len(parts) != 2:
-            return None
-        return {"path": parts[0], "content": parts[1],
-                "mode": "append" if cmd == "/append" else "create"}
-    if cmd == "/edit":
-        pieces = text.split("|", 2)
-        if len(pieces) != 3:
-            return None
-        return {"path": pieces[0].strip(), "old": pieces[1], "new": pieces[2]}
-    return None
 
 
 # S1. Refusals observed during one chat turn. The permission gate reports
@@ -3302,7 +3279,7 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
+                  idempotency_key="", workspace_project=None, lane_session="", storage_session=""):
     """Return response text if `content` is a recognized slash command, else None."""
     state = _state_or_legacy(state)
 
@@ -3653,6 +3630,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             state.last_iid = None
             return msg
         return "(nothing to record yet)"
+    if cmd == "/temp":
+        from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
+        return _chat_temperature.slash_temp(arg, storage_session, context, _state_principal, serve_lane_temperature())
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -7387,6 +7367,13 @@ class Handler(BaseHTTPRequestHandler):
                 status=error.status,
             )
             return
+        try:  # the GUI slider; checked here, stored in the turn's slot after every check
+            apply_session_temperature, session_temperature = _chat_temperature.session_field(
+                req.get("session_temperature"), storage_session)
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_session_temperature")
+            self._send_json_payload({"error": {"message": "session_temperature: %s" % error, "type": "invalid_request"}}, status=400)
+            return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7463,6 +7450,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lifecycle.acquire_request_slot(
                 mutating=True, owner=_admission_request_owner(context)
             ), state.lock:
+                _chat_temperature.store_session_field(
+                    apply_session_temperature, session_temperature, storage_session, context, _state_principal)
                 _record_chat("user", prompt, state=state)
                 with server.activity_tracker.response_span(
                     "chat:%s" % (model or "sonder"),
@@ -7490,6 +7479,7 @@ class Handler(BaseHTTPRequestHandler):
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
                             workspace_project=project, lane_session=session,
+                            storage_session=storage_session,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
@@ -7583,7 +7573,7 @@ class Handler(BaseHTTPRequestHandler):
                             # cache so each draw is independent; force temp>0.
                             _sample_temp = max(
                                 float(_spanda_policy.sample_temperature),
-                                float(_live_serve_temperature()) or 0.0,
+                                float(0.2 if _live_serve_temperature() is None else _live_serve_temperature()),  # auto keeps the old 0.2 floor
                                 0.05,
                             )
                             _samples = []
