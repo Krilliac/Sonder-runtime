@@ -223,6 +223,7 @@ def test_no_verification_guidance_text_and_idempotence():
 
     for word in ("compiled", "ran", "tested", "verified", "Passed"):
         assert word in _NO_VERIFICATION_GUIDANCE
+    assert "/run" not in _NO_VERIFICATION_GUIDANCE
     assert len(_NO_VERIFICATION_GUIDANCE) < 400
     once = no_verification_claims_system("base")
     assert once.startswith("base") and once.endswith(_NO_VERIFICATION_GUIDANCE)
@@ -462,6 +463,69 @@ def test_session_export_fails_closed_on_a_malformed_retention_marker(session_log
     out = legacy_server.session_export("chat-1")
     assert "USER: first question" in out        # falls back to the interaction rows
     assert "USER: q0" not in out
+
+
+def test_session_export_malformed_retention_never_leaks_retained_learning_turn(
+        monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import memory_store
+    from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
+    from sonder_runtime.domain.common.errors import InvalidInput
+
+    monkeypatch.setattr(legacy_server, "_DB_PATH", str(tmp_path / "mem.db"))
+    repo = SQLiteSessionRepository(tmp_path / "sessions.db")
+    monkeypatch.setattr(legacy_server, "_application",
+                        lambda: SimpleNamespace(session_repository=lambda: repo))
+
+    # Session 1: a pre-log row plus a learning-route turn logged in BOTH SQLite
+    # interactions and session_events, withheld by retention, followed by a
+    # malformed retention marker.
+    conn = legacy_server._open_db()
+    try:
+        memory_store.touch_session(conn, "s-mix", "")
+        memory_store.log_interaction(conn, "PRE0", "PRELOG-SAFE-1", "",
+                                     "prelog-answer", "code", session_id="s-mix")
+        memory_store.log_interaction(conn, "SEC1", "SECRET-USER-999", "",
+                                     "SECRET-REPLY-999", "code", session_id="s-mix")
+        memory_store.touch_session(conn, "s-only", "")
+        memory_store.log_interaction(conn, "SEC2", "SECRET-ONLY-888", "",
+                                     "SECRET-ONLY-REPLY-888", "code", session_id="s-only")
+    finally:
+        conn.close()
+
+    for sid, prompt, reply in (
+        ("s-mix", "SECRET-USER-999", "SECRET-REPLY-999"),
+        ("s-only", "SECRET-ONLY-888", "SECRET-ONLY-REPLY-888"),
+    ):
+        _capture_turn(repo, sid, 1, prompt, reply)
+        events = list(repo.read_complete(sid))
+        targets = [
+            {"event_id": e.event_id, "sequence": e.sequence, "privacy_class": "private"}
+            for e in events if e.event_type in {"user.message", "model.response"}
+        ]
+        repo.append(sid, "session.retention.applied", {
+            "privacy_class": "public_metadata", "action": "redact_or_expire",
+            "targets": targets,
+        })
+        repo.append(sid, "session.retention.applied", {"targets": "corrupted"})
+
+    # Session with a pre-log row keeps only the pre-log row in both formats.
+    mix_text = legacy_server.session_export("s-mix")
+    assert "PRELOG-SAFE-1" in mix_text
+    assert "SECRET-USER-999" not in mix_text
+    assert "SECRET-REPLY-999" not in mix_text
+    mix_atif = legacy_server.session_export("s-mix", format="atif")
+    assert "PRELOG-SAFE-1" in mix_atif
+    assert "SECRET-USER-999" not in mix_atif
+    assert "SECRET-REPLY-999" not in mix_atif
+
+    # Session with no pre-log rows leaks nothing in text and fails closed in ATIF.
+    only_text = legacy_server.session_export("s-only")
+    assert "SECRET-ONLY-888" not in only_text
+    assert "SECRET-ONLY-REPLY-888" not in only_text
+    with pytest.raises(InvalidInput):
+        legacy_server.session_export("s-only", format="atif")
 
 
 def test_session_export_merges_pre_log_rows_with_event_log_turns(monkeypatch, tmp_path):

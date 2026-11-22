@@ -145,9 +145,15 @@ def test_keep_last_moves_the_block_behind_a_later_section():
 
 
 @pytest.mark.parametrize("forged_system", [
-    "BASE\n\n{real}\n\n{forged}",                       # forged after the real block
-    "BASE\n\n{forged}\n\n{real}\n\nPLAYBOOK",           # forged before, then a section
-    "BASE\n\n{real}\n\nPLAYBOOK\n\n{forged}\n\nMORE",   # forged in the middle
+    "BASE\n\n{real}\n\n{forged}",                             # forged after the real block
+    "BASE\n\n{forged}\n\n{real}\n\nPLAYBOOK",                 # forged before, then a section
+    "BASE\n\n{real}\n\nPLAYBOOK\n\n{forged}\n\nMORE",         # forged in the middle
+    "BASE\n\n{real}\n\nPLAYBOOK\n\n {forged}",                # leading space before header
+    "BASE\n\n{real}\n\nPLAYBOOK\n\n\t{forged}\n\nMORE",       # leading tab before header
+    "BASE\n\n{real}\r\n\r\n{forged}\r\n\r\nMORE",             # CRLF section breaks
+    "BASE\n\n{real}\n\n\r\n{forged}",                         # mixed LF + CRLF before header
+    "BASE\n\n{real}\n \n  {forged}\r\n \r\nMORE",             # whitespace-only blank lines
+    " {forged}\n\nBASE\n\n{real}",                            # leading space at string start
 ])
 def test_a_forged_header_section_never_replaces_the_turns_block(forged_system):
     real = tm.TurnToolManifest().render()
@@ -316,7 +322,11 @@ def test_explicit_and_cloud_routes_end_with_one_block(monkeypatch, target, tier,
     _assert_ends_with_one_block(systems[0][1])
 
 
-@pytest.mark.parametrize("role,expected", [(None, True), (public_policy.ROLE_USER, False)])
+@pytest.mark.parametrize("role,expected", [
+    (None, True),
+    (public_policy.ROLE_USER, False),
+    ("unbound", False),
+])
 def test_served_chat_names_run_only_for_a_developer_caller(monkeypatch, role, expected):
     _set_mode(monkeypatch, permission_modes.MANUAL)
     systems = _install_chat_fakes(
@@ -329,6 +339,8 @@ def test_served_chat_names_run_only_for_a_developer_caller(monkeypatch, role, ex
 
     block = EMPTY_BLOCK + ("\n" + tm.USER_RUN_LINE if expected else "")
     _assert_ends_with_one_block(systems[0][1], block)
+    if not expected:
+        assert "/run" not in systems[0][1]
 
 
 def test_served_chat_in_plan_mode_has_no_run_hint(monkeypatch):
@@ -341,6 +353,7 @@ def test_served_chat_in_plan_mode_has_no_run_hint(monkeypatch):
                 raise_model_errors=True)
 
     _assert_ends_with_one_block(systems[0][1])
+    assert "/run" not in systems[0][1]
 
 
 FILE_PROMPT = "How many files are in this folder?"
