@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import sonder_paths
 import sonder_runtime.adapters.secrets as sonder_secrets
 from sonder_runtime.adapters.security import login_throttle
+from sonder_runtime.application.config.saas_config import SaaSConfig, feature_key, tier_limit_key
 
 
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
@@ -174,8 +176,35 @@ def init(conn: sqlite3.Connection) -> None:
             consumed_ts INTEGER,
             consumed_by TEXT
         );
+        CREATE TABLE IF NOT EXISTS account_api_keys (
+            key_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            created_ts INTEGER NOT NULL,
+            expires_ts INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS account_api_keys_username ON account_api_keys(username);
+        CREATE TABLE IF NOT EXISTS usage_stats (
+            username TEXT PRIMARY KEY,
+            monthly_count INTEGER NOT NULL DEFAULT 0,
+            month_start INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS saas_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
+    # Key tables created before key expiry existed gain the one nullable column
+    # (NULL: the key never expires).
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(account_api_keys)")}
+    if "expires_ts" not in columns:
+        try:
+            conn.execute("ALTER TABLE account_api_keys ADD COLUMN expires_ts INTEGER")
+        except sqlite3.OperationalError as exc:
+            # Another process upgraded the same database since the check.
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.commit()
 
 
@@ -477,7 +506,29 @@ def require(account: dict | None, role: str = "user") -> tuple[bool, str]:
         return False, "%s role required" % role
     if account.get("banned"):
         return False, "account is banned"
+    # An assigned API key is a long-lived bearer that can leak; it never
+    # carries admin authority, which needs a signed-in session.
+    if role == "admin" and account.get("via_api_key"):
+        return False, "admin authority requires a signed-in session"
     return True, ""
+
+
+def _has_dev_flag(account: dict, flag: str) -> bool:
+    """True when ``flag`` is an exact entry of the comma- or space-separated ``dev_flags``."""
+    return flag in str(account.get("dev_flags") or "").replace(",", " ").split()
+
+
+def has_developer_authority(account: dict | None) -> bool:
+    """True when the account's role, or a ``developer`` entry in its dev_flags, grants developer.
+
+    ``dev_flags`` is a comma- or space-separated list set by an admin; only the
+    exact ``developer`` entry counts.
+    """
+    if require(account, "developer")[0]:
+        return True
+    if not account or account.get("banned"):
+        return False
+    return _has_dev_flag(account, "developer")
 
 
 @coordinated_account_mutation
@@ -515,6 +566,9 @@ def set_account(conn: sqlite3.Connection, username: str, **changes) -> dict:
                 "UPDATE account_sessions SET revoked=1 WHERE username=? AND revoked=0",
                 (username,),
             )
+            # Assigned API keys are bearer credentials too: delete them, so
+            # un-banning does not silently restore a key issued before the ban.
+            conn.execute("DELETE FROM account_api_keys WHERE username=?", (username,))
         conn.commit()
     return public_account(conn, username)
 
@@ -529,6 +583,12 @@ def list_accounts(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
 
 
 def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) -> tuple[bool, str]:
+    """The per-minute request budget of an account's tier; separate from SaaS metering.
+
+    No account (key-only or local-open callers) and ``unlimited`` accounts are
+    never limited.  This applies whatever the SaaS switches say; monthly token
+    metering is :func:`meter_usage`.
+    """
     init(conn)
     if not account:
         return True, ""
@@ -537,7 +597,7 @@ def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) ->
         limit = 600
     if account.get("tier") == "enterprise":
         limit = 3000
-    if "unlimited" in (account.get("dev_flags") or ""):
+    if _has_dev_flag(account, "unlimited"):
         return True, ""
     username = account["username"]
     window = (_now() // RATE_WINDOW_SECONDS) * RATE_WINDOW_SECONDS
@@ -571,4 +631,243 @@ def rate_limit(conn: sqlite3.Connection, account: dict | None, cost: int = 1) ->
     if count > limit:
         return False, "rate limit exceeded for tier %s (%d/min)" % (account.get("tier"), limit)
     return True, ""
+
+
+# --- SaaS switches and monthly token metering ------------------------------
+#
+# SaaS mode is OFF by default (``saas_config.FEATURES`` all start False).  The
+# switches live in ``saas_settings`` in this accounts database, so an operator
+# turns one on per deployment; nothing here reads the environment.
+
+# Fixed charge per chat request while ``usage_metering_enabled`` is on.  It is
+# charged when the request is admitted, before inference, because per-response
+# token accounting does not exist yet; with metering off it is never charged.
+CHAT_REQUEST_TOKEN_ESTIMATE = 500
+_USAGE_PERIOD_SECONDS = 30 * 24 * 60 * 60
+
+
+def saas_config(conn: sqlite3.Connection) -> SaaSConfig:
+    """An immutable snapshot of this database's SaaS switches and tier limits."""
+    init(conn)
+    rows = conn.execute("SELECT key, value FROM saas_settings").fetchall()
+    return SaaSConfig.from_rows((row[0], row[1]) for row in rows)
+
+
+def set_saas_feature(conn: sqlite3.Connection, name: str, enabled: bool) -> SaaSConfig:
+    """Turn one SaaS feature on or off; ``ValueError`` for an unknown feature."""
+    init(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO saas_settings(key, value) VALUES(?, ?)",
+        (feature_key(name), "1" if enabled else "0"),
+    )
+    conn.commit()
+    return saas_config(conn)
+
+
+def set_saas_tier_limit(conn: sqlite3.Connection, tier: str, limit: int) -> SaaSConfig:
+    """Override one tier's monthly token limit; ``ValueError`` for an unusable tier or limit."""
+    init(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO saas_settings(key, value) VALUES(?, ?)",
+        (tier_limit_key(tier, limit), str(limit)),
+    )
+    conn.commit()
+    return saas_config(conn)
+
+
+def meter_usage(conn: sqlite3.Connection, account: dict | None, tokens: int) -> tuple[bool, str]:
+    """Charge ``tokens`` to the account's monthly tier budget when SaaS metering is on.
+
+    Never metered: callers with no account (key-only, local-open), admins
+    signed in through a session, and ``unlimited`` accounts; and nobody at all
+    while ``usage_metering_enabled`` is off.  An admin account's API key is
+    metered like any other key: it carries no admin authority (``require``).
+    The check and the charge are one ``BEGIN IMMEDIATE`` transaction,
+    so concurrent requests cannot both spend the last of a budget, and a
+    refused request is not charged.  A usage period is a fixed 30-day bucket.
+    """
+    if not account:
+        return True, ""
+    session_admin = account.get("role") == "admin" and not account.get("via_api_key")
+    if session_admin or _has_dev_flag(account, "unlimited"):
+        return True, ""
+    config = saas_config(conn)
+    if not config.is_feature_enabled("usage_metering_enabled"):
+        return True, ""
+    units = max(0, int(tokens or 0))
+    if not units:
+        return True, ""
+    username = _username(account["username"])
+    tier = str(account.get("tier") or "free")
+    limit = config.get_tier_limit(tier)
+    period = (_now() // _USAGE_PERIOD_SECONDS) * _USAGE_PERIOD_SECONDS
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT monthly_count, month_start FROM usage_stats WHERE username=?",
+            (username,),
+        ).fetchone()
+        current = int(row[0] or 0) if row and row[1] == period else 0
+        if current + units > limit:
+            conn.rollback()
+            return False, "monthly token limit exceeded for tier %s (%d tokens/month)" % (tier, limit)
+        conn.execute(
+            "INSERT INTO usage_stats(username, monthly_count, month_start) VALUES(?, ?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET monthly_count=excluded.monthly_count, "
+            "month_start=excluded.month_start",
+            (username, current + units, period),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return True, ""
+
+
+# --- assigned, revocable API keys ------------------------------------------
+#
+# Only the HMAC of a key is stored (``_hash_token``); the key itself is shown
+# once, by ``generate_api_key``.  Every function takes the owning username
+# from its caller, which must have it from an authenticated session.
+
+API_KEY_PREFIX = "sk-"
+MAX_API_KEYS_PER_ACCOUNT = 10
+_MAX_API_KEY_LENGTH = 128
+# ``saas_settings`` row holding the lifetime of newly minted keys in seconds.
+# Absent or 0: keys never expire (the default).
+API_KEY_TTL_SETTING = "api_key_ttl_seconds"
+
+
+def set_api_key_ttl(conn: sqlite3.Connection, seconds: int) -> None:
+    """Set the lifetime of keys minted from now on; 0 means they never expire.
+
+    Keys already issued keep the expiry they were minted with.
+    ``ValueError`` for anything but a non-negative integer.
+    """
+    if type(seconds) is not int or seconds < 0:
+        raise ValueError("api key ttl must be a non-negative integer")
+    init(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO saas_settings(key, value) VALUES(?, ?)",
+        (API_KEY_TTL_SETTING, str(seconds)),
+    )
+    conn.commit()
+
+
+def _api_key_ttl(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT value FROM saas_settings WHERE key=?", (API_KEY_TTL_SETTING,)
+    ).fetchone()
+    try:
+        seconds = int(str(row[0]).strip()) if row else 0
+    except ValueError:  # an unparsable row is no TTL, like an absent one
+        return 0
+    return max(0, seconds)
+
+
+@coordinated_account_mutation
+def generate_api_key(conn: sqlite3.Connection, username: str) -> dict:
+    """Mint a key for an existing account: ``{"key", "key_id", "created_ts", "expires_ts"}``.
+
+    ``expires_ts`` is None unless ``API_KEY_TTL_SETTING`` sets a lifetime.
+    The account's expired keys are deleted first, so they do not count
+    against the limit.  ``ValueError`` for an unknown account or one already
+    holding ``MAX_API_KEYS_PER_ACCOUNT`` live keys.
+    """
+    init(conn)
+    username = _username(username)
+    key = API_KEY_PREFIX + secrets.token_hex(24)
+    key_id = secrets.token_hex(8)
+    created = _now()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM accounts WHERE username=?", (username,)).fetchone() is None:
+            raise ValueError("unknown account")
+        conn.execute(
+            "DELETE FROM account_api_keys WHERE username=? AND expires_ts IS NOT NULL AND expires_ts <= ?",
+            (username, created),
+        )
+        held = conn.execute(
+            "SELECT COUNT(*) FROM account_api_keys WHERE username=?", (username,)
+        ).fetchone()[0]
+        if int(held) >= MAX_API_KEYS_PER_ACCOUNT:
+            raise ValueError("api key limit reached")
+        ttl = _api_key_ttl(conn)
+        expires = created + ttl if ttl else None
+        conn.execute(
+            "INSERT INTO account_api_keys(key_id, username, key_hash, created_ts, expires_ts) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (key_id, username, _hash_token(key), created, expires),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return {"key": key, "key_id": key_id, "created_ts": created, "expires_ts": expires}
+
+
+@coordinated_account_mutation
+def revoke_api_key(conn: sqlite3.Connection, username: str, key_id: str | None = None) -> int:
+    """Revoke one of ``username``'s keys (``key_id``) or all of them; the number revoked."""
+    init(conn)
+    username = _username(username)
+    if key_id is None:
+        cursor = conn.execute("DELETE FROM account_api_keys WHERE username=?", (username,))
+    else:
+        cursor = conn.execute(
+            "DELETE FROM account_api_keys WHERE username=? AND key_id=?", (username, str(key_id))
+        )
+    conn.commit()
+    return int(cursor.rowcount or 0)
+
+
+def list_api_keys(conn: sqlite3.Connection, username: str) -> list[dict]:
+    """``username``'s keys, oldest first, as ``{"key_id", "created_ts", "expires_ts"}``.
+
+    Never a key or its hash.  ``expires_ts`` is None for a key that never expires.
+    """
+    init(conn)
+    username = _username(username)
+    rows = conn.execute(
+        "SELECT key_id, created_ts, expires_ts FROM account_api_keys WHERE username=? "
+        "ORDER BY created_ts, key_id",
+        (username,),
+    ).fetchall()
+    return [{"key_id": row[0], "created_ts": row[1], "expires_ts": row[2]} for row in rows]
+
+
+def authenticate_api_key(conn: sqlite3.Connection, key: str) -> str | None:
+    """The username owning ``key`` when it is live, unexpired and the account is not banned, else None."""
+    if (type(key) is not str or not key.startswith(API_KEY_PREFIX)
+            or len(key) > _MAX_API_KEY_LENGTH or any(not 33 <= ord(c) <= 126 for c in key)):
+        return None
+    init(conn)
+    row = conn.execute(
+        "SELECT k.username FROM account_api_keys AS k JOIN accounts AS a ON a.username = k.username "
+        "WHERE k.key_hash=? AND COALESCE(a.banned, 0) = 0 "
+        "AND (k.expires_ts IS NULL OR k.expires_ts > ?)",
+        (_hash_token(key), _now()),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def api_key_account(conn: sqlite3.Connection, key: str) -> dict | None:
+    """The public account (role, tier, dev_flags) a live ``key`` stands for, else None.
+
+    None for a malformed, unknown, revoked or expired key and for a banned or
+    deleted account, so the caller sees no difference between them.  The
+    account is marked ``via_api_key=True``: :func:`require` then refuses it
+    admin authority, while its tier, rate limit and metering still apply.
+    """
+    username = authenticate_api_key(conn, key)
+    if username is None:
+        return None
+    try:
+        account = public_account(conn, username)
+    except ValueError:  # the account was deleted after the key lookup
+        return None
+    if account["banned"]:
+        return None
+    account["via_api_key"] = True
+    return account
 
