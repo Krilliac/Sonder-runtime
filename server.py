@@ -514,6 +514,7 @@ from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool, prew
 from sonder_runtime.adapters.inference import ollama_reporting as _ollama_reporting
 from sonder_runtime.adapters.inference.pool_model_catalog import (
     PoolCatalogCache,
+    discovery_tags as _pool_discovery_tags,
     resolve_model_pin,
 )
 from sonder_runtime.domain import ollama_policy
@@ -742,6 +743,12 @@ def _valid_tier_names():
     return _valid_tier_names_policy(available_tiers())
 
 
+def _discovery_tags(host_only=False):
+    """Known-model catalog: the pool's union, or this host's when ``host_only`` (pooled read if it is down)."""
+    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/api/tags"), lambda o: _pool_member_tags(
+        o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS), host_origin=BASE if host_only else None)
+
+
 def discovered_models():
     """Return the live Ollama catalog as canonical, deduplicated model names.
 
@@ -749,7 +756,7 @@ def discovered_models():
     operator's Ollama endpoint currently advertises, but cannot turn an
     arbitrary string into a backend request.
     """
-    return _catalog_names(_get("/api/tags"))
+    return _catalog_names(_discovery_tags())
 
 
 def discovered_model_records():
@@ -759,7 +766,12 @@ def discovered_model_records():
     Unknown records deliberately remain eligible; fanout excludes only models
     which the operator's catalog positively identifies as non-generative.
     """
-    return _catalog_records(_get("/api/tags"))
+    return _catalog_records(_discovery_tags())
+
+
+def servable_model_records():
+    """Records the chat gate and ``/v1/models`` share: when pooled, this host's (see ``_discovery_tags``)."""
+    return _catalog_records(_discovery_tags(True)) if OLLAMA_POOL.enabled else discovered_model_records()
 
 
 def _cache_model_revision(model):
@@ -776,7 +788,7 @@ def _cache_model_revision(model):
     if not requested:
         return ""
     try:
-        records = discovered_model_records()
+        records = servable_model_records()
     except Exception:
         return ""
     return _catalog_revision(requested, records)
@@ -788,11 +800,9 @@ def _inventory_rows(payload, endpoint):
 
 
 def resolve_discovered_model_record(selector):
-    """Resolve an exact live catalog record case-insensitively, or return None."""
+    """Resolve an exact ``servable_model_records()`` record case-insensitively, or None."""
     wanted = str(selector or "").strip().casefold()
-    if not wanted:
-        return None
-    return _resolve_catalog_record(wanted, discovered_model_records())
+    return _resolve_catalog_record(wanted, servable_model_records()) if wanted else None
 
 
 def resolve_discovered_model(selector):
@@ -6895,8 +6905,8 @@ def _sonder_impl_serialized(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
@@ -7364,8 +7374,8 @@ def _answer_with_history_impl(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:
-        return ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
+    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
+        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
                 "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
     finally:
         rung_scope.close()
@@ -23370,11 +23380,17 @@ _PIN_CATALOG_TIMEOUT_SECONDS = 3
 _POOL_PIN_CATALOG = PoolCatalogCache()
 
 
+def _pin_endpoint_record(selector):
+    """Pin lookup tier one: the single pooled read (workers are the next tier)."""
+    wanted = str(selector or "").strip().casefold()
+    return _resolve_catalog_record(wanted, _catalog_records(_get("/api/tags"))) if wanted else None
+
+
 def _resolve_model_pin(selector):
     """Resolve a model pin against this host, then the pool's routable members."""
     return resolve_model_pin(
         selector,
-        endpoint_record=lambda s: resolve_discovered_model_record(s),
+        endpoint_record=lambda s: _pin_endpoint_record(s),
         pool=OLLAMA_POOL,
         fetch_member_tags=lambda o: _pool_member_tags(o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS),
         nonchat_reason=lambda r: _fanout_nonchat_reason(r),

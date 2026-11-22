@@ -9,6 +9,13 @@ Three-Hundred-Eighth Slice with its behaviour byte-for-byte intact.
 from __future__ import annotations
 
 import json
+import re
+
+_OPEN_FENCE_RE = re.compile(r"^\s*```[A-Za-z0-9_+#.-]*\s*$")
+_CLOSE_FENCE_RE = re.compile(r"^\s*```\s*$")
+_CODE_LEAD_RE = re.compile(
+    r"^\s*(?:def |class |import |from |#|//|/\*|using |package |fn |func |let |const |var |public |private |protected |template\b)"
+)
 
 
 def candidate_references(answers):
@@ -94,3 +101,36 @@ def synthesis_prompt(question, answers, *, keep_citations=False):
         "QUESTION (authoritative):\n%s\n\n"
         "%s\n\nCOMPOUNDED ANSWER:" % (question, candidate_boundary(candidate_data))
     )
+
+
+def is_code_synthesis_prompt(prompt: str) -> bool:
+    """True when *prompt* was built by :func:`code_synthesis_prompt`."""
+    return (
+        isinstance(prompt, str)
+        and prompt.startswith("Several models independently wrote the same source file.")
+        and prompt.rstrip().endswith("FINAL FILE:")
+    )
+
+
+def strip_code_fences(text: str) -> str:
+    """Strip markdown wrapper fences (including stray trailing ```) from code output."""
+    if not isinstance(text, str) or not text.strip():
+        return text
+    lines = text.strip().splitlines()
+    if len(lines) >= 2 and _OPEN_FENCE_RE.match(lines[0]) and _CLOSE_FENCE_RE.match(lines[-1]):
+        return "\n".join(lines[1:-1]).strip("\r\n")
+    if _CLOSE_FENCE_RE.match(lines[-1]):
+        earlier_fences = [idx for idx, line in enumerate(lines[:-1]) if _OPEN_FENCE_RE.match(line)]
+        if len(earlier_fences) % 2 == 0:
+            return "\n".join(lines[:-1]).rstrip()
+        if len(earlier_fences) == 1:
+            idx = earlier_fences[0]
+            preamble = lines[:idx]
+            if preamble and not any(
+                _CODE_LEAD_RE.match(line) or any(ch in line for ch in "{};=")
+                for line in preamble
+            ):
+                return "\n".join(lines[idx + 1:-1]).strip("\r\n")
+    if _OPEN_FENCE_RE.match(lines[0]) and not any(_OPEN_FENCE_RE.match(line) for line in lines[1:]):
+        return "\n".join(lines[1:]).lstrip("\r\n")
+    return text
