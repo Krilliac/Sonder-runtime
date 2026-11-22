@@ -311,13 +311,6 @@ class SessionQueryEngine:
             raise QueryExportError("invalid pagination cursor")
         return next_sequence
 
-    def _scan_limit(self) -> int:
-        """Rows per read: the service bound, lowered to the adapter's ceiling."""
-        adapter_limit = getattr(self._repository, "_max_read_limit", self._max_scan)
-        if isinstance(adapter_limit, bool) or not isinstance(adapter_limit, int) or adapter_limit < 1:
-            adapter_limit = self._max_scan
-        return min(self._max_scan, adapter_limit)
-
     def last_sequence(self, session_id: str) -> int:
         """Sequence of the newest event, or 0 when the session has none."""
         if not isinstance(session_id, str) or not session_id.strip():

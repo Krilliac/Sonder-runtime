@@ -248,7 +248,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   bool _loadingExtras = false;
 
   /// Bumped when the server, key or account changes. An extras load that
-  /// started under an older generation is discarded and re-run.
+  /// started under an older generation is discarded silently.
   int _extrasGeneration = 0;
   PermissionMode? _mode;
   Object? _modeError;
@@ -322,6 +322,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _mode = null;
       _modeError = null;
       _modeLoaded = false;
+      _loadingExtras = false;
       _extrasGeneration++;
       unawaited(_loadExtras());
     }
@@ -440,14 +441,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       readCatalog(),
       readMode(),
     ]);
-    if (!mounted) return;
-    if (generation != _extrasGeneration) {
-      // The identity changed while this load was in flight: its result
-      // belongs to the old server/account. Drop it and load again.
-      setState(() => _loadingExtras = false);
-      unawaited(_loadExtras());
-      return;
-    }
+    if (!mounted || generation != _extrasGeneration) return;
     setState(() {
       _loadingExtras = false;
       _workRuns = runs ??
