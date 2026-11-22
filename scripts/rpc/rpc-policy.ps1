@@ -107,7 +107,7 @@ function Test-RpcTcpReachable([string]$TargetHost, [int]$TargetPort, [int]$Timeo
 }
 
 function ConvertTo-RpcArgumentString([string[]]$Arguments) {
-    # Quote per the CommandLineToArgvW rules so Start-Process -ArgumentList
+    # Quote per the CommandLineToArgvW rules so a Win32_Process command line
     # reaches the child as exactly these argv entries on Windows PowerShell 5.1
     # and PowerShell 7 (5.1 joins an array with spaces and does not quote).
     $parts = foreach ($arg in $Arguments) {
@@ -122,6 +122,24 @@ function ConvertTo-RpcArgumentString([string[]]$Arguments) {
         }
     }
     return ($parts -join ' ')
+}
+
+function Start-RpcDetached([string]$ExePath, [string]$ArgumentString, [string]$WorkingDirectory) {
+    # Launch detached through Win32_Process.Create. Unlike Start-Process with
+    # redirected output, the child inherits none of the caller's pipe handles and
+    # is not in the caller's job object, so a one-shot `ssh host powershell -File`
+    # or a piped CI/agent wrapper returns at once and the server outlives the
+    # session. Returns the new process id. No PowerShell source string is built.
+    $commandLine = '"' + $ExePath + '"'
+    if ($ArgumentString) { $commandLine += ' ' + $ArgumentString }
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine      = $commandLine
+        CurrentDirectory = $WorkingDirectory
+    }
+    if ($created.ReturnValue -ne 0) {
+        throw "Win32_Process Create failed with return code $($created.ReturnValue)."
+    }
+    return [int]$created.ProcessId
 }
 
 function ConvertTo-RpcBaseUrl([string]$HostAddress, [int]$Port) {

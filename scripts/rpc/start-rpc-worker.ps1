@@ -158,8 +158,10 @@ switch ($Action) {
 
         $exe = Resolve-RpcServerExe $InstallDir
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $stdout = Join-Path $logDir "llama-rpc-worker-$stamp.stdout.log"
-        $stderr = Join-Path $logDir "llama-rpc-worker-$stamp.stderr.log"
+        # Detached launch has no stdout/stderr capture (rpc-server has no verified
+        # log-file option), so no log paths are recorded for the worker.
+        $stdout = $null
+        $stderr = $null
 
         $rpcArgs = @('--host', $bindHost, '--port', [string]$rpcPort)
         if ($Device.Trim()) {
@@ -172,12 +174,9 @@ switch ($Action) {
             $rpcArgs += '-c'
         }
 
-        $proc = Start-Process -FilePath $exe `
-            -ArgumentList (ConvertTo-RpcArgumentString $rpcArgs) `
-            -WorkingDirectory $InstallDir `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-            -WindowStyle Hidden -PassThru
-        $launchedPid = [int]$proc.Id
+        $launchedPid = Start-RpcDetached -ExePath $exe `
+            -ArgumentString (ConvertTo-RpcArgumentString $rpcArgs) `
+            -WorkingDirectory $InstallDir
         $startedUtc = Get-RpcProcessStartUtc -ProcessId $launchedPid
         $recordedExe = Get-RpcProcessPath -ProcessId $launchedPid
 
@@ -195,8 +194,7 @@ switch ($Action) {
             }
             $alive = Get-Process -Id $launchedPid -ErrorAction SilentlyContinue
             if ($null -eq $alive) {
-                $errTail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 20) -join "`n" } else { '' }
-                throw "rpc-server exited during startup: $errTail"
+                throw "rpc-server exited during startup."
             }
             Start-Sleep -Milliseconds 250
         }
