@@ -250,12 +250,29 @@ def test_file_delete_runs_on_both_surfaces_dry_run_first(
     confirmed = server.file_delete("del1.txt", dry_run=False, confirm="DELETE %s" % (workspace / "del1.txt"))
     assert "deleted: True" in confirmed and not (workspace / "del1.txt").exists()
 
-    native = _native(application, "file_delete", {"path": "del2.txt", "dry_run": True})
+    # A delete always asks, and an allow rule does not waive that: with nobody
+    # to answer, the native surface refuses it in auto...
+    from sonder_runtime.adapters.security.approval_ledger import ApprovalLedger
+    ledger = ApprovalLedger(tmp_path / "approvals.db")
+    old_ledger = pm._approval_ledger
+    pm._approval_ledger = lambda: ledger
+    try:
+        refused = _native(application, "file_delete", {"path": "del2.txt", "dry_run": True})
+        assert refused["isError"] is True, refused
+        assert (workspace / "del2.txt").exists()
+        # ...and a one-shot approval runs it, dry run first.
+        pending = ledger.pending()
+        assert pending, "refused delete should record a pending approval"
+        ledger.issue(pending[0].tool, pending[0].digest, approver="test", surface="console")
+        native = _native(application, "file_delete", {"path": "del2.txt", "dry_run": True})
+    finally:
+        pm._approval_ledger = old_ledger
     assert native["isError"] is False and json.loads(native["output"])["dry_run"] is True
     assert (workspace / "del2.txt").exists()
     records = _audit(tmp_path).read()
-    assert [record["tool_name"] for record in records] == ["file_delete"] * 3
-    assert records[-1]["policy_match"] == "resource:mutating:file_delete;permission:rule"
+    assert [record["tool_name"] for record in records] == ["file_delete"] * 4
+    assert records[-2]["policy_match"] == "permission:unattended"
+    assert records[-1]["policy_match"] == "resource:mutating:file_delete;permission:approval"
 
 
 def test_the_legacy_outputs_keep_their_formats(application, workspace):

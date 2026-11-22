@@ -618,21 +618,20 @@ def test_regression_redact_text_not_idempotent_after_adjacent_substitution(modul
 
 
 @BOTH_COPIES
-def test_pass_bound_never_undoes_the_first_pass(module, redact) -> None:
-    """No finite bound settles every text: each ``x'`` unit here costs one more pass.
+def test_pass_bound_never_undoes_the_first_pass(module, redact, monkeypatch) -> None:
+    """With the pass bound cut to one, a text needing two passes keeps the first pass's work.
 
     Past the bound the text is still safe, because a pass only swaps matched text for
     the marker; what is given up is idempotence for that text.
     """
-    text = "token='hunter2secret'" + "x'" * (module._MAX_PASSES * 3) + " AKIA0000000000000000"
-    assert _changing_passes(module, text) > module._MAX_PASSES  # otherwise this test checks nothing
+    text = "AKIA0000000000000000Cookie: a=b"
+    assert _changing_passes(module, text) == 2  # otherwise this test checks nothing
+    monkeypatch.setattr(module, "_MAX_PASSES", 1)
     first = module._apply_patterns(text)
     out = redact(text)
-    for secret in ("hunter2secret", "AKIA0000000000000000"):
-        assert secret not in first and secret not in out
-    assert len(out) < len(first)  # the later passes ran, and only removed text
+    assert out == first and "AKIA0000000000000000" not in out
     again = redact(out)
-    assert len(again) < len(out) and "hunter2secret" not in again
+    assert again != out and "a=b" not in again
 
 
 @BOTH_COPIES
@@ -1031,3 +1030,196 @@ def test_hand_scanners_grow_linearly(module, redact, shape) -> None:
     t_small = max(_best_of_3(fn, build(small)), 0.005)  # floor: below 5 ms is timer noise
     t_large = _best_of_3(fn, build(large))
     assert t_large / t_small < 8, f"{shape}: t(4N)/t(N) = {t_large / t_small:.1f}"
+
+
+# ---------------------------------------------------------------------------
+# 9. Credential values with interior quotes: never weaker than the baseline rule
+# ---------------------------------------------------------------------------
+
+# The credential ``key=value`` rule as it stood at 7f95afccc. Run through each
+# copy's own pass loop, with no second stage, it is the floor: the current
+# redaction must hide at least the value characters this one hid, on every input.
+_BASELINE_CREDENTIAL_RULE = re.compile(
+    r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"[\"']?\s*[:=]\s*)"
+    r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
+)
+
+
+def _under_baseline_rule(module, redact, texts: list[str]) -> list[str]:
+    """``redact`` over *texts* as 7f95afccc did: its credential rule, no second stage."""
+    name = "PATTERNS" if module is domain_redaction else "_PATTERNS"
+    patterns = getattr(module, name)
+    hits = [i for i, p in enumerate(patterns)
+            if isinstance(p, re.Pattern) and "passwd|credential" in p.pattern]
+    assert len(hits) == 1, hits
+    swapped = patterns[:hits[0]] + (_BASELINE_CREDENTIAL_RULE,) + patterns[hits[0] + 1:]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(module, name, swapped)
+        mp.setattr(module, "_sub_credential_values", lambda text: text, raising=False)
+        # The swap took effect: the baseline rule leaves this escaped-quoted value.
+        assert redact('password = \\"hunter22\\"') == 'password = \\"hunter22\\"'
+        return [redact(text) for text in texts]
+
+
+def test_the_credential_rule_and_its_second_stage_are_identical_in_both_copies() -> None:
+    for module, name in ((domain_redaction, "PATTERNS"), (platform_logging, "_PATTERNS")):
+        rules = [p for p in getattr(module, name)
+                 if isinstance(p, re.Pattern) and "passwd|credential" in p.pattern]
+        # The pass rule is still 7f95afccc's, so the passes alone redact as it did.
+        assert [(p.pattern, p.flags) for p in rules] == [
+            (_BASELINE_CREDENTIAL_RULE.pattern, _BASELINE_CREDENTIAL_RULE.flags)]
+    domain, platform = domain_redaction._CREDENTIAL_VALUE, platform_logging._CREDENTIAL_VALUE
+    assert (domain.pattern, domain.flags) == (platform.pattern, platform.flags)
+
+
+# The review-round-5 inputs (both copies gave identical results), plus the
+# decoded form of the first one, which is what a structural pass over JSON sees.
+_INTERIOR_QUOTE_VALUES = [
+    ('token=abc\\"defghijk', "token=[REDACTED]"),
+    ('password=p@ss"word123', "password=[REDACTED]"),
+    ('password=abcd\\"efgh', "password=[REDACTED]"),
+    ('{"note":"password=p@ss\\"word123"}', '{"note":"password=[REDACTED]}'),
+    ('token=abc"defghijk', "token=[REDACTED]"),
+    ("secret=a\\'bcdefgh", "secret=[REDACTED]"),
+    ("secret=a'bcdefgh", "secret=[REDACTED]"),
+    ('api_key=ab"cdefghij', "api_key=[REDACTED]"),
+    ("password='ab'cdefgh", "password=[REDACTED]"),
+    ('password="ab"cd"efgh', "password=[REDACTED]"),
+    ("token='hunter2secret'" + "x'" * 24 + " AKIA0000000000000000", "token=[REDACTED] [REDACTED]"),
+]
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("text, want", _INTERIOR_QUOTE_VALUES)
+def test_a_credential_value_with_an_interior_quote_is_redacted_whole(module, redact, text, want) -> None:
+    assert redact(text) == want
+
+
+def _is_subsequence(small: str, big: str) -> bool:
+    chars = iter(big)
+    return all(ch in chars for ch in small)
+
+
+_DIFF_ALPHABETS = (
+    "abcdefgh1234@#!%\"'\\",  # the round-5 reviewer's differential alphabet
+    "abcd12@\"'\\,;}{ ]:=\t",
+)
+_DIFF_LINES = (("password=", ""), ("DB_PASSWORD=", "\nnext"), ("token: ", ""),
+               ("secret = '", ""), ('api_key="', ""), ("pwd=\\\"", ""))
+_DIFF_JSON = ('{"note":"password=%s"}', '["token: %s", 1]', "{'a': 'secret=%s', 'b': 2}")
+
+
+# Several keys on one line: a value run that takes the next key's name must not
+# expose that key's value, which the baseline still saw and hid.
+_MULTI_KEY_PIECES = (
+    "password=", "token: ", "secret='", 'api_key="', "pwd=\\\"", '"', "'", "\\", "\\\"", "\\'",
+    "ab", "x", "12", ",", ";", "}", "{", " ", "\t", "=", ":", "]", REDACTED, "@#", "PASSWORD = ", "\n",
+)
+# Found by that generator against a single-stage version of the wider rule.
+_SEEN_MULTI_KEY = [
+    ("password=x'token: hunter22", "hunter22"),
+    ("\tpassword=:]'PASSWORD = secret='pwd=\\\"", "secret="),
+    ("PASSWORD = secret='ab,{pwd=\\\":'PASSWORD = pwd=\\\"[REDACTED]12}ab,", "= pwd="),
+    ("=api_key=\"\\\"ab'@#\"'token: @#pwd=\\\" ", "@#pwd"),
+]
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("text, hidden", _SEEN_MULTI_KEY)
+def test_a_value_run_does_not_expose_the_next_keys_value(module, redact, text, hidden) -> None:
+    [baseline] = _under_baseline_rule(module, redact, [text])
+    assert hidden not in baseline  # the baseline hid it
+    assert hidden not in redact(text)
+
+
+# A private source path with a space in it, as ``redactor_for_config`` passes
+# ``config.private_source_paths`` (a Windows profile folder often has one).
+_SPACED_PATH = r"C:\Users\John Smith\.sonder\secrets.env"
+_SPACED_PREFIXES = (_SPACED_PATH, "C:/Users/John Smith/.sonder")
+
+
+def _redact_with_prefixes(module, redact, prefixes):
+    """The copy's ``redact`` with *prefixes* as its private path prefixes."""
+    if not prefixes:
+        return redact
+    if module is domain_redaction:
+        return lambda text: redact_text(text, path_prefixes=prefixes)
+
+    def run(text: str) -> str:
+        out = platform_logging.Redactor(env={}, path_prefixes=prefixes).redact(text)
+        assert out != platform_logging.REDACTION_FAILED, _fail(f"platform Redactor failed on {text[:200]!r}")
+        return out
+
+    return run
+
+
+# The round-6 review's inputs: HEAD replaced each path whole with [WORKSPACE].
+# (A path glued straight to the key, ``token=C:\Users\John Smith...``, is not
+# here: the pass rule takes ``C:\Users\John`` before the path labels run, so
+# HEAD shows `` Smith...`` too; that is unchanged and not covered.)
+_SPACED_PATH_CASES = [
+    'password="ab,c"' + _SPACED_PATH,
+    "token='a;bc'" + _SPACED_PATH,
+    'password=ab"c' + _SPACED_PATH,
+    'api_key="ab,cd"' + _SPACED_PATH + " tail",
+    "token='x'C:/Users/John Smith/.sonder/secrets.env",
+    'password=ab\\"cC:/Users/John Smith/.sonder/a',
+]
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("text", _SPACED_PATH_CASES)
+def test_a_private_path_with_a_space_is_never_partly_shown(module, redact, text) -> None:
+    out = _redact_with_prefixes(module, redact, _SPACED_PREFIXES)(text)
+    for fragment in ("Smith", "John", ".sonder", "secrets.env", "Users"):
+        assert fragment not in out, out
+    assert "[WORKSPACE]" in out or REDACTED in out, out
+
+
+@BOTH_COPIES
+@pytest.mark.parametrize("prefixes", [(), _SPACED_PREFIXES], ids=["no-paths", "spaced-paths"])
+def test_credential_values_are_never_less_redacted_than_the_baseline_rule(module, redact, prefixes) -> None:
+    redact = _redact_with_prefixes(module, redact, prefixes)
+    rng = random.Random(SEED + 31)
+    texts: list[str] = []
+    line_keys: list[int | None] = []  # length of the one key on a single-value line
+    for alphabet in _DIFF_ALPHABETS:
+        for _ in range(700):
+            value = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 14)))
+            for prefix, suffix in _DIFF_LINES:
+                texts.append(prefix + value + suffix)
+                line_keys.append(len(prefix.rstrip("\"'\\")))
+                if prefixes:
+                    texts.append(prefix + value + rng.choice(prefixes) + suffix)
+                    line_keys.append(None)
+            texts += [template % value for template in _DIFF_JSON]
+            line_keys += [None] * len(_DIFF_JSON)
+    for _ in range(3000):
+        texts.append("".join(rng.choice(_MULTI_KEY_PIECES) for _ in range(rng.randint(2, 18))))
+        line_keys.append(None)
+    baseline = _under_baseline_rule(module, redact, texts)
+    current = [redact(text) for text in texts]
+    assert sum(b != t for b, t in zip(baseline, texts, strict=True)) > 2000  # the baseline rule fired
+    worse = []
+    for text, key, b, n in zip(texts, line_keys, baseline, current, strict=True):
+        # The second stage runs last, on exactly the text the baseline settled
+        # on (path labels included), so it can only take characters away.
+        if n != module._sub_credential_values(b):
+            worse.append((text, b, n))
+            continue
+        # Both only swap matched text for a marker, so with the markers taken
+        # out each is a subsequence of the input; hiding at least what the
+        # baseline hid makes the current one a subsequence of the baseline's.
+        kept_b = b.replace(REDACTED, "").replace("[WORKSPACE]", "")
+        kept_n = n.replace(REDACTED, "").replace("[WORKSPACE]", "")
+        if len(kept_n) > len(kept_b) or not _is_subsequence(kept_n, kept_b):
+            worse.append((text, b, n))
+            continue
+        # A single-value line: what survives of the value (an opening quote
+        # included; leading blanks belong to the key) must be a tail of what
+        # survived the baseline.
+        if key is not None and not kept_b[key:].lstrip().endswith(kept_n[key:].lstrip()):
+            worse.append((text, b, n))
+    assert not worse, _fail(f"{len(worse)} of {len(texts)} less redacted, e.g. {worse[:5]!r}")

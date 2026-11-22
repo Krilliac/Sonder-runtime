@@ -55,6 +55,7 @@ sonder_runtime/adapters/filesystem/__init__.py
 sonder_runtime/adapters/filesystem/atomic_json.py
 sonder_runtime/adapters/filesystem/operator_only_paths.py
 sonder_runtime/adapters/filesystem/path_aliases.py
+sonder_runtime/adapters/filesystem/read_only_root_gate.py
 sonder_runtime/adapters/filesystem/sealed_python_main.py
 sonder_runtime/adapters/filesystem/typed.py
 sonder_runtime/adapters/fleet_aggregation.py
@@ -637,6 +638,7 @@ sonder_runtime/domain/scheduler_partition.py
 sonder_runtime/domain/security/__init__.py
 sonder_runtime/domain/security/credential_egress.py
 sonder_runtime/domain/security/credential_formats.py
+sonder_runtime/domain/security/delete_calls.py
 sonder_runtime/domain/security_eval/__init__.py
 sonder_runtime/domain/security_eval/context_select.py
 sonder_runtime/domain/security_eval/errors.py
@@ -683,6 +685,7 @@ sonder_runtime/interfaces/http/facades/permission_mode_post.py
 sonder_runtime/interfaces/http/memory_replication.py
 sonder_runtime/interfaces/http/served_dispatch_policy.py
 sonder_runtime/interfaces/http/slash_call_arguments.py
+sonder_runtime/interfaces/http/thin_routes.py
 sonder_runtime/interfaces/http/web_app.py
 sonder_runtime/interfaces/mcp/__init__.py
 sonder_runtime/interfaces/repl/__init__.py

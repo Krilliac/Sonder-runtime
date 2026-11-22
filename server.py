@@ -9237,20 +9237,25 @@ def permission_approve(
             raise approval_ledger_module.ApprovalLedgerError(
                 "give a call id from /approvals, or a tool with its arguments_json"
             )
+        # Only the console may knowingly approve a call an operator denied.
+        overrode = surface == "console" and ledger.denied_for(target, digest)
         approval = ledger.issue(
             target, digest, approver=approver, surface=surface,
             ttl_seconds=ttl_seconds, preview=preview,
+            override_denial=surface == "console",
         )
     except approval_ledger_module.ApprovalLedgerError as exc:
         error = "ERROR: %s" % exc
         return error
     _record_direct_tool(
         "permission_approve",
-        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds)},
+        {"tool": approval.tool, "call_id": approval.call_id, "ttl_seconds": int(ttl_seconds),
+         **({"overrode_denial": True} if overrode else {})},
         ok=True, started=started, summary=approval.nonce,
     )
     return (
-        "approved %s call %s once: nonce %s, by %s, expires %s.\n"
+        ("overrode a denial: " if overrode else "")
+        + "approved %s call %s once: nonce %s, by %s, expires %s.\n"
         "  the next unchanged %s call from any surface runs once and spends it; "
         "/approvals shows it; /approve revoke %s withdraws it."
         % (
@@ -15227,7 +15232,7 @@ def _loop_permission_refusal(action_type, arguments=None):
     if str(action_type or "").strip().lower() not in _LOOP_ACTION_TYPES:
         return None
     tool = _loop_action_tool(action_type)
-    decision = permission_modes.decide(tool, interactive=False, surface="loop", arguments=_powershell_gate.loop_gate_arguments(tool, arguments))
+    decision = permission_modes.decide(tool, interactive=False, surface="loop", arguments=_powershell_gate.loop_decision_arguments(tool, arguments))
     if decision.allowed:
         return None
     return {
@@ -15237,7 +15242,7 @@ def _loop_permission_refusal(action_type, arguments=None):
         "output": (
             "HOST POLICY: '%s' is refused by the active permission gate: %s "
             "(tool=%s, mode=%s, risk=%s). This is standing policy, not a "
-            "transient failure -- choose a different action."
+            "transient failure -- an operator must approve it or change the rule; do not retry or work around it."
             % (action_type, decision.reason, tool, decision.mode, decision.risk)
         ),
     }
@@ -17214,17 +17219,10 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "emotion_vector_status", "preferences_status", "tool_manifest",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
-    # test_discover / find_references / diff_files / secret_scan are
-    # deliberately absent.  They are read-only, but they are direct-MCP tools
-    # only: harness_tools._resolve_root resolves any absolute path with no
-    # allowed-roots check, and their signatures expose no token/approval/
-    # extra_roots, so they cannot take part in the guarded-read contract this
-    # allow-list grants.  _repository_read_only_error has no resolve branch for
-    # them and _project_scoped_path_key maps them to "path" while they actually
-    # take "root", so both the scope check and the project rebase would inspect
-    # a key they never use and pass while the real root went unchecked.
-    # Re-add them here, to REPOSITORY_AGENT_TOOL_HELP and to _agent_dispatch
-    # together, and only once they are root-confined.
+    # find_references / diff_files are root-confined (see read_only_root_gate);
+    # dependency_audit stays out (it runs pip-audit/npm), and so does secret_scan:
+    # it follows in-root links to files outside the root, which the gate does not vet.
+    "find_references", "diff_files",
 })
 REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
     "token", "approval", "extra_roots",
@@ -17273,6 +17271,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - web_fetch: {"url": "https://...", "max_chars": 8000}
 - weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
 - test_discover: {"root": ".", "framework": "auto"}
+- find_references: {"root": ".", "symbol": "<exact symbol named by the task>", "glob": "<task-relevant source glob>"}
+- diff_files: {"root": ".", "left": "<first task-relevant file>", "right": "<second task-relevant file>", "context": 3}
 - command_registry_list: {"filter_text": "filesystem|context|status"}
 - activity_status: {}
 - permission_policy: {"tool_name": "file_read"}
@@ -17838,6 +17838,9 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                     path, allow_workspace_root=True, reject_sensitive=True,
                     extra_roots=trusted_extra_roots,
                 )
+        elif tool_name in {"find_references", "diff_files"}:
+            from sonder_runtime.adapters.filesystem import read_only_root_gate
+            read_only_root_gate.check_root_confined_read(tool_name, args, trusted_extra_roots)
         elif tool_name in {"workspace_inventory", "dependency_inventory", "project_detect", "directory_digest", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", "") or args.get("root", "") or ".",
@@ -22276,11 +22279,9 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
-    # test_discover / find_references / diff_files / secret_scan /
-    # dependency_audit are deliberately absent: _agent_dispatch has no branch
-    # for any of them, exactly as for REPOSITORY_READ_ONLY_TOOLS, so a run
-    # that believed this list burned steps on "ERROR: unknown tool".  Re-add
-    # them here only together with a root-confined dispatch branch.
+    # find_references / diff_files: root-confined (read_only_root_gate).
+    # secret_scan, dependency_audit and test_discover stay out of this lane.
+    "find_references", "diff_files",
     # process_list / process_memory_risk_inspect / task_progress moved to the
     # workspace-only block below: _autopilot_work_model runs observe tasks
     # with read_only=True, and _repository_read_only_error refuses every tool

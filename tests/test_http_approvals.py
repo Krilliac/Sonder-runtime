@@ -276,10 +276,17 @@ def _serve_with_accounts(monkeypatch, mode="account"):
         lambda header: accounts.get(str(header or "").replace("Bearer ", "", 1).strip()))
 
 
-@pytest.mark.parametrize("token, expected", [
-    (None, 401), ("user-token", 403), ("dev-token", 201), ("admin-token", 201),
+# Approving is the authority chat's ``/permission_approve`` needs: an
+# administrator (``SYSTEM_OPERATION_TOOLS["permission_approve"]`` is an
+# admin-bound operation). Reviewing the list stays developer-readable.
+@pytest.mark.parametrize("token, expected, listed_expected, refusal", [
+    (None, 401, 401, ""),
+    ("user-token", 403, 403, "developer"),
+    ("dev-token", 403, 200, "administrator"),
+    ("admin-token", 201, 200, ""),
 ])
-def test_approve_authorization_matrix(ledger, monkeypatch, token, expected):
+def test_approve_authorization_matrix(ledger, monkeypatch, token, expected,
+                                      listed_expected, refusal):
     _serve_with_accounts(monkeypatch)
     decision = _refuse_write(ledger)
     headers = dict(JSON)
@@ -290,15 +297,58 @@ def test_approve_authorization_matrix(ledger, monkeypatch, token, expected):
                                       body="{}", headers=headers)
         assert status == expected, payload
         listed, _, _ = _request(port, "GET", "/v1/approvals", headers=headers)
-        assert listed == (200 if expected == 201 else expected)
+        assert listed == listed_expected
     if expected == 201:
         approval = json.loads(payload)["approval"]
-        username = {"dev-token": "dev", "admin-token": "ada"}[token]
-        assert approval["approver"] == "developer:%s" % username
+        assert approval["approver"] == "admin:ada"
     elif expected == 403:
         body = json.loads(payload)["error"]
-        assert body["code"] == "FORBIDDEN" and "developer" in body["message"]
+        assert body["code"] == "FORBIDDEN" and refusal in body["message"]
         assert ledger.approvals() == []
+
+
+def test_approve_authority_matches_chat_permission_approve(ledger, monkeypatch):
+    """The route and ``/permission_approve`` in chat refuse the same callers."""
+    _serve_with_accounts(monkeypatch)
+    for role in ("user", "developer", "admin"):
+        context = {"authorized": True, "mode": "account", "api_key": False,
+                   "account": {"username": role, "role": role}}
+        chat = ts._system_operation_authority_error(
+            ts._http_system_operation_for("permission_approve"), context)
+        route = ts.Handler._approval_ports(None).approve_authority_error(context)
+        assert route == chat, role
+        assert bool(route) is (role != "admin"), role
+
+
+def test_http_approver_names_the_accounts_real_role():
+    """The ledger's approver label names the role that authorized the call."""
+    class _Account:
+        username, role = "obi", "admin"
+
+    def label(account, **extra):
+        return ts._http_approver({"mode": "account", "account": account, **extra})
+
+    assert label({"username": "ada", "role": "admin"}) == "admin:ada"
+    assert label({"username": "dev", "role": "developer"}) == "developer:dev"
+    assert label(_Account()) == "admin:obi"
+    assert label({"username": "", "role": ""}) == "account:account"
+    assert ts._http_approver({"mode": "local-open"}) == "local-open"
+    assert ts._http_approver({"mode": "api-key", "api_key": True}) == "admin-key"
+
+
+def test_developer_cannot_revoke_an_approval(ledger, monkeypatch):
+    _serve_with_accounts(monkeypatch)
+    decision = _refuse_write(ledger)
+    admin = {**JSON, "Authorization": "Bearer admin-token"}
+    with _http_server(monkeypatch) as port:
+        _, _, payload = _request(port, "POST", "/v1/approvals/" + decision.call_id,
+                                 body="{}", headers=admin)
+        nonce = json.loads(payload)["approval"]["nonce"]
+        status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce, body="{}",
+                                      headers={**JSON, "Authorization": "Bearer dev-token"})
+    assert status == 403, payload
+    assert "administrator" in json.loads(payload)["error"]["message"]
+    assert ledger.approvals()[0].state() == "open"
 
 
 def test_deployment_api_key_approves_as_admin_key(ledger, monkeypatch):

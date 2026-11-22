@@ -533,6 +533,22 @@ def call_id(digest: str) -> str:
     return str(digest or "")[:CALL_ID_CHARS]
 
 
+def run_code_detail(tool_name: str, arguments) -> str:
+    """The exact ``code`` of a ``run_code`` call, for the operator to read.
+
+    ``argument_preview`` shows ``code`` only by its length (a bulk payload), so
+    an operator approving a ``run_code`` call could not see what they approved.
+    This is the separate view: the raw text, unbounded here (the ledger redacts
+    and bounds what it stores). "" for any other tool or a call without
+    string code. It is display-only and never feeds ``call_digest``.
+    """
+    if str(tool_name or "").strip().lstrip("/") != "run_code":
+        return ""
+    body = _call_body(arguments)
+    code = body.get("code") if body else None
+    return code if isinstance(code, str) else ""
+
+
 def preview_fields(arguments) -> list[tuple[str, str, bool]]:
     """``(key, value, literal)`` for every argument a call binds, sorted.
 
@@ -592,6 +608,18 @@ READ_BRANCH_WORK = {
     "goal_status": "safe",      # /goal [show|status|history|proposals]
     "training_status": "safe",  # /training [plan|status|hardware|help]
 }
+
+# Work an HTTP route performs without fronting a registered tool, graded
+# because it was declared. ``POST /v1/recall``
+# (``sonder_runtime/interfaces/http/thin_routes.py``) runs ``RecallHandler``
+# -> ``MemoryFacade.recall``: it pages past interaction episodes out of the
+# memory store and writes nothing -- the same read class as ``memory_search``
+# over the same store. Lending it ``apply_learned``'s name instead made that
+# tool's rules and grade (``ask``, refused under ``plan``) govern a different
+# operation. ``thin_routes.ROUTE_TOOLS`` binds the route to this name, and a
+# drift test pins every entry to a route bound to it and to no registered
+# tool, so this cannot become a list of free-floating exemptions.
+HTTP_ROUTE_WORK = {"recall": "safe"}
 
 # risk class -> action, per mode. "execution" is a synthetic class: tools that
 # start a host process, split out of `ask`/`mutation` so acceptEdits and auto
@@ -1251,6 +1279,8 @@ def _catalog_risk_of(tool_name: str) -> str:
         return NON_TOOL_WORK[name]
     if name in READ_BRANCH_WORK:
         return READ_BRANCH_WORK[name]
+    if name in HTTP_ROUTE_WORK:
+        return HTTP_ROUTE_WORK[name]
     # Nothing knows this name. Not "probably fine, ask someone" -- that
     # answer was indistinguishable from a catalogued ``ask`` and, with nobody
     # to ask, indistinguishable from ``allow``. Say the classifier failed.
@@ -1592,23 +1622,90 @@ def _modes_allowing(risk: str) -> list:
     return [m for m in MODES if _MATRIX[m].get(risk) == ALLOW]
 
 
-def _unattended_reason(name: str, active: str, risk: str, call: str = "") -> str:
+# Surfaces whose caller reaches the approval ledger over HTTP, not at a console.
+HTTP_APPROVAL_SURFACES = frozenset({"http", "agent", "chat-tool", "chat_tool"})
+
+NO_ROUTE_AROUND = (
+    "Do not route around this refusal with another tool or a host program: "
+    "the operator's decision applies to the effect, not to the tool's name."
+)
+
+
+def http_approval_text(call: str) -> str:
+    """The HTTP routes that approve or decline exactly one pending call."""
+    return (
+        "approve exactly this call once with POST /v1/approvals/%s, or decline "
+        "it with POST /v1/approvals/deny/%s" % (call, call)
+    )
+
+
+def _unattended_reason(name: str, active: str, risk: str, call: str = "",
+                       surface: str = "", always_ask: bool = False) -> str:
     """Name what was refused and every route out, so the refusal can be acted on."""
-    remedies = ["write an explicit allow rule with /permissions"]
-    modes = [m for m in _modes_allowing(risk) if m != active]
-    if modes:
-        remedies.append("switch to %s" % " or ".join(modes))
+    over_http = surface in HTTP_APPROVAL_SURFACES
+    remedies = []
+    if not always_ask:
+        remedies.append("write an explicit allow rule with /permissions")
+        modes = [m for m in _modes_allowing(risk) if m != active]
+        if modes:
+            remedies.append("switch to %s" % " or ".join(modes))
     remedies.append("run it from the console and answer the prompt")
     if call:
         remedies.append(
             "approve exactly this call once at the console with /approve %s" % call
         )
+        if over_http:
+            remedies.append(http_approval_text(call))
     noun = _EFFECT_NOUNS.get(risk, "is graded %s" % risk)
-    return (
+    if always_ask:
+        noun = "deletes files, which always asks in every mode"
+    text = (
         "%s %s and nobody is here to answer %s's ask, so it is refused "
         "rather than assumed; %s"
         % (name or "(empty name)", noun, MODE_LABELS.get(active, active),
            ", or ".join(remedies))
+    )
+    if over_http:
+        text += ". " + NO_ROUTE_AROUND
+    return text
+
+
+def always_asks(tool_name: str, arguments=None) -> bool:
+    """Whether this call asks every time, in every mode.
+
+    Deleting files: the ``file_delete`` tool, and a host program or code
+    (``git rm``, ``rm``, ``del``, ``Remove-Item``, ``os.remove``...) run
+    through a host-program tool (``delete_calls.HOST_PROGRAM_TOOLS``). The
+    ask is answered per call: an approval is one-shot and bound to the exact
+    call (see ``decide``), and no mode, rule or grant makes it a standing
+    yes. A fault while deciding fails closed for those tools: it answers
+    ``True``.
+    """
+    from sonder_runtime.domain.security import delete_calls
+
+    name = str(tool_name or "").strip().lstrip("/")
+    try:
+        return delete_calls.deletes_files(name, arguments)
+    except Exception:
+        return name in delete_calls.DELETE_TOOLS or name in delete_calls.HOST_PROGRAM_TOOLS
+
+
+def _rule_file_hint(pattern: str, rule_lookup) -> str:
+    """Where the operator's rule lives and the command that changes it ("" if unknown)."""
+    if rule_lookup is not None or _rule_lookup is not _default_rule_lookup:
+        return ""
+    try:
+        import sonder_paths
+        import permission_rules
+
+        path = permission_rules.policy_path(sonder_paths.default_home())
+    except Exception:
+        return ""
+    if not pattern or pattern.startswith("<"):
+        return "; repair or remove %s" % path
+    return (
+        "; the rule is in %s, and `permission_rule_set %s ask` (or allow) changes it"
+        % (path, pattern)
     )
 
 
@@ -1694,7 +1791,8 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         return Decision(
             DENY, active, risk,
             "rule denies this tool (pattern %r); an explicit deny outranks "
-            "every mode, including auto" % (rule_pattern or name),
+            "every mode, including auto%s"
+            % (rule_pattern or name, _rule_file_hint(rule_pattern, rule_lookup)),
             name,
             source="rule", call_id=call,
         )
@@ -1709,11 +1807,19 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
 
     mode_action = _MATRIX[active].get(risk, ASK)
 
+    # 2b. Deleting files asks every time in every mode: the mode cannot allow
+    #     it, an allow rule cannot waive it, and (below) the unattended answer
+    #     is a one-shot approval of exactly this call, never a standing grant.
+    #     ``plan`` keeps denying it outright.
+    always_ask = always_asks(name, arguments)
+    if always_ask and mode_action == ALLOW:
+        mode_action = ASK
+
     # 3. An explicit allow loosens an ask into an allow -- but only an ask:
     #    it must not appear to have decided anything when the mode already
     #    allowed the tool, and (4) plan's denials are never a mode's "ask" in
     #    the first place, so this branch naturally never fires under plan.
-    if rule_action == ALLOW and mode_action == ASK:
+    if rule_action == ALLOW and mode_action == ASK and not always_ask:
         return Decision(
             ALLOW, active, risk,
             "rule allows this tool (pattern %r), satisfying %s's ask"
@@ -1731,7 +1837,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         #     what it is confirming. An explicit ``allow`` rule already
         #     resolved above (3), so an operator who wants this name to run
         #     has a written way to say so.
-        if risk == UNCLASSIFIED:
+        if risk == UNCLASSIFIED and not always_ask:
             return Decision(
                 DENY, active, risk,
                 "nothing could classify %r, and there is no one to ask; "
@@ -1768,7 +1874,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
         #     approval is spent atomically on the way through, and only for a
         #     live decision -- a preflight neither spends one nor leaves a
         #     pending request behind.
-        if risk in UNATTENDED_REFUSED_RISKS:
+        if risk in UNATTENDED_REFUSED_RISKS or always_ask:
             ledger = _ledger_for(approval_ledger) if (digest and live) else None
             if ledger is not None:
                 try:
@@ -1789,9 +1895,11 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                         name, source="approval", call_id=call,
                     )
                 try:
+                    extra = run_code_detail(name, arguments)
                     ledger.record_pending(
                         name, digest, surface=surface,
                         preview=preview_fields(arguments),
+                        **({"detail": extra} if extra else {}),
                     )
                 except Exception:
                     # The ledger is a route out, not the gate: a ledger that
@@ -1799,7 +1907,8 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
                     pass
             _note_first_refusal()
             return Decision(
-                DENY, active, risk, _unattended_reason(name, active, risk, call), name,
+                DENY, active, risk,
+                _unattended_reason(name, active, risk, call, surface, always_ask), name,
                 source="unattended", call_id=call,
             )
         # 5d. The ``ask`` class proceeds on the record: it is the grade the
@@ -1813,7 +1922,10 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             name,
             source="non-interactive", call_id=call,
         )
-    return Decision(action, active, risk, mode_reason(action, active, risk), name,
+    reason = mode_reason(action, active, risk)
+    if always_ask and action == ASK:
+        reason = "deleting files asks every time, in every mode (%s)" % reason
+    return Decision(action, active, risk, reason, name,
                     source="mode", call_id=call)
 
 

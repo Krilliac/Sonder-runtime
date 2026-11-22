@@ -52,14 +52,19 @@ caller, and is published as the same constant summary without its text.
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
+import re
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
+from ...domain.security import redaction as _redaction
 from ...domain.common.errors import Cancelled, DeadlineExceeded, Forbidden, InvalidInput
 from ...domain.security.redaction import REDACTION_FAILED
 from ...domain.tools.builtin_traits import builtin_traits
@@ -239,6 +244,134 @@ class RedactedOutput:
     applied: bool
 
 
+def _unique_object(pairs: list) -> dict:
+    """A JSON object whose keys are all distinct; a repeated key is refused.
+
+    ``json.loads`` keeps only the last value of a repeated key, so the
+    earlier values would never reach the redactor while the raw text still
+    carries them.
+    """
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return value
+
+
+def _exact_float(token: str) -> float:
+    """A JSON number that a float holds without losing digits; else refused."""
+    value = float(token)
+    if not math.isfinite(value) or Decimal(repr(value)) != Decimal(token):
+        raise ValueError("JSON number does not fit a float exactly")
+    return value
+
+
+def _parse_json_container(output: Any) -> dict | list | None:
+    """The object or array a JSON-text output encodes, else ``None``.
+
+    Only a string that starts like a JSON object or array and parses as one,
+    without losing anything the text holds, qualifies: a repeated object key
+    or a number a float cannot hold exactly sends the output down the text
+    path. Any other output (plain text, a bare JSON scalar, a malformed
+    document) keeps being redacted as text.
+    """
+    if not isinstance(output, str):
+        return None
+    head = output.lstrip()[:1]
+    if head not in ("{", "["):
+        return None
+    try:
+        value = json.loads(output, object_pairs_hook=_unique_object,
+                           parse_float=_exact_float)
+    except (ValueError, RecursionError, ArithmeticError):
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+def _dump_json(value: Any) -> str:
+    """Serialize redacted JSON, unescaped unless it holds a lone surrogate."""
+    text = json.dumps(value, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(value)
+    return text
+
+
+_JSON_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.DOTALL)
+_JSON_ESCAPED = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_WORD = re.compile(r"\w+")
+
+
+def _words(text: str) -> set[str]:
+    """The word runs of *text* with JSON escapes decoded (leniently)."""
+    def unescape(match: re.Match[str]) -> str:
+        if match.group(1):
+            return chr(int(match.group(1), 16))
+        return _JSON_ESCAPED.get(match.group(2), match.group(2))
+    return set(_WORD.findall(_JSON_ESCAPE.sub(unescape, text)))
+
+
+def _keeps_text_redacted_words(raw: str, raw_text: str, candidate: str) -> bool:
+    """Whether *candidate* still holds a word the text path removed from *raw*.
+
+    The text path sees context across JSON strings (a PEM block split over
+    array items, ``"Authorization:"`` beside its value) that a per-string pass
+    cannot, so a structural result is kept only when it lost every word the
+    text path took out.
+    """
+    return bool((_words(raw) - _words(raw_text)) & _words(candidate))
+
+
+def _redact_json_keys(value: Any, redact_text, *, secret: bool = False,
+                      _depth: int = 0, _budget: list | None = None) -> Any:
+    """Key-aware pass over a parsed JSON output, before the structural redactor.
+
+    The text patterns that once saw ``"password": "hunter22"`` as one line see
+    the key and the value apart in a parsed structure, so this pass restores
+    that context: any non-empty string or number under a credential-named key
+    (``_redaction.SENSITIVE_KEY``), and everything nested below such a key, is
+    replaced; every key is run through ``redact_text`` (a credential-shaped
+    key such as an access-key id is a secret too). Past the walk bounds the
+    subtree is replaced rather than passed unexamined. Pure; returns a copy.
+    """
+    if _budget is None:
+        _budget = [_redaction.MAX_WALK_ITEMS]
+    _budget[0] -= 1
+    if _depth > _redaction.MAX_WALK_DEPTH or _budget[0] < 0:
+        return _redaction.REDACTED
+    if isinstance(value, dict):
+        cleaned: dict = {}
+        for key, item in value.items():
+            name = key if isinstance(key, str) else str(key)
+            label = redact_text(name) if isinstance(key, str) else key
+            if isinstance(label, str) and label != name:
+                base, index = label, 1
+                while label in cleaned:
+                    index += 1
+                    label = "%s#%d" % (base, index)
+            sensitive = secret or bool(_redaction.SENSITIVE_KEY.match(name))
+            cleaned[label] = _redact_json_keys(
+                item, redact_text, secret=sensitive,
+                _depth=_depth + 1, _budget=_budget,
+            )
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        return [
+            _redact_json_keys(item, redact_text, secret=secret,
+                              _depth=_depth + 1, _budget=_budget)
+            for item in value
+        ]
+    if secret and not isinstance(value, bool) and value not in (None, ""):
+        return _redaction.REDACTED
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # The structural redactor passes numbers through, but a known secret
+        # value can be all digits; the text path used to see them.
+        token = json.dumps(value)
+        if redact_text(token) != token:
+            return _redaction.REDACTED
+    return value
+
+
 class ReceiptSink(Protocol):
     def record(self, receipt: "ToolReceipt") -> None: ...
 
@@ -393,6 +526,31 @@ class ToolGateway:
             concurrency_gate=concurrency_gate,
         )
 
+    def _redact_text(self, tool_name: str, text: str) -> str:
+        """One string through the injected redactor; anything unreadable is replaced."""
+        redacted = self._redactor.redact(tool_name, text)
+        if isinstance(redacted, RedactedOutput):
+            redacted = redacted.value
+        return redacted if isinstance(redacted, str) else _redaction.REDACTED
+
+    def _settle_json_output(self, tool_name: str, raw: str, redacted: Any,
+                            original: Any) -> tuple[str, bool]:
+        """The text a structurally redacted JSON output is returned as.
+
+        Unchanged output comes back byte-for-byte only when the text path over
+        the raw bytes agrees nothing needs redacting; a changed one is
+        serialized again unless it still holds a word the text path took out.
+        Either disagreement fails closed to the text path's own result, and
+        the second element says so.
+        """
+        raw_text = self._redact_text(tool_name, raw)
+        if redacted == original:
+            return (raw, False) if raw_text == raw else (raw_text, True)
+        candidate = _dump_json(redacted)
+        if raw_text != raw and _keeps_text_redacted_words(raw, raw_text, candidate):
+            return raw_text, True
+        return candidate, False
+
     def execute(self, request: ToolGatewayRequest) -> ToolReceipt:
         # A typed registry is host authority; request metadata can never
         # replace it. Legacy callers retain their effects compatibility map.
@@ -502,11 +660,29 @@ class ToolGateway:
         # already be in the audit, so no failure receipt may follow it.
         publish_attempted = False
         try:
-            redacted = self._redactor.redact(request.tool_name, result.output)
+            structured = _parse_json_container(result.output)
+            original_structured = structured
+            if structured is not None:
+                structured = _redact_json_keys(
+                    structured, lambda text: self._redact_text(request.tool_name, text),
+                )
+            redacted = self._redactor.redact(
+                request.tool_name, result.output if structured is None else structured,
+            )
             if isinstance(redacted, RedactedOutput):
                 safe_output, redaction_applied = redacted.value, redacted.applied
             else:
                 safe_output, redaction_applied = redacted, True
+            if structured is not None and structured != original_structured:
+                redaction_applied = True
+            if structured is not None and isinstance(safe_output, (dict, list)):
+                # The output was JSON text: it was redacted as a structure and
+                # is serialized again, so a pattern can never swallow the quote
+                # or brace that closes an enclosing JSON string.
+                safe_output, text_fallback = self._settle_json_output(
+                    request.tool_name, result.output, safe_output, original_structured,
+                )
+                redaction_applied = redaction_applied or text_fallback
             # A failure message is shown and audited exactly like output, so it is
             # scrubbed the same way; a primitive's refusal can quote a path or a
             # value the caller sent.

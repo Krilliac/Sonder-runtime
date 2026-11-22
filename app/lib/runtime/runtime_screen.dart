@@ -831,7 +831,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
             detail: error.message);
       } else if (const {401, 403}.contains(error.httpStatus)) {
         outcome = const ActionOutcome(
-            StatusKind.warn, SonderStrings.approvalsNeedRole);
+            StatusKind.warn, SonderStrings.approvalsNeedAdmin);
       } else {
         outcome = ActionOutcome.failed('The approval was not recorded',
             detail: error.message);
@@ -860,7 +860,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } on SonderException catch (error) {
       outcome = error.code == ApprovalsApi.unavailableCode
           ? ActionOutcome(StatusKind.note, error.message)
-          : ActionOutcome.failed('Could not revoke', detail: error.message);
+          : const {401, 403}.contains(error.httpStatus)
+              ? const ActionOutcome(
+                  StatusKind.warn, SonderStrings.approvalsNeedAdmin)
+              : ActionOutcome.failed('Could not revoke',
+                  detail: error.message);
     } finally {
       _approvalBusy.remove(nonce);
     }
