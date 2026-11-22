@@ -29,17 +29,45 @@ class McpTransportLimits:
     max_tools: int = 256
     max_arguments_bytes: int = 64_000
     max_exchange_bytes: int = 1_024_000
+    max_json_depth: int = 256
 
     def __post_init__(self) -> None:
         if any(isinstance(v, bool) or v <= 0 for v in (
             self.max_frame_bytes, self.max_tools, self.max_arguments_bytes,
-            self.max_exchange_bytes,
+            self.max_exchange_bytes, self.max_json_depth,
         )):
             raise ValueError("MCP transport limits must be positive integers")
 
 
 class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
+
+
+def _check_json_nesting_depth(raw: str, max_depth: int) -> None:
+    """Reject deeply nested JSON frames before json.loads (Python 3.14+ parses 10k+)."""
+    if raw.count("{") + raw.count("[") <= max_depth:
+        return
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in raw:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            if depth > max_depth:
+                raise McpTransportError("MCP frame exceeds max_json_depth")
+        elif ch in "}]" and depth > 0:
+            depth -= 1
 
 
 class _MethodNotFound(KeyError):
@@ -253,11 +281,20 @@ class StdioMcpTransport:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise McpTransportError("MCP frame is not UTF-8") from exc
-        if len(raw.encode("utf-8")) > self._limits.max_frame_bytes:
+        try:
+            encoded_size = len(raw.encode("utf-8"))
+        except UnicodeEncodeError as exc:  # a lone surrogate in a text stream
+            raise McpTransportError("MCP frame is not UTF-8") from exc
+        if encoded_size > self._limits.max_frame_bytes:
             raise McpTransportError("MCP frame exceeds max_frame_bytes")
+        _check_json_nesting_depth(raw, self._limits.max_json_depth)
         try:
             value = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
+            # ValueError covers JSONDecodeError and an integer past the
+            # int-conversion digit limit; RecursionError is deep nesting.
+            # serve() handles only McpTransportError, so anything else from
+            # one short hostile line used to end the session.
             raise McpTransportError("invalid JSON-RPC frame") from exc
         if not isinstance(value, dict):
             raise McpTransportError("JSON-RPC frame must be an object")
