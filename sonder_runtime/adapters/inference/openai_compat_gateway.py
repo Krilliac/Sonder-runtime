@@ -589,9 +589,16 @@ class OpenAICompatibleGateway:
     @staticmethod
     def _is_loopback(base_url: str) -> bool:
         # Unparsable is never loopback; _require_secure_transport refuses it.
+        # Shared by the consent gate, the transport check and the hostedness
+        # probe: only a plain http(s) URL with no userinfo and a named loopback
+        # host counts (0.0.0.0 is the unspecified address, not loopback).
         parts = urlsplit_or_none(base_url)
-        host = (parts.hostname or "").lower() if parts is not None else ""
-        return host in _LOOPBACK_HOSTS
+        if parts is None or parts.scheme.lower() not in ("http", "https"):
+            return False
+        if "@" in parts.netloc:
+            return False
+        host = (parts.hostname or "").lower()
+        return host != "0.0.0.0" and host in _LOOPBACK_HOSTS
 
     def endpoint_is_loopback(self) -> bool:
         """Whether a call made now would send its prompt to a loopback endpoint.
@@ -600,8 +607,13 @@ class OpenAICompatibleGateway:
         resolve (the injected config, else ``SONDER_OPENAI_BASE_URL``).  No I/O;
         an unset or unparsable endpoint is not loopback.
         """
-        base_url = self._config.base_url if self._config is not None else _env_base_url()
-        return bool(base_url) and self._is_loopback(base_url)
+        try:
+            # The hook subclasses override, so a subclass never reads this
+            # class's SONDER_OPENAI_BASE_URL for its own endpoint.
+            base_url = self._resolved_config().base_url
+        except InvalidInput:
+            return False
+        return self._is_loopback(base_url)
 
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         if not self._is_loopback(cfg.base_url) and not context.cloud_allowed:
