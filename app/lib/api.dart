@@ -786,6 +786,67 @@ class SonderApi implements SonderApiPort {
     );
   }
 
+  /// Lists the API keys of the signed-in session's account. The account comes
+  /// only from the session token (`X-Sonder-Account-Token`), never from the
+  /// request body. An assigned API key cannot use this route: the server
+  /// refuses it, and the bearer here must be the deployment key.
+  Future<Map<String, dynamic>> listApiKeys() =>
+      _appControlPost('/v1/app-control/api-keys/list', 'Could not list API keys.');
+
+  /// Generates a new API key for the signed-in session's account. The reply
+  /// carries the key once (`key`) with its `key_id`; the server keeps only a
+  /// hash.
+  Future<Map<String, dynamic>> generateApiKey() => _appControlPost(
+      '/v1/app-control/api-keys/generate', 'Could not generate an API key.');
+
+  /// Revokes the one API key named by [keyId] (its `key_id`, never the key).
+  /// There is no revoke-all call: an empty [keyId] is refused here.
+  Future<Map<String, dynamic>> revokeApiKey(String keyId) async {
+    final id = keyId.trim();
+    if (id.isEmpty) {
+      throw SonderException('Choose which API key to revoke.');
+    }
+    return _appControlPost(
+      '/v1/app-control/api-keys/revoke',
+      'Could not revoke the API key.',
+      body: <String, Object?>{'key_id': id},
+    );
+  }
+
+  /// Operator view of the swarm; needs an admin session. An API key assigned
+  /// to an account has no admin authority.
+  Future<Map<String, dynamic>> getSwarmStatus() => _appControlPost(
+      '/v1/app-control/swarm/status', 'Could not load swarm status.');
+
+  /// POSTs an app-control route and returns its JSON object. A non-2xx status,
+  /// a body that is not a JSON object, or `ok: false` is a [SonderException],
+  /// never a result.
+  Future<Map<String, dynamic>> _appControlPost(
+    String path,
+    String failure, {
+    Map<String, Object?> body = const <String, Object?>{},
+  }) async {
+    final response = await requestPost(
+      _uri(path),
+      headers: _headers(),
+      body: jsonEncode(body),
+      timeout: const Duration(seconds: 20),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw responseException(response, failure);
+    }
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      throw SonderException(failure, httpStatus: response.statusCode);
+    }
+    if (decoded is! Map<String, dynamic> || decoded['ok'] == false) {
+      throw SonderException(failure, httpStatus: response.statusCode);
+    }
+    return decoded;
+  }
+
   /// Requests cancellation through the existing permission-gated chat
   /// commands.  The aggregate endpoint is read-only; cancellation must keep
   /// the command's owner and approval policy rather than inventing a second
@@ -1869,6 +1930,8 @@ class SystemInfo {
   final ExecutionStatus? execution;
   final ExecutionFeed? executionFeed;
   final List<SystemModel> models;
+  final String role;
+  final AllowedFeatures? allowedFeatures;
 
   const SystemInfo({
     required this.status,
@@ -1890,6 +1953,8 @@ class SystemInfo {
     required this.execution,
     this.executionFeed,
     required this.models,
+    this.role = '',
+    this.allowedFeatures,
   });
 
   factory SystemInfo.fromJson(Map<String, dynamic> json) {
@@ -1955,6 +2020,10 @@ class SystemInfo {
             )
           : null,
       models: models,
+      role: json['role']?.toString() ?? '',
+      allowedFeatures: json['allowed_features'] is Map
+          ? AllowedFeatures.fromJson(json['allowed_features'])
+          : null,
     );
   }
 
