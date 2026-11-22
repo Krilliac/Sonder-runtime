@@ -218,6 +218,7 @@ sonder_runtime/application/chat/__init__.py
 sonder_runtime/application/chat/admission_wait_status.py
 sonder_runtime/application/chat/handoff_receipts.py
 sonder_runtime/application/chat/honesty.py
+sonder_runtime/application/chat/model_fitness.py
 sonder_runtime/application/chat/reference_lookup.py
 sonder_runtime/application/chat/stream_sink.py
 sonder_runtime/application/chat/tool_intent.py
@@ -390,6 +391,7 @@ sonder_runtime/application/selfmod/stage_refusal.py
 sonder_runtime/application/session/__init__.py
 sonder_runtime/application/session/checkpoints.py
 sonder_runtime/application/session/continuity.py
+sonder_runtime/application/session/event_turns.py
 sonder_runtime/application/session/projections.py
 sonder_runtime/application/session/transcript_export.py
 sonder_runtime/application/skill_discovery/__init__.py
@@ -470,6 +472,7 @@ sonder_runtime/domain/build/attribution.py
 sonder_runtime/domain/build/compile_db.py
 sonder_runtime/domain/build/tool_targets.py
 sonder_runtime/domain/campaign_corpus.py
+sonder_runtime/domain/chat_model_fitness.py
 sonder_runtime/domain/chat_template_policy.py
 sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py

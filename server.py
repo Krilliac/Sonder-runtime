@@ -227,6 +227,8 @@ from sonder_runtime.domain.master_timeout import (
 from sonder_runtime.domain.distillation_policy import (
     distillation_timeout_seconds as _distillation_timeout_policy,
 )
+from sonder_runtime.application.chat import model_fitness as _chat_model_fitness
+from sonder_runtime.application.session import event_turns as _event_turns
 from sonder_runtime.domain.fanout_policy import (
     declares_generative_capability as _fanout_declares_generative_capability,
 )
@@ -1742,6 +1744,17 @@ def _model_context_metadata(model):
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
+
+
+_CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(
+    lambda model: _post("/api/show", {"model": model, "name": model}, timeout=10),
+    vision_only_model_families=lambda: _model_list_consumers.values()["vision_only_model_families"],
+)
+
+
+def chat_model_unfit_reason(model):
+    """Why a local model cannot serve chat, or "" (cloud models are not probed)."""
+    return "" if _is_cloud_model_name(model) else _CHAT_FITNESS.unfit_reason(model)
 
 
 def _residency_feedback():
@@ -7140,10 +7153,11 @@ def _answer_with_history_impl(
             # model that answered -- including a pre-routed first attempt,
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
-            effective_system = _reference_lookup_lanes.system_for(model, _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
-                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH))))
+            from sonder_runtime.application.chat.honesty import no_tools_system, no_verification_claims_system
+            # A served chat turn calls no tools, on every route and model.
+            effective_system = _reference_lookup_lanes.system_for(model, no_verification_claims_system(_build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+                _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))))
             if not cloud and not _explicit_serve_selection(tier, ""):
-                from sonder_runtime.application.chat.honesty import no_tools_system
                 effective_system = _reference_lookup_lanes.system_for(model, no_tools_system(effective_system, prompt))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             req_ctx = (
@@ -14311,6 +14325,11 @@ def sonder_sessions(limit: int = 20) -> str:
     conn = _open_db()
     try:
         sessions = memory_store.list_sessions(conn, limit=limit)
+        logged = _event_turns.merged_turn_counts(
+            lambda: _application().session_repository(),
+            lambda sid: memory_store.session_turns(conn, sid),
+            [s["session_id"] for s in sessions],
+        )
     finally:
         conn.close()
     if not sessions:
@@ -14318,7 +14337,7 @@ def sonder_sessions(limit: int = 20) -> str:
     lines = ["sonder sessions (most recent first):"]
     for s in sessions:
         lines.append("  %s  [%d turns]  %s  (updated %s)" % (
-            s["session_id"], s["turn_count"], s.get("title") or "(untitled)",
+            s["session_id"], logged.get(s["session_id"], s["turn_count"]), s.get("title") or "(untitled)",
             s.get("updated_ts") or "?",
         ))
     return "\n".join(lines)
@@ -16734,8 +16753,15 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
         if sess is None:
             return "ERROR: no session '%s'." % session
         if export_format == "atif":
-            return atif_export.interaction_session_atif(conn, session_id, sess, limit=limit)
-        turns = memory_store.session_turns(conn, session_id)[-limit:]
+            return atif_export.interaction_session_atif(
+                conn, session_id, sess, limit=limit,
+                get_repository=lambda: _application().session_repository(),
+            )
+        turns = _event_turns.fuller_turns(
+            lambda: _application().session_repository(),
+            session_id,
+            memory_store.session_turns(conn, session_id),
+        )[-limit:]  # the event log also holds selected-model/cloud turns
     finally:
         conn.close()
     # Same value-aware redactor durable capture uses (graph config or env secrets).

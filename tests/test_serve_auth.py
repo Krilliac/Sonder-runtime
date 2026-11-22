@@ -1841,14 +1841,19 @@ def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
 
 
 def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
-    """A selected model receives slash-looking text instead of local dispatch."""
+    """A selected model receives text no command claims; only the slash
+    dispatcher stays open to it (a recognised command runs as a command)."""
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
     monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
     monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
-    monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("slash dispatch must not run"))
+    slash_calls = []
+    monkeypatch.setattr(
+        ts, "_handle_slash",
+        lambda prompt, *_args, **kwargs: slash_calls.append((prompt, kwargs["selected_model"])),
+    )
     monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("feedback dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("intent dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: pytest.fail("work dispatch must not run"))
@@ -1874,6 +1879,7 @@ def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
     assert status == 200
     assert json.loads(body)["choices"][0]["message"]["content"] == "selected-model answer"
     assert seen == {"prompt": "/hardware", "tier": "cloud-general"}
+    assert slash_calls == [("/hardware", True)]
 
 
 def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):

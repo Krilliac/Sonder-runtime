@@ -3302,8 +3302,8 @@ def _narrate_http_command(name, arguments, call, context):
 
 
 def _handle_slash(content, messages=None, state=None, project="", context=None,
-                  idempotency_key="", workspace_project=None, lane_session=""):
-    """Return response text if `content` is a recognized slash command, else None."""
+                  idempotency_key="", workspace_project=None, lane_session="", selected_model=False):
+    """Return response text if `content` is a recognized slash command, else None.  selected_model: a lone unknown "/word" goes to the model."""
     state = _state_or_legacy(state)
 
     stripped = (content or "").strip()
@@ -3688,7 +3688,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if dispatched is not None:
         return dispatched
 
-    if _BARE_SLASH_COMMAND.fullmatch(stripped):
+    if _BARE_SLASH_COMMAND.fullmatch(stripped) and not selected_model:
         # A lone "/word" is a command attempt, not a sentence: answer without
         # spending a model call on a typo.  Same text as a hidden command so
         # the reply does not reveal which names exist for other accounts.
@@ -4104,6 +4104,8 @@ def _chat_model_selection_error(selector):
         if tier_label == "cloud-disabled":
             return 403, "cloud model access is disabled by the operator"
         if tier_label is not None:
+            if (unfit := "" if _cloud or not _target else server.chat_model_unfit_reason(_target)):
+                return 400, "model is not chat-capable (%s); choose another model" % unfit
             return None
         found = server.resolve_discovered_model_record(selector)
     except Exception:
@@ -4146,16 +4148,14 @@ def _openai_model_rows():
     add("sonder", "local")
     for tier_name, model in server.available_tiers().items():
         cloud = server._is_cloud_tier(tier_name, model)
-        if not cloud and server._runtime_model_capability_error(
-            tier_name, model, records,
-        ):
+        if not cloud and (server._runtime_model_capability_error(tier_name, model, records) or server.chat_model_unfit_reason(model)):
             continue
         add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
             continue
         cloud = server._is_cloud_model_name(name)
-        if cloud and not server.cloud_allowed():
+        if (cloud and not server.cloud_allowed()) or (not cloud and server.chat_model_unfit_reason(name)):
             continue
         add(name, "cloud" if cloud else "local")
     return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
@@ -7430,12 +7430,12 @@ class Handler(BaseHTTPRequestHandler):
         _request_started = time.monotonic()
         # Selecting a concrete model is an API routing contract.  The default
         # route retains Sonder's slash, feedback, web, and work conveniences;
-        # an explicit target receives the caller's text unchanged instead of
-        # allowing any of those local dispatchers to consume it.
+        # an explicit target receives the caller's text unchanged, bar slash commands.
         allow_control_routes = (
             model_operation != "responses"
             and _uses_default_model_route(model)
         )
+        allow_slash_command = model_operation != "responses" and prompt.lstrip().startswith("/")
         # A user-role caller reaches no computer-use or web tool route: those
         # dispatch tools outside the role allowlist (public-mode P2).
         role_runs_tools = _restricted_tool_role(context) is None
@@ -7484,12 +7484,12 @@ class Handler(BaseHTTPRequestHandler):
                         content = turn.content
                         response_model = turn.resolved_model
                         response_tier = turn.resolved_tier
-                    elif allow_control_routes:
+                    elif allow_control_routes or allow_slash_command:
                         reply = _handle_slash(
-                            prompt, messages=messages, state=state,
+                            prompt, state=state, messages=[*history, *(messages or ())] if history and not _history_from_messages(messages) else messages,
                             project=storage_project, context=context,
                             idempotency_key=self.headers.get("Idempotency-Key", ""),
-                            workspace_project=project, lane_session=session,
+                            workspace_project=project, lane_session=session, selected_model=not allow_control_routes,
                         )
                     if (structured_schema is None and allow_control_routes and reply is None
                             and not context.get("account")
