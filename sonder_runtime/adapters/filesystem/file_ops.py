@@ -29,6 +29,10 @@ import sonder_runtime.adapters.git_discovery as git_discovery
 import sonder_runtime.adapters.filesystem.operator_only_paths as _operator_only
 import sonder_runtime.adapters.filesystem.path_aliases as _path_aliases
 from sonder_runtime.platform import paths as runtime_paths
+from sonder_runtime.platform.policy_roots import (
+    EXTENDED_LOCAL_RE as _EXTENDED_LOCAL_RE,
+    try_parse_policy_root as _parse_policy_root,
+)
 from sonder_runtime.adapters.security.control_plane_paths import live_control_plane_inventory
 from sonder_runtime.adapters.filesystem.intent_executor import (
     execute_delete as _execute_delete_intent,
@@ -258,45 +262,6 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     except (OSError, ValueError):
         return False
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
-
-
-def _normalize_policy_root_text(raw: str) -> str | None:
-    text = (raw or "").strip()
-    if not text or "\0" in text:
-        return None
-    extended = _EXTENDED_LOCAL_RE.match(text)
-    if extended:
-        return text[extended.start(1):]
-    flat = text.replace("/", "\\")
-    if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
-        return None
-    return text
-
-
-def _parse_policy_root(raw: str) -> Path | None:
-    """Parse one policy-root entry, stripping ``\\\\?\\`` local prefixes and dropping other prefixed forms.
-
-    Extended-length local paths (``\\\\?\\D:\\x`` or ``//?/D:/x``) are stripped
-    with ``_EXTENDED_LOCAL_RE`` before ``Path()`` is built so containment checks
-    agree with ``resolve_path`` regardless of Python version (Python 3.12's
-    ``Path.resolve()`` preserves ``//?/`` while ``_reject_network_path`` strips
-    it). Every other prefixed or network form (``\\\\?\\UNC\\...``, ``\\\\.\\...``,
-    ``GLOBALROOT``, ``Volume{...}``, ``\\??\\...``, plain UNC ``\\\\host\\share``)
-    is dropped before ``Path()`` or ``resolve()`` ever sees it, and the same
-    check is re-run after ``expanduser()`` so a UNC or prefixed ``USERPROFILE``
-    cannot turn ``~`` into a network or device root.
-    """
-    text = _normalize_policy_root_text(raw)
-    if text is None:
-        return None
-    try:
-        expanded = Path(text).expanduser()
-    except RuntimeError:
-        return None
-    checked = _normalize_policy_root_text(str(expanded))
-    if checked is None:
-        return None
-    return Path(checked)
 
 
 def _split_roots(raw: str) -> list[Path]:
@@ -1415,9 +1380,6 @@ def _require_plain_name_spelling(path: str) -> None:
             "refusing path with a Windows alias component (%r): a trailing dot or space or a ':' "
             "names the same file as its trimmed spelling" % alias
         )
-
-
-_EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
 
 
 def _reject_network_path(path: str) -> str:

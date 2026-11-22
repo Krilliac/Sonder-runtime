@@ -75,7 +75,6 @@ def isolated_root_policy(monkeypatch, tmp_path):
         ("\\\\?\\D:/work/proj", Path("D:/work/proj")),
         ("//?/D:\\work\\proj", Path("D:\\work\\proj")),
         ("\\\\?\\c:\\lower\\proj", Path("c:\\lower\\proj")),
-        ("\\\\?\\C:\\", Path("C:\\")),
     ],
     ids=[
         "backslash-prefix",
@@ -83,7 +82,6 @@ def isolated_root_policy(monkeypatch, tmp_path):
         "backslash-prefix-slash-body",
         "slash-prefix-backslash-body",
         "lowercase-drive",
-        "drive-root",
     ],
 )
 def test_extended_local_prefix_is_stripped_before_path_construction(isolated_root_policy, raw, expected):
@@ -97,6 +95,81 @@ def test_extended_local_prefix_is_stripped_before_path_construction(isolated_roo
         from_env = file_ops._split_roots(raw)
         assert from_env == [expected]
         assert not str(from_env[0]).startswith(("\\\\?\\", "//?/"))
+
+
+DRIVE_AND_RELATIVE_ROOT_FORMS = [
+    pytest.param("C:\\", id="drive-root-backslash"),
+    pytest.param("C:/", id="drive-root-slash"),
+    pytest.param("d:\\", id="other-drive-root"),
+    pytest.param("/", id="filesystem-root"),
+    pytest.param("\\", id="filesystem-root-backslash"),
+    pytest.param("C:", id="drive-relative-bare"),
+    pytest.param("C:x", id="drive-relative-name"),
+    pytest.param("C:x\\y", id="drive-relative-nested"),
+    pytest.param("\\x", id="rooted-no-drive"),
+    pytest.param("relative\\dir", id="relative"),
+    pytest.param(".", id="current-dir"),
+    pytest.param("..", id="parent-dir"),
+    pytest.param("%SONDER_UNSET_ROOT_VAR%", id="unexpanded-percent-var"),
+    pytest.param("%SONDER_UNSET_ROOT_VAR%\\proj", id="unexpanded-percent-var-nested"),
+    pytest.param("$SONDER_UNSET_ROOT_VAR", id="unexpanded-dollar-var"),
+    pytest.param("${SONDER_UNSET_ROOT_VAR}/proj", id="unexpanded-dollar-brace-var"),
+    pytest.param("\\\\?\\C:\\", id="extended-drive-root"),
+    pytest.param("//?/C:/", id="extended-drive-root-slash"),
+    pytest.param("\\\\?\\C:\\x\\..\\..", id="extended-dotdot-above-start"),
+    pytest.param("\\\\?\\C:\\x\\..", id="extended-dotdot-to-drive-root"),
+    pytest.param("C:\\x\\..", id="dotdot-to-drive-root"),
+    pytest.param("C:\\x\\y\\..\\..\\..", id="dotdot-above-drive-root"),
+    pytest.param("C:\\.", id="dot-drive-root"),
+]
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("raw", DRIVE_AND_RELATIVE_ROOT_FORMS)
+def test_drive_root_and_relative_root_are_refused_by_every_parser(isolated_root_policy, monkeypatch, raw):
+    from sonder_runtime.platform import policy_roots
+
+    monkeypatch.delenv("SONDER_UNSET_ROOT_VAR", raising=False)
+    assert file_ops._parse_policy_root(raw) is None
+    with pytest.raises(policy_roots.PolicyRootError):
+        policy_roots.parse_policy_root(raw)
+    assert file_ops._split_roots(raw) == []
+
+    isolated_root_policy.write_text(raw + "\n", encoding="utf-8")
+    assert file_ops._roots_from_file() == []
+    isolated_root_policy.unlink()
+
+    baseline_allowed = file_ops.allowed_roots()
+    baseline_grants = file_ops.lane_grant_roots(())
+    assert file_ops.allowed_roots(extra_roots=raw) == baseline_allowed
+    assert file_ops.lane_grant_roots((raw,)) == baseline_grants
+    monkeypatch.setenv("SONDER_FILE_ROOTS", raw)
+    assert file_ops.allowed_roots() == baseline_allowed
+    assert file_ops.lane_grant_roots(()) == baseline_grants
+
+
+def test_posix_filesystem_root_and_relative_root_are_refused():
+    for raw in ("/", "//", "/.", "/x/..", "relative/dir", ".", "$SONDER_UNSET_ROOT_VAR"):
+        assert file_ops._parse_policy_root(raw) is None, raw
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("home", ["C:\\", "C:", "relative-home"], ids=["drive-root", "drive-relative", "relative"])
+def test_tilde_expanding_to_drive_root_or_relative_home_is_refused(monkeypatch, home):
+    monkeypatch.setenv("USERPROFILE", home)
+    monkeypatch.setenv("HOME", home)
+    assert file_ops._parse_policy_root("~") is None
+    assert file_ops._split_roots("~") == []
+
+
+@WINDOWS_ONLY
+def test_dotdot_inside_a_root_is_normalised_and_kept_below_its_start(tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    spelled = "\\\\?\\" + str(project) + "\\sub\\..\\.."
+    parsed = file_ops._parse_policy_root(spelled)
+    assert parsed == Path(str(tmp_path))
+    assert ".." not in parsed.parts
 
 
 @pytest.mark.parametrize("raw", DISALLOWED_ROOT_FORMS)
@@ -360,36 +433,34 @@ def test_lane_grant_roots_configured_drops_tilde_when_userprofile_is_unc(
 
 
 @WINDOWS_ONLY
-def test_config_apply_environment_and_production_lane_grant_call_shape(
+def test_config_load_and_production_lane_grant_call_shape(
     isolated_root_policy, monkeypatch, tmp_path,
 ):
     plain = tmp_path / "plain"
     plain.mkdir()
     _guard_resolve_against_disallowed(monkeypatch)
 
-    # Disallowed-only SONDER_FILE_ROOTS never enters state.workspace_roots or lane_grant_roots.
-    errors_bad: list[str] = []
-    cfg_bad = runtime_config._apply_environment(
-        runtime_config.SonderConfig(),
-        {"SONDER_FILE_ROOTS": "\\\\?\\UNC\\nohost.invalid\\share" + os.pathsep + "\\\\host\\share" + os.pathsep + "\\??\\C:\\x"},
-        errors_bad,
-    )
-    assert cfg_bad.state.workspace_roots == ()
-    baseline = file_ops.lane_grant_roots(())
-    assert file_ops.lane_grant_roots(cfg_bad.state.workspace_roots) == baseline
+    # Every disallowed SONDER_FILE_ROOTS entry is a config error; none is dropped silently.
+    with pytest.raises(runtime_config.ConfigError) as caught:
+        runtime_config.load_config(
+            None,
+            env={"SONDER_FILE_ROOTS": "\\\\?\\UNC\\nohost.invalid\\share" + os.pathsep + "\\\\host\\share" + os.pathsep + "\\??\\C:\\x"},
+        )
+    assert len([e for e in caught.value.errors if "workspace_roots" in e]) == 3, caught.value.errors
 
-    # Extended-length local SONDER_FILE_ROOTS is stripped in config AND through lane_grant_roots.
-    errors_ok: list[str] = []
+    # A disallowed entry next to a good one still fails the load.
     combined = os.pathsep.join([
         "\\\\?\\UNC\\nohost.invalid\\share",
         "\\\\.\\PhysicalDrive0",
         "\\\\?\\" + str(plain),
     ])
-    cfg_ok = runtime_config._apply_environment(
-        runtime_config.SonderConfig(),
-        {"SONDER_FILE_ROOTS": combined},
-        errors_ok,
-    )
+    with pytest.raises(runtime_config.ConfigError) as caught_mixed:
+        runtime_config.load_config(None, env={"SONDER_FILE_ROOTS": combined})
+    assert len([e for e in caught_mixed.value.errors if "workspace_roots" in e]) == 2, caught_mixed.value.errors
+
+    # Extended-length local SONDER_FILE_ROOTS is stripped in config AND through lane_grant_roots.
+    spelled = "\\\\?\\" + str(plain)
+    cfg_ok = runtime_config.load_config(None, env={"SONDER_FILE_ROOTS": spelled})
     assert cfg_ok.state.workspace_roots == (str(plain),)
     assert all(not r.startswith(("\\\\", "//", "\\??")) for r in cfg_ok.state.workspace_roots)
 
