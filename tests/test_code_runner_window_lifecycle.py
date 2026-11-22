@@ -238,3 +238,41 @@ def test_lifetime_expiry_survives_a_bad_job_handle():
     registry._windows[1] = {"proc": proc, "job": object(), "timer": _Timer(), "run_dir": None}
     registry._expire(1)
     assert registry._windows == {}
+
+
+def test_lifetime_expiry_closes_the_job_handle_exactly_once(monkeypatch):
+    """Teardown closes the job; the release must not close the same handle.
+
+    A second CloseHandle on a value Windows may already have reused could
+    close another console's job (or any other handle) in this process.
+    """
+    calls = []
+
+    class _Kernel32:
+        def TerminateJobObject(self, job, code):
+            calls.append(("terminate", job))
+            return 1
+
+        def CloseHandle(self, handle):
+            calls.append(("close", handle))
+            return 1
+
+    class _WinDLL:
+        kernel32 = _Kernel32()
+
+    class _Timer:
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(code_runner.os, "name", "nt", raising=False)
+    monkeypatch.setattr(code_runner.ctypes, "windll", _WinDLL(), raising=False)
+    job = 0x1234
+    proc = _Proc()
+    proc._sonder_job_handle = job
+    registry = code_runner._WindowRegistry()
+    registry._windows[1] = {"proc": proc, "job": job, "timer": _Timer(), "run_dir": None}
+
+    registry._expire(1)
+
+    assert calls == [("terminate", job), ("close", job)]
+    assert registry._windows == {}
