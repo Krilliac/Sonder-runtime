@@ -555,7 +555,10 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
                 return source.open_worker_url(request, timeout=kwargs["timeout"])
             prober = _default_capability_prober(timeout=1, allow_remote=True, open_url=opened)
             assert prober(ORIGIN)["models"] == ("code",)
-            assert len(connected) == 2
+            # /api/version (404 tolerated), /api/tags, best-effort /api/ps,
+            # then one background /api/show for the uncached model.
+            prober.wait_show_fill(5.0)
+            assert len(connected) == 4
             return
         with pytest.raises((MembershipSourceError, ModelCallError)) as caught:
             path = {"post_version_missing":"/api/version", "inference_missing":"/api/generate", "tags_missing":"/api/tags"}.get(failure, "/v1/membership")
@@ -795,7 +798,8 @@ def test_external_local_fallback_cannot_authorize_a_remote_or_cross_lane_origin(
             pool.request(lambda _: pytest.fail("unadmitted remote dispatched"), model="remote-only")
         with pytest.raises(ollama_pool.WorkerPoolUnavailable):
             pool.open_url(urllib.request.Request("http://127.0.0.2:11434/api/generate"), timeout=1)
-        assert calls == ([request.full_url, "http://127.0.0.1:11434/api/version", "http://127.0.0.1:11434/api/tags"] if fallback else [])
+        assert calls == ([request.full_url, "http://127.0.0.1:11434/api/version", "http://127.0.0.1:11434/api/tags",
+                          "http://127.0.0.1:11434/api/ps"] if fallback else [])
         assert control._thread is None
     finally:
         application.close_providers(timeout=2)
@@ -857,7 +861,7 @@ def test_external_policy_ceiling_does_not_bypass_pool_admission_bound(tmp_path, 
     def retrieve(policy, **kwargs):
         assert not pool._condition._is_owned()
         if kwargs["path"] == "/v1/membership": return raw
-        probed.append(policy.origin)
+        probed.append((policy.origin, kwargs["path"]))
         return b'{"version":"1","models":[{"name":"code"}]}'
     monkeypatch.setattr(control._source._transport, "retrieve", retrieve)
     try:
@@ -867,7 +871,11 @@ def test_external_policy_ceiling_does_not_bypass_pool_admission_bound(tmp_path, 
         assert pool.summary()["membership_omitted_worker_count"] == 4093
         assert len(pool._states) == 4  # reserved static loopback plus three remote
         admitted = {p.origin for p in policies[:3]}
-        assert set(probed) == admitted and len(probed) == 6
+        # The background /api/show fill also goes through the pinned transport.
+        pool._capability_prober.wait_show_fill(5.0)
+        assert {origin for origin, _path in probed} == admitted
+        assert sorted(path for _origin, path in probed) == sorted(
+            ["/api/version", "/api/tags", "/api/ps", "/api/show"] * 3)
         dispatched = []
         for _ in range(8): pool.request(lambda origin: dispatched.append(origin), model="code")
         assert set(dispatched) <= admitted
