@@ -215,3 +215,87 @@ def test_command_classifier_ignores_plain_questions_and_slashes():
     assert intents.classify_command("write me a poem about queues") is None
     assert intents.classify_command("/consult already a slash") is None
     assert intents.classify_command("refactor the whole project") is None
+
+
+import pytest
+
+
+@pytest.mark.parametrize("text", [
+    "run this by the team first",
+    "execute that plan carefully",
+    "practice makes perfect",
+    "this is not strict",
+    "I need strict typing",
+    "can you debug on windows",
+    "don't run it",
+    "please do not execute it",
+])
+def test_ordinary_chat_does_not_fire_control_intents(text):
+    assert intents.classify(text) == {}
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("be strict", {"strict": True}),
+    ("strict mode on", {"strict": True}),
+    ("run that", {"run": True}),
+    ("Run the code.", {"run": True}),
+    ("practice 4", {"train": 4}),
+    ("train on 7", {"train": 7}),
+])
+def test_anchored_command_phrasings_still_fire(text, expected):
+    assert intents.classify(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "run it, then deploy",
+    "strict on, explain closures",
+    "run it and delete the database",
+    "strict on and write me a parser",
+    "run it; rm -rf",
+    "run it, don't",
+    "trace on :)",
+    "debug on windows",
+    "train yourself on 5",
+    "run it pls",
+])
+def test_every_clause_must_be_a_control_phrasing(text):
+    assert intents.classify(text) == {}
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("run this code", {"run": True}),
+    ("execute this code", {"run": True}),
+    ("run it again", {"run": True}),
+    ("run it for me", {"run": True}),
+    ("practice tasks", {"train": intents.TRAIN_DEFAULT_N}),
+    ("strict on, run it", {"strict": True, "run": True}),
+    ("strict off & trace on", {"strict": False, "trace": True}),
+])
+def test_restored_control_phrasings_fire(text, expected):
+    assert intents.classify(text) == expected
+
+
+def _best_of_three(fn, arg):
+    import time
+
+    best = None
+    for _ in range(3):
+        started = time.perf_counter()
+        fn(arg)
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+@pytest.mark.parametrize("filler", ["\n", " ", "\t", ". ", " and "])
+def test_classify_is_linear_on_hostile_whitespace(filler):
+    def build(n):
+        return "x" + filler * n + "y"
+
+    small, large = 5000, 20000
+    t_small = max(_best_of_three(intents.classify, build(small)), 0.005)
+    t_large = _best_of_three(intents.classify, build(large))
+    assert t_small < 0.5
+    assert t_large / t_small < 8, (filler, t_small, t_large)
+    assert intents.classify(build(large)) == {}
+    assert intents.classify("x" + filler * 40000 + "y") == {}

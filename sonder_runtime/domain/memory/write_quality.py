@@ -47,7 +47,9 @@ MAX_CHARS = 280
 # Code spans and dotted identifiers are opaque to the sentence splitter:
 # "pathlib.Path" or "`a; b`" must not read as two sentences.
 _CODE_SPAN = re.compile(r"`[^`]*`")
-_SENTENCE_BREAK = re.compile(r"[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
+# The lookbehind starts a match only at the beginning of a punctuation run, so a
+# long run of dots is scanned once, not once per dot (quadratic).
+_SENTENCE_BREAK = re.compile(r"(?<![.!?])[.!?]+[\"')\]]*\s+(?=[A-Z0-9\"'(\[])")
 # Clause-level joins only. A bare " and " between two nouns ("tests and lint")
 # is a list, not a second claim, so only the comma/semicolon-marked forms and
 # discourse connectives count.
@@ -110,11 +112,13 @@ _VERSION = re.compile(
     r"|(?<![\d.])\d+\.\d+\.\d+(?![\d.])",        # 1.2.3, not 10.0.0.1
 )
 # "Python 3.12", "UE 5.8": a capitalised name followed by a two-part number.
+# The name must start its token (not follow a word, "+", "#" or "-" character), so a
+# long run like "A-A-A-..." has one start instead of one per capital (was quadratic).
 # A number carrying a unit ("Timeout 2.5 seconds", "Wait 1.5 s") is a
 # quantity, and a structural or imperative lead word ("Section 3.2",
 # "Use 4.0 as ...") names no product, so neither reads as a version.
 _NAMED_VERSION = re.compile(
-    r"\b([A-Z][\w+#-]*)\s+\d+\.\d+(?![\d.])"
+    r"(?<![\w+#-])([A-Z][\w+#-]*)\s+\d+\.\d+(?![\d.])"
     r"(?!\s*(?i:%|x\b|[kmgt]i?b\b|ms\b|s\b|secs?\b|seconds?\b|mins?\b|"
     r"minutes?\b|h\b|hrs?\b|hours?\b|days?\b|px\b|pt\b|em\b|rem\b))"
 )
