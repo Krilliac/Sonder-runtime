@@ -19,6 +19,7 @@ from pathlib import Path
 
 from sonder_runtime.platform.private_files import (
     _EXTENDED_LOCAL_RE as _EXTENDED_LOCAL_RE,
+    _strip_extended_or_refuse_prefixed as _strip_extended_or_refuse_prefixed,
     ensure_private_dir,
     parse_local_root as parse_local_root,
     tighten_existing_stores,
@@ -168,9 +169,13 @@ def env_home_override(env=None) -> str:
     unset.  Both ``default_home`` and the typed config use this resolver.
     """
     values = os.environ if env is None else env
-    return str(values.get("SONDER_STATE_HOME", "")).strip() or str(
-        values.get("SONDER_HOME", "")
-    ).strip()
+    for key in ("SONDER_STATE_HOME", "SONDER_HOME"):
+        raw = str(values.get(key, ""))
+        if raw.strip():
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+                return raw
+            return raw.strip()
+    return ""
 
 
 def default_home() -> Path:

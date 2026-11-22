@@ -61,6 +61,16 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 # ``\\?\C:\`` or ``//?/C:/`` (either separator after the drive): the only
 # prefixed spelling that names an ordinary local path.
 _EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "conin$",
+    "conout$",
+    *(f"com{s}" for s in "0123456789¹²³"),
+    *(f"lpt{s}" for s in "0123456789¹²³"),
+})
 
 
 def _strip_extended_or_refuse_prefixed(text: str) -> str:
@@ -84,6 +94,9 @@ def _reject_windows_alias_components(path: Path) -> None:
             continue
         if part.endswith((".", " ")) or ":" in part:
             raise ValueError("path contains a Windows alias component")
+        stem = part.split(".", 1)[0].rstrip(" ").casefold()
+        if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+            raise ValueError("path contains a Windows reserved device name")
 
 
 def parse_local_root(raw: object, *, expand_user: bool = True) -> Path:
@@ -96,11 +109,11 @@ def parse_local_root(raw: object, *, expand_user: bool = True) -> Path:
     """
     if not isinstance(raw, str):
         raise ValueError("the path must be a string")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise ValueError("the path contains a control character")
     text = raw.strip()
     if not text:
         raise ValueError("the path is empty")
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
-        raise ValueError("the path contains a control character")
     expanded = _strip_extended_or_refuse_prefixed(text)
     if expand_user:
         try:
