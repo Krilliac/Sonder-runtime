@@ -318,6 +318,7 @@ def test_broker_gate_refuses_a_failed_or_missing_broker(monkeypatch, tmp_path):
 
 
 def test_nightly_rejects_a_candidate_the_broker_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "_isolation_refusal", lambda: None)
     calls = _drive_to_gates(tmp_path, monkeypatch)
     _, public = _receipt_key(tmp_path)
     _configure_broker(monkeypatch, public)
@@ -366,6 +367,7 @@ def test_nightly_rejects_a_candidate_the_broker_refuses(tmp_path, monkeypatch):
 
 
 def test_broker_acceptance_adds_a_gate_and_unlocks_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "_isolation_refusal", lambda: None)
     calls = _drive_to_gates(tmp_path, monkeypatch, mode="auto-low-risk")
     _, public = _receipt_key(tmp_path)
     _configure_broker(monkeypatch, public)
@@ -382,6 +384,7 @@ def test_broker_acceptance_adds_a_gate_and_unlocks_nothing(tmp_path, monkeypatch
 
 
 def test_nightly_without_a_broker_never_calls_the_broker_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "_isolation_refusal", lambda: None)
     calls = _drive_to_gates(tmp_path, monkeypatch)
 
     def gate(*_args):

@@ -39,15 +39,18 @@ GIT_PROGRAM_KEYS = (
 _GIT_PROGRAM_KEY_RE = re.compile(
     r"^(?P<section>filter|merge|diff)\.(?P<name>.+)\."
     r"(?P<key>clean|smudge|process|required|driver|textconv)$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 # ``git merge-file`` is git's own three-way text merge: what the built-in
 # driver does, with none of the repository's configuration.
 BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
 
 # Arguments (after ``git``) of the one probe that reads driver configuration.
+# Use ``--list`` rather than ``--get-regexp``: on Linux under UTF-8 locales,
+# glibc's POSIX regex ``.`` skips non-UTF-8 bytes (e.g. ``0xFF`` in a subsection
+# name), silently hiding malicious driver keys from ``--get-regexp``.
 CONFIG_PROBE_ARGUMENTS = (
-    "config", "--null", "--name-only", "--get-regexp", GIT_PROGRAM_KEYS,
+    "config", "--null", "--name-only", "--list",
 )
 
 
@@ -131,6 +134,14 @@ def driver_overrides(keys: Iterable[str]) -> list[str]:
     return arguments
 
 
+def _program_keys_from_listing(stdout: str) -> list[str]:
+    """Select driver-program keys from ``git config --null --name-only --list``."""
+    return [
+        key for raw in stdout.split("\x00")
+        if (key := raw.strip()) and _GIT_PROGRAM_KEY_RE.fullmatch(key) is not None
+    ]
+
+
 def neutralized_git_arguments(
     run_probe: Callable[[list[str]], Mapping[str, object]],
 ) -> list[str]:
@@ -153,7 +164,7 @@ def neutralized_git_arguments(
     if probe.get("truncated"):
         raise GitProgramConfigError("git driver configuration is too large to neutralize safely")
     stdout = str(probe.get("stdout") or "")
-    return static_overrides() + driver_overrides(stdout.split("\x00"))
+    return static_overrides() + driver_overrides(_program_keys_from_listing(stdout))
 
 
 # Arguments (after ``git`` and :func:`static_overrides`) that list index
@@ -219,8 +230,8 @@ def submodule_driver_overrides(
             probe = run_probe_at(child, list(CONFIG_PROBE_ARGUMENTS))
             if probe is None:
                 continue
-            keys.extend(_checked_probe(
+            keys.extend(_program_keys_from_listing(_checked_probe(
                 probe, "submodule driver configuration", accept=(0, 1),
-            ).split("\x00"))
+            )))
             pending.append((child, depth + 1))
     return driver_overrides(keys)
