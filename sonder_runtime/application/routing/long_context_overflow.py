@@ -38,7 +38,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Iterator, Mapping
 
-from sonder_runtime.application.routing import tier_escalation
+from sonder_runtime.application.routing import context_fit, tier_escalation
 from sonder_runtime.domain.context_formatting import rough_token_count
 
 ROUTE = "long_context_overflow"
@@ -318,7 +318,7 @@ def notice_scope() -> Iterator[list]:
         _NOTICES.reset(token)
 
 
-def record(decision: Decision | None) -> bool:
+def record(decision: Decision | context_fit.FitDecision | None) -> bool:
     """Record the turn's final decision; False when no scope is bound."""
     notes = _NOTICES.get()
     if decision is None or notes is None:
@@ -330,7 +330,9 @@ def record(decision: Decision | None) -> bool:
 def receipt_entry(notes: Iterable) -> dict | None:
     """The receipt entry for a scope's recorded decision, or ``None``."""
     for decision in reversed(list(notes or ())):
-        if isinstance(decision, Decision):
+        # The overflow's Decision, or context-fit routing's decision (same
+        # ``{status, notice, ...}`` receipt shape, plus ``route``).
+        if isinstance(decision, (Decision, context_fit.FitDecision)):
             return decision.receipt()
     return None
 
