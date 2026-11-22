@@ -297,3 +297,124 @@ def test_validate_called_directly_never_resolves_a_refused_root(no_network_touch
 
     assert [e for e in errors if "workspace_roots" in e], errors
     assert no_network_touch == []
+
+
+WINDOWS_ALIAS_AND_BAD_DRIVE_FORMS = [
+    pytest.param(_bs("C:|..."), id="triple-dot-drive-alias"),
+    pytest.param(_bs("C:|...."), id="quad-dot-drive-alias"),
+    pytest.param(_bs("C:| ."), id="space-dot-drive-alias"),
+    pytest.param(_bs("C:| |"), id="space-component-drive-alias"),
+    pytest.param(_bs("C:|. |"), id="dot-space-drive-alias"),
+    pytest.param(_bs("C:|...|"), id="triple-dot-trailing-sep"),
+    pytest.param(_bs("C:|a|..|..."), id="dotdot-to-triple-dot"),
+    pytest.param(_bs("C:|a|..| |"), id="dotdot-to-space-component"),
+    pytest.param(_bs("||?|C:|..."), id="extended-triple-dot"),
+    pytest.param(_bs("||?|C:| |"), id="extended-space-component"),
+    pytest.param("//?/C:/...", id="extended-slash-triple-dot"),
+    pytest.param("//?/C:/ /", id="extended-slash-space-component"),
+    pytest.param(_bs("C:|a:b"), id="ads-colon"),
+    pytest.param(_bs("C:|::$DATA"), id="ads-root-data"),
+    pytest.param(_bs("C:|.:$DATA"), id="ads-dot-data"),
+    pytest.param(_bs("C:|foo::$DATA"), id="ads-file-data"),
+    pytest.param(_bs("C:|foo."), id="trailing-dot-component"),
+    pytest.param(_bs("C:|foo |bar"), id="trailing-space-parent-component"),
+    pytest.param(_bs("1:|foo"), id="digit-drive"),
+    pytest.param(_bs("@:|foo"), id="symbol-drive"),
+]
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("raw", WINDOWS_ALIAS_AND_BAD_DRIVE_FORMS)
+def test_windows_alias_ads_and_nonletter_drive_roots_refused_in_toml_and_env(
+    tmp_path, no_network_touch, raw,
+):
+    toml = _write_config(tmp_path, [raw])
+    with pytest.raises(runtime_config.ConfigError) as caught_toml:
+        runtime_config.load_config(toml, env={})
+    assert _root_errors(caught_toml.value), caught_toml.value.errors
+
+    with pytest.raises(runtime_config.ConfigError) as caught_env:
+        runtime_config.load_config(None, env={"SONDER_FILE_ROOTS": raw})
+    assert _root_errors(caught_env.value), caught_env.value.errors
+    assert no_network_touch == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("C:" + BS + "foo\nbar", id="newline"),
+        pytest.param("C:" + BS + "foo\rbar", id="carriage-return"),
+        pytest.param("C:" + BS + "foo\x01bar", id="control-soh"),
+        pytest.param("C:" + BS + "foo\x7fbar", id="control-del"),
+    ],
+)
+def test_control_char_root_in_env_is_refused(raw):
+    with pytest.raises(runtime_config.ConfigError) as caught:
+        runtime_config.load_config(None, env={"SONDER_FILE_ROOTS": raw})
+    assert _root_errors(caught.value), caught.value.errors
+
+
+@pytest.mark.parametrize(
+    "raw_env",
+    [
+        pytest.param(os.pathsep, id="single-sep"),
+        pytest.param(f" {os.pathsep} {os.pathsep} ", id="spaced-seps"),
+    ],
+)
+def test_separator_only_env_roots_fails_closed_and_does_not_fallback_to_toml(
+    tmp_path, raw_env,
+):
+    project = tmp_path / "tomlproj"
+    project.mkdir()
+    toml = _write_config(tmp_path, [str(project)])
+
+    with pytest.raises(runtime_config.ConfigError) as caught:
+        runtime_config.load_config(toml, env={"SONDER_FILE_ROOTS": raw_env})
+
+    assert _root_errors(caught.value), caught.value.errors
+
+
+@pytest.mark.parametrize("raw", REFUSED_PREFIXED_FORMS)
+def test_default_workspace_root_refuses_prefixed_without_network_touch(
+    tmp_path, no_network_touch, raw,
+):
+    from sonder_runtime.adapters import creation_workspace
+
+    toml = tmp_path / "sonder.toml"
+    toml.write_text(f"[state]\ndefault_workspace_root = {_toml_literal(raw)}\n", encoding="utf-8")
+
+    with pytest.raises(runtime_config.ConfigError) as caught_toml:
+        runtime_config.load_config(toml, env={})
+    assert any("default_workspace_root" in e for e in caught_toml.value.errors)
+
+    with pytest.raises(runtime_config.ConfigError) as caught_env:
+        runtime_config.load_config(None, env={"SONDER_DEFAULT_WORKSPACE_ROOT": raw})
+    assert any("default_workspace_root" in e for e in caught_env.value.errors)
+
+    with pytest.raises(creation_workspace.CreationWorkspaceError):
+        creation_workspace.default_workspace_root(raw)
+    assert no_network_touch == []
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _bs("C:|"),
+        _bs("C:|..."),
+        _bs("C:| |"),
+        _bs("C:|a:b"),
+        _bs("1:|foo"),
+    ],
+    ids=["drive-root", "triple-dot", "space-component", "ads-colon", "digit-drive"],
+)
+def test_default_workspace_root_refuses_drive_root_and_aliases(tmp_path, no_network_touch, raw):
+    from sonder_runtime.adapters import creation_workspace
+
+    with pytest.raises(runtime_config.ConfigError) as caught:
+        runtime_config.load_config(None, env={"SONDER_DEFAULT_WORKSPACE_ROOT": raw})
+    assert any("default_workspace_root" in e for e in caught.value.errors)
+
+    with pytest.raises(creation_workspace.CreationWorkspaceError):
+        creation_workspace.default_workspace_root(raw)
+    assert no_network_touch == []

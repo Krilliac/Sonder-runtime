@@ -3163,10 +3163,11 @@ def _http_workspace_roots(auth):
     Never ``file_ops.lane_grant_roots``: its ambient roots are for local-owner lanes only."""
     if not _admin_authorized(auth):
         return ()
-    from sonder_runtime.adapters.filesystem.file_ops import _parse_policy_root
     from sonder_runtime.bootstrap.app import default_app
+    from sonder_runtime.platform.policy_roots import try_parse_policy_root
     state = getattr(getattr(default_app(), "config", None), "state", None)
-    return tuple(dict.fromkeys(str(p.resolve()) for r in getattr(state, "workspace_roots", ()) if (p := _parse_policy_root("" if r is None else str(r))) is not None))
+    resolved = (p.resolve() for r in getattr(state, "workspace_roots", ()) if (p := try_parse_policy_root(r, expand_user=False)) is not None)
+    return tuple(dict.fromkeys(str(q) for q in resolved if try_parse_policy_root(str(q), expand_user=False) is not None))
 
 
 def _http_debug_context(auth, correlation_id):
