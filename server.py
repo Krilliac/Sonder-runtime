@@ -3882,6 +3882,12 @@ def control_command(prompt: str, history=None, session="", project="",
         )
     if cmd in ("/image", "/inspectimage"):
         return image_inspect(path=arg.strip()) if arg.strip() else "usage: /image <path>"
+    if cmd in ("/doc", "/document_extract"):
+        return document_extract(path=arg.strip()) if arg.strip() else "usage: /doc <path>"
+    if cmd in ("/media", "/media_inspect"):
+        return media_inspect(path=arg.strip()) if arg.strip() else "usage: /media <path>"
+    if cmd in ("/metrics", "/code_metrics"):
+        return code_metrics(path=arg.strip() or ".")
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -14121,6 +14127,111 @@ def image_inspect(
     return output
 
 
+@mcp.tool()
+def document_extract(
+    path: str,
+    max_chars: int = 32000,
+    max_items: int = 200,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT files."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_chars": max_chars, "max_items": max_items}
+    try:
+        import sonder_runtime.adapters.inspection.document_extract as _doc_extract
+
+        data = _doc_extract.extract_document(
+            path,
+            max_chars=max_chars,
+            max_items=max_items,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("document_extract", args, ok=False, started=started, summary=str(exc))
+        return "document extraction refused: %s" % exc
+    output = _doc_extract.format_result(data)
+    _record_direct_tool(
+        "document_extract", args, ok=True, started=started,
+        summary="%s (%d bytes)" % (data.get("format", ""), data.get("bytes", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def media_inspect(
+    path: str,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Inspect guarded WAV audio, MIDI tracks, AVI video, or GLB/glTF/OBJ/STL 3D assets."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path}
+    try:
+        import sonder_runtime.adapters.inspection.media_inspect as _media_inspect
+
+        data = _media_inspect.inspect_media(
+            path,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("media_inspect", args, ok=False, started=started, summary=str(exc))
+        return "media inspection refused: %s" % exc
+    output = _media_inspect.format_result(data)
+    _record_direct_tool(
+        "media_inspect", args, ok=True, started=started,
+        summary="%s (%d bytes)" % (data.get("format", ""), data.get("bytes", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def code_metrics(
+    path: str = ".",
+    max_files: int = 2000,
+    top_n: int = 10,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path": path, "max_files": max_files, "top_n": top_n}
+    try:
+        import sonder_runtime.adapters.inspection.code_metrics as _code_metrics
+
+        data = _code_metrics.analyze_code_metrics(
+            path,
+            max_files=max_files,
+            top_n=top_n,
+            extra_roots=extra_roots,
+            bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
+        )
+    except Exception as exc:
+        _record_direct_tool("code_metrics", args, ok=False, started=started, summary=str(exc))
+        return "code metrics refused: %s" % exc
+    output = _code_metrics.format_result(data)
+    totals = data.get("totals") or {}
+    _record_direct_tool(
+        "code_metrics", args, ok=True, started=started,
+        summary="files=%d code=%d" % (totals.get("files", 0), totals.get("code", 0)),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -17126,7 +17237,7 @@ AGENT_TOOL_HELP = """Available tools:
 - git_tag: {"root": ".", "name": "v1.0.0", "message": "", "delete": false, "timeout": 10}
 - git_merge: {"root": ".", "branch": "feature/x", "no_ff": true, "message": "", "timeout": 30}
 - git_cherry_pick: {"root": ".", "commits_json": "[\"abc123\"]", "timeout": 30}
-- build_run: {"root": ".", "command": "", "timeout": 120} -- auto-detects Make/Cargo/CMake/Go/npm/Gradle/Maven; command overrides
+- build_run: {"root": ".", "command": "", "timeout": 120} -- auto-detects Make/Cargo/CMake/Meson/.NET/Flutter-Dart/Go/npm/Gradle/Maven; command overrides
 - ensemble_codegen_build_loop: {"project_dir": ".", "files_json": "{\"src/main.py\": \"task-specific file contract\"}", "build_program": "python", "build_args_json": "[\"-m\", \"pytest\", \"-q\"]", "timeout": 120} -- local code + reasoning ensemble with two compiler-feedback attempts per file; requires a project
 - build_clean: {"root": ".", "timeout": 30} -- clean build artifacts
 - rename_symbol: {"root": ".", "old_name": "foo", "new_name": "bar", "glob": "**/*.py", "dry_run": true} -- rename across files; dry_run=false to apply
@@ -17135,6 +17246,9 @@ AGENT_TOOL_HELP = """Available tools:
 - apply_patch: {"root": ".", "patch_text": "...", "check_only": false} -- apply a unified diff patch
 - secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
 - image_inspect: {"path": "artifacts/generated/demo/icon.png"}
+- document_extract: {"path": "artifacts/generated/demo/document.docx", "max_chars": 32000, "max_items": 200} -- extract text/tables/slides/cues from DOCX, XLSX, PPTX, HTML, SVG, SRT, VTT
+- media_inspect: {"path": "artifacts/generated/demo/rigged.glb"} -- inspect WAV audio, MIDI, AVI video, GLB/glTF/OBJ/STL 3D meshes
+- code_metrics: {"path": ".", "max_files": 2000, "top_n": 10} -- language LOC, TODO/FIXME markers, largest files, and complexity hotspots
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -17211,7 +17325,8 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "repo_log", "repo_show", "repo_blame",
     "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
-    "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
+    "text_search", "script_search", "program_search", "image_inspect",
+    "document_extract", "media_inspect", "code_metrics", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -17267,6 +17382,9 @@ an exact symbol named by the task; do not default to Python or server.py.
 - output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- exactly one of path or job_id; bounded failure summary
 - hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
 - image_inspect: {"path": "<task-relevant image path>"}
+- document_extract: {"path": "<task-relevant DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT path>", "max_chars": 32000, "max_items": 200}
+- media_inspect: {"path": "<task-relevant WAV/MIDI/AVI/GLB/glTF/OBJ/STL path>"}
+- code_metrics: {"path": ".", "max_files": 2000, "top_n": 10}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -17779,10 +17897,17 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
+        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "document_extract", "media_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+        elif tool_name == "code_metrics":
+            file_ops.resolve_repository_read_path(
+                args.get("path", ".") or ".",
+                allow_workspace_root=True,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
@@ -19001,6 +19126,31 @@ def _agent_dispatch(
             approval=args.get("approval", ""),
             extra_roots=args.get("extra_roots", ""),
         )
+    if tool_name == "document_extract":
+        return document_extract(
+            path=args.get("path", ""),
+            max_chars=args.get("max_chars", 32000),
+            max_items=args.get("max_items", 200),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "media_inspect":
+        return media_inspect(
+            path=args.get("path", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "code_metrics":
+        return code_metrics(
+            path=args.get("path", "."),
+            max_files=args.get("max_files", 2000),
+            top_n=args.get("top_n", 10),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -19438,7 +19588,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -19520,7 +19670,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -19919,7 +20069,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 # Leads an end report that claims completion the record says must be earned.
@@ -20097,7 +20247,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -20162,7 +20312,7 @@ _UNCONFINED_ROOT_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory", "artifact_risk_inspect",
 })
@@ -20171,7 +20321,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -22252,7 +22402,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

@@ -248,6 +248,32 @@ _NATIVE_TOOLS = (
          "required": ["path"], "additionalProperties": False},
     ),
     ToolDescriptor(
+        "document_extract",
+        "Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX, XLSX, PPTX, HTML, SVG, SRT, or VTT files",
+        {"type": "object", "properties": {
+            "path": _PATH,
+            "max_chars": {"type": "integer"},
+            "max_items": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "media_inspect",
+        "Inspect bounded metadata, loudness, geometry, and hash for guarded WAV, MIDI, AVI, GLB/glTF, OBJ, or STL assets",
+        {"type": "object", "properties": {"path": _PATH, "extra_roots": _ROOT},
+         "required": ["path"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "code_metrics",
+        "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots for a guarded file or directory",
+        {"type": "object", "properties": {
+            "path": _PATH,
+            "max_files": {"type": "integer"},
+            "top_n": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,

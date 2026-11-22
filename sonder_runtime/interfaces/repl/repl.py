@@ -4802,7 +4802,9 @@ def main(*, machine_output=False):
                         "/inventory", "/workspace",
                         "/tree", "/folders", "/search", "/grep",
                         "/programs", "/programfind", "/scripts", "/scriptfind",
-                        "/image", "/inspectimage", "/vision", "/analyzeimage",
+                        "/image", "/inspectimage", "/doc", "/document_extract",
+                        "/media", "/media_inspect", "/metrics", "/code_metrics",
+                        "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
                     ):

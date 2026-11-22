@@ -227,6 +227,24 @@ COMMANDS = [
         "summary": "Inspect a guarded image's format, dimensions, size, and digest.",
     },
     {
+        "name": "/doc",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "Extract structured text, tables, slides, or cues from guarded DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT files.",
+    },
+    {
+        "name": "/media",
+        "category": "inspect",
+        "risk": "safe",
+        "summary": "Inspect guarded WAV audio, MIDI, AVI video, and GLB/glTF/OBJ/STL 3D assets.",
+    },
+    {
+        "name": "/metrics",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

@@ -17,10 +17,13 @@ import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import symbol_index
 
 
-FORMATS = frozenset({"json", "jsonl", "csv", "tsv"})
+FORMATS = frozenset({"json", "jsonl", "csv", "tsv", "markdown", "toml"})
+OUTPUT_FORMATS = frozenset({"json", "jsonl", "csv", "tsv", "markdown"})
 SUFFIX_FORMATS = {
     ".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl",
     ".csv": "csv", ".tsv": "tsv",
+    ".md": "markdown", ".markdown": "markdown",
+    ".toml": "toml",
 }
 DEFAULT_MAX_INPUT_BYTES = 16_000_000
 HARD_MAX_INPUT_BYTES = 64_000_000
@@ -178,19 +181,21 @@ def _format_for_input(path):
     try:
         return SUFFIX_FORMATS[path.suffix.lower()]
     except KeyError as exc:
-        raise DataConvertError("input must use .json, .jsonl/.ndjson, .csv, or .tsv") from exc
+        raise DataConvertError(
+            "input must use .json, .jsonl/.ndjson, .csv, .tsv, .md/.markdown, or .toml"
+        ) from exc
 
 
 def _format_for_output(path, requested):
     requested = str(requested or "").strip().lower()
     suffix_format = SUFFIX_FORMATS.get(path.suffix.lower(), "")
     output_format = requested or suffix_format
-    if output_format not in FORMATS:
-        raise DataConvertError("output_format must be json, jsonl, csv, or tsv")
+    if output_format not in OUTPUT_FORMATS:
+        raise DataConvertError("output_format must be json, jsonl, csv, tsv, or markdown")
     if suffix_format and suffix_format != output_format:
         raise DataConvertError("output_format conflicts with the output filename suffix")
     if not suffix_format:
-        raise DataConvertError("output filename must use .json, .jsonl, .csv, or .tsv")
+        raise DataConvertError("output filename must use .json, .jsonl, .csv, .tsv, or .md")
     return output_format
 
 
@@ -270,7 +275,68 @@ def _selected_record(record, fields, limits):
     return selected
 
 
+def _toml_normalize(value):
+    import datetime as _dt
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _toml_normalize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_toml_normalize(v) for v in value]
+    return value
+
+
+def _split_md_row(line):
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
 def _input_records(text, input_format, limits, deadline):
+    if input_format == "toml":
+        import tomllib
+        try:
+            parsed = tomllib.loads(text)
+        except Exception as exc:
+            _check_deadline(deadline)
+            raise DataConvertError("malformed TOML input: %s" % exc) from exc
+        _check_deadline(deadline)
+        normalized = _toml_normalize(parsed)
+        if not isinstance(normalized, dict):
+            raise DataConvertError("TOML input must parse to a table")
+        list_tables = [
+            v for v in normalized.values()
+            if isinstance(v, list) and v and all(isinstance(item, dict) for item in v)
+        ]
+        if len(normalized) == 1 and len(list_tables) == 1:
+            yield from list_tables[0]
+        else:
+            yield normalized
+        return
+    if input_format == "markdown":
+        table_lines = [ln.strip() for ln in text.splitlines() if "|" in ln]
+        if len(table_lines) < 2:
+            raise DataConvertError("markdown input must contain a pipe table with header and separator")
+        headers = _split_md_row(table_lines[0])
+        if not headers or any(not h for h in headers):
+            raise DataConvertError("markdown table has an empty header")
+        if len(headers) != len(set(headers)):
+            raise DataConvertError("markdown table has duplicate headers")
+        if len(headers) > limits["max_columns"]:
+            raise DataConvertError("markdown table exceeds the column ceiling")
+        sep_cells = _split_md_row(table_lines[1])
+        if not all(cell.replace("-", "").replace(":", "").strip() == "" and "-" in cell for cell in sep_cells):
+            raise DataConvertError("markdown table is missing a valid separator row")
+        for row_idx, line in enumerate(table_lines[2:], 3):
+            _check_deadline(deadline)
+            cells = _split_md_row(line)
+            if len(cells) != len(headers):
+                raise DataConvertError("markdown table row %d does not match header width" % row_idx)
+            yield dict(zip(headers, cells))
+        return
     if input_format == "json":
         try:
             payload = json.loads(
@@ -379,6 +445,10 @@ def _convert_records(records, fields, output_format, sink, limits, deadline):
             lineterminator="\n", quoting=csv.QUOTE_MINIMAL,
         )
         writer.writerow(fields)
+    elif output_format == "markdown":
+        safe_headers = [f.replace("|", "\\|") for f in fields]
+        sink.write("| " + " | ".join(safe_headers) + " |\n")
+        sink.write("| " + " | ".join("---" for _ in fields) + " |\n")
     for record in records:
         _check_deadline(deadline)
         if row_count >= limits["max_rows"]:
@@ -398,6 +468,12 @@ def _convert_records(records, fields, output_format, sink, limits, deadline):
                 selected, ensure_ascii=False, separators=(",", ":"),
                 allow_nan=False,
             ) + "\n")
+        elif output_format == "markdown":
+            cells = [
+                _delimited_value(selected[field]).replace("|", "\\|").replace("\r\n", " ").replace("\n", " ")
+                for field in fields
+            ]
+            sink.write("| " + " | ".join(cells) + " |\n")
         else:
             writer.writerow([_delimited_value(selected[field]) for field in fields])
         row_count += 1

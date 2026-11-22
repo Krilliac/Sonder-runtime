@@ -19,7 +19,8 @@ READ_ONLY_TOOLS = frozenset({
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "project_detect",
     "data_inspect", "data_query", "archive_list", "artifact_risk_inspect", "verify_artifact",
-    "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract",
+    "media_inspect", "code_metrics", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan", "diagnostics",
     "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status", "memory_quality_report", "memory_privacy_review",
@@ -49,7 +50,8 @@ _ALIASES = {
 # deliberately absent, even when their existing read-only contract is retained.
 _PARALLEL_READS = frozenset({
     "directory_tree", "file_find", "file_read", "file_read_range", "file_digest",
-    "text_search", "image_inspect", "output_digest",
+    "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
+    "output_digest",
 })
 _LOCAL_READS = _PARALLEL_READS | frozenset({
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",

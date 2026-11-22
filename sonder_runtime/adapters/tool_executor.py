@@ -79,6 +79,45 @@ class ToolExecutorAdapter:
                 _require_read(args["path"], args, context)
                 res = workbench.image_inspect(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "document_extract":
+                import sonder_runtime.adapters.inspection.document_extract as document_extract
+
+                _require_read(args["path"], args, context)
+                res = document_extract.extract_document(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=document_extract.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "media_inspect":
+                import sonder_runtime.adapters.inspection.media_inspect as media_inspect
+
+                _require_read(args["path"], args, context)
+                res = media_inspect.inspect_media(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=media_inspect.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "code_metrics":
+                import sonder_runtime.adapters.inspection.code_metrics as code_metrics
+
+                _require_read(args.get("path", "."), args, context)
+                res = code_metrics.analyze_code_metrics(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=code_metrics.format_result(res),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 
