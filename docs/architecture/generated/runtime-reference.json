@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+    "catalog_digest": "d994e018cb46fd61f9c414425aeeddee3f96e194dc554ac0cd586ac57e3156c1",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+      "catalog_digest": "d994e018cb46fd61f9c414425aeeddee3f96e194dc554ac0cd586ac57e3156c1",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6755,9 +6755,16 @@
                 "type": "string"
               },
               "temperature": {
-                "default": 0.2,
-                "title": "Temperature",
-                "type": "number"
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Temperature"
               },
               "tier": {
                 "default": "",
@@ -16518,10 +16525,10 @@
           "type": "str"
         },
         {
-          "default": 0.2,
+          "default": null,
           "name": "temperature",
           "required": false,
-          "type": "num"
+          "type": "str"
         },
         {
           "default": 1024,
@@ -17216,6 +17223,16 @@
       "risk": "ask",
       "summary": "Update task status/details.",
       "tool": "task_update"
+    },
+    {
+      "aliases": [],
+      "category": "diagnostics",
+      "name": "/temp",
+      "native": true,
+      "params": [],
+      "risk": "safe",
+      "summary": "show/set this session's sampling temperature (auto = model preset)",
+      "tool": ""
     },
     {
       "aliases": [],
@@ -20488,14 +20505,14 @@
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
     "capabilities": 242,
-    "commands": 360,
+    "commands": 361,
     "configuration": 317,
     "events": 43,
     "native_tools": 69,
     "schemas": 4,
     "tools": 242
   },
-  "digest": "0d118ef60004f976bfc22fc180668d2ad107b5c27344e7506108ad26de69ab31",
+  "digest": "5e486a4052c55051d41615651f1c7450acc3b5c1dd8cf2001acc55e3c1edbaf0",
   "events": [
     {
       "name": "session.started",
@@ -23207,9 +23224,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+    "catalog_digest": "d994e018cb46fd61f9c414425aeeddee3f96e194dc554ac0cd586ac57e3156c1",
     "client": {
-      "digest": "13f00b9d3101f792d90fc3001a6b32a87b45a0d88bedcbfb6f1e0262b09b543c",
+      "digest": "d994e018cb46fd61f9c414425aeeddee3f96e194dc554ac0cd586ac57e3156c1",
       "events": [
         {
           "name": "approval.denied",
@@ -32510,9 +32527,16 @@
                 "type": "string"
               },
               "temperature": {
-                "default": 0.2,
-                "title": "Temperature",
-                "type": "number"
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Temperature"
               },
               "tier": {
                 "default": "",
@@ -41587,9 +41611,16 @@
                 "type": "string"
               },
               "temperature": {
-                "default": 0.2,
-                "title": "Temperature",
-                "type": "number"
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Temperature"
               },
               "tier": {
                 "default": "",
@@ -49988,9 +50019,16 @@
                   "type": "string"
                 },
                 "temperature": {
-                  "default": 0.2,
-                  "title": "Temperature",
-                  "type": "number"
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Temperature"
                 },
                 "tier": {
                   "default": "",
@@ -51672,7 +51710,7 @@
   },
   "sources": {
     "command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "server.py": "649dab58833ae04f60d47b1df99f1c4c7639af90b0dcee28063d0ff12f4596a2",
+    "server.py": "b64d3684c52ae8ccb18aea99eff2868a6edf0276344c971c33ea7dd81c979ba1",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "52cf0331617bcf57cc5fe77a0166c3d4191fc499a3537bbf78f1bd9f3e6b110b",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -57967,9 +58005,16 @@
             "type": "string"
           },
           "temperature": {
-            "default": 0.2,
-            "title": "Temperature",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Temperature"
           },
           "tier": {
             "default": "",

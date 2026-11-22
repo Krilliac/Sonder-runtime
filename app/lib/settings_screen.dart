@@ -11,6 +11,7 @@ import 'runtime/model_routing.dart';
 import 'settings.dart';
 import 'settings/connection.dart';
 import 'settings/context_size.dart';
+import 'settings/temperature.dart';
 import 'settings/model_picker.dart';
 import 'settings/widgets.dart';
 import 'theme.dart';
@@ -121,6 +122,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _bootstrapServer = '';
 
   late bool _allowHosted;
+
+  /// Staged sampling temperature; null is Auto.
+  double? _temperature;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
 
@@ -186,6 +190,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _observatoryWebUrl = TextEditingController(text: s.observatoryWebUrl);
     _username = TextEditingController(text: widget.initialUsername ?? '');
     _allowHosted = s.allowHosted;
+    _temperature = s.temperature;
     _keepServerRunning = s.keepServerRunning;
     _allowApproximateLocation = s.allowApproximateLocation;
     _cleartextKeyHosts = {...s.cleartextKeyHosts};
@@ -311,6 +316,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     follow(_observatoryExecutable, (s) => s.observatoryExecutable);
     follow(_observatoryWebUrl, (s) => s.observatoryWebUrl);
     if (_allowHosted == before.allowHosted) _allowHosted = next.allowHosted;
+    if (_temperature == before.temperature) _temperature = next.temperature;
     if (_keepServerRunning == before.keepServerRunning) {
       _keepServerRunning = next.keepServerRunning;
     }
@@ -350,6 +356,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return staged != saved;
   }
 
+  bool get _temperatureChanged => _temperature != _saved.temperature;
   bool get _launcherUrlChanged =>
       _textChanged(_launcherUrl, _saved.launcherUrl);
   bool get _launcherTokenChanged =>
@@ -369,7 +376,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// Which pages hold staged changes.
   Map<String, bool> get _changes => {
-        SettingsCategory.general: _modelChanged || _contextChanged,
+        SettingsCategory.general:
+            _modelChanged || _contextChanged || _temperatureChanged,
         SettingsCategory.connection: _serverChanged ||
             _keyChanged ||
             _hostsChanged ||
@@ -421,6 +429,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         themeMode: _saved.themeMode,
         allowHosted: _allowHosted,
         contextSize: canonicalContextSize(_contextSize.text),
+        temperature: _temperature,
         keepServerRunning: _keepServerRunning,
         allowApproximateLocation: _allowApproximateLocation,
         launcherUrl: _launcherUrl.text.trim(),
@@ -482,6 +491,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _contextNote = null);
   }
 
+  void _setTemperature(double? value) =>
+      _stage(() => _temperature = normalizeTemperature(value));
+
   void _discard() {
     _setText(_server, _saved.serverUrl);
     _setText(_key, _saved.apiKey);
@@ -493,6 +505,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _setText(_observatoryWebUrl, _saved.observatoryWebUrl);
     setState(() {
       _allowHosted = _saved.allowHosted;
+      _temperature = _saved.temperature;
       _keepServerRunning = _saved.keepServerRunning;
       _allowApproximateLocation = _saved.allowApproximateLocation;
       _cleartextKeyHosts = {..._saved.cleartextKeyHosts};

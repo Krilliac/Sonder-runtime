@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 480,
+      "file_count": 481,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -86,6 +86,7 @@
         "sonder_runtime/adapters/build/tree_reader.py",
         "sonder_runtime/adapters/chat_file_routing.py",
         "sonder_runtime/adapters/chat_observers.py",
+        "sonder_runtime/adapters/chat_temperature.py",
         "sonder_runtime/adapters/cheat_trial_runner.py",
         "sonder_runtime/adapters/claim_checker.py",
         "sonder_runtime/adapters/cli_options.py",
@@ -524,7 +525,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 426,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -886,6 +887,7 @@
         "sonder_runtime/application/session/query_export.py",
         "sonder_runtime/application/session/repair.py",
         "sonder_runtime/application/session/replay.py",
+        "sonder_runtime/application/session/temperature_settings.py",
         "sonder_runtime/application/session/trajectory.py",
         "sonder_runtime/application/session/transcript_export.py",
         "sonder_runtime/application/skill_discovery/__init__.py",
@@ -1047,7 +1049,7 @@
       ]
     },
     {
-      "file_count": 324,
+      "file_count": 325,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1320,6 +1322,7 @@
         "sonder_runtime/domain/runtime_policy/__init__.py",
         "sonder_runtime/domain/runtime_policy/rules.py",
         "sonder_runtime/domain/runtime_update_parsing.py",
+        "sonder_runtime/domain/sampling_temperature.py",
         "sonder_runtime/domain/scheduler_partition.py",
         "sonder_runtime/domain/schema_policy.py",
         "sonder_runtime/domain/security/__init__.py",
@@ -1377,7 +1380,7 @@
       ]
     },
     {
-      "file_count": 77,
+      "file_count": 78,
       "name": "interfaces",
       "python_files": [
         "sonder_runtime/interfaces/__init__.py",
@@ -1433,6 +1436,7 @@
         "sonder_runtime/interfaces/http/memory_replication.py",
         "sonder_runtime/interfaces/http/serve.py",
         "sonder_runtime/interfaces/http/serve_policy.py",
+        "sonder_runtime/interfaces/http/slash_call_arguments.py",
         "sonder_runtime/interfaces/http/sse.py",
         "sonder_runtime/interfaces/http/web_app.py",
         "sonder_runtime/interfaces/http/work_runs.py",

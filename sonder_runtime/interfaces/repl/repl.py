@@ -61,6 +61,7 @@ from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
 from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.interfaces.repl import command_router
 from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.repl import style as S
@@ -1741,6 +1742,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /logs [n]          show the last n records of this session's REPL log
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
+  /temp [0-2|auto]   show/set this session's sampling temperature (auto = model preset)
   /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
   /model [name|tier] list installed models and tiers; switch either one
   /cloud [status|on|off]  change process-local hosted/cloud consent
@@ -3081,7 +3083,7 @@ def _run_train(n):
     for t in tasks:
         print("  %s %s" % (_paint("PRACTICE", "teal", "bold"), t["name"]))
         # Practice runs are single-turn and must not pollute the user's chat thread.
-        resp = server.sonder(t["prompt"], session="none")
+        resp = server.sonder(t["prompt"], session="none", temperature=0.2)  # practice keeps its fixed 0.2
         iid = server.parse_interaction_id(resp)
         code = grounding.extract_code_block(resp)
         ok = False
@@ -4379,6 +4381,9 @@ def main(*, machine_output=False):
                                   % build_identity.VERSION)
                     elif cmd == "/clear":
                         _clear_terminal_scrollback()
+                    elif cmd == "/temp":
+                        # Kept with this session id; the next turn reads it.
+                        _emit(_chat_temperature.temp_command(arg, session_id))
                     elif cmd == "/trace":
                         apply_trace(_on_off(arg, trace))
                     elif cmd == "/strict":

@@ -66,6 +66,10 @@ class TurnRequest {
   final String project;
   final bool allowApproximateLocation;
 
+  /// The `session_temperature` to send: a number 0..2, `'auto'`, or null to
+  /// leave the session's value alone (see [SessionTemperatureSync]).
+  final Object? sessionTemperature;
+
   /// `'client'` asks the server not to inject its durable history (server
   /// S5). Set after a session rotation, so a cancelled first turn cannot be
   /// resurrected from the server side.
@@ -78,6 +82,7 @@ class TurnRequest {
     this.sessionId = '',
     this.project = '',
     this.allowApproximateLocation = false,
+    this.sessionTemperature,
     this.historyMode,
   });
 }
@@ -389,6 +394,7 @@ class _ApiTurn implements ChatTurn {
         sessionId: r.sessionId,
         project: r.project,
         allowApproximateLocation: r.allowApproximateLocation,
+        sessionTemperature: r.sessionTemperature,
         history: r.historyMode,
         cancel: _cancel,
       )) {
