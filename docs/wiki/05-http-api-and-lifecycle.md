@@ -1,17 +1,18 @@
 # HTTP API & Lifecycle
 
-The HTTP adapter (`sonder_serve.py`) is OpenAI-compatible for chat, plus a
-production lifecycle and admission layer (`sonder_lifecycle.py`).
+The HTTP adapter (`sonder_runtime/interfaces/http/serve.py`) is OpenAI-compatible
+for chat, plus a production lifecycle and admission layer
+(`sonder_runtime/adapters/web/lifecycle.py`).
 
 ## Endpoints
 
 | Method & path | Auth | Purpose |
 |---|---|---|
 | `GET /live` | none | Liveness — returns only `{"status":"alive"}`. |
-| `GET /ready` | loopback or key | Readiness — 200 only when serving and required deps healthy. |
-| `GET /health` | loopback or key | Process/dependency state, build, schemas, draining. |
-| `GET /version` | loopback or key | Build version + commit. |
-| `GET /metrics` | loopback or key | Prometheus exposition (or a disabled comment). |
+| `GET /ready` | key, or loopback peer with trusted `Host` | Readiness — 200 only when serving and required deps healthy. |
+| `GET /health` | key, or loopback peer with trusted `Host` | Process/dependency state, build, schemas, draining. |
+| `GET /version` | key, or loopback peer with trusted `Host` | Build version + commit. |
+| `GET /metrics` (path: `[observability].metrics_path`) | key, or loopback peer with trusted `Host` | Prometheus exposition (or a disabled comment). |
 | `POST /v1/chat/completions` | key | OpenAI-compatible chat. |
 | `GET /v1/models` | key | Route IDs plus exact chat-capable catalog models. |
 | `POST /v1/admin/drain` | admin | Begin graceful drain (idempotent). |
@@ -30,7 +31,10 @@ production lifecycle and admission layer (`sonder_lifecycle.py`).
 | `GET /v1/sessions` | admin | Durable sessions, newest activity first: `id`, redacted `title` (first user message, one line, at most 80 characters), `turns`, `events`, `created`, `updated`; `?limit=1..100` (default 20) and `?after=<next_cursor>`. Ids are storage ids, the same ones `/v1/sessions/<id>/{events,export,replay}` take. |
 | `GET /v1/sessions/<id>/transcript?format=md\|json` | admin | The whole chat from the durable event log (not the live history window): every `user.message` and `model.response` in sequence order, with the requested `tier` (`model.requested`), the answering `model` (`provider.responded`) and `model.failed` `error_code` per turn, redacted like `/export`. Same admin authorization as the other session routes; an id outside `[A-Za-z0-9_.-]{1,128}` is `400 invalid_session_id`, an unknown session `404 session_not_found`. The body is JSON (`sonder.http-session-transcript.v1`) with `markdown` (default) or `messages` (`format=json`), `message_count`, `truncated` and `truncated_reason` (`bytes` at 2 MiB of JSON-escaped text, or `events` after 50000 events scanned). The web app's "Copy link" (`<origin>/app/#/c/<id>`) and "Copy chat code" (`sonder:chat/<id>`) name the id this route takes. |
 | `GET /v1/sessions/<id>/export?format=atif` | admin | The same bounded, redacted export as an [ATIF-v1.7](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md) trajectory for Harbor / Terminal-Bench tooling (save it as `trajectory.json`): model calls are agent steps with per-step `metrics` (token usage, provider time) and `llm_call_count`, tool calls link to their observations by `tool_call_id`/`source_call_id`, and a delegated child session linked by a `subagent.*` event is embedded in `subagent_trajectories` (at most 16 children per export, 4 levels deep; beyond that the delegation step stays, unresolved). Every string passes the export redaction again. Without `format` (or with `format=sonder`) the body is the unchanged `sonder.session-export.v1` envelope; any other value is a `400`. An export with no representable step is `409 session_atif_unavailable`. |
-| `POST /v1/sonder/register` | bootstrap secret, or admin when additional registration is enabled | Create an account; `201 {"ok": true, "account": {...}, "message": "Account <u> created (role <r>)."}`. |
+| `POST /v1/sonder/register` | bootstrap secret, or admin when additional registration is enabled | Create an account (the first admin sends the `X-Sonder-Bootstrap-Secret` header); `201 {"ok": true, "account": {...}, "message": "Account <u> created (role <r>)."}`. |
+| `POST /v1/sonder/login` | none in `account`/`either`; the API key in `Authorization` in `api-key`/`both` (401 without it, `login_throttle_http.py:87-89`); throttled | Log in with `username` and `password`; returns `{"ok": true, "token": ..., "account": {...}}`. Send the token on later calls in `Authorization: Bearer` or `X-Sonder-Account-Token` (logout accepts only the latter). Procedure: [configure-authentication](../runbooks/configure-authentication.md). |
+| `POST /v1/sonder/logout` | account token in `X-Sonder-Account-Token` only (a token in `Authorization: Bearer` gets 401), plus the API key in `Authorization` in `api-key`/`both` (`serve.py:6579-6592`) | End the caller's account session. |
+| `POST /v1/sonder/admin/account` | admin | Change an account's `role`, `tier`, `dev_flags` or `banned` state for `username`. There is no HTTP account-list route. |
 | `GET /v1/sonder/feed` | any authorized caller | Owner-scoped live execution feed: the caller's own active and recently completed responses (category/name, state, elapsed, redacted summary, current operation). Never exposes prompts, tool arguments, paths, outputs, reasoning, or another principal's work. |
 | `GET /v1/client/schema` | any authorized caller | API-008 client/SDK schema envelope (`{"type":"client_schema","version":1,"schema":{...,"digest"},"streams":[{"stream_id","event_types"}]}`). `schema` is derived from the served typed tool catalog; clients cache it and advertise its `digest` on reconnect. `streams` lists the stream ids this server instance serves; they are outside the digest and change on every restart. |
 | `POST /v1/client/reconnect` | any authorized caller | API-007 reconnect plan for a `{"type":"reconnect","version":1,...}` body: a stale or missing `schema_digest` returns `refresh_schema` (a malformed one is a 400), a known stream resumes from its watermark in batches of at most `batch_limit` with `has_more`, and an unknown stream or out-of-range watermark is `rejected`. The only stream is the in-memory `control.<instance>` stream of `control.snapshot` permission-mode events. It gets a new id and restarts at sequence 1 with the process, so a cursor from before a restart is `rejected` as an unknown stream and the client refetches the schema for the new id. A malformed body is a 400. |
@@ -66,10 +70,28 @@ work intents, ensemble and fanout (developer only) stay on Ollama. A rejected
 `Origin` gets 403 with `"code": "forbidden_origin"`.
 
 `/live` may be unauthenticated so an external check never needs the key;
-everything else requires the bearer key unless the peer is loopback (the
-reverse proxy restricts those paths to loopback upstream).
+everything else requires credentials when any are configured, with two
+exceptions on the account routes. `POST /v1/sonder/login` needs no
+credential in `account` and `either` mode (it answers the API-key check only
+in `api-key` and `both` mode: `adapters/web/login_throttle_http.py:87-89`),
+because it is how an account obtains its token. `POST /v1/sonder/register` is
+reachable without credentials only for the very first account, which becomes
+admin and must present the one-time bootstrap secret in
+`X-Sonder-Bootstrap-Secret` (`admin_auth.py:210-226`); every later
+registration is refused unless registration is enabled and the caller is an
+authenticated admin (`admin_auth.py:227-233`). Both routes are throttled. The `/ready`,
+`/health`, `/version` and metrics routes (the metrics path is
+`[observability].metrics_path`, default `/metrics`) skip the key only for a
+loopback peer that also sent a trusted `Host`; every other peer needs
+credentials. With no key and no account requirement (`local-open`) nothing is
+authenticated and every caller is admin and developer, so such a listener must
+never sit behind a proxy ([secure-remote-access](../runbooks/secure-remote-access.md)).
+A reverse proxy on the same host makes every remote caller a loopback peer, so
+it must forward only `/live` and `/v1/*`.
 
-**Host allowlist (DNS-rebinding defence).** Before any routing, the `Host`
+## Host names and `421 HOST_NOT_ALLOWED`
+
+This is the one home for the `Host` rules. Before any routing, the `Host`
 header is checked. DNS rebinding needs a hostname the attacker controls and a
 listener that answers without credentials, so:
 
@@ -81,7 +103,7 @@ listener that answers without credentials, so:
   computed once at startup from `gethostname`/`getfqdn` (the FQDN lookup is
   bounded to one second and dropped if it does not finish);
 - `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` entries are accepted
-  (`name` on any port, `name:port` on that port only);
+  (`name` on any port, `name:port` on that port only; at most 64 entries);
 - any other well-formed name is accepted when the listener requires
   credentials (`api-key`, `account`, `both` or `either`), because a rebinding
   page holds none; in the unauthenticated `local-open` mode it is refused.
@@ -93,8 +115,32 @@ most once a minute per name. Malformed or repeated `Host` headers are always
 refused; a request with no `Host` header (HTTP/1.0 tooling; browsers always
 send one) is accepted. A name accepted only because credentials are required
 does not earn the loopback-peer conveniences: through it, `/ready`, `/health`,
-`/version` and `/metrics` need the key even from a local browser, and the
-local log page is not served.
+`/version` and the metrics path need the key even from a local browser, and
+the local log page is not served.
+
+Consequences for proxies (2026-11-20): a proxy that forwards the public `Host`
+(Caddy's default) works against a credentialed listener with no
+`allowed_hosts` entry and gets a `421` against a `local-open` one; do not
+"fix" the latter by listing the name, because that would publish an
+unauthenticated admin API. A proxy that rewrites `Host` to `127.0.0.1:<port>`
+(the nginx reference) is accepted as an IP literal. Code:
+`sonder_runtime/interfaces/http/host_policy.py:180-232`.
+
+**CORS.** Browser callers get `Access-Control-Allow-Origin` for origins in
+`[server].cors_origins` (TOML, `config.py:158`) or `SONDER_CORS_ORIGINS`
+(comma-separated; exact match). A literal `*` is kept by the canonical config
+path (`config.py:1562-1568`) but never matches an `Origin`, so it grants
+nothing (the direct-entrypoint parser drops it, `serve.py:727-732`). Two other
+grants exist: a read-only, GET-only route-scoped grant for the telemetry
+routes to origins in `[observability].live_export_origins` or
+`SONDER_OBSERVATORY_ORIGINS` (`serve.py:4843-4846`), and a same-origin
+allowance for the bundled web app when it is enabled (`serve.py:4952`). Allowed request
+headers: `Content-Type`, `Authorization`, `X-Sonder-Account-Token`,
+`X-Sonder-Bootstrap-Secret`, `X-Sonder-App-Control`, `X-Sonder-Spanda`,
+`Idempotency-Key`, `Accept`, `Cache-Control`, `Last-Event-ID`. Exposed
+response headers: `X-Sonder-Elapsed-Ms`, `X-Sonder-Correlation-Id`,
+`X-Sonder-Spanda-Rsc`, `X-Sonder-Spanda-Clusters`, `X-Sonder-Spanda-Decision`,
+`X-Sonder-Spanda-Uncertain`. A proxy must not strip or reject `Origin`.
 
 **Client address.** `X-Forwarded-For` is consulted only when
 `tls_terminated_by_proxy = true` *and* the socket peer is inside

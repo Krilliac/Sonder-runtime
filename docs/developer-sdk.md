@@ -5,6 +5,28 @@ typed tool calls, structured errors, and declarative plugin manifests. It is a
 projection over the runtime's generated catalogs and tool gateway; it is not a
 second executor or permission system.
 
+**The SDK is in-process only (2026-11-20).** It runs inside a Python process
+that already holds a composed runtime. It ships no HTTP, MCP, or other remote
+transport: `GatewayTransport` is the only bundled transport that reaches a
+runtime, and it accepts only a `ToolApplicationFacade` (see below).
+`CallableTransport` only adapts callables you supply. A program in another process or on
+another machine should call the runtime's HTTP API instead; see
+[HTTP API & lifecycle](wiki/05-http-api-and-lifecycle.md) and, for a remote
+host, [Connect clients](runbooks/connect-clients.md).
+
+## What the facade is and where it comes from
+
+`tool_facade` below is a
+`sonder_runtime.application.tools.facade.ToolApplicationFacade`. The SDK does
+not create one. A host composes it with `ToolApplicationFacade.compose(...)`;
+the packaged runtime does this in `build_runtime()`
+(`sonder_runtime/adapters/runtime_container.py`) and carries the result as the
+`tools` field of the returned `Runtime` (the field is `None` when the runtime
+was composed without it). `GatewayTransport` raises `TypeError` for any other
+object, and also when `request_factory` is not callable. The public import
+surface is `sonder_runtime.sdk`, which re-exports the implementation in
+`sonder_runtime/interfaces/sdk/`.
+
 ## Minimal in-process use
 
 ```python
@@ -31,10 +53,11 @@ else:
     print(result.error.code, result.error.message, result.error.retryable)
 ```
 
-For HTTP, MCP, or another provider, implement the two-method `SdkTransport`
-protocol (`discover()` and `invoke(request)`) or wrap callables with
-`CallableTransport`. The client validates discovered tool schemas before it
-sends a request and rejects mismatched response IDs.
+To reach the runtime through another path, implement the two-method
+`SdkTransport` protocol (`discover()` and `invoke(request)`) or wrap callables
+with `CallableTransport`; no such HTTP or MCP transport is bundled. The
+client validates discovered tool schemas before it sends a request and rejects
+mismatched response IDs.
 
 ## Compatibility and safety contracts
 

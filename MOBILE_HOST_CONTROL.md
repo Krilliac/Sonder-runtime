@@ -33,11 +33,52 @@ for single-user desktops, but it prints a `WARNING: ... WITHOUT
 authentication` line on stderr at startup: any local process or user can then
 start, stop, and restart Sonder through it. Set a token on shared machines.
 
-The launcher checks the `Host` header the same way the main server does, to
-stop DNS-rebinding pages in a local browser from driving it: IP addresses and
-the PC's own names are accepted on any port, and any other name is accepted
-only when a token is set or the name is listed in the comma-separated
-`SONDER_LAUNCHER_ALLOWED_HOSTS`. Otherwise it answers `421 HOST_NOT_ALLOWED`.
+The launcher checks the `Host` header with the same policy as the main
+server, to stop DNS-rebinding pages in a local browser from driving it. The
+main server's rules, and the `421 HOST_NOT_ALLOWED` answer, are described in
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
+The launcher has its own allowlist variable: any other name is accepted only
+when a token is set or the name is listed in the comma-separated
+`SONDER_LAUNCHER_ALLOWED_HOSTS`; otherwise the launcher answers
+`421 HOST_NOT_ALLOWED` and its `remedy` names that variable.
+
+## Launcher environment and flags
+
+Checked against `sonder_launcher.py` on 2026-11-20. A flag, when it exists,
+overrides the variable.
+
+| Variable | Flag | Default | Meaning |
+|---|---|---|---|
+| `SONDER_LAUNCHER_HOST` | `--host` | `127.0.0.1` | Address the launcher listens on. Any non-loopback value needs a token and TLS (below). |
+| `SONDER_LAUNCHER_PORT` | `--port` | `11436` | Launcher port. |
+| `SONDER_LAUNCHER_TOKEN` | `--token` | empty | Bearer token for host control. At least 24 characters for a non-loopback bind. With no token, only loopback peers are accepted. |
+| `SONDER_LAUNCHER_CERT`, `SONDER_LAUNCHER_KEY` | `--cert`, `--key` | empty | PEM certificate chain and private key. Both or neither; one alone is rejected at startup. TLS 1.2 or later. |
+| `SONDER_HOST`, `SONDER_PORT` | `--server-host`, `--server-port` | `127.0.0.1`, `11435` | The managed Sonder API the launcher starts and probes. The host must be loopback, or the launcher refuses to start. |
+| `SONDER_LAUNCHER_ALLOWED_HOSTS` | none | empty | Extra `Host` names to accept when no token is set. Comma-separated; a malformed entry is dropped with a message on stderr. |
+| `SONDER_LAUNCHER_DB` | none | `<SONDER_HOME or the platform default>/run/sonder-launcher-operations.sqlite3` | Operation ledger path. For the standalone launcher this override always applies; `SONDER_HOME` only changes the default location. |
+| `SONDER_LAUNCHER_COMMAND_JOURNAL` | none | `sonder-launcher-command-journal.jsonl` beside the ledger | Command-acknowledgement journal path. |
+| `SONDER_LAUNCHER_START_TIMEOUT` | none | `1860` seconds (31 minutes) | Start and Restart time limit. Values are clamped to 1 second up to the default, so this can shorten the limit but not raise it. |
+| `SONDER_LAUNCHER_STOP_TIMEOUT` | none | `60` seconds | Stop time limit, clamped the same way. |
+| `SONDER_LAUNCHER_OPERATION_RETENTION` | none | `100` | Operations kept in the ledger; clamped to 1 through 1000. |
+| `SONDER_LAUNCHER_QUIET` | none | unset | `1` silences the per-request log lines. |
+| `SONDER_LAUNCHER_HEALTH_TOKEN` | none | generated | Optional. Secret the launcher uses to verify the Sonder server's identity. If set it must be at least 32 characters, and it must equal the persisted token when one already exists. Normally leave it unset: the launcher creates a private token file `sonder-launcher-health.token` beside the ledger. The launcher passes it to the managed Sonder server it starts; the runtime then strips it from the environments of tool and command child processes. |
+
+Other flags: `--allow-insecure-http-for-development` (plaintext on a
+non-loopback bind; see below) and `--generate-token` (print a random token and
+exit).
+
+Startup rules: a non-loopback `--host` without a token of 24 or more
+characters is refused; a certificate without a key (or the reverse) is refused;
+a non-loopback `--host` without a certificate is refused unless
+`--allow-insecure-http-for-development` is given. A refusal prints
+`ERROR: <reason>` on stderr and exits with status 2.
+
+The launcher serves these routes (`GET /` is also answered as status): `GET /v1/launcher/status`,
+`GET /v1/launcher/operations/<operation-id>`,
+`POST /v1/launcher/start`, `POST /v1/launcher/stop`,
+`POST /v1/launcher/restart` and `POST /v1/launcher/commands/ack`. Any other
+path is a `404`; a wrong or missing token is a `401`. The token is accepted
+as `Authorization: Bearer <token>` or as an `X-Sonder-Launcher-Token` header.
 
 ## Windows host setup
 
@@ -52,6 +93,13 @@ setx SONDER_AUTH_MODE "api-key"
 setx SONDER_LAUNCHER_CERT "C:\path\fullchain.pem"
 setx SONDER_LAUNCHER_KEY "C:\path\privkey.pem"
 ```
+
+`C:\pathullchain.pem` and `C:\path\privkey.pem` are a PEM certificate chain
+and its private key for the name the phone connects to; the launcher serves TLS
+itself and is not behind Caddy. A phone needs a publicly trusted certificate
+(Caddy's `tls internal` root is not trusted by the Android app). Where to
+obtain one, and the renewal restart, are in
+[secure remote access](docs/runbooks/secure-remote-access.md#where-the-launchers-certificate-comes-from).
 
 `setx` updates future command windows, not this one. Close this terminal and
 open a new terminal in the repository (or set the same variables in the
@@ -69,6 +117,20 @@ entry. Remove it with:
 ```bat
 sonder-launcher-autostart.cmd uninstall
 ```
+
+To confirm the launcher is up, run this on the host in a second terminal
+(replace `LAUNCHER_TOKEN`). Expect a JSON status object; a `401` means the
+token is wrong:
+
+```powershell
+curl.exe -k -H "Authorization: Bearer LAUNCHER_TOKEN" https://127.0.0.1:11436/v1/launcher/status
+```
+
+`-k` is needed only because the certificate names the public name, not
+`127.0.0.1`. To undo the setup, run `sonder-launcher-autostart.cmd uninstall`,
+stop the launcher process, and remove each `setx` variable from your user
+environment (Settings, System, About, Advanced system settings, Environment
+Variables).
 
 Open the TLS reverse-proxy port (normally `443`) and TLS launcher port `11436`
 only for the trusted private network or VPN. Never open or port-forward the
@@ -108,29 +170,24 @@ In **Settings → Connection**, enter:
 
 ### Reaching the PC from a phone
 
-Connect by address when you can: `https://192.168.1.20`, a Tailscale `100.x`
-address, or `http://10.0.2.2:11435` from the Android emulator (or
-`127.0.0.1:11435` after `adb reverse tcp:11435 tcp:11435`). IP addresses are
-accepted on any port, as are the PC's own names (host name, FQDN,
-`<hostname>.local`). Other names, such as a Tailscale MagicDNS name or a proxy
-name, are accepted whenever the server requires credentials (`SONDER_API_KEY`
-or accounts). Only an unauthenticated `local-open` server refuses them with
-`421 HOST_NOT_ALLOWED`; the response names the fix, which is to connect by IP
-or add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` on the PC.
-See the [server-private install runbook](docs/runbooks/install-server-private.md)
-for proxies that keep the `Host` name.
+Connect by address when you can: `https://192.0.2.10` (a documentation
+address; use your PC's), a Tailscale `100.x` address, or
+`http://10.0.2.2:11435` from the Android emulator (or `127.0.0.1:11435` after
+`adb reverse tcp:11435 tcp:11435`). Which names the server accepts, and the
+`421 HOST_NOT_ALLOWED` fix, are in
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
+Proxies that keep the `Host` name are covered in the
+[server-private install runbook](docs/runbooks/install-server-private.md). The
+app's own rules for sending the API key over plain HTTP are only in the
+[app README](app/README.md#connecting-a-phone-to-the-pc).
 
 ### Approving a refused change from the phone
 
-In `manual` mode a file change or host program asked for over HTTP is refused,
-because nobody is at the console to answer the prompt. The chat reply keeps
-its text, and `sonder_receipt.refusal` names the refused call (`tool`,
-`call_id`, `reason`, `remedies`). A developer or administrator can approve
-exactly that call once with `POST /v1/approvals/<call_id>` (body `{}` or
-`{"ttl_seconds": 900}`); then send the same request again. The approval runs
-the unchanged call once, expires, and leaves the mode as it was. Changing any
-argument needs a new approval. `GET /v1/approvals` lists what is waiting,
-and `POST /v1/approvals/revoke/<nonce>` withdraws an approval. See
+In `manual` mode a file change or host program asked for over HTTP is refused
+because nobody is at the console; the chat reply's `sonder_receipt.refusal`
+names the call. A developer or administrator approves exactly that call once
+and the same request is then sent again. The endpoints, body, expiry and
+revocation are in
 [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
 
 Save, open **System**, and verify that **Host Launcher** says `ready`. The
@@ -151,8 +208,9 @@ Restart performs a complete verified Stop transition before starting the new
 process, avoiding a race with the old listener.
 
 Operations and their bounded output are stored in the per-user
-`run/launcher-operations.sqlite3` ledger, so an app reconnect can inspect the
-same operation. `SONDER_LAUNCHER_DB` can override that location. Only one
+`run/sonder-launcher-operations.sqlite3` ledger, so an app reconnect can
+inspect the same operation. `SONDER_LAUNCHER_DB` always overrides that
+location for the standalone launcher (see the table above). Only one
 operation may be active. Each submitted action carries an idempotency key, so a
 transport retry of that same request returns the original operation; overlapping
 actions are rejected. If acknowledgement is lost, refresh status before tapping
@@ -213,7 +271,11 @@ flutter create --org com.sonder --project-name sonder .
 python ../scripts/configure_flutter_networking.py . --allow-android-cleartext-for-development
 ```
 
-Omit that development-only flag for every distributed build. The same script
+Omit that development-only flag for every distributed build. A build made
+this way sends the API key to a plain-HTTP host only after the person allows
+that exact `host:port` in the app's Settings (see the
+[app README](app/README.md#connecting-a-phone-to-the-pc)); without that, the
+app withholds the key and the server answers `401`. The same script
 adds Apple's local-network usage explanation when an iOS or macOS native project
 exists. Android's generated manifest already includes the required Internet
 permission.
@@ -230,6 +292,11 @@ From the host:
 ```sh
 python sonder_launcher.py --host 127.0.0.1
 ```
+
+Expect `Sonder launcher listening on http://127.0.0.1:11436`, plus the
+`WARNING: ... WITHOUT authentication` line when no token is set. If startup
+prints `ERROR: ...` and exits with status 2, the message names the rule from
+[Launcher environment and flags](#launcher-environment-and-flags) that failed.
 
 From another trusted machine, replace the token and host:
 
@@ -265,7 +332,8 @@ implementation work is tracked only in the
 | Wake-on-LAN | Unsupported | The host must be powered on with the launcher already running. |
 | Reaching the main server by IP, emulator alias, or the PC's own name | Implemented | Any port; other names need credentials on the server or an `allowed_hosts` entry. |
 | Approving one refused call from the phone | Implemented | Developer or administrator credential; one exact pending call, once, expiring. |
-| Launcher `Host` allowlist | Implemented | Same policy as the main server; without a token, other names need `SONDER_LAUNCHER_ALLOWED_HOSTS`. |
+| Launcher `Host` allowlist | Implemented | Same policy as the main server ([rules](docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed)); without a token, other names need `SONDER_LAUNCHER_ALLOWED_HOSTS`. |
+| Raising the launcher start or stop time limit by environment | Unsupported | `SONDER_LAUNCHER_START_TIMEOUT` and `SONDER_LAUNCHER_STOP_TIMEOUT` are clamped to at most the defaults (1860 s and 60 s). |
 | Automatic operating-system firewall changes | Unsupported | Open only the TLS proxy and launcher ports yourself. |
 | Setup engine, Git updates, or local training from client-only devices | Unsupported | These operations require direct host file access. |
 | Mobile stream resume and desktop-equivalent durable state | Proposed | API-007; bounded reconnect shares the typed protocol graph, but full parity is not a current contract. |

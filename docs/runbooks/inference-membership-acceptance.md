@@ -16,8 +16,8 @@ advertisement ceiling of at most 4,096 is not a 4,096-worker scheduler.
 Use disposable hosts, an isolated private network and test-only prompts. Have
 the owning operator authorize the exact coordinator, registry and workers.
 Do not reuse a production identity, state directory, model prompt, credential,
-listener or DNS zone. Do not synchronize any existing Node1 workspace or change
-an installed runtime for this procedure.
+listener or DNS zone. Do not synchronize any existing workspace on another
+host or change an installed runtime for this procedure.
 
 Provision the following and record their revisions in the evidence record:
 

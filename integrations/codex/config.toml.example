@@ -4,14 +4,19 @@
 # path to your checkout. On Windows the interpreter is
 # <SONDER_DIR>\venv\Scripts\python.exe; on Linux/macOS it is
 # <SONDER_DIR>/venv/bin/python. Use the venv interpreter, not a system python.
+# PYTHONPATH below is required: sonder_runtime is not installed into the venv and
+# the client does not start the server in the checkout, so without it the server
+# fails with "No module named sonder_runtime".
 
 [mcp_servers.sonder]
 command = '<SONDER_DIR>/venv/bin/python'
-args = ['<SONDER_DIR>/server.py']
+args = ['-m', 'sonder_runtime', 'mcp']
 # First start may pull an embedding model, so allow generous startup.
 startup_timeout_sec = 120.0
 
 [mcp_servers.sonder.env]
+# Single quotes (TOML literal string) so Windows backslashes are not escapes.
+PYTHONPATH = '<SONDER_DIR>'
 # --- tier -> model. setup_alias.py creates this hardware-sized stable alias. ---
 SONDER_FAST = "sonder:latest"
 SONDER_CODE = "sonder:latest"
@@ -28,6 +33,7 @@ SONDER_GENERAL = "sonder:latest"
 # SONDER_NUM_THREAD = "8"
 SONDER_NUM_BATCH = "512"
 # Longer keeps models resident between turns; shorten it if RAM is tight.
+# 5m is an example; the code default is 2m.
 SONDER_KEEP_ALIVE = "5m"
 
 # --- learning loop ---

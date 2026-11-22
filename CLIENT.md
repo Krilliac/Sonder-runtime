@@ -32,19 +32,22 @@ weights because those stay on the host.
 2. **Fully local.** Clone the repo and run Sonder Runtime on your own
    machine — the `sonder` REPL / `sonder.cmd` (Windows). See
    [README.md → Quick start](README.md#quick-start).
-3. **Integrated with Claude Code, via MCP.** `server.py` is registered as
-   the `sonder-runtime` MCP server; Claude Code calls `sonder(...)`,
-   `offload(...)`, etc. directly as tools. See [README.md →
-   Key capabilities](README.md#key-capabilities).
+3. **Integrated with Claude Code, via MCP.** Register
+   `python -m sonder_runtime mcp` as the `sonder-runtime` MCP server; Claude
+   Code then calls `sonder(...)`, `offload(...)`, etc. directly as tools. Setup
+   steps for each MCP client are in
+   [Connect clients](docs/runbooks/connect-clients.md); the tool list is in
+   [README.md → Key capabilities](README.md#key-capabilities).
 
 This doc covers #1.
 
 ## Requirements
 
-**Python 3** (any recent 3.x) and a checkout of this repository (a Git clone
-or an extracted source archive). The client imports only the standard library
-and the checkout's `sonder_runtime` package, so no virtual environment, pip
-installs, or Ollama are required.
+The same Python as the runtime (3.11 or later; see
+[README.md → Requirements](README.md#requirements)) and a checkout of this
+repository (a Git clone or an extracted source archive). The client imports
+only the standard library and the checkout's `sonder_runtime` package, so no
+virtual environment, pip installs, or Ollama are required.
 
 ## Get the client
 
@@ -82,20 +85,35 @@ python sonder_client.py
 ```
 
 Or use the `sonder-remote.cmd` wrapper if you have the repo checked out
-locally (`sonder-remote.cmd` just calls `venv\Scripts\python.exe
-sonder_client.py` with the same environment variables).
+locally. It runs `sonder_client.py` with the same environment variables, using
+the first of these that applies: the interpreter named by `SONDER_PYTHON`;
+otherwise the checkout's `venv\Scripts\python.exe` when that file exists and
+runs; otherwise `python` from `PATH`.
+
+`sonder.cmd` (the full local REPL launcher) can also end up in this thin
+client, but only after it has set up the local machine. It always runs
+`sonder_headless.py engine` first (skipped only when
+`SONDER_TERMINAL_BOOTSTRAP=0`) and starts the local server second (skipped
+only when `SONDER_TERMINAL_START_SERVER=0`). If Ollama is unreachable, the
+engine step fails and `sonder.cmd` exits with status 2 before it reaches the
+client. Only then, when `SONDER_SERVER` is set and `SONDER_TERMINAL_REMOTE` is
+not `0`, does it switch to `sonder_client.py`. With
+`SONDER_TERMINAL_REMOTE=0` it ignores `SONDER_SERVER` and stays local. On a
+client-only machine, use `sonder-remote.cmd`, or set
+`SONDER_TERMINAL_BOOTSTRAP=0` and `SONDER_TERMINAL_START_SERVER=0` before
+running `sonder.cmd`.
 
 If the hosted server is unreachable, the client automatically retries the local
 server at `SONDER_LOCAL_FALLBACK` (default `http://127.0.0.1:11435`) and
-prints a warning before the reply. Set `SONDER_FALLBACK_LOCAL=0` to disable
-that fallback. HTTP errors from the hosted server, such as bad API keys or
-account bans, do not fall back.
+prints a warning before the reply. The fallback request carries no API key:
+the client sends an empty key to the local server, never the hosted one. Set
+`SONDER_FALLBACK_LOCAL=0` to disable that fallback. HTTP errors from the hosted
+server, such as bad API keys or account bans, do not fall back.
 
-If the server answers `421 HOST_NOT_ALLOWED`, it is an unauthenticated
-`local-open` server that does not know the name in your URL. Use its IP
-address, or add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS`
-on the server. A server that requires an API key or accounts accepts any
-name.
+A `421 HOST_NOT_ALLOWED` answer means the server does not accept the name in
+your URL; connect by IP address or add the name to the server's allowlist. The
+rules are in
+[HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
 
 A reply that begins `refused /write:` (or another tool) was stopped by the
 server's permission mode because nobody was at its console to answer the
@@ -140,7 +158,8 @@ workspaces. Anyone who has its API key and URL can invoke the configured tool
 surface and consume host resources. Treat the key like a privileged password:
 
 - Keep it out of shell history / dotfiles committed to git.
-- Rotate it in `/etc/sonder/sonder.env` and restart `sonder` if it leaks.
+- If it leaks, rotate it with `python -m sonder_runtime rotate-key`; see
+  [Rotate credentials](docs/runbooks/rotate-credentials.md).
 - Never send the key over plaintext HTTP except to a loopback address. Remote
   clients must use HTTPS through the documented reverse proxy. The thin client
   enforces this: with a key set it refuses a non-loopback `http://` server,

@@ -2,12 +2,19 @@
 
 Two layers, deliberately separate:
 
-1. **Production configuration** (`sonder_config.py`) — typed, validated,
-   **fail-closed**, read once at startup. Governs bind, auth, TLS, limits,
-   state paths, features, capacity, observability, backups.
-2. **Runtime policy** (`runtime_policy.py`) — hot-reloadable JSON that
-   selects model aliases, routing lanes, and NPU modes. It can **never**
-   widen network, filesystem, credential, or cloud permissions.
+1. **Production configuration** (`sonder_runtime/platform/config.py`) — typed,
+   validated, **fail-closed**, read once at startup. Governs bind, auth, TLS,
+   limits, state paths, features, capacity, observability, backups. The root
+   `sonder_config.py` only re-exports it for older callers; edit nothing there.
+2. **Runtime policy** (`sonder_runtime/adapters/runtime_policy.py`) —
+   hot-reloadable JSON that selects model aliases, routing lanes, and NPU
+   modes. It can **never** widen network, filesystem, credential, or cloud
+   permissions.
+
+This page is the one home for: precedence, where the state home lives, the
+secrets list, and the `[ollama]` key / environment / range table. Other pages
+link here instead of repeating them. Facts below were re-checked against the
+code on 2026-11-20.
 
 ## Model lists and defaults
 
@@ -71,20 +78,168 @@ Lowest to highest:
 
 ```
 built-in safe defaults
-  < profile TOML (/etc/sonder/sonder.toml)
-  < secrets env file (/etc/sonder/sonder.env, mode 0600)
+  < profile TOML (sonder.toml)
+  < secrets env file (sonder.env, mode 0600 on POSIX)
   < process environment (SONDER_* / OLLAMA_*)
   < explicit --set command-line overrides
 ```
 
+(`platform/config.py` module docstring and `load_config`.) The paths
+`/etc/sonder/...` used elsewhere on this page are the Linux server layout of
+`packaging/`; nothing in the code requires them.
+
 Validation collects **all** errors and reports them together; no listener
 opens until every mandatory check passes. Secrets are **never** accepted
-in TOML — a secret key there is a validation error.
+in TOML: a secret key there is a validation error.
+
+Where the files come from, per file, first match wins (`__main__.py`
+`_configured_path`):
+
+1. The explicit flag, `--config <file>` or `--secrets <file>`.
+2. The environment variable `SONDER_CONFIG` or `SONDER_SECRETS`.
+3. `sonder.toml` or `sonder.env` inside the [state home](#state-home), but
+   only if that file exists.
+
+An explicit path (flag or variable) that is missing is an error
+(`configuration file not found`, `secrets file not found`). The auto-found
+files are optional: with none present, built-in defaults apply. `serve`,
+`repl`, `mcp`, `config`, `status`, `diagnostics`, `migrate` and the other
+subcommands that accept the flags all resolve them the same way.
 
 ```bash
 python -m sonder_runtime config --config /etc/sonder/sonder.toml \
     --secrets /etc/sonder/sonder.env      # prints the effective, redacted config
 ```
+
+```powershell
+python -m sonder_runtime config           # uses <state home>\sonder.toml / sonder.env if present
+```
+
+Expected: the effective configuration with secrets redacted, and a `sources`
+list showing which of `defaults`, the TOML path, the secrets path,
+`environment` and `command-line` contributed. A non-zero exit with a list of
+validation errors means nothing was started; fix every listed line, then rerun.
+
+### `--set` overrides
+
+`--set section.key=value` (repeatable) is the highest layer. Rules
+(`config.py` `_apply_overrides`):
+
+- The key must match `section.key` in lowercase letters and underscores, and
+  the section must be one of the typed sections (`server`, `state`, `ollama`,
+  `features`, `capacity`, `observability`, `backup`, ...).
+  `[compute]` and `[memory_replication]` are **not** settable this way, so
+  `--set compute.worker_memory_budget_bytes=...` is refused; put them in the
+  TOML.
+- Booleans are strict: `true/false/yes/no/on/off/1/0`. Anything else is an
+  error (the environment readers are lenient and treat a typo as false;
+  `--set` is not).
+- Lists (tuple settings such as `ollama.workers`) are comma-separated.
+- Integers and floats must parse; non-finite floats are refused.
+
+### Secrets
+
+Secrets arrive only through the secrets file or the process environment.
+`SECRET_ENV_KEYS` (`config.py`) lists them, and they are also scrubbed from
+child-process environments:
+
+```text
+SONDER_API_KEY                                  SONDER_AUTH_SECRET
+SONDER_ARTIFACT_TRANSFER_KEY                    SONDER_ARTIFACT_MOBILITY_PEER_KEY
+SONDER_MEMORY_REPLICATION_KEY                   SONDER_MEMORY_REPLICATION_STATE_INTEGRITY_KEY
+SONDER_MEMBERSHIP_CLIENT_CERT_FILE              SONDER_MEMBERSHIP_CLIENT_KEY_FILE
+SONDER_LAUNCHER_HEALTH_TOKEN                    SONDER_CONTROL_STATE_REHEARSAL_API_KEY
+SONDER_HEALTH_ALERT_NTFY_URL                    SONDER_BACKUP_KEY_FILE
+```
+
+- `SONDER_BACKUP_KEY_FILE` is on the list only so it is scrubbed. A non-empty
+  value **fails configuration**: backups are not encrypted or key-authenticated.
+  Unset it and protect the backup target with filesystem permissions or an
+  encrypted volume.
+- `SONDER_BOOTSTRAP_SECRET` is not in that list and is read from the
+  **process environment only** (`admin_auth.py`, `_bootstrap_secret`), never
+  from the secrets file. It must be at least 16 characters and gates creation
+  of the first (admin) account from a non-local request. See
+  [Configure authentication](../runbooks/configure-authentication.md).
+- Secrets file format: one `KEY=VALUE` per line, `#` comment lines, blank
+  lines ignored, one pair of matching single or double quotes around a value is
+  stripped, and control characters in the file are rejected
+  (`config_environment.py` `parse_env_file`). A line without `=` fails with
+  `expected KEY=VALUE`.
+- The 0600 mode check (no group/world bits) is enforced on **POSIX only**.
+  On Windows keep the file in a folder only your account can read; Sonder does
+  not check it.
+
+## State home
+
+One place decides where Sonder keeps its databases, sessions, `sonder.toml`,
+`sonder.env`, `model_lists.json`, `prompts/`, `web_app/` and
+`references/references.sqlite`. Other pages link here.
+
+`default_home()` (`platform/paths.py`) resolves, strongest first:
+
+1. A home set inside the process by `configure_home` (the runtime calls it
+   with `[state].home` once the configuration has loaded).
+2. `SONDER_STATE_HOME`.
+3. `SONDER_HOME`.
+4. The per-OS default:
+
+| OS | Default state home |
+|---|---|
+| Windows | `%LOCALAPPDATA%\sonder`, else `%APPDATA%\sonder`, else `%USERPROFILE%\AppData\Local\sonder`, else `%SystemDrive%\Sonder` |
+| Linux | `$XDG_DATA_HOME/sonder`, else `~/.local/share/sonder` |
+| macOS | `~/Library/Application Support/sonder`; an existing `~/.local/share/sonder` is kept while the native folder does not exist yet |
+
+Caveats:
+
+- **One order everywhere.** The configuration loader and `default_home()` both
+  resolve the environment through `env_home_override`
+  (`platform/paths.py:157-167`): `SONDER_STATE_HOME` first, then `SONDER_HOME`,
+  blank values counting as unset (the loader calls it at `platform/config.py:1597`).
+  With a loaded configuration (`serve`, the console, `rotate-key`) the merged
+  environment is applied after the TOML (`config.py:2543`), so either variable
+  **overrides `[state].home`**; only then does `_configure_typed_home` call
+  `configure_home` (`__main__.py:1176-1177`). Strongest first:
+  `SONDER_STATE_HOME`, `SONDER_HOME`, `[state].home`, per-OS default. Commands
+  that load no configuration (for example `update`) use the same order through
+  `default_home()`. If both variables are set to different values the first
+  wins everywhere; set only one to avoid confusion.
+- **The config files are found before the TOML loads.** `sonder.toml` and
+  `sonder.env` are looked up in `default_home()` as resolved from the process
+  and environment alone. So `[state].home` in the TOML moves the state but not
+  the place the TOML itself is found. To keep both together, set `SONDER_HOME`
+  in the process environment, or pass `--config`/`--secrets` explicitly.
+- **`SONDER_DB` wins.** `SONDER_DB` (the memory database) is honoured even when
+  a home is configured. The per-store variables `SONDER_AUTOPILOT_DB`,
+  `SONDER_FLEET_DB` and the other `SONDER_*_DB` are ignored whenever a typed
+  home is in effect under the runtime. A typed home exists when `[state].home`
+  is set in the TOML, and also when `SONDER_HOME` or `SONDER_STATE_HOME` is set
+  in the environment alone, because the loader copies it into `state.home`
+  (`platform/config.py`, `_apply_environment`) and the entry point then calls
+  `configure_home` (`__main__.py`, `_configure_typed_home`). Only with no home
+  variable and no `[state].home` do the per-store variables apply
+  (`paths.py` `state_path`; `adapters/persistence/migrations.py`).
+- `SONDER_FILE_ROOTS` (separated by `os.pathsep`: `;` on Windows, `:` on
+  POSIX) **replaces** `[state].workspace_roots` when set.
+- Other `[state]` defaults: `minimum_free_disk_bytes` 5368709120,
+  `sqlite_busy_timeout_ms` 5000, `auto_workspace` true,
+  `default_workspace_root` empty meaning `%USERPROFILE%\Sonder\workspaces` on
+  Windows or `~/Sonder/workspaces` elsewhere.
+
+Check it:
+
+```powershell
+python -c "from sonder_runtime.platform import paths; print(paths.default_home())"
+```
+
+```bash
+python -c "from sonder_runtime.platform import paths; print(paths.default_home())"
+```
+
+Expected: the folder that holds `memory.db` once Sonder has run. To move the
+state, stop Sonder, copy the folder, set `SONDER_HOME` (or `[state].home`) to the
+new path, start, and keep the old folder until the new one works; rollback is
+unsetting the variable.
 
 ## `sonder.toml` (see `packaging/sonder.toml.example`)
 
@@ -99,6 +254,7 @@ auth_mode = "api-key"               # api-key | account | both | either
 max_request_bytes = 1048576
 max_concurrent_requests = 4
 request_timeout_seconds = 300
+stream_idle_timeout_seconds = 60
 tls_terminated_by_proxy = true      # reference TLS-proxy deployment; also hides the local log dashboard
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]  # X-Forwarded-For is read only with tls_terminated_by_proxy = true
 allowed_hosts = []                  # extra Host names ("name" or "name:port"); only local-open refuses other names (421)
@@ -111,27 +267,25 @@ stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed t
 prewarm_on_start = true             # load the default chat model once the listener is bound (SONDER_PREWARM_ON_START); needs prewarm enabled, goes through GPU admission
 
 [state]
-home = "/var/lib/sonder"
+home = "/var/lib/sonder"            # moves state; does not change where sonder.toml is found (see "State home")
 workspace_roots = ["/srv/sonder/workspaces"]
 minimum_free_disk_bytes = 5368709120
 auto_workspace = true               # console work with no folder gets a dated folder in default_workspace_root (SONDER_AUTO_WORKSPACE)
 default_workspace_root = ""         # "" = %USERPROFILE%\Sonder\workspaces or ~/Sonder/workspaces; granted to managed console work (SONDER_DEFAULT_WORKSPACE_ROOT)
 
 [ollama]
-url = "http://127.0.0.1:11434"
+url = "http://127.0.0.1:11434"      # explicit port required; a remote URL needs allow_remote and https
 allow_remote = false                # remote-Ollama consent gate
 
 # Optional multi-PC inference pool. Keep model tags installed on every host.
-# The environment form is preferred for deployment secrets and overrides:
-# SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434,https://192.168.1.21:11434
+# Each worker is an https origin with an explicit port. Behind a Caddy reverse
+# proxy that is the proxy's name and port, never a raw Ollama :11434 on the network.
+# The environment form is preferred for deployment overrides:
+# SONDER_OLLAMA_WORKERS=https://<worker-host>:443
 workers = []
-worker_max_inflight = 1             # coordinator cap per host
-worker_queue_depth = 32             # bounded waiters across the pool
-worker_admission_timeout_ms = 1000  # interactive chat/offload fail-fast bound
-worker_failure_threshold = 3
-worker_cooldown_seconds = 30
-worker_capability_ttl_seconds = 300
-worker_probe_timeout_ms = 2000
+# Pool tuning keys (worker_max_inflight, worker_queue_depth, ...): see the
+# [ollama] table below, which lists every key, its environment variable,
+# default and range.
 
 [compute]
 allow_remote = false               # private-node compute consent gate
@@ -139,7 +293,10 @@ node_id = "local"
 snapshot_ttl_seconds = 30
 probe_timeout_ms = 2000
 # Add [[compute.nodes]] and worker-owned [[compute.jobs]] only after following
-# docs/runbooks/compute-fabric.md. Remote jobs also require per-request consent.
+# ../runbooks/compute-fabric.md#worker-setup (worker side) and
+# #controller-setup (controller side); keys are listed at
+# #configuration-reference. Remote jobs also require
+# per-request consent.
 
 [features]
 cloud = false                       # hosted-model consent gate
@@ -167,13 +324,14 @@ retention_monthly = 6
 
 ### The bind-security rule
 
-A non-loopback `[server].host` is **rejected before bind** unless *both*
-`tls_terminated_by_proxy = true` and a `SONDER_API_KEY` of ≥24 chars are
-set. The reference topology keeps Sonder on loopback behind a TLS proxy
-regardless; it still sets `tls_terminated_by_proxy = true` so the
-unauthenticated loopback-only log dashboard is not made available through the
-proxy. Set it to `false` only for a direct local development listener. See
-[Security Model](09-security-model.md).
+A non-loopback `[server].host` is rejected before bind unless
+`tls_terminated_by_proxy = true` **and** a `SONDER_API_KEY` of at least 24
+characters are set; the `server-private` profile also requires that key even on
+loopback (`config.py` `_validate`, around the `SPEC-2 remote exposure rules`
+comment). There is no override. The rule, the reference topology and the Caddy
+and nginx setups are owned by
+[Secure remote access](../runbooks/secure-remote-access.md); the threat model is
+in [Security Model](09-security-model.md).
 
 ### Bounded fixed-peer fact replication
 
@@ -277,15 +435,19 @@ Security model:
   as empty boxes.
 - `HEAD` requests are not supported (the server answers 501), as elsewhere.
 
-## Secrets file (`packaging/sonder.env.example`, mode 0600)
+## Secrets file (`packaging/sonder.env.example`)
 
 ```
-SONDER_API_KEY=...            # bearer key clients present
-SONDER_AUTH_SECRET=...        # HMAC secret for account tokens
+# bearer key clients present (at least 24 characters)
+SONDER_API_KEY=<generated-key>
+# HMAC secret for account tokens
+SONDER_AUTH_SECRET=<generated-secret>
 ```
 
-The loader refuses a group/world-readable secrets file on POSIX. Rotate
-with `python -m sonder_runtime rotate-key` (overlap window; old key valid
+Comments must be on their own line: the parser does not strip text after a
+value (`config_environment.py` `parse_env_file`). The full list of secret names,
+the file format and the POSIX mode rule are under [Secrets](#secrets) above.
+Rotate with `python -m sonder_runtime rotate-key` (overlap window; old key valid
 until expiry). See [rotate-credentials](../runbooks/rotate-credentials.md).
 
 ### Cross-PC model sharding (llama.cpp RPC, opt-in)
@@ -316,7 +478,8 @@ Core paths/identity: `SONDER_HOME`, `SONDER_DB`, `SONDER_AUTOPILOT_DB`,
 `SONDER_FLEET_DB`, `SONDER_OPERATIONS_DB`, `SONDER_UPDATES_DB`,
 `SONDER_APPROVALS_DB` (one-shot permission approvals), `SONDER_TOOL_AUDIT`
 (the typed tool gateway's durable receipts), `SONDER_RUNTIME_POLICY`,
-`SONDER_TRAINING_STATE`.
+`SONDER_TRAINING_STATE`. How the home is chosen, and why to set only one of
+`SONDER_HOME` and `SONDER_STATE_HOME`: [State home](#state-home).
 
 Formal verification: `SONDER_LEAN_EXE` selects Lean 4. Optional
 `SONDER_LAKE_EXE` plus `SONDER_LEAN_PROJECT` select a pinned Lake project so
@@ -374,28 +537,87 @@ Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 `SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
 independent: enabling private-node compute does not enable remote inference or
 hosted models. Remote compute also requires per-workload consent. See
-[Private Compute Fabric](../runbooks/compute-fabric.md). To add independent Ollama hosts to the local
-inference pool, set `SONDER_OLLAMA_WORKERS` to a comma- or semicolon-separated
-list of origins, for example:
+[Private Compute Fabric](../runbooks/compute-fabric.md). Also: `SONDER_FILE_ROOTS`,
+`SONDER_LOCATION_CONSENT`, `SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`.
+
+Chat call knobs (read by `server.py` at import): `SONDER_KEEP_ALIVE` (default
+`2m`, Ollama `keep_alive` for chat requests) and `SONDER_TIMEOUT` (default `300`
+seconds, integer, per-call model timeout).
+
+### Remote Ollama and the worker pool
+
+Variables: `OLLAMA_HOST` (the primary), `SONDER_ALLOW_REMOTE_OLLAMA`,
+`SONDER_OLLAMA_WORKERS` (comma- or semicolon-separated origins; a bare
+`host:port` gets `http://`, which a remote host then rejects),
+`SONDER_OLLAMA_CA_BUNDLE`, and `SONDER_TRUSTED_ORIGINS`. The URL rules (HTTPS,
+explicit port, no credentials, no path), the Caddy setup and the coordinator
+settings are in
+[Remote Ollama behind Caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings);
+the multi-host procedure is
+[Multi-node Ollama](../runbooks/multi-node-ollama.md). Example:
 
 ```text
 SONDER_ALLOW_REMOTE_OLLAMA=1
-SONDER_OLLAMA_WORKERS=https://192.168.1.20:11434;https://192.168.1.21:11434
+SONDER_OLLAMA_WORKERS=https://<worker-host>:443
 ```
 
 The coordinator keeps its normal `[ollama].url` endpoint as the first worker,
 then schedules requests by least in-flight count, breaking idle ties toward
-the host with the lowest observed request latency. A worker is temporarily
-circuit-broken after three transport failures; repeated trips double the
-cooldown up to 8x, and a worker returning from cooldown receives one trial
-request at a time until a success closes the circuit. Requests fail over only
-before any response is received. Every host must have the selected model tag
-installed; Sonder does not copy model weights between PCs. Remote origins must
-use HTTPS and must not put credentials in the URL. For a private Ethernet or
-Wi-Fi link, use a private CA/VPN or a TLS reverse proxy; do not expose raw
-Ollama or Sonder loopback ports to the Internet.
-`SONDER_ALLOW_REMOTE_OLLAMA`, `SONDER_FILE_ROOTS`, `SONDER_LOCATION_CONSENT`,
-`SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`.
+the host with the lowest observed request latency. After
+`worker_failure_threshold` consecutive transport failures (default 3) a worker
+is circuit-broken for `worker_cooldown_seconds`; each further failure doubles
+the cooldown, up to 8x (`ollama_pool.py`, exponent `min(3, ...)`). A worker
+returning from cooldown receives one trial request at a time until a success
+closes the circuit. Requests fail over only before any response is received.
+Every host must have the selected model tag installed; Sonder does not copy
+model weights between PCs.
+
+#### `[ollama]` keys, environment variables, defaults and ranges
+
+One home for these (checked against `platform/config.py` 2026-11-20). A TOML key
+and its environment variable are the same setting; the environment is the
+higher layer, `--set ollama.<key>=<value>` the highest. Values outside the range
+fail configuration with `[ollama].<key> must be >= 1` or `<= <max>`.
+
+| Key | Environment variable | Default | Range | Meaning |
+|---|---|---|---|---|
+| `url` | `OLLAMA_HOST` | `http://127.0.0.1:11434` | explicit port required | Primary endpoint. `host:port` without a scheme gets `http://`. A non-loopback host needs `allow_remote` and `https`. |
+| `allow_remote` | `SONDER_ALLOW_REMOTE_OLLAMA` | `false` | boolean | Remote-Ollama consent gate. |
+| `workers` | `SONDER_OLLAMA_WORKERS` | none | at most `worker_pool_max_workers` unique origins including the primary | Extra origins, `https://host:port`. A duplicate of the primary or of another worker is an error. |
+| `ca_bundle` | `SONDER_OLLAMA_CA_BUNDLE`; if unset, the TOML `[ollama].ca_bundle`; if that is empty, `SSL_CERT_FILE`, then `REQUESTS_CA_BUNDLE` | none | absolute path to an existing file | PEM CA bundle that verifies private-CA HTTPS. An unusable `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` is ignored; an unusable `SONDER_OLLAMA_CA_BUNDLE` or TOML value fails configuration. |
+| `trusted_origins` | `SONDER_TRUSTED_ORIGINS` | none | CIDR list, validated | Parsed and exported, but `validate_worker_origin` does not use it to admit or refuse a worker; do not rely on it. |
+| `worker_pool_max_workers` | `SONDER_OLLAMA_POOL_MAX_WORKERS` | 16 | 1-256 | Roster cap, primary plus workers. |
+| `worker_max_inflight` | `SONDER_OLLAMA_WORKER_MAX_INFLIGHT` | 1 | 1-64 | Concurrent requests the coordinator sends one host. |
+| `worker_queue_depth` | `SONDER_OLLAMA_WORKER_QUEUE_DEPTH` | 32 | 1-4096 | Bounded waiters across the pool. |
+| `worker_admission_timeout_ms` | `SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS` | 1000 | 1-60000 | Interactive chat and offload fail-fast wait (default 1 s). |
+| `worker_failure_threshold` | `SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD` | 3 | 1-100 | Consecutive failures that open the circuit. |
+| `worker_cooldown_seconds` | `SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS` | 30 | 1-3600 | Base cooldown; doubles per repeat to 8x. |
+| `worker_capability_ttl_seconds` | `SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS` | 300 | 1-86400 | Capability (model list) cache lifetime. |
+| `worker_probe_timeout_ms` | `SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS` | 2000 | 1-30000 | Capability probe timeout. |
+| `worker_capability_probe_parallelism` | `SONDER_OLLAMA_WORKER_PROBE_PARALLELISM` | 4 | 1-8 | Capability-probe parallelism. |
+| `worker_capability_probe_batch_size` | `SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE` | 32 | 1-128 | Capability-probe batch size. |
+| `worker_status_page_size` | `SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE` | 32 | 1-128 | Status page size. |
+| `startup_timeout_seconds` | none (TOML only) | 60 | none validated | Scales the lifecycle manager's Ollama probe interval (a quarter of it) and probe timeout (a twelfth), each at least 1 s. |
+| `request_timeout_seconds` | none (TOML only) | 300 | minimum 1 at use | Request timeout of the vision gateway only. |
+
+The variable names do not follow one pattern (`..._POOL_MAX_WORKERS`,
+`..._WORKER_PROBE_PARALLELISM`, and so on): copy them from this table.
+
+Two further variables sit outside `[ollama]`:
+
+- `SONDER_POOL_ADMISSION_TIMEOUT_SECONDS` (environment only, default `30`, range
+  `0..60`; an empty value means the default) is how long agent, autopilot and
+  fleet calls may queue for a pool slot, capped by the remaining model-call
+  deadline. `0` is a real value: those calls then wait 0 s for a slot, not 1 s.
+  A non-number, a negative value or a value above 60 raises `ValueError`
+  (`_bounded_seconds`) and the pool fails to build.
+  It applies only when **every** pool origin is loopback, `localhost`, or a
+  literal private or link-local IP address (`ollama_pool.py`
+  `_is_local_origin`). A worker addressed by a DNS name, such as a Caddy name
+  `https://<worker-host>:443`, is not "local" for this test, so those calls get
+  `worker_admission_timeout_ms` (default 1 s) instead.
+  Interactive chat and ordinary offload always use `worker_admission_timeout_ms`.
+- `SONDER_KEEP_ALIVE` and `SONDER_TIMEOUT` above.
 
 `SONDER_EXPOSE_REASONING` decides whether Sonder asks a reasoning model for its
 thinking at all; with it off nothing is captured, so nothing can be shown. It
@@ -419,6 +641,17 @@ failing that `OLLAMA_KV_CACHE_TYPE`, also affects the default, and
 that specialist tier unbound, in which case reasoning/vision work falls back
 to a base tier.
 
+#### Embedding settings (one home)
+
+Defaults: `SONDER_EMBED_MODEL` is `nomic-embed-text` unless the model catalog
+says otherwise (`adapters/model_list_consumers.py`); `SONDER_EMBED_MAX_CHARS`
+(default `4000`) truncates the text sent to the embedder
+(`adapters/embeddings.py`). Embedding vectors are cached in `embed-cache.db` in
+the state home: `SONDER_EMBED_CACHE=0` disables the cache, `SONDER_EMBED_CACHE_MAX`
+(default `50000`, minimum `100`) bounds its rows and `SONDER_EMBED_CACHE_DB`
+moves it (ignored once a typed state home is configured, see
+[State home](#state-home); `adapters/embedding_cache.py`).
+
 `SONDER_EMBED_ON_CPU=1` is opt-in. It asks Ollama to keep the embedding model
 on the CPU (`num_gpu: 0`). Use it when the chat model nearly fills VRAM:
 
@@ -433,7 +666,8 @@ It pairs with Ollama's `OLLAMA_MAX_LOADED_MODELS` of 2 or more.
 `SONDER_EMBED_BASE_URL` sends embeddings to a dedicated Ollama origin, for
 example a LAN node, while chat stays on the primary. This keeps the embedder
 off the chat model's GPU entirely. The origin passes the same policy as
-`OLLAMA_HOST`: a remote host needs `https://` and `SONDER_ALLOW_REMOTE_OLLAMA=1`.
+`OLLAMA_HOST`: a remote host needs `https://` and `SONDER_ALLOW_REMOTE_OLLAMA=1`
+(Caddy front: [Remote Ollama behind Caddy](../runbooks/remote-ollama-caddy.md)).
 If the host is unreachable, or a fronting proxy answers 502-504, embeddings
 stop for `SONDER_EMBED_COOLDOWN_SECONDS` (default 30). During that time
 callers use their lexical fallback. `SONDER_EMBED_FALLBACK=local` instead
@@ -501,7 +735,7 @@ response receipt carries `sonder_receipt.overflow` (`status` `switched` or
 activity record gets a `model_route` event, the system prompt names the
 overflow model, and the Observatory receives `route.changed` with
 `reason_code: context_over_threshold`. Notices read, for example,
-`long-context overflow: switched to qwen3.6:35b on 10.77.0.2:8443 — context
+`long-context overflow: switched to qwen3.6:35b on 192.0.2.10:443 — context
 41.2k tokens > 32.8k threshold`, or `long-context overflow (qwen3.6:35b)
 unavailable, stayed on <model>: <reason> — …` when no pool worker advertises
 the model or the overflow attempt fails (the turn then falls back to its
@@ -1135,15 +1369,8 @@ licences of each source and troubleshooting.
 Connect the index to Sonder in one of two ways.
 
 - Build it into the default path, `<Sonder home>/references/references.sqlite`.
-  The Sonder home is, on Windows, `%LOCALAPPDATA%\sonder`
-  (for example `C:\Users\<you>\AppData\Local\sonder`); on Linux
-  `$XDG_DATA_HOME/sonder`, or `~/.local/share/sonder` when that is unset; on
-  macOS `~/Library/Application Support/sonder` (an existing
-  `~/.local/share/sonder` is kept when the macOS folder does not exist yet).
-  Three things override all three, strongest first: a home set inside the
-  process (the app's own `configure_home`), then `SONDER_STATE_HOME`, then
-  `SONDER_HOME`.
-  Create the `references` folder if it is not there.
+  The Sonder home and what overrides it are described once, under
+  [State home](#state-home). Create the `references` folder if it is not there.
 - Or set the path of the file in the environment of every Sonder process, for
   example for PowerShell:
 
@@ -1334,6 +1561,8 @@ caps how long a request waits to take its pool slot back after it queued in
 GPU admission (it returns the slot while it queues there). At the cap it is
 refused with backpressure and its GPU slot is released.
 
+See also [Tiers & Gateway](08-model-tiers-and-gateway.md) and the [`[ollama]` table](#ollama-keys-environment-variables-defaults-and-ranges).
+
 Observatory live export (contract section 11; served by the runtime telemetry
 routes, which the chat-telemetry change adds): `SONDER_OBSERVATORY_EXPORT`
 (default `1`; `0` makes the telemetry routes answer 404),
@@ -1445,13 +1674,12 @@ effective configuration, schema state, and preflight for support.
 
 ## One user-global file
 
-For a workstation install, Sonder automatically uses
-`%LOCALAPPDATA%\\sonder\\sonder.toml` on Windows (or the platform-specific
-Sonder state home elsewhere) when that file exists. The optional matching
-secret file is `sonder.env`. `SONDER_CONFIG` and `SONDER_SECRETS`, then the
-explicit `--config` and `--secrets` flags, select a different file. This same
-resolved configuration is now applied by `serve`, `repl`, and `mcp`; command
-line flags remain only explicit, higher-precedence one-shot overrides.
+For a workstation install, put `sonder.toml` (and optionally `sonder.env`) in the
+[state home](#state-home), for example `%LOCALAPPDATA%\sonder\sonder.toml` on
+Windows. It is picked up automatically, with no flags, by `serve`, `repl`, `mcp`
+and the other subcommands. `SONDER_CONFIG` and `SONDER_SECRETS`, then the
+explicit `--config` and `--secrets` flags, select a different file; see
+[Precedence](#precedence-production-config) for the order.
 
 ## Editing system and agent prompts
 
