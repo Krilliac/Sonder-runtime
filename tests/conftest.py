@@ -86,6 +86,18 @@ def _gpu_admission_off_by_default():
 
 
 @pytest.fixture(autouse=True)
+def _clear_ephemeral_delegation_state():
+    """Ensure depth-1 ephemeral child rows never leak between tests."""
+    from sonder_runtime.application.agents.delegation_runtime import clear_ephemeral_state
+
+    clear_ephemeral_state()
+    try:
+        yield
+    finally:
+        clear_ephemeral_state()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime_home():
     """Restore process-local path configuration after entrypoint tests.
 

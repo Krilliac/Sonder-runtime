@@ -3019,5 +3019,7 @@ def reset_for_tests() -> None:
         _RESERVED_AGENT_IDS.clear()
         _RESERVED_SLOTS = 0
     fleet_store.clear_all()
+    from sonder_runtime.application.agents.delegation_runtime import clear_ephemeral_state
+    clear_ephemeral_state()
     _OWNER_REGISTERED = False
     _STORE_ERROR = ""
