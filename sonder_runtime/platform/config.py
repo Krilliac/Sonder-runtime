@@ -31,6 +31,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.platform.policy_roots import (
+    PolicyRootError,
+    parse_policy_root,
+    try_parse_policy_root,
+)
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform.security_eval_config import (
     SecurityEvalConfig,
@@ -998,8 +1003,11 @@ def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
 
     errors: list[str] = []
     writable_roots = (config.state.home, *config.state.workspace_roots)
-    for root in writable_roots:
+    for index, root in enumerate(writable_roots):
         if not isinstance(root, str):
+            continue
+        # A refused workspace root is reported by _validate; never resolve it.
+        if index > 0 and try_parse_policy_root(root, expand_user=False) is None:
             continue
         root_path = _canonical_private_path(root)
         if root_path is not None and _paths_overlap(source_path, root_path):
@@ -1598,22 +1606,16 @@ def _apply_environment(
     if state_home:
         state = replace(state, home=state_home)
     if env.get("SONDER_FILE_ROOTS", "").strip():
-        extended_local_re = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
-        parsed_roots: list[str] = []
-        for part in env["SONDER_FILE_ROOTS"].split(os.pathsep):
-            item = part.strip()
-            if not item or "\0" in item:
-                continue
-            matched = extended_local_re.match(item)
-            if matched:
-                item = item[matched.start(1):]
-            else:
-                flat = item.replace("/", "\\")
-                if flat.startswith(("\\\\", "\\??\\")) or flat == "\\??":
-                    continue
-            parsed_roots.append(item)
-        if parsed_roots:
-            state = replace(state, workspace_roots=tuple(parsed_roots))
+        # Kept as written: load_config parses every workspace root once, after
+        # all sources are merged, and a refused entry is an error there. Never
+        # filter here, or an all-refused value would fall back to the TOML roots.
+        roots = tuple(
+            part.strip()
+            for part in env["SONDER_FILE_ROOTS"].split(os.pathsep)
+            if part.strip()
+        )
+        if roots:
+            state = replace(state, workspace_roots=roots)
     # Empty keeps the configured value, as env_bool_from_env reads it later.
     if env.get("SONDER_AUTO_WORKSPACE", "").strip():
         state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
@@ -2038,6 +2040,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
     local_workspace_mappings = {"default"}
     effective_workspace_roots: dict[str, Path] = {}
     for index, root in enumerate(config.state.workspace_roots):
+        # load_config has already parsed these; this guard keeps a direct
+        # _validate caller from resolving (and so connecting to) a UNC root.
+        if not isinstance(root, str) or try_parse_policy_root(root, expand_user=False) is None:
+            errors.append(f"[state].workspace_roots entry refused: {root!r}")
+            continue
         raw_path = Path(root)
         if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
@@ -2437,6 +2444,32 @@ def web_app_root(config: "SonderConfig") -> Path:
     return (Path(home) if home else sonder_paths.default_home()) / "web_app"
 
 
+def _parse_workspace_roots(config: SonderConfig, errors: list[str]) -> SonderConfig:
+    """Parse every ``[state].workspace_roots`` entry once, after all sources merged.
+
+    Each entry (from the TOML file, ``SONDER_FILE_ROOTS`` or a command-line
+    override) goes through the shared policy-root parser: an extended-length
+    local prefix is stripped, and a UNC / device / NT-namespace spelling, a
+    relative path (``~`` is not expanded here), or a drive or filesystem root
+    is refused. A refused entry is
+    an error, so the load fails closed; it is never dropped silently and never
+    replaced by another source's roots. The parser is lexical, so a refused
+    spelling reaches no ``resolve()`` or ``stat()`` (no SMB connection is opened).
+    Consumers of ``config.state.workspace_roots`` therefore see only absolute,
+    local, normalised paths.
+    """
+    parsed: list[str] = []
+    for root in config.state.workspace_roots:
+        if not isinstance(root, str):
+            errors.append("[state].workspace_roots entries must be strings")
+            continue
+        try:
+            parsed.append(str(parse_policy_root(root, expand_user=False)))
+        except PolicyRootError as exc:
+            errors.append(f"[state].workspace_roots entry refused ({exc}): {root!r}")
+    return replace(config, state=replace(config.state, workspace_roots=tuple(parsed)))
+
+
 def load_config(
     toml_path: str | os.PathLike | None = None,
     *,
@@ -2589,6 +2622,9 @@ def load_config(
             setting="[observability].live_export_origins",
         ),
     ))
+    # After TOML, environment and overrides are merged and before _validate
+    # resolves any root.
+    config = _parse_workspace_roots(config, errors)
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
