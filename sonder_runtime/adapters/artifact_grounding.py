@@ -3659,6 +3659,10 @@ def _safe_manifest_path(root: Path, value: str) -> Path | None:
     pure = PurePosixPath(str(value or "").replace("\\", "/"))
     if not pure.parts or pure.is_absolute() or ".." in pure.parts:
         return None
+    # Lexical refusal before any filesystem call: a drive-qualified or NUL-bearing
+    # part makes ``root / part`` replace the root, and resolving it leaves the pack.
+    if any(":" in part or chr(0) in part for part in pure.parts):
+        return None
     lexical = root / Path(*pure.parts)
     candidate = lexical.resolve()
     if root not in candidate.parents:

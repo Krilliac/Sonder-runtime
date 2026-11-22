@@ -442,3 +442,44 @@ def test_regeneration_removes_stale_generator_outputs(monkeypatch, tmp_path):
     paths = {row["path"] for row in second["files"]}
     assert paths == {"icon.png", "request.json"}
     assert not os.path.exists(os.path.join(second["root"], "theme.wav"))
+
+
+@pytest.mark.parametrize("spelling", ["unc", "slashes", "extended", "device"])
+def test_network_output_dir_is_refused_before_any_resolve(monkeypatch, tmp_path, spelling):
+    _local_root(monkeypatch, tmp_path)
+    bs = chr(92)
+    raw = {
+        "unc": bs * 2 + "attacker-host" + bs + "share" + bs + "assets",
+        "slashes": "//attacker-host/share/assets",
+        "extended": bs * 2 + "?" + bs + "UNC" + bs + "attacker-host" + bs + "share",
+        "device": bs * 2 + "." + bs + "pipe" + bs + "x",
+    }[spelling]
+    seen = []
+    real = os.path.realpath
+
+    def spy(p, *a, **k):
+        seen.append(str(p))
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(os.path, "realpath", spy)
+    with pytest.raises(PermissionError):
+        assetgen.resolve_pack_dir("demo", raw)
+    with pytest.raises(PermissionError):
+        assetgen.verify_pack(raw)
+    leaked = [p for p in seen if "attacker-host" in p or "pipe" in p]
+    assert leaked == []
+
+
+def test_directory_named_like_owned_file_aborts_before_any_deletion(monkeypatch, tmp_path):
+    _local_root(monkeypatch, tmp_path)
+    first = assetgen.generate_artifacts("pk", "icon", kinds="icon,data")
+    root = first["root"]
+    os.remove(os.path.join(root, "data.json"))
+    os.mkdir(os.path.join(root, "data.json"))
+    before = sorted(os.listdir(root))
+
+    with pytest.raises(ValueError, match="unexpectedly a directory"):
+        assetgen.generate_artifacts("pk", "icon", kinds="icon,data")
+
+    assert sorted(os.listdir(root)) == before
+
