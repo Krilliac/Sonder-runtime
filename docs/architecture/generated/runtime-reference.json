@@ -20495,7 +20495,7 @@
     "schemas": 4,
     "tools": 242
   },
-  "digest": "0d118ef60004f976bfc22fc180668d2ad107b5c27344e7506108ad26de69ab31",
+  "digest": "344bcbd5c7ac38ffee8364aeea3f9676b3024c60385708ed80b6d31623d122d2",
   "events": [
     {
       "name": "session.started",
@@ -51678,7 +51678,7 @@
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "833f78a6a14076998636c6d7d63bd6a3869b48e96da9e92f63b9b20697ab5843",
+    "sonder_runtime/platform/config.py": "5ecae8262463690254109dd9e42768a2df2319853ba266433c99959fd09332ed",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",
