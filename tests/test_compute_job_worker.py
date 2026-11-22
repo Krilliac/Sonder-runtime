@@ -299,6 +299,62 @@ def test_worker_rejects_argument_junction_escape_without_symlink_privilege(
         os.rmdir(junction)
 
 
+def _bounded_entry() -> JobCatalogEntry:
+    return replace(_entry(), entry_id="bounded", argument_policy=ArgumentPolicy.BOUNDED)
+
+
+def test_worker_contains_bounded_positional_arguments(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "build").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name != "nt":
+            pytest.skip(f"symlinks unavailable: {exc}")
+        created = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(outside)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert created.returncode == 0, created.stdout + created.stderr
+    try:
+        provider = CapturingProvider()
+        worker = ComputeJobWorker(
+            worker_id="worker-1",
+            catalog={"bounded": _bounded_entry()},
+            workspace_mappings={"sonder": workspace},
+            provider=provider,
+        )
+        for index, argument in enumerate(("escape", "escape/sub")):
+            with pytest.raises(InvalidInput, match="escape"):
+                worker.submit(_envelope(
+                    catalog_entry_id="bounded",
+                    idempotency_key=f"idem-escape-{index}",
+                    relative_cwd=".",
+                    arguments=(argument,),
+                ))
+        worker.submit(_envelope(catalog_entry_id="bounded", relative_cwd=".",
+                                arguments=("build",)))
+        assert provider.request.argv[-1] == "build"
+    finally:
+        if link.is_symlink():
+            link.unlink()
+        elif link.exists():
+            os.rmdir(link)
+
+
+def test_bounded_catalog_entry_refuses_escaping_positionals_without_the_envelope() -> None:
+    entry = _bounded_entry()
+    for argument in ("../outside", "/etc/passwd", "C:/Windows", "a/../../b"):
+        with pytest.raises(ValueError, match="escape"):
+            entry.argv_for((argument,))
+    assert entry.argv_for(("build",))[-1] == "build"
+
+
 def test_worker_idempotency_returns_same_job_and_conflict_rejects(tmp_path: Path) -> None:
     provider = CapturingProvider()
     worker = ComputeJobWorker(
@@ -579,14 +635,12 @@ def test_worker_rejects_opened_digest_input_outside_workspace(
     payload.write_bytes(b"inside")
     outside = tmp_path.parent / f"{tmp_path.name}-outside.bin"
     outside.write_bytes(b"abc")
-    original_open = Path.open
+    original_open_regular = jobs_module._open_regular_file
 
-    def swapped_open(path, *args, **kwargs):
-        if path == payload and (not args or args[0] == "rb"):
-            return original_open(outside, *args, **kwargs)
-        return original_open(path, *args, **kwargs)
+    def swapped_open(path, refuse):
+        return original_open_regular(outside if path == payload else path, refuse)
 
-    monkeypatch.setattr(Path, "open", swapped_open)
+    monkeypatch.setattr(jobs_module, "_open_regular_file", swapped_open)
     worker = ComputeJobWorker(
         worker_id="worker-1",
         catalog={"pytest": _entry()},
@@ -1139,28 +1193,28 @@ def test_concurrent_terminal_status_publishes_one_artifact_snapshot(
         provider=CompletedProvider(),
     )
     started = worker.submit(_envelope())
-    original_open = Path.open
+    original_open = jobs_module._open_regular_file
     first_opened = Event()
     second_opened = Event()
     release_first = Event()
     counter_lock = Lock()
     calls = 0
 
-    def competing_open(path, *args, **kwargs):
+    def competing_open(path, refuse):
         nonlocal calls
         if path != report:
-            return original_open(path, *args, **kwargs)
+            return original_open(path, refuse)
         with counter_lock:
             calls += 1
             call = calls
         if call == 1:
             first_opened.set()
             release_first.wait(timeout=5)
-            return original_open(source_a, *args, **kwargs)
+            return original_open(source_a, refuse)
         second_opened.set()
-        return original_open(source_b, *args, **kwargs)
+        return original_open(source_b, refuse)
 
-    monkeypatch.setattr(Path, "open", competing_open)
+    monkeypatch.setattr(jobs_module, "_open_regular_file", competing_open)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(worker.status, started.remote_job_id)
@@ -1327,11 +1381,95 @@ def test_worker_rejects_artifact_handle_opened_outside_workspace_after_path_race
             return original_stat(outside_report, *args, **kwargs)
         return original_stat(path, *args, **kwargs)
 
+    original_open_regular = jobs_module._open_regular_file
+
+    def raced_open_regular(path, refuse):
+        return original_open_regular(outside_report if path == report else path, refuse)
+
     monkeypatch.setattr(Path, "open", raced_open)
     monkeypatch.setattr(Path, "stat", raced_stat)
+    monkeypatch.setattr(jobs_module, "_open_regular_file", raced_open_regular)
 
     with pytest.raises(InvalidInput, match="workspace"):
         worker.status(started.remote_job_id)
+
+
+def _completed_provider() -> CapturingProvider:
+    class CompletedProvider(CapturingProvider):
+        def wait(self, job_id, *, timeout=None):
+            return ProcessJobWait(
+                JobRecord(
+                    JobIdentity(job_id, "compute-test", "controller-job", "idem-1"),
+                    status=JobStatus.SUCCEEDED,
+                ),
+                exit_code=0,
+            )
+
+    return CompletedProvider()
+
+
+def _call_with_fifo_watchdog(fifo: Path, call):
+    """Run ``call`` in a thread; fail (and release the reader) if it blocks."""
+    import threading
+
+    outcome: dict[str, BaseException | object] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - reported to the test thread
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(10)
+    if thread.is_alive():
+        # Opening the write side unblocks a reader stuck in open(2).
+        writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(writer)
+        thread.join(10)
+        pytest.fail("opening the FIFO blocked the worker")
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome.get("value")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+def test_worker_refuses_a_fifo_artifact_without_blocking(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    fifo = tests / "report.json"
+    os.mkfifo(fifo)
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": replace(_entry(), artifact_paths=("report.json",))},
+        workspace_mappings={"sonder": tmp_path},
+        provider=_completed_provider(),
+    )
+    started = worker.submit(_envelope())
+
+    with pytest.raises(InvalidInput, match="regular file"):
+        _call_with_fifo_watchdog(fifo, lambda: worker.status(started.remote_job_id))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
+def test_worker_refuses_a_fifo_input_artifact_without_blocking(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    fifo = tests / "input.bin"
+    os.mkfifo(fifo)
+    worker = ComputeJobWorker(
+        worker_id="worker-1",
+        catalog={"pytest": _entry()},
+        workspace_mappings={"sonder": tmp_path},
+        provider=CapturingProvider(),
+    )
+
+    with pytest.raises(InvalidInput, match="regular file"):
+        _call_with_fifo_watchdog(fifo, lambda: worker.submit(_envelope(
+            arguments=("input.bin",),
+            input_artifacts=(DigestBoundInput("input.bin", 3, "0" * 64),),
+        )))
 
 
 def test_worker_refuses_artifact_larger_than_transport_limit(tmp_path: Path) -> None:
