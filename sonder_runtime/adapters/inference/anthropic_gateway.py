@@ -927,8 +927,8 @@ class AnthropicGateway:
 
     def _account_partial(
         self, stream: Any, model: str, slot: int, reserved: Decimal | None = None,
-    ) -> None:
-        """Bill an unfinished stream; never raises.
+    ) -> bool:
+        """Bill an unfinished stream; never raises.  True when the stream was recorded.
 
         After ``message_start`` Anthropic bills the call even when this side
         abandons the stream, times out or loses the connection.  The SDK's
@@ -938,19 +938,21 @@ class AnthropicGateway:
         """
         try:
             snapshot = stream.current_message_snapshot  # raises before message_start
-        except Exception:  # noqa: BLE001 - nothing was started, so nothing was billed
-            return
+        except Exception:  # noqa: BLE001 - no message_start yet: the caller charges the reservation
+            return False
         try:
             data = self._normalize(snapshot, model)
             data["partial"] = True
             self._account(data, model, slot, reserved, unfinished=True)
         except Exception as exc:  # noqa: BLE001 - never mask the stream's own failure
             logger.error("anthropic: could not account an unfinished stream (%s)", type(exc).__name__)
+            return False
+        return True
 
     def _account_unanswered(self, model: str, slot: int, reserved: Decimal | None) -> None:
         """Charge the worst case for a sent request whose response never arrived; never raises.
 
-        A non-streaming call that times out or loses its connection after the
+        A call (streaming or not) that times out or loses its connection after the
         request was sent may still be processed and billed by Anthropic, so the
         reservation is recorded as spend rather than released as free.
         """
@@ -974,12 +976,14 @@ class AnthropicGateway:
             failure: Exception | None = None
             final = None
             sent = False
+            accounted = False
             try:
                 client = self._client(slot, key, settings)
                 if sink is None:
                     sent = True
                     final = client.messages.create(timeout=timeout, **params)
                 else:
+                    sent = True
                     with client.messages.stream(timeout=timeout, **params) as stream:
                         try:
                             for piece in stream.text_stream:
@@ -989,12 +993,12 @@ class AnthropicGateway:
                                     sink(GenerationChunk(text=piece))
                             final = stream.get_final_message()
                         except BaseException:
-                            self._account_partial(stream, model, slot, reserved)
+                            accounted = self._account_partial(stream, model, slot, reserved)
                             raise
             except Exception as exc:  # noqa: BLE001 - mapped below, outside this handler
                 failure = exc
             if failure is not None:
-                if sent and _may_have_been_billed(failure):
+                if sent and not accounted and _may_have_been_billed(failure):
                     self._account_unanswered(model, slot, reserved)
                 # Mapped outside the except block so the domain error has neither
                 # __cause__ nor __context__: the SDK exception references the

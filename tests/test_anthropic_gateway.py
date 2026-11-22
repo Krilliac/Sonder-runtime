@@ -989,11 +989,37 @@ def test_real_sdk_transport_errors_are_charged_only_after_send(ledger):
     assert ledger.snapshot()["calls"] == 1  # none of the never-sent failures was charged
 
 
-def test_a_stream_that_fails_before_message_start_records_nothing(ledger):
-    sdk = FakeSdk(lambda k, p: _message(plan={"fail": APITimeoutError("t"), "before_start": True}))
-    with pytest.raises(DeadlineExceeded):
+@pytest.mark.parametrize("make_error", [
+    lambda: APITimeoutError("t"), lambda: ConnectionResetError("dropped"),
+], ids=["sdk_timeout", "connection_reset"])
+def test_a_stream_that_fails_before_message_start_is_charged_its_worst_case(ledger, monkeypatch, make_error):
+    reserved = _capture_reservations(ledger, monkeypatch)
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": make_error(), "before_start": True}))
+    with pytest.raises((DeadlineExceeded, DependencyUnavailable)):
+        list(_gateway(sdk, ledger).stream(_request(options={"num_predict": 1000}), _context()))
+    (worst,) = reserved
+    assert ledger.snapshot()["calls"] == 1
+    assert Decimal(ledger.snapshot()["usd"]) == worst
+    assert ledger._inflight == {}
+
+
+def test_a_stream_whose_connection_never_opened_is_not_charged(ledger):
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": _wrapped_connect_error(), "before_start": True}))
+    with pytest.raises(DependencyUnavailable):
         list(_gateway(sdk, ledger).stream(_request(), _context()))
     assert ledger.snapshot()["calls"] == 0
+    assert ledger._inflight == {}
+
+
+def test_repeated_stream_timeouts_reach_the_daily_cap(ledger):
+    sdk = FakeSdk(lambda k, p: _message(plan={"fail": APITimeoutError("t"), "before_start": True}))
+    gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.05")))
+    for _ in range(2):
+        with pytest.raises(DeadlineExceeded):
+            list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    with pytest.raises(AnthropicDailyCapReached):
+        list(gateway.stream(_request(options={"num_predict": 1000}), _context()))
+    assert len(sdk.calls) == 2
 
 
 def test_a_completed_stream_is_recorded_once_not_twice(ledger):
