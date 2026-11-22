@@ -33,6 +33,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../local_manager_models.dart' show clientRiskRank;
 import 'chat.dart';
 import 'transport.dart';
 
@@ -334,25 +335,8 @@ class ChatStreamToolEvent extends ChatStreamEvent {
     );
   }
 
-  static int _riskRank(String risk) {
-    switch (risk.trim()) {
-      case '':
-        return -1;
-      case 'read_only':
-        return 0;
-      case 'write':
-      case 'workspace_write':
-        return 1;
-      case 'execute':
-      case 'host_exec':
-        return 2;
-      default:
-        return 3;
-    }
-  }
-
   static String _stricterRisk(String before, String now) =>
-      _riskRank(now) > _riskRank(before) ? now : before;
+      clientRiskRank(now) > clientRiskRank(before) ? now : before;
 
   factory ChatStreamToolEvent.fromJson(Map<String, dynamic> json) {
     final rawCallId = json['call_id']?.toString().trim().toLowerCase() ?? '';

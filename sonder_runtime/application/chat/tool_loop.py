@@ -79,6 +79,9 @@ class ChatToolTurn:
     is_aborted: Callable[[], bool] | None = None
     role_refusal: Callable[[str], str] | None = None
     allow_system_tools: bool = False
+    client_exec_tools: frozenset[str] = frozenset()
+    delegate_client_tool: Callable[[str, dict[str, Any]], tuple[str, ChatToolRecord]] | None = None
+    client_handoffs: list[dict[str, Any]] = field(default_factory=list)
     records: list[ChatToolRecord] = field(default_factory=list)
 
     def _emit(self, payload: Mapping[str, Any]) -> None:
@@ -116,6 +119,18 @@ class ChatToolTurn:
             msg = f"ERROR: HOST POLICY: tool '{name}' cannot receive caller credential arguments."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
+        if self.delegate_client_tool is not None and name in self.client_exec_tools:
+            if name in _EXECUTION_CAP_TOOLS and run_count >= self.budget.max_runs:
+                msg = (
+                    f"ERROR: HOST POLICY: chat turn execution budget reached "
+                    f"({self.budget.max_runs} execution runs per turn). Summarize with existing results."
+                )
+                self.records.append(ChatToolRecord("", name, "budget_exceeded", "client", reason=msg[:200]))
+                return msg, run_count
+            obs, record = self.delegate_client_tool(name, args)
+            self.records.append(record)
+            clipped_obs, _ = self._clip(obs, self.budget.model_output_chars)
+            return clipped_obs, run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
         if self.role_refusal is not None and (role_refusal := self.role_refusal(name)):
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=role_refusal[:200]))
             return role_refusal, run_count
@@ -295,7 +310,7 @@ class ChatToolTurn:
                     if (time.monotonic() - started) >= self.budget.wall_seconds:
                         break
                     calls += 1
-                    step_tools = self.tools_payload if calls < self.budget.max_model_calls else None
+                    step_tools = self.tools_payload if (calls < self.budget.max_model_calls and not self.client_handoffs) else None
                     step = generate_step(messages, step_tools)
                     message = step.get("message") if isinstance(step, Mapping) else {}
                     if not isinstance(message, Mapping):

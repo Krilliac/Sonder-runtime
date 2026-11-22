@@ -14,7 +14,7 @@ class AccountAuthProvider:
 
     def register(self, connection, username, password, role="user", *,
                  trusted_local=True, bootstrap_secret="",
-                 allow_additional=False, actor=None):
+                 allow_additional=False, actor=None, public_hosting=False):
         # The hosted HTTP route depends on the keyword-only registration
         # policy (``trusted_local=False`` and the bootstrap secret). Forward it
         # verbatim so the engine, not this adapter, decides admission.
@@ -24,6 +24,7 @@ class AccountAuthProvider:
             bootstrap_secret=bootstrap_secret,
             allow_additional=allow_additional,
             actor=actor,
+            public_hosting=public_hosting,
         )
 
     def login(self, connection, username, password, *, client_ip=None):

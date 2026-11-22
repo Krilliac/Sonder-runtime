@@ -925,6 +925,7 @@ class LocalManager {
     List<String> args, {
     required String workingDirectory,
     Map<String, String>? environment,
+    bool includeParentEnvironment = true,
     required Duration timeout,
     Future<void> Function(int pid)? onKillTree,
   }) async {
@@ -940,6 +941,7 @@ class LocalManager {
         args,
         workingDirectory: workingDirectory,
         environment: environment,
+        includeParentEnvironment: includeParentEnvironment,
       );
     } else {
       try {
@@ -953,6 +955,7 @@ class LocalManager {
           ],
           workingDirectory: workingDirectory,
           environment: environment,
+          includeParentEnvironment: includeParentEnvironment,
         );
         grouped = true;
       } on ProcessException {
@@ -961,6 +964,7 @@ class LocalManager {
           args,
           workingDirectory: workingDirectory,
           environment: environment,
+          includeParentEnvironment: includeParentEnvironment,
         );
       }
     }
@@ -1353,6 +1357,1024 @@ class LocalManager {
       message: observatoryGuidance,
     );
   }
+
+  static const _maxClientOutputChars = 65536;
+  static const _maxClientErrorChars = 4096;
+
+  static String _boundClientText(String text, int limit) {
+    if (text.length <= limit) return text;
+    return '${text.substring(0, limit - 16)}\n...[truncated]';
+  }
+
+  static final RegExp _driveRelativePattern = RegExp(r'^[A-Za-z]:(?:$|[^/\\])');
+  static final RegExp _localExtendedDrivePattern =
+      RegExp(r'^\\\\\?\\[A-Za-z]:(?:$|[/\\])');
+
+  /// Lexically refuse UNC, device, extended, NT-namespace, control-char, and
+  /// Windows drive-relative paths BEFORE any filesystem or symlink call.
+  static void _rejectUnsafeClientPathSpelling(
+    String raw, {
+    bool allowLocalExtended = false,
+  }) {
+    for (var i = 0; i < raw.length; i++) {
+      final code = raw.codeUnitAt(i);
+      if (code < 32 || code == 127) {
+        throw FileSystemException(
+            'Path contains disallowed control characters', raw);
+      }
+    }
+    var text = raw.trim();
+    if (text.isEmpty) return;
+    if (allowLocalExtended && _localExtendedDrivePattern.hasMatch(text)) {
+      text = text.substring(4);
+    }
+    if (text.startsWith(r'\\') ||
+        text.startsWith('//') ||
+        text.startsWith(r'\/') ||
+        text.startsWith(r'/\')) {
+      throw FileSystemException(
+          'UNC, device, or extended path is not allowed', raw);
+    }
+    if (text == r'\??' ||
+        text == '/??' ||
+        (text.length > 3 &&
+            (text.startsWith(r'\??') || text.startsWith('/??')) &&
+            (text[3] == r'\' || text[3] == '/'))) {
+      throw FileSystemException('NT namespace path is not allowed', raw);
+    }
+    if (_driveRelativePattern.hasMatch(text)) {
+      throw FileSystemException(
+          'Windows drive-relative path is not allowed', raw);
+    }
+  }
+
+  static bool _isAbsolutePath(String p) {
+    if (p.isEmpty) return false;
+    if (Platform.isWindows) {
+      return RegExp(r'^[A-Za-z]:[/\\]').hasMatch(p) || p.startsWith(r'\\');
+    }
+    return p.startsWith('/');
+  }
+
+  static String _normalizeSegments(String path) {
+    final sep = Platform.pathSeparator;
+    final parts = path.split(RegExp(r'[/\\]+'));
+    String prefix = '';
+    var start = 0;
+    if (Platform.isWindows && parts.isNotEmpty && RegExp(r'^[A-Za-z]:$').hasMatch(parts[0])) {
+      prefix = '${parts[0]}$sep';
+      start = 1;
+    } else if (path.startsWith('/')) {
+      prefix = '/';
+      start = 1;
+    }
+    final stack = <String>[];
+    for (var i = start; i < parts.length; i++) {
+      final seg = parts[i];
+      if (seg.isEmpty || seg == '.') continue;
+      if (seg == '..') {
+        if (stack.isNotEmpty) stack.removeLast();
+      } else {
+        stack.add(seg);
+      }
+    }
+    if (prefix.isEmpty) return stack.join(sep);
+    if (stack.isEmpty) return prefix;
+    return '$prefix${stack.join(sep)}';
+  }
+
+  static void _rejectUnsafeLinkAncestors(String normalized) {
+    final sep = Platform.pathSeparator;
+    final parts = normalized.split(sep);
+    if (parts.length <= 1) return;
+    var cur = parts[0];
+    if (Platform.isWindows && RegExp(r'^[A-Za-z]:$').hasMatch(cur)) {
+      cur = '$cur$sep';
+    } else if (cur.isEmpty && normalized.startsWith(sep)) {
+      cur = sep;
+    }
+    for (var i = 1; i < parts.length; i++) {
+      final seg = parts[i];
+      if (seg.isEmpty) continue;
+      cur = cur.endsWith(sep) ? '$cur$seg' : '$cur$sep$seg';
+      if (FileSystemEntity.isLinkSync(cur)) {
+        final target = Link(cur).targetSync();
+        _rejectUnsafeClientPathSpelling(target, allowLocalExtended: true);
+      }
+    }
+  }
+
+  static String _canonicalizeWithExistingAncestor(String rawPath) {
+    _rejectUnsafeClientPathSpelling(rawPath);
+    final normalized = _normalizeSegments(rawPath);
+    _rejectUnsafeLinkAncestors(normalized);
+    var cur = normalized;
+    final tail = <String>[];
+    while (cur.isNotEmpty) {
+      final type = FileSystemEntity.typeSync(cur, followLinks: false);
+      if (type != FileSystemEntityType.notFound) {
+        final resolved = type == FileSystemEntityType.directory
+            ? Directory(cur).resolveSymbolicLinksSync()
+            : File(cur).resolveSymbolicLinksSync();
+        _rejectUnsafeClientPathSpelling(resolved, allowLocalExtended: true);
+        if (tail.isEmpty) return _normalizeSegments(resolved);
+        return _normalizeSegments(
+            '$resolved${Platform.pathSeparator}${tail.reversed.join(Platform.pathSeparator)}');
+      }
+      final sepIdx = cur.lastIndexOf(Platform.pathSeparator);
+      if (sepIdx <= 0) break;
+      tail.add(cur.substring(sepIdx + 1));
+      cur = cur.substring(0, sepIdx);
+    }
+    return normalized;
+  }
+
+  static String _clientRoot(String workspaceRoot) {
+    if (workspaceRoot.isNotEmpty) {
+      _rejectUnsafeClientPathSpelling(workspaceRoot);
+    }
+    final rootRaw = workspaceRoot.trim().isEmpty
+        ? Directory.current.path
+        : workspaceRoot.trim();
+    final resolvedRoot = _canonicalizeWithExistingAncestor(
+      _isAbsolutePath(rootRaw)
+          ? rootRaw
+          : '${Directory.current.path}${Platform.pathSeparator}$rootRaw',
+    );
+    _rejectUnsafeClientPathSpelling(resolvedRoot);
+    return resolvedRoot;
+  }
+
+  static String _resolveClientPath(
+    Object? rawArg,
+    String workspaceRoot, {
+    required bool bypass,
+  }) {
+    final rawFull = rawArg?.toString() ?? '';
+    _rejectUnsafeClientPathSpelling(rawFull);
+    final root = _clientRoot(workspaceRoot);
+    final raw = rawFull.trim();
+    final candidate = raw.isEmpty || raw == '.'
+        ? root
+        : (_isAbsolutePath(raw) ? raw : '$root${Platform.pathSeparator}$raw');
+    final resolved = _canonicalizeWithExistingAncestor(candidate);
+    _rejectUnsafeClientPathSpelling(resolved);
+    if (!bypass) {
+      final rCheck = Platform.isWindows ? root.toLowerCase() : root;
+      final pCheck = Platform.isWindows ? resolved.toLowerCase() : resolved;
+      final sep = Platform.pathSeparator;
+      final rootWithSep = rCheck.endsWith(sep) ? rCheck : '$rCheck$sep';
+      if (pCheck != rCheck && !pCheck.startsWith(rootWithSep)) {
+        throw FileSystemException(
+            'Path "$raw" escapes workspace root "$root"', resolved);
+      }
+    }
+    return resolved;
+  }
+
+  // Git runs programs named by repository metadata as a side effect of the
+  // read-only git tools: core.fsmonitor on every status/diff, hooks, and the
+  // filter/diff/merge drivers that .git/config defines and .gitattributes /
+  // .git/info/attributes select. A write there would turn a write-class call
+  // (no prompt in acceptEdits) into execution with no execute prompt, so the
+  // write tools refuse these paths in every mode, bypass included. The same
+  // holds for credential stores (a swapped token, or a program a later
+  // command runs: ~/.ssh/config ProxyCommand, authorized_keys, an .npmrc
+  // script-shell). Mirrors sonder_runtime/interfaces/client_agent/executor.py
+  // and the server's file_ops secret-name rules.
+  static const _gitMetadataDirectory = '.git';
+  static const _gitControlFiles = {'.gitattributes', '.gitmodules'};
+  static const _credentialDirectories = {
+    '.ssh', '.aws', '.azure', '.gcloud', '.gnupg', '.kube', //
+  };
+  static const _credentialFiles = {
+    '.credentials.json', '.netrc', '_netrc', '.token', 'auth.json',
+    'credentials.json', 'secrets.json', 'token.json', '.git-credentials',
+    '.pgpass', 'id_dsa', 'id_ecdsa', 'id_ecdsa_sk', 'id_ed25519',
+    'id_ed25519_sk', 'id_rsa', '.npmrc', '.pypirc', 'kubeconfig',
+    '.terraformrc', 'terraform.rc', 'credentials.tfrc.json', '.boto',
+    '.s3cfg', '.htpasswd', '.vault-token', 'service-account.json',
+    'service_account.json', 'serviceaccount.json',
+    'application_default_credentials.json',
+  };
+  static const _credentialSuffixes = {'.key', '.p12', '.pem', '.pfx', '.kdbx'};
+  static const _namedCredentialConfigSuffixes = {
+    '.cfg', '.ini', '.json', '.toml', '.txt', '.yaml', '.yml', //
+  };
+  static const _credentialPairs = {
+    '.docker/config.json', '.cargo/credentials.toml', '.cargo/credentials',
+    '.gem/credentials', '.m2/settings.xml', '.m2/settings-security.xml',
+    'github cli/hosts.yml',
+  };
+  static const _credentialDirectoryPairs = {'.config/gcloud', 'roaming/gcloud'};
+  static const _credentialTriples = {
+    '.config/gh/hosts.yml', '.config/glab-cli/config.yml', //
+  };
+
+  /// The name Windows opens for [part], lower-cased: NTFS ignores trailing
+  /// dots and spaces and treats `name:stream` (`.git::$INDEX_ALLOCATION`) as
+  /// `name`. Folded on every platform; on POSIX that only errs toward refusal.
+  static String _canonicalClientComponent(String part) {
+    final colon = part.indexOf(':');
+    final s = colon >= 0 ? part.substring(0, colon) : part;
+    var end = s.length;
+    while (end > 0) {
+      final c = s.codeUnitAt(end - 1);
+      if (c != 0x20 && c != 0x2E) break;
+      end--;
+    }
+    return s.substring(0, end).toLowerCase();
+  }
+
+  static bool _isInsideClientDir(String path, String dir) {
+    final p = Platform.isWindows ? path.toLowerCase() : path;
+    final d = Platform.isWindows ? dir.toLowerCase() : dir;
+    final sep = Platform.pathSeparator;
+    return p == d || p.startsWith(d.endsWith(sep) ? d : '$d$sep');
+  }
+
+  static List<String> _clientSplitPath(String path) =>
+      path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+
+  /// Every component of [root], the credential rules' context.
+  static List<String> _clientRootContext(String root) => _clientSplitPath(root);
+
+  /// (the root's components, [path]'s components below [root]);
+  /// no context and the whole path when it is outside.
+  static (List<String>, List<String>) _clientComponentsUnder(
+      String path, String root) {
+    if (!_isInsideClientDir(path, root)) {
+      return (const <String>[], _clientSplitPath(path));
+    }
+    final sep = Platform.pathSeparator;
+    final prefixLength = root.endsWith(sep) ? root.length : root.length + 1;
+    final rest = path.length <= prefixLength ? '' : path.substring(prefixLength);
+    return (_clientRootContext(root), _clientSplitPath(rest));
+  }
+
+  static bool _isCredentialName(String name) {
+    final dot = name.lastIndexOf('.');
+    final suffix = dot > 0 ? name.substring(dot) : '';
+    if (_credentialFiles.contains(name) || _credentialSuffixes.contains(suffix)) {
+      return true;
+    }
+    if (name == '.env' ||
+        name == '.envrc' ||
+        name.startsWith('.env.') ||
+        suffix == '.env') {
+      return true;
+    }
+    return _namedCredentialConfigSuffixes.contains(suffix) &&
+        (name.contains('credential') || name.contains('secret'));
+  }
+
+  /// [names] (canonical components below the root, leaf last) name a
+  /// credential store. [context] holds every canonical component of the
+  /// canonical workspace root (empty for a path outside the root, whose
+  /// [names] are then the whole path). Every rule that names a directory
+  /// runs on [context] plus [names], so a root that is, or sits anywhere
+  /// inside, a credential store (`~/.aws`, `~/.aws/sso`,
+  /// `~/.config/gcloud/configurations`) makes every write under it a
+  /// credential write. The leaf-name rule still judges only the target's own
+  /// name.
+  static bool _isCredentialPath(List<String> names, List<String> context) {
+    if (names.isEmpty) return false;
+    final window = [...context, ...names];
+    if (window.any(_credentialDirectories.contains)) return true;
+    for (var i = 0; i + 1 < window.length; i++) {
+      if (_credentialDirectoryPairs.contains('${window[i]}/${window[i + 1]}')) {
+        return true;
+      }
+    }
+    if (_isCredentialName(names.last)) return true;
+    final n = window.length;
+    if (n >= 2 &&
+        _credentialPairs.contains('${window[n - 2]}/${window[n - 1]}')) {
+      return true;
+    }
+    return n >= 3 &&
+        _credentialTriples
+            .contains('${window[n - 3]}/${window[n - 2]}/${window[n - 1]}');
+  }
+
+  /// [_resolveClientPath] for the write-class tools: refuses git metadata,
+  /// git control files and credential stores, judged on both the lexical
+  /// spelling (so `sub/../.git` is caught) and the resolved path (so a
+  /// symlink or short name is caught). The git rules do not inspect
+  /// components above the workspace root; a path outside it (bypass) is
+  /// inspected in full. The credential rules also see every component of the
+  /// root (see [_isCredentialPath]).
+  static String _resolveClientWritePath(
+    Object? rawArg,
+    String workspaceRoot, {
+    required bool bypass,
+  }) {
+    final resolved = _resolveClientPath(rawArg, workspaceRoot, bypass: bypass);
+    final root = _clientRoot(workspaceRoot);
+    final raw = (rawArg?.toString() ?? '').trim();
+    final lexical = _isAbsolutePath(raw)
+        ? _clientComponentsUnder(raw, root)
+        : (_clientRootContext(root), _clientSplitPath(raw));
+    for (final (contextParts, parts) in [
+      lexical,
+      _clientComponentsUnder(resolved, root),
+    ]) {
+      final names = parts.map(_canonicalClientComponent).toList();
+      final context = contextParts.map(_canonicalClientComponent).toList();
+      if (names.contains(_gitMetadataDirectory)) {
+        throw _ClientPathRefused(
+            "Refusing to modify git repository metadata '$raw': hooks and "
+            'config there name programs git runs; use run_program (execute '
+            'approval) if this is intended.');
+      }
+      if (names.isNotEmpty && _gitControlFiles.contains(names.last)) {
+        throw _ClientPathRefused(
+            "Refusing to modify git control file '$raw': it selects programs "
+            'git runs; use run_program (execute approval) if this is intended.');
+      }
+      if (_isCredentialPath(names, context)) {
+        throw _ClientPathRefused(
+            "Refusing to modify credential store '$raw' from a client tool; "
+            'use run_program (execute approval) if this is intended.');
+      }
+    }
+    return resolved;
+  }
+
+  // Command-line -c values beat every config file, so these hold even for a
+  // repository the tools did not write. Mirrors _GIT_STATIC_OVERRIDES in
+  // sonder_runtime/interfaces/client_agent/executor.py:
+  //   core.hooksPath / core.fsmonitor / core.sshCommand: programs git runs.
+  //   submodule/diff/status settings: never descend into a submodule, whose
+  //     own config the driver probe does not see.
+  //   safe.bareRepository=explicit: a directory the write tools filled with
+  //     HEAD/objects/refs/config (no .git component) is not a repository.
+  //   protocol.allow=never (and GIT_NO_LAZY_FETCH): no lazy fetch runs a
+  //     promisor remote's upload-pack.
+  //   log.showSignature=false: git log never runs gpg.program.
+  static List<String> get _gitStaticOverrides => [
+        '-c', 'core.hooksPath=${Platform.isWindows ? 'nul' : '/dev/null'}',
+        '-c', 'core.fsmonitor=false',
+        '-c', 'core.sshCommand=',
+        '-c', 'submodule.recurse=false',
+        '-c', 'diff.ignoreSubmodules=all',
+        '-c', 'diff.submodule=short',
+        '-c', 'status.submoduleSummary=false',
+        '-c', 'fetch.recurseSubmodules=false',
+        '-c', 'safe.bareRepository=explicit',
+        '-c', 'protocol.allow=never',
+        '-c', 'log.showSignature=false',
+      ];
+
+  // `git config` arguments listing every configured filter/merge/diff driver
+  // key (git's regex syntax; Dart never compiles it). `git config` launches
+  // no program.
+  static const _gitDriverProbe = [
+    'config', '--null', '--name-only', '--get-regexp',
+    r'^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver|diff\..*\.textconv)$',
+  ];
+  static const _gitDriverLeaves = {
+    'filter': {'clean', 'smudge', 'process', 'required'},
+    'merge': {'driver'},
+    'diff': {'textconv'},
+  };
+  static const _builtinMergeDriver = 'git merge-file --marker-size=%L %A %O %B';
+  // ASCII only and case-sensitive, so no Unicode case-fold slips in.
+  static final _safeGitDriverName = RegExp(r'^[A-Za-z0-9_.-]+$');
+  static const _gitProgramEnvVars = {
+    'GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'GIT_SSH', 'GIT_SSH_COMMAND',
+    'GIT_ASKPASS',
+  };
+  static const _gitTimeout = Duration(seconds: 30);
+
+  static Map<String, String> _clientGitEnvironment() {
+    final env = <String, String>{};
+    Platform.environment.forEach((key, value) {
+      if (!_gitProgramEnvVars.contains(key.toUpperCase())) env[key] = value;
+    });
+    env['GIT_NO_LAZY_FETCH'] = '1';
+    env['GIT_OPTIONAL_LOCKS'] = '0';
+    env['GIT_TERMINAL_PROMPT'] = '0';
+    return env;
+  }
+
+  /// Absolute path of the git on PATH; never one the write tools could have
+  /// planted. Relative PATH entries are skipped, and on Windows only
+  /// `git.exe` is accepted (a `git.cmd` would run through cmd.exe).
+  static String _clientGitExecutable(String root, String cwd) {
+    final pathVar = Platform.environment['PATH'] ?? '';
+    final name = Platform.isWindows ? 'git.exe' : 'git';
+    final sep = Platform.pathSeparator;
+    for (var dir in pathVar.split(Platform.isWindows ? ';' : ':')) {
+      dir = dir.trim();
+      if (Platform.isWindows && dir.length >= 2 && dir.startsWith('"') && dir.endsWith('"')) {
+        dir = dir.substring(1, dir.length - 1);
+      }
+      if (dir.isEmpty || !_isAbsolutePath(dir)) continue;
+      final candidate = '${dir.endsWith(sep) ? dir : '$dir$sep'}$name';
+      if (FileSystemEntity.typeSync(candidate) != FileSystemEntityType.file) {
+        continue;
+      }
+      if (!Platform.isWindows && (File(candidate).statSync().mode & 0x49) == 0) {
+        continue;
+      }
+      final resolved = File(candidate).resolveSymbolicLinksSync();
+      for (final base in [root, cwd]) {
+        if (_isInsideClientDir(resolved, base)) {
+          throw _ClientGitRefused(
+              'Refusing to run a git executable found inside the workspace: $resolved');
+        }
+      }
+      return resolved;
+    }
+    throw const _ClientGitRefused('git is not installed or not on PATH');
+  }
+
+  /// Neutralising overrides for every driver key [_gitDriverProbe] listed:
+  /// filters run no program (empty clean/smudge/process, required=false),
+  /// merge drivers become git's built-in merge-file, textconv becomes `cat`
+  /// (the diff and log tools also pass --no-textconv). A key of an
+  /// unexpected shape, or a driver name `-c` cannot express exactly (git
+  /// splits `-c` at the first '='; a quote, space, control or non-ASCII
+  /// character may not round-trip), refuses: fail closed. Only names in
+  /// [_safeGitDriverName] are overridden, the same charset as
+  /// sonder_runtime/adapters/git_program_guard.py.
+  static List<String> _clientGitDriverOverrides(String probeStdout) {
+    final overrides = <String>[];
+    final seen = <String>{};
+    for (final rawKey in probeStdout.split('\x00')) {
+      final key = rawKey.trim();
+      if (key.isEmpty) continue;
+      final firstDot = key.indexOf('.');
+      final lastDot = key.lastIndexOf('.');
+      if (firstDot <= 0 || lastDot <= firstDot + 1) {
+        throw const _ClientGitRefused(
+            'Unexpected git driver configuration key; refusing to run git.');
+      }
+      final section = key.substring(0, firstDot).toLowerCase();
+      final name = key.substring(firstDot + 1, lastDot);
+      final leaf = key.substring(lastDot + 1).toLowerCase();
+      if (!(_gitDriverLeaves[section]?.contains(leaf) ?? false)) {
+        throw const _ClientGitRefused(
+            'Unexpected git driver configuration key; refusing to run git.');
+      }
+      if (!_safeGitDriverName.hasMatch(name)) {
+        throw const _ClientGitRefused(
+            'git driver name is outside [A-Za-z0-9_.-]; refusing to run git.');
+      }
+      if (!seen.add('$section.$name')) continue;
+      final prefix = '$section.$name.';
+      if (section == 'filter') {
+        overrides.addAll([
+          '-c', '${prefix}process=',
+          '-c', '${prefix}clean=',
+          '-c', '${prefix}smudge=',
+          '-c', '${prefix}required=false',
+        ]);
+      } else if (section == 'merge') {
+        overrides.addAll(['-c', '${prefix}driver=$_builtinMergeDriver']);
+      } else {
+        overrides.addAll(['-c', '${prefix}textconv=cat']);
+      }
+    }
+    return overrides;
+  }
+
+  /// The git arguments that keep repository config from launching a
+  /// program: the static overrides, then a `git config` probe (which
+  /// launches nothing) of the configured drivers, each neutralised. A probe
+  /// that fails (including safe.bareRepository refusing an embedded bare
+  /// repository) or times out throws, and no further git command runs.
+  static Future<List<String>> _clientHardenedGitArgs(
+    String git,
+    String cwd,
+    Map<String, String> env,
+  ) async {
+    final base = ['--no-pager', '--no-optional-locks', ..._gitStaticOverrides];
+    final probe = await runBoundedProcess(
+      git,
+      [...base, ..._gitDriverProbe],
+      workingDirectory: cwd,
+      environment: env,
+      includeParentEnvironment: false,
+      timeout: _gitTimeout,
+    );
+    if (probe.timedOut) {
+      throw const _ClientGitRefused(
+          'git driver configuration probe timed out; refusing to run git.');
+    }
+    if (probe.exitCode != 0 && probe.exitCode != 1) {
+      // 1 is git's "no matching key".
+      final detail = probe.output.isEmpty ? 'exit code ${probe.exitCode}' : probe.output;
+      throw _ClientGitRefused(
+          'git driver configuration could not be read; refusing to run git: '
+          '${_boundClientText(detail, _maxClientErrorChars)}');
+    }
+    return [...base, ..._clientGitDriverOverrides(probe.stdout)];
+  }
+
+  /// Reports native desktop execution readiness (or unavailability on mobile).
+  static Future<ClientAgentHealth> checkClientAgent({
+    String companionUrl = '',
+    String token = '',
+    String workspaceRoot = '',
+  }) async {
+    if (!canRunLocalTools) {
+      return ClientAgentHealth(
+        reachable: false,
+        nativeRunner: false,
+        message: 'Local execution is not supported on $platformLabel.',
+      );
+    }
+    final ws = workspaceRoot.trim().isEmpty
+        ? Directory.current.path
+        : workspaceRoot.trim();
+    return ClientAgentHealth(
+      reachable: true,
+      authenticated: true,
+      nativeRunner: true,
+      workspace: ws,
+      canBypass: true,
+      message: 'Native $platformLabel execution ready.',
+    );
+  }
+
+  /// No-op for native desktop runner (mode is held in client settings).
+  static Future<bool> setClientAgentMode({
+    required String mode,
+    bool confirmBypass = false,
+    String companionUrl = '',
+    String token = '',
+  }) async =>
+      canRunLocalTools;
+
+  /// Execute one `execution_target="client"` tool natively on the desktop PC.
+  static Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = '',
+    String companionToken = '',
+  }) async {
+    if (!canRunLocalTools) {
+      return ClientToolExecResult(
+        ok: false,
+        error: 'Client tool execution is not supported on $platformLabel.',
+      );
+    }
+    final cleanTool = tool.trim().replaceFirst(RegExp(r'^/+'), '');
+    // A declared risk can raise the local classification, never lower it.
+    final effectiveRisk = effectiveClientToolRisk(risk, cleanTool);
+    if (!approved && !clientModeAllowsWithoutPrompt(mode, effectiveRisk)) {
+      return ClientToolExecResult(
+        ok: false,
+        needsApproval: true,
+        error:
+            "Approval required on your PC for '$cleanTool' ($effectiveRisk) in $mode mode.",
+      );
+    }
+    final bypass = mode.trim() == 'bypass';
+    try {
+      switch (cleanTool) {
+        case 'file_read':
+          final path =
+              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          final lines = const LineSplitter()
+              .convert(await file.readAsString(encoding: utf8));
+          final rawOffset = int.tryParse('${args['offset'] ?? 1}') ?? 1;
+          final offset = rawOffset < 1 ? 1 : rawOffset;
+          final rawLimit = int.tryParse('${args['limit'] ?? 200}') ?? 200;
+          final limit = rawLimit.clamp(1, 500);
+          final end = (offset - 1 + limit).clamp(0, lines.length);
+          final start = (offset - 1).clamp(0, lines.length);
+          final out = <String>[];
+          for (var i = start; i < end; i++) {
+            out.add('${i + 1}: ${lines[i]}');
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: _boundClientText(out.join('\n'), _maxClientOutputChars),
+          );
+        case 'file_write':
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
+          final content = args['content']?.toString() ?? '';
+          final writeMode =
+              (args['mode']?.toString() ?? 'overwrite').trim().toLowerCase();
+          final file = File(path);
+          if (writeMode == 'create' && await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File already exists: $path');
+          }
+          await file.parent.create(recursive: true);
+          if (writeMode == 'append' && await file.exists()) {
+            await file.writeAsString(content, mode: FileMode.append);
+          } else {
+            await file.writeAsString(content);
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: 'Wrote ${content.length} chars to $path',
+          );
+        case 'file_edit':
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
+          final oldStr = args['old']?.toString() ?? '';
+          final newStr = args['new']?.toString() ?? '';
+          if (oldStr.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: "'old' text must be non-empty");
+          }
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          final text = await file.readAsString();
+          final count = oldStr.allMatches(text).length;
+          if (count == 0) {
+            return const ClientToolExecResult(
+                ok: false, error: 'Target string not found in file');
+          }
+          if (count > 1) {
+            return ClientToolExecResult(
+                ok: false,
+                error: 'Target string matched $count times; must be unique');
+          }
+          await file.writeAsString(text.replaceFirst(oldStr, newStr));
+          return ClientToolExecResult(ok: true, output: 'Edited $path');
+        case 'file_delete':
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
+          final file = File(path);
+          if (!await file.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'File not found: $path');
+          }
+          await file.delete();
+          return ClientToolExecResult(ok: true, output: 'Deleted $path');
+        case 'directory_create':
+          final path = _resolveClientWritePath(args['path'], workspaceRoot,
+              bypass: bypass);
+          await Directory(path).create(recursive: true);
+          return ClientToolExecResult(
+              ok: true, output: 'Created directory $path');
+        case 'directory_tree':
+          final base = _resolveClientPath(
+              args['path'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final depth =
+              (int.tryParse('${args['depth'] ?? 2}') ?? 2).clamp(1, 5);
+          final lines = <String>[];
+          Future<void> walk(Directory cur, int level) async {
+            if (level > depth || lines.length >= 200) return;
+            final children = await cur.list(followLinks: false).toList();
+            children.sort((a, b) {
+              final aDir = a is Directory ? 0 : 1;
+              final bDir = b is Directory ? 0 : 1;
+              if (aDir != bDir) return aDir.compareTo(bDir);
+              return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+            });
+            for (final entity in children) {
+              final name = entity.uri.pathSegments
+                  .where((s) => s.isNotEmpty)
+                  .lastOrNull ?? '';
+              if (name == '.git' || name == '__pycache__') continue;
+              final indent = '  ' * (level - 1);
+              final isDir = entity is Directory;
+              lines.add('$indent$name${isDir ? '/' : ''}');
+              if (lines.length >= 200) return;
+              if (isDir && level < depth) await walk(entity, level + 1);
+            }
+          }
+          await walk(dir, 1);
+          return ClientToolExecResult(
+            ok: true,
+            output: lines.isEmpty ? '(empty)' : lines.join('\n'),
+          );
+        case 'file_find':
+          final base = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final pattern = (args['pattern']?.toString() ?? '*').trim();
+          final regex = _globToRegex(pattern.isEmpty ? '*' : pattern);
+          final matches = <String>[];
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            var rel = entity.path.substring(base.length);
+            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
+            rel = rel.replaceAll('\\', '/');
+            if (rel.split('/').contains('.git')) continue;
+            final name = rel.split('/').last;
+            if (regex.hasMatch(name) || regex.hasMatch(rel)) {
+              matches.add(rel);
+              if (matches.length >= 200) break;
+            }
+          }
+          matches.sort();
+          return ClientToolExecResult(
+            ok: true,
+            output: matches.isEmpty ? '(no matches)' : matches.join('\n'),
+          );
+        case 'text_search':
+          final query = args['query']?.toString() ?? '';
+          if (query.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'query is required');
+          }
+          final base = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final dir = Directory(base);
+          if (!await dir.exists()) {
+            return ClientToolExecResult(
+                ok: false, error: 'Directory not found: $base');
+          }
+          final globPat = (args['glob']?.toString() ?? '').trim();
+          final globRegex =
+              globPat.isEmpty ? null : _globToRegex(globPat);
+          final matches = <String>[];
+          await for (final entity
+              in dir.list(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            var rel = entity.path.substring(base.length);
+            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
+            rel = rel.replaceAll('\\', '/');
+            if (rel.split('/').contains('.git')) continue;
+            final name = rel.split('/').last;
+            if (globRegex != null && !globRegex.hasMatch(name)) continue;
+            try {
+              if (await entity.length() > 512 * 1024) continue;
+              final content = await entity.readAsString();
+              final fileLines = const LineSplitter().convert(content);
+              for (var i = 0; i < fileLines.length; i++) {
+                if (fileLines[i].contains(query)) {
+                  final lineText = fileLines[i].trim();
+                  final clipped = lineText.length <= 200
+                      ? lineText
+                      : lineText.substring(0, 200);
+                  matches.add('$rel:${i + 1}: $clipped');
+                  if (matches.length >= 100) break;
+                }
+              }
+            } catch (_) {}
+            if (matches.length >= 100) break;
+          }
+          return ClientToolExecResult(
+            ok: true,
+            output: matches.isEmpty ? '(no matches)' : matches.join('\n'),
+          );
+        case 'run_code':
+          final code = args['code']?.toString() ?? '';
+          if (code.trim().isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'code is required');
+          }
+          final lang =
+              (args['language']?.toString() ?? 'python').trim().toLowerCase();
+          final timeoutSec =
+              (int.tryParse('${args['timeout'] ?? 15}') ?? 15).clamp(1, 60);
+          final cwd = _resolveClientPath('.', workspaceRoot, bypass: bypass);
+          late final String exe;
+          late final List<String> procArgs;
+          File? tempScript;
+          if (lang == 'python' || lang == 'py') {
+            exe = Platform.isWindows ? 'python' : 'python3';
+            procArgs = ['-c', code];
+          } else if (lang == 'js' || lang == 'javascript' || lang == 'node') {
+            exe = 'node';
+            procArgs = ['-e', code];
+          } else if (lang == 'powershell' || lang == 'ps1') {
+            tempScript = File(
+                '${Directory.systemTemp.path}${Platform.pathSeparator}sonder_${DateTime.now().microsecondsSinceEpoch}.ps1');
+            await tempScript.writeAsString(code);
+            exe = 'powershell';
+            procArgs = ['-NoProfile', '-File', tempScript.path];
+          } else if (lang == 'bash' || lang == 'sh') {
+            exe = 'bash';
+            procArgs = ['-lc', code];
+          } else {
+            return ClientToolExecResult(
+                ok: false, error: 'Unsupported language on client: $lang');
+          }
+          try {
+            final res = await runBoundedProcess(
+              exe,
+              procArgs,
+              workingDirectory: cwd,
+              timeout: Duration(seconds: timeoutSec),
+            );
+            return _fromProcessResult(res);
+          } finally {
+            try {
+              if (tempScript != null && await tempScript.exists()) {
+                await tempScript.delete();
+              }
+            } catch (_) {}
+          }
+        case 'run_program':
+          final command = (args['command']?.toString() ?? '').trim();
+          if (command.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'command is required');
+          }
+          final cwd = _resolveClientPath(
+              args['cwd'] ?? '.', workspaceRoot, bypass: bypass);
+          final timeoutSec =
+              (int.tryParse('${args['timeout'] ?? 30}') ?? 30).clamp(1, 120);
+          final tokens = _splitCommand(command);
+          if (tokens.isEmpty) {
+            return const ClientToolExecResult(
+                ok: false, error: 'command is required');
+          }
+          final res = await runBoundedProcess(
+            tokens.first,
+            tokens.skip(1).toList(),
+            workingDirectory: cwd,
+            timeout: Duration(seconds: timeoutSec),
+          );
+          return _fromProcessResult(res);
+        case 'test_run':
+          final cwd = _resolveClientPath(
+              args['root'] ?? '.', workspaceRoot, bypass: bypass);
+          final procArgs = ['-m', 'pytest', '-p', 'no:cacheprovider', '-q'];
+          final relPath = (args['path']?.toString() ?? '').trim();
+          if (relPath.isNotEmpty) {
+            procArgs.add(
+                _resolveClientPath(relPath, cwd, bypass: bypass));
+          }
+          final pat = (args['pattern']?.toString() ?? '').trim();
+          if (pat.isNotEmpty) {
+            procArgs.addAll(['-k', pat]);
+          }
+          final res = await runBoundedProcess(
+            Platform.isWindows ? 'python' : 'python3',
+            procArgs,
+            workingDirectory: cwd,
+            timeout: const Duration(seconds: 120),
+          );
+          return _fromProcessResult(res);
+        case 'git_status':
+        case 'git_diff':
+        case 'git_log':
+        case 'git_branch':
+          final cwd = _resolveClientPath(
+              args['cwd'] ?? '.', workspaceRoot, bypass: bypass);
+          final gitArgs = <String>[];
+          if (cleanTool == 'git_status') {
+            gitArgs.addAll(['status', '--short']);
+          } else if (cleanTool == 'git_diff') {
+            gitArgs.addAll(['diff', '--no-ext-diff', '--no-textconv']);
+            if (args['staged'] == true) gitArgs.add('--staged');
+            final rel = (args['path']?.toString() ?? '').trim();
+            if (rel.isNotEmpty) {
+              gitArgs.addAll(
+                  ['--', _resolveClientPath(rel, cwd, bypass: bypass)]);
+            }
+          } else if (cleanTool == 'git_log') {
+            final limit =
+                (int.tryParse('${args['limit'] ?? 20}') ?? 20).clamp(1, 100);
+            gitArgs.addAll(
+                ['log', '--no-ext-diff', '--no-textconv', '-n$limit', '--oneline']);
+          } else {
+            gitArgs.addAll(['branch', '-a']);
+          }
+          final env = _clientGitEnvironment();
+          final git = _clientGitExecutable(_clientRoot(workspaceRoot), cwd);
+          final hardened = await _clientHardenedGitArgs(git, cwd, env);
+          final res = await runBoundedProcess(
+            git,
+            [...hardened, ...gitArgs],
+            workingDirectory: cwd,
+            environment: env,
+            includeParentEnvironment: false,
+            timeout: _gitTimeout,
+          );
+          return _fromProcessResult(res);
+        default:
+          return ClientToolExecResult(
+            ok: false,
+            denied: true,
+            error: "Tool '$cleanTool' is not supported for client execution.",
+          );
+      }
+    } on _ClientPathRefused catch (e) {
+      return ClientToolExecResult(
+        ok: false,
+        denied: true,
+        error: _boundClientText(e.message, _maxClientErrorChars),
+      );
+    } catch (e) {
+      return ClientToolExecResult(
+        ok: false,
+        error: _boundClientText('$e', _maxClientErrorChars),
+      );
+    }
+  }
+
+  static ClientToolExecResult _fromProcessResult(BoundedProcessResult res) {
+    final combined = res.output;
+    if (res.exitCode == 0 && !res.timedOut) {
+      return ClientToolExecResult(
+        ok: true,
+        output: _boundClientText(
+          combined.isEmpty ? '(no output)' : combined,
+          _maxClientOutputChars,
+        ),
+      );
+    }
+    return ClientToolExecResult(
+      ok: false,
+      output: _boundClientText(res.stdout, _maxClientOutputChars),
+      error: _boundClientText(
+        res.timedOut
+            ? 'Command timed out.'
+            : (combined.isEmpty ? 'Exit code ${res.exitCode}' : combined),
+        _maxClientErrorChars,
+      ),
+    );
+  }
+
+  static RegExp _globToRegex(String glob) {
+    final buf = StringBuffer('^');
+    for (var i = 0; i < glob.length; i++) {
+      final ch = glob[i];
+      if (ch == '*') {
+        buf.write('.*');
+      } else if (ch == '?') {
+        buf.write('.');
+      } else if (r'\.+^$[]{}()|'.contains(ch)) {
+        buf.write('\\$ch');
+      } else {
+        buf.write(ch);
+      }
+    }
+    buf.write(r'$');
+    return RegExp(buf.toString(), caseSensitive: !Platform.isWindows);
+  }
+
+  static List<String> _splitCommand(String command) {
+    final out = <String>[];
+    final buf = StringBuffer();
+    String? quote;
+    for (var i = 0; i < command.length; i++) {
+      final ch = command[i];
+      if (quote != null) {
+        if (ch == quote) {
+          quote = null;
+        } else {
+          buf.write(ch);
+        }
+      } else if (ch == '"' || ch == "'") {
+        quote = ch;
+      } else if (ch.trim().isEmpty) {
+        if (buf.isNotEmpty) {
+          out.add(buf.toString());
+          buf.clear();
+        }
+      } else {
+        buf.write(ch);
+      }
+    }
+    if (buf.isNotEmpty) out.add(buf.toString());
+    return out;
+  }
+}
+
+/// A write-class client tool targeted git metadata, a git control file or a
+/// credential store; reported as a denial.
+class _ClientPathRefused implements Exception {
+  final String message;
+  const _ClientPathRefused(this.message);
+
+  @override
+  String toString() => message;
+}
+
+/// A git tool refused to run (fail closed); reported as a tool error.
+class _ClientGitRefused implements Exception {
+  final String message;
+  const _ClientGitRefused(this.message);
+
+  @override
+  String toString() => message;
 }
 
 /// The outcome of [LocalManager.runBoundedProcess].

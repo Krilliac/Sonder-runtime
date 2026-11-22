@@ -6,6 +6,7 @@ import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat_screen.dart';
 import 'package:sonder_runtime/chat_store.dart';
+import 'package:sonder_runtime/local_manager.dart';
 import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/settings.dart';
 import 'package:sonder_runtime/shell/app_shell.dart';
@@ -63,6 +64,19 @@ class FakeChatBackend implements ChatBackend {
   final List<String> workRunCancels = [];
   final List<(String, Duration)> approvals = [];
   final List<(String, String, String)> denials = [];
+  final List<(String, Map<String, dynamic>, bool, String)> clientToolExecs = [];
+  final List<(String, bool, String, String, bool, String)> clientToolResults = [];
+
+  ServerCapabilities? capabilities;
+  WhoamiInfo? whoami;
+  Future<ClientToolExecResult> Function(
+    String callId,
+    String tool,
+    Map<String, dynamic> args,
+    String risk,
+    String mode,
+    bool approved,
+  )? clientExecHandler;
 
   /// `(tool, digest)` sent with each approval, in order.
   final List<(String, String)> approvalBindings = [];
@@ -144,6 +158,12 @@ class FakeChatBackend implements ChatBackend {
       activeStatusCalls--;
     }
   }
+
+  @override
+  Future<ServerCapabilities?> fetchCapabilities() async => capabilities;
+
+  @override
+  Future<WhoamiInfo?> fetchWhoami() async => whoami;
 
   @override
   Future<List<String>> listModels() async => models;
@@ -229,6 +249,38 @@ class FakeChatBackend implements ChatBackend {
       {String tool = '', String digest = ''}) async {
     denials.add((callId, tool, digest));
     return denialOutcome;
+  }
+
+  @override
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  }) async {
+    clientToolExecs.add((tool, args, approved, mode));
+    final handler = clientExecHandler;
+    if (handler != null) {
+      return handler(callId, tool, args, risk, mode, approved);
+    }
+    return ClientToolExecResult(ok: true, output: 'executed $tool');
+  }
+
+  @override
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  }) async {
+    clientToolResults.add((callId, ok, output, error, denied, session));
   }
 
   @override

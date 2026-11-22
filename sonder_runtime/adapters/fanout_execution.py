@@ -7,12 +7,15 @@ here as small explicit-input functions so the executor only calls them.
 """
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, cast
 
 from sonder_runtime.domain.model_usage import usage_count
 from sonder_runtime.domain.fanout_receipts import safe_answer as _default_redact
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 ENVELOPE_VERSION = 1
 
@@ -101,3 +104,31 @@ def result_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "sealed_answer": metadata.get("sealed_answer", ""),
         "sealed_truncated": bool(metadata.get("sealed_truncated")),
     }
+
+
+@contextlib.contextmanager
+def fanout_lease_heartbeat(
+    fanout_store: Any,
+    run_id: str,
+    owner_id: str,
+    lease_seconds: float,
+) -> Iterator[None]:
+    """Keep a claimed fanout run's lease renewed while the worker is active."""
+    stop = threading.Event()
+    interval = max(5.0, float(lease_seconds) / 3.0)
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            with contextlib.suppress(Exception):
+                fanout_store.heartbeat(run_id, owner_id, lease_seconds=lease_seconds)
+
+    thread_ctor: Any = owned_runtime_thread
+    thread = thread_ctor(
+        target=_loop, daemon=True, name="sonder-fanout-heartbeat",
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
