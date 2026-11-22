@@ -99,9 +99,11 @@ name.
 
 A reply that begins `refused /write:` (or another tool) was stopped by the
 server's permission mode because nobody was at its console to answer the
-prompt. The response's `sonder_receipt.refusal.call_id` names the call; a
-developer or administrator can approve it once with
-`POST /v1/approvals/<call_id>` and then resend the same request. See
+prompt. The response's `sonder_receipt.refusal.call_id` names the call. An
+administrator account, the deployment API key or the local-open listener can
+approve it once with `POST /v1/approvals/<call_id>`; then resend the same
+request. Revoking an approval needs the same authority. A developer account
+can only list what is waiting (`GET /v1/approvals`), not approve or revoke. See
 [HTTP API & lifecycle](docs/wiki/05-http-api-and-lifecycle.md#one-shot-approvals-over-http).
 
 `--server`/`--key` argv flags also work and override the env vars:

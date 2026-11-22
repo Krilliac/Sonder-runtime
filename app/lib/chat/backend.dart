@@ -321,7 +321,7 @@ class SonderApiChatBackend implements ChatBackend {
       }
       if (e.httpStatus == 401 || e.httpStatus == 403) {
         return const ApprovalOutcome(ApprovalStatus.forbidden,
-            message: 'Approvals need a developer or admin account.');
+            message: ApprovalsApi.forbiddenToIssue);
       }
       return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
     }
