@@ -206,6 +206,37 @@ def test_local_log_dashboard_requires_direct_loopback_and_no_tls_proxy(monkeypat
     assert ts._local_log_dashboard_allowed("127.0.0.1") is False
 
 
+def _lifecycle_handler(peer, *, host_trusted=True):
+    handler = ts.Handler.__new__(ts.Handler)
+    handler.client_address = (peer, 50000)
+    handler._host_trusted = host_trusted
+    handler.headers = {}
+    events = []
+    handler._auth_rate_limited = lambda: False
+    handler._request_auth_context = lambda: {"authorized": False}
+    handler._send_auth_error = lambda: events.append("401")
+    handler._send_json_payload = lambda payload, status=200: events.append(status)
+    return handler, events
+
+
+def test_lifecycle_loopback_bypass_is_off_behind_a_declared_proxy(monkeypatch):
+    """G1464: behind a loopback reverse proxy every peer is 127.0.0.1."""
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", False)
+    direct, events = _lifecycle_handler("127.0.0.1")
+    assert direct._peer_is_loopback() is True
+    assert direct._handle_lifecycle_get("/version") is True
+    assert events == [200]
+    untrusted_host, _ = _lifecycle_handler("127.0.0.1", host_trusted=False)
+    assert untrusted_host._peer_is_loopback() is False
+
+    monkeypatch.setattr(ts, "TLS_TERMINATED_BY_PROXY", True)
+    for path in ("/ready", "/health", "/version"):
+        proxied, events = _lifecycle_handler("127.0.0.1")
+        assert proxied._peer_is_loopback() is False
+        assert proxied._handle_lifecycle_get(path) is True
+        assert events == ["401"], path
+
+
 def test_check_auth_open_when_no_key():
     assert ts.check_auth("", "") is True
 
@@ -3835,3 +3866,51 @@ def test_natural_language_intents_meet_the_slash_permission_gate(monkeypatch, in
     output = ts._handle_intent("do it", messages=messages, context=context)
     assert output == slash_refusal
     assert seen == [(slash.split()[0], context)]
+
+
+def test_responses_endpoint_does_not_execute_slash_control_commands(monkeypatch):
+    """POST /v1/responses is model-only and must not reach control_command via answer_with_history."""
+    import selfmod
+    import server as srv
+    import permission_modes
+
+    orig_rule = permission_modes._rule_action_for
+    monkeypatch.setattr(
+        permission_modes, "_rule_action_for",
+        lambda tool, args=None: (permission_modes.ALLOW, "allow") if tool == "selfmod" else orig_rule(tool, args),
+    )
+    mutated = []
+    monkeypatch.setattr(
+        selfmod, "set_enabled",
+        lambda flag: mutated.append(flag) or {"enabled": flag},
+    )
+    developer = {
+        "mode": "account", "authorized": True, "api_key": False,
+        "account": {"username": "developer", "role": "developer"},
+    }
+    monkeypatch.setattr(ts.Handler, "_request_auth_context", lambda _self: developer)
+    monkeypatch.setattr(ts._legacy_runtime(), "available_tiers", lambda: {})
+    monkeypatch.setattr(ts._legacy_runtime(), "chat_web_response", lambda *a, **kw: None)
+    monkeypatch.setattr(ts._legacy_runtime(), "route_computer_use", lambda *a, **kw: None)
+
+    seen_prompts = []
+
+    def fake_answer(prompt, history, **kwargs):
+        # Invoke real control_command the same way _answer_with_history_impl does.
+        cmd = srv.control_command(prompt)
+        if cmd is not None:
+            return cmd
+        seen_prompts.append(prompt)
+        return "model-reply"
+
+    monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", fake_answer)
+    body = json.dumps({"model": "sonder", "input": "/selfmod disable"}).encode("utf-8")
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(
+            port, "POST", "/v1/responses", body=body,
+            headers={"Content-Type": "application/json"},
+        )
+    assert status == 200, payload
+    assert mutated == []
+    assert seen_prompts == ["/selfmod disable"]
+

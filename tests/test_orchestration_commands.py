@@ -98,6 +98,7 @@ def test_http_slash_both_spellings_use_parser(monkeypatch, command, arguments, c
     monkeypatch.setattr(serve, "_LEGACY_RUNTIME", SimpleNamespace(
         master_orchestrator=SimpleNamespace(capacity=lambda: {"worker_slots": 1}),
         master_orchestrate=lambda **kw: calls.append(kw) or "started",
+        served_project_refusal=lambda project: "",
     ))
     assert serve._handle_slash(f"{command} {arguments}", project="project") == "started"
     assert calls == [{"task": "task", "mode": "fleet", "agents": count, "project": "project"}]

@@ -23,7 +23,8 @@ class ApprovalRequest {
   final String callId;
 
   /// Redacted argument preview rows, in server order: `path`, `content`.
-  /// Values are shown as given (the server already redacts them).
+  /// Values are shown as given (the server already redacts them), except
+  /// that the sheet escapes hidden characters ([approvalVisibleText]).
   final List<(String, String)> arguments;
 
   /// When the call was refused, already formatted (`12:39`).
@@ -51,6 +52,43 @@ class ApprovalRequest {
         if (reason != null && reason!.isNotEmpty) reason!,
       ].join(' · ');
 }
+
+/// [value] with every character that could hide, reorder or break what the
+/// approval sheet shows rewritten as a visible `\uXXXX` escape
+/// (`\UXXXXXXXX` above U+FFFF): C0 and C1 controls and DEL, the
+/// line/paragraph separators, the bidi marks, embeddings, overrides and
+/// isolates, zero-width and other invisible format characters, and lone
+/// surrogates. Other text, including backslashes, is unchanged.
+String approvalVisibleText(String value) {
+  final out = StringBuffer();
+  for (final rune in value.runes) {
+    if (_hiddenInApproval(rune)) {
+      out.write(rune <= 0xFFFF
+          ? '\\u${rune.toRadixString(16).padLeft(4, '0')}'
+          : '\\U${rune.toRadixString(16).padLeft(8, '0')}');
+    } else {
+      out.writeCharCode(rune);
+    }
+  }
+  return out.toString();
+}
+
+bool _hiddenInApproval(int rune) =>
+    rune <= 0x1F ||
+    (rune >= 0x7F && rune <= 0x9F) ||
+    rune == 0xAD || // soft hyphen
+    (rune >= 0x600 && rune <= 0x605) ||
+    rune == 0x61C || // Arabic letter mark
+    rune == 0x6DD ||
+    rune == 0x70F ||
+    rune == 0x180E ||
+    (rune >= 0x200B && rune <= 0x200F) || // zero-width, LRM, RLM
+    (rune >= 0x2028 && rune <= 0x202E) || // separators, embeddings, overrides
+    (rune >= 0x2060 && rune <= 0x206F) || // word joiner, isolates, invisibles
+    (rune >= 0xD800 && rune <= 0xDFFF) || // lone surrogates
+    rune == 0xFEFF ||
+    (rune >= 0xFFF9 && rune <= 0xFFFB) ||
+    (rune >= 0xE0000 && rune <= 0xE007F); // tag characters
 
 /// Lifetimes the sheet offers; the server caps the value it accepts.
 const approvalTtlOptions = <Duration>[
@@ -118,9 +156,11 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
     Widget argRow(String key, String value, {Color? color}) => Padding(
           padding: const EdgeInsets.only(bottom: SonderSpace.xs),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            SizedBox(width: 76, child: Text(key, style: keyStyle)),
+            SizedBox(
+                width: 76,
+                child: Text(approvalVisibleText(key), style: keyStyle)),
             Expanded(
-                child: Text(value,
+                child: Text(approvalVisibleText(value),
                     style: color == null
                         ? valueStyle
                         : valueStyle.copyWith(color: color))),
@@ -131,7 +171,8 @@ class _ApprovalSheetState extends State<ApprovalSheet> {
       key: const Key('approval-sheet'),
       kind: StatusKind.ask,
       word: 'approve',
-      title: SonderStrings.approvalTitle(request.tool, request.callId),
+      title: approvalVisibleText(
+          SonderStrings.approvalTitle(request.tool, request.callId)),
       semanticsLabel: SonderStrings.approvalSheetLabel,
       actions: [
         TextButton(

@@ -269,6 +269,7 @@ def test_slash_handler_preserves_prefix_until_master(server, queued, surface, mo
     from sonder_runtime.interfaces.orchestration_commands import execute_master_command
     host = SimpleNamespace(
         master_orchestrate=server.master_orchestrate, master_orchestrator=mo,
+        served_project_refusal=lambda project: "",
         control_command=lambda command, **kw: execute_master_command(
             command.split(None, 1)[1], orchestrate=server.master_orchestrate,
             capacity=mo.capacity, project=kw.get("project", ""),

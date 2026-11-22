@@ -3081,6 +3081,8 @@ def test_master_orchestrate_delegates_and_audits(monkeypatch):
 
 
 def test_master_orchestrate_uses_tool_agent_for_repo_inspection(monkeypatch, tmp_path):
+    # A task-text root must lie inside the configured file roots.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     calls = []
 
     def grounded_agent(prompt, **kwargs):

@@ -110,6 +110,8 @@ def test_repository_worker_arms_the_inspect_before_final_nudge(monkeypatch, tmp_
 
 
 def test_repository_worker_propagates_labeled_external_project(monkeypatch, tmp_path):
+    # A task-text root must lie inside the configured file roots.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     captured = {}
 
     class _FakeServer:
@@ -442,7 +444,9 @@ def test_partial_fleet_audits_successful_outputs_only():
     )
 
 
-def test_repository_delegation_refuses_outputs_without_tool_ledger(tmp_path):
+def test_repository_delegation_refuses_outputs_without_tool_ledger(monkeypatch, tmp_path):
+    # A task-text root must lie inside the configured file roots.
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
     audited = []
 
     # Use a real, existing repository root so the fail-closed resolver accepts
