@@ -65,12 +65,42 @@ Language is chosen by fence: ```` ```rust ```` / ```` ```go ```` /
 error rather than a stack trace. `/run [seconds]` executes the last code
 block from the previous response.
 
+Child output is drained into bounded buffers while the run is live, and a
+spawn failure (for example stdin that cannot be encoded) never leaves the
+child or its Windows job running. In code, `code_runner.run_code(...,
+limits=RunLimits())` opts into a hardened host run: a Windows Job Object
+process and memory cap (fail closed if they cannot be set), `RLIMIT_NPROC`,
+`RLIMIT_AS` and `RLIMIT_FSIZE` on POSIX, Python run with `-I -X utf8`, and a
+total-output kill threshold. No production caller passes limits yet, so the
+`/run` handlers keep the behaviour described above.
+
 Related: `run_project` (bounded multi-file temp project with optional
-build), `parallel_run_code` (many snippets concurrently), `script_run` /
-`workspace_run` (argv-only execution of a real script/program). `script_run`
-(and the native MCP `run_script` tool) first applies the operator's static
-artifact-risk policy to its exact file; `workspace_run`/`run_program` launch an
-argv and are not gated by it.
+build; `commands_json` lists at most 16 commands), `parallel_run_code` (many
+snippets concurrently), `script_run` / `workspace_run` (argv-only execution
+of a real script/program). `script_run` (and the native MCP `run_script`
+tool) first applies the operator's static artifact-risk policy to its exact
+file; `workspace_run`/`run_program` launch an argv and are not gated by it.
+`run_program` does refuse program text that is not a file: it parses the
+interpreter's argv with a per-interpreter option grammar (Python, the sh
+family, csh, fish, elvish, nu, Perl, Ruby, PHP, Node, Deno and Bun),
+so bundled short options (`python -Ic CODE`), option values that carry code
+(`node --import data:...`), remote or `data:` operands, and code fed on stdin
+(`-`, `/dev/stdin`, `/proc/self/fd/0`, including dot-segment spellings) are
+refused, while `python script.py -c` still runs. Launchers such as `env`,
+`nice`, `timeout`, `sudo`, `wsl` and `conhost` are unwrapped and the inner
+command is checked the same way, including absolute interpreter paths
+(`timeout 5 /bin/sh -c ...`). `env` options are parsed the way getopt
+reads them, so a split string in a glued or bundled `-S` (`-Ssh -c id`,
+`-iS 'sh -c id'`) or an abbreviated `--split-string` (`--sp=...`) is split
+and its words are read again as `env` arguments; an `-S` string that uses
+`env`'s own escapes, `${VAR}`, `#` comments or control characters is refused,
+as is an unknown short option bundle that also contains `S`. Only Windows `timeout.exe` syntax (a leading
+`/t`, `/nobreak` or `/?`, or the system `timeout.exe` itself, which never runs
+a command) is left alone. `wsl` must name its command with `-e`/`--exec`;
+without it the rest of the line goes to the distro's default shell, so it is
+refused (a leading `~` is skipped first). PowerShell refuses inline switches in any
+spelling (`/`, Unicode dashes, `:`/`=` values), a positional command without
+`-File`, and stdin script text. Use `script_run` for ad-hoc code.
 
 ## Formal proofs — Lean 4 / Mathlib
 

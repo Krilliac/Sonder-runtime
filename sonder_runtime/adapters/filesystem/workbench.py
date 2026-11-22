@@ -14,7 +14,9 @@ import hashlib
 import heapq
 import json
 import os
+import posixpath
 import re
+import shlex
 import signal
 import shutil
 import stat
@@ -816,6 +818,9 @@ def _resolve_program(program, *, extra_roots="", bypass=False):
     value = str(program or "").strip()
     if not value:
         raise ValueError("program is required")
+    # Refuse UNC/device/NT-namespace spellings before any os.path.realpath
+    # call can open an SMB share (NTLM credential leak).
+    value = file_ops._reject_network_path(value)
     if Path(value).is_absolute() or any(mark in value for mark in ("/", "\\")):
         if Path(value).is_absolute():
             if os.path.normcase(os.path.realpath(value)) == os.path.normcase(os.path.realpath(sys.executable)):
@@ -934,75 +939,949 @@ def _terminate_process_tree(proc):
         proc.kill()
 
 
-# Inline-code flags per interpreter. run_program is argv-only, so an inline
-# code string (e.g. `bash -c ...`, `python -c ...`) is an ad-hoc script that
-# never passes through run_script's per-suffix validation. Refuse these
-# uniformly and route callers to script_run, mirroring the PowerShell/cmd
-# guard below. Keys are matched against the resolved executable's basename
-# (with any ".exe" suffix and python version suffix normalized away).
-_INLINE_CODE_FLAGS = {
-    "bash": ("-c",),
-    "sh": ("-c",),
-    "zsh": ("-c",),
-    "dash": ("-c",),
-    "python": ("-c",),
-    "node": ("-e", "--eval", "-p", "--print"),
-    "nodejs": ("-e", "--eval", "-p", "--print"),
-    "perl": ("-e", "-E"),
-    "ruby": ("-e",),
-    "php": ("-r",),
+# Inline program text per interpreter. run_program is argv-only, so inline
+# code (``bash -c ...``, ``python -c ...``, program text piped on stdin) is an
+# ad-hoc script that never passes through run_script's per-suffix validation
+# or the execution-risk policy. Refuse it uniformly and route callers to
+# script_run, mirroring the PowerShell/cmd guard below.
+#
+# Matching the flag exactly or as a prefix was evaded by short-option bundles
+# (``python -Ic``, ``bash -ec``, ``perl -we``) and by an option value in front
+# of the flag (``python -X dev -c``), so argv is walked the way the
+# interpreter parses it: bundles letter by letter (letters are case-sensitive,
+# like the interpreters), option values skipped, and option parsing ending at
+# the first operand -- the script, whose own arguments (``python script.py
+# -c``) are not the interpreter's. Anything the grammar does not know marks
+# the parse uncertain; from then on no operand ends the scan, so an unknown
+# value-taking option can only cause a refusal, never hide an inline flag.
+#
+# Grammar fields: ``inline`` letters/longs take program text; ``value``
+# letters take the rest of the bundle or, at its end, the next argument;
+# ``after`` letters take the next argument and the bundle carries on (sh:
+# ``-oc pipefail CODE``); ``program`` letters name the program to run
+# (``python -m``; option parsing ends there when ``ends_at_program``);
+# ``module`` letters take a perl module list, which perl pastes into
+# ``use MODULE ...;`` source. ``checks`` maps a value letter to a check of
+# its value and ``glued`` letters take only the rest of the bundle, never the
+# next argument; ``stdin`` letters make the interpreter read program text
+# from stdin; ``data_long`` options load a module specifier, where a
+# ``data:`` URL is inline source; ``commands`` are subcommands the scan
+# continues past; ``inline_commands`` take program text; with
+# ``remote_operands`` a ``data:``/``http(s):`` program operand is refused.
+# Long option names are compared with ``_`` folded into ``-`` (node does
+# that); an interpreter that does not fold rejects the spelling outright.
+def _inline_grammar(
+    inline="", flags="", value="", after="", program="", stdin="", glued="",
+    checks=None, inline_long=(), value_long=(), flags_long=(), data_long=(),
+    stdin_long=(), plus=False, ends_at_program=False, commands=(),
+    inline_commands=(), stdin_commands=(), remote_operands=False,
+):
+    checks = dict(checks or {})
+    return {
+        "inline": frozenset(inline), "flags": frozenset(flags),
+        "value": frozenset(value + program + glued + "".join(checks)),
+        "after": frozenset(after), "program": frozenset(program),
+        "glued": frozenset(glued), "checks": checks,
+        "stdin": frozenset(stdin), "inline_long": frozenset(inline_long),
+        "value_long": frozenset(value_long), "flags_long": frozenset(flags_long),
+        "data_long": frozenset(data_long), "stdin_long": frozenset(stdin_long),
+        "plus": plus, "ends_at_program": ends_at_program,
+        "commands": frozenset(commands),
+        "inline_commands": frozenset(inline_commands),
+        "stdin_commands": frozenset(stdin_commands),
+        "remote_operands": remote_operands,
+    }
+
+
+_STDIN_OPERANDS = frozenset({
+    "-",
+    "/dev/stdin",
+    "/dev/fd/0",
+    "/proc/self/fd/0",
+    "/proc/thread-self/fd/0",
+})
+
+
+def _is_stdin_operand(arg):
+    """True when ``arg`` names standard input (``-``, empty, or ``/dev/stdin`` etc.)."""
+    candidate = arg.strip()
+    if candidate in ("", "-"):
+        return True
+    lowered = candidate.lower()
+    if lowered.startswith("file:"):
+        rest = candidate[5:]
+        if rest.startswith("//localhost/"):
+            rest = rest[len("//localhost"):]
+        elif rest.startswith("///"):
+            rest = rest[2:]
+        candidate = rest
+    if candidate.startswith("/"):
+        # Collapse repeated slashes (normpath keeps a leading "//"), then the
+        # "." and ".." segments, so /dev/./stdin and /proc/self/fd/../fd/0
+        # match. Lexical only: it can over-match a symlinked path, which
+        # refuses rather than allows.
+        return posixpath.normpath(re.sub(r"/+", "/", candidate)) in _STDIN_OPERANDS
+    return False
+
+
+def _is_remote_operand(arg):
+    return arg.strip().lower().startswith(("data:", "http:", "https:"))
+
+
+# Option-value checks. Each returns "refuse" for a value that is program
+# text, "stdin" when the option makes the interpreter read code from stdin.
+# A perl -M/-m value perl turns into plain ``use Module LIST;``: a module name,
+# optionally ``=a,b`` (pasted inside a NUL-quoted q{}). Anything else is code.
+_PERL_MODULE_ARG = re.compile(r"-?[A-Za-z_][A-Za-z0-9_:]*(?:=.*)?\Z", re.DOTALL)
+# perl -d[t]:MOD loads Devel::MOD; an "=LIST" or any other text is pasted into
+# source, and a bare -d / -dt starts the debugger, which reads its commands
+# (perl code) from stdin.
+_PERL_DEBUGGER_ARG = re.compile(
+    r"t?:[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*\Z")
+# python -m modules whose command line runs program text from argv or stdin
+# (code, timeit, pdb commands, idlelib/IPython -c, the asyncio and _pyrepl
+# REPLs) or that hand off to another module named on argv (profile,
+# cProfile, trace, runpy), which would let `-m runpy code` reach the rest. A
+# denylist, not an allowlist: -m pytest/pip/venv/json.tool and the like are
+# ordinary file-running tools. compileall (byte-compiles, never executes),
+# site (prints paths), pydoc, doctest and unittest (run files) are not listed.
+_PYTHON_CODE_MODULES = frozenset({
+    "code", "timeit", "pdb", "profile", "cprofile", "trace", "runpy",
+    "idlelib", "ipython", "asyncio", "_pyrepl",
+})
+
+
+def _is_data_url(value):
+    return value.strip().lower().startswith("data:")
+
+
+def _perl_module_verdict(value):
+    return "refuse" if value and not _PERL_MODULE_ARG.match(value) else None
+
+
+def _perl_debugger_verdict(value):
+    if value in ("", "t"):
+        return "stdin"
+    return None if _PERL_DEBUGGER_ARG.match(value) else "refuse"
+
+
+def _data_url_verdict(value):
+    return "refuse" if _is_data_url(value) else None
+
+
+def _python_module_verdict(value):
+    top = value.strip().split(".", 1)[0].casefold()
+    return "refuse" if top in _PYTHON_CODE_MODULES else None
+
+
+_PYTHON_GRAMMAR = _inline_grammar(
+    inline="c", flags="bBdEhiIOPqRsSuvVx?", value="WX", program="m", stdin="i",
+    checks={"m": _python_module_verdict},
+    flags_long=("help", "version", "help-env", "help-xoptions", "help-all"),
+    value_long=("check-hash-based-pycs",), ends_at_program=True,
+)
+_SH_GRAMMAR = _inline_grammar(
+    inline="c", flags="abefhiklmnprstuvxBCDEHPT", after="oO", stdin="s",
+    flags_long=(
+        "login", "noprofile", "norc", "posix", "debugger", "dump-strings",
+        "dump-po-strings", "verbose", "version", "help", "restricted",
+        "noediting", "pretty-print",
+    ),
+    value_long=("rcfile", "init-file"), plus=True,
+)
+_CSH_GRAMMAR = _inline_grammar(
+    inline="c", flags="bdefimnqsStvVxX", stdin="st",
+    flags_long=("version", "help"),
+)
+_NU_GRAMMAR = _inline_grammar(
+    inline="ce",
+    inline_long=("commands", "execute"),
+    value_long=("config", "env-config", "log-level", "threads", "table-mode"),
+    flags_long=("stdin", "interactive", "login", "no-config-file", "help", "version"),
+    stdin_long=("stdin", "interactive"),
+)
+_INLINE_GRAMMARS = {
+    "python": _PYTHON_GRAMMAR,
+    "py": _PYTHON_GRAMMAR,
+    "bash": _SH_GRAMMAR,
+    "sh": _SH_GRAMMAR,
+    "zsh": _SH_GRAMMAR,
+    "dash": _SH_GRAMMAR,
+    "ash": _SH_GRAMMAR,
+    "ksh": _SH_GRAMMAR,
+    "mksh": _SH_GRAMMAR,
+    "pdksh": _SH_GRAMMAR,
+    "oksh": _SH_GRAMMAR,
+    "csh": _CSH_GRAMMAR,
+    "tcsh": _CSH_GRAMMAR,
+    "fish": _inline_grammar(
+        inline="cC", flags="dDilnNPv", value="f",
+        inline_long=("command", "init-command"),
+        flags_long=(
+            "debug", "interactive", "login", "no-execute", "no-config",
+            "private", "version", "help",
+        ),
+        value_long=("features", "debug-output", "profile"),
+    ),
+    "elvish": _inline_grammar(
+        inline="c", flags="i", inline_long=("c",),
+        flags_long=("compileonly", "help", "version", "no-rc"),
+    ),
+    "nu": _NU_GRAMMAR,
+    "nushell": _NU_GRAMMAR,
+    "perl": _inline_grammar(
+        inline="eEF", flags="acfhlnpsStTuUvwWX0123456789", value="CDiIVx",
+        glued="d", checks={
+            "m": _perl_module_verdict, "M": _perl_module_verdict,
+            "d": _perl_debugger_verdict,
+        },
+    ),
+    "ruby": _inline_grammar(inline="e", value="CEIr"),
+    "php": _inline_grammar(
+        inline="rRBE", value="cdtzS", program="fF",
+        inline_long=("run", "process-begin", "process-code", "process-end"),
+    ),
+    "node": _inline_grammar(
+        inline="ep", flags="chiv", value="C", stdin="i",
+        checks={"r": _data_url_verdict},
+        inline_long=("eval", "print"),
+        flags_long=(
+            "check", "interactive", "version", "help", "no-warnings",
+            "no-deprecation", "trace-warnings", "throw-deprecation",
+            "pending-deprecation", "preserve-symlinks",
+            "preserve-symlinks-main", "experimental-strip-types",
+            "no-experimental-strip-types", "enable-source-maps", "watch",
+            "test",
+        ),
+        stdin_long=("interactive",),
+        value_long=(
+            "conditions", "input-type", "title", "max-old-space-size",
+            "env-file", "test-name-pattern", "test-reporter-destination",
+            "redirect-warnings", "heapsnapshot-signal", "diagnostic-dir",
+        ),
+        data_long=(
+            "import", "require", "loader", "experimental-loader",
+            "test-reporter",
+        ),
+    ),
+    "deno": _inline_grammar(
+        flags="Aq", value="c",
+        flags_long=(
+            "allow-all", "quiet", "no-check", "no-lock", "no-prompt",
+            "no-remote", "reload", "watch", "help", "version",
+            "allow-read", "allow-write", "allow-net", "allow-env",
+            "allow-run", "allow-sys", "allow-ffi", "allow-hrtime",
+        ),
+        value_long=(
+            "config", "import-map", "lock", "ext", "cert", "location",
+            "seed", "v8-flags", "inspect", "inspect-brk", "inspect-wait",
+            "log-level", "permission-set",
+        ),
+        inline_long=("eval", "eval-file"),
+        commands=("run", "repl", "test", "bench", "serve", "compile"),
+        inline_commands=("eval",), stdin_commands=("repl",),
+        remote_operands=True,
+    ),
+    "bun": _inline_grammar(
+        inline="ep", flags="bhv", value="c",
+        checks={"r": _data_url_verdict},
+        inline_long=("eval", "print"),
+        flags_long=(
+            "bun", "hot", "watch", "smol", "no-install", "help", "version",
+        ),
+        value_long=("cwd", "config", "env-file", "tsconfig-override"),
+        data_long=("preload", "require"),
+        commands=("run", "test", "repl"),
+        inline_commands=("exec",), stdin_commands=("repl",),
+        remote_operands=True,
+    ),
+    "lua": _inline_grammar(
+        inline="e", flags="ivW", value="l", stdin="i",
+    ),
+    "luajit": _inline_grammar(
+        inline="e", flags="iv", value="ljOb", stdin="i",
+    ),
 }
+_INLINE_GRAMMARS["nodejs"] = _INLINE_GRAMMARS["node"]
+_AWK_NAMES = frozenset({"awk", "gawk", "mawk", "nawk"})
+
+# py.exe launcher version selectors (-3, -3.12, -3.12-32, -V:Company/Tag).
+_PY_LAUNCHER_SELECTOR = re.compile(r"-(?:[0-9]|V:)")
+
+
+def _normalized_program_basename(executable):
+    """Normalise an executable path to a casefolded Windows-alias-free basename.
+
+    Handles both ``/`` and ``\\``, Windows drive prefixes (``C:python``),
+    NTFS alternate data streams (``python.exe::$DATA``), and trailing dots or
+    spaces (``powershell.exe.``, ``cmd.exe ``).
+    """
+    text = str(executable or "").strip()
+    if not text:
+        return ""
+    normalised = posixpath.normpath(text.replace("\\", "/"))
+    base = normalised.rsplit("/", 1)[-1]
+    if len(base) >= 2 and base[1] == ":" and base[0].isascii() and base[0].isalpha():
+        base = base[2:]
+    if ":" in base:
+        base = base.split(":", 1)[0]
+    return base.rstrip(". ").lower()
+
+
+def _strip_win_exec_ext(name):
+    for ext in (".exe", ".com", ".bat", ".cmd"):
+        if name.endswith(ext):
+            return name[:-len(ext)]
+    return name
 
 
 def _inline_interpreter_key(basename):
-    """Normalize a resolved executable basename to an _INLINE_CODE_FLAGS key.
+    """Normalize a resolved executable basename to an _INLINE_GRAMMARS key.
 
-    Strips a trailing ".exe" and collapses versioned python names
-    (python3, python3.11) onto the bare "python" key. Returns None when the
-    basename is not a known inline-capable interpreter.
+    Strips a trailing ".exe"/".com"/".bat"/".cmd", Windows aliases/ADS, maps
+    the py/pyw launchers onto "py", any python* name (python3.12, pythonw,
+    python3.13t) onto "python", and drops a version suffix from the others
+    (perl5.36.0, ruby3.2, php8.2). Returns None when the basename is not a
+    known inline-capable interpreter.
     """
-    name = basename[:-4] if basename.endswith(".exe") else basename
+    name = _strip_win_exec_ext(_normalized_program_basename(basename))
+    if name in ("py", "pyw"):
+        return "py"
     if name.startswith("python"):
-        name = "python"
-    return name if name in _INLINE_CODE_FLAGS else None
+        return "python"
+    name = name.rstrip("0123456789.")
+    return name if name in _INLINE_GRAMMARS else None
 
 
-def _is_inline_code_arg(arg, flags):
-    """True if ``arg`` is one of ``flags`` including its value-glued forms.
+def _awk_inline_refusal(key, args):
+    """Refuse awk invocations that supply an inline program (no -f/--file or uses -e)."""
+    has_file = False
+    for arg in args:
+        if arg == "--":
+            break
+        if arg in ("-e", "--source") or arg.startswith(("-e", "--source=")):
+            return "inline %s code is disabled; use script_run" % key
+        if arg in ("-f", "--file") or arg.startswith(("-f", "--file=")):
+            has_file = True
+    if not has_file:
+        return "inline %s code is disabled; use script_run" % key
+    return None
 
-    An exact-match check alone is trivially evaded, because the interpreters
-    accept the code string glued onto the flag: ``python -cCODE``,
-    ``perl -eCODE``, ``node --eval=CODE``.  A short option (``-c``) may carry
-    the value directly appended; a long option (``--eval``) carries it after
-    ``=``.  Both forms run inline code and must be refused too.
+
+def _inline_code_refusal(key, args, stdin=""):
+    """Why interpreter ``key`` run with ``args`` would run inline program text.
+
+    Returns the refusal message, or None when the argv names a program file
+    (or no program at all, with nothing on stdin).
     """
-    for flag in flags:
-        if arg == flag:
-            return True
-        if flag.startswith("--"):
-            if arg.startswith(flag + "="):
-                return True
-        elif len(flag) == 2 and flag.startswith("-"):
-            # Short option: value appended directly, e.g. -cCODE / -eCODE.
-            if arg.startswith(flag):
-                return True
-    return False
+    grammar = _INLINE_GRAMMARS[key]
+    if key == "py" and args and _PY_LAUNCHER_SELECTOR.match(args[0]):
+        args = args[1:]
+    refusal = "inline %s code is disabled; use script_run" % key
+    uncertain = False       # an option the grammar cannot parse was seen
+    operand_seen = False    # a program file (or possible one) was named
+    reads_stdin = False
+    pending = 0             # option values still to be consumed from argv
+    first_operand = True
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if pending:
+            pending -= 1
+            if not arg.startswith("-"):
+                continue
+            # An option where a value was expected is parsed as an option:
+            # refusing a malformed argv beats letting a flag slip past.
+        if arg == "--" and not uncertain:
+            if index < len(args):
+                operand = args[index]
+                operand_seen = True
+                reads_stdin = reads_stdin or _is_stdin_operand(operand)
+                if grammar["remote_operands"] and _is_remote_operand(operand):
+                    return refusal
+                if first_operand and operand in grammar["inline_commands"]:
+                    return refusal
+                if first_operand and operand in grammar["stdin_commands"]:
+                    reads_stdin = True
+            break
+        if arg.startswith("--"):
+            name, has_value, value = arg[2:].partition("=")
+            name = name.replace("_", "-")
+            if name in grammar["inline_long"]:
+                return refusal
+            if name in grammar["stdin_long"]:
+                reads_stdin = True
+            if name in grammar["data_long"]:
+                if not has_value:
+                    value = args[index] if index < len(args) else ""
+                if _is_data_url(value):
+                    return refusal
+            if name in grammar["value_long"] or name in grammar["data_long"]:
+                pending += 0 if has_value else 1
+            elif name not in grammar["flags_long"]:
+                uncertain = True
+            continue
+        plus = grammar["plus"] and arg.startswith("+")
+        if len(arg) > 1 and (arg.startswith("-") or plus):
+            letters = arg[1:]
+            for position, letter in enumerate(letters):
+                # bash/sh still execute +c/+lc as an inline command string.
+                if letter in grammar["inline"]:
+                    return refusal
+                if letter in grammar["after"]:
+                    pending += 1
+                    continue
+                if letter in grammar["value"]:
+                    rest = letters[position + 1:]
+                    glued = letter in grammar["glued"]
+                    value = rest
+                    if not rest and not glued and index < len(args):
+                        value = args[index]
+                    check = grammar["checks"].get(letter)
+                    if check is not None:
+                        verdict = check(value)
+                        if verdict == "refuse":
+                            return refusal
+                        reads_stdin = reads_stdin or verdict == "stdin"
+                    if letter in grammar["program"] and _is_stdin_operand(value):
+                        reads_stdin = True
+                    if not rest and not glued:
+                        pending += 1
+                    if letter in grammar["program"]:
+                        operand_seen = True
+                        if grammar["ends_at_program"]:
+                            index = len(args)
+                    break
+                if letter in grammar["stdin"]:
+                    reads_stdin = True
+                if letter not in grammar["flags"]:
+                    uncertain = True
+            continue
+        # An operand: a subcommand, the program file, or stdin.
+        if (first_operand or uncertain) and arg in grammar["inline_commands"]:
+            return refusal
+        if (first_operand or uncertain) and arg in grammar["commands"]:
+            first_operand = False
+            reads_stdin = reads_stdin or arg in grammar["stdin_commands"]
+            continue
+        first_operand = False
+        operand_seen = True
+        reads_stdin = reads_stdin or _is_stdin_operand(arg)
+        if grammar["remote_operands"] and _is_remote_operand(arg):
+            return refusal
+        if not uncertain:
+            break
+    if not operand_seen or uncertain:
+        reads_stdin = True
+    if reads_stdin and str(stdin or "").strip():
+        return "%s program text on stdin is disabled; use script_run" % key
+    return None
+
+
+_PS_SWITCH_TRANS = str.maketrans({"\u2013": "-", "\u2014": "-", "\u2015": "-"})
+_PS_VALUE_FLAGS = frozenset({
+    "-executionpolicy", "-ep", "-outputformat", "-of", "-inputformat", "-if",
+    "-windowstyle", "-w", "-configurationname", "-config", "-workingdirectory",
+    "-wd", "-psconsolefile", "-settingsfile", "-custompipename",
+    "-encodedarguments", "-ea",
+})
+_PS_BOOL_FLAGS = frozenset({
+    "-noprofile", "-nop", "-noninteractive", "-noni", "-nologo", "-nol",
+    "-noexit", "-noe", "-sta", "-mta", "-login", "-l", "-help", "-h", "-?",
+    "-v",
+})
+
+
+def _normalize_ps_switch(arg):
+    text = str(arg).strip().lower().translate(_PS_SWITCH_TRANS)
+    if text.startswith("/"):
+        text = "-" + text[1:]
+    head, sep, value = re.split(r"([:=])", text, maxsplit=1) if (":" in text or "=" in text) else (text, "", "")
+    return head, bool(sep), value
 
 
 def _is_inline_powershell_arg(arg):
     """Match PowerShell's executable-level abbreviations for inline code."""
-    switch = arg.split("=", 1)[0]
-    # powershell.exe accepts every Command prefix (including -co/-com), every
-    # EncodedCommand prefix, and the non-prefix -ec alias. Missing one lets an
-    # argv-only runner execute arbitrary script while claiming inline refusal.
+    switch, _has_val, _val = _normalize_ps_switch(arg)
+    if switch.startswith("--") and len(switch) >= 3:
+        switch = switch[1:]
+    # powershell.exe / pwsh accept /, unicode dashes, ":" or "=" value
+    # separators, whitespace padding, pwsh "--" prefixes, every Command /
+    # CommandWithArgs / EncodedCommand prefix, and the -ec / -cwa aliases.
     return (
         len(switch) >= 2
         and (
             "-command".startswith(switch)
+            or "-commandwithargs".startswith(switch)
             or "-encodedcommand".startswith(switch)
-            or switch == "-ec"
+            or switch in ("-ec", "-cwa")
         )
     )
+
+
+def _powershell_inline_refusal(args, stdin=""):
+    """Refuse inline PowerShell commands, positional commands, and stdin code."""
+    refusal = "inline PowerShell commands are disabled; use script_run"
+    file_seen = False
+    reads_stdin = False
+    pending = 0
+    index = 0
+    while index < len(args):
+        raw = args[index]
+        index += 1
+        if _is_inline_powershell_arg(raw):
+            return refusal
+        if pending:
+            pending -= 1
+            continue
+        switch, has_val, value = _normalize_ps_switch(raw)
+        if len(switch) >= 2 and "-file".startswith(switch):
+            target = value if has_val else (args[index] if index < len(args) else "")
+            if not has_val and index < len(args):
+                index += 1
+            if not target or _is_stdin_operand(target):
+                reads_stdin = True
+                break
+            file_seen = True
+            break
+        if switch in _PS_VALUE_FLAGS:
+            if not has_val:
+                pending = 1
+            continue
+        if len(switch) >= 2 and "-version".startswith(switch):
+            # Windows PowerShell -Version takes a version operand unless it's
+            # the last arg or followed by another switch.
+            if not has_val and index < len(args) and not _normalize_ps_switch(args[index])[0].startswith("-"):
+                pending = 1
+            continue
+        if len(switch) >= 4 and "-noexit".startswith(switch):
+            # -NoExit drops into the stdin command loop after running -File.
+            reads_stdin = True
+            continue
+        if switch in _PS_BOOL_FLAGS or switch in ("--help", "--version"):
+            continue
+        if _is_stdin_operand(raw):
+            reads_stdin = True
+            break
+        # Any positional argument or unrecognised switch (which Windows
+        # PowerShell executes as the start of a -Command) fails closed.
+        return refusal
+    if (not file_seen or reads_stdin) and str(stdin or "").strip():
+        return "PowerShell program text on stdin is disabled; use script_run"
+    return None
+
+
+def _launcher_key(basename):
+    return _strip_win_exec_ext(_normalized_program_basename(basename))
+
+
+_COMMAND_STRING_LAUNCHERS = frozenset({
+    "forfiles", "wmic", "mshta", "rundll32", "wscript", "cscript",
+    "regsvr32", "msiexec", "pcalua", "syncappvpublishingserver",
+    "scriptrunner", "schtasks", "runas", "certutil", "bitsadmin",
+    "cmstp", "infdefaultinstall", "odbcconf", "mavinject",
+    "regasm", "regsvcs", "installutil", "diskshadow",
+})
+
+
+_LAUNCHER_SPECS = {
+    "conhost": {
+        "flags": frozenset({"--headless", "--forcev1", "--vtmode", "-headless", "/headless"}),
+        "value": frozenset({"--width", "--height", "--signal", "--server", "--feature"}),
+        "slash_as_dash": True,
+    },
+    "openconsole": {
+        "flags": frozenset({"--headless", "--forcev1", "--vtmode"}),
+        "value": frozenset({"--width", "--height", "--signal", "--server", "--feature"}),
+        "slash_as_dash": True,
+    },
+    # env has its own getopt-style parser (_unwrap_env); its argv is
+    # case-sensitive and -S re-feeds the split words through option parsing.
+    "env": {"flags": frozenset(), "value": frozenset(), "parser": "env"},
+    "nice": {
+        "flags": frozenset({"--help", "--version"}),
+        "value": frozenset({"-n", "--adjustment"}),
+        "numeric_dash": True,
+    },
+    "nohup": {"flags": frozenset({"--help", "--version"}), "value": frozenset()},
+    "setsid": {
+        "flags": frozenset({"-c", "--ctty", "-f", "--fork", "-w", "--wait", "--help", "--version"}),
+        "value": frozenset(),
+    },
+    "stdbuf": {
+        "flags": frozenset({"--help", "--version"}),
+        "value": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
+    },
+    "time": {
+        "flags": frozenset({"-p", "-v", "--verbose", "-q", "--quiet", "-a", "--append", "--portability", "--help", "--version"}),
+        "value": frozenset({"-f", "--format", "-o", "--output"}),
+    },
+    "timeout": {
+        "flags": frozenset({"--preserve-status", "--foreground", "-v", "--verbose", "--help", "--version"}),
+        "value": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+        "leading_operands": 1,
+        # Windows timeout.exe only waits; it never runs a command. Its argv is
+        # recognised by a leading switch (see _is_windows_timeout_syntax).
+        "windows_timeout_bail": True,
+    },
+    "wsl": {
+        "flags": frozenset({"--system", "--web-download", "--no-distribution", "--help", "--version", "-l", "--list", "--status", "--shutdown", "--terminate"}),
+        "value": frozenset({"-d", "--distribution", "--distribution-id", "-u", "--user", "--cd", "--shell-type"}),
+        "exec_flags": frozenset({"-e", "--exec"}),
+        "stdin_if_no_inner": True,
+        # A leading "~" only selects the home directory; it is not a program.
+        "leading_skip": frozenset({"~"}),
+        # Without -e/--exec, wsl.exe hands the rest of the command line to the
+        # distro's default Linux shell, so it is shell text, not an argv.
+        "shell_unless_exec": True,
+    },
+    "busybox": {"flags": frozenset(), "value": frozenset()},
+    "toybox": {"flags": frozenset(), "value": frozenset()},
+    "sudo": {
+        "flags": frozenset({"-b", "-e", "-h", "-i", "-k", "-n", "-p", "-s", "-v", "--background", "--preserve-env", "--set-home", "--login", "--non-interactive", "--shell", "--stdin", "--version", "--help"}),
+        "value": frozenset({"-u", "-g", "-c", "-d", "-r", "-t", "--user", "--group", "--chdir", "--prompt", "--role", "--type"}),
+        "stdin_flags": frozenset({"-s", "--shell", "-i", "--login"}),
+    },
+    "doas": {"flags": frozenset({"-l", "-n", "-s"}), "value": frozenset({"-u", "-c"}), "stdin_flags": frozenset({"-s"})},
+    "xargs": {"flags": frozenset(), "value": frozenset(), "refuse_any": True},
+    "npx": {
+        "flags": frozenset({"-y", "--yes", "-q", "--quiet", "--no", "--no-install", "--prefer-online", "--prefer-offline", "--offline", "--help", "--version"}),
+        "value": frozenset({"-p", "--package", "-c", "--call", "--cache", "--userconfig", "--prefix", "--workspace"}),
+    },
+    "pnpx": {
+        "flags": frozenset({"-y", "--yes", "--help", "--version"}),
+        "value": frozenset({"--package", "-c"}),
+    },
+    "bunx": {
+        "flags": frozenset({"--bun", "-y", "--help", "--version"}),
+        "value": frozenset({"--cwd"}),
+    },
+    "uv": {
+        "flags": frozenset({"-q", "--quiet", "-v", "--verbose", "--no-cache", "--offline", "--frozen", "--locked", "--isolated", "--no-project", "--no-sync", "--help", "--version"}),
+        "value": frozenset({"--python", "-p", "--directory", "--project", "--with", "--with-editable", "--from", "--index-url", "--extra-index-url", "--cache-dir"}),
+        "subcommands": frozenset({"run"}),
+    },
+}
+_LAUNCHER_SPECS["wslg"] = _LAUNCHER_SPECS["wsl"]
+
+
+_WINDOWS_TIMEOUT_SWITCHES = frozenset({"/t", "/nobreak", "/?"})
+
+
+def _is_windows_system_timeout(executable):
+    """True when ``executable`` is the Windows System32/SysWOW64 timeout.exe."""
+    if os.name != "nt" or not executable:
+        return False
+    root = os.environ.get("SystemRoot") or os.environ.get("windir")
+    if not root:
+        return False
+    target = os.path.normcase(os.path.normpath(str(executable)))
+    for sub in ("System32", "SysWOW64", "Sysnative"):
+        candidate = os.path.normcase(os.path.normpath(os.path.join(root, sub, "timeout.exe")))
+        if target == candidate:
+            return True
+    return False
+
+
+def _is_windows_timeout_syntax(executable, args):
+    """Windows timeout.exe argv: a leading /t, /nobreak or /? switch, or the
+    resolved executable is the system timeout.exe (which never runs a command).
+
+    Any other "/" argument (``/bin/sh``, a trailing ``/x``) is a POSIX path and
+    does not stop the GNU timeout unwrap.
+    """
+    if args and args[0].lower() in _WINDOWS_TIMEOUT_SWITCHES:
+        return True
+    return _is_windows_system_timeout(executable)
+
+
+# env's short options, read as getopt bundles ("+0iC:S:u:v" in GNU env, plus
+# -a/--argv0 in newer coreutils). P, L and U take a value in BSD env and are
+# invalid in GNU env; treating them as value options is right for both.
+_ENV_SHORT_FLAGS = frozenset("0iv")
+_ENV_SHORT_VALUE = frozenset("CuaPLU")
+# GNU env long options and how each takes its argument. getopt_long accepts
+# any unambiguous prefix ("--sp=...", "--split-str X"); an optional argument
+# is only ever given with "=", never as the next element.
+_ENV_LONG_OPTIONS = {
+    "ignore-environment": "none",
+    "null": "none",
+    "debug": "none",
+    "list-signal-handling": "none",
+    "help": "none",
+    "version": "none",
+    "unset": "required",
+    "chdir": "required",
+    "argv0": "required",
+    "split-string": "split",
+    "block-signal": "optional",
+    "default-signal": "optional",
+    "ignore-signal": "optional",
+}
+# env -S has its own escapes (\_ is a word break, \c ends the string), ${VAR}
+# expansion and "#" comments, none of which shlex reproduces; control
+# characters other than tab may split differently. Such strings are refused.
+_ENV_SPLIT_UNCHECKABLE = re.compile(r"[\\$#\x00-\x08\x0a-\x1f\x7f]")
+_ENV_MAX_SPLIT_DEPTH = 8
+
+
+def _env_split(value, rest, depth):
+    """Split an env -S string and re-read it, then ``rest``, as env argv."""
+    if _ENV_SPLIT_UNCHECKABLE.search(value):
+        raise PermissionError(
+            "env -S string with escapes, ${VAR}, comments or control "
+            "characters cannot be checked; use script_run"
+        )
+    try:
+        tokens = shlex.split(value)
+    except ValueError as exc:
+        raise PermissionError("malformed env -S command string; use script_run") from exc
+    return _unwrap_env([*tokens, *rest], depth + 1)
+
+
+def _unwrap_env(args, depth=0):
+    """Extract the command candidates from an ``env`` argv.
+
+    Parses env's options the way getopt does: short options are bundles
+    (``-iSsh -c id``), an ``S`` takes the rest of its element or the next
+    element as the split string, and long options match by unambiguous prefix.
+    GNU env feeds the split words back through option parsing, so they are
+    re-read here as env argv (``-S '-i sh -c id'``).
+
+    Returns ``(candidates, uncertain)``. After an option that cannot be parsed
+    (``uncertain``), it may have consumed the next element, so every later
+    operand is a candidate and later option-looking elements are still parsed.
+    An unparseable short bundle that contains ``S`` after the unknown letter is
+    refused, since some env could read it as a split string.
+    """
+    if depth >= _ENV_MAX_SPLIT_DEPTH:
+        raise PermissionError("env -S nesting exceeds limit; use script_run")
+    candidates = []
+    uncertain = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            if uncertain:
+                # "--" may be the value of the unknown option; keep parsing.
+                continue
+            while index < len(args) and "=" in args[index]:
+                index += 1
+            if index < len(args):
+                candidates.append((args[index], args[index + 1:]))
+            return candidates, False
+        if arg == "-":
+            # A lone "-" means -i.
+            index += 1
+            continue
+        if arg.startswith("--"):
+            name, has_eq, value = arg[2:].partition("=")
+            if name in _ENV_LONG_OPTIONS:
+                matches = [name]
+            elif name:
+                matches = [opt for opt in _ENV_LONG_OPTIONS if opt.startswith(name)]
+            else:
+                matches = []
+            kinds = {_ENV_LONG_OPTIONS[opt] for opt in matches}
+            if "split" in kinds:
+                if has_eq:
+                    split_value, step = value, 1
+                elif index + 1 < len(args):
+                    split_value, step = args[index + 1], 2
+                else:
+                    return candidates, uncertain
+                inner, inner_uncertain = _env_split(split_value, args[index + step:], depth)
+                return [*candidates, *inner], uncertain or inner_uncertain
+            if len(matches) != 1:
+                # Unknown or ambiguous: GNU env rejects it; another env may not.
+                uncertain = True
+                index += 1
+                continue
+            kind = kinds.pop()
+            if kind == "required" and not has_eq:
+                index += 2
+                continue
+            if kind == "none" and has_eq:
+                uncertain = True
+            index += 1
+            continue
+        if arg.startswith("-"):
+            bundle = arg[1:]
+            step = 1
+            for pos, letter in enumerate(bundle):
+                if letter in _ENV_SHORT_FLAGS:
+                    continue
+                if letter == "S":
+                    tail = bundle[pos + 1:]
+                    if tail:
+                        split_value, step = tail, 1
+                    elif index + 1 < len(args):
+                        split_value, step = args[index + 1], 2
+                    else:
+                        return candidates, uncertain
+                    inner, inner_uncertain = _env_split(split_value, args[index + step:], depth)
+                    return [*candidates, *inner], uncertain or inner_uncertain
+                if letter in _ENV_SHORT_VALUE:
+                    if pos + 1 == len(bundle):
+                        step = 2
+                    break
+                if "S" in bundle[pos + 1:]:
+                    raise PermissionError(
+                        "env option %r cannot be parsed and may carry -S; "
+                        "use script_run" % arg
+                    )
+                uncertain = True
+                break
+            index += step
+            continue
+        if "=" in arg:
+            # NAME=VALUE assignment (or, when uncertain, an option's value).
+            index += 1
+            continue
+        candidates.append((arg, args[index + 1:]))
+        if not uncertain:
+            return candidates, False
+        index += 1
+    return candidates, uncertain
+
+
+def _unwrap_launcher(key, args, stdin="", executable=""):
+    """Extract inner command candidates from a known launcher's argv.
+
+    Returns ``(candidates, uncertain, reads_stdin)`` where ``candidates`` is a
+    list of ``(prog, inner_args)`` tuples to guard-check. When ``uncertain`` is
+    True, an unknown option may have shifted the command boundary, so every
+    plausible token after the uncertain flag is included as a candidate.
+
+    Raises PermissionError when the launcher would hand the remaining command
+    line to a shell (``wsl`` without ``-e``/``--exec``).
+    """
+    spec = _LAUNCHER_SPECS[key]
+    if spec.get("refuse_any") and (args or str(stdin or "").strip()):
+        raise PermissionError(
+            "%s launches commands constructed from its arguments or stdin; "
+            "use script_run" % key
+        )
+    if spec.get("parser") == "env":
+        candidates, uncertain = _unwrap_env(list(args))
+        return candidates, uncertain, False
+    if spec.get("windows_timeout_bail") and _is_windows_timeout_syntax(executable, args):
+        return [], False, False
+    uncertain = False
+    reads_stdin = False
+    exec_seen = False
+    skip_operands = spec.get("leading_operands", 0)
+    subcommands = spec.get("subcommands", ())
+    subcommand_seen = not bool(subcommands)
+    index = 0
+    if args and args[0] in spec.get("leading_skip", ()):
+        index = 1
+    while index < len(args):
+        arg = args[index]
+        lowered = arg.lower()
+        if spec.get("slash_as_dash") and lowered.startswith("/"):
+            lowered = "-" + lowered[1:]
+        if arg == "--":
+            index += 1 + skip_operands
+            break
+        if lowered in spec.get("exec_flags", ()):
+            exec_seen = True
+            index += 1
+            break
+        if lowered in spec.get("stdin_flags", ()):
+            reads_stdin = True
+        if lowered in spec["flags"]:
+            index += 1
+            continue
+        head, has_eq, _eq_val = lowered.partition("=")
+        if head in spec["value"]:
+            index += 1 if has_eq else 2
+            continue
+        if spec.get("numeric_dash") and re.fullmatch(r"-\d+", lowered):
+            index += 1
+            continue
+        if arg.startswith("-") or (spec.get("slash_as_dash") and arg.startswith("/")):
+            uncertain = True
+            index += 1
+            continue
+        if not subcommand_seen:
+            if lowered in subcommands:
+                subcommand_seen = True
+                index += 1
+                continue
+            return [], False, False
+        if skip_operands > 0:
+            skip_operands -= 1
+            index += 1
+            continue
+        break
+    if index >= len(args):
+        if spec.get("stdin_if_no_inner") or reads_stdin:
+            reads_stdin = True
+        return [], uncertain, reads_stdin
+    if spec.get("shell_unless_exec") and not exec_seen:
+        raise PermissionError(
+            "%s command line without -e/--exec runs through the default shell; "
+            "use script_run" % key
+        )
+    if (spec.get("stdin_if_no_inner") or reads_stdin) and uncertain:
+        reads_stdin = True
+    if not uncertain:
+        return [(args[index], args[index + 1:])], False, reads_stdin
+    candidates = []
+    for pos in range(index, len(args)):
+        if not args[pos].startswith("-"):
+            candidates.append((args[pos], args[pos + 1:]))
+    return candidates, True, reads_stdin
+
+
+def _check_program_guards(
+    executable, args, stdin="", *, _allow_cmd_script=False, _depth=0,
+):
+    """Refuse inline code, cmd/batch escapes, and launcher-wrapped payloads."""
+    if _depth >= 8:
+        raise PermissionError("launcher nesting exceeds limit; use script_run")
+    basename = _normalized_program_basename(executable)
+    stem = _strip_win_exec_ext(basename)
+    if stem in _COMMAND_STRING_LAUNCHERS:
+        raise PermissionError(
+            "%s decodes and executes its own command string; use script_run" % stem
+        )
+    launcher = _launcher_key(basename)
+    if launcher in _LAUNCHER_SPECS:
+        candidates, _uncertain, reads_stdin = _unwrap_launcher(
+            launcher, args, stdin, executable=executable,
+        )
+        if reads_stdin and str(stdin or "").strip():
+            raise PermissionError(
+                "%s program text on stdin is disabled; use script_run" % launcher
+            )
+        for inner_prog, inner_args in candidates:
+            _check_program_guards(
+                inner_prog, inner_args, stdin,
+                _allow_cmd_script=False, _depth=_depth + 1,
+            )
+        return
+    if stem in ("powershell", "powershell_ise", "pwsh"):
+        refusal = _powershell_inline_refusal(args, stdin)
+        if refusal:
+            raise PermissionError(refusal)
+        return
+    if stem == "cmd" and not _allow_cmd_script:
+        raise PermissionError("inline cmd execution is disabled; use script_run")
+    if Path(basename).suffix.lower() in (".bat", ".cmd") and not _allow_cmd_script:
+        raise PermissionError("batch files must be executed with script_run")
+    if stem.rstrip("0123456789.") in _AWK_NAMES:
+        refusal = _awk_inline_refusal(stem, args)
+        if refusal:
+            raise PermissionError(refusal)
+        return
+    interp_key = _inline_interpreter_key(basename)
+    refusal = interp_key and _inline_code_refusal(interp_key, args, stdin)
+    if refusal:
+        raise PermissionError(refusal)
 
 
 def run_program(
@@ -1017,24 +1896,9 @@ def run_program(
     else:
         executable = _resolve_program(program, extra_roots=extra_roots, bypass=bypass)
     args = _json_args(args_json)
-    basename = Path(executable).name.lower()
-    lowered_args = [arg.lower() for arg in args]
-    if basename in ("powershell", "powershell.exe", "pwsh", "pwsh.exe") and any(
-        _is_inline_powershell_arg(arg) for arg in lowered_args
-    ):
-        raise PermissionError("inline PowerShell commands are disabled; use script_run")
-    if basename in ("cmd", "cmd.exe") and not _allow_cmd_script:
-        raise PermissionError("inline cmd execution is disabled; use script_run")
-    if Path(executable).suffix.lower() in (".bat", ".cmd") and not _allow_cmd_script:
-        raise PermissionError("batch files must be executed with script_run")
-    interp_key = _inline_interpreter_key(basename)
-    if interp_key is not None and any(
-        _is_inline_code_arg(arg, _INLINE_CODE_FLAGS[interp_key])
-        for arg in lowered_args
-    ):
-        raise PermissionError(
-            "inline %s code is disabled; use script_run" % interp_key
-        )
+    _check_program_guards(
+        executable, args, stdin, _allow_cmd_script=_allow_cmd_script,
+    )
     working = _resolve(cwd, extra_roots=extra_roots, bypass=bypass)
     if not working.is_dir():
         raise ValueError("working directory is not a directory: %s" % working)
