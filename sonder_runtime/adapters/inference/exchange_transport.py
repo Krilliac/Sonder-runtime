@@ -29,8 +29,9 @@ import time
 import urllib.request
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
-from typing import Iterator
+from typing import Callable, Iterator, cast
 
+from ...platform.runtime_threads import Thread as owned_runtime_thread
 from ..tls_contexts import default_https_context
 
 logger = logging.getLogger(__name__)
@@ -175,7 +176,7 @@ class _ExchangeBudget:
             if _cancelled_quietly(self._cancellation):
                 self.abort()
             else:
-                self._cancel_thread = threading.Thread(
+                self._cancel_thread = cast(Callable[..., threading.Thread], owned_runtime_thread)(
                     target=copy_context().run, args=(self._watch_cancel,),
                     name="sonder-inference-cancel", daemon=True,
                 )

@@ -41,7 +41,9 @@ from sonder_runtime.adapters.launcher_idempotency import (
 )
 from sonder_runtime.adapters.launcher_probe import probe_error_state, settle_probe
 from sonder_runtime.adapters.launcher_output import (
+    BoundedOutputTail,
     bounded_seconds,
+    drain_process_output,
     output_text,
     retention_limit,
 )
@@ -92,6 +94,8 @@ _valid_command_replay = valid_command_replay
 _output_text = output_text
 _bounded_seconds = bounded_seconds
 _retention_limit = retention_limit
+_BoundedOutputTail = BoundedOutputTail
+_drain_process_output = drain_process_output
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
@@ -408,44 +412,6 @@ def _wait_until(predicate, timeout, interval=0.05):
         if remaining <= 0:
             return False
         time.sleep(min(interval, remaining))
-
-
-class _BoundedOutputTail:
-    """Thread-safe byte tail that never grows with command output volume."""
-
-    def __init__(self, limit=MAX_OPERATION_OUTPUT):
-        self.limit = max(256, int(limit))
-        self.data = bytearray()
-        self.truncated = False
-        self.lock = threading.Lock()
-
-    def append(self, chunk):
-        if not chunk:
-            return
-        if isinstance(chunk, str):
-            chunk = chunk.encode("utf-8", errors="replace")
-        with self.lock:
-            self.data.extend(chunk)
-            if len(self.data) > self.limit:
-                del self.data[:len(self.data) - self.limit]
-                self.truncated = True
-
-    def text(self):
-        with self.lock:
-            value = bytes(self.data).decode("utf-8", errors="replace")
-            truncated = self.truncated
-        return ("[output truncated]\n" + value) if truncated else value
-
-
-def _drain_process_output(pipe, tail):
-    try:
-        while True:
-            chunk = pipe.read(8192)
-            if not chunk:
-                return
-            tail.append(chunk)
-    except (OSError, ValueError):
-        return
 
 
 def _windows_process_table():

@@ -13,6 +13,7 @@ that policy.
 from __future__ import annotations
 
 from sonder_runtime.platform.runtime_threads import (
+    Thread as owned_runtime_thread,
     ThreadPoolExecutor as owned_runtime_pool,
     run_bounded,
 )
@@ -1042,7 +1043,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         with show_lock:
             if origin in fillers:
                 return
-            thread = threading.Thread(
+            thread = owned_runtime_thread(
                 target=fill_show_cache,
                 args=(origin, pending),
                 name="sonder-ollama-show-fill",
