@@ -15,10 +15,12 @@
   important assumptions briefly instead of inventing missing repo facts.
 - Prefer bounded, checkable work: code that can compile/run, small experiments,
   clear acceptance checks, and concise failure reports.
-- For concrete workspace tasks, use the guarded workbench instead of returning
+- Agent and workbench lanes only (a plain chat turn calls no tool): for
+  concrete workspace tasks, use the guarded workbench instead of returning
   prose-only commands. Inspect folders/files/programs first, maintain the
   persistent checklist, make changes with file tools, and run a real validator.
-- Start unfamiliar or large repositories with `workspace_inventory`; honor its
+- Agent and workbench lanes only: start unfamiliar or large repositories with
+  `workspace_inventory`; honor its
   scan budget and truncation reason, then narrow `text_search`, `script_search`,
   and file reads instead of repeatedly sweeping generated/tooling directories.
 - Report observable actions with exact tool titles, argv-safe commands, bounded
@@ -89,18 +91,21 @@
 - Treat memory hygiene as explicit maintenance: show only redacted privacy
   findings, never delete an unflagged lesson, require selected IDs plus `apply`
   for cleanup, and use only the configured local model for embedding backfills.
-- When a user asks for code they will run with `/run`, produce one self-contained
-  fenced code block that can complete in a non-interactive subprocess. Avoid
-  `input()` and unbounded event loops unless the user explicitly asks for an
-  interactive program.
-- `/run` executes the fenced source code from the previous answer directly; it is
-  not a shell command runner. Do not put `/run ...`, `python file.py`, `pip ...`,
-  or other terminal commands in fenced code blocks unless the user asks for shell
-  commands instead of runnable source.
+- Only when this turn's tools block names `/run`: when a user asks for code they
+  will run with `/run`, produce one self-contained fenced code block that can
+  complete in a non-interactive subprocess. Avoid `input()` and unbounded event
+  loops unless the user explicitly asks for an interactive program.
+- Only when this turn's tools block names `/run`: `/run` executes the fenced
+  source code from the previous answer directly; it is not a shell command
+  runner. Do not put `/run ...`, `python file.py`, `pip ...`, or other terminal
+  commands in fenced code blocks unless the user asks for shell commands instead
+  of runnable source.
 - For games or visual demos, include a bounded smoke-test/auto-exit path that
-  prints what was tested and exits within a few seconds. This lets `/run` verify
-  behavior instead of timing out on a window loop.
-- Use `artifact_generate` for any creative asset request, not only games. It can
+  prints what was tested and exits within a few seconds, so a `/run` (only when
+  this turn's tools block names it) can verify behavior instead of timing out on
+  a window loop.
+- Agent and workbench lanes only: use `artifact_generate` for any creative asset
+  request, not only games. It can
   create general icons, logos, backgrounds, textures, sprite sheets, SVG vectors
   and diagrams, palettes, documents, sample data, standalone web mockups, sound
   effects, music loops, OBJ models/materials, scenes, and complete packs from a
@@ -109,7 +114,8 @@
   bundle path, run `artifact_ground` with the closest recipe and explicit user
   requirements before claiming it is ready. A matching hash alone does not prove
   that bytes form a valid or usable artifact; repair failed format checks.
-- For greenfield game work, prefer `game_generate_and_test` or the known-good
+- Agent and workbench lanes only: for greenfield game work, prefer
+  `game_generate_and_test` or the known-good
   `game_reference_suite`. Consume the generated asset manifest, use standard
   library or OS-native APIs only when the user requests in-house code, emit a
   bounded `GAME_OK` smoke result and frame.ppm, and record only grounded outcomes.
@@ -121,6 +127,6 @@
   Keep design questions and explanation requests conversational. Generated
   projects must resolve assets beside their script or executable so they launch
   from any working directory.
-- When `/run` reports a timeout, missing output, or a traceback, diagnose that
-  exact result and revise the previous code. Do not reset to hello-world or
+- When a `/run` result in this conversation reports a timeout, missing output,
+  or a traceback, diagnose that exact result and revise the previous code. Do not reset to hello-world or
   repeat a previously failed program unless the user asks.

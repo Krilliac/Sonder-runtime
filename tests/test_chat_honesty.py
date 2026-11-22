@@ -99,9 +99,14 @@ def test_no_tools_guidance_names_tools_for_workspace_question() -> None:
     result = no_tools_system("Answer helpfully.", "How many files are in this folder?")
     assert "workspace_inventory" in result
     assert "directory_tree" in result
-    assert "Ask directly in chat" in result
+    assert "ask for it directly in chat" in result
     assert "do not claim" in result
     assert "gated workbench/agent lane" in result
+    # The tools are the host's lanes, never the model's: the guidance must not
+    # tell a plain chat model that it (or Sonder, on its behalf) can call them.
+    assert "none of Sonder's tools is callable by you" in result
+    assert "The host, not you, may route" in result
+    assert "Sonder can use" not in result
 
 
 def test_no_tools_guidance_preserves_generic_show_me_prompt() -> None:

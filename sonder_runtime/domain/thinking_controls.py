@@ -10,6 +10,7 @@ Three-Hundred-Twelfth Slice with its behaviour byte-for-byte intact.
 """
 from __future__ import annotations
 
+import contextvars
 import re
 
 
@@ -39,23 +40,98 @@ def cloud_can_disable_thinking(model) -> bool:
 
 LOCAL_THINKING_MIN_NUM_PREDICT = 4096
 
+LOCAL_STEP_THINKING_HEADROOM = 1024
 
-def with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT):
+
+def with_local_thinking_budget(payload, minimum=LOCAL_THINKING_MIN_NUM_PREDICT, headroom=None):
     """Return ``payload`` with room for a local model's thinking plus its answer.
 
     The local mirror of _ensure_cloud_prediction_budget. Returns a copy so a
     caller's dict is never mutated; an unset or already-generous num_predict is
-    left alone, and 0/-1 (unlimited) is not a small budget.
+    left alone, and 0/-1 (unlimited) is not a small budget.  An agent tool step
+    passes ``headroom`` (``LOCAL_STEP_THINKING_HEADROOM``): its thought gets that
+    many tokens on top of the caller's reply budget instead of the flat floor.
     """
     options = payload.get("options")
     if not isinstance(options, dict):
         return dict(payload)
     requested = options.get("num_predict")
-    if not isinstance(requested, int) or requested <= 0 or requested >= minimum:
+    if not isinstance(requested, int) or isinstance(requested, bool) or requested <= 0:
         return dict(payload)
+    if headroom is None:
+        if requested >= minimum:
+            return dict(payload)
+        target = minimum
+    else:
+        target = requested + max(0, int(headroom))
     payload = dict(payload)
-    payload["options"] = dict(options, num_predict=minimum)
+    payload["options"] = dict(options, num_predict=target)
     return payload
+
+
+def pool_says_thinking(pool, model) -> bool:
+    """Whether any pool worker's cached /api/show metadata lists ``thinking`` for ``model``.
+
+    Read-only: the snapshots are copies of what the pool already probed, so this
+    adds no round trip.  The very first call to a reasoning model then gets
+    thinking headroom instead of waiting for a response that carries thinking.
+    """
+    name = str(model or "").strip()
+    snapshots = getattr(pool, "snapshots", None)
+    if not name or not callable(snapshots):
+        return False
+    try:
+        for snap in snapshots():
+            metadata = getattr(snap, "model_metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            meta = metadata.get(name)
+            if meta is None:
+                folded = name.casefold()
+                meta = next((v for k, v in metadata.items() if str(k).casefold() == folded), None)
+            capabilities = meta.get("capabilities") if isinstance(meta, dict) else None
+            if isinstance(capabilities, (list, tuple, set, frozenset)) and any(
+                str(item).strip().casefold() == "thinking" for item in capabilities
+            ):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+# One-element list owned by the HTTP turn (set before the model runs); the model
+# call stores whether its latest reply was cut at the reply budget (done_reason
+# "length").  None outside a turn.
+REPLY_TRUNCATION = contextvars.ContextVar("sonder_reply_truncation", default=None)
+DEFAULT_REPLY_NUM_PREDICT = 1024
+EXPLICIT_REPLY_NUM_PREDICT = 4096
+
+
+def begin_reply_truncation():
+    """Start tracking a turn's truncation: ``(flag, token)``; reset ``REPLY_TRUNCATION`` with the token."""
+    flag = [False]
+    return flag, REPLY_TRUNCATION.set(flag)
+
+
+def note_reply_truncation(truncated: bool) -> None:
+    holder = REPLY_TRUNCATION.get()
+    if holder is not None:
+        holder[0] = bool(truncated)
+
+
+def reply_num_predict(env_int, *, explicit: bool) -> int:
+    """The reply budget of a chat turn; ``env_int(name, default)`` reads the override.
+
+    The default route keeps 1024 (``SONDER_CHAT_REPLY_NUM_PREDICT``); an
+    explicit-tier or tool-loop reply gets 4096 (``SONDER_EXPLICIT_REPLY_NUM_PREDICT``).
+    An unset, unreadable or non-positive value falls back to that default.
+    """
+    name, default = (
+        ("SONDER_EXPLICIT_REPLY_NUM_PREDICT", EXPLICIT_REPLY_NUM_PREDICT) if explicit
+        else ("SONDER_CHAT_REPLY_NUM_PREDICT", DEFAULT_REPLY_NUM_PREDICT)
+    )
+    value = env_int(name, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
 
 
 # Some local community models serialize deliberation into ordinary ``content``
