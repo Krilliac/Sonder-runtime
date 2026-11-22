@@ -18108,6 +18108,8 @@ def _agent_permission_gate_error(tool_name, args=None, *, mode=None, rule_lookup
     name = _canonical_agent_tool_name(str(tool_name or "").strip())
     if role_refusal := _role_tool_policy.agent_refusal(name):  # an HTTP caller's role binds every agent dispatch
         return role_refusal
+    if blocked := _restricted_tool_lane.classifier_block_refusal(name, args):
+        return blocked
     decision = permission_modes.decide(
         name, interactive=False, mode=mode, rule_lookup=rule_lookup, surface="agent",
         record=record, arguments=args if isinstance(args, dict) else None, fence=effect_fence.current())
