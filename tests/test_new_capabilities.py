@@ -388,6 +388,13 @@ def test_polyglot_code_runner_languages_and_sql_execution():
     assert "Vex | 99" in sql_res["stdout"]
     assert "Nova | 42" in sql_res["stdout"]
 
+    sql_oneline = code_runner.run_code(
+        "CREATE TABLE w(n TEXT, d INT); INSERT INTO w VALUES ('Rail;gun', 120), ('Plasma', 85); SELECT * FROM w ORDER BY d DESC;",
+        language="sql",
+    )
+    assert sql_oneline["ok"] is True
+    assert "Rail;gun | 120" in sql_oneline["stdout"]
+
     with pytest.raises(ValueError, match="run limits are not supported"):
         code_runner.run_code("int main(){return 0;}", language="c", limits=code_runner.RunLimits())
 
