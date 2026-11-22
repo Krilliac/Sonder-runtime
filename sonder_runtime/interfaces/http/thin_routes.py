@@ -46,15 +46,15 @@ class ThinRequest:
     method: str
     path: str
     body: bytes
-    headers: dict
+    headers: dict[str, str]
 
 
-def _forbidden(message: str) -> dict:
+def _forbidden(message: str) -> dict[str, Any]:
     # The thin handlers' own error shape (``handlers.error_response``).
     return {"error": "FORBIDDEN", "message": message, "retryable": False}
 
 
-def serve(handler: Any, thin_handler: Any, path: str, req: Any, context: dict, *,
+def serve(handler: Any, thin_handler: Any, path: str, req: Any, context: dict[str, Any], *,
           tool_refusal: Callable[..., str]) -> None:
     """Authorize, then run ``thin_handler`` on the already-parsed body ``req``."""
     if not context["authorized"]:
