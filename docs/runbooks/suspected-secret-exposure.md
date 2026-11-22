@@ -22,16 +22,22 @@ sudo chown sonder:sonder /var/lib/sonder/operations.db*
 sudo systemctl start sonder
 ```
 
-`--config` is required: it selects the state home that receives
-`rotation.json` and the `API_KEY_ROTATED` event that section 5 relies on;
-without it the command uses the default home of the invoking user
-(`__main__.py:60-87`, `:1654-1657`). 60 seconds is the shortest overlap the
-tool accepts (`secrets.py:24-26`, `:136-139`). The `chown` lines and why the
-command runs as root rather than `sonder` are in
-[rotate-credentials](rotate-credentials.md#why-not-sudo--u-sonder).
+`--config` is required on a packaged install: it selects the state home that
+receives `rotation.json` and the `API_KEY_ROTATED` event that section 5 relies
+on; without it the command uses the invoking user's default home (or
+`SONDER_STATE_HOME` before `SONDER_HOME`,
+`sonder_runtime/platform/paths.py:157-194`,
+`sonder_runtime/__main__.py:60-88`, `:1681-1706`). 60 seconds is the shortest
+overlap `rotate-key` accepts (`sonder_runtime/adapters/secrets.py:24-26`,
+`:136-139`). Since #808, `/etc/sonder/sonder.env` is owned by `sonder:sonder`
+mode `0600` (`packaging/install_sonder.sh:160-161`) while `/etc/sonder` remains
+`root` `0755` (`:87`); see
+[rotate-credentials](rotate-credentials.md#why-not-sudo--u-sonder) for why the
+command runs as `root` and why the `chown` lines are needed.
 
 If account auth is in use, also rotate `SONDER_AUTH_SECRET` (invalidates
-all tokens) and force re-login.
+all tokens, keeping `/etc/sonder/sonder.env` owned by `sonder:sonder` mode
+`0600`) and force re-login.
 
 ## 2. Assess exposure window
 
@@ -55,7 +61,9 @@ mode. Review during the window:
 
 ## 4. Harden
 
-- Verify `/etc/sonder/sonder.env` is mode 0600 (the loader enforces it).
+- Verify `/etc/sonder/sonder.env` is owned by `sonder:sonder` and mode `0600`
+  (matching `packaging/install_sonder.sh:160-161`; the loader refuses any
+  group/world access).
 - Verify the plaintext port is loopback-only: `ss -tlnp | grep 11435`.
 - Confirm logs pass redaction (grep the journal for the *old* key — it
   should never appear; if it does, file a redaction bug and purge logs).
