@@ -41,6 +41,10 @@ ALIASES = {
     "golang": "go",
     "java": "java-maven",
     "maven": "java-maven",
+    "web": "web-app",
+    "webapp": "web-app",
+    "html": "web-app",
+    "flutter-dart": "dart",
 }
 
 
@@ -365,6 +369,77 @@ _TEMPLATES = {
     "java-maven": {
         "pom.xml": _POM_XML,
         "src/main/java/Main.java": _MAIN_JAVA,
+    },
+    "web-app": {
+        "index.html": (
+            "<!doctype html>\n"
+            "<html lang=\"en\">\n"
+            "<head>\n"
+            "  <meta charset=\"utf-8\" />\n"
+            "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+            "  <title>@NAME@</title>\n"
+            "  <link rel=\"stylesheet\" href=\"styles.css\" />\n"
+            "</head>\n"
+            "<body>\n"
+            "  <main class=\"app\">\n"
+            "    <h1>@NAME@</h1>\n"
+            "    <p id=\"status\">Ready.</p>\n"
+            "    <button id=\"action-btn\" type=\"button\">Run Action</button>\n"
+            "  </main>\n"
+            "  <script type=\"module\" src=\"app.js\"></script>\n"
+            "</body>\n"
+            "</html>\n"
+        ),
+        "styles.css": (
+            ":root { color-scheme: dark; font-family: system-ui, sans-serif; }\n"
+            "body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f172a; color: #e2e8f0; }\n"
+            ".app { padding: 2rem; border-radius: 12px; background: #1e293b; border: 1px solid #334155; text-align: center; }\n"
+            "button { margin-top: 1rem; padding: 0.6rem 1.2rem; border-radius: 8px; border: none; background: #38bdf8; color: #0f172a; font-weight: 600; cursor: pointer; }\n"
+        ),
+        "app.js": (
+            "export function nextMessage(count) {\n"
+            "  return `@NAME@ action count: ${count}`;\n"
+            "}\n\n"
+            "if (typeof document !== 'undefined') {\n"
+            "  let clicks = 0;\n"
+            "  const status = document.getElementById('status');\n"
+            "  const btn = document.getElementById('action-btn');\n"
+            "  btn?.addEventListener('click', () => {\n"
+            "    clicks += 1;\n"
+            "    if (status) status.textContent = nextMessage(clicks);\n"
+            "  });\n"
+            "}\n"
+        ),
+    },
+    "dart": {
+        "pubspec.yaml": (
+            "name: @LOWER@\n"
+            "description: @NAME@ Dart application.\n"
+            "version: 0.1.0\n"
+            "environment:\n"
+            "  sdk: ^3.0.0\n"
+            "dev_dependencies:\n"
+            "  test: ^1.25.0\n"
+        ),
+        "lib/@LOWER@.dart": (
+            "String greeting(String target) => 'Hello from @NAME@, $target!';\n"
+        ),
+        "bin/@LOWER@.dart": (
+            "import 'package:@LOWER@/@LOWER@.dart';\n\n"
+            "void main(List<String> args) {\n"
+            "  final target = args.isNotEmpty ? args.first : 'world';\n"
+            "  print(greeting(target));\n"
+            "}\n"
+        ),
+        "test/@LOWER@_test.dart": (
+            "import 'package:test/test.dart';\n"
+            "import 'package:@LOWER@/@LOWER@.dart';\n\n"
+            "void main() {\n"
+            "  test('greeting formats target', () {\n"
+            "    expect(greeting('Sonder'), 'Hello from @NAME@, Sonder!');\n"
+            "  });\n"
+            "}\n"
+        ),
     },
 }
 

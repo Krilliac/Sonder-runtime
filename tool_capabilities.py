@@ -253,6 +253,9 @@ _DESCRIPTORS = (
     # even though the tool deliberately never returns pixel/OCR text, so it
     # must not enter a hosted-agent transcript.
     _read_tool("image_inspect"),
+    _read_tool("document_extract"),
+    _read_tool("media_inspect"),
+    _read_tool("code_metrics"),
     _read_tool("repo_status", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool("repo_diff", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool(

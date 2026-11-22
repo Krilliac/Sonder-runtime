@@ -609,6 +609,8 @@ _LINT_TOOLS = {
     "pylint": {"check": ["pylint"], "fix": None},
     "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
     "clippy": {"check": ["cargo", "clippy"], "fix": ["cargo", "clippy", "--fix", "--allow-dirty"]},
+    "dart": {"check": ["dart", "analyze"], "fix": ["dart", "fix", "--apply"]},
+    "dotnet": {"check": ["dotnet", "format", "--verify-no-changes"], "fix": ["dotnet", "format"]},
 }
 
 _FORMATTERS = {
@@ -618,13 +620,20 @@ _FORMATTERS = {
     "rustfmt": ["cargo", "fmt"],
     "gofmt": ["gofmt", "-w"],
     "clang-format": ["clang-format", "-i"],
+    "dart": ["dart", "format"],
+    "dotnet": ["dotnet", "format"],
 }
 
 _TYPECHECKERS = {
     "mypy": [sys.executable, "-m", "mypy"],
     "pyright": ["npx", "pyright"],
     "tsc": ["npx", "tsc", "--noEmit"],
+    "dart": ["dart", "analyze"],
 }
+
+
+def _has_glob(root: Path, pattern: str) -> bool:
+    return any(root.glob(pattern))
 
 
 def _detect_linter(root):
@@ -633,6 +642,10 @@ def _detect_linter(root):
     ruff_available = bool(shutil.which("ruff") or importlib.util.find_spec("ruff"))
     if ruff_available and (root / "pyproject.toml").exists():
         return "ruff"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
     if (root / ".eslintrc.js").exists() or (root / ".eslintrc.json").exists() or (root / "eslint.config.js").exists():
         return "eslint"
     if (root / "Cargo.toml").exists():
@@ -652,6 +665,12 @@ def _detect_formatter(root):
     root = Path(root)
     if shutil.which("ruff") and (root / "pyproject.toml").exists():
         return "ruff"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
+    if ((root / ".clang-format").exists() or (root / "CMakeLists.txt").exists()) and shutil.which("clang-format"):
+        return "clang-format"
     if shutil.which("black"):
         return "black"
     if (root / "package.json").exists():
@@ -667,6 +686,8 @@ def _detect_typechecker(root):
     root = Path(root)
     if (root / "tsconfig.json").exists():
         return "tsc"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
     if (root / "pyrightconfig.json").exists():
         return "pyright"
     if shutil.which("mypy"):
@@ -731,9 +752,13 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
             cmd[-1] = "--check"
         elif tool == "rustfmt":
             cmd.append("--check")
+        elif tool == "dart":
+            cmd.extend(["--output=none", "--set-exit-if-changed"])
+        elif tool == "dotnet":
+            cmd.append("--verify-no-changes")
     if path:
         cmd.append(path)
-    elif tool in ("ruff", "black"):
+    elif tool in ("ruff", "black", "dart"):
         cmd.append(".")
     result = _run(cmd, cwd=root, timeout=timeout)
     result["tool"] = tool
@@ -1119,6 +1144,15 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
         return _run(["cargo", "build"], cwd=root, timeout=timeout)
     if (root / "CMakeLists.txt").exists():
         return _run(["cmake", "--build", "build"], cwd=root, timeout=timeout)
+    if (root / "meson.build").exists():
+        return _run(["meson", "compile", "-C", "build"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj"))
+    if dotnet_targets:
+        return _run(["dotnet", "build", dotnet_targets[0].name], cwd=root, timeout=timeout)
+    if (root / "pubspec.yaml").exists():
+        if shutil.which("flutter"):
+            return _run(["flutter", "analyze"], cwd=root, timeout=timeout)
+        return _run(["dart", "analyze"], cwd=root, timeout=timeout)
     if (root / "go.mod").exists():
         return _run(["go", "build", "./..."], cwd=root, timeout=timeout)
     if (root / "package.json").exists():
@@ -1139,6 +1173,9 @@ def build_clean(root=".", timeout=30, extra_roots=""):
         return _run(["make", "clean"], cwd=root, timeout=timeout)
     if (root / "Cargo.toml").exists():
         return _run(["cargo", "clean"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj"))
+    if dotnet_targets:
+        return _run(["dotnet", "clean", dotnet_targets[0].name], cwd=root, timeout=timeout)
     if (root / "go.mod").exists():
         return _run(["go", "clean", "./..."], cwd=root, timeout=timeout)
     return {"ok": False, "error": "no recognized build system for clean"}
