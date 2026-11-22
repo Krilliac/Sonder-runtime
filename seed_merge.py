@@ -46,15 +46,18 @@ def load_records(files):
 
 
 def _text_of(rec):
-    return (rec.get("lesson") or rec.get("text") or "").strip()
+    if not isinstance(rec, dict):
+        return ""
+    value = rec.get("lesson") or rec.get("text") or ""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def merge_records(conn, records, embed_fn=None, dry_run=False):
     """Merge lesson records into `conn`, applying the full quality pipeline.
 
     Returns a stats dict: {added, skipped_vague, skipped_private, skipped_dup_text,
-    skipped_dup_embed, by_source}. `records` is an iterable of dicts with a
-    'lesson'/'text' field and optional 'source'.
+    skipped_dup_embed, skipped_tombstoned, by_source}. `records` is an iterable of
+    dicts with a 'lesson'/'text' field and optional 'source'.
     """
     runtime_default = embed_fn is None
     embed_fn = embed_fn or embeddings.embed
@@ -64,9 +67,13 @@ def merge_records(conn, records, embed_fn=None, dry_run=False):
     }
     stats = {
         "added": 0, "skipped_vague": 0, "skipped_private": 0,
-        "skipped_dup_text": 0, "skipped_dup_embed": 0, "by_source": {},
+        "skipped_dup_text": 0, "skipped_dup_embed": 0,
+        "skipped_tombstoned": 0, "by_source": {},
     }
     for rec in records:
+        if not isinstance(rec, dict):
+            stats["skipped_vague"] += 1
+            continue
         text = _text_of(rec)
         if not text or reflection._looks_vague(text):
             stats["skipped_vague"] += 1
@@ -77,6 +84,9 @@ def merge_records(conn, records, embed_fn=None, dry_run=False):
         key = text.lower()
         if key in seen_text:
             stats["skipped_dup_text"] += 1
+            continue
+        if memory_store.lesson_text_tombstoned(conn, text):
+            stats["skipped_tombstoned"] += 1
             continue
         emb = embed_fn(text) if embed_fn else None
         if not embeddings.valid_vector(emb):
@@ -93,6 +103,15 @@ def merge_records(conn, records, embed_fn=None, dry_run=False):
             embedding_dim=provenance.get("dimension"),
         ):
             stats["skipped_dup_embed"] += 1
+            continue
+        if emb is not None and reflection.is_tombstoned_duplicate(
+            emb,
+            conn,
+            embedding_model=provenance.get("model"),
+            embedding_revision=provenance.get("revision"),
+            embedding_dim=provenance.get("dimension"),
+        ):
+            stats["skipped_tombstoned"] += 1
             continue
         if not dry_run:
             blob = embeddings.to_blob(emb) if emb else None
@@ -135,6 +154,7 @@ def main(argv=None):
     print("  skipped private:   %d" % stats["skipped_private"])
     print("  skipped dup(text): %d" % stats["skipped_dup_text"])
     print("  skipped dup(embed):%d" % stats["skipped_dup_embed"])
+    print("  skipped tombstoned:%d" % stats["skipped_tombstoned"])
     print("  lessons %d -> %d" % (before, after))
     print("  by source:")
     for src in sorted(stats["by_source"]):

@@ -1898,3 +1898,97 @@ def test_total_finalization_failure_is_recovered_after_worker_exits(
 
     assert finished["phase"] == "interrupted"
     assert controller.status()["active_operation"] is None
+
+
+def test_post_handshake_idle_tls_client_is_closed_within_handler_timeout(monkeypatch, tmp_path):
+    cert, key = _self_signed_loopback_pair(tmp_path)
+    created = []
+    ready = threading.Event()
+
+    class FastTimeoutHandler(sonder_launcher.LauncherHandler):
+        timeout = 0.4
+
+    class CapturingServer(sonder_launcher.LauncherServer):
+        tls_handshake_timeout = 1.0
+
+        def __init__(self, *args, **kwargs):
+            kwargs["command_journal"] = sonder_launcher.command_recovery.CommandJournal(
+                tmp_path / "launcher-commands.jsonl"
+            )
+            super().__init__(*args, **kwargs)
+            created.append(self)
+            ready.set()
+
+    assert sonder_launcher.LauncherHandler.timeout == 10.0
+    monkeypatch.setattr(sonder_launcher, "LauncherHandler", FastTimeoutHandler)
+    monkeypatch.setattr(sonder_launcher, "LauncherServer", CapturingServer)
+    monkeypatch.setenv("SONDER_LAUNCHER_QUIET", "1")
+    thread = threading.Thread(
+        target=sonder_launcher.serve,
+        args=("127.0.0.1", 0, "a" * 32),
+        kwargs={"controller": FakeController(), "cert": cert, "key": key},
+        daemon=True,
+    )
+    thread.start()
+    assert ready.wait(SYNC_TIMEOUT)
+    server = created[0]
+    port = server.server_address[1]
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    raw = socket.create_connection(("127.0.0.1", port), timeout=SYNC_TIMEOUT)
+    tls_sock = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+    try:
+        # Handshake succeeded; send zero HTTP bytes and verify server closes promptly.
+        tls_sock.settimeout(SYNC_TIMEOUT)
+        started = time.monotonic()
+        try:
+            assert tls_sock.recv(1) == b""
+        except (ConnectionResetError, ssl.SSLError):
+            pass
+        assert time.monotonic() - started < 3.0
+    finally:
+        tls_sock.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_launcher_server_bounds_concurrent_connections(tmp_path):
+    class CappedHandler(sonder_launcher.LauncherHandler):
+        timeout = 2.0
+
+    class CappedServer(sonder_launcher.LauncherServer):
+        max_connections = 1
+
+    server = CappedServer(
+        ("127.0.0.1", 0),
+        CappedHandler,
+        controller=FakeController(),
+        token="a" * 32,
+        command_journal=sonder_launcher.command_recovery.CommandJournal(
+            tmp_path / "launcher-commands.jsonl"
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    first = socket.create_connection(("127.0.0.1", port), timeout=SYNC_TIMEOUT)
+    try:
+        deadline = time.monotonic() + 2.0
+        while server.active_connections < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.active_connections == 1
+        second = socket.create_connection(("127.0.0.1", port), timeout=SYNC_TIMEOUT)
+        try:
+            second.settimeout(2.0)
+            data = second.recv(4096)
+            assert b"503 Service Unavailable" in data
+            assert b"too many open connections" in data
+        finally:
+            second.close()
+    finally:
+        first.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
