@@ -164,11 +164,21 @@ class ChatRunBackend:
 
 def resolve_agent_project_scope(project: object) -> tuple[str, str]:
     """Resolve a project directory while preserving bare checklist namespaces."""
+    from sonder_runtime.adapters.filesystem import file_ops as _file_ops
+
     text = str(project or "").strip()
     if not text:
         return "", ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        msg = f"{LEGACY_ERROR_PREFIX} invalid agent project root: control characters are not permitted"
+        return "", msg
     try:
-        expanded = os.path.expanduser(text)
+        cleaned = _file_ops._reject_network_path(text)
+        expanded = os.path.expanduser(cleaned)
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in expanded):
+            msg = f"{LEGACY_ERROR_PREFIX} invalid agent project root: control characters are not permitted"
+            return "", msg
+        expanded = _file_ops._reject_network_path(expanded)
         candidate = os.path.realpath(os.path.abspath(expanded))
         if os.path.isdir(candidate):
             return candidate, ""

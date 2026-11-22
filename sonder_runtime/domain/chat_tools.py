@@ -61,7 +61,7 @@ def preview_tool_arguments(
     )
     safe_args: dict[str, Any] = {}
     for key, value in args.items():
-        if key in {"token", "approval", "extra_roots"}:
+        if key in {"token", "approval", "extra_roots", "bypass", "developer_authorized"}:
             continue
         safe_args[key] = value[:512] + "..." if isinstance(value, str) and len(value) > 512 else value
     return {
@@ -79,6 +79,7 @@ class ChatToolBudget:
     """Hard bounds for one interactive chat-tool turn."""
 
     max_runs: int = 3
+    max_tool_calls: int = 24
     max_model_calls: int = 6
     wall_seconds: float = 180.0
     model_output_chars: int = 4000
