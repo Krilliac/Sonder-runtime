@@ -87,6 +87,11 @@ if "_PRINCIPAL_ID" not in globals():
     _PRINCIPAL_SECRET = ""
 
 
+def get_swarm_status() -> list[dict]:
+    """Every local agent row, for the admin-only app-control swarm view."""
+    with _LOCK:
+        return [{"id": agent_id, **data} for agent_id, data in _AGENTS.items()]
+
 
 def _lane_deadline(row, progress_deadline: float) -> float:
     """Progress deadline for one lane's current fleet row (see fleet_store)."""

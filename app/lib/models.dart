@@ -771,3 +771,36 @@ class ExtensionRegistryStatus {
             .toList(growable: false),
       );
 }
+
+/// Per-feature flags derived from the authenticated caller's role on the
+/// server, carried on `/v1/sonder/status` and related discovery payloads.
+class AllowedFeatures {
+  final bool chat;
+  final bool registration;
+  final bool clientExec;
+  final bool hostTools;
+  final bool hostBypass;
+  final bool hostAdmin;
+
+  const AllowedFeatures({
+    this.chat = true,
+    this.registration = false,
+    this.clientExec = true,
+    this.hostTools = true,
+    this.hostBypass = false,
+    this.hostAdmin = true,
+  });
+
+  factory AllowedFeatures.fromJson(Object? raw) {
+    if (raw is! Map) return const AllowedFeatures();
+    final map = Map<String, dynamic>.from(raw);
+    return AllowedFeatures(
+      chat: map['chat'] != false,
+      registration: map['registration'] == true,
+      clientExec: map['client_exec'] == true,
+      hostTools: map['host_tools'] == true,
+      hostBypass: map['host_bypass'] == true,
+      hostAdmin: map['host_admin'] == true,
+    );
+  }
+}

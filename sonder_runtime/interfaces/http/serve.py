@@ -151,6 +151,7 @@ from sonder_runtime.interfaces.http.facades.observability import dispatch_trace_
 from sonder_runtime.interfaces.http.facades import observability_stream
 from sonder_runtime.interfaces.http.facades import observatory_routes
 from sonder_runtime.interfaces.http.facades import approval_routes as _approval_routes
+from sonder_runtime.interfaces.http.facades import saas_auth as _saas_auth
 from sonder_runtime.interfaces.http.facades.session import dispatch_session_route
 from sonder_runtime.interfaces.http import thin_routes
 from sonder_runtime.platform import debug_dump
@@ -1292,6 +1293,10 @@ def _state_principal(context):
     return "local-open"
 
 
+def _mode_principal(context):
+    return _saas_auth.mode_principal(context, _state_principal)
+
+
 def _account_identity(account) -> str:
     """Return one bounded identity or ``""`` for malformed auth output."""
     if not isinstance(account, dict):
@@ -1952,10 +1957,9 @@ def _bearer_token(auth_header):
 
 
 def _auth_account(auth_header):
-    token = _bearer_token(auth_header)
-    if not token:
-        return None
-    return _legacy_runtime()._admin_account_from_token(token)
+    return _saas_auth.resolve_account_token(
+        _bearer_token(auth_header), _legacy_runtime(), admin_auth,
+    )
 
 
 def _app_control_deployment_authorized(authorization, config):
@@ -2040,7 +2044,7 @@ def _developer_authorized(context):
     if not context["authorized"]:
         return False
     account = context.get("account")
-    role_ok = bool(account) and account.get("role") in ("developer", "admin")
+    role_ok = admin_auth.has_developer_authority(account)
     if context["mode"] == "both":
         return role_ok
     return bool(context.get("api_key")) or role_ok
@@ -6236,7 +6240,7 @@ class Handler(BaseHTTPRequestHandler):
         if run is None:
             return None, (404, "fanout run was not found")
         account = context.get("account") or {}
-        is_admin = account.get("role") == "admin"
+        is_admin = admin_auth.require(account, "admin")[0]
         if context.get("mode") != "local-open" and not is_admin:
             if run.get("request_owner") != _fanout_request_owner(context):
                 # Do not disclose another developer's run identifier.
@@ -6261,6 +6265,7 @@ class Handler(BaseHTTPRequestHandler):
             parse_query=lambda: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(self.path).query, keep_blank_values=True),
             developer_authorized=_developer_authorized,
+            admin_authorized=lambda ctx: admin_auth.require(ctx.get("account") or {}, "admin")[0],
             request_owner_of=_fanout_request_owner, runtime=server,
         )
 
@@ -6572,7 +6577,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if handle_app_control(self, "POST", _APP_CONTROL_BINDING,
                 deployment_authorized=_app_control_deployment_authorized,
-                work_binding=_app_managed_work_binding):
+                work_binding=_app_managed_work_binding, accounts=admin_auth,
+                swarm_status=lambda: server.master_orchestrator.get_swarm_status()):
             return
         if handle_artifact_transfer(self, "POST", _ARTIFACT_TRANSFER_BINDING, max_request_bytes=MAX_REQUEST_BYTES):
             return
@@ -7167,7 +7173,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         conn = server._open_db()
         try:
-            ok, msg = admin_auth.rate_limit(conn, account)
+            ok, msg = _saas_auth.rate_limit_and_meter(conn, account, admin_auth)
         finally:
             conn.close()
         if not ok:

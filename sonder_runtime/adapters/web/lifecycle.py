@@ -506,6 +506,9 @@ class RuntimeLifecycle:
         account = auth.get("account") or {}
         role = account.get("role") if isinstance(account, dict) else None
         auth_level = role if role in {"user", "developer", "admin"} else "local"
+        if auth_level == "admin" and account.get("via_api_key"):
+            # An account's API key never carries admin authority (admin_auth.require).
+            auth_level = "developer"
         principal = account.get("username") if isinstance(account, dict) else None
         context = local_owner_context(
             correlation_id=correlation_id,

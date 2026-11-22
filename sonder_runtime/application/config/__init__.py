@@ -1,0 +1,1 @@
+"""Application configuration domain helpers."""

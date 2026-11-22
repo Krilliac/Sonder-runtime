@@ -48,6 +48,7 @@ shared and holds no lock.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import json
 import os
@@ -95,6 +96,126 @@ _TREE_TRUNCATED = re.compile(r"^  \.\.\. truncated at \d+ entries$")
 def _refusal(text: str) -> str:
     message = "%s%s" % (_POLICY, text)
     return message
+
+
+def classifier_verdict(tool_name: str, args: Any) -> str:
+    """``allow``, ``ask`` or ``block`` for one call, with the catalog's risk grade filled in.
+
+    The rules are ``domain.security.tool_call_classifier``; a grade that cannot
+    be read is no grade, which they answer with ``ask``, as they answer any
+    fault.  No model name is an input, so no model is exempt.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    try:
+        risk = str(gate.risk_of(tool_name))
+    except Exception:  # noqa: BLE001 - no grade: the rules ask
+        risk = ""
+    return classifier.classify(tool_name, args, risk=risk)
+
+
+def classifier_block_refusal(tool_name: str, args: Any) -> str:
+    """A refusal when the safety classifier blocks this call, else ``""``.
+
+    The dispatch gate asks it for every model-originated call in every
+    permission mode, bypass included, whatever the model.  ``ask`` is not
+    decided here: it stays this lane's rule (:func:`classifier_refusal`).
+    """
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    if classifier_verdict(tool_name, args) != classifier.BLOCK:
+        return ""
+    return _refusal("the safety classifier blocks tool '%s'." % tool_name)
+
+
+# Records a classifier ask this lane refused, as ``(decision, tool_name,
+# arguments)``, on the caller's HTTP work-run row.  The composition root
+# (``server.py``) installs it, because recording needs the interfaces layer,
+# which an adapter must not import.  None records nothing.  It is installed
+# once at import and only read afterwards.
+PendingRefusalRecorder = Callable[[Any, str, Mapping[str, Any] | None], None]
+_pending_refusal_recorder: PendingRefusalRecorder | None = None
+
+
+def install_pending_refusal_recorder(recorder: PendingRefusalRecorder | None) -> None:
+    """Install (or, with None, remove) the recorder :func:`classifier_refusal` calls."""
+    global _pending_refusal_recorder
+    _pending_refusal_recorder = recorder
+
+
+def _record_pending_refusal(decision: Any, tool_name: str, arguments: Mapping[str, Any] | None,
+                            reason: str) -> None:
+    """Hand one unattended refusal to the installed recorder; recording never changes the refusal.
+
+    The receipt carries the operator's mode, not the ``manual`` this lane
+    decided under, and this lane's reason, because no mode lifts a classifier ask.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+
+    recorder = _pending_refusal_recorder
+    if recorder is None or getattr(decision, "source", "") != "unattended":
+        return
+    try:
+        recorder(dataclasses.replace(decision, mode=gate.current_mode(), reason=reason),
+                 tool_name, arguments)
+    except Exception:  # noqa: BLE001 - the record is a route out, not the gate
+        pass
+
+
+def classifier_refusal(model: str, tool_name: str, args: Any) -> str:
+    """The safety classifier's answer for one dispatch: a refusal, or ``""`` to go on.
+
+    ``block`` refuses in every permission mode, bypass included.  ``allow``
+    goes on to the operator's own gate at dispatch, which still decides.
+    ``ask`` is skipped only in bypass (``bypass_root_containment_active``, so a
+    restricted caller role in bypass is still asked).  Otherwise the call must
+    be confirmed by a person: when the operator's mode would already ask for
+    it, the dispatch gate asks, so this returns ``""``; when the mode would
+    let it run outright (``auto``, say), it is decided here as ``manual``
+    would, so it stays refused, naming its call id, until an operator approves
+    exactly that call once (an explicit ``allow`` rule the operator wrote for
+    the tool also answers it, as it answers ``manual``).  Any fault on this
+    path refuses.
+    """
+    from sonder_runtime.adapters.security.permission_policy import permission_policy as gate
+    from sonder_runtime.domain.security import tool_call_classifier as classifier
+
+    verdict = classifier_verdict(tool_name, args)
+    if verdict == classifier.ALLOW:
+        return ""
+    if verdict != classifier.ASK:
+        return _refusal("the safety classifier blocks tool '%s' for model '%s'." % (tool_name, model))
+    try:
+        from sonder_runtime.adapters.execution import effect_fence
+
+        bypass_active = getattr(gate, "bypass_root_containment_active", None)
+        if callable(bypass_active) and bypass_active():
+            return ""
+        arguments = args if isinstance(args, dict) else None
+        preflight = gate.decide(tool_name, interactive=False, surface="agent", record=False,
+                                arguments=arguments)
+        if not preflight.allowed:
+            return ""  # the dispatch gate asks (or refuses) for this call itself
+        decision = gate.decide(tool_name, interactive=False, mode=gate.MANUAL, surface="agent",
+                               record=True, arguments=arguments, fence=effect_fence.current())
+        if decision.allowed:
+            return ""
+        call = str(getattr(decision, "call_id", "") or "")
+        # Not decision.reason: its remedies name modes, and no mode lifts this ask.
+        reason = (
+            "approve exactly this call once at the console with /approve %s, or write an "
+            "explicit allow rule for the tool with /permissions" % call
+            if call else str(decision.reason)
+        )
+        if call:
+            _record_pending_refusal(decision, tool_name, arguments, reason)
+    except Exception:  # noqa: BLE001 - an unconfirmable ask is a refusal, never an allow
+        reason = "the confirmation could not be checked"
+    return _refusal(
+        "the safety classifier requires confirmation for tool '%s' from model '%s': %s"
+        % (tool_name, model, reason)
+    )
 
 
 # ---- entry marking ------------------------------------------------------------
@@ -466,7 +587,8 @@ class RestrictedRun:
             refused = self.path_refusal(tool_name, scope_args(tool_name, args, self.project_root), globs)
             if refused:
                 return refused
-            return str(inner(tool_name, args) or "") if inner is not None else ""
+            refused = str(inner(tool_name, args) or "") if inner is not None else ""
+            return refused or classifier_refusal(self.model, tool_name, args)
 
         return check
 
@@ -629,6 +751,8 @@ class RestrictedRun:
 
 
 __all__ = [
-    "LaneEntry", "RestrictedRun", "admit", "decide", "entering", "entry", "permitted",
-    "suppressed", "suppressing",
+    "LaneEntry", "PendingRefusalRecorder", "RestrictedRun", "admit",
+    "classifier_block_refusal", "classifier_refusal", "classifier_verdict",
+    "decide", "entering", "entry", "install_pending_refusal_recorder",
+    "permitted", "suppressed", "suppressing",
 ]
