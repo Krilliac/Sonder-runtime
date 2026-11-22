@@ -22,6 +22,7 @@ import wave
 import zlib
 
 import sonder_runtime.adapters.artifact_grounding as artifact_grounding
+from sonder_runtime.adapters.filesystem.file_ops import _reject_network_path
 from sonder_runtime.domain.security.redaction import redact_text
 import media_assets
 import model_assets
@@ -174,6 +175,8 @@ def resolve_pack_dir(name: str, output_dir: str = "") -> str:
     so it may not be pointed at arbitrary project directories.
     """
     slug = _safe_slug(name)
+    if output_dir:
+        _reject_network_path(output_dir)
     base = output_dir.strip() if output_dir else default_asset_root()
     if not os.path.isabs(base):
         base = os.path.join(workspace_root(), base)
@@ -779,11 +782,13 @@ def generate_artifacts(name: str, brief: str, kinds: str = "auto",
             "(no manifest.json from %s); choose another name or remove those files"
             % (", ".join(existing[:5]), _safe_slug(name), GENERATOR_ID)
         )
-    for filename in OWNED_FILENAMES:
+    for filename in sorted(OWNED_FILENAMES):
+        stale = os.path.join(root, filename)
+        if os.path.isdir(stale) and not os.path.islink(stale):
+            raise ValueError("generated file path is unexpectedly a directory: %s" % filename)
+    for filename in sorted(OWNED_FILENAMES):
         stale = os.path.join(root, filename)
         if os.path.lexists(stale):
-            if os.path.isdir(stale) and not os.path.islink(stale):
-                raise ValueError("generated file path is unexpectedly a directory: %s" % filename)
             os.remove(stale)
     palette = palette_from_brief(brief, THEMES[theme])
     selected = set(request["kinds"])
@@ -937,7 +942,43 @@ def generate_pack(name: str, dimension: str = "2d", theme: str = "arcane",
     )
 
 
+def _manifest_row_name_is_safe(filename) -> bool:
+    """Lexical check of a manifest row filename; no filesystem call is made.
+
+    Refuses anything that is not a plain relative name: UNC, device and NT
+    prefixes, absolute or drive-qualified paths, parent-directory components
+    and NUL.  Joining such a value onto the pack root returns it unchanged, and
+    resolving it would make Windows authenticate to the named host.
+    """
+    if not isinstance(filename, str) or not filename or chr(0) in filename:
+        return False
+    flat = filename.replace("/", "\\")
+    if flat.startswith("\\"):
+        return False
+    try:
+        _reject_network_path(filename)
+    except PermissionError:
+        return False
+    if os.path.isabs(filename) or os.path.splitdrive(filename)[0]:
+        return False
+    if len(flat) > 1 and flat[1] == ":":
+        return False
+    return ".." not in flat.split("\\")
+
+
+def _lexically_directly_inside(root: str, candidate: str) -> bool:
+    """True when ``candidate`` is a direct child of ``root``; purely lexical."""
+    try:
+        return (
+            os.path.commonpath([root, candidate]) == root
+            and os.path.dirname(candidate) == root
+        )
+    except ValueError:
+        return False
+
+
 def verify_pack(path: str) -> dict:
+    path = _reject_network_path(path)
     if not os.path.isabs(path):
         path = os.path.join(workspace_root(), path)
     root = os.path.abspath(path)
@@ -959,10 +1000,13 @@ def verify_pack(path: str) -> dict:
             failures.append("manifest file row must be an object")
             continue
         filename = row.get("path", "")
+        if not _manifest_row_name_is_safe(filename):
+            failures.append("unsafe manifest path: %r" % (filename,))
+            continue
         candidate = os.path.abspath(os.path.join(root, filename))
         if filename in seen:
             failures.append("duplicate manifest path: %r" % filename)
-        elif not _inside_workspace(candidate) or os.path.dirname(candidate) != root:
+        elif not _lexically_directly_inside(root, candidate) or not _inside_workspace(candidate):
             failures.append("unsafe manifest path: %r" % filename)
         elif not os.path.isfile(candidate):
             failures.append("missing: %s" % filename)

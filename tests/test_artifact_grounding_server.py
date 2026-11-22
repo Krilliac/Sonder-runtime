@@ -186,3 +186,37 @@ def test_loop_respects_existing_in_memory_grounding_failure():
     assert result["summary"] == "grounding: failed"
     assert server._agent_observation_ok("artifact grounding: PASS") is True
     assert server._agent_observation_ok("artifact grounding: FAIL") is False
+
+
+import os
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        r"\\evil\share\x",
+        "//evil/share/x",
+        r"\\?\UNC\evil\share\x",
+        r"\\.\pipe\x",
+    ],
+)
+def test_artifact_verify_refuses_network_path_before_touching_it(monkeypatch, spelling):
+    seen = []
+
+    def _spy(name, real):
+        def wrapper(p, *a, **k):
+            seen.append((name, str(p)))
+            return real(p, *a, **k)
+        return wrapper
+
+    monkeypatch.setattr(os.path, "exists", _spy("exists", os.path.exists))
+    monkeypatch.setattr(os.path, "isdir", _spy("isdir", os.path.isdir))
+    monkeypatch.setattr(os.path, "realpath", _spy("realpath", os.path.realpath))
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+
+    out = server.artifact_verify(spelling)
+
+    assert out.startswith("ERROR:")
+    assert not [s for s in seen if "evil" in s[1] or "pipe" in s[1]], seen
