@@ -3821,18 +3821,9 @@ def _handle_feedback(content, state=None):
 
 
 def _handle_intent(content, messages=None, state=None, context=None):
-    """Return response text if `content` is a natural-language control intent, else None.
-
-    "run it" and "practice 3 tasks" are the slash commands they stand for, so
-    they go through ``_handle_slash`` and its gate (`_http_slash_refusal`:
-    permission mode, deny rules, role checks) exactly as ``/run`` and
-    ``/train N`` do. Calling the runners directly let `plan` and unattended
-    `manual` run a request-supplied code block that ``/run`` refuses.
-    ``context`` is the request's auth context (None only for the trusted
-    in-process surface); a served caller without developer authority is
-    refused here too, whatever the call site checked.
-    """
+    """Reply text for a natural-language control intent, else None; run/train take the /run, /train gate."""
     state = _state_or_legacy(state)
+    from sonder_runtime.application.command_surface.natural_intents import dispatch
     intent = intents.classify(content)
     if not intent:
         return None
@@ -3844,23 +3835,9 @@ def _handle_intent(content, messages=None, state=None, context=None):
     if "strict" in intent:
         state.strict = intent["strict"]
         replies.append("strict %s" % ("on" if state.strict else "off"))
-    commands = []
-    if intent.get("run"):
-        commands.append("/run")
-    if "train" in intent:
-        commands.append("/train %d" % intent["train"])
-    try:
-        developer = context is None or _developer_authorized(context)
-    except (KeyError, TypeError, AttributeError):
-        developer = False  # a malformed context fails closed
-    for command in commands:
-        if not developer:
-            replies.append(
-                "refused %s: developer or admin authentication is required"
-                % command.split()[0]
-            )
-            continue
-        replies.append(_handle_slash(command, messages=messages, state=state, context=context))
+    replies.extend(dispatch(
+        intent, lambda command: _handle_slash(command, messages=messages, state=state, context=context),
+        lambda: context is None or _developer_authorized(context)))
     return "\n".join(replies)
 
 

@@ -524,7 +524,7 @@
       ]
     },
     {
-      "file_count": 425,
+      "file_count": 426,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -587,6 +587,7 @@
         "sonder_runtime/application/command_surface/__init__.py",
         "sonder_runtime/application/command_surface/command_text.py",
         "sonder_runtime/application/command_surface/mcp.py",
+        "sonder_runtime/application/command_surface/natural_intents.py",
         "sonder_runtime/application/compaction/__init__.py",
         "sonder_runtime/application/compaction/append_service.py",
         "sonder_runtime/application/compaction/engine.py",
