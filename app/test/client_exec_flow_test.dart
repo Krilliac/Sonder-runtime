@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat/tool_run_card.dart';
 import 'package:sonder_runtime/chat_store.dart';
@@ -505,6 +506,134 @@ void main() {
           'sess-h1',
         ),
       ]);
+      c.dispose();
+    });
+
+    test('P2: native executor lexically refuses UNC, device, extended, NT, NUL, and drive-relative paths in all modes',
+        () async {
+      final tmp = await Directory.systemTemp.createTemp('sonder_p2_paths_');
+      try {
+        const hostilePaths = <String>[
+          r'\\nohost.invalid\share\secret.txt',
+          '//nohost.invalid/share/secret.txt',
+          r'\\.\C:\Windows\win.ini',
+          r'\\?\UNC\nohost.invalid\share\a.txt',
+          r'\??\C:\Windows\win.ini',
+          r'\??',
+          '/??',
+          '/??/C:/Windows/win.ini',
+          'C:relative.txt',
+          'C:',
+          'ok.txt\x00evil',
+          'bad\npath.txt',
+        ];
+        for (final mode in const ['manual', 'acceptEdits', 'bypass']) {
+          for (final bad in hostilePaths) {
+            final res = await native_mgr.LocalManager.executeClientTool(
+              callId: 'p2-path',
+              tool: 'file_read',
+              args: {'path': bad},
+              risk: 'read_only',
+              mode: mode,
+              workspaceRoot: tmp.path,
+              approved: true,
+            );
+            expect(res.ok, isFalse, reason: 'mode=$mode path=$bad');
+          }
+          // Hostile workspaceRoot is also refused lexically.
+          final rootRes = await native_mgr.LocalManager.executeClientTool(
+            callId: 'p2-root',
+            tool: 'file_read',
+            args: {'path': 'a.txt'},
+            risk: 'read_only',
+            mode: mode,
+            workspaceRoot: r'\\nohost.invalid\share',
+            approved: true,
+          );
+          expect(rootRes.ok, isFalse, reason: 'mode=$mode hostile root');
+        }
+      } finally {
+        await tmp.delete(recursive: true);
+      }
+    });
+
+    testWidgets(
+        'P3: clientExecEnabled=false never executes streamed or non-stream client tools (even read_only or acceptEdits/auto)',
+        (tester) async {
+      final backend = FakeChatBackend();
+      final c = await _startController(tester, backend);
+      c.clientExecEnabled = false;
+      c.clientPermissionMode = 'auto';
+      c.clientWorkspaceRoot = r'C:\proj';
+
+      // 1. Streamed server-emitted read_only + write tools must NEVER call executeClientTool.
+      final sendFuture = c.send('check files');
+      await tester.pump();
+      backend.lastTurn.tool(ChatStreamToolEvent.fromJson(const {
+        'id': 'cafe00000001',
+        'call_id': 'cafe00000001',
+        'execution_target': 'client',
+        'backend': 'client',
+        'phase': 'awaiting_client_result',
+        'tool': 'file_read',
+        'risk': 'read_only',
+        'session': 'sess-off',
+        'args': {'path': 'secret.txt'},
+      }));
+      backend.lastTurn.tool(ChatStreamToolEvent.fromJson(const {
+        'id': 'cafe00000002',
+        'call_id': 'cafe00000002',
+        'execution_target': 'client',
+        'backend': 'client',
+        'phase': 'awaiting_client_result',
+        'tool': 'file_write',
+        'risk': 'write',
+        'session': 'sess-off',
+        'args': {'path': 'x.txt', 'content': 'pwn'},
+      }));
+      await tester.pump();
+      await tester.pump();
+      expect(backend.clientToolExecs, isEmpty);
+      expect(backend.clientToolResults, hasLength(2));
+      for (final r in backend.clientToolResults) {
+        expect(r.$2, isFalse);
+        expect(r.$5, isTrue); // denied=true
+        expect(r.$4, contains('disabled'));
+      }
+
+      // 2. Non-stream handoffs in _finishOk must ALSO skip execution when disabled.
+      backend.lastTurn.done(
+        'done',
+        metadata: const ChatResponseMetadata(
+          clientToolHandoffs: [
+            ClientToolHandoff(
+              callId: 'cafe00000003',
+              tool: 'file_read',
+              risk: 'read_only',
+              session: 'sess-off',
+              args: {'path': 'secret.txt'},
+            ),
+            ClientToolHandoff(
+              callId: 'cafe00000004',
+              tool: 'file_write',
+              risk: 'write',
+              session: 'sess-off',
+              args: {'path': 'x.txt', 'content': 'pwn'},
+            ),
+          ],
+        ),
+      );
+      await sendFuture;
+      await tester.pumpAndSettle();
+      expect(backend.clientToolExecs, isEmpty);
+
+      // 3. Direct approveClientTool must refuse immediately when disabled.
+      final approveOutcome =
+          await c.approveClientTool('cafe00000003', 'file_read', '');
+      expect(approveOutcome.status, ApprovalStatus.failed);
+      expect(approveOutcome.message, contains('disabled'));
+      expect(backend.clientToolExecs, isEmpty);
+
       c.dispose();
     });
   });

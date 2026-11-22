@@ -104,6 +104,83 @@ class ClientToolExecutionResult:
         }
 
 
+_DRIVE_RELATIVE_RE = re.compile(r"^[A-Za-z]:(?:$|[^/\\])")
+_LOCAL_EXTENDED_DRIVE_RE = re.compile(r"^\\\\\?\\[A-Za-z]:(?:$|[/\\])")
+
+
+def _reject_unsafe_path_spelling(raw: str, *, allow_local_extended: bool = False) -> None:
+    """Lexically reject UNC, device, extended, NT-namespace, control-char, and drive-relative paths.
+
+    Runs BEFORE any ``Path.resolve()`` or filesystem call so hostile spellings
+    cannot trigger outbound SMB/NTLM lookups or escape into NT device namespaces
+    (in every mode, including ``bypass``).
+    """
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        raise PermissionError(f"path {raw!r} contains disallowed control characters")
+    text = raw.strip()
+    if not text:
+        return
+    if allow_local_extended and _LOCAL_EXTENDED_DRIVE_RE.match(text):
+        text = text[4:]
+    if (
+        text.startswith("\\\\")
+        or text.startswith("//")
+        or text.startswith("\\/")
+        or text.startswith("/\\")
+    ):
+        raise PermissionError(f"UNC, device, or extended path is not allowed: {raw!r}")
+    if text in ("\\??", "/??") or (
+        len(text) > 3 and text[:3] in ("\\??", "/??") and text[3] in ("\\", "/")
+    ):
+        raise PermissionError(f"NT namespace path is not allowed: {raw!r}")
+    if _DRIVE_RELATIVE_RE.match(text):
+        raise PermissionError(f"Windows drive-relative path is not allowed: {raw!r}")
+
+
+def _is_reparse_or_link(path: Path | str) -> bool:
+    """True when ``path`` is a symlink or (on Windows) an NTFS directory junction."""
+    if os.path.islink(path):
+        return True
+    is_junction = getattr(os.path, "isjunction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction(path))
+        except OSError:
+            return True
+    return False
+
+
+def _reject_unsafe_reparse_ancestors(candidate: Path) -> None:
+    """Walk ``candidate`` top-down and refuse any symlink/junction targeting UNC/device/NT before resolve()."""
+    parts = candidate.parts
+    if not parts:
+        return
+    cur = Path(parts[0])
+    for part in parts[1:]:
+        if part in ("", "."):
+            continue
+        cur = cur / part
+        if _is_reparse_or_link(cur):
+            try:
+                target = os.readlink(cur)
+            except OSError as exc:
+                raise PermissionError(f"unreadable link/junction at '{cur}'") from exc
+            _reject_unsafe_path_spelling(target, allow_local_extended=True)
+
+
+def _entry_within_root(entry: Path, root: Path) -> bool:
+    """True when ``entry`` is neither a reparse point/link nor resolved outside ``root``."""
+    if _is_reparse_or_link(entry):
+        return False
+    try:
+        resolved = entry.resolve()
+        _reject_unsafe_path_spelling(str(resolved))
+        resolved.relative_to(root)
+    except (OSError, ValueError, PermissionError):
+        return False
+    return True
+
+
 class ClientAgentPolicy:
     """Mutable client-local mode & workspace policy owned by the local PC user."""
 
@@ -113,8 +190,15 @@ class ClientAgentPolicy:
         workspace_root: Path | str | None = None,
         mode: str = "manual",
     ) -> None:
-        resolved_root = Path(workspace_root) if workspace_root is not None else Path.cwd()
+        if workspace_root is not None:
+            raw_root = str(workspace_root)
+            _reject_unsafe_path_spelling(raw_root)
+            resolved_root = Path(raw_root)
+            _reject_unsafe_reparse_ancestors(resolved_root)
+        else:
+            resolved_root = Path.cwd()
         self.workspace_root: Path = resolved_root.resolve()
+        _reject_unsafe_path_spelling(str(self.workspace_root))
         if mode not in CLIENT_AGENT_MODES:
             raise ValueError(f"unknown client permission mode: {mode!r}")
         self.mode: str = mode
@@ -130,11 +214,15 @@ class ClientAgentPolicy:
 
 
 def _resolve_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
-    text = str(raw or "").strip() or "."
+    raw_str = str(raw or "")
+    _reject_unsafe_path_spelling(raw_str)
+    text = raw_str.strip() or "."
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = root / candidate
+    _reject_unsafe_reparse_ancestors(candidate)
     resolved = candidate.resolve()
+    _reject_unsafe_path_spelling(str(resolved))
     if not allow_escape:
         try:
             resolved.relative_to(root)
@@ -439,9 +527,16 @@ def _exec_file_find(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
     pattern = str(args.get("pattern") or "*").strip() or "*"
     matches: list[str] = []
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if d not in {".git", "__pycache__", ".dart_tool", "node_modules"})
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in {".git", "__pycache__", ".dart_tool", "node_modules"}
+            and (bypass or not _is_reparse_or_link(os.path.join(dirpath, d)))
+        )
         for name in sorted(filenames):
-            rel = (Path(dirpath) / name).relative_to(base).as_posix()
+            fpath = Path(dirpath) / name
+            if not bypass and not _entry_within_root(fpath, root):
+                continue
+            rel = fpath.relative_to(base).as_posix()
             if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern):
                 matches.append(rel)
                 if len(matches) >= _MAX_FIND_MATCHES:
@@ -468,6 +563,8 @@ def _exec_directory_tree(args: Mapping[str, Any], root: Path, *, bypass: bool) -
         for entry in entries:
             if entry.name in {".git", "__pycache__"}:
                 continue
+            if not bypass and not _entry_within_root(entry, root):
+                continue
             indent = "  " * (level - 1)
             suffix = "/" if entry.is_dir() else ""
             lines.append(f"{indent}{entry.name}{suffix}")
@@ -490,11 +587,17 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     glob_pat = str(args.get("glob") or "").strip()
     matches: list[str] = []
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if d not in {".git", "__pycache__", ".dart_tool", "node_modules"})
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in {".git", "__pycache__", ".dart_tool", "node_modules"}
+            and (bypass or not _is_reparse_or_link(os.path.join(dirpath, d)))
+        )
         for name in sorted(filenames):
             if glob_pat and not fnmatch.fnmatch(name, glob_pat):
                 continue
             fpath = Path(dirpath) / name
+            if not bypass and not _entry_within_root(fpath, root):
+                continue
             try:
                 if fpath.stat().st_size > 512 * 1024:
                     continue

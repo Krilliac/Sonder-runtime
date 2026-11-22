@@ -1349,6 +1349,48 @@ class LocalManager {
     return '${text.substring(0, limit - 16)}\n...[truncated]';
   }
 
+  static final RegExp _driveRelativePattern = RegExp(r'^[A-Za-z]:(?:$|[^/\\])');
+  static final RegExp _localExtendedDrivePattern =
+      RegExp(r'^\\\\\?\\[A-Za-z]:(?:$|[/\\])');
+
+  /// Lexically refuse UNC, device, extended, NT-namespace, control-char, and
+  /// Windows drive-relative paths BEFORE any filesystem or symlink call.
+  static void _rejectUnsafeClientPathSpelling(
+    String raw, {
+    bool allowLocalExtended = false,
+  }) {
+    for (var i = 0; i < raw.length; i++) {
+      final code = raw.codeUnitAt(i);
+      if (code < 32 || code == 127) {
+        throw FileSystemException(
+            'Path contains disallowed control characters', raw);
+      }
+    }
+    var text = raw.trim();
+    if (text.isEmpty) return;
+    if (allowLocalExtended && _localExtendedDrivePattern.hasMatch(text)) {
+      text = text.substring(4);
+    }
+    if (text.startsWith(r'\\') ||
+        text.startsWith('//') ||
+        text.startsWith(r'\/') ||
+        text.startsWith(r'/\')) {
+      throw FileSystemException(
+          'UNC, device, or extended path is not allowed', raw);
+    }
+    if (text == r'\??' ||
+        text == '/??' ||
+        (text.length > 3 &&
+            (text.startsWith(r'\??') || text.startsWith('/??')) &&
+            (text[3] == r'\' || text[3] == '/'))) {
+      throw FileSystemException('NT namespace path is not allowed', raw);
+    }
+    if (_driveRelativePattern.hasMatch(text)) {
+      throw FileSystemException(
+          'Windows drive-relative path is not allowed', raw);
+    }
+  }
+
   static bool _isAbsolutePath(String p) {
     if (p.isEmpty) return false;
     if (Platform.isWindows) {
@@ -1384,8 +1426,31 @@ class LocalManager {
     return '$prefix${stack.join(sep)}';
   }
 
+  static void _rejectUnsafeLinkAncestors(String normalized) {
+    final sep = Platform.pathSeparator;
+    final parts = normalized.split(sep);
+    if (parts.length <= 1) return;
+    var cur = parts[0];
+    if (Platform.isWindows && RegExp(r'^[A-Za-z]:$').hasMatch(cur)) {
+      cur = '$cur$sep';
+    } else if (cur.isEmpty && normalized.startsWith(sep)) {
+      cur = sep;
+    }
+    for (var i = 1; i < parts.length; i++) {
+      final seg = parts[i];
+      if (seg.isEmpty) continue;
+      cur = cur.endsWith(sep) ? '$cur$seg' : '$cur$sep$seg';
+      if (FileSystemEntity.isLinkSync(cur)) {
+        final target = Link(cur).targetSync();
+        _rejectUnsafeClientPathSpelling(target, allowLocalExtended: true);
+      }
+    }
+  }
+
   static String _canonicalizeWithExistingAncestor(String rawPath) {
+    _rejectUnsafeClientPathSpelling(rawPath);
     final normalized = _normalizeSegments(rawPath);
+    _rejectUnsafeLinkAncestors(normalized);
     var cur = normalized;
     final tail = <String>[];
     while (cur.isNotEmpty) {
@@ -1394,6 +1459,7 @@ class LocalManager {
         final resolved = type == FileSystemEntityType.directory
             ? Directory(cur).resolveSymbolicLinksSync()
             : File(cur).resolveSymbolicLinksSync();
+        _rejectUnsafeClientPathSpelling(resolved, allowLocalExtended: true);
         if (tail.isEmpty) return _normalizeSegments(resolved);
         return _normalizeSegments(
             '$resolved${Platform.pathSeparator}${tail.reversed.join(Platform.pathSeparator)}');
@@ -1407,14 +1473,19 @@ class LocalManager {
   }
 
   static String _clientRoot(String workspaceRoot) {
+    if (workspaceRoot.isNotEmpty) {
+      _rejectUnsafeClientPathSpelling(workspaceRoot);
+    }
     final rootRaw = workspaceRoot.trim().isEmpty
         ? Directory.current.path
         : workspaceRoot.trim();
-    return _canonicalizeWithExistingAncestor(
+    final resolvedRoot = _canonicalizeWithExistingAncestor(
       _isAbsolutePath(rootRaw)
           ? rootRaw
           : '${Directory.current.path}${Platform.pathSeparator}$rootRaw',
     );
+    _rejectUnsafeClientPathSpelling(resolvedRoot);
+    return resolvedRoot;
   }
 
   static String _resolveClientPath(
@@ -1422,12 +1493,15 @@ class LocalManager {
     String workspaceRoot, {
     required bool bypass,
   }) {
+    final rawFull = rawArg?.toString() ?? '';
+    _rejectUnsafeClientPathSpelling(rawFull);
     final root = _clientRoot(workspaceRoot);
-    final raw = (rawArg?.toString() ?? '').trim();
+    final raw = rawFull.trim();
     final candidate = raw.isEmpty || raw == '.'
         ? root
         : (_isAbsolutePath(raw) ? raw : '$root${Platform.pathSeparator}$raw');
     final resolved = _canonicalizeWithExistingAncestor(candidate);
+    _rejectUnsafeClientPathSpelling(resolved);
     if (!bypass) {
       final rCheck = Platform.isWindows ? root.toLowerCase() : root;
       final pCheck = Platform.isWindows ? resolved.toLowerCase() : resolved;

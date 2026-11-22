@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -299,3 +300,110 @@ def test_cli_requires_confirm_bypass(capsys):
     rc = cli_main(["--mode", "bypass"])
     assert rc == 2
     assert "confirm-bypass" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows NTFS junction test")
+def test_p1_find_search_tree_do_not_escape_windows_junctions(tmp_path):
+    ws = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    aws_dir = tmp_path / ".aws"
+    ws.mkdir()
+    outside.mkdir()
+    aws_dir.mkdir()
+    (ws / "inside.txt").write_text("SAFE_LOCAL\n", encoding="utf-8")
+    (outside / "secret.txt").write_text("TOPSECRET_OUTSIDE\n", encoding="utf-8")
+    (aws_dir / "credentials").write_text("aws_secret_access_key=FAKE\n", encoding="utf-8")
+
+    j_out = ws / "j_out"
+    j_aws = ws / "j_aws"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(j_out), str(outside)], check=True, capture_output=True)
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(j_aws), str(aws_dir)], check=True, capture_output=True)
+
+    policy = ClientAgentPolicy(workspace_root=ws, mode="acceptEdits")
+
+    read_res = execute_client_tool("file_read", {"path": "j_out/secret.txt"}, policy=policy)
+    assert read_res.ok is False and "escapes workspace root" in read_res.error
+
+    find_res = execute_client_tool("file_find", {"root": ".", "pattern": "*.txt"}, policy=policy)
+    assert find_res.ok is True
+    assert "inside.txt" in find_res.output
+    assert "secret.txt" not in find_res.output
+    assert "j_out" not in find_res.output
+
+    search_res = execute_client_tool("text_search", {"root": ".", "query": "TOPSECRET_OUTSIDE"}, policy=policy)
+    assert search_res.ok is True
+    assert "TOPSECRET_OUTSIDE" not in search_res.output
+    assert "secret.txt" not in search_res.output
+
+    tree_res = execute_client_tool("directory_tree", {"path": ".", "depth": 3}, policy=policy)
+    assert tree_res.ok is True
+    assert "inside.txt" in tree_res.output
+    assert "secret.txt" not in tree_res.output
+    assert "credentials" not in tree_res.output
+
+
+def test_p2_unc_device_nt_and_drive_relative_refused_before_path_resolve(monkeypatch, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    hostile_paths = [
+        r"\\nohost.invalid\share\secret.txt",
+        "//nohost.invalid/share/secret.txt",
+        r"\\.\C:\Windows\win.ini",
+        r"\\?\UNC\nohost.invalid\share\a.txt",
+        r"\??\C:\Windows\win.ini",
+        r"\??",
+        "/??",
+        "/??/C:/Windows/win.ini",
+        "C:relative.txt",
+        "C:",
+        "ok.txt\x00evil",
+        "bad\npath.txt",
+    ]
+    resolve_touches: list[str] = []
+    orig_resolve = Path.resolve
+
+    def spy_resolve(self, *a, **k):
+        resolve_touches.append(str(self))
+        return orig_resolve(self, *a, **k)
+
+    # Policy constructor must also refuse hostile roots BEFORE Path.resolve().
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    for bad in hostile_paths:
+        resolve_touches.clear()
+        with pytest.raises(PermissionError):
+            ClientAgentPolicy(workspace_root=bad, mode="manual")
+        assert resolve_touches == [], f"ClientAgentPolicy touched resolve() on {bad!r}: {resolve_touches}"
+
+    monkeypatch.setattr(Path, "resolve", orig_resolve)
+    policies = [
+        ClientAgentPolicy(workspace_root=ws, mode="manual"),
+        ClientAgentPolicy(workspace_root=ws, mode="acceptEdits"),
+        ClientAgentPolicy(workspace_root=ws, mode="bypass"),
+    ]
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    for pol in policies:
+        for bad in hostile_paths:
+            resolve_touches.clear()
+            res = execute_client_tool("file_read", {"path": bad}, policy=pol)
+            assert res.ok is False and res.error, f"mode={pol.mode} path={bad!r}: {res}"
+            assert resolve_touches == [], f"mode={pol.mode} touched resolve() on {bad!r}: {resolve_touches}"
+
+    # Simulated reparse-point ancestor pointing to SMB/UNC must also refuse BEFORE Path.resolve().
+    from sonder_runtime.interfaces.client_agent import executor as _exec_mod
+
+    fake_link = ws / "j_smb"
+    monkeypatch.setattr(
+        _exec_mod,
+        "_is_reparse_or_link",
+        lambda p: Path(p) == fake_link,
+    )
+    monkeypatch.setattr(
+        os,
+        "readlink",
+        lambda p: r"\\?\UNC\nohost.invalid\share" if Path(p) == fake_link else "",
+    )
+    for pol in policies:
+        resolve_touches.clear()
+        res = execute_client_tool("file_read", {"path": "j_smb/secret.txt"}, policy=pol)
+        assert res.ok is False and res.error
+        assert resolve_touches == [], f"mode={pol.mode} touched resolve() on UNC junction: {resolve_touches}"

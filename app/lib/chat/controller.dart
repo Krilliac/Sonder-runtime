@@ -1054,6 +1054,9 @@ class ChatController extends ChangeNotifier {
     );
   }
 
+  static const _clientExecDisabledMessage =
+      'Client PC tool execution is disabled in Settings.';
+
   void _handleTurnTool(
     ChatTurn turn,
     ChatStreamToolEvent tool,
@@ -1062,6 +1065,30 @@ class ChatController extends ChangeNotifier {
     if (tool.isAwaitingClientResult && tool.callId.isNotEmpty) {
       final firstSeen = _handledClientCalls.add(tool.callId);
       if (!firstSeen) return;
+      if (!clientExecEnabled) {
+        _upsertLiveTool(
+          tool.copyWith(
+            state: 'denied',
+            phase: 'denied',
+            error: _clientExecDisabledMessage,
+          ),
+          awaiting: false,
+        );
+        final session = tool.session.isNotEmpty
+            ? tool.session
+            : sessionFor(
+                _turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
+        unawaited(_backend
+            .submitClientToolResult(
+              tool.callId,
+              ok: false,
+              error: _clientExecDisabledMessage,
+              denied: true,
+              session: session,
+            )
+            .catchError((Object _) {}));
+        return;
+      }
       final risk = effectiveClientToolRisk(tool.risk, tool.tool);
       if (clientModeAllowsWithoutPrompt(clientPermissionMode, risk)) {
         _upsertLiveTool(tool, awaiting: false);
@@ -1086,6 +1113,13 @@ class ChatController extends ChangeNotifier {
     required int expectedGeneration,
     required bool approved,
   }) async {
+    if (!clientExecEnabled) {
+      return const ClientToolExecResult(
+        ok: false,
+        denied: true,
+        error: _clientExecDisabledMessage,
+      );
+    }
     final backend = _backend;
     final execRes = await backend.executeClientTool(
       callId: tool.callId,
@@ -1171,6 +1205,12 @@ class ChatController extends ChangeNotifier {
     String toolName,
     String digest,
   ) async {
+    if (!clientExecEnabled) {
+      return const ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: _clientExecDisabledMessage,
+      );
+    }
     final ev = _findClientToolEvent(callId);
     if (ev == null) {
       return const ApprovalOutcome(ApprovalStatus.failed,
@@ -1377,6 +1417,23 @@ class ChatController extends ChangeNotifier {
       if (h.callId.isNotEmpty && !seenIds.contains(h.callId)) {
         seenIds.add(h.callId);
         final effectiveRisk = effectiveClientToolRisk(h.risk, h.tool);
+        if (!clientExecEnabled) {
+          final ev = ChatStreamToolEvent.fromJson({
+            'id': h.callId,
+            'call_id': h.callId,
+            'execution_target': h.executionTarget,
+            'backend': h.executionTarget,
+            'phase': 'denied',
+            'state': 'denied',
+            'error': _clientExecDisabledMessage,
+            'tool': h.tool,
+            'args': h.args,
+            'risk': effectiveRisk,
+            'session': h.session,
+          });
+          handoffTools.add(ev);
+          continue;
+        }
         final allowed =
             clientModeAllowsWithoutPrompt(clientPermissionMode, effectiveRisk);
         final ev = ChatStreamToolEvent.fromJson({
@@ -1419,6 +1476,7 @@ class ChatController extends ChangeNotifier {
 
   Future<void> _executeNonStreamHandoff(
       ChatStreamToolEvent ev, int generation) async {
+    if (!clientExecEnabled) return;
     final execRes = await _backend.executeClientTool(
       callId: ev.callId,
       tool: ev.tool,
