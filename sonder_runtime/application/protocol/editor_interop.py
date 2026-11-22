@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 MAX_PATH_LENGTH = 512
 MAX_CONTENT_LENGTH = 256 * 1024
 MAX_DOCUMENTS = 128
+MAX_PAYLOAD_DEPTH = 64
 PROTOCOL_VERSION = "1"
 _ALLOWED_NAMES = {"AGENTS.md", "SKILL.md"}
 _ALLOWED_SUFFIXES = {".json", ".md", ".rule", ".rules", ".yaml", ".yml"}
@@ -47,6 +48,25 @@ def _safe_relative_path(value: str) -> str:
     return "/".join(parts)
 
 
+def _check_payload_depth(value: Any, *, max_depth: int = MAX_PAYLOAD_DEPTH) -> None:
+    """Iteratively reject container nesting deeper than ``max_depth``."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, Mapping):
+            if depth >= max_depth:
+                raise EditorInteropError("payload must be JSON-compatible (nesting too deep)")
+            for child in current.values():
+                if isinstance(child, (Mapping, list, tuple)):
+                    stack.append((child, depth + 1))
+        elif isinstance(current, (list, tuple)):
+            if depth >= max_depth:
+                raise EditorInteropError("payload must be JSON-compatible (nesting too deep)")
+            for child in current:
+                if isinstance(child, (Mapping, list, tuple)):
+                    stack.append((child, depth + 1))
+
+
 @dataclass(frozen=True)
 class ProtocolEnvelope:
     """Versioned message envelope with bounded, JSON-compatible payload."""
@@ -69,6 +89,7 @@ class ProtocolEnvelope:
             raise EditorInteropError("message_id must be a UUID") from exc
         if not isinstance(self.payload, Mapping) or len(self.payload) > 128:
             raise EditorInteropError("payload must be a mapping with at most 128 keys")
+        _check_payload_depth(self.payload)
         try:
             encoded = json.dumps(self.payload, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError, RecursionError) as exc:
