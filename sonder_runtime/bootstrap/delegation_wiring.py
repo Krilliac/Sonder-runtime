@@ -237,6 +237,7 @@ def _run_one_child(
     parent_read_only: bool,
     peer_handles: Sequence[str],
     board: _rt.AgentProgressBoard,
+    parent_allow_web: bool = True,
 ) -> DelegationChildResult:
     started = time.monotonic()
     effective_read_only = bool(parent_read_only) or bool(spec.read_only)
@@ -338,7 +339,7 @@ def _run_one_child(
             call_kwargs: dict[str, Any] = {
                 "tier": tier,
                 "max_steps": spec.max_steps,
-                "allow_web": not effective_read_only,
+                "allow_web": bool(parent_allow_web) and not effective_read_only,
                 "read_only": effective_read_only,
                 "project": child_project,
                 "auto_checklist": False,
@@ -444,6 +445,7 @@ def make_delegation_executor(server: Any) -> _rt.DelegationExecutor:
         parent_project: str,
         parent_read_only: bool,
         board: _rt.AgentProgressBoard,
+        parent_allow_web: bool = True,
     ) -> tuple[DelegationChildResult, ...]:
         if not _rt.can_delegate():
             raise PermissionError(_rt.depth_refusal_message("delegate_task"))
@@ -468,6 +470,7 @@ def make_delegation_executor(server: Any) -> _rt.DelegationExecutor:
                         parent_read_only=parent_read_only,
                         peer_handles=peer_handles,
                         board=board,
+                        parent_allow_web=parent_allow_web,
                     )
                 )
             return tuple(results)
@@ -490,6 +493,7 @@ def make_delegation_executor(server: Any) -> _rt.DelegationExecutor:
                         parent_read_only=parent_read_only,
                         peer_handles=peer_handles,
                         board=board,
+                        parent_allow_web=parent_allow_web,
                     ),
                 ))
             for idx, future in futures:
@@ -506,6 +510,7 @@ def dispatch_delegation(
     *,
     read_only: bool = False,
     repository_extra_roots: str = "",
+    allow_web: bool = True,
 ) -> str:
     """Execute ``delegate_task`` or ``spawn_agents`` with strict depth-1 enforcement."""
     if not _rt.can_delegate():
@@ -530,6 +535,7 @@ def dispatch_delegation(
                 tool_name=tool_name,
                 parent_project=str(repository_extra_roots or ""),
                 parent_read_only=bool(read_only),
+                parent_allow_web=bool(allow_web),
             )
     except (PermissionError, RuntimeError) as exc:
         msg = str(exc) if str(exc).startswith(LEGACY_ERROR_PREFIX) else f"{LEGACY_ERROR_PREFIX} {exc}"
@@ -591,6 +597,7 @@ def dispatch_agent_tool(
     *,
     read_only: bool = False,
     repository_extra_roots: str = "",
+    allow_web: bool = True,
 ) -> str:
     """Unified dispatch router for delegation, progress, and peer-board tools."""
     if tool_name in ("delegate_task", "spawn_agents"):
@@ -600,6 +607,7 @@ def dispatch_agent_tool(
             args,
             read_only=read_only,
             repository_extra_roots=repository_extra_roots,
+            allow_web=allow_web,
         )
     if tool_name in ("report_progress", "post_status"):
         return dispatch_report_progress(args)

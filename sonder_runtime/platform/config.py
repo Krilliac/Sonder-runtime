@@ -1962,7 +1962,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[server].work_wait_seconds must be within 1..work_budget_seconds")
     if not 1 <= server.work_max_running <= 64:
         errors.append("[server].work_max_running must be within 1..64")
-    if isinstance(server.work_max_live, bool) or (
+    if isinstance(server.work_max_live, bool) or not isinstance(server.work_max_live, int) or (
         server.work_max_live != 0
         and not server.work_max_running <= server.work_max_live <= 256
     ):

@@ -40,7 +40,7 @@ def test_runner_resolves_live_bound(running, live, expected):
     assert runner.max_live == expected
 
 
-@pytest.mark.parametrize("bad_live", [-1, True, False])
+@pytest.mark.parametrize("bad_live", [-1, True, False, "bad", None, 2.5])
 def test_negative_and_bool_work_max_live_are_refused(bad_live):
     from dataclasses import replace
 

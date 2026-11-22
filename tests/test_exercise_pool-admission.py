@@ -654,3 +654,9 @@ def test_error_formatting_defaults_to_hiding_a_remote_worker_host():
     error.served_origin = "http://203.0.113.9:11434"
     text = format_runtime_model_call_error(error, endpoint_loopback=False, display="primary")
     assert "203.0.113.9" not in text
+
+
+@pytest.mark.parametrize("bad_slots", [True, False, 1.5, "2", None])
+def test_max_inflight_by_origin_rejects_bool_float_and_non_int(bad_slots):
+    with pytest.raises(ValueError, match="integer"):
+        OllamaWorkerPool(LOCAL, (), max_inflight_by_origin={LOCAL: bad_slots})

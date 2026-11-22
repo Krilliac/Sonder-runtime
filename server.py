@@ -18413,7 +18413,7 @@ def _agent_dispatch(
         )
     if tool_name in ("delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board"):
         from sonder_runtime.bootstrap import delegation_wiring as _dw
-        return _dw.dispatch_agent_tool(sys.modules[__name__], tool_name, args, read_only=read_only, repository_extra_roots=repository_extra_roots)
+        return _dw.dispatch_agent_tool(sys.modules[__name__], tool_name, args, read_only=read_only, repository_extra_roots=repository_extra_roots, allow_web=allow_web)
     if tool_name in ("tool_help", "tool_search"):
         search_args = {**args, "query": args.get("q", "")} if ("query" not in args and "q" in args) else args
         advertised_names = None if _agent_help_tools.has_active_scope() else _agent_help_advertised_tools(
