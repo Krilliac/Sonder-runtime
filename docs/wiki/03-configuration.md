@@ -107,6 +107,7 @@ web_app_dir = ""                    # absolute bundle root; "" = <state home>/we
 work_wait_seconds = 240             # routed chat work: wait before answering with a work-run id
 work_budget_seconds = 1800          # routed chat work: wall-clock budget, then effects are refused
 work_max_running = 2                # concurrent routed work runs
+work_max_live = 0                   # all live routed work runs, parked-on-approval ones included; 0 = max(8, work_max_running) (SONDER_HTTP_WORK_MAX_LIVE)
 stream_heartbeat_seconds = 15       # SSE keep-alive interval while a streamed turn generates
 prewarm_on_start = true             # load the default chat model once the listener is bound (SONDER_PREWARM_ON_START); needs prewarm enabled, goes through GPU admission
 

@@ -1723,7 +1723,16 @@ def _pool_words():
     if eligible != workers:
         words += " (%d ready)" % eligible
     state = "idle" if waiting == 0 else "%d waiting" % waiting
-    return "Ollama: %s, %s" % (words, state)
+    line = "Ollama: %s, %s" % (words, state)
+    try:
+        from sonder_runtime.adapters.inference import ollama_reporting
+
+        tiers = ollama_reporting.tier_capacity_lines_for(server)
+    except Exception:
+        tiers = []
+    if tiers:
+        line += "; " + "; ".join(tiers)
+    return line
 
 
 def _composer_frame_width():

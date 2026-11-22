@@ -810,11 +810,93 @@ def resolve_sonder_inference_pin(
     )
 
 
-def remote_cluster_parallel_slots(server: Any) -> int:
-    """Return total healthy remote inflight/worker slots across Node1 and pool members."""
+def _model_carriers(pool: Any, model: str | None) -> tuple[frozenset[str], dict[str, int]] | None:
+    """Origins and slot counts of the pool workers carrying ``model``.
+
+    ``None`` when no model was asked for, the pool is absent or disabled, or
+    no worker advertises it yet: unknown capability must not read as zero.
+    """
+    if not model or pool is None or not bool(getattr(pool, "enabled", False)):
+        return None
+    try:
+        counts = pool.model_slot_counts(model)
+        origins = pool.origins_for_model(model)
+    except _SOFT_ERRORS:
+        return None
+    if not counts or not origins:
+        return None
+    return frozenset(origins), counts
+
+
+def fleet_model_name() -> str:
+    """Model the fleet lane's tier runs under the runtime policy, or ``""``."""
+    try:
+        import sonder_runtime.adapters.runtime_policy as runtime_policy
+
+        policy = runtime_policy.load(create=True)
+        tier = runtime_policy.route_tier("fleet", policy=policy)
+        return str((policy.get("local_models") or {}).get(tier) or "").strip()
+    except Exception:
+        return ""
+
+
+def fleet_pool_route(server: Any) -> tuple[Any, str, dict[str, int]] | None:
+    """``(pool, model, slot counts)`` when the pool serves the fleet model.
+
+    The fleet tier routes through the Ollama worker pool when the pool is
+    enabled and at least one healthy worker advertises the fleet model. Slot
+    counts then cover only those workers, whichever hosts they are. ``None``
+    means the local-host limits still apply.
+    """
+    pool = getattr(server, "OLLAMA_POOL", None)
+    if pool is None or not bool(getattr(pool, "enabled", False)):
+        return None
+    model = fleet_model_name()
+    if not model:
+        return None
+    try:
+        counts = pool.model_slot_counts(model)
+    except Exception:
+        return None
+    if not counts or int(counts.get("total") or 0) < 1:
+        return None
+    return pool, model, counts
+
+
+def pool_capacity_note(
+    route: tuple[Any, str, dict[str, int]] | None, requested: int, slots: int, bound_by: str,
+) -> tuple[str, int, str]:
+    """Apply the pool's real model capacity to a slot choice: ``(note, slots, bound_by)``.
+
+    The explicit-cap and override branches of ``capacity`` do not read the
+    slot limits, so the pool's capacity is applied to them here. The note is
+    empty when the pool did not reduce the requested concurrency.
+    """
+    if route is None:
+        return "", slots, bound_by
+    cap = int(route[2]["total"])
+    asked = slots if slots > cap else requested
+    if slots > cap:
+        slots, bound_by = cap, "pool_model_capacity"
+    elif not (requested > slots and bound_by == "pool_model_capacity"):
+        return "", slots, bound_by
+    return (
+        "%d agents were requested but the pool carries %s on %d worker(s) with %d "
+        "slot(s) in total; running %d at a time, the rest in later waves"
+        % (asked, route[1], int(route[2]["workers"]), cap, slots)
+    ), slots, bound_by
+
+
+def remote_cluster_parallel_slots(server: Any, model: str | None = None) -> int:
+    """Return total healthy remote inflight/worker slots across Node1 and pool members.
+
+    With ``model``, pool workers count only when they advertise it, so a
+    worker that cannot serve the fleet's model adds no slots.
+    """
     slots = 0
     gw = _find_sonder_inference_gateway(server)
     pool = getattr(server, "OLLAMA_POOL", None)
+    carriers = _model_carriers(pool, model)
     if gw is not None:
         try:
             status = gw.unified_worker_status(ollama_pool=pool)
@@ -830,9 +912,13 @@ def remote_cluster_parallel_slots(server: Any) -> int:
                 if src == "sonder_inference_worker":
                     slots += max(1, int(row.get("max_inflight") or 1))
                 elif src == "ollama_pool" and not is_loopback:
+                    if carriers is not None and origin.rstrip("/") not in carriers[0]:
+                        continue
                     slots += max(1, int(row.get("capacity") or 1))
             if slots > 0:
                 return slots
+    if carriers is not None:
+        return int(carriers[1].get("remote_total") or 0)
     if pool is not None and bool(getattr(pool, "enabled", False)):
         try:
             summary = pool.pool_capacity_summary()
@@ -845,9 +931,17 @@ def remote_cluster_parallel_slots(server: Any) -> int:
     return slots
 
 
-def effective_cluster_parallel(local_parallel: int, server: Any) -> int:
-    """Combine local Ollama batch width with healthy remote pool/private worker slots."""
-    remote = remote_cluster_parallel_slots(server) if server is not None else 0
+def effective_cluster_parallel(local_parallel: int, server: Any, model: str | None = None) -> int:
+    """Combine local Ollama batch width with healthy remote pool/private worker slots.
+
+    With ``model``, only workers that advertise it count: the local worker
+    contributes nothing when it lacks the model, and remote pool workers
+    count only when they carry it.
+    """
+    remote = remote_cluster_parallel_slots(server, model) if server is not None else 0
+    carriers = _model_carriers(getattr(server, "OLLAMA_POOL", None), model)
+    if carriers is not None and not int(carriers[1].get("local_total") or 0):
+        return remote
     if remote > 0:
         return (int(local_parallel) if int(local_parallel) > 0 else 1) + remote
     return int(local_parallel)
