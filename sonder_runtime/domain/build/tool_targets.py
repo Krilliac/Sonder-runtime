@@ -19,7 +19,16 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass, replace
 
-from .model import LIBRARY_TYPES, BuildModel, BuildTarget, TargetType, bounded_notes
+from .model import (
+    LIBRARY_TYPES,
+    VS_GENERATORS,
+    BuildModel,
+    BuildSystem,
+    BuildTarget,
+    Generator,
+    TargetType,
+    bounded_notes,
+)
 
 
 # Pseudo-targets that package, install, deploy or run things.
@@ -29,6 +38,26 @@ UTILITY_TARGET_NAMES = frozenset({
     "list_install_components", "Continuous", "Experimental", "Nightly", "NightlyMemoryCheck",
 })
 BUILD_ALIASES = frozenset({"all", "ALL_BUILD", "Build"})
+
+
+def build_aliases_for(model: BuildModel) -> frozenset[str]:
+    """The generator's own build-everything alias for ``model``'s system.
+
+    Only these names skip the utility classification and model lookup; any
+    other name (``Build`` in a CMake tree, ``ALL_BUILD`` under Ninja or in a
+    solution) may be a user-defined custom target or project and is checked
+    like every target. For MSBuild only the plain solution target ``Build`` is
+    an alias: ``X:Build`` always names project ``X``.
+    """
+    if model.system is BuildSystem.MSBUILD:
+        return frozenset({"Build"})
+    if model.system is BuildSystem.CMAKE:
+        if model.generator in VS_GENERATORS or model.generator is Generator.XCODE:
+            return frozenset({"ALL_BUILD"})
+        return frozenset({"all"})
+    if model.system in (BuildSystem.NINJA, BuildSystem.MAKE):
+        return frozenset({"all"})
+    return frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +71,8 @@ class TargetSafety:
         return name in self.utility
 
 
-def _is_utility(target: BuildTarget) -> bool:
-    if target.name in BUILD_ALIASES:
+def _is_utility(target: BuildTarget, aliases: frozenset[str] = BUILD_ALIASES) -> bool:
+    if target.name in aliases:
         return False
     if target.type in (TargetType.UTILITY, TargetType.MSBUILD_MAKEFILE):
         return True
@@ -52,7 +81,8 @@ def _is_utility(target: BuildTarget) -> bool:
 
 def classify_targets(model: BuildModel) -> TargetSafety:
     by_name = {target.name: target for target in model.targets}
-    utility = {target.name for target in model.targets if _is_utility(target)}
+    aliases = build_aliases_for(model)
+    utility = {target.name for target in model.targets if _is_utility(target, aliases)}
     notes: list[str] = []
 
     inputs = set(model.build_inputs)
@@ -115,4 +145,4 @@ def apply_safety(model: BuildModel, safety: TargetSafety) -> tuple[BuildTarget, 
 
 
 __all__ = ["BUILD_ALIASES", "TargetSafety", "UTILITY_TARGET_NAMES", "apply_safety",
-           "classify_targets"]
+           "build_aliases_for", "classify_targets"]

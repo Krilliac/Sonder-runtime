@@ -21,8 +21,16 @@ def test_classify_signal_mixed_cues_are_ambiguous_not_rejected():
         "thanks, no problem",
         "perfect, no more errors",
         "great, no issues",
+        "copied, no problem",
+        "used it, no issues",
+        "edited it, no errors",
     ):
         assert feedback.classify_signal(text) is None, text
+    for text in (
+        "thanks, no problem",
+        "perfect, no more errors",
+        "great, no issues",
+    ):
         assert feedback.classify_feedback(text) is None, text
     assert feedback.classify_signal("no, that's wrong") == "rejected"
     assert feedback.classify_signal("copied") == "copied"

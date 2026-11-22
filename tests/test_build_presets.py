@@ -128,3 +128,28 @@ def test_diamond_inheritance_is_walked_once_per_preset():
     assert top.generator == "Ninja" and top.binary_dir == ROOT + "/deep"
     assert dict(top.cache) == {"CMAKE_BUILD_TYPE": "Debug"}
     assert elapsed < 2.0, elapsed
+
+
+def test_cyclic_presets_are_order_independent_for_resolved_and_merged_cache():
+    # A -> [B, C], B -> [A], C disables via condition and sets generator/cache; X -> [B].
+    # Regardless of declaration order, cyclic cuts must not poison memoized lookups.
+    a = {"name": "A", "inherits": ["B", "C"]}
+    b = {"name": "B", "hidden": True, "inherits": ["A"]}
+    c = {
+        "name": "C", "hidden": True, "generator": "Ninja", "binaryDir": "${sourceDir}/c",
+        "condition": {"type": "const", "value": False},
+        "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"},
+    }
+    x = {"name": "X", "inherits": ["B"]}
+    first = parse_cmake_presets(_doc(configurePresets=[a, b, c, x]), includes={}, source_root=ROOT)
+    second = parse_cmake_presets(_doc(configurePresets=[x, b, c, a]), includes={}, source_root=ROOT)
+    assert first.configure == second.configure == ()
+
+    # Same order-independence check for merged_cache when a cycle cuts before D.
+    a2 = {"name": "A", "inherits": ["B", "D"]}
+    d = {"name": "D", "hidden": True, "binaryDir": "${sourceDir}/d",
+         "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}}
+    y = {"name": "Y", "inherits": ["B"]}
+    m1 = parse_cmake_presets(_doc(configurePresets=[a2, b, d, y]), includes={}, source_root=ROOT)
+    m2 = parse_cmake_presets(_doc(configurePresets=[y, b, d, a2]), includes={}, source_root=ROOT)
+    assert dict(m1.find("Y").cache) == dict(m2.find("Y").cache) == {"CMAKE_BUILD_TYPE": "Debug"}

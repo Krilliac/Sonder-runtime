@@ -55,6 +55,7 @@ from sonder_runtime.application.lifecycle import (
 from sonder_runtime.platform.paths import state_path
 from sonder_runtime.platform.runtime_threads import run_bounded
 from sonder_runtime.adapters.web import deferred_tls
+from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
     HOST_NOT_ALLOWED_REMEDY,
     host_decision,
@@ -1913,9 +1914,10 @@ def parse_launcher_allowed_hosts(value):
     return tuple(dict.fromkeys(parsed))
 
 
-class LauncherServer(deferred_tls.DeferredTLSHandshakeMixin, ThreadingHTTPServer):
+class LauncherServer(BoundedConnectionsMixin, deferred_tls.DeferredTLSHandshakeMixin, ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    max_connections = 64
 
     def __init__(
         self, address, handler, *, controller, token, command_journal=None,
@@ -1946,6 +1948,7 @@ class LauncherServer(deferred_tls.DeferredTLSHandshakeMixin, ThreadingHTTPServer
 
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "SonderLauncher/1"
+    timeout = 10.0
 
     def log_message(self, fmt, *args):
         if os.environ.get("SONDER_LAUNCHER_QUIET") != "1":
