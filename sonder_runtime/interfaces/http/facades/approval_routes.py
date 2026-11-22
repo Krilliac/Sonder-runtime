@@ -30,6 +30,30 @@ from .approvals import approvals_payload, approve_call, deny_call, revoke_approv
 
 ROUTE = "/v1/approvals"
 _SINGLE_OWNER_MODES = frozenset({"local-open", "api-key"})
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _default_unquote(segment: str) -> str:
+    if "%" not in segment:
+        return segment
+    raw = bytearray()
+    i = 0
+    length = len(segment)
+    while i < length:
+        ch = segment[i]
+        if ch == "%":
+            if (
+                i + 2 >= length
+                or segment[i + 1] not in _HEX_DIGITS
+                or segment[i + 2] not in _HEX_DIGITS
+            ):
+                raise ValueError("malformed percent escape")
+            raw.append(int(segment[i + 1 : i + 3], 16))
+            i += 3
+        else:
+            raw.extend(ch.encode("utf-8"))
+            i += 1
+    return raw.decode("utf-8", errors="strict")
 
 
 def _unavailable() -> dict:
@@ -50,6 +74,35 @@ class HttpApprovalPorts:
     audit: Callable[[str, Any, float], None]
     clock: Callable[[], float]
     log: Any
+    # Percent-decodes one path segment; raises ValueError for one that is not UTF-8.
+    unquote: Callable[[str], str] = _default_unquote
+
+
+def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
+    """Split the raw path on '/' first, then percent-decode each segment once.
+
+    A client that encodes the '@' of a call reference (``%40``) names the same
+    row as a raw '@'. A segment that still holds '%' after one decode (a
+    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
+    """
+    segments = []
+    for segment in raw.split("/"):
+        try:
+            decoded = unquote(segment)
+        except ValueError:
+            return None
+        if "%" in decoded:
+            return None
+        segments.append(decoded)
+    return segments
+
+
+def _approval_role(context: Any) -> str:
+    """The account's role here: an account's API key never holds admin
+    (``admin_auth.require``), so an admin account's key counts as a developer."""
+    account = (context or {}).get("account") or {}
+    role = str(account.get("role") or "").strip().lower()
+    return "developer" if role == "admin" and account.get("via_api_key") else role
 
 
 def approver_label(context: Any) -> str:
@@ -68,7 +121,8 @@ def approver_label(context: Any) -> str:
             value = account.get(name) if isinstance(account, dict) else getattr(account, name, "")
             return str(value or "").strip()
 
-        return "%s:%s" % (field("role") or "account", field("username") or "account")
+        role = _approval_role(context) if isinstance(account, dict) else field("role")
+        return "%s:%s" % (role or "account", field("username") or "account")
     if context.get("api_key"):
         return "admin-key"
     return "http"
@@ -160,9 +214,19 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
 
     The approval is bound to that call's digest, single-use and expiring,
     recorded as the caller's approver label with surface ``http``, and
-    audited on the direct-tool path as ``permission_approve``.
+    audited on the direct-tool path as ``permission_approve``. Each path
+    segment is percent-decoded exactly once (``_decoded_segments``).
     """
-    parts = path[len(ROUTE):].strip("/").split("/")
+    parts = _decoded_segments(path[len(ROUTE):].strip("/"), ports.unquote)
+    if parts is None:
+        handler._send_json_payload(
+            {"error": {"message": "the path is percent-decoded exactly once; a segment "
+                                  "still holding '%' after that, or one that is not "
+                                  "UTF-8, is refused",
+                       "type": "invalid_request", "code": "INVALID_PATH"}},
+            status=400,
+        )
+        return
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
         action, target = "revoke", parts[1]
     elif len(parts) == 2 and parts[0] == "deny" and parts[1]:
