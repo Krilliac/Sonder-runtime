@@ -103,6 +103,13 @@ def test_refusal_receipt_ignores_decisions_that_name_no_call(ledger):
     assert unnamed.action == "deny" and facade.refusal_receipt(unnamed) is None
 
 
+KEY = {"Authorization": "Bearer " + API_KEY}
+
+
+def _owner_key(monkeypatch):
+    _serve_with_accounts(monkeypatch, mode="api-key")
+
+
 def _chat(port, content, headers=None):
     body = json.dumps({"model": "sonder", "messages": [{"role": "user", "content": content}]})
     status, _, payload = _request(port, "POST", "/v1/chat/completions", body=body,
@@ -111,11 +118,11 @@ def _chat(port, content, headers=None):
 
 
 def test_chat_write_refusal_carries_the_pending_call_id_and_approval_runs_it_once(ledger, monkeypatch):
-    _local_open(monkeypatch)
+    _owner_key(monkeypatch)
     written = []
     monkeypatch.setattr(server, "file_write", lambda **kwargs: written.append(kwargs) or "wrote it")
     with _http_server(monkeypatch) as port:
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", KEY)
         assert status == 200, reply
         text = reply["choices"][0]["message"]["content"]
         assert text.startswith("refused /write:")  # the text is unchanged
@@ -125,31 +132,31 @@ def test_chat_write_refusal_carries_the_pending_call_id_and_approval_runs_it_onc
         assert "/approve %s" % refusal["call_id"] in text
         assert written == []
 
-        status, _, payload = _request(port, "GET", "/v1/approvals")
+        status, _, payload = _request(port, "GET", "/v1/approvals", headers=KEY)
         assert status == 200
         pending = json.loads(payload)["pending"]
         assert [row["call_id"] for row in pending] == [refusal["call_id"]]
         assert pending[0]["tool"] == "file_write"
 
         status, _, payload = _request(port, "POST", "/v1/approvals/%s" % refusal["call_id"],
-                                      body=json.dumps({"ttl_seconds": 600}), headers=JSON)
+                                      body=json.dumps({"ttl_seconds": 600}), headers={**JSON, **KEY})
         assert status == 201, payload
         approval = json.loads(payload)["approval"]
-        assert approval["approver"] == "local-open" and approval["surface"] == "http"
+        assert approval["approver"] == "admin-key" and approval["surface"] == "http"
         assert approval["state"] == "open" and approval["ttl_seconds"] == 600
 
         # The unchanged call runs once and spends it ...
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", KEY)
         assert reply["choices"][0]["message"]["content"] == "wrote it"
         assert "refusal" not in reply["sonder_receipt"]
         assert [{k: v for k, v in w.items() if k != "token"} for w in written] == [
             {"path": "notes.txt", "content": "hello", "mode": "create"}]
         # ... and only once.
-        status, reply = _chat(port, "/write notes.txt hello")
+        status, reply = _chat(port, "/write notes.txt hello", KEY)
         assert reply["choices"][0]["message"]["content"].startswith("refused /write:")
         assert len(written) == 1
         # A changed argument is a different call with a different id.
-        status, other = _chat(port, "/write notes.txt HELLO")
+        status, other = _chat(port, "/write notes.txt HELLO", KEY)
         assert other["sonder_receipt"]["refusal"]["call_id"] != refusal["call_id"]
     assert any(args and args[0] == "permission_approve" for args, _ in ledger.audits)
 
@@ -258,14 +265,15 @@ def test_deployment_api_key_approves_as_admin_key(ledger, monkeypatch):
 
 
 def test_idempotent_retry_does_not_issue_a_second_approval(ledger, monkeypatch):
-    _local_open(monkeypatch)
+    _owner_key(monkeypatch)
     decision = _refuse_write(ledger)
-    headers = {**JSON, "Idempotency-Key": "approve-once-1"}
+    headers = {**JSON, **KEY, "Idempotency-Key": "approve-once-1"}
     with _http_server(monkeypatch) as port:
         first = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=headers)
         second = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=headers)
         # Without a key a repeat is refused rather than stacking approvals.
-        third = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=JSON)
+        third = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}",
+                         headers={**JSON, **KEY})
     assert first[0] == 201
     assert second[0] == 201 and json.loads(second[2]) == json.loads(first[2])
     assert third[0] == 409
@@ -335,25 +343,46 @@ def test_expiry(ledger, monkeypatch):
 
 
 def test_revoke_over_http(ledger, monkeypatch):
-    _local_open(monkeypatch)
+    _owner_key(monkeypatch)
     decision = _refuse_write(ledger)
     with _http_server(monkeypatch) as port:
         _, _, payload = _request(port, "POST", "/v1/approvals/" + decision.call_id,
-                                 body="{}", headers=JSON)
+                                 body="{}", headers={**JSON, **KEY})
         nonce = json.loads(payload)["approval"]["nonce"]
         status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce,
-                                      body="{}", headers=JSON)
+                                      body="{}", headers={**JSON, **KEY})
         assert status == 200, payload
         assert json.loads(payload)["approval"]["state"] == "revoked"
         status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce,
-                                      body="{}", headers=JSON)
+                                      body="{}", headers={**JSON, **KEY})
         assert status == 404
         status, _, _ = _request(port, "POST", "/v1/approvals/revoke/not-a-nonce",
-                                body="{}", headers=JSON)
+                                body="{}", headers={**JSON, **KEY})
         assert status == 400
     denied = pm.decide("file_write", interactive=False, surface="http",
                        arguments={"path": "notes.txt", "content": "hello", "mode": "create"})
     assert denied.action == "deny"
+
+
+def test_an_encoded_reference_is_decoded_once_and_a_double_encoded_one_is_refused(ledger, monkeypatch):
+    _owner_key(monkeypatch)
+    decision = _refuse_write(ledger)
+    headers = {**JSON, **KEY}
+    with _http_server(monkeypatch) as port:
+        for raw_ref in (decision.call_id + "%2540-", decision.call_id + "%40%ff", decision.call_id + "%4"):
+            status, _, payload = _request(port, "POST", "/v1/approvals/" + raw_ref,
+                                          body="{}", headers=headers)
+            assert status == 400, (raw_ref, payload)
+        assert ledger.approvals() == []
+        # A client that percent-encodes '@' names the same row as a raw '@'.
+        status, _, payload = _request(port, "POST", "/v1/approvals/%s%%40-" % decision.call_id,
+                                      body="{}", headers=headers)
+        assert status == 201, payload
+        nonce = json.loads(payload)["approval"]["nonce"]
+        status, _, payload = _request(port, "POST", "/v1/approvals/revoke/" + nonce.replace("_", "%5F"),
+                                      body="{}", headers=headers)
+        assert status == 200, payload
+        assert json.loads(payload)["approval"]["state"] == "revoked"
 
 
 def test_ledger_unavailable_is_503(monkeypatch):

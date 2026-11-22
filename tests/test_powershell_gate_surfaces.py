@@ -259,11 +259,17 @@ def test_python_run_blocks_keep_no_gate_arguments(monkeypatch, surface):
     runner = lambda *a, **k: {"ok": True, "returncode": 0, "stdout": "ok", "stderr": "", "language": "python"}
     monkeypatch.setattr(serve.code_runner, "run_code", runner)
     monkeypatch.setattr(serve.code_runner, "format_result", lambda result: "ran")
+    from sonder_runtime.adapters.security import powershell_gate
+    monkeypatch.setattr(powershell_gate, "inspect_powershell",
+                        lambda source: pytest.fail("python /run launched PowerShell parser"))
     if surface == "control-run":
         server.control_command("/run", history=messages)
+        assert seen and all(arguments is None for _tool, arguments in seen)
     else:
         serve._handle_slash("/run", messages=messages)
-    assert seen and all(arguments is None for _tool, arguments in seen)
+        # HTTP /run binds {code, language} so unattended refusals emit a call_id + detail,
+        # while never launching the PowerShell parser for Python blocks.
+        assert seen == [("run_code", {"code": "print(1)", "language": "python"})]
 
 
 def test_powershell_selection_never_launches_the_parser(monkeypatch):

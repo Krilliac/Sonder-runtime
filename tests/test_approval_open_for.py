@@ -386,7 +386,11 @@ def test_deny_route_blocks_consume_and_is_idempotent(active, monkeypatch):
         assert json.loads(first[2])["denial"]["call_id"] == decision.call_id
         # An approval after a denial is refused, so nothing can be spent.
         late = _request(port, "POST", "/v1/approvals/" + decision.call_id, body="{}", headers=JSON)
-        assert late[0] == 409 and json.loads(late[2])["error"]["code"] == "CALL_DENIED"
+        assert late[0] == 403
+        assert json.loads(late[2])["error"]["code"] == "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"
+        from sonder_runtime.interfaces.http.facades import approvals as _facade
+        denied = _facade.approve_call(active, decision.call_id, {}, approver="admin-key")
+        assert denied.status == 409 and denied.body["error"]["code"] == "CALL_DENIED"
         # Unknown call, bad id, disagreeing digest.
         assert _request(port, "POST", "/v1/approvals/deny/" + "ef" * 8,
                         body="{}", headers=JSON)[0] == 404
@@ -404,17 +408,17 @@ def test_deny_route_blocks_consume_and_is_idempotent(active, monkeypatch):
 
 
 def test_deny_route_revokes_an_open_approval_and_leaves_other_calls(active, monkeypatch):
-    _local_open(monkeypatch)
+    _serve_with_accounts(monkeypatch, mode="api-key")
     first = _refuse_write(active, path="a.txt")
     other = _refuse_write(active, path="b.txt")
     with _http_server(monkeypatch) as port:
         status, _, payload = _request(port, "POST", "/v1/approvals/" + first.call_id,
-                                      body="{}", headers=JSON)
+                                      body="{}", headers={**JSON, "Authorization": "Bearer " + "a" * 40})
         assert status == 201, payload
         assert _request(port, "POST", "/v1/approvals/deny/" + first.call_id,
-                        body="{}", headers=JSON)[0] == 200
+                        body="{}", headers={**JSON, "Authorization": "Bearer " + "a" * 40})[0] == 200
         assert _request(port, "POST", "/v1/approvals/" + other.call_id,
-                        body="{}", headers=JSON)[0] == 201
+                        body="{}", headers={**JSON, "Authorization": "Bearer " + "a" * 40})[0] == 201
     first_digest = active.resolve_call(first.call_id).digest
     other_digest = active.resolve_call(other.call_id).digest
     assert active.open_for("file_write", first_digest) is False

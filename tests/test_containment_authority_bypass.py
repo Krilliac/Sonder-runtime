@@ -837,6 +837,14 @@ def test_http_cloud_opt_in_is_bound_to_admin_authority(role, action, strongest, 
     ran = "cloud_opt_in" in tripwires
     if role in ("user", "developer"):
         assert not ran and out.startswith("refused /cloud_opt_in: administrator"), _fail(f"{role} {action}: {out!r}")
+    elif action == "on":
+        # Authority is necessary, not sufficient: giving consent is refused to
+        # every unattended caller in every mode, and the allow-every-tool rule
+        # of ``strongest`` does not reopen it (permission_modes
+        # UNATTENDED_CONSENT_TOOLS).
+        assert not ran and out.startswith("refused /cloud_opt_in"), _fail(f"{role} {action}: {out!r}")
+        assert "SONDER_ALLOW_CLOUD" in out, _fail(f"{role} {action}: {out!r}")
+        assert os.environ.get("SONDER_ALLOW_CLOUD") == "0", _fail(f"{role} {action} flipped cloud")
     else:
         assert ran, _fail(f"{role} {action}: {out!r}")
     assert ts.SYSTEM_OPERATION_TOOLS["cloud_opt_in"] == "runtime_policy_change"
