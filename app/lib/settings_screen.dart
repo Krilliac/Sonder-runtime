@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -140,6 +141,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ConnectionDiagnosis? _connection;
   ActionOutcome? _launcherOutcome;
   ActionOutcome? _accountOutcome;
+  ActionOutcome? _apiOutcome;
+
+  /// A freshly generated API key, held only until the person dismisses it:
+  /// the server keeps a hash and cannot show it again.
+  String? _newApiKey;
+
+  /// `key_id`s from the last key listing, one revoke button each.
+  List<String> _apiKeyIds = const <String>[];
   String? _keyringWarning;
   String? _saveError;
 
@@ -819,6 +828,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _account = null;
     _signedInUser = null;
     _signedInToken = null;
+    _newApiKey = null;
+    _apiKeyIds = const <String>[];
     _password.clear();
     _saved = _saved.copyWith(withoutAccountSession: true);
   }
