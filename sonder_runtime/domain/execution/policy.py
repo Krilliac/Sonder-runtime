@@ -25,7 +25,11 @@ DEFAULT_RULES = [
     {"pattern": "file_edit", "action": "ask", "note": "edits local files"},
     {"pattern": "file_copy", "action": "ask", "note": "copies one local file"},
     {"pattern": "file_move", "action": "ask", "note": "moves one local file"},
-    {"pattern": "file_delete", "action": "deny", "note": "destructive by default"},
+    # Deleting asks every time, in every mode but bypass, with a fresh one-shot
+    # approval per call (permission_modes.always_asks); host-program deletes
+    # (git rm, rm, del, Remove-Item) share it. The row is "ask", not "deny": a
+    # deny could never be approved, which pushed the model to route around it.
+    {"pattern": "file_delete", "action": "ask", "note": "destructive: asks every time"},
     {"pattern": "run_*", "action": "ask", "note": "executes generated code"},
     {"pattern": "isolated_run", "action": "ask",
      "note": "executes an image through an external container runtime"},
@@ -79,6 +83,31 @@ def normalize_rules(data) -> list[dict]:
         if rule is not None:
             rules.append(rule)
     return rules
+
+
+#: The shipped ``file_delete`` row before deletes became approvable. A saved
+#: policy that still carries exactly this row (never edited by an operator)
+#: is migrated to the current shipped row when it is loaded.
+LEGACY_FILE_DELETE_RULE = {
+    "pattern": "file_delete", "action": "deny", "note": "destructive by default",
+}
+
+
+def migrate_shipped_rows(rules) -> list[dict]:
+    """Replace the unmodified legacy ``file_delete`` deny row with the shipped ask row.
+
+    A row an operator changed (another action or another note) is left alone,
+    so a deliberate deny survives. Returns a new list; ``rules`` is untouched.
+    """
+    current = next(
+        (rule for rule in DEFAULT_RULES if rule["pattern"] == "file_delete"), None,
+    )
+    if current is None:
+        return [dict(rule) for rule in rules]
+    return [
+        dict(current) if rule == LEGACY_FILE_DELETE_RULE else dict(rule)
+        for rule in rules
+    ]
 
 
 def evaluate(rules, tool_name: str) -> dict:

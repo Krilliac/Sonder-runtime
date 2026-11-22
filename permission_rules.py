@@ -207,6 +207,7 @@ def _load_report(home):
             rules_kept=0,
             dropped=tuple(dropped),
         )
+    rules = _policy.migrate_shipped_rows(rules)
     return rules, LoadReport(
         str(path),
         LOAD_PARTIAL if dropped else LOAD_OK,

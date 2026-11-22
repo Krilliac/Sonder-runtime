@@ -379,10 +379,11 @@ def test_both_spellings_of_one_tool_get_the_same_answer(monkeypatch):
 
     Note that agreement is not the same as refusal: with no rule in play a
     `dangerous` tool is refused for a caller with nobody to ask in every
-    mode, and with an explicit `allow` rule it runs wherever the mode asks;
-    both spellings must agree about each of those, which is why the property
-    is measured twice. A version of this test that asserted "both refuse"
-    would have been asserting the over-correction instead of the property.
+    mode, and an explicit `allow` rule does not waive a delete's ask (deletes
+    always ask, in every mode but bypass); both spellings must agree about
+    each of those, which is why the property is measured twice. Bypass runs
+    it, and both spellings must run it there exactly once each, so the
+    agreement cannot be vacuous.
     """
     ran = []
     monkeypatch.setattr(
@@ -413,9 +414,19 @@ def test_both_spellings_of_one_tool_get_the_same_answer(monkeypatch):
         lambda tool: {"pattern": tool, "action": pm.ALLOW} if tool == "file_delete" else None,
     )
     agree()
-    # ...and the guard against both halves being vacuously permissive: with
-    # the written grant, at least one mode must actually have run it.
-    assert ran, "no mode ran the tool -- the agreement is vacuous"
+    # An allow rule cannot waive the delete's ask: with nobody to answer it,
+    # no mode ran it.
+    assert not ran, "an allow rule waived the always-ask on a delete"
+
+    # ...and the guard against both halves being vacuously restrictive: with
+    # always_asks out of the way, the allow rule lets each spelling reach the
+    # tool exactly once.
+    monkeypatch.setattr(pm, "always_asks", lambda *_a, **_k: False)
+    pm.set_mode(pm.AUTO)
+    named = ts._handle_slash("/delete notes.txt")
+    assert len(ran) == 1, named
+    by_tool = ts._handle_slash("/file_delete path=notes.txt")
+    assert len(ran) == 2, by_tool
 
 
 def test_the_fall_through_still_runs_a_read_in_every_mode(monkeypatch):
