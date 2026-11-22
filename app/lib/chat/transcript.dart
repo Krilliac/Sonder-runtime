@@ -49,6 +49,9 @@ class TranscriptActions {
   final Future<PendingCallLookup> Function(String callId)? onLookupApproval;
   final ApproveCallback? onApprove;
   final ToolDecisionCallback? onDeny;
+  final ToolDecisionCallback? onApproveClient;
+  final ToolDecisionCallback? onDenyClient;
+  final VoidCallback? onChangeClientMode;
   final Future<WorkRun> Function(String id) fetchWorkRun;
   final Future<WorkRun> Function(String id) cancelWorkRun;
   final Future<List<WorkRun>> Function() listWorkRuns;
@@ -65,6 +68,9 @@ class TranscriptActions {
     this.onLookupApproval,
     required this.onApprove,
     this.onDeny,
+    this.onApproveClient,
+    this.onDenyClient,
+    this.onChangeClientMode,
     required this.fetchWorkRun,
     required this.cancelWorkRun,
     required this.listWorkRuns,
@@ -608,9 +614,14 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
                 for (final tool in tools)
                   ToolRunCard(
                     event: tool,
-                    onApprove: inlineApprove,
-                    onDeny: actions.onDeny,
-                    onChangeMode: actions.onChangeMode,
+                    onApprove: tool.isClientTarget
+                        ? actions.onApproveClient
+                        : inlineApprove,
+                    onDeny:
+                        tool.isClientTarget ? actions.onDenyClient : actions.onDeny,
+                    onChangeMode: tool.isClientTarget
+                        ? (actions.onChangeClientMode ?? actions.onChangeMode)
+                        : actions.onChangeMode,
                   ),
               ],
             );
@@ -767,7 +778,16 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          for (final tool in entry.toolCalls) ToolRunCard(event: tool),
+          for (final tool in entry.toolCalls)
+            ToolRunCard(
+              event: tool,
+              onApprove:
+                  tool.isClientTarget ? actions.onApproveClient : null,
+              onDeny: tool.isClientTarget ? actions.onDenyClient : null,
+              onChangeMode: tool.isClientTarget
+                  ? (actions.onChangeClientMode ?? actions.onChangeMode)
+                  : null,
+            ),
           if (m?.overflow != null) ...[
             Align(
               alignment: Alignment.centerLeft,

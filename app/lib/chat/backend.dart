@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../account_session.dart';
 import '../api.dart';
+import '../local_manager.dart';
 import '../models.dart';
 import '../settings.dart';
 import 'turn_progress.dart';
@@ -28,6 +29,8 @@ abstract class ChatBackend {
   Future<void> recordFeedback(String command, TurnRequest context);
 
   Future<SystemInfo> systemInfo();
+  Future<ServerCapabilities?> fetchCapabilities();
+  Future<WhoamiInfo?> fetchWhoami();
   Future<List<String>> listModels();
 
   /// `/v1/models` ids with each row's routing field: the picker's labels
@@ -41,6 +44,29 @@ abstract class ChatBackend {
   Future<PermissionMode?> fetchPermissionMode();
   Future<PermissionMode> setPermissionMode(String mode,
       {bool confirmBypass = false});
+
+  /// Execute a `client` tool on the user's PC (desktop native or web companion).
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  });
+
+  /// Post a client-executed tool result to `POST /v1/client-tools/<callId>/result`.
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  });
 
   Future<WorkRun> getWorkRun(String id);
   Future<WorkRun> cancelWorkRun(String id);
@@ -79,6 +105,9 @@ class TurnRequest {
   /// resurrected from the server side.
   final String? historyMode;
 
+  /// Whether `X-Sonder-Client-Exec: 1` should be advertised on this turn.
+  final bool clientExec;
+
   const TurnRequest({
     required this.history,
     required this.model,
@@ -87,6 +116,7 @@ class TurnRequest {
     this.project = '',
     this.allowApproximateLocation = false,
     this.historyMode,
+    this.clientExec = true,
   });
 }
 
@@ -248,6 +278,12 @@ class SonderApiChatBackend implements ChatBackend {
   }
 
   @override
+  Future<ServerCapabilities?> fetchCapabilities() => api.fetchCapabilities();
+
+  @override
+  Future<WhoamiInfo?> fetchWhoami() => api.fetchWhoami();
+
+  @override
   Future<List<String>> listModels() => api.listModels();
 
   @override
@@ -271,6 +307,48 @@ class SonderApiChatBackend implements ChatBackend {
       throw normalizeModeError(e);
     }
   }
+
+  @override
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  }) =>
+      LocalManager.executeClientTool(
+        callId: callId,
+        tool: tool,
+        args: args,
+        risk: risk,
+        mode: mode,
+        workspaceRoot: workspaceRoot,
+        approved: approved,
+        companionUrl: companionUrl,
+        companionToken: companionToken,
+      );
+
+  @override
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  }) =>
+      api.submitClientToolResult(
+        callId,
+        ok: ok,
+        output: output,
+        error: error,
+        denied: denied,
+        session: session,
+      );
 
   /// Work runs need a developer or admin account; say so in those words.
   Future<T> _workRuns<T>(Future<T> Function(WorkRunsApi runs) call) async {
@@ -423,6 +501,7 @@ class _ApiTurn implements ChatTurn {
         project: r.project,
         allowApproximateLocation: r.allowApproximateLocation,
         history: r.historyMode,
+        clientExec: r.clientExec,
         cancel: _cancel,
       )) {
         if (_cancel.isCancelled) break;
