@@ -3802,17 +3802,22 @@ def _handle_feedback(content, state=None):
 
 
 def _handle_intent(content, messages=None, state=None, context=None):
-    """Return response text if `content` is a natural-language control intent, else None.
-
-    Effects run as their slash spelling with the caller's ``context``, so they
-    meet every gate ``/run`` and ``/train`` meet (mode, rules, role, PowerShell).
-    """
+    """Reply text for a natural-language control intent, else None; run/train take the /run, /train gate."""
     state = _state_or_legacy(state)
+    from sonder_runtime.application.command_surface.natural_intents import dispatch
     intent = intents.classify(content)
     if not intent:
         return None
-    return "\n".join(_handle_slash(line, messages=messages, state=state, context=context)
-                     for line in served_dispatch_policy.intent_slash_lines(intent))
+    replies = [
+        _handle_slash(line, messages=messages, state=state, context=context)
+        for line in served_dispatch_policy.intent_slash_lines(
+            {k: intent[k] for k in ("trace", "strict") if k in intent}
+        )
+    ]
+    replies.extend(dispatch(
+        intent, lambda command: _handle_slash(command, messages=messages, state=state, context=context),
+        lambda: context is None or _developer_authorized(context)))
+    return "\n".join(replies)
 
 
 def _work_project_for_request(project, storage_project, content="", auth=None):
