@@ -59,6 +59,39 @@ void main() {
     c.dispose();
   });
 
+  testWidgets(
+      'slash commands route to sonder when code, fast, or named model selected; '
+      'paths and comments keep selected model', (tester) async {
+    final backend = FakeChatBackend();
+    for (final selected in ['code', 'fast', 'qwen:27b']) {
+      final c = ChatController(backend, model: selected);
+      for (final cmd in [
+        '/run',
+        '/run_code print(1)',
+        '/help',
+        '/write notes.txt hi',
+        '/test',
+        '/build',
+        '/stats',
+      ]) {
+        final t = c.send(cmd);
+        await tester.pump();
+        expect(backend.lastTurn.request.model, 'sonder',
+            reason: '$cmd under $selected');
+        backend.lastTurn.done('ok');
+        await t;
+      }
+      for (final nonCmd in ['/etc/passwd', '// comment', 'hello world']) {
+        final t = c.send(nonCmd);
+        await tester.pump();
+        expect(backend.lastTurn.request.model, selected,
+            reason: '$nonCmd under $selected');
+        backend.lastTurn.done('ok');
+        await t;
+      }
+      c.dispose();
+    }
+  });
   testWidgets('a server wait status shows, repeats leave live untouched, a clear '
       'frame drops it', (tester) async {
     final backend = FakeChatBackend();
@@ -506,14 +539,36 @@ void main() {
     await second;
     c.dispose();
   });
+
+  testWidgets('deleteThread and restoreThread persist session rotation counters',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final thread = c.currentThread;
+    final first = c.send('first turn');
+    await tester.pump();
+    c.cancel();
+    await tester.pump();
+    await first;
+    expect(await ChatStore.loadSessions(), {thread.id: 1});
+
+    final deleted = await c.deleteThread(thread);
+    expect(await ChatStore.loadSessions(), isEmpty);
+
+    await c.restoreThread(deleted);
+    expect(await ChatStore.loadSessions(), {thread.id: 1});
+    c.dispose();
+  });
 }
 
 class _DelayedModeWriteBackend extends FakeChatBackend {
   final modeWrite = Completer<PermissionMode>();
 
   @override
-  Future<PermissionMode> setPermissionMode(String next) {
+  Future<PermissionMode> setPermissionMode(String next,
+      {bool confirmBypass = false}) {
     modePosts.add(next);
+    modeRequests.add((next, confirmBypass));
     return modeWrite.future;
   }
 }

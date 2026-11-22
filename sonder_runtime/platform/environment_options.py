@@ -55,6 +55,9 @@ def local_model_options(
         "num_predict": num_predict,
         "num_ctx": normalize_context(num_ctx),
     }
+    if temperature is None:
+        # "auto": send no temperature so the model's preset applies.
+        del options["temperature"]
     runtime = {
         # A remote worker gets only an operator-pinned thread count; the
         # coordinator's CPU count says nothing about the remote host.  Locally

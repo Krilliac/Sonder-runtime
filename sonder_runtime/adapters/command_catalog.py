@@ -346,7 +346,7 @@ _CATEGORY_BY_SLASH = {
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
     "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
-    "/trace": "system", "/strict": "system", "/dump": "system",
+    "/trace": "system", "/strict": "system", "/temp": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/approve": "security", "/approvals": "security",
@@ -448,6 +448,9 @@ _READ_ONLY = frozenset({
     # (bootstrap/reference_agent_tools.py): query and count only, no model
     # call, no write, no network; the index path is never an argument.
     "reference_search",
+    # Transient in-memory agent progress / peer-board coordination only (no
+    # disk, database, network, or command execution).
+    "report_progress", "post_status", "post_to_board", "read_board",
 })
 
 # Branches whose real work is done by module-level functions that front no

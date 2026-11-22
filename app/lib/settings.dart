@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager_models.dart';
+import 'settings/temperature.dart'
+    show normalizeTemperature, parseTemperature;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -77,6 +79,7 @@ class Settings {
   static const _kModel = 'sonder_model';
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
+  static const _kTemperature = 'sonder_temperature';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -84,6 +87,11 @@ class Settings {
   static const _kObservatoryExecutable = 'sonder_observatory_executable';
   static const _kObservatoryWebUrl = 'sonder_observatory_web_url';
   static const _kCleartextKeyHosts = 'sonder_cleartext_key_hosts';
+  static const _kClientExecEnabled = 'sonder_client_exec_enabled';
+  static const _kClientPermissionMode = 'sonder_client_permission_mode';
+  static const _kClientWorkspaceRoot = 'sonder_client_workspace_root';
+  static const _kClientAgentUrl = 'sonder_client_agent_url';
+  static const _kClientAgentToken = 'sonder_client_agent_token';
   static const _credentials = PlatformCredentialStore();
 
   /// Test-only override: widget tests do not load desktop/mobile plugins, and
@@ -133,6 +141,10 @@ class Settings {
   String model;
   bool allowHosted;
   String contextSize;
+
+  /// Sampling temperature for new chat requests, 0 to 2 in steps of 0.05;
+  /// null is Auto (the model's own preset applies).
+  double? temperature;
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -153,6 +165,23 @@ class Settings {
   /// [CleartextKeyPolicy] on load and save; not a secret.
   List<String> cleartextKeyHosts;
 
+  /// Whether client-side tool execution (`X-Sonder-Client-Exec: 1`) is active.
+  bool clientExecEnabled;
+
+  /// User's own client-local permission mode (`plan|manual|acceptEdits|auto|bypass`).
+  String clientPermissionMode;
+
+  /// Client PC workspace root for native desktop execution (empty = current dir).
+  String clientWorkspaceRoot;
+
+  /// Loopback URL of the optional web client companion (default `http://127.0.0.1:11439`).
+  String clientAgentUrl;
+
+  /// Bearer token for the local client companion (kept in secure storage / memory-only on web).
+  String clientAgentToken;
+
+  static const defaultClientAgentUrl = 'http://127.0.0.1:11439';
+
   Settings({
     String? serverUrl,
     this.apiKey = '',
@@ -161,6 +190,7 @@ class Settings {
     this.model = defaultModel,
     this.allowHosted = false,
     this.contextSize = '8192',
+    double? temperature,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -168,7 +198,13 @@ class Settings {
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
     this.cleartextKeyHosts = const [],
-  }) : serverUrl = serverUrl ?? defaultServerUrl;
+    this.clientExecEnabled = true,
+    this.clientPermissionMode = 'manual',
+    this.clientWorkspaceRoot = '',
+    this.clientAgentUrl = defaultClientAgentUrl,
+    this.clientAgentToken = '',
+  })  : temperature = normalizeTemperature(temperature),
+        serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
 
@@ -183,6 +219,8 @@ class Settings {
     String? model,
     bool? allowHosted,
     String? contextSize,
+    double? temperature,
+    bool autoTemperature = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -190,6 +228,11 @@ class Settings {
     String? observatoryExecutable,
     String? observatoryWebUrl,
     List<String>? cleartextKeyHosts,
+    bool? clientExecEnabled,
+    String? clientPermissionMode,
+    String? clientWorkspaceRoot,
+    String? clientAgentUrl,
+    String? clientAgentToken,
   }) =>
       Settings(
         serverUrl: serverUrl ?? this.serverUrl,
@@ -201,6 +244,8 @@ class Settings {
         model: model ?? this.model,
         allowHosted: allowHosted ?? this.allowHosted,
         contextSize: contextSize ?? this.contextSize,
+        temperature:
+            autoTemperature ? null : temperature ?? this.temperature,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -210,6 +255,11 @@ class Settings {
             observatoryExecutable ?? this.observatoryExecutable,
         observatoryWebUrl: observatoryWebUrl ?? this.observatoryWebUrl,
         cleartextKeyHosts: [...cleartextKeyHosts ?? this.cleartextKeyHosts],
+        clientExecEnabled: clientExecEnabled ?? this.clientExecEnabled,
+        clientPermissionMode: clientPermissionMode ?? this.clientPermissionMode,
+        clientWorkspaceRoot: clientWorkspaceRoot ?? this.clientWorkspaceRoot,
+        clientAgentUrl: clientAgentUrl ?? this.clientAgentUrl,
+        clientAgentToken: clientAgentToken ?? this.clientAgentToken,
       );
 
   static const themeModes = ['dark', 'light', 'system'];
@@ -276,6 +326,11 @@ class Settings {
       preferences: p,
       key: _kLauncherToken,
     );
+    final clientAgentToken = await _readCredential(
+      credentials: credentials,
+      preferences: p,
+      key: _kClientAgentToken,
+    );
     AccountSession? account;
     try {
       final raw = await credentials.read(_kAccount);
@@ -299,13 +354,30 @@ class Settings {
       model: p.getString(_kModel) ?? defaultModel,
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
+      temperature: _temperatureFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
       launcherToken: launcherToken,
       observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
       observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
+      clientExecEnabled: p.getBool(_kClientExecEnabled) ?? true,
+      clientPermissionMode:
+          p.getString(_kClientPermissionMode) ?? 'manual',
+      clientWorkspaceRoot: p.getString(_kClientWorkspaceRoot) ?? '',
+      clientAgentUrl:
+          p.getString(_kClientAgentUrl) ?? defaultClientAgentUrl,
+      clientAgentToken: clientAgentToken,
     );
+  }
+
+  /// The stored temperature; a missing or garbled value is Auto (null).
+  static double? _temperatureFrom(SharedPreferences p) {
+    try {
+      return parseTemperature(p.getString(_kTemperature));
+    } catch (_) {
+      return null;
+    }
   }
 
   /// The stored preference, falling back to the boolean older builds wrote
@@ -383,6 +455,18 @@ class Settings {
     } else {
       await p.remove(_kLauncherToken);
     }
+    if (clientAgentToken.trim().isNotEmpty) {
+      await guarded(
+          _kClientAgentToken,
+          () => _writeCredential(
+                credentials: credentials,
+                preferences: p,
+                key: _kClientAgentToken,
+                value: clientAgentToken,
+              ));
+    } else {
+      await p.remove(_kClientAgentToken);
+    }
     final account = accountSession;
     if (account != null && account.matches(serverUrl)) {
       await guarded(
@@ -402,12 +486,30 @@ class Settings {
       _kContextSize,
       contextSize.trim().isEmpty ? '8192' : contextSize.trim(),
     );
+    final stagedTemperature = temperature;
+    if (stagedTemperature == null) {
+      await p.remove(_kTemperature);
+    } else {
+      await p.setString(_kTemperature, '$stagedTemperature');
+    }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
     await p.setString(_kLauncherUrl, launcherUrl.trim());
     await p.setString(_kObservatoryExecutable, observatoryExecutable.trim());
     await p.setString(_kObservatoryWebUrl, observatoryWebUrl.trim());
     await p.setStringList(_kCleartextKeyHosts, cleartextKeyHosts);
+    await p.setBool(_kClientExecEnabled, clientExecEnabled);
+    await p.setString(
+        _kClientPermissionMode,
+        clientPermissionMode.trim().isEmpty
+            ? 'manual'
+            : clientPermissionMode.trim());
+    await p.setString(_kClientWorkspaceRoot, clientWorkspaceRoot.trim());
+    await p.setString(
+        _kClientAgentUrl,
+        clientAgentUrl.trim().isEmpty
+            ? defaultClientAgentUrl
+            : clientAgentUrl.trim());
     CleartextKeyPolicy.allowOnly(cleartextKeyHosts);
     return SettingsSaveResult(
       credentialsStored: stored || !needed,
@@ -482,6 +584,14 @@ class Settings {
       _deleteCredential(
         credentialStore ?? testingCredentialStore ?? _credentials,
         _kLauncherToken,
+      );
+
+  /// Removes the local client-companion token from this device.
+  static Future<void> clearClientAgentToken(
+          {CredentialStore? credentialStore}) =>
+      _deleteCredential(
+        credentialStore ?? testingCredentialStore ?? _credentials,
+        _kClientAgentToken,
       );
 
   static Future<String> _readCredential({

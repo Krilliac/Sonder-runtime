@@ -85,6 +85,7 @@ from sonder_runtime.platform.rpc_sharding_config import (
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
     env_bool,
+    env_bool_checked,
     env_int,
     parse_env_file as _parse_env_file,
 )
@@ -168,6 +169,7 @@ class ServerConfig:
     cors_origins: tuple[str, ...] = ()
     require_account: bool = False
     allow_registration: bool = False
+    public_hosting: bool = False
     reasoning_audience: str = "developer"
     session_state_limit: int = 128
     session_state_owner_limit: int = 32
@@ -195,8 +197,11 @@ class ServerConfig:
     work_wait_seconds: int = 240
     work_budget_seconds: int = 1800
     work_max_running: int = 2
+    # Live routed runs in total, parked-on-approval ones included.  0 means
+    # max(8, work_max_running).
+    work_max_live: int = 0
     # SSE keep-alive comment interval while a streamed chat turn generates.
-    stream_heartbeat_seconds: int = 15
+    stream_heartbeat_seconds: int = 10
     # Load the default chat model as soon as the listener is bound so the first
     # chat never waits on a cold load (SONDER_PREWARM_ON_START).  Still gated by
     # the global prewarm switch and by GPU admission.
@@ -980,10 +985,14 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def _canonical_private_path(value: str) -> Path | None:
     """Resolve an already validated private path without surfacing its text."""
+    parsed = sonder_paths.try_parse_local_root(value, expand_user=True)
+    if parsed is None:
+        return None
     try:
-        return Path(value).expanduser().resolve(strict=False)
+        resolved = parsed.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
+    return sonder_paths.try_parse_local_root(str(resolved), expand_user=False)
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:
@@ -1021,7 +1030,25 @@ def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
             )
             break
 
-    receiver_path = _canonical_private_path(str(private_store_path(config)))
+    receiver_source = (
+        config.artifact_transfer.store_dir
+        if isinstance(config.artifact_transfer.store_dir, str)
+        and config.artifact_transfer.store_dir.strip()
+        else config.state.home
+    )
+    if (
+        isinstance(receiver_source, str)
+        and receiver_source.strip()
+        and sonder_paths.try_parse_local_root(receiver_source, expand_user=True) is None
+    ):
+        receiver_path = None
+    else:
+        try:
+            receiver_raw = str(private_store_path(config))
+        except (OSError, RuntimeError, ValueError):
+            receiver_path = None
+        else:
+            receiver_path = _canonical_private_path(receiver_raw)
     if receiver_path is not None and _paths_overlap(source_path, receiver_path):
         errors.append(
             "[artifact_mobility_source].store_dir overlaps artifact transfer store"
@@ -1568,6 +1595,9 @@ def _apply_environment(
         work_max_running=_env_int(
             "SONDER_HTTP_WORK_MAX_RUNNING", env, server.work_max_running, errors,
         ),
+        work_max_live=_env_int(
+            "SONDER_HTTP_WORK_MAX_LIVE", env, server.work_max_live, errors,
+        ),
         stream_heartbeat_seconds=_env_int(
             "SONDER_STREAM_HEARTBEAT_SECONDS", env, server.stream_heartbeat_seconds, errors,
         ),
@@ -1589,16 +1619,41 @@ def _apply_environment(
             ),
         )
     if "SONDER_PREWARM_ON_START" in env:
-        server = replace(server, prewarm_on_start=_env_bool(env["SONDER_PREWARM_ON_START"]))
+        server = replace(
+            server,
+            prewarm_on_start=env_bool_checked(
+                "SONDER_PREWARM_ON_START", env, server.prewarm_on_start, errors,
+            ),
+        )
     if "SONDER_WEB_APP" in env:
-        server = replace(server, web_app_enabled=_env_bool(env["SONDER_WEB_APP"]))
+        server = replace(
+            server,
+            web_app_enabled=env_bool_checked(
+                "SONDER_WEB_APP", env, server.web_app_enabled, errors,
+            ),
+        )
     if "SONDER_WEB_APP_DIR" in env:
         server = replace(server, web_app_dir=env["SONDER_WEB_APP_DIR"].strip())
     if "SONDER_REQUIRE_ACCOUNT" in env:
-        server = replace(server, require_account=_env_bool(env["SONDER_REQUIRE_ACCOUNT"]))
+        server = replace(
+            server,
+            require_account=env_bool_checked(
+                "SONDER_REQUIRE_ACCOUNT", env, server.require_account, errors,
+            ),
+        )
     if "SONDER_ALLOW_REGISTRATION" in env:
         server = replace(
-            server, allow_registration=_env_bool(env["SONDER_ALLOW_REGISTRATION"])
+            server,
+            allow_registration=env_bool_checked(
+                "SONDER_ALLOW_REGISTRATION", env, server.allow_registration, errors,
+            ),
+        )
+    if "SONDER_PUBLIC_HOSTING" in env:
+        server = replace(
+            server,
+            public_hosting=env_bool_checked(
+                "SONDER_PUBLIC_HOSTING", env, server.public_hosting, errors,
+            ),
         )
     if env.get("SONDER_REASONING_AUDIENCE", "").strip():
         server = replace(
@@ -1860,6 +1915,7 @@ def validate_deployment(config: SonderConfig) -> None:
 def _context_root_errors(config: SonderConfig) -> list[str]:
     errors: list[str] = []
     seen: set[tuple[str, str]] = set()
+    is_junction = getattr(os.path, "isjunction", None)
     for field_name in (
         "instruction_bundled_roots", "instruction_global_roots",
         "instruction_configured_roots", "skill_bundled_roots",
@@ -1873,11 +1929,16 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
                 errors.append(f"[context].{field_name} contains an empty root")
                 continue
             try:
-                path = Path(raw).expanduser()
-                if not path.is_absolute():
-                    raise ValueError
+                path = sonder_paths.parse_local_root(raw, expand_user=True)
+                for ancestor in (*reversed(path.parents), path):
+                    if ancestor.parent == ancestor:
+                        continue
+                    if ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    ):
+                        raise ValueError
                 resolved = path.resolve(strict=False)
-                if path.is_symlink():
+                if sonder_paths.try_parse_local_root(str(resolved), expand_user=False) is None:
                     raise ValueError
             except (OSError, RuntimeError, ValueError):
                 errors.append(f"[context].{field_name} root must be an absolute non-link path")
@@ -2020,6 +2081,14 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[server].work_wait_seconds must be within 1..work_budget_seconds")
     if not 1 <= server.work_max_running <= 64:
         errors.append("[server].work_max_running must be within 1..64")
+    if isinstance(server.work_max_live, bool) or not isinstance(server.work_max_live, int) or (
+        server.work_max_live != 0
+        and not server.work_max_running <= server.work_max_live <= 256
+    ):
+        errors.append(
+            "[server].work_max_live must be 0 (automatic) or within work_max_running..256 "
+            f"(got {server.work_max_live}, work_max_running {server.work_max_running})"
+        )
     if not 1 <= server.stream_heartbeat_seconds <= 300:
         errors.append("[server].stream_heartbeat_seconds must be within 1..300")
     if len(server.allowed_hosts) > 64:
@@ -2031,6 +2100,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[server].prewarm_on_start must be a boolean")
     if type(server.web_app_enabled) is not bool:
         errors.append("[server].web_app_enabled must be a boolean")
+    if type(server.public_hosting) is not bool:
+        errors.append("[server].public_hosting must be a boolean")
     if type(server.web_app_dir) is not str or (
             server.web_app_dir and not Path(server.web_app_dir).is_absolute()):
         errors.append("[server].web_app_dir must be an absolute path")
@@ -2063,6 +2134,11 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if require_account is True and auth_mode_is_exact_string and auth_mode == "api-key"
         else auth_mode if auth_mode_is_exact_string else ""
     )
+    if server.public_hosting is True and effective_auth_mode not in ACCOUNT_BEARING_AUTH_MODES:
+        errors.append(
+            "[server].public_hosting requires an account-bearing auth_mode "
+            "('account', 'both', or 'either') or require_account=true"
+        )
     if effective_auth_mode in ACCOUNT_BEARING_AUTH_MODES:
         auth_secret = getattr(config.secrets, "auth_secret", None)
         if not _is_exact_string(auth_secret):
@@ -2076,6 +2152,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 "development auth secret; set SONDER_AUTH_SECRET to a private value"
             )
 
+    if config.state.home:
+        if sonder_paths.try_parse_local_root(config.state.home, expand_user=True) is None:
+            errors.append(
+                "[state].home must be a local absolute non-root path "
+                "(UNC, device/NT, relative, and drive-root spellings are not allowed)"
+            )
     if config.state.minimum_free_disk_bytes < 0:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
@@ -2108,7 +2190,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
             continue
         try:
-            resolved = raw_path.resolve(strict=False)
+            resolved = parsed_root.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
             continue
@@ -2163,11 +2245,42 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
 
     if config.ollama.ca_bundle:
-        ca_path = Path(config.ollama.ca_bundle).expanduser()
-        if not ca_path.is_absolute():
+        parsed_ca = sonder_paths.try_parse_local_root(
+            config.ollama.ca_bundle, expand_user=True
+        )
+        if parsed_ca is None:
             errors.append("[ollama].ca_bundle must be an absolute path")
-        elif not ca_path.is_file():
-            errors.append("[ollama].ca_bundle must name an existing regular file")
+        else:
+            is_junction = getattr(os.path, "isjunction", None)
+            ca_unsafe = False
+            for ancestor in (*reversed(parsed_ca.parents), parsed_ca):
+                if ancestor.parent == ancestor:
+                    continue
+                try:
+                    is_link = ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    )
+                except OSError:
+                    ca_unsafe = True
+                    break
+                if is_link:
+                    try:
+                        sonder_paths._strip_extended_or_refuse_prefixed(os.readlink(ancestor))
+                    except (OSError, ValueError):
+                        ca_unsafe = True
+                        break
+            if ca_unsafe:
+                errors.append("[ollama].ca_bundle must be an absolute local path")
+            else:
+                try:
+                    resolved_ca = parsed_ca.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    errors.append("[ollama].ca_bundle must be an absolute local path")
+                else:
+                    if sonder_paths.try_parse_local_root(str(resolved_ca), expand_user=False) is None:
+                        errors.append("[ollama].ca_bundle must be an absolute local path")
+                    elif not resolved_ca.is_file():
+                        errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
     canonical_workers: list[str] = []
@@ -2673,6 +2786,9 @@ def load_config(
         config = replace(
             config, state=replace(config.state, home=str(sonder_paths.default_home()))
         )
+    parsed_home = sonder_paths.try_parse_local_root(config.state.home, expand_user=True)
+    if parsed_home is not None:
+        config = replace(config, state=replace(config.state, home=str(parsed_home)))
 
     # A trailing '/' or an upper-case scheme/host is the same origin; spell
     # it the browser's way (with a WARNING) instead of refusing to start.

@@ -90,6 +90,17 @@ def _text(value: Any, limit: int = 240) -> str:
     return text[:limit]
 
 
+def _clip(value: Any, limit: int) -> str:
+    """Like ``_text`` but cut at a word boundary with ``...`` instead of mid-word."""
+    text = _text(value, 100_000)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 3]
+    if not text[limit - 3].isspace() and " " in cut:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:.-") + "..."
+
+
 def _number(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -174,7 +185,7 @@ def acknowledgement(goal: Any, mode: Any, project: Any = "", tier: Any = "",
         how += ", starting with " + "; ".join(task for task in first if task)
     elif mode == "autopilot":
         how += ", first creating the task plan"
-    parts = ["I will work on: %s. Mode: %s." % (_text(goal, 180) or "the requested goal", how)]
+    parts = ["I will work on: %s. Mode: %s." % (_clip(goal, 180) or "the requested goal", how)]
     parts.append("Where: %s; tier %s; host %s." % (_text(project, 180) or "no project folder selected",
                  _text(tier, 60) or "not selected yet", _text(host, 100) or "not selected yet"))
     parts.append("Why: %s." % (_text(reason, 180) or "the requested execution mode"))

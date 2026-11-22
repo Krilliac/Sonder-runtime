@@ -45,12 +45,91 @@ def provider_bindings(graph: object) -> object:
         raise ModelCallError("configuration", str(exc), status=503) from exc
 
 
+def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
+    """Return True when the graph's ``sonder_inference`` gateway advertises ``model_name``."""
+    from collections.abc import Mapping
+
+    wanted = str(model_name or "").strip()
+    if not wanted or graph is None:
+        return False
+    root_gw = getattr(graph, "model_gateway", None)
+    if root_gw is None:
+        return False
+    seen: set[int] = set()
+    queue: list[object] = [root_gw]
+    gw = None
+    while queue:
+        cand = queue.pop(0)
+        if cand is None or id(cand) in seen:
+            continue
+        seen.add(id(cand))
+        if callable(getattr(cand, "unified_worker_status", None)):
+            gw = cand
+            break
+        for map_attr in ("providers", "_providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping):
+                preferred = providers.get("sonder_inference")
+                if preferred is not None:
+                    queue.insert(0, preferred)
+                for k, v in providers.items():
+                    if k != "sonder_inference":
+                        queue.append(v)
+        for attr in ("primary", "_primary", "fallback", "_fallback", "_gateway", "gateway"):
+            nested = getattr(cand, attr, None)
+            if nested is not None:
+                queue.append(nested)
+    if gw is None:
+        return False
+    candidates: list[str] = []
+    try:
+        status = gw.unified_worker_status()
+    except Exception:
+        status = None
+    if isinstance(status, Mapping):
+        for row in status.get("workers") or ():
+            if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
+                for raw in row.get("models") or ():
+                    text = str(raw or "").strip()
+                    if text:
+                        candidates.append(text)
+    if not candidates:
+        try:
+            snap = gw.health()
+            doc = getattr(snap, "document", None)
+            if isinstance(doc, Mapping):
+                for raw in doc.get("models") or ():
+                    text = str(raw or "").strip()
+                    if text:
+                        candidates.append(text)
+        except Exception:
+            pass
+    wanted_cf = wanted.casefold()
+    for item in candidates:
+        if item.casefold() == wanted_cf:
+            return True
+    if ":" not in wanted:
+        prefix = wanted_cf + ":"
+        return any(item.casefold().startswith(prefix) for item in candidates)
+    return False
+
+
 def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | None:
     """The non-Ollama provider serving a local rung, or None for Ollama."""
     if cloud:
         return None
-    provider = provider_bridge.provider_for_tier(tier_label, provider_bindings(graph))
-    return provider if provider_bridge.is_bridged(provider) else None
+    bindings = provider_bindings(graph)
+    provider = provider_bridge.provider_for_tier(tier_label, bindings)
+    if provider_bridge.is_bridged(provider):
+        return provider
+    raw_label = str(tier_label or "").strip()
+    if raw_label.lower().startswith("model:"):
+        model_name = raw_label[len("model:"):].strip()
+        tiers_map = getattr(bindings, "tier_providers", None) or {}
+        if model_name and "sonder_inference" in tiers_map.values():
+            if _sonder_inference_advertises_model(graph, model_name):
+                return "sonder_inference"
+    return None
 
 
 def endpoint_is_loopback(provider: str, graph: object) -> bool:
@@ -228,6 +307,19 @@ def chat_request(
         error.provider_display_url = _provider_display_url(gateway, rung.provider)
         raise error from exc
     require_served(rung, response.model, text_only=text_only)
+    from sonder_runtime.application.agents.delegation_runtime import (
+        current_board,
+        current_depth,
+        note_agent_execution,
+    )
+    origin = ""
+    if current_depth() >= 1 or current_board() is not None:
+        resolved = _provider_display_url(gateway, rung.provider)
+        origin = "" if resolved == "(endpoint unavailable)" else resolved
+    note_agent_execution(
+        model=str(getattr(response, "model", "") or ""),
+        origin=origin,
+    )
     return out, response.text
 
 
@@ -258,10 +350,12 @@ def ollama_only_reroute(
     -- the existing statement that local Ollama may serve prompts bound for
     Inference -- such a step returns its payload (with the Ollama context
     window the bridged rung skipped, via ``context_probe``) and the caller
-    runs its ordinary Ollama path, *loopback only* (``local_only``), with the
-    payload's own tier model.  Consent never widens: a hosted ``-cloud`` model or a
-    non-loopback Ollama endpoint is refused here, exactly as the pre-send
-    fallback's narrowed context would refuse it.
+    runs its ordinary Ollama path with the payload's own tier model: on the
+    loopback endpoint only (``local_only``), unless ``reroute_may_use_pool``
+    lets the operator's Ollama pool place it on one of its configured workers.
+    A hosted ``-cloud`` model or a non-loopback primary Ollama endpoint is
+    refused here whatever the pool holds, exactly as the pre-send fallback's
+    narrowed context would refuse it.
 
     Returns None for every other step (it stays on the bridge, which refuses
     the feature for providers without a declared fallback).  Without the
@@ -316,6 +410,24 @@ def ollama_only_reroute(
 
     report_provider_fallback(provider, "ollama", OLLAMA_ONLY_FEATURE_REASON)
     return with_local_context(payload, context_probe)
+
+
+def reroute_may_use_pool(pool: object, *, base_loopback: bool, local_only: bool) -> bool:
+    """Whether an ``ollama_only_reroute`` step may be placed by the Ollama pool.
+
+    Node1 pooled inference: with a loopback primary and a pool that holds
+    remote workers, the rerouted step may run on any pool member, a remote
+    worker included.  Those workers are the operator's configured list
+    (``SONDER_OLLAMA_WORKERS``), each admitted by ``validate_worker_origin``
+    only with ``SONDER_ALLOW_REMOTE_OLLAMA=1`` and https; nothing here checks
+    that a worker's address is private.  A remote primary never qualifies
+    (``ollama_only_reroute`` refuses it), and a ``local_only`` call stays on
+    the loopback endpoint.
+    """
+    return bool(
+        base_loopback and not local_only
+        and getattr(pool, "enabled", False) and getattr(pool, "has_remote_workers", False)
+    )
 
 
 def with_local_context(payload: dict, context_probe: Callable[[], object]) -> dict:

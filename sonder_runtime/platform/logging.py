@@ -12,6 +12,7 @@ import time
 from typing import Iterable
 
 from sonder_runtime.platform.child_environment_policy import (
+    unsafe_child_environment_entry,
     unsafe_child_secret_name,
 )
 # Exact reviewed exception (scripts/check_architecture.py): the pure shared
@@ -62,7 +63,9 @@ def child_environment(base=None):
     # Child tools must never receive a secret merely because the unsafe-lab
     # policy is inactive.  The shared classifier deliberately covers both
     # typed Sonder names and common provider/authority names.
-    secret.update(key for key in source if _unsafe_child_secret_name(key))
+    secret.update(
+        key for key, value in source.items() if unsafe_child_environment_entry(key, value)
+    )
     return {key: value for key, value in source.items() if key not in secret}
 
 
@@ -155,9 +158,8 @@ _PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
         r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
-        r"(?:\\?[\"'])?\s*[:=]\s*)"
-        r"(\\?\"[^\"\r\n]*\"|\\?'[^'\r\n]*'|\[REDACTED\](?=[\s,;}\])]|$)|"
-        r"\\?[\"']?[^\s\"']+[\"']?)"
+        r"[\"']?\s*[:=]\s*)"
+        r"([\"']?[^\s\"',;}{]{4,}[\"']?)"
     ),
     _URL_USERINFO,
     re.compile(
@@ -184,6 +186,39 @@ _PATTERNS: tuple[re.Pattern, ...] = (
 # been redacted: the result may be non-idempotent, and a second call can
 # redact further.
 _MAX_PASSES = 8
+
+# Byte-identical to domain/security/redaction.py (see that copy's note): a
+# second stage, run last (after the path-prefix labels), over the settled text
+# that only ever adds redaction.
+_CREDENTIAL_VALUE = re.compile(
+    r"(?i)([\"']?(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"(?:\\?[\"'])?\s*[:=]\s*)"
+    r'''("(?:[^"\\\r\n]++|\\[^\r\n])++"|'(?:[^'\\\r\n]++|\\[^\r\n])++'|\\"(?:[^"\\\r\n]++|\\(?!"))++\\"|\\'(?:[^'\\\r\n]++|\\(?!'))++\\'|\[REDACTED\](?=[\s,;}\])]|$)|["']?[^\s"',;}{](?:["']*[^\s"',;}{]){3,}["']*|[^\s"'}{,;]++(?:[,;]++[^\s"'}{,;]++)++)'''
+)
+
+_SPLIT_QUOTED_CREDENTIAL = re.compile(
+    r"(?i)((?:(?<![\"'])(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|\b(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))"
+    r"|\"(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))\""
+    r"|'(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
+    r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))')"
+    r"\s*[:=]\s*)"
+    r"(\[REDACTED\][ \t]++[^\"'\r\n:={}\[\],;]++[\"'])"
+)
+
+
+def _sub_credential_values(text):
+    """The second stage over settled text, repeated until stable (bounded)."""
+    if REDACTED in text:
+        text = _SPLIT_QUOTED_CREDENTIAL.sub(lambda m: m.group(1) + REDACTED, text)
+    for _ in range(_MAX_PASSES):
+        after = _CREDENTIAL_VALUE.sub(lambda m: m.group(1) + REDACTED, text)
+        if after == text:
+            break
+        text = after
+    return text
 
 _PEM_BEGIN_MARK = "-----BEGIN "
 _PEM_END_MARK = "-----END "
@@ -281,6 +316,12 @@ class Redactor:
             for value in self._values:
                 if value in text:
                     text = text.replace(value, REDACTED)
+            # Replace private path prefixes before the pattern passes so a
+            # greedy credential value cannot eat the start of a spaced path
+            # and leave its tail behind unredacted (mirrors domain layer).
+            for prefix in self._path_prefixes:
+                if prefix in text:
+                    text = text.replace(prefix, "[WORKSPACE]")
             # A substitution can create a new word boundary, so repeat the
             # pattern passes until stable (see _MAX_PASSES; mirrors the
             # domain layer).
@@ -289,9 +330,7 @@ class Redactor:
                 text = _apply_patterns(text)
                 if text == before:
                     break
-            for prefix in self._path_prefixes:
-                if prefix in text:
-                    text = text.replace(prefix, "[WORKSPACE]")
+            text = _sub_credential_values(text)
             return text
         except Exception:
             if self._failure_hook is not None:

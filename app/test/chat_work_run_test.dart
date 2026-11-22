@@ -404,5 +404,88 @@ void main() {
         );
       }, () => client);
     });
+
+    test('parses pending_refusal on GET /v1/work-runs/<id>', () async {
+      final client = MockClient((_) async => http.Response(
+          jsonEncode({
+            'id': _runId,
+            'status': 'running',
+            'pending_refusal': {
+              'kind': 'refused',
+              'tool': 'run_code',
+              'call_id': '3f9a12c0',
+              'risk': 'execution',
+              'mode': 'manual',
+              'mode_label': 'Manual',
+              'reason': 'manual mode asks before running code',
+              'remedies': ['/approve 3f9a12c0'],
+            },
+          }),
+          200));
+      await http.runWithClient(() async {
+        final run =
+            await SonderApiChatBackend(baseUrl: 'http://pc:11435').getWorkRun(_runId);
+        expect(run.pendingRefusal, isNotNull);
+        expect(run.pendingRefusal!.callId, '3f9a12c0');
+        expect(run.pendingRefusal!.tool, 'run_code');
+        expect(run.pendingRefusal!.risk, 'execution');
+        expect(run.pendingRefusal!.modeLabel, 'Manual');
+      }, () => client);
+    });
+  });
+
+  testWidgets('WorkRunCard surfaces pending_refusal and approves inline',
+      (tester) async {
+    final backend = FakeChatBackend()
+      ..pendingCalls = {
+        '3f9a12c0': const PendingApproval(
+          callId: '3f9a12c0',
+          digest:
+              '3f9a12c0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          tool: 'run_code',
+          preview: 'language=python',
+          mode: 'manual',
+        ),
+      }
+      ..workRun = (id) => WorkRun(
+            id: id,
+            status: 'running',
+            pendingRefusal: const ChatRefusal(
+              callId: '3f9a12c0',
+              tool: 'run_code',
+              reason: 'manual mode asks before running code',
+              mode: 'manual',
+            ),
+          );
+    await pumpChat(tester, backend);
+    await _sendLongTurn(tester, backend);
+    await tester.tap(find.byKey(const Key('work-run-refresh')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('work-run-pending-refusal')), findsOneWidget);
+    expect(find.byKey(const Key('refusal-approve')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('refusal-approve')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('approval-confirm')));
+    await tester.pumpAndSettle();
+    expect(backend.approvals.single.$1, '3f9a12c0');
+
+    // When the work run later settles as refused, RefusalNotice stays active.
+    backend.workRun = (id) => WorkRun(
+          id: id,
+          status: 'refused',
+          pendingRefusal: const ChatRefusal(
+            callId: '3f9a12c0',
+            tool: 'run_code',
+            reason: 'manual mode asks before running code',
+            mode: 'manual',
+          ),
+        );
+    await tester.tap(find.byKey(const Key('work-run-refresh')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('work-run-card')), findsNothing);
+    expect(find.byKey(const Key('refusal-notice')), findsOneWidget);
+    expect(find.byKey(const Key('refusal-approve')), findsOneWidget);
+    await unmountChat(tester);
   });
 }

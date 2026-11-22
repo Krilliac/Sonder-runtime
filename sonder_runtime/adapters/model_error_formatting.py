@@ -34,8 +34,15 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
                 retry_hint += " Provider suggests retrying after about %ss." % (
                     int(round(error.retry_after_seconds)),
                 )
-        return _ERROR_PREFIX + " %s rejected the model request (HTTP %s)%s: %s%s" % (
-            target, error.status or "unknown", suffix, error.detail, retry_hint,
+        # Name the host only when a pool worker is known to have served the
+        # request; every other http error keeps its historical wording.
+        where = (
+            " at %s" % display
+            if display and not error.cloud and getattr(error, "served_origin", None)
+            else ""
+        )
+        return _ERROR_PREFIX + " %s%s rejected the model request (HTTP %s)%s: %s%s" % (
+            target, where, error.status or "unknown", suffix, error.detail, retry_hint,
         )
     if error.kind == "configuration":
         return _ERROR_PREFIX + " %s" % error.detail
@@ -51,7 +58,7 @@ def format_model_call_error(error, *, target: str, display: str) -> str:
 
 
 def format_runtime_model_call_error(
-    error, *, endpoint_loopback: bool, display: str,
+    error, *, endpoint_loopback: bool, display: str, reveal_workers: bool = False,
 ) -> str:
     """Render a runtime model error after classifying its endpoint target."""
     provider = getattr(error, "provider", None)
@@ -62,6 +69,14 @@ def format_runtime_model_call_error(
             provider, getattr(error, "provider_display_url", "(endpoint unavailable)"),
             error.attempts, error.detail,
         )
+    served = getattr(error, "served_origin", None)
+    if served and not error.cloud:
+        # The pool worker that answered is the endpoint to name, not the
+        # primary; an account caller sees "remote worker" for a remote one.
+        from sonder_runtime.adapters.inference.ollama_reporting import served_endpoint
+
+        located = served_endpoint(served, reveal_workers=reveal_workers)
+        endpoint_loopback, display = located["endpoint_loopback"], located["display"]
     target = (
         "hosted Ollama" if error.cloud else
         "remote Ollama" if not endpoint_loopback else

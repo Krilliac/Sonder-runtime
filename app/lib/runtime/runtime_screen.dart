@@ -29,6 +29,7 @@ import 'host_tools_panel.dart';
 import 'jobs_panel.dart';
 import 'model_routing.dart';
 import 'overview.dart';
+import 'panels/saas_config_panel.dart';
 import 'runtime_data.dart';
 import 'runtime_rows.dart';
 import 'status_word.dart';
@@ -831,7 +832,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
             detail: error.message);
       } else if (const {401, 403}.contains(error.httpStatus)) {
         outcome = const ActionOutcome(
-            StatusKind.warn, SonderStrings.approvalsNeedRole);
+            StatusKind.warn, SonderStrings.approvalsNeedAdmin);
       } else {
         outcome = ActionOutcome.failed('The approval was not recorded',
             detail: error.message);
@@ -860,7 +861,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } on SonderException catch (error) {
       outcome = error.code == ApprovalsApi.unavailableCode
           ? ActionOutcome(StatusKind.note, error.message)
-          : ActionOutcome.failed('Could not revoke', detail: error.message);
+          : const {401, 403}.contains(error.httpStatus)
+              ? const ActionOutcome(
+                  StatusKind.warn, SonderStrings.approvalsNeedAdmin)
+              : ActionOutcome.failed('Could not revoke',
+                  detail: error.message);
     } finally {
       _approvalBusy.remove(nonce);
     }
@@ -1337,7 +1342,24 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return failed ? StatusKind.warn : null;
   }
 
-  bool get _hasUpdates => _updateStatus != null || _extensionRegistry != null;
+  bool get _hasUpdates =>
+      _hostAdminAllowed && (_updateStatus != null || _extensionRegistry != null);
+
+  bool get _hostAdminAllowed {
+    final features =
+        _info?.allowedFeatures ?? _info?.capabilities?.allowedFeatures;
+    if (features != null) return features.hostAdmin;
+    if (_info?.role == 'user') return false;
+    return true;
+  }
+
+  bool get _hostBypassAllowed {
+    final bypass = _info?.hostBypassAllowed ?? _info?.capabilities?.hostBypassAllowed;
+    if (bypass != null) return bypass;
+    final features = _info?.allowedFeatures;
+    if (features != null) return features.hostBypass;
+    return _mode?.canBypass ?? false;
+  }
 
   // -- Layout --------------------------------------------------------------
 
@@ -1417,34 +1439,36 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         ],
         builder: (context) => _ModelsPage(this),
       ),
-      SonderCategory(
-        id: RuntimeCategories.memory,
-        label: 'Memory & learning',
-        group: 'Inference',
-        icon: Icons.school_outlined,
-        description:
-            'What the runtime has learned, and how well it is grounded.',
-        keywords: const [
-          'learning quality',
-          'lessons',
-          'memory tiers',
-          'improvements',
-          'stats',
-          'self-improvement',
-          'selfmod',
-          'practice',
-          'train',
-        ],
-        builder: (context) => _MemoryPage(this),
-      ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: RuntimeCategories.memory,
+          label: 'Memory & learning',
+          group: 'Inference',
+          icon: Icons.school_outlined,
+          description:
+              'What the runtime has learned, and how well it is grounded.',
+          keywords: const [
+            'learning quality',
+            'lessons',
+            'memory tiers',
+            'improvements',
+            'stats',
+            'self-improvement',
+            'selfmod',
+            'practice',
+            'train',
+          ],
+          builder: (context) => _MemoryPage(this),
+        ),
       SonderCategory(
         id: RuntimeCategories.permissions,
         label: 'Permissions',
         group: 'Safety',
         icon: Icons.shield_outlined,
-        description:
-            'Approvals, the permission mode, and the tools agents can reach.',
-        badge: waiting > 0
+        description: _hostAdminAllowed
+            ? 'Approvals, the permission mode, and the tools agents can reach.'
+            : 'Client PC execution, local permission mode and access policy.',
+        badge: _hostAdminAllowed && waiting > 0
             ? Semantics(
                 label: '$waiting approval${waiting == 1 ? '' : 's'} waiting',
                 child: ExcludeSemantics(
@@ -1458,45 +1482,48 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'approve',
           'revoke',
           'permission mode',
+          'client pc',
           'host tools',
           'developer tools',
           'mcp',
         ],
         builder: (context) => _PermissionsPage(this),
       ),
-      SonderCategory(
-        id: RuntimeCategories.server,
-        label: 'Server',
-        group: 'Host',
-        icon: Icons.dns_outlined,
-        description: 'The local server process and its launcher.',
-        badge: problem == null
-            ? null
-            : StatusPill(problem,
-                word: problem == StatusKind.fail ? 'error' : 'warn',
-                dense: true),
-        keywords: const [
-          'start',
-          'stop',
-          'restart',
-          'launcher',
-          'install',
-          'setup',
-          'update from git',
-          'database',
-          'state',
-        ],
-        builder: (context) => _ServerPage(this),
-      ),
-      SonderCategory(
-        id: RuntimeCategories.observatory,
-        label: 'Observatory',
-        group: 'Host',
-        icon: Icons.insights_outlined,
-        description: 'Live telemetry for the Sonder Observatory.',
-        keywords: const ['telemetry', 'export', 'connect urls'],
-        builder: (context) => _ObservatoryPage(this),
-      ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: RuntimeCategories.server,
+          label: 'Server',
+          group: 'Host',
+          icon: Icons.dns_outlined,
+          description: 'The local server process and its launcher.',
+          badge: problem == null
+              ? null
+              : StatusPill(problem,
+                  word: problem == StatusKind.fail ? 'error' : 'warn',
+                  dense: true),
+          keywords: const [
+            'start',
+            'stop',
+            'restart',
+            'launcher',
+            'install',
+            'setup',
+            'update from git',
+            'database',
+            'state',
+          ],
+          builder: (context) => _ServerPage(this),
+        ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: RuntimeCategories.observatory,
+          label: 'Observatory',
+          group: 'Host',
+          icon: Icons.insights_outlined,
+          description: 'Live telemetry for the Sonder Observatory.',
+          keywords: const ['telemetry', 'export', 'connect urls'],
+          builder: (context) => _ObservatoryPage(this),
+        ),
       if (_hasUpdates)
         SonderCategory(
           id: RuntimeCategories.updates,
@@ -1507,40 +1534,51 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           keywords: const ['release', 'rollback', 'extensions', 'version'],
           builder: (context) => _UpdatesPage(this),
         ),
-      SonderCategory(
-        id: RuntimeCategories.cluster,
-        label: 'Cluster',
-        group: 'Host',
-        icon: Icons.lan_outlined,
-        description:
-            'Deployment profile, distributed capabilities and compute nodes.',
-        keywords: const [
-          'deployment',
-          'profile',
-          'takeover',
-          'failback',
-          'capabilities',
-          'compute nodes',
-          'peers',
-        ],
-        builder: (context) => _ClusterPage(this),
-      ),
-      SonderCategory(
-        id: RuntimeCategories.developer,
-        label: 'Developer',
-        group: 'Advanced',
-        icon: Icons.terminal_outlined,
-        description: 'Slash commands and the raw status report.',
-        keywords: const [
-          'command',
-          'console',
-          'slash',
-          'quick commands',
-          'raw status',
-          'diagnostics',
-        ],
-        builder: (context) => _DeveloperPage(this),
-      ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: RuntimeCategories.cluster,
+          label: 'Cluster',
+          group: 'Host',
+          icon: Icons.lan_outlined,
+          description:
+              'Deployment profile, distributed capabilities and compute nodes.',
+          keywords: const [
+            'deployment',
+            'profile',
+            'takeover',
+            'failback',
+            'capabilities',
+            'compute nodes',
+            'peers',
+          ],
+          builder: (context) => _ClusterPage(this),
+        ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: RuntimeCategories.developer,
+          label: 'Developer',
+          group: 'Advanced',
+          icon: Icons.terminal_outlined,
+          description: 'Slash commands and the raw status report.',
+          keywords: const [
+            'command',
+            'console',
+            'slash',
+            'quick commands',
+            'raw status',
+            'diagnostics',
+          ],
+          builder: (context) => _DeveloperPage(this),
+        ),
+      if (_hostAdminAllowed)
+        SonderCategory(
+          id: 'saas-config',
+          label: 'SaaS Config',
+          group: 'Advanced',
+          icon: Icons.settings_applications_outlined,
+          description: 'Where SaaS mode and metering are configured.',
+          builder: (context) => const SaasConfigPanel(),
+        ),
       SonderCategory(
         id: RuntimeCategories.about,
         label: 'About',

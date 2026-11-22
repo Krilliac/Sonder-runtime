@@ -9,6 +9,7 @@ from sonder_runtime.domain.build.model import (
     BuildSystem,
     BuildTarget,
     CompileUnit,
+    Generator,
     TargetType,
 )
 from sonder_runtime.domain.build.tool_targets import classify_targets
@@ -38,6 +39,7 @@ def _unit(target: str, rel: str) -> CompileUnit:
 def test_libraries_linked_by_tools_are_tainted_transitively():
     model = BuildModel(
         project_label="engine", source_root="/e", build_dir="/e/b", system=BuildSystem.CMAKE,
+        generator=Generator.VS2022,
         targets=(
             BuildTarget("base", TargetType.STATIC_LIBRARY),
             BuildTarget("reflect_core", TargetType.STATIC_LIBRARY, depends=("base",)),

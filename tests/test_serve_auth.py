@@ -1872,14 +1872,19 @@ def test_http_explicit_model_suppresses_natural_fanout_routing(monkeypatch):
 
 
 def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
-    """A selected model receives slash-looking text instead of local dispatch."""
+    """A selected model receives text no command claims; only the slash
+    dispatcher stays open to it (a recognised command runs as a command)."""
     monkeypatch.setattr(ts, "API_KEY", "")
     monkeypatch.setattr(ts, "AUTH_MODE", "local-open")
     monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
     monkeypatch.setattr(ts, "_request_model_selector", lambda model: model)
     monkeypatch.setattr(ts, "_chat_model_selection_error", lambda _selector: None)
     monkeypatch.setattr(ts._legacy_runtime(), "prewarm_model", lambda *_args: None)
-    monkeypatch.setattr(ts, "_handle_slash", lambda *_args, **_kwargs: pytest.fail("slash dispatch must not run"))
+    slash_calls = []
+    monkeypatch.setattr(
+        ts, "_handle_slash",
+        lambda prompt, *_args, **kwargs: slash_calls.append((prompt, kwargs["selected_model"])),
+    )
     monkeypatch.setattr(ts, "_handle_feedback", lambda *_args, **_kwargs: pytest.fail("feedback dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_intent", lambda *_args, **_kwargs: pytest.fail("intent dispatch must not run"))
     monkeypatch.setattr(ts, "_handle_work_intent", lambda *_args, **_kwargs: pytest.fail("work dispatch must not run"))
@@ -1905,6 +1910,7 @@ def test_http_explicit_model_bypasses_control_dispatchers(monkeypatch):
     assert status == 200
     assert json.loads(body)["choices"][0]["message"]["content"] == "selected-model answer"
     assert seen == {"prompt": "/hardware", "tier": "cloud-general"}
+    assert slash_calls == [("/hardware", True)]
 
 
 def test_http_developer_natural_ensemble_uses_fixed_local_tiers(monkeypatch):
@@ -3285,6 +3291,10 @@ def test_ordinary_account_cannot_trigger_natural_control_intents(
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
     )
+    # The fake connection has no tables: the metering step is faked with it.
+    monkeypatch.setattr(
+        ts.admin_auth, "meter_usage", lambda conn, account, tokens: (True, "")
+    )
     monkeypatch.setattr(
         ts._legacy_runtime(),
         "answer_with_history",
@@ -3330,6 +3340,10 @@ def test_durable_session_and_project_ids_are_principal_scoped(monkeypatch):
     monkeypatch.setattr(ts._legacy_runtime(), "_open_db", lambda: FakeConnection())
     monkeypatch.setattr(
         ts.admin_auth, "rate_limit", lambda conn, account: (True, "")
+    )
+    # The fake connection has no tables: the metering step is faked with it.
+    monkeypatch.setattr(
+        ts.admin_auth, "meter_usage", lambda conn, account, tokens: (True, "")
     )
     forwarded = []
 
@@ -3567,6 +3581,7 @@ def test_unusable_idempotency_key_is_rejected_not_silently_ignored(monkeypatch, 
     monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    monkeypatch.setattr(ts.permission_policy, "set_global_mode", lambda mode: applied.append(mode))
     # local-open is held to non-escalating changes (see test_permission_mode_local_open).
     monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
                         lambda mode: applied.append(mode))
@@ -3612,6 +3627,7 @@ def test_bounded_idempotency_key_still_replays(
     monkeypatch.setattr(ts.served_action_receipts, "finish", lambda *a, **k: None)
     applied = []
     monkeypatch.setattr(ts.permission_policy, "set_mode", lambda mode: applied.append(mode))
+    monkeypatch.setattr(ts.permission_policy, "set_global_mode", lambda mode: applied.append(mode))
     # local-open is held to non-escalating changes (see test_permission_mode_local_open).
     monkeypatch.setattr(ts.permission_policy, "set_mode_without_escalation",
                         lambda mode: applied.append(mode))
@@ -3807,7 +3823,8 @@ def test_thin_handlers_apply_per_tool_account_checks(monkeypatch, path):
         status, _, payload = _request(port, "POST", path, body='{"task":"x"}',
                                       headers={"Content-Type": "application/json"})
     assert status == 403, payload
-    assert json.loads(payload)["error"]["code"] == "FORBIDDEN"
+    err = json.loads(payload)["error"]
+    assert (err["code"] if isinstance(err, dict) else err) == "FORBIDDEN"
     assert spy.bodies == []
 
 

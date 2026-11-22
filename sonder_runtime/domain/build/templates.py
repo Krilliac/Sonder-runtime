@@ -28,20 +28,18 @@ from .model import (
     BuildSystem,
     BuildTarget,
     CompileUnit,
-    Generator,
     NetworkPolicy,
     PchMode,
     PresetInfo,
     BuildWorld,
     TargetType,
-    VS_GENERATORS,
     is_absolute,
     loads_bounded_json,
     norm_path,
     rel_under,
     safe_rel,
 )
-from .tool_targets import UTILITY_TARGET_NAMES, TargetSafety
+from .tool_targets import UTILITY_TARGET_NAMES, TargetSafety, build_aliases_for
 
 
 PLACEHOLDERS = frozenset({
@@ -425,24 +423,7 @@ def _field(request: object, name: str) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-def _build_aliases(model: BuildModel) -> frozenset[str]:
-    """The generator's own build-everything alias for ``model``'s system.
-
-    Only these names skip the model lookup; any other name (``Build`` in a CMake
-    tree, ``ALL_BUILD`` under Ninja or in a solution) may be a user-defined
-    custom target or project and is checked against the model and the utility
-    refusal like every target. For MSBuild only the plain solution target
-    ``Build`` is an alias: ``X:Build`` always names project ``X``.
-    """
-    if model.system is BuildSystem.MSBUILD:
-        return frozenset({"Build"})
-    if model.system is BuildSystem.CMAKE:
-        if model.generator in VS_GENERATORS or model.generator is Generator.XCODE:
-            return frozenset({"ALL_BUILD"})
-        return frozenset({"all"})
-    if model.system in (BuildSystem.NINJA, BuildSystem.MAKE):
-        return frozenset({"all"})
-    return frozenset()
+_build_aliases = build_aliases_for
 
 
 def validate_request_against_model(

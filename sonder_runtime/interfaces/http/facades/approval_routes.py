@@ -2,16 +2,20 @@
 
 * ``GET /v1/approvals`` -- refused calls waiting for approval, and approvals;
 * ``POST /v1/approvals/<call_id>`` -- approve one refused call once;
-* ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval.
+* ``POST /v1/approvals/revoke/<nonce>`` -- withdraw an open approval;
+* ``POST /v1/approvals/deny/<call_id>`` -- decline one refused call (authorises
+  nothing; revokes its open approval and lets a waiting turn see the refusal).
 
-Approving a refused call is the attended answer to the gate's ask, the same
-authority ``/approve`` needs at the console: an authenticated developer or
-administrator. Under ``local-open`` (including ``api-key`` with no key on a
-loopback bind) the developer check passes for every local process with no
-secret, so an approval there is refused with 403
+Reviewing the list needs a developer or administrator. Approving, denying or
+revoking issues or changes authority another caller spends later, so it needs
+exactly what the ``permission_approve`` tool needs on the chat ``/<tool>``
+path: the administrator role its system operation is bound to (the deployment
+API key counts, exactly as for ``/v1/permission-mode``). Under ``local-open``
+(including ``api-key`` with no key on a loopback bind) no credential stands
+behind the request, so approving is refused with 403
 ``APPROVAL_REQUIRES_AUTHENTICATED_ADMIN``, as a raise is at
-``/v1/permission-mode``; listing and revoking stay allowed, and the console's
-``/approve`` is unchanged. The ledger semantics live in ``approvals.py``.
+``/v1/permission-mode``; listing, denying and revoking stay allowed, and the
+console's ``/approve`` is unchanged. The ledger semantics live in ``approvals.py``.
 
 ``handler`` is serve.py's request handler: these functions use its auth
 check, its correlation id, its headers and its JSON sender, so the wire
@@ -22,15 +26,58 @@ label, the audit record and the logger -- arrives as
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .approvals import CALL_ID_CHARS, DIGEST_CHARS, approvals_payload, approve_call, revoke_approval
+from .approvals import (
+    CALL_ID_CHARS,
+    DIGEST_CHARS,
+    approvals_payload,
+    approve_call,
+    deny_call,
+    revoke_approval,
+)
 from .local_open_authority import AUTHENTICATED_ADMIN_REMEDY, credential_less
 
 ROUTE = "/v1/approvals"
 GRANT_REFUSED_CODE = "APPROVAL_REQUIRES_AUTHENTICATED_ADMIN"
+_SINGLE_OWNER_MODES = frozenset({"local-open", "api-key"})
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _default_unquote(segment: str) -> str:
+    if "%" not in segment:
+        return segment
+    raw = bytearray()
+    i = 0
+    length = len(segment)
+    while i < length:
+        ch = segment[i]
+        if ch == "%":
+            if (
+                i + 2 >= length
+                or segment[i + 1] not in _HEX_DIGITS
+                or segment[i + 2] not in _HEX_DIGITS
+            ):
+                raise ValueError("malformed percent escape")
+            raw.append(int(segment[i + 1 : i + 3], 16))
+            i += 3
+        else:
+            raw.extend(ch.encode("utf-8"))
+            i += 1
+    return raw.decode("utf-8", errors="strict")
+
+APPROVE_HTTP_LOCAL_OPEN_REFUSAL = (
+    "approving a refused call over HTTP needs an authenticated administrator; "
+    "this server's auth is local-open, so every local process reaches it "
+    "unauthenticated as the same caller and could approve its own call. Set "
+    "SONDER_API_KEY or SONDER_REQUIRE_ACCOUNT=1 and approve as an "
+    "administrator, or approve at the attended Sonder console "
+    "(/approve <call id>). Denying and revoking stay available here."
+)
 
 
 def _unavailable() -> dict:
@@ -41,6 +88,8 @@ def _unavailable() -> dict:
 @dataclass(frozen=True)
 class HttpApprovalPorts:
     developer_authorized: Callable[[Any], bool]
+    # "" when the caller may approve or revoke, else the refusal reason.
+    approve_authority_error: Callable[[Any], str]
     error_envelope: Callable[..., Any]
     ledger: Callable[[], Any]
     idempotent_action: Callable[..., Any]
@@ -49,6 +98,35 @@ class HttpApprovalPorts:
     audit: Callable[[str, Any, float], None]
     clock: Callable[[], float]
     log: Any
+    # Percent-decodes one path segment; raises ValueError for one that is not UTF-8.
+    unquote: Callable[[str], str] = _default_unquote
+
+
+def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
+    """Split the raw path on '/' first, then percent-decode each segment once.
+
+    A client that encodes the '@' of a call reference (``%40``) names the same
+    row as a raw '@'. A segment that still holds '%' after one decode (a
+    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
+    """
+    segments = []
+    for segment in raw.split("/"):
+        try:
+            decoded = unquote(segment)
+        except ValueError:
+            return None
+        if "%" in decoded:
+            return None
+        segments.append(decoded)
+    return segments
+
+
+def _approval_role(context: Any) -> str:
+    """The account's role here: an account's API key never holds admin
+    (``admin_auth.require``), so an admin account's key counts as a developer."""
+    account = (context or {}).get("account") or {}
+    role = str(account.get("role") or "").strip().lower()
+    return "developer" if role == "admin" and account.get("via_api_key") else role
 
 
 def _refuse_credential_less_grant(handler: Any, context: Any, target: str,
@@ -73,8 +151,8 @@ def _refuse_credential_less_grant(handler: Any, context: Any, target: str,
             "approving a refused call over HTTP is refused: this server runs "
             "in local-open mode, so the request carries no credential and "
             "could come from any local process. Approve it at the Sonder "
-            "console with /approve %s, or %s. Listing pending calls and "
-            "revoking an approval are allowed here." % (ref, AUTHENTICATED_ADMIN_REMEDY),
+            "console with /approve %s, or %s. Listing pending calls, denying "
+            "and revoking an approval are allowed here." % (ref, AUTHENTICATED_ADMIN_REMEDY),
             handler._correlation(),
             retryable=False,
         ),
@@ -83,23 +161,57 @@ def _refuse_credential_less_grant(handler: Any, context: Any, target: str,
     return True
 
 
-def _access(handler: Any, context: Any, ports: HttpApprovalPorts) -> tuple[Any, bool]:
-    """(ledger, done): ``done`` when an error response was already sent."""
+def approver_label(context: Any) -> str:
+    """Who issued an HTTP approval, as the ledger records it.
+
+    ``local-open`` for the single-user listener; ``<role>:<username>`` for an
+    account (a dict or an object with ``role``/``username``), so the audit
+    trail names the role that authorized the approval; ``admin-key`` for the
+    deployment API key; ``http`` otherwise. Pure; safe from any thread.
+    """
+    if context.get("mode") == "local-open":
+        return "local-open"
+    account = context.get("account")
+    if account:
+        def field(name: str) -> str:
+            value = account.get(name) if isinstance(account, dict) else getattr(account, name, "")
+            return str(value or "").strip()
+
+        role = _approval_role(context) if isinstance(account, dict) else field("role")
+        return "%s:%s" % (role or "account", field("username") or "account")
+    if context.get("api_key"):
+        return "admin-key"
+    return "http"
+
+
+def _forbidden(handler: Any, ports: HttpApprovalPorts, message: str) -> None:
+    handler._send_json_payload(
+        ports.error_envelope("FORBIDDEN", message, handler._correlation(), retryable=False),
+        status=403,
+    )
+
+
+def _access(handler: Any, context: Any, ports: HttpApprovalPorts, *,
+            issuing: bool = False) -> tuple[Any, bool]:
+    """(ledger, done): ``done`` when an error response was already sent.
+
+    ``issuing`` (approve, deny or revoke) adds the ``permission_approve``
+    authority on top of the developer check that reviewing needs.
+    """
     if not context["authorized"]:
         handler._send_auth_error()
         return None, True
     if not ports.developer_authorized(context):
-        handler._send_json_payload(
-            ports.error_envelope(
-                "FORBIDDEN",
-                "developer or administrator authorization is required "
-                "to review or approve calls",
-                handler._correlation(),
-                retryable=False,
-            ),
-            status=403,
-        )
+        _forbidden(handler, ports,
+                   "developer or administrator authorization is required "
+                   "to review or approve calls")
         return None, True
+    if issuing:
+        authority_error = ports.approve_authority_error(context)
+        if authority_error:
+            _forbidden(handler, ports,
+                       "%s to approve or revoke calls" % authority_error)
+            return None, True
     try:
         ledger = ports.ledger()
     except Exception:
@@ -115,12 +227,54 @@ def _access(handler: Any, context: Any, ports: HttpApprovalPorts) -> tuple[Any, 
     return ledger, False
 
 
+def _approval_owner_for_context(context: Any) -> str:
+    account = (context or {}).get("account") or {}
+    username = str(account.get("username") or account.get("id") or "").strip()
+    if not username:
+        return ""
+    principal = "account:%s" % username
+    return "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+
+
+def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
+    """Split the raw path on '/' first, then percent-decode each segment once.
+
+    A client that encodes the '@' of a call reference (``%40``) names the same
+    row as a raw '@'. A segment that still holds '%' after one decode (a
+    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
+    """
+    segments = []
+    for segment in raw.split("/"):
+        try:
+            decoded = unquote(segment)
+        except ValueError:
+            return None
+        if "%" in decoded:
+            return None
+        segments.append(decoded)
+    return segments
+
+
+def _approval_role(context: Any) -> str:
+    """The account's role here: an account's API key never holds admin
+    (``admin_auth.require``), so an admin account's key counts as a developer."""
+    account = (context or {}).get("account") or {}
+    role = str(account.get("role") or "").strip().lower()
+    return "developer" if role == "admin" and account.get("via_api_key") else role
+
+
+def _approval_include_unowned(context: Any) -> bool:
+    return (_approval_role(context) in ("developer", "admin")
+            or (context or {}).get("mode") in _SINGLE_OWNER_MODES)
+
+
 def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
               ports: HttpApprovalPorts) -> bool:
     """``GET /v1/approvals``; ``False`` for another route."""
     if (path.rstrip("/") or "/") != ROUTE:
         return False
-    ledger, done = _access(handler, handler._request_auth_context(), ports)
+    context = handler._request_auth_context()
+    ledger, done = _access(handler, context, ports)
     if done:
         return True
     query = parse_query()
@@ -135,7 +289,24 @@ def serve_get(handler: Any, path: str, parse_query: Callable[[], dict],
         return True
     include_spent = (query.get("include_spent") or [""])[0].lower() in ("1", "true", "yes")
     try:
-        payload = approvals_payload(ledger, limit=limit, include_spent=include_spent)
+        # Scope ledger queries to the authenticated account's owner key.
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            scope_fn(
+                _approval_owner_for_context(context),
+                include_unowned=_approval_include_unowned(context),
+                # An administrator (the local-open listener and the deployment
+                # key count) is the operator: it sees every owner's calls.
+                all_owners=not ports.approve_authority_error(context),
+            )
+            if callable(scope_fn)
+            else nullcontext()
+        )
+        with scope_ctx:
+            payload = approvals_payload(
+                ledger, limit=limit, include_spent=include_spent,
+                show_detail=context.get("mode") in _SINGLE_OWNER_MODES,
+            )
     except Exception:
         ports.log.error("approval ledger read failed", exc_info=True)
         handler._send_json_payload(_unavailable(), status=503)
@@ -151,28 +322,53 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     The approval is bound to that call's digest, single-use and expiring,
     recorded as the caller's approver label with surface ``http``, and
     audited on the direct-tool path as ``permission_approve``. A
-    credential-less (local-open) caller may revoke but not approve.
+    credential-less (local-open) caller may revoke or deny but not approve.
+    Each path segment is percent-decoded exactly once (``_decoded_segments``).
     """
-    parts = path[len(ROUTE):].strip("/").split("/")
+    parts = _decoded_segments(path[len(ROUTE):].strip("/"), ports.unquote)
+    if parts is None:
+        handler._send_json_payload(
+            {"error": {"message": "the path is percent-decoded exactly once; a segment "
+                                  "still holding '%' after that, or one that is not "
+                                  "UTF-8, is refused",
+                       "type": "invalid_request", "code": "INVALID_PATH"}},
+            status=400,
+        )
+        return
     if len(parts) == 2 and parts[0] == "revoke" and parts[1]:
         action, target = "revoke", parts[1]
-    elif len(parts) == 1 and parts[0] and parts[0] != "revoke":
+    elif len(parts) == 2 and parts[0] == "deny" and parts[1]:
+        action, target = "deny", parts[1]
+    elif len(parts) == 1 and parts[0] and parts[0] not in ("revoke", "deny"):
         action, target = "approve", parts[0]
     else:
         handler._send_not_found()
         return
     if action == "approve" and _refuse_credential_less_grant(handler, context, target, ports):
         return
-    ledger, done = _access(handler, context, ports)
+    ledger, done = _access(handler, context, ports, issuing=True)
     if done:
         return
     approver = ports.approver_of(context)
     started = ports.clock()
+    owner_key = _approval_owner_for_context(context)
+    include_unowned = _approval_include_unowned(context)
 
     def run():
-        if action == "revoke":
-            return revoke_approval(ledger, target)
-        return approve_call(ledger, target, req, approver=approver, surface="http")
+        scope_fn = getattr(ledger, "scope", None)
+        scope_ctx = (
+            # Every caller here passed the administrator check in _access
+            # (issuing=True), so it approves, denies and revokes any owner's call.
+            scope_fn(owner_key, include_unowned=include_unowned, all_owners=True)
+            if callable(scope_fn)
+            else nullcontext()
+        )
+        with scope_ctx:
+            if action == "revoke":
+                return revoke_approval(ledger, target)
+            if action == "deny":
+                return deny_call(ledger, target, req)
+            return approve_call(ledger, target, req, approver=approver, surface="http")
 
     action_text = "approval\0%s\0%s\0%s" % (
         action, target.lower(), json.dumps(req, sort_keys=True, default=str),
@@ -188,9 +384,16 @@ def serve_post(handler: Any, path: str, req: Any, context: Any,
     if ports.send_idempotency_refusal(handler, result):
         return
     if result.status < 300:
-        approval = (result.body or {}).get("approval") or {}
+        body = result.body or {}
+        approval = {**(body.get("approval") or body.get("denial") or {}), "actor": approver}
         ports.audit(action, approval, started)
+        from sonder_runtime.interfaces.http.chat_tool_stream import notify_call_decision
+
+        notify_call_decision(str(approval.get("call_id") or target))
     handler._send_json_payload(dict(result.body), status=result.status)
 
 
-__all__ = ["GRANT_REFUSED_CODE", "HttpApprovalPorts", "ROUTE", "serve_get", "serve_post"]
+__all__ = [
+    "APPROVE_HTTP_LOCAL_OPEN_REFUSAL", "GRANT_REFUSED_CODE",
+    "HttpApprovalPorts", "ROUTE", "approver_label", "serve_get", "serve_post",
+]

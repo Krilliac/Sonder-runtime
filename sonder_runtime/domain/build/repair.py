@@ -837,6 +837,8 @@ def include_path_problem(path: str, *, quoted: bool) -> str:
     if not path or "\x00" in path:
         return "empty include path"
     text = path.replace("\\", "/")
+    if text.endswith("/"):
+        return "include path names a directory"
     if text.startswith("/") or re.match(r"^[A-Za-z]:", text) or text.startswith("//"):
         return "absolute include path"
     suffix = posixpath.splitext(posixpath.basename(text))[1].lower()
@@ -851,6 +853,7 @@ def include_path_problem(path: str, *, quoted: bool) -> str:
     # reach credential stores through an ``-I`` root, and Windows aliases
     # (``credentials ``, ``CREDEN~1``, streams, device names) open the same file
     # under a name the checks below would not recognise (same rules as EditScope.allows).
+    denied_names = {name.lower() for name in DENIED_NAMES}
     for part in text.split("/"):
         if part in ("", ".", ".."):
             continue
@@ -859,11 +862,11 @@ def include_path_problem(path: str, *, quoted: bool) -> str:
         if ":" in part or part[-1] == "." or part[-1].isspace() or _SHORT_NAME_RE.search(part) \
                 or part.split(".", 1)[0].strip().upper() in _WINDOWS_DEVICE_NAMES:
             return "include path uses a Windows name alias"
-        if part.startswith(".") or part.lower() in DENIED_DIRS:
+        lower = part.lower()
+        if part.startswith(".") or lower in DENIED_DIRS or lower in _SECRET_INCLUDE_NAMES or lower in denied_names:
             return "include of a dotfile or credential file"
     base = posixpath.basename(text).lower()
-    if base.startswith(".") or base in _SECRET_INCLUDE_NAMES \
-            or base in {name.lower() for name in DENIED_NAMES}:
+    if base.startswith(".") or base in _SECRET_INCLUDE_NAMES or base in denied_names:
         return "include of a dotfile or credential file"
     return ""
 

@@ -2,9 +2,12 @@ import 'dart:async';
 
 import '../account_session.dart';
 import '../api.dart';
+import '../local_manager.dart';
 import '../models.dart';
 import '../settings.dart';
 import 'turn_progress.dart';
+
+export '../api/stream.dart' show ChatStreamToolEvent, ToolRunResult;
 
 /// Everything the chat workspace needs from a server, behind one seam.
 ///
@@ -26,6 +29,8 @@ abstract class ChatBackend {
   Future<void> recordFeedback(String command, TurnRequest context);
 
   Future<SystemInfo> systemInfo();
+  Future<ServerCapabilities?> fetchCapabilities();
+  Future<WhoamiInfo?> fetchWhoami();
   Future<List<String>> listModels();
 
   /// `/v1/models` ids with each row's routing field: the picker's labels
@@ -37,7 +42,31 @@ abstract class ChatBackend {
   Future<EcosystemReading> ecosystemStatus();
   Future<CommandCatalog> fetchCommands();
   Future<PermissionMode?> fetchPermissionMode();
-  Future<PermissionMode> setPermissionMode(String mode);
+  Future<PermissionMode> setPermissionMode(String mode,
+      {bool confirmBypass = false});
+
+  /// Execute a `client` tool on the user's PC (desktop native or web companion).
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  });
+
+  /// Post a client-executed tool result to `POST /v1/client-tools/<callId>/result`.
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  });
 
   Future<WorkRun> getWorkRun(String id);
   Future<WorkRun> cancelWorkRun(String id);
@@ -53,6 +82,11 @@ abstract class ChatBackend {
   Future<ApprovalOutcome> approveCall(String callId,
       {Duration ttl, String tool, String digest});
 
+  /// Decline one pending call (`POST /v1/approvals/deny/<call_id>`), bound
+  /// to [tool] and [digest] so an in-flight waiting turn stops waiting.
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''});
+
   /// Release anything held (open turns, clients).
   void dispose() {}
 }
@@ -66,10 +100,17 @@ class TurnRequest {
   final String project;
   final bool allowApproximateLocation;
 
+  /// The `session_temperature` to send: a number 0..2, `'auto'`, or null to
+  /// leave the session's value alone (see [SessionTemperatureSync]).
+  final Object? sessionTemperature;
+
   /// `'client'` asks the server not to inject its durable history (server
   /// S5). Set after a session rotation, so a cancelled first turn cannot be
   /// resurrected from the server side.
   final String? historyMode;
+
+  /// Whether `X-Sonder-Client-Exec: 1` should be advertised on this turn.
+  final bool clientExec;
 
   const TurnRequest({
     required this.history,
@@ -78,7 +119,9 @@ class TurnRequest {
     this.sessionId = '',
     this.project = '',
     this.allowApproximateLocation = false,
+    this.sessionTemperature,
     this.historyMode,
+    this.clientExec = true,
   });
 }
 
@@ -110,6 +153,12 @@ class TurnStatus extends TurnEvent {
 class TurnDelta extends TurnEvent {
   final String text;
   const TurnDelta(this.text);
+}
+
+/// A live `sonder_tool` approval/execution update during the turn.
+class TurnTool extends TurnEvent {
+  final ChatStreamToolEvent tool;
+  const TurnTool(this.tool);
 }
 
 /// The final reply. Its text replaces whatever the deltas built up.
@@ -234,6 +283,12 @@ class SonderApiChatBackend implements ChatBackend {
   }
 
   @override
+  Future<ServerCapabilities?> fetchCapabilities() => api.fetchCapabilities();
+
+  @override
+  Future<WhoamiInfo?> fetchWhoami() => api.fetchWhoami();
+
+  @override
   Future<List<String>> listModels() => api.listModels();
 
   @override
@@ -249,13 +304,56 @@ class SonderApiChatBackend implements ChatBackend {
   Future<PermissionMode?> fetchPermissionMode() => api.fetchPermissionMode();
 
   @override
-  Future<PermissionMode> setPermissionMode(String mode) async {
+  Future<PermissionMode> setPermissionMode(String mode,
+      {bool confirmBypass = false}) async {
     try {
-      return await api.setPermissionMode(mode);
+      return await api.setPermissionMode(mode, confirmBypass: confirmBypass);
     } on SonderException catch (e) {
       throw normalizeModeError(e);
     }
   }
+
+  @override
+  Future<ClientToolExecResult> executeClientTool({
+    required String callId,
+    required String tool,
+    required Map<String, dynamic> args,
+    String risk = '',
+    String mode = 'manual',
+    String workspaceRoot = '',
+    bool approved = false,
+    String companionUrl = Settings.defaultClientAgentUrl,
+    String companionToken = '',
+  }) =>
+      LocalManager.executeClientTool(
+        callId: callId,
+        tool: tool,
+        args: args,
+        risk: risk,
+        mode: mode,
+        workspaceRoot: workspaceRoot,
+        approved: approved,
+        companionUrl: companionUrl,
+        companionToken: companionToken,
+      );
+
+  @override
+  Future<void> submitClientToolResult(
+    String callId, {
+    required bool ok,
+    String output = '',
+    String error = '',
+    bool denied = false,
+    String session = '',
+  }) =>
+      api.submitClientToolResult(
+        callId,
+        ok: ok,
+        output: output,
+        error: error,
+        denied: denied,
+        session: session,
+      );
 
   /// Work runs need a developer or admin account; say so in those words.
   Future<T> _workRuns<T>(Future<T> Function(WorkRunsApi runs) call) async {
@@ -325,7 +423,25 @@ class SonderApiChatBackend implements ChatBackend {
       }
       if (e.httpStatus == 401 || e.httpStatus == 403) {
         return const ApprovalOutcome(ApprovalStatus.forbidden,
-            message: 'Approvals need a developer or admin account.');
+            message: ApprovalsApi.forbiddenToIssue);
+      }
+      return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
+    }
+  }
+
+  @override
+  Future<ApprovalOutcome> denyCall(String callId,
+      {String tool = '', String digest = ''}) async {
+    try {
+      await api.approvals.deny(callId, tool: tool, digest: digest);
+      return const ApprovalOutcome(ApprovalStatus.approved);
+    } on SonderException catch (e) {
+      if (e.code == ApprovalsApi.unavailableCode) {
+        return const ApprovalOutcome(ApprovalStatus.unsupported);
+      }
+      if (e.httpStatus == 401 || e.httpStatus == 403) {
+        return const ApprovalOutcome(ApprovalStatus.forbidden,
+            message: 'Denying tool calls needs an administrator account.');
       }
       return ApprovalOutcome(ApprovalStatus.failed, message: e.message);
     }
@@ -396,7 +512,9 @@ class _ApiTurn implements ChatTurn {
         sessionId: r.sessionId,
         project: r.project,
         allowApproximateLocation: r.allowApproximateLocation,
+        sessionTemperature: r.sessionTemperature,
         history: r.historyMode,
+        clientExec: r.clientExec,
         cancel: _cancel,
       )) {
         if (_cancel.isCancelled) break;
@@ -410,6 +528,9 @@ class _ApiTurn implements ChatTurn {
             break;
           case ChatStreamStatus(:final text):
             _controller.add(TurnStatus(text));
+          case ChatStreamToolEvent():
+            if (_progress.toolEvent(event)) _phase();
+            _controller.add(TurnTool(event));
           case ChatStreamDelta(:final text):
             if (text.isNotEmpty) {
               if (_progress.wrote()) _phase();

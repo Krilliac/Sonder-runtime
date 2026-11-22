@@ -247,3 +247,132 @@ bool isMacAppBundle(String path) =>
       return ('xdg-open', [url]);
   }
 }
+
+/// Risk classification matching `sonder_runtime/domain/client_tools.py`.
+String clientToolRisk(String tool) {
+  switch (tool.trim()) {
+    case 'file_read':
+    case 'file_find':
+    case 'directory_tree':
+    case 'text_search':
+    case 'git_status':
+    case 'git_diff':
+    case 'git_log':
+    case 'git_branch':
+      return 'read_only';
+    case 'file_write':
+    case 'file_edit':
+    case 'file_delete':
+    case 'directory_create':
+      return 'write';
+    default:
+      return 'execute';
+  }
+}
+
+/// The one ranking of client tool risk values, least strict first. An empty
+/// value ("not declared") ranks below everything; an unknown value ranks
+/// above everything, so it is never treated as safer than a known one. Used
+/// by [effectiveClientToolRisk] (both client executors and the chat gate) and
+/// by the stream frame merge.
+int clientRiskRank(String risk) {
+  switch (risk.trim()) {
+    case '':
+      return -1;
+    case 'read_only':
+      return 0;
+    case 'write':
+    case 'workspace_write':
+      return 1;
+    case 'execute':
+    case 'host_exec':
+      return 2;
+    default:
+      return 3; // unknown: the strictest
+  }
+}
+
+/// The risk to gate a client tool on: the STRICTER of what the server
+/// declared and what this app classifies [tool] as, so a server or model
+/// cannot downgrade a tool. An empty declared risk means "not declared"; an
+/// unknown declared value ranks above everything and is returned as is, so
+/// no mode except bypass runs it without a prompt.
+String effectiveClientToolRisk(String declared, String tool) {
+  final local = clientToolRisk(tool);
+  final d = declared.trim();
+  if (d.isEmpty) return local;
+  return clientRiskRank(d) >= clientRiskRank(local) ? d : local;
+}
+
+/// Whether [mode] allows executing a client tool of [risk] without prompting
+/// `"Approve on my PC"`.
+bool clientModeAllowsWithoutPrompt(String mode, String risk) {
+  switch (mode.trim()) {
+    case 'bypass':
+      return true;
+    case 'auto':
+      return risk == 'read_only' || risk == 'write' || risk == 'execute';
+    case 'acceptEdits':
+      return risk == 'read_only' || risk == 'write';
+    case 'plan':
+    case 'manual':
+    default:
+      return risk == 'read_only';
+  }
+}
+
+/// Exact command to launch the local Python client companion on the user's PC.
+String clientCompanionLaunchCommand({
+  String workspace = '.',
+  String allowOrigin = '',
+  int port = 11439,
+}) {
+  final cleanWs = workspace.trim().isEmpty ? '.' : workspace.trim();
+  final parts = <String>[
+    'python -m sonder_runtime.interfaces.client_agent',
+    if (port != 11439) '--port $port',
+    if (cleanWs != '.') '--workspace "$cleanWs"',
+    if (allowOrigin.trim().isNotEmpty) '--allow-origin ${allowOrigin.trim()}',
+  ];
+  return parts.join(' ');
+}
+
+/// Status of the local client execution companion (or native desktop runner).
+class ClientAgentHealth {
+  final bool reachable;
+  final bool authenticated;
+  final bool nativeRunner;
+  final String mode;
+  final String workspace;
+  final bool canBypass;
+  final String message;
+
+  const ClientAgentHealth({
+    required this.reachable,
+    this.authenticated = false,
+    this.nativeRunner = false,
+    this.mode = 'manual',
+    this.workspace = '',
+    this.canBypass = true,
+    this.message = '',
+  });
+}
+
+/// Result of executing one `execution_target="client"` tool on the user's PC.
+class ClientToolExecResult {
+  final bool ok;
+  final String output;
+  final String error;
+  final bool denied;
+  final bool needsApproval;
+  final bool companionUnavailable;
+
+  const ClientToolExecResult({
+    required this.ok,
+    this.output = '',
+    this.error = '',
+    this.denied = false,
+    this.needsApproval = false,
+    this.companionUnavailable = false,
+  });
+}

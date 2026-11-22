@@ -51,6 +51,10 @@ def test_master_offload_applies_budget_and_marks_raw_provider_truncation(provide
     scope = _host_functions({"_offload_tier_impl"}, dict(
         TIMEOUT=180, TIERS={"code": "test"}, os=os, contextlib=contextlib,
         _provider_bridge=provider_bridge,
+        _PINNED_OLLAMA_ORIGIN=SimpleNamespace(get=lambda: None),
+        _pool_wiring=SimpleNamespace(selected_origin_for_model=lambda *a, **kw: "http://127.0.0.1:11434"),
+        OLLAMA_POOL=None, BASE="http://127.0.0.1:11434",
+        ollama_endpoint=SimpleNamespace(is_loopback=lambda origin: True),
         time=SimpleNamespace(time=lambda: 0), _fleet_synthesis=fleet_synthesis,
         _parse_schema_arg=lambda value: value, _refresh_live_cloud_tiers=lambda: None,
         _bound_request_timeout=lambda timeout, default: timeout,

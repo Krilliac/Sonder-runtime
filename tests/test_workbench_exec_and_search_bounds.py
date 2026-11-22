@@ -72,9 +72,9 @@ def test_run_program_refuses_pwsh_command_with_args(monkeypatch, tmp_path, flag,
 
 
 def test_inline_interpreter_key_covers_the_py_launchers():
-    assert workbench._inline_interpreter_key("py.exe") == "python"
-    assert workbench._inline_interpreter_key("py") == "python"
-    assert workbench._inline_interpreter_key("pyw.exe") == "python"
+    assert workbench._inline_interpreter_key("py.exe") == "py"
+    assert workbench._inline_interpreter_key("py") == "py"
+    assert workbench._inline_interpreter_key("pyw.exe") == "py"
     # Not a prefix match: other "py..." tools are not the Python launcher.
     assert workbench._inline_interpreter_key("pyright") is None
 

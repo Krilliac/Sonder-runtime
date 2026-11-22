@@ -191,7 +191,8 @@ def test_message_code_is_bound_at_every_surface(monkeypatch, surface, inspectabl
 
 
 def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkeypatch):
-    """A python "run it" is graded like ``/run``: same gate, argument-free digest."""
+    """A python "run it" is graded like ``/run`` and never invokes the PowerShell AST."""
+    from sonder_runtime.adapters.security import powershell_gate
     import sonder_runtime.interfaces.http.serve as serve
 
     monkeypatch.setattr(serve, "_LEGACY_RUNTIME", server)
@@ -206,13 +207,14 @@ def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkey
         )
 
     monkeypatch.setattr(serve.permission_policy, "decide_for_caller", decide)
+    monkeypatch.setattr(powershell_gate, "inspect_powershell", lambda _src: pytest.fail("PowerShell AST ran on Python"))
     monkeypatch.setattr(serve.code_runner, "run_code", lambda *a, **k: pytest.fail("refused run executed"))
     monkeypatch.setattr(serve.intents, "classify", lambda value: {"run": True})
 
     output = serve._handle_intent("run it", messages=messages)
 
     assert output.startswith("refused /run:")
-    assert seen and all(arguments is None for _tool, arguments in seen)
+    assert seen == [("run_code", {"code": "print(1)", "language": "python"})]
 
 
 # --- non-PowerShell calls keep origin/main's argument-free decisions --------
@@ -224,7 +226,7 @@ def test_non_powershell_intent_takes_the_slash_run_gate_without_arguments(monkey
     {"type": "workspace_run", "program": "git", "args": ["status"]},
     {"type": "file_write", "path": "a.txt", "content": "x"},
 ])
-def test_loop_gate_keeps_no_arguments_for_other_actions(monkeypatch, action):
+def test_loop_gate_keeps_no_arguments_for_non_host_actions(monkeypatch, action):
     seen = {}
 
     def decide(tool, **kwargs):
@@ -233,7 +235,11 @@ def test_loop_gate_keeps_no_arguments_for_other_actions(monkeypatch, action):
 
     monkeypatch.setattr(permission_modes, "decide", decide)
     server._loop_permission_refusal(action["type"], action)
-    assert seen.get("arguments", None) is None
+    if action["type"] in ("run_code", "workspace_run"):
+        # A host program can delete files, so decision 23 sees its arguments.
+        assert seen["arguments"]["code" if action["type"] == "run_code" else "program"]
+    else:
+        assert seen.get("arguments", None) is None
 
 
 @pytest.mark.parametrize("tool,kwargs", [
@@ -274,11 +280,17 @@ def test_python_run_blocks_keep_no_gate_arguments(monkeypatch, surface):
     runner = lambda *a, **k: {"ok": True, "returncode": 0, "stdout": "ok", "stderr": "", "language": "python"}
     monkeypatch.setattr(serve.code_runner, "run_code", runner)
     monkeypatch.setattr(serve.code_runner, "format_result", lambda result: "ran")
+    from sonder_runtime.adapters.security import powershell_gate
+    monkeypatch.setattr(powershell_gate, "inspect_powershell",
+                        lambda source: pytest.fail("python /run launched PowerShell parser"))
     if surface == "control-run":
         server.control_command("/run", history=messages)
+        assert seen and all(arguments is None for _tool, arguments in seen)
     else:
         serve._handle_slash("/run", messages=messages)
-    assert seen and all(arguments is None for _tool, arguments in seen)
+        # HTTP /run binds {code, language} so unattended refusals emit a call_id + detail,
+        # while never launching the PowerShell parser for Python blocks.
+        assert seen == [("run_code", {"code": "print(1)", "language": "python"})]
 
 
 def test_powershell_selection_never_launches_the_parser(monkeypatch):

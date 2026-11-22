@@ -52,8 +52,16 @@ abstract final class SonderStrings {
   /// shortened one).
   static String approveCommand(String callId) => '/approve $callId';
 
+  /// Listing pending calls (`GET /v1/approvals`) answered 403.
   static const approvalsNeedRole =
       'Approvals need a developer or admin account';
+
+  /// Approving or revoking answered 403: the server lets only an
+  /// administrator (or the deployment API key) issue or revoke approvals,
+  /// so a developer account can see the list but not act on it.
+  static const approvalsNeedAdmin =
+      'Approving or revoking needs an administrator account or the '
+      'deployment API key';
 
   // Raise-mode sheet (§2.5, P0-4).
   static const raiseModeWord = 'raise mode';
@@ -70,12 +78,19 @@ abstract final class SonderStrings {
           'still ask first.',
       'auto' => 'File changes and host programs will run without asking, '
           'for every chat and agent on $where, until someone lowers the mode.',
+      'bypass' => 'All tool confirmation prompts and filesystem root '
+          'containment are bypassed on $where until someone lowers the mode.',
       _ => 'Sonder will ask less often before acting, for every chat and '
           'agent on $where, until someone lowers the mode.',
     };
   }
 
   static const raiseDestructiveNote = 'Destructive tools still need a person.';
+  static const raiseBypassWarning =
+      'Destructive tools, host programs, and files outside the project root '
+      'will execute without confirmation. Explicit deny rules still apply.';
+  static const raiseBypassAck =
+      'I understand bypass skips all confirmation prompts and root restrictions';
 
   /// `Switch to auto`
   static String switchTo(String mode) => 'Switch to $mode';

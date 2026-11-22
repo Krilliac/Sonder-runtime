@@ -128,9 +128,39 @@ def configured_host(runtime: Any, tier: str = "") -> str:
         suffix = (" (fallback %s %s)" % (fallback_label, fallback_host)
                   if fallback_label and fallback_host else "")
         return "%s %s%s" % (label, host, suffix)
+    pooled = _pool_hosts(runtime, tier)
+    if pooled:
+        return "ollama " + pooled
     base = _get(runtime, "BASE", "") or _get(runtime, "OLLAMA_HOST", "")
     host = _url_host(base) or _url_host(os.environ.get("OLLAMA_HOST", ""))
     return ("ollama " + host) if host else ""
+
+
+def _pool_hosts(runtime: Any, tier: str) -> str:
+    """Hosts of the pool workers that carry the tier's model, or ``""``.
+
+    Only with remote workers in the pool: a lone local Ollama keeps naming its
+    configured host. The pool's cached capability evidence is read, never
+    probed. Account callers see a generic count instead of addresses.
+    """
+    pool = _get(runtime, "OLLAMA_POOL")
+    try:
+        if pool is None or not bool(getattr(pool, "has_remote_workers", False)):
+            return ""
+        policy = _get(runtime, "_RUNTIME_POLICY") or {}
+        models = policy.get("local_models") if isinstance(policy, Mapping) else None
+        model = str((models or {}).get(tier) or "").strip() if isinstance(models, Mapping) else ""
+        origins = tuple(pool.origins_for_model(model)) if model else ()
+    except Exception:
+        return ""
+    hosts = [host for host in (_url_host(origin) for origin in origins) if host]
+    if not hosts:
+        return ""
+    from sonder_runtime.adapters.inference.ollama_reporting import caller_may_see_worker_hosts
+
+    if caller_may_see_worker_hosts():
+        return ", ".join(hosts)
+    return "%d worker%s" % (len(hosts), "" if len(hosts) == 1 else "s")
 
 
 __all__ = ["configured_host"]

@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -32,6 +34,7 @@ from typing import Any
 
 from ...domain.common.errors import DependencyUnavailable
 from ..filesystem.atomic_json import file_lock, write_json_atomic
+from ..process_liveness import pid_alive
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ FILENAME = "anthropic-spend.json"
 KEEP_DAYS = 62
 _MAX_USD = Decimal(1_000_000_000)
 _LOCK_TIMEOUT_SECONDS = 5.0
+DEFAULT_RESERVATION_TTL_SECONDS = 900.0
 
 
 class SpendLedgerUnreadable(DependencyUnavailable):
@@ -73,17 +77,20 @@ class SpendLedger:
         self, path: Path | str | Callable[[], Path | str] | None = None,
         *, clock: Callable[[], float] = time.time,
         filename: str = FILENAME, schema: str = SCHEMA, label: str = "Anthropic",
+        reservation_ttl_seconds: float = DEFAULT_RESERVATION_TTL_SECONDS,
     ) -> None:
         self._path_source = path
         self._filename = filename
         self._schema = schema
         self._label = label
         self._clock = clock
+        self._reservation_ttl = max(1.0, float(reservation_ttl_seconds))
+        self._instance_id = uuid.uuid4().hex[:12]
         self._thread_lock = threading.Lock()
         # Spend that could not be persisted, by day: still counted in-process.
         self._unpersisted: dict[str, Decimal] = {}
-        # Worst-case cost of calls in flight in this process, by reservation token.
-        self._inflight: dict[int, Decimal] = {}
+        # Active reservations held by this ledger: token -> (day, key, amount, persisted).
+        self._inflight: dict[int, tuple[str, str, Decimal, bool]] = {}
         self._next_token = 1
 
     @property
@@ -115,6 +122,33 @@ class SpendLedger:
         entry = document["days"].get(day)
         return entry if isinstance(entry, dict) else {}
 
+    def _prune_reserved(self, entry: dict[str, Any], now: float) -> tuple[dict[str, dict[str, Any]], bool]:
+        raw = entry.get("reserved")
+        if not isinstance(raw, dict):
+            return {}, False
+        kept: dict[str, dict[str, Any]] = {}
+        changed = False
+        current_pid = os.getpid()
+        for key, item in raw.items():
+            if not isinstance(key, str) or not isinstance(item, dict):
+                changed = True
+                continue
+            try:
+                usd = _decimal(item.get("usd", "0"), self._label)
+                expires_at = float(item.get("expires_at", 0.0))
+                pid = int(item.get("pid", 0))
+            except (SpendLedgerUnreadable, TypeError, ValueError):
+                changed = True
+                continue
+            if expires_at <= now or usd <= 0:
+                changed = True
+                continue
+            if pid != current_pid and (pid <= 0 or not pid_alive(pid)):
+                changed = True
+                continue
+            kept[key] = {"usd": str(usd), "pid": pid, "expires_at": expires_at}
+        return kept, changed
+
     def _today_locked(self) -> Decimal:
         """Today's spend; the caller holds ``_thread_lock``."""
         day = utc_day(self._clock())
@@ -131,24 +165,97 @@ class SpendLedger:
     def try_reserve(self, amount: Decimal, cap: Decimal) -> tuple[int | None, Decimal, Decimal]:
         """Atomically refuse over the cap, else hold ``amount`` for a call in flight.
 
-        Returns ``(token, spent_today, inflight)``; ``token`` is ``None`` when
-        spend plus the reservations already held plus ``amount`` would exceed
-        ``cap`` (an exact fit is admitted).  Release
-        the token with :meth:`release` once the call's real cost is recorded.
+        Persists positive reservations in the file-locked ledger so concurrent
+        processes and separate ``SpendLedger`` instances sharing one state home
+        observe each other's in-flight reservations.  Stale reservations whose
+        TTL expired or whose owning PID is dead are pruned under the lock.
         """
+        now = self._clock()
+        day = utc_day(now)
+        path = self.path
         with self._thread_lock:
-            spent = self._today_locked()
-            inflight = sum(self._inflight.values(), Decimal(0))
-            if spent + inflight + amount > cap:
-                return None, spent, inflight
-            token = self._next_token
-            self._next_token += 1
-            self._inflight[token] = amount
-            return token, spent, inflight
+            with file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+                document = self._read(path)
+                days = document["days"]
+                entry = dict(self._day_entry(document, day))
+                stored = _decimal(entry.get("usd", "0"), self._label)
+                spent = stored + self._unpersisted.get(day, Decimal(0))
+                active_reserved, pruned = self._prune_reserved(entry, now)
+                persisted_inflight = sum(
+                    (_decimal(item["usd"], self._label) for item in active_reserved.values()),
+                    Decimal(0),
+                )
+                local_unpersisted = sum(
+                    (amt for d, key, amt, persisted in self._inflight.values()
+                     if d == day and (not persisted or key not in active_reserved)),
+                    Decimal(0),
+                )
+                inflight = persisted_inflight + local_unpersisted
+                if spent + inflight + amount > cap:
+                    if pruned and path.exists():
+                        if active_reserved:
+                            entry["reserved"] = active_reserved
+                        else:
+                            entry.pop("reserved", None)
+                        days[day] = entry
+                        try:
+                            write_json_atomic(path, document)
+                        except OSError:
+                            pass
+                    return None, spent, inflight
+                token = self._next_token
+                self._next_token += 1
+                res_key = "%d:%s:%d" % (os.getpid(), self._instance_id, token)
+                persisted = False
+                if amount > 0:
+                    active_reserved[res_key] = {
+                        "usd": str(amount),
+                        "pid": os.getpid(),
+                        "expires_at": now + self._reservation_ttl,
+                    }
+                    entry["reserved"] = active_reserved
+                    days[day] = entry
+                    for old in sorted(days)[:-KEEP_DAYS]:
+                        days.pop(old, None)
+                    try:
+                        write_json_atomic(path, document)
+                        persisted = True
+                    except OSError as exc:
+                        logger.warning(
+                            "%s: could not persist in-flight reservation (%s); holding in memory only",
+                            self._label.lower(), type(exc).__name__,
+                        )
+                self._inflight[token] = (day, res_key, amount, persisted)
+                return token, spent, inflight
 
     def release(self, token: int) -> None:
         with self._thread_lock:
-            self._inflight.pop(token, None)
+            record = self._inflight.pop(token, None)
+            if record is None:
+                return
+            day, res_key, _amount, persisted = record
+            if not persisted:
+                return
+            path = self.path
+            try:
+                with file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+                    if not path.exists():
+                        return
+                    document = self._read(path)
+                    days = document["days"]
+                    entry = dict(self._day_entry(document, day))
+                    reserved = entry.get("reserved")
+                    if isinstance(reserved, dict) and res_key in reserved:
+                        reserved = dict(reserved)
+                        reserved.pop(res_key, None)
+                        if reserved:
+                            entry["reserved"] = reserved
+                        else:
+                            entry.pop("reserved", None)
+                        days[day] = entry
+                        write_json_atomic(path, document)
+            except (OSError, SpendLedgerUnreadable):
+                pass
 
     def snapshot(self) -> dict[str, object]:
         """Today's content-free totals for status surfaces."""

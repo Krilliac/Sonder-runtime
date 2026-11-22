@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 import sonder_runtime.adapters.meshgen.sandbox_win as sandbox_win  # exact module: "from . import x" adds an edge to every sibling
+import sonder_runtime.adapters.process_tree as process_tree
 
 HARNESS_PATH = Path(__file__).with_name("harness.py")
 REPLAY_PATH = Path(__file__).with_name("replay.py")
@@ -146,9 +147,19 @@ def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
             job = _windows_job(limit)
         except Exception:  # noqa: BLE001 - the cap is best effort; the build still runs
             job = None
-    process = subprocess.Popen(argv, cwd=cwd, shell=False, env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    if os.name != "nt":
+        # Windows already has the kill-on-close Job Object; POSIX needs a
+        # session so the whole tree can be removed (see process_tree).
+        kwargs.update(process_tree.group_popen_kwargs())
+    process = None
+    tree = None
     try:
+        process = subprocess.Popen(argv, cwd=cwd, shell=False, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+        tree = (
+            process_tree.ProcessTree.owning(process)
+            if os.name != "nt" and process_tree.is_real_popen(process) else None
+        )
         if job is not None:
             job[0](process)
         elif os.name != "nt":
@@ -156,14 +167,33 @@ def run_limited(argv, *, cwd, env, timeout, memory_mb=DEFAULT_MEMORY_MB):
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
+            if tree is not None:
+                tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
+            else:
+                if job is not None:
+                    job[1]()
+                    job = None
+                process.kill()
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.output or b""
+                stderr = exc.stderr or b""
             raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
         return process.returncode, stdout, stderr
     finally:
-        if process.poll() is None:
+        if tree is not None:
+            if process is not None and (process.poll() is None or tree.has_survivors()):
+                tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
+        elif process is not None and process.poll() is None:
+            if job is not None:
+                job[1]()
+                job = None
             process.kill()
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         if job is not None:
             job[1]()
 

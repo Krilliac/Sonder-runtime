@@ -58,6 +58,12 @@ def test_default_cleanup_never_constructs_app_and_keeps_compute_cleanup(
         if failed:
             raise RuntimeError("cleanup incomplete")
 
+    monkeypatch.setattr(composition, "_default_runtime_closing", False)
+    monkeypatch.setattr(composition, "_default_application_close", None)
+    monkeypatch.setattr(composition, "_default_artifact_mobility_close", None)
+    monkeypatch.setattr(composition, "_default_memory_replication_close", None)
+    monkeypatch.setattr(composition, "_default_inference_close", None)
+    monkeypatch.setattr(composition, "_default_inference_pool_close", None)
     monkeypatch.setattr(composition, "_default_delegation_close", close_delegation)
     monkeypatch.setattr(
         composition, "_default_compute_close", lambda **kw: calls.append("compute")
@@ -72,6 +78,8 @@ def test_default_cleanup_never_constructs_app_and_keeps_compute_cleanup(
 
 def test_old_default_compute_api_remains_narrow(monkeypatch):
     calls = []
+    monkeypatch.setattr(composition, "_default_runtime_closing", False)
+    monkeypatch.setattr(composition, "_default_application_close", None)
     monkeypatch.setattr(
         composition,
         "_default_delegation_close",

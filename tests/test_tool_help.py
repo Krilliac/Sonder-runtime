@@ -203,14 +203,21 @@ def test_map_fixture_step_one_fits_prompt_budget(monkeypatch, tmp_path):
 
 
 def test_server_full_help_matches_legacy_unfiltered_projection():
+    import permission_modes as pm
     import server
     original = server.AGENT_TOOL_HELP
     generated = server._generic_agent_dispatch.generated_help_lines(
         server.mcp, server._agent_help_advertised_tools(original), server._AGENT_SYSTEM_OPERATOR_TOOLS)
     if generated:
         original = original.rstrip() + "\n" + "\n".join(generated) + "\n"
-    denied = {name for name in server._agent_help_advertised_tools(original)
-              if server._agent_run_tool_refusal(name)}
+    denied = set()
+    for name in server._agent_help_advertised_tools(original):
+        if server._agent_run_tool_refusal(name):
+            denied.add(name)
+        else:
+            decision = pm.decide(name, interactive=False, record=False)
+            if not decision.allowed and decision.source in ("mode", "rule"):
+                denied.add(name)
     expected = original if not denied else "\n".join(
         line for line in original.splitlines()
         if not any(line.lstrip().startswith("- %s:" % name) for name in denied))

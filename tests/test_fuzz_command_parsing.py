@@ -1282,7 +1282,6 @@ _HEAD_FOLD = re.compile(
 )
 # Folds of a word that is not a command name; each is compared with ASCII keywords only.
 _NOT_A_HEAD = {
-    ("server.py", "head = parts[0].lower()"): "/approve sub-action (revoke, call) or a call id",
     # Not ASCII-only for /stash: this gate folds with lower() while the server
     # dispatcher (server.py control_command) uses casefold() and "_" -> "-", so
     # "/stash save_untracked" reads as non-dangerous here. Pre-existing on main;
