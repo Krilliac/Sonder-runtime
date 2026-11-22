@@ -282,7 +282,7 @@ and unknown tokens answer identically, so retrying is safe.
   restore them (`admin_auth.py:509-517`).
 - Per-account rate limit: 120 requests per 60 s; tier `pro` 600; `enterprise`
   3000; `dev_flags` containing `unlimited` bypasses it (`admin_auth.py:17-18`,
-  `:520-529`).
+  `:531-541`).
 - Failed credential attempts are limited per client address (bucket of 10,
   refilling one every 2 s; `adapters/web/lifecycle.py:85-86`) and per username:
   backoff starts after `SONDER_LOGIN_USERNAME_THRESHOLD` failures (default 20),
