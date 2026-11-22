@@ -4803,7 +4803,7 @@ def main(*, machine_output=False):
                         "/tree", "/folders", "/search", "/grep",
                         "/programs", "/programfind", "/scripts", "/scriptfind",
                         "/image", "/inspectimage", "/doc", "/document_extract",
-                        "/media", "/media_inspect", "/metrics", "/code_metrics",
+                        "/media", "/media_inspect", "/loc", "/code_metrics",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
