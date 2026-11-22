@@ -42,6 +42,7 @@ from sonder_runtime.application.selfmod.independent_oracle import (
     payload_nonce,
 )
 from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied, require_atomic_checkout_promotion
+from sonder_runtime.application.selfmod.governance import SENSITIVE_PARTS, SENSITIVE_PREFIXES
 from sonder_runtime.application.selfmod.rollback_scope import rollback_manifest
 from sonder_runtime.application.evaluation import integrity as _integrity
 
@@ -54,48 +55,6 @@ PHASES = (
 )
 ACTIVE_PHASES = {"backed_up", "editing", "testing", "reviewing", "approved", "rollback_requested"}
 TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
-SENSITIVE_PREFIXES = (
-    "permission_rules.py", "admin_auth.py", "file_ops.py", "safe_update.py",
-    "selfmod.py", "selfmod_recover.py", "server.py", "reloadable_mcp.py",
-    "tool_contract.py",
-    "model_transport.py", "sonder_runtime/adapters/model_transport.py",
-    "sonder_runtime/domain/context/overflow.py",
-    "sonder_runtime/domain/context/compaction.py",
-    "sonder_runtime/domain/cloud_agent_tool_policy.py",
-    "process_liveness.py", "ollama_endpoint.py",
-    # Evaluation and verifier implementations are the truth source for
-    # candidate acceptance.  A candidate may not alter the oracle it is
-    # being judged by during its own trial.
-    "verifiers.py", "promotion_eval.py", "eval_retrieval.py",
-    "ruff_verifier.py", "node_verifier.py", "json_schema_verifier.py",
-    "sql_verifier.py",
-    "scripts/nightly_selfmod.py", "scripts/nightly_self_improve.py",
-    "scripts/check_", "scripts/generate_documentation_catalogs.py",
-    "tests/test_verifiers", "tests/test_promotion_eval",
-    "tests/test_eval_retrieval", "tests/test_ruff_verifier",
-    "tests/test_node_verifier", "tests/test_json_schema_verifier",
-    "tests/test_sql_verifier", "tests/test_nightly_selfmod",
-    "tests/test_nightly_self_improve",
-    "autopilot_controller.py", "autopilot_store.py", "sonder_paths.py", "sonder_serve.py",
-    "deploy_", "sonder-runtime", "tests/test_permission", "tests/test_admin",
-    "tests/test_control_plane", "tests/test_read_only_agent_policy",
-    "tests/test_selfmod",
-    "scripts/selfmod_low_integrity.py",
-    "scripts/selfmod_linux_isolation.py", "tests/test_linux_candidate_isolation",
-    "tests/test_517_linux_uid_separated_candidate_evaluator",
-    # The independent oracle and the evaluation-integrity checks (cheat trials, protected writes).
-    "scripts/selfmod_oracle.py", "scripts/selfmod_host_grader.py", "scripts/selfmod_cheat_trials.py",
-    # The opt-in evaluator broker endpoint, its worker client, and the
-    # receipt signature verifier the nightly accepts its verdict through.
-    "scripts/selfmod_evaluator_broker.py", "scripts/selfmod_evaluator_client.py",
-    "sonder_runtime/adapters/inference/external_membership.py",
-    "sonder_runtime/application/selfmod/", "tests/test_selfmod_independent_oracle",
-    "sonder_runtime/application/evaluation/integrity.py", "sonder_runtime/application/evaluation/cheat_trials.py", "sonder_runtime/adapters/cheat_trial_runner.py",
-)
-SENSITIVE_PARTS = (
-    ".env", "credential", "secret", "token", "account", "migration",
-    "permissions.json", "selfmod_policy", "selfmod.db", "audit",
-)
 # Attestations a candidate supervisor may build.  Each is accepted only from
 # the supervisor that constructs it (see ``_record_command``).
 _ISOLATED_ATTESTATIONS = ISOLATION_KINDS

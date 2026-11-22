@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+
 HOTKEY_TEXT = "Ctrl+Alt+Shift+K"
 _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
 _VK_K = 0x4B
@@ -84,7 +86,7 @@ class _HotkeyListener:
         self._started = threading.Event()
         self.registered = False
         self.thread_id = 0
-        self._thread = threading.Thread(target=self._run, name="sonder-kill-hotkey", daemon=True)
+        self._thread = owned_runtime_thread(target=self._run, name="sonder-kill-hotkey", daemon=True)
 
     def start(self, timeout: float = 5.0) -> bool:
         """Start the thread; True once the hotkey is registered on it."""

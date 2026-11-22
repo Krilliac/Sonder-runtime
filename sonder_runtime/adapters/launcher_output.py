@@ -1,7 +1,8 @@
 """Pure output, timeout, and retention policy for the launcher."""
 from __future__ import annotations
 
-from typing import Any
+import threading
+from typing import Any, Protocol
 
 MAX_OPERATION_OUTPUT = 20_000
 DEFAULT_OPERATION_RETENTION = 100
@@ -48,11 +49,57 @@ def retention_limit(
     return max(1, min(parsed, maximum))
 
 
+class _ReadablePipe(Protocol):
+    def read(self, size: int = ..., /) -> bytes | str: ...
+
+
+class BoundedOutputTail:
+    """Thread-safe byte tail that never grows with command output volume."""
+
+    def __init__(self, limit: int = MAX_OPERATION_OUTPUT) -> None:
+        self.limit = max(256, int(limit))
+        self.data = bytearray()
+        self.truncated = False
+        self.lock = threading.Lock()
+
+    def append(self, chunk: bytes | bytearray | memoryview | str | None) -> None:
+        if not chunk:
+            return
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8", errors="replace")
+        with self.lock:
+            self.data.extend(chunk)
+            if len(self.data) > self.limit:
+                del self.data[:len(self.data) - self.limit]
+                self.truncated = True
+
+    def text(self) -> str:
+        with self.lock:
+            value = bytes(self.data).decode("utf-8", errors="replace")
+            truncated = self.truncated
+        return ("[output truncated]\n" + value) if truncated else value
+
+
+def drain_process_output(pipe: _ReadablePipe | None, tail: BoundedOutputTail) -> None:
+    if pipe is None:
+        return
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                return
+            tail.append(chunk)
+    except (OSError, ValueError):
+        return
+
+
 __all__ = [
+    "BoundedOutputTail",
     "DEFAULT_OPERATION_RETENTION",
     "MAX_OPERATION_OUTPUT",
     "MAX_OPERATION_RETENTION",
     "bounded_seconds",
+    "drain_process_output",
     "output_text",
     "retention_limit",
 ]
