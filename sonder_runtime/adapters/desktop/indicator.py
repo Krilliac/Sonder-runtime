@@ -162,8 +162,8 @@ def main(argv=None) -> int:
     def record_stop(why: str) -> None:
         with stop_lock:
             if not reason["value"]:
-                reason["value"] = why
                 _write(stop_file, {"reason": why, "at": time.time()})
+                reason["value"] = why
 
     hotkey = _HotkeyListener(
         user32, kernel32,
