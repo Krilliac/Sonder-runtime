@@ -568,3 +568,106 @@ def test_config_validate_refuses_hostile_workspace_and_ca_bundle_zero_smb(
     assert any("[state].workspace_roots" in err for err in errs)
     assert any("[ollama].ca_bundle" in err for err in errs)
     assert touched == []
+
+
+# ---- 8. Residual fixes R1, R2, R3 -------------------------------------------
+
+
+def test_context_root_errors_walks_ancestors_top_down_before_touching_descendants(
+    tmp_path, monkeypatch
+):
+    junc_dir = tmp_path / "junc_ctx"
+    junc_dir.mkdir()
+    target = junc_dir / "sub1" / "sub2"
+
+    probed_paths: list[Path] = []
+    real_is_symlink = Path.is_symlink
+
+    def spy_is_symlink(self):
+        probed_paths.append(self)
+        return real_is_symlink(self)
+
+    def fake_isjunction(p):
+        p_obj = Path(p)
+        probed_paths.append(p_obj)
+        return p_obj == junc_dir
+
+    monkeypatch.setattr(Path, "is_symlink", spy_is_symlink)
+    monkeypatch.setattr(os.path, "isjunction", fake_isjunction, raising=False)
+
+    cfg = config_mod.SonderConfig(
+        context=replace(
+            config_mod.ContextConfig(),
+            instruction_configured_roots=(str(target),),
+        ),
+    )
+    errs = config_mod._context_root_errors(cfg)
+    assert any("instruction_configured_roots" in err for err in errs)
+    assert junc_dir in probed_paths
+    assert (junc_dir / "sub1") not in probed_paths
+    assert target not in probed_paths
+
+
+def test_ca_bundle_refuses_unc_reparse_target_without_smb_or_resolve(tmp_path, monkeypatch):
+    junc_dir = tmp_path / "ca_junc"
+    junc_dir.mkdir()
+    ca_path = junc_dir / "ca.pem"
+
+    resolve_calls: list[Path] = []
+    is_file_calls: list[Path] = []
+    real_resolve = Path.resolve
+    real_is_file = Path.is_file
+
+    def spy_resolve(self, *args, **kwargs):
+        if str(junc_dir) in str(self):
+            resolve_calls.append(self)
+        return real_resolve(self, *args, **kwargs)
+
+    def spy_is_file(self):
+        if str(junc_dir) in str(self):
+            is_file_calls.append(self)
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    monkeypatch.setattr(Path, "is_file", spy_is_file)
+    monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p) == junc_dir, raising=False)
+    monkeypatch.setattr(
+        os, "readlink",
+        lambda p: r"\\?\UNC\nohost.invalid\share" if Path(p) == junc_dir else str(p),
+    )
+
+    cfg = config_mod.SonderConfig(
+        state=replace(config_mod.StateConfig(), home=str(tmp_path / "home")),
+        ollama=replace(config_mod.OllamaConfig(), ca_bundle=str(ca_path)),
+    )
+    errs: list[str] = []
+    config_mod._validate(cfg, errs)
+    assert any("[ollama].ca_bundle" in err for err in errs)
+    assert resolve_calls == []
+    assert is_file_calls == []
+
+
+def test_safe_env_path_refuses_post_resolve_unc_target(tmp_path, monkeypatch):
+    local_candidate = tmp_path / "ca.pem"
+    monkeypatch.setattr(
+        file_ops,
+        "_resolve_best_effort",
+        lambda _p: Path("//nohost.invalid/share/ca.pem"),
+    )
+    assert file_ops._safe_env_path(str(local_candidate), base=tmp_path) is None
+
+
+@pytest.mark.parametrize("relative", [
+    "tests/conftest.pyd",
+    "tests/conftest.cp312-win_amd64.pyd",
+    "tests/conftest.pyc",
+    "tests/conftest.pyo",
+    "tests/conftest.pyw",
+    "tests/__pycache__/conftest.cpython-312.pyc",
+])
+def test_first_party_code_files_binary_shadows_refused_without_developer(isolated_ws, relative):
+    ws, _home = isolated_ws
+    (ws / "tests").mkdir(exist_ok=True)
+    with pytest.raises(PermissionError, match="protected Sonder control-plane path"):
+        file_ops.write_file(relative, "shadow-payload", mode="create")
+    assert not (ws / relative).exists()

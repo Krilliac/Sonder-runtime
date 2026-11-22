@@ -1867,9 +1867,9 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
                 continue
             try:
                 path = sonder_paths.parse_local_root(raw, expand_user=True)
-                for ancestor in (path, *path.parents):
+                for ancestor in (*reversed(path.parents), path):
                     if ancestor.parent == ancestor:
-                        break
+                        continue
                     if ancestor.is_symlink() or (
                         is_junction is not None and is_junction(ancestor)
                     ):
@@ -2124,8 +2124,37 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         )
         if parsed_ca is None:
             errors.append("[ollama].ca_bundle must be an absolute path")
-        elif not parsed_ca.is_file():
-            errors.append("[ollama].ca_bundle must name an existing regular file")
+        else:
+            is_junction = getattr(os.path, "isjunction", None)
+            ca_unsafe = False
+            for ancestor in (*reversed(parsed_ca.parents), parsed_ca):
+                if ancestor.parent == ancestor:
+                    continue
+                try:
+                    is_link = ancestor.is_symlink() or (
+                        is_junction is not None and is_junction(ancestor)
+                    )
+                except OSError:
+                    ca_unsafe = True
+                    break
+                if is_link:
+                    try:
+                        sonder_paths._strip_extended_or_refuse_prefixed(os.readlink(ancestor))
+                    except (OSError, ValueError):
+                        ca_unsafe = True
+                        break
+            if ca_unsafe:
+                errors.append("[ollama].ca_bundle must be an absolute local path")
+            else:
+                try:
+                    resolved_ca = parsed_ca.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    errors.append("[ollama].ca_bundle must be an absolute local path")
+                else:
+                    if sonder_paths.try_parse_local_root(str(resolved_ca), expand_user=False) is None:
+                        errors.append("[ollama].ca_bundle must be an absolute local path")
+                    elif not resolved_ca.is_file():
+                        errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
     canonical_workers: list[str] = []
