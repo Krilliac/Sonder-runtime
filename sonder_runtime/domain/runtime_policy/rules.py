@@ -35,6 +35,14 @@ BASE_LOCAL_TIERS = ("fast", "code", "general")
 OPTIONAL_LOCAL_TIERS = ("reasoning", "vision")
 LOCAL_TIERS = BASE_LOCAL_TIERS + OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = ("chat", "router", "workbench", "autopilot", "fleet", "review")
+# Optional context-fit routing target, stored in the ``routing`` section only
+# when set, so an unset policy is byte-identical to one written before it
+# existed (the shipped ``default_routing`` names lanes only, so the default is
+# always unset).  A chat turn whose estimated prompt does not fit its tier's
+# model moves to this local tier; unset, such a turn fails with an actionable
+# error.  ``SONDER_LONG_CONTEXT_TIER`` overrides it per process.
+LONG_CONTEXT_TIER_KEY = "long_context_tier"
+LONG_CONTEXT_TIER_ENV = "SONDER_LONG_CONTEXT_TIER"
 # Environment values that explicitly leave an optional tier unbound.
 UNSET_TOKENS = frozenset({"none", "off", "disabled", "-"})
 # The NPU utility accelerator sits below the local tiers and never becomes
@@ -312,6 +320,44 @@ def effective_long_context_overflow(policy, env) -> dict:
     return {**settings, "overrides": tuple(overrides), "error": "; ".join(errors)}
 
 
+def normalize_long_context_tier(value) -> str:
+    """``""`` (unset) or a local tier name; never a lane, cloud or model name."""
+    tier = str(value or "").strip().lower()
+    if tier in UNSET_TOKENS:
+        return ""
+    if tier and tier not in LOCAL_TIERS:
+        raise ValueError(
+            "runtime routing long_context_tier must be one of: %s (or empty to unset)"
+            % ", ".join(LOCAL_TIERS)
+        )
+    return tier
+
+
+def effective_long_context_tier(policy, env) -> dict:
+    """The long-context tier in force: ``SONDER_LONG_CONTEXT_TIER``, else the policy.
+
+    An invalid environment value is ignored and reported in ``error``; it
+    never enables anything.  ``source`` is ``environment``, ``policy`` or ``""``.
+    """
+    routing = policy.get("routing") if isinstance(policy, dict) else None
+    try:
+        configured = normalize_long_context_tier(
+            routing.get(LONG_CONTEXT_TIER_KEY) if isinstance(routing, dict) else "",
+        )
+    except ValueError:
+        configured = ""
+    result = {"tier": configured, "source": "policy" if configured else "", "error": ""}
+    raw = str((env or {}).get(LONG_CONTEXT_TIER_ENV, "") or "").strip()
+    if raw:
+        try:
+            tier = normalize_long_context_tier(raw)
+        except ValueError as exc:
+            result["error"] = "%s: %s" % (LONG_CONTEXT_TIER_ENV, exc)
+        else:
+            result.update(tier=tier, source="environment")
+    return result
+
+
 def normalize_provider_models(raw) -> dict:
     """Validate ``provider_models``: ``{provider: {tier: model id}}``.
 
@@ -546,6 +592,12 @@ def normalize(payload, defaults=None, *, floor: ToolLaneFloor, lists) -> dict:
                 % (lane, ", ".join(BASE_LOCAL_TIERS))
             )
         routing[lane] = tier
+    long_context_tier = normalize_long_context_tier(
+        raw_routing.get(LONG_CONTEXT_TIER_KEY) if LONG_CONTEXT_TIER_KEY in raw_routing
+        else base["routing"].get(LONG_CONTEXT_TIER_KEY),
+    )
+    if long_context_tier:
+        routing[LONG_CONTEXT_TIER_KEY] = long_context_tier
     return {
         "version": VERSION,
         "revision": max(0, int(payload.get("revision") or 0)),

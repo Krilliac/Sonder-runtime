@@ -83,6 +83,13 @@ from ...domain.common.errors import (
     InvalidInput,
     SonderError,
 )
+from ...domain.inference_profiles import (
+    CATALOG_ABSENT,
+    CATALOG_ERROR,
+    CATALOG_OK,
+    LaunchProfileCatalog,
+    parse_launch_profile_models,
+)
 from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_CHAT,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
@@ -92,6 +99,7 @@ from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
 from ..observability import activity_tracker
 from ..provider_bindings import PROVIDER_TIERS
+import sonder_runtime.adapters.inference.launch_profile_cache as launch_profile_cache
 from .exchange_transport import (
     DEFAULT_TIMEOUT_SECONDS,
     DETAIL_LIMIT,  # noqa: F401  (re-exported)
@@ -140,6 +148,9 @@ DEFAULT_STREAM_FIRST_CONTENT_SECONDS = 0.0
 MAX_STREAM_STALL_SECONDS = 86_400.0
 DEFAULT_HEALTH_TTL_SECONDS = 5.0
 HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
+# ``/v1/models`` launch-profile metadata is optional display and routing
+# data; a slow endpoint must not hold a status read or a chat turn long.
+MODELS_PROBE_TIMEOUT_SECONDS = 2.0
 DEFAULT_HEALTH_STALE_SECONDS = 120.0
 BUSY_RETRY_SECONDS = 5.0
 READY_FILE_LIMIT = 65_536
@@ -190,7 +201,7 @@ STATUS_KEYS = (
     "provider", "state", "healthy", "checked_at", "detail", "capabilities",
     "base_url", "version", "api_version", "models", "synthetic", "identity",
     "telemetry", "fallback", "fallback_count", "tier_models",
-    "busy", "workers",
+    "busy", "workers", "tier_context",
 )
 
 _BIND_ADDRESS_REWRITES = {"0.0.0.0": "127.0.0.1", "::": "::1"}
@@ -908,6 +919,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] | None = None,
         ollama_pool=None,
+        profile_cache: launch_profile_cache.ProfileCache | None = None,
     ) -> None:
         super().__init__(
             None,
@@ -932,6 +944,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._health_cache: HealthSnapshot | None = None
         self._health_probe_monotonic = float("-inf")
         self._identity_cache: dict[tuple[str, str], tuple[float, IdentityObservation]] = {}
+        # ``/v1/models`` launch-profile metadata, shared process-wide by
+        # default so every gateway instance (status, doctor, the chat loop's
+        # context-fit check) costs one GET per endpoint per TTL.
+        self._profile_cache = (
+            profile_cache if profile_cache is not None else launch_profile_cache.shared_cache()
+        )
         # Settings of the call in flight on this thread, so the transport's
         # error classifiers can name the endpoint and update its health.
         self._call = threading.local()
@@ -1364,6 +1382,89 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         """``{provider: {tier: model}}`` from configuration alone (no I/O)."""
         return {PROVIDER_ID: self._tier_models(self.settings())}
 
+    # -- launch-profile metadata (/v1/models) --------------------------------
+
+    def _fetch_profile_catalog(self, settings: SonderInferenceConfig) -> LaunchProfileCatalog:
+        """GET ``/v1/models`` on the bounded, direct transport.  Never raises."""
+        base = settings.base_url
+        self._call.settings = settings
+        cfg = OpenAICompatibleConfig(base_url=base, api_key=settings.api_key)
+        try:
+            with trust_scope(settings.ca_bundle):
+                status, document = self.get_json(
+                    "/v1/models", timeout=MODELS_PROBE_TIMEOUT_SECONDS, cfg=cfg,
+                )
+        except SonderInferenceUnreachable as exc:
+            return LaunchProfileCatalog(
+                base, CATALOG_ERROR, _bounded("models probe failed: %s" % exc.reason),
+            )
+        except SonderError as exc:
+            return LaunchProfileCatalog(base, CATALOG_ERROR, _bounded("models probe failed: %s" % exc))
+        except Exception as exc:  # noqa: BLE001 - metadata is optional, never fatal
+            return LaunchProfileCatalog(
+                base, CATALOG_ERROR, "models probe failed: %s" % type(exc).__name__,
+            )
+        if status in (404, 405, 501):
+            return LaunchProfileCatalog(base, CATALOG_ABSENT, "no /v1/models (HTTP %d)" % status)
+        if status != 200:
+            return LaunchProfileCatalog(base, CATALOG_ERROR, "/v1/models returned HTTP %d" % status)
+        models = parse_launch_profile_models(document)
+        if models is None:
+            return LaunchProfileCatalog(base, CATALOG_ABSENT, "/v1/models has no model list")
+        return LaunchProfileCatalog(
+            base, CATALOG_OK, "%d model(s)" % len(models), MappingProxyType(models),
+        )
+
+    def model_profiles(self, *, refresh: bool = False) -> LaunchProfileCatalog:
+        """``/v1/models`` launch-profile metadata, TTL-cached per endpoint; never raises.
+
+        An Inference without ``/v1/models`` or without profile fields gives a
+        catalog whose entries report ``None`` (unknown), which never changes a
+        route.  A remote endpoint is contacted only under the same consent
+        rules as every other request.  Only provider status, doctor and the
+        chat loop's context-fit check call this; ``generate`` never does.
+        """
+        try:
+            settings = self.settings()
+            check_endpoint_policy(settings)
+        except Exception as exc:  # noqa: BLE001 - metadata is optional
+            return LaunchProfileCatalog("", CATALOG_ERROR, _bounded(
+                exc.summary if isinstance(exc, SonderInferenceUnreachable)
+                else exc if isinstance(exc, SonderError) else type(exc).__name__
+            ))
+        return self._profile_cache.get(
+            settings.base_url,
+            lambda: self._fetch_profile_catalog(settings),
+            ttl=launch_profile_cache.profile_ttl_seconds(self._env),
+            refresh=refresh,
+        )
+
+    def tier_context(self, catalog: LaunchProfileCatalog | None = None) -> dict[str, object]:
+        """Per-tier context length and capabilities (the additive status field).
+
+        ``catalog`` defaults to :meth:`model_profiles`.  A tier whose model has
+        no reported ``context_length`` says ``None``: unknown, not unlimited.
+        """
+        settings = self.settings()
+        catalog = catalog if catalog is not None else self.model_profiles()
+        tiers: dict[str, object] = {}
+        for tier, model in self._tier_models(settings).items():
+            found = catalog.lookup(model)
+            tiers[tier] = {
+                "model": model,
+                "profile": found.profile if found is not None else None,
+                "context_length": found.context_length if found is not None else None,
+                "capabilities": (
+                    list(found.capabilities)
+                    if found is not None and found.capabilities is not None else None
+                ),
+                "source": (
+                    "inference_profile"
+                    if found is not None and found.context_length is not None else "unknown"
+                ),
+            }
+        return {"state": catalog.state, "detail": catalog.detail, "tiers": tiers}
+
     def _workers_status(self, settings: SonderInferenceConfig) -> list[dict[str, object]]:
         """One content-free row per approved private worker (never the token)."""
         rows: list[dict[str, object]] = []
@@ -1443,6 +1544,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 ))
                 identity = None
             entry["identity"] = identity.to_dict() if identity is not None else None
+            try:
+                entry["tier_context"] = self.tier_context()
+            except Exception as exc:  # noqa: BLE001 - profile metadata is optional display data
+                logger.info("sonder-inference profile metadata unavailable: %s", _bounded(
+                    exc if isinstance(exc, SonderError) else type(exc).__name__,
+                ))
         pool = self._ollama_pool
         if pool is not None:
             # Reuse the worker rows read above: one health call per worker.

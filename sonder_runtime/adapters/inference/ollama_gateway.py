@@ -46,6 +46,7 @@ from ...application.ports.model_target import (
     ResolvedModelRoute,
 )
 from ...platform import context_policy
+from ...platform.tier_model_options import tier_num_ctx as _configured_tier_num_ctx
 from ...platform.metrics import default_registry
 from .telemetry import from_ollama
 from ..model_transport import ModelCallError
@@ -247,6 +248,14 @@ class OllamaGateway:
             self._route_issuer,
         )
 
+    def _tier_num_ctx(self, tier_label, cloud) -> int:
+        """The tier's configured Ollama ``num_ctx`` (``SONDER_OLLAMA_TIER_OPTIONS``), else the session window."""
+        if not cloud:
+            configured = _configured_tier_num_ctx(tier_label)
+            if configured is not None:
+                return configured
+        return self._session_num_ctx
+
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
@@ -367,9 +376,11 @@ class OllamaGateway:
                 f"tier={tier_label!r}; inference will run without system context"
             )
         effective_timeout = max(1, math.ceil(timeout)) if timeout is not None else None
+        # An explicit request option wins over the tier's configured window.
+        num_ctx = int(options.get("num_ctx", self._tier_num_ctx(tier_label, cloud)))
         logger.debug(
             f"OllamaGateway.generate: building generate fn, model={model!r}, "
-            f"temperature={options.get('temperature', 0.2)}, num_ctx={options.get('num_ctx', self._session_num_ctx)}, "
+            f"temperature={options.get('temperature', 0.2)}, num_ctx={num_ctx}, "
             f"timeout={effective_timeout}"
         )
         generate_options = {}
@@ -392,7 +403,7 @@ class OllamaGateway:
             effective_system,
             float(options.get("temperature", 0.2)),
             num_predict,
-            int(options.get("num_ctx", self._session_num_ctx)),
+            num_ctx,
             cloud=cloud,
             # Keep a positive sub-second deadline bounded.  ``int(0.5)`` used
             # to become zero and the legacy transport interpreted zero as no

@@ -75,10 +75,12 @@ sonder_runtime/adapters/inference/__init__.py
 sonder_runtime/adapters/inference/anthropic_gateway.py
 sonder_runtime/adapters/inference/anthropic_spend.py
 sonder_runtime/adapters/inference/capability_refresh.py
+sonder_runtime/adapters/inference/context_fit_route.py
 sonder_runtime/adapters/inference/exchange_transport.py
 sonder_runtime/adapters/inference/gpu_admission.py
 sonder_runtime/adapters/inference/gpu_admission_store.py
 sonder_runtime/adapters/inference/injected.py
+sonder_runtime/adapters/inference/launch_profile_cache.py
 sonder_runtime/adapters/inference/log_safe.py
 sonder_runtime/adapters/inference/model_gateway_factory.py
 sonder_runtime/adapters/inference/ollama.py
@@ -314,8 +316,8 @@ sonder_runtime/application/memory/__init__.py
 sonder_runtime/application/memory/hybrid_retrieval.py
 sonder_runtime/application/memory/learning_ladder.py
 sonder_runtime/application/memory/procedural_learning.py
-sonder_runtime/application/memory/receipt_bound_fact_promotion.py
 sonder_runtime/application/memory/recall_service.py
+sonder_runtime/application/memory/receipt_bound_fact_promotion.py
 sonder_runtime/application/memory/retrieval_evaluation.py
 sonder_runtime/application/meshgen/__init__.py
 sonder_runtime/application/model_gateway/__init__.py
@@ -400,6 +402,7 @@ sonder_runtime/application/repository_intelligence/index_map.py
 sonder_runtime/application/repository_intelligence/navigation.py
 sonder_runtime/application/routing/__init__.py
 sonder_runtime/application/routing/calibration.py
+sonder_runtime/application/routing/context_fit.py
 sonder_runtime/application/routing/identity_cache.py
 sonder_runtime/application/routing/request_capabilities.py
 sonder_runtime/application/runtime_policy/__init__.py
@@ -708,5 +711,6 @@ sonder_runtime/platform/spanda_http.py
 sonder_runtime/platform/spanda_rsc.py
 sonder_runtime/platform/speculation.py
 sonder_runtime/platform/symbol_consent.py
+sonder_runtime/platform/tier_model_options.py
 sonder_runtime/platform/version.py
 sonder_runtime/sdk.py
