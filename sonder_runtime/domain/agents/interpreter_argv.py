@@ -23,6 +23,8 @@ import re
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from sonder_runtime.domain import network_path_spelling as _network_spelling
+
 
 class _Grammar(NamedTuple):
     """Short- and long-option grammar of one getopt-style interpreter family.
@@ -123,13 +125,33 @@ _GETOPT_GRAMMAR: dict[str, _Grammar] = {
         }),
         option_prefixes=("-",),
     ),
+    "php": _Grammar(
+        code="r", stop="cdzBFR", space_stop="", colon_stop="",
+        value="cdzBFRf", next_value="", stdin="a",
+        long_code=frozenset({"--run"}),
+        long_stdin=frozenset({"--interactive"}),
+        long_value=frozenset({"--file", "--define", "--php-ini"}),
+        option_prefixes=("-",),
+    ),
+    "lua": _Grammar(
+        code="e", stop="l", space_stop="", colon_stop="",
+        value="l", next_value="", stdin="i",
+        long_code=frozenset(), long_stdin=frozenset(), long_value=frozenset(),
+        option_prefixes=("-",),
+    ),
 }
 # `python -m code` (and the asyncio / _pyrepl REPLs) execute stdin even though
 # -m names a module, and `python -m pdb script.py` reads debugger commands
 # from stdin, which run Python statements (`!import os`); any other module
 # named by -m is the program, so stdin is data to it (`python -m json.tool`
-# stays allowed).
+# stays allowed). Submodule spellings such as `code.__main__` run the same
+# entry point, so callers match on the top-level module name before `.`.
 _PYTHON_STDIN_REPL_MODULES = frozenset({"code", "asyncio", "_pyrepl", "pdb"})
+# `python -m timeit` executes arbitrary Python statements given in argv
+# without `-c`.
+_PYTHON_INLINE_MODULES = frozenset({"timeit"})
+_PERL_MODULE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_:]*(?:'[A-Za-z0-9_:]+)*")
+_RUBY_STDIN_REPL_SCRIPTS = frozenset({"irb", "pry"})
 _WIN_EXT = r"(?:\.(?:exe|cmd|bat|com))?"
 _VERSION = r"(?:\d+(?:\.\d+)*)?%s" % _WIN_EXT
 
@@ -139,8 +161,9 @@ def program_name(token: object) -> str:
 
     Strips outer whitespace (matching ``workbench._resolve_program`` and
     ``run_program``), collapses ``.``, ``..`` and trailing separators across
-    both ``/`` and ``\\``, strips a Windows drive prefix (``C:python``), and
-    trims trailing dots and spaces (Windows filename aliases such as
+    both ``/`` and ``\\``, strips a Windows drive prefix (``C:python``) and
+    NTFS alternate data stream suffix (``python.exe::$DATA``), and trims
+    trailing dots and spaces (Windows filename aliases such as
     ``python.exe.`` or ``python.exe .``).
     """
     text = str(token).strip()
@@ -150,6 +173,8 @@ def program_name(token: object) -> str:
     base = normalised.rsplit("/", 1)[-1]
     if len(base) >= 2 and base[1] == ":" and base[0].isascii() and base[0].isalpha():
         base = base[2:]
+    if ":" in base:
+        base = base.split(":", 1)[0]
     return base.rstrip(". ").casefold()
 
 
@@ -157,15 +182,25 @@ def interpreter_family(name: str) -> str:
     """The inline-capable interpreter family a program basename names, or ''."""
     if re.fullmatch(r"(?:(?:pythonw?|pypyw?)%s|pyw?%s)" % (_VERSION, _WIN_EXT), name):
         return "python"
-    if re.fullmatch(r"node(?:js)?%s" % _VERSION, name):
+    if re.fullmatch(r"(?:node(?:js)?|bun)%s" % _VERSION, name):
         return "node"
-    if re.fullmatch(r"(?:ba|z|da)?sh%s" % _WIN_EXT, name):
+    if re.fullmatch(r"deno%s" % _VERSION, name):
+        return "deno"
+    if re.fullmatch(r"(?:(?:ba|z|da|a|k|mk|c|tc|fi)?sh|git-bash|busybox)%s" % _WIN_EXT, name):
         return "shell"
     if re.fullmatch(r"perl%s" % _VERSION, name):
         return "perl"
     if re.fullmatch(r"ruby%s" % _VERSION, name):
         return "ruby"
-    if re.fullmatch(r"powershell%s" % _WIN_EXT, name):
+    if re.fullmatch(r"php%s" % _VERSION, name):
+        return "php"
+    if re.fullmatch(r"lua(?:jit)?%s" % _VERSION, name):
+        return "lua"
+    if re.fullmatch(r"[gmn]?awk%s" % _VERSION, name):
+        return "awk"
+    if re.fullmatch(r"env%s" % _WIN_EXT, name):
+        return "env"
+    if re.fullmatch(r"powershell(?:_ise)?%s" % _WIN_EXT, name):
         return "powershell"
     if re.fullmatch(r"pwsh%s" % _WIN_EXT, name):
         return "pwsh"
@@ -194,7 +229,7 @@ _POWERSHELL_PARAMETERS: dict[str, tuple[tuple[str, str, frozenset[str], str], ..
         ("noprofile", "nop", frozenset(), "switch"),
         ("nologo", "nol", frozenset(), "switch"),
         ("noninteractive", "noni", frozenset(), "switch"),
-        ("noexit", "noe", frozenset(), "switch"),
+        ("noexit", "noe", frozenset(), "stdin_switch"),
         ("sta", "st", frozenset(), "switch"),
         ("mta", "mta", frozenset(), "switch"),
         ("executionpolicy", "ex", frozenset({"ep"}), "value"),
@@ -212,7 +247,7 @@ _POWERSHELL_PARAMETERS: dict[str, tuple[tuple[str, str, frozenset[str], str], ..
         ("noprofileloadtime", "noprofileloadtime", frozenset(), "switch"),
         ("nologo", "nol", frozenset(), "switch"),
         ("noninteractive", "noni", frozenset(), "switch"),
-        ("noexit", "noe", frozenset(), "switch"),
+        ("noexit", "noe", frozenset(), "stdin_switch"),
         ("interactive", "i", frozenset(), "switch"),
         ("login", "l", frozenset(), "switch"),
         ("sta", "sta", frozenset(), "switch"),
@@ -261,33 +296,51 @@ def _powershell_parameter_kind(family: str, name: str) -> str:
     return kinds.pop() if len(kinds) == 1 else ""
 
 
-def _powershell_scan(family: str, tokens: Sequence[str]) -> tuple[bool, str | None]:
-    """(runs inline code, -File operand or None) for a PowerShell argv.
+def _powershell_scan(family: str, tokens: Sequence[str]) -> tuple[bool, str | None, bool]:
+    """(runs inline code, -File operand or None, forces stdin) for PowerShell argv.
 
     Refuses unless every token up to an explicit ``-File <script>`` is a
     parameter the table pins down (with its value). A positional token is a
     -Command to Windows PowerShell (``powershell.exe "iex ..."``); pwsh's
     positional -File is refused alike, so only the explicit form passes.
+    ``-NoExit`` drops into the stdin command loop after running ``-File``, so
+    it sets ``forces_stdin=True`` like ``python -i``.
     """
     index = 0
+    forces_stdin = False
     while index < len(tokens):
         token = str(tokens[index])
         if token_runs_inline_code(family, token):
-            return True, None
+            return True, None, forces_stdin
         kind = _powershell_parameter_kind(family, _powershell_parameter_name(token, family))
         following = str(tokens[index + 1]) if index + 1 < len(tokens) else ""
         if kind == "file":
-            return False, following
+            return False, following, forces_stdin
+        if kind == "stdin_switch":
+            forces_stdin = True
+            index += 1
+            continue
         if kind == "switch":
             index += 1
             continue
         if kind == "value":
             if following and token_runs_inline_code(family, following):
-                return True, None
+                return True, None, forces_stdin
             index += 2
             continue
-        return True, None
-    return False, None
+        return True, None, forces_stdin
+    return False, None, forces_stdin
+
+
+def _perl_module_token_is_code(raw: str) -> bool:
+    """Whether a Perl ``-M``/``-m`` or ``-d:`` module text injects code."""
+    mod_part = raw.split("=", 1)[0].lstrip("-")
+    return not mod_part or not bool(_PERL_MODULE_NAME_RE.fullmatch(mod_part))
+
+
+def _node_data_import_value(value: str) -> bool:
+    """Whether a Node ``--import`` / ``--loader`` value is an inline ``data:`` URL."""
+    return value.strip().casefold().startswith("data:")
 
 
 def token_runs_inline_code(family: str, token: str) -> bool:
@@ -315,11 +368,26 @@ def token_runs_inline_code(family: str, token: str) -> bool:
         # and finds them anywhere in its command line, not only at the start
         # of a token: `cmd /d/c dir` and `cmd x/c dir` both run `dir`.
         return bool(re.search(r"/[ckr]", text, re.IGNORECASE))
+    if family == "env":
+        if text.startswith("--"):
+            return text.split("=", 1)[0] == "--split-string"
+        return text.startswith("-") and len(text) >= 2 and "S" in text[1:]
+    if family == "deno":
+        return text.strip().casefold() == "eval"
     grammar = _GETOPT_GRAMMAR.get(family)
     if grammar is None:
         return False
     if text.startswith("--"):
-        return text.split("=", 1)[0] in grammar.long_code
+        opt_name, has_eq, opt_val = text.partition("=")
+        if family == "node":
+            opt_name = opt_name.replace("_", "-")
+            if (
+                has_eq
+                and opt_name in {"--import", "--loader", "--experimental-loader"}
+                and _node_data_import_value(opt_val)
+            ):
+                return True
+        return opt_name in grammar.long_code
     # The shells take `+` as an option prefix too, and bash still reads `c`
     # in `+c` / `+lc` as "run the next argument".
     if not text.startswith(grammar.option_prefixes) or len(text) < 2:
@@ -329,6 +397,11 @@ def token_runs_inline_code(family: str, token: str) -> bool:
         if letter in grammar.code:
             return True
         rest = cluster[position + 1:]
+        if family == "perl":
+            if letter in ("M", "m") and rest:
+                return _perl_module_token_is_code(rest)
+            if letter == "d" and rest.startswith(":"):
+                return _perl_module_token_is_code(rest[1:])
         if letter in grammar.stop or (letter in grammar.colon_stop and rest.startswith(":")):
             return False
         if letter in grammar.space_stop:
@@ -336,6 +409,42 @@ def token_runs_inline_code(family: str, token: str) -> bool:
             remainder = rest[space.end():] if space else ""
             return any(item in grammar.code for item in remainder)
     return False
+
+
+def _python_runs_inline_module(tokens: Sequence[str]) -> bool:
+    """Whether Python argv runs an inline-eval ``-m`` module (e.g. ``timeit``)."""
+    grammar = _GETOPT_GRAMMAR["python"]
+    texts = [str(token) for token in tokens]
+    for index, text in enumerate(texts):
+        if text == "--":
+            break
+        if not text.startswith("-") or text.startswith("--") or len(text) < 2:
+            if not text.startswith("-"):
+                break
+            continue
+        cluster = text[1:]
+        for position, letter in enumerate(cluster):
+            rest = cluster[position + 1:]
+            if letter == "m":
+                module = rest or (texts[index + 1] if index + 1 < len(texts) else "")
+                return module.split(".", 1)[0] in _PYTHON_INLINE_MODULES
+            if letter in grammar.stop:
+                break
+    return False
+
+
+def _awk_runs_inline_code(tokens: Sequence[str]) -> bool:
+    """Whether ``awk`` runs an inline program (no ``-f``/``--file`` or uses ``-e``)."""
+    has_file = False
+    for token in tokens:
+        text = str(token)
+        if text == "--":
+            break
+        if text in {"-e", "--source"} or text.startswith(("-e", "--source=")):
+            return True
+        if text in {"-f", "--file"} or text.startswith(("-f", "--file=")):
+            has_file = True
+    return not has_file
 
 
 def runs_inline_code(family: str, tokens: Sequence[str]) -> bool:
@@ -346,14 +455,47 @@ def runs_inline_code(family: str, tokens: Sequence[str]) -> bool:
     """
     if family in _POWERSHELL_FAMILIES:
         return _powershell_scan(family, tokens)[0]
-    return any(token_runs_inline_code(family, str(token)) for token in tokens)
+    if family == "awk":
+        return _awk_runs_inline_code(tokens)
+    if any(token_runs_inline_code(family, str(token)) for token in tokens):
+        return True
+    if family == "python":
+        return _python_runs_inline_module(tokens)
+    if family == "node":
+        texts = [str(token) for token in tokens]
+        for index, text in enumerate(texts[:-1]):
+            if text.startswith("--") and "=" not in text:
+                opt_name = text.replace("_", "-")
+                if opt_name in {"--import", "--loader", "--experimental-loader"} and _node_data_import_value(texts[index + 1]):
+                    return True
+    if family == "perl":
+        texts = [str(token) for token in tokens]
+        for index, text in enumerate(texts[:-1]):
+            if text in {"-M", "-m"} and _perl_module_token_is_code(texts[index + 1]):
+                return True
+    return False
 
 
 def _powershell_stdin_runs_as_code(family: str, tokens: Sequence[str]) -> bool:
-    # Only an explicit -File <script> makes stdin data. A positional value is
-    # a -Command to Windows PowerShell, and -File - reads stdin.
-    inline, operand = _powershell_scan(family, tokens)
-    return inline or operand is None or operand.strip() in {"", "-"}
+    # Only an explicit -File <script> (without -NoExit) makes stdin data.
+    # A positional value is a -Command to Windows PowerShell, and -File -
+    # reads stdin.
+    inline, operand, forces_stdin = _powershell_scan(family, tokens)
+    return inline or forces_stdin or operand is None or operand.strip() in {"", "-"}
+
+
+def _deno_stdin_runs_as_code(tokens: Sequence[str]) -> bool:
+    """Whether ``deno`` invoked with ``tokens`` executes stdin as code."""
+    texts = [str(token) for token in tokens]
+    if not texts:
+        return True
+    non_flags = [tok for tok in texts if tok and not tok.startswith("-")]
+    if not non_flags:
+        return True
+    sub = non_flags[0].casefold()
+    if sub == "repl":
+        return True
+    return any(_names_stdin(tok) for tok in texts)
 
 
 def stdin_runs_as_code(family: str, tokens: Sequence[str]) -> bool:
@@ -376,21 +518,24 @@ def stdin_runs_as_code(family: str, tokens: Sequence[str]) -> bool:
         return True
     if family in _POWERSHELL_FAMILIES:
         return _powershell_stdin_runs_as_code(family, tokens)
+    if family == "deno":
+        return _deno_stdin_runs_as_code(tokens)
     grammar = _GETOPT_GRAMMAR.get(family)
     if grammar is None:
         return False
     texts = [str(token) for token in tokens]
     # A reading depends only on where it resumes and whether a stdin flag
-    # was seen, so each (index, forced) state is walked once: at most
-    # 2 * (len(texts) + 1) walks, however many options branch.
-    pending: list[tuple[int, bool]] = [(0, False)]
-    seen: set[tuple[int, bool]] = set()
+    # (or ruby -S PATH search) was seen, so each state is walked once.
+    pending: list[tuple[int, bool, bool]] = [(0, False, False)]
+    seen: set[tuple[int, bool, bool]] = set()
     while pending:
         state = pending.pop()
         if state in seen:
             continue
         seen.add(state)
-        if _reading_runs_stdin(family, grammar, texts, state[0], state[1], pending):
+        if _reading_runs_stdin(
+            family, grammar, texts, state[0], state[1], state[2], pending,
+        ):
             return True
     return False
 
@@ -406,7 +551,8 @@ def _reading_runs_stdin(
     texts: list[str],
     index: int,
     forced: bool,
-    pending: list[tuple[int, bool]],
+    ruby_path_search: bool,
+    pending: list[tuple[int, bool, bool]],
 ) -> bool:
     """Whether one reading of ``texts[index:]`` runs stdin as the program.
 
@@ -423,10 +569,14 @@ def _reading_runs_stdin(
             # `--` ends option parsing; the next token is the operand. A `-`
             # or empty name there (`python -- -`, `node -- ""`) is still the
             # stdin program, and nothing after `--` means no operand at all.
-            return forced or index + 1 >= len(texts) or _names_stdin(texts[index + 1])
+            if forced or index + 1 >= len(texts) or _names_stdin(texts[index + 1]):
+                return True
+            return ruby_path_search and program_name(texts[index + 1]) in _RUBY_STDIN_REPL_SCRIPTS
         consumed = 0
         if text.startswith("--"):
             name, equals, _ = text.partition("=")
+            if family == "node":
+                name = name.replace("_", "-")
             forced = forced or name in grammar.long_stdin
             if not equals and (grammar.long_value is None or name in grammar.long_value):
                 consumed = 1
@@ -435,6 +585,8 @@ def _reading_runs_stdin(
             for position, letter in enumerate(cluster):
                 if letter in grammar.stdin:
                     forced = True
+                if family == "ruby" and letter == "S":
+                    ruby_path_search = True
                 if letter in grammar.next_value:
                     consumed += 1
                     continue
@@ -442,19 +594,23 @@ def _reading_runs_stdin(
                     attached = cluster[position + 1:]
                     if family == "python" and letter == "m":
                         # -m takes the module and leaves the rest of argv to
-                        # it; a missing or `-` module is refused.
+                        # it; a missing or `-` module is refused, as is any
+                        # submodule of the REPL modules (`code.__main__`).
                         module = attached or (
                             texts[index + 1 + consumed]
                             if index + 1 + consumed < len(texts) else "-"
                         )
-                        return forced or module == "-" or module in _PYTHON_STDIN_REPL_MODULES
+                        top_module = module.split(".", 1)[0]
+                        return forced or module == "-" or top_module in _PYTHON_STDIN_REPL_MODULES
                     if not attached:
                         consumed += 1
                     break
         else:
+            if ruby_path_search and program_name(text) in _RUBY_STDIN_REPL_SCRIPTS:
+                return True
             return forced
         for skipped in range(consumed):
-            pending.append((index + 1 + skipped, forced))
+            pending.append((index + 1 + skipped, forced, ruby_path_search))
         index += 1 + consumed
     return True
 
@@ -479,12 +635,29 @@ _CMD_NAME_TERMINATORS = ",;=/("
 # build tools, and their argument grammars hide an interpreter from this
 # guard, so they are refused wherever they appear.
 _COMMAND_STRING_LAUNCHERS = (
-    "forfiles", "wmic", "schtasks", "at", "runas", "mshta", "rundll32",
+    "forfiles", "wmic", "schtasks", "runas", "mshta", "rundll32",
     "wscript", "cscript", "regsvr32", "msiexec", "certutil", "bitsadmin",
+    "wsl", "wslg", "pcalua", "conhost", "syncappvpublishingserver",
+    "cmstp", "infdefaultinstall", "odbcconf", "scriptrunner", "mavinject",
+    "regasm", "regsvcs", "installutil", "ssh", "ftp", "diskshadow",
 )
 _COMMAND_STRING_LAUNCHER_RE = re.compile(
     r"(?:%s)%s" % ("|".join(_COMMAND_STRING_LAUNCHERS), _WIN_EXT)
 )
+# Short two-letter Windows launchers that also collide with common English
+# words or test-filter tokens (`echo look at this`, `pytest -k at`). Refused
+# in command position (index 0, after a command-launching wrapper, or with an
+# explicit path/extension) rather than as plain data arguments.
+_COMMAND_POS_ONLY_LAUNCHERS = ("at", "sc", "hh")
+_COMMAND_POS_ONLY_LAUNCHER_RE = re.compile(
+    r"(?:%s)%s" % ("|".join(_COMMAND_POS_ONLY_LAUNCHERS), _WIN_EXT)
+)
+_CMD_WRAPPER_VERBS = frozenset({"call", "start", "if", "else", "do"})
+_LAUNCHER_WRAPPER_VERBS = _CMD_WRAPPER_VERBS | frozenset({
+    "cmd", "uv", "npx", "pnpx", "bunx", "env", "sudo", "xargs", "run",
+    "exec", "nice", "nohup", "timeout", "time", "stdbuf", "setsid",
+})
+_WIN_EXEC_EXTS = (".exe", ".cmd", ".bat", ".com")
 
 OPAQUE_QUOTES = (
     "double quotes are not supported in build_run commands (the program "
@@ -501,35 +674,81 @@ OPAQUE_NON_ASCII_WHITESPACE = (
 OPAQUE_FOR_LOOP = "cmd.exe for loops are not supported in build_run commands"
 
 
-def program_name_candidates(token: object) -> tuple[str, ...]:
+def program_name_candidates(
+    token: object, *, include_slash_prefixes: bool = False,
+) -> tuple[str, ...]:
     """Every normalised program name ``token`` can name once cmd.exe reads it.
 
     The whole token, and each piece between cmd.exe's name delimiters ``=``,
-    ``,`` and ``;`` with leading ``@`` stripped: ``call =python``,
-    ``if exist x=python`` and ``start @python`` all reach ``python``. Each
-    candidate goes through :func:`program_name`. A piece that is not really a
-    program only makes the guard refuse more.
+    ``,``, ``;`` and ``(`` with leading ``@`` stripped: ``call =python``,
+    ``if exist x=python``, ``start @python`` and ``call cmd(/c ...)`` all
+    reach the command name. When ``include_slash_prefixes`` is True, prefixes
+    before ``/`` (``forfiles/m``, ``C:/Windows/System32/forfiles.exe/c``) are
+    also yielded. Each candidate goes through :func:`program_name`.
     """
     text = str(token)
     names: list[str] = []
-    for raw in (text, *re.split(r"[=,;]", text)):
-        name = program_name(raw.strip().lstrip(_CMD_NAME_LEADERS))
+    for raw in (text, *re.split(r"[=,;(]", text)):
+        cleaned = raw.strip().lstrip(_CMD_NAME_LEADERS)
+        name = program_name(cleaned)
         if name and name not in names:
             names.append(name)
+        if include_slash_prefixes and "/" in cleaned:
+            pos = 0
+            while True:
+                slash = cleaned.find("/", pos)
+                if slash < 0:
+                    break
+                prefix_name = program_name(cleaned[:slash])
+                if prefix_name and prefix_name not in names:
+                    names.append(prefix_name)
+                pos = slash + 1
     return tuple(names)
+
+
+def _token_has_path_or_exec_ext(token: str) -> bool:
+    """Whether ``token`` carries a path separator or Windows executable suffix."""
+    lowered = token.strip().rstrip(". ").casefold()
+    return (
+        "/" in lowered
+        or "\\" in lowered
+        or lowered.endswith(_WIN_EXEC_EXTS)
+    )
 
 
 def command_string_launcher(tokens: Sequence[object]) -> str:
     """The first command-string launcher any of ``tokens`` names, or ''.
 
     Names are matched after :func:`program_name_candidates` normalisation
-    (case, path, ``.exe``/``.cmd``/``.bat``/``.com``, cmd.exe delimiters), the
-    same way the interpreter families are.
+    (case, path, ``.exe``/``.cmd``/``.bat``/``.com``, cmd.exe delimiters and
+    glued ``/`` switches), the same way the interpreter families are. Short
+    two-letter Windows launchers (``at``, ``sc``, ``hh``) are matched only in
+    command position (index 0, after a command-launching wrapper, or with an
+    explicit path/extension) so ordinary text arguments such as ``echo look at
+    this`` or ``pytest -k at`` are not falsely rejected.
     """
-    for token in tokens:
-        for name in program_name_candidates(token):
+    wrapper_seen = False
+    for index, token in enumerate(tokens):
+        raw_text = str(token)
+        candidates = program_name_candidates(raw_text, include_slash_prefixes=True)
+        for name in candidates:
             if _COMMAND_STRING_LAUNCHER_RE.fullmatch(name):
                 return name
+        in_cmd_pos = (
+            index == 0
+            or wrapper_seen
+            or _token_has_path_or_exec_ext(raw_text)
+        )
+        if in_cmd_pos:
+            for name in candidates:
+                if _COMMAND_POS_ONLY_LAUNCHER_RE.fullmatch(name):
+                    return name
+        if any(
+            name in _LAUNCHER_WRAPPER_VERBS
+            or any(name.endswith(ext) and name[:-len(ext)] in _LAUNCHER_WRAPPER_VERBS for ext in _WIN_EXEC_EXTS)
+            for name in candidates
+        ):
+            wrapper_seen = True
     return ""
 
 
@@ -582,7 +801,7 @@ def _opaque_reason(command: str) -> str:
 
 
 def _split_glued_windows_switch(tok: str, *, is_verb: bool) -> tuple[str, str] | None:
-    """Split ``cmd/c``, ``cmd.exe/d/c``, ``powershell/c`` into (program, /switch)."""
+    """Split ``cmd/c``, ``cmd.exe/d/c``, ``powershell/c``, ``powershell/nop``."""
     start = 0
     while True:
         pos = tok.find("/", start)
@@ -593,7 +812,13 @@ def _split_glued_windows_switch(tok: str, *, is_verb: bool) -> tuple[str, str] |
         if prefix and len(suffix) > 1:
             fam = interpreter_family(program_name(prefix))
             if fam in _WINDOWS_SLASH_FAMILIES and (
-                is_verb or fam == "cmd" or token_runs_inline_code(fam, suffix)
+                is_verb
+                or fam == "cmd"
+                or token_runs_inline_code(fam, suffix)
+                or (
+                    fam in _POWERSHELL_FAMILIES
+                    and bool(_powershell_parameter_kind(fam, _powershell_parameter_name(suffix, fam)))
+                )
             ):
                 return prefix, suffix
         start = pos + 1
@@ -606,12 +831,34 @@ def _has_cmd_for_loop(tokens: Sequence[str]) -> bool:
     verb_head = tokens[0].split("=", 1)[0].split("/", 1)[0]
     if program_name(verb_head) == "for":
         return True
-    for idx, tok in enumerate(tokens[:-1]):
-        if program_name(tok.split("/", 1)[0]) != "for":
+    for idx, tok in enumerate(tokens):
+        if "/" in tok:
+            head, tail = tok.split("/", 1)
+            if program_name(head.lstrip(_CMD_NAME_LEADERS)) == "for" and tail[:1].casefold() in {"f", "d", "l", "r"}:
+                return True
+        if idx + 1 >= len(tokens):
+            continue
+        if program_name(tok.split("/", 1)[0].lstrip(_CMD_NAME_LEADERS)) != "for":
             continue
         nxt = tokens[idx + 1].casefold()
         if nxt in {"/f", "/d", "/l", "/r"} or (
             len(nxt) >= 2 and nxt[0] == "%" and nxt[1].isalpha()
+        ):
+            return True
+    return False
+
+
+def _part_names_cmd_target(part: str) -> bool:
+    """Whether an ``=``-separated piece names an interpreter, launcher or ``for``."""
+    cleaned = part.strip().lstrip(_CMD_NAME_LEADERS)
+    if not cleaned:
+        return False
+    for name in program_name_candidates(cleaned, include_slash_prefixes=True):
+        if (
+            name == "for"
+            or interpreter_family(name)
+            or _COMMAND_STRING_LAUNCHER_RE.fullmatch(name)
+            or _COMMAND_POS_ONLY_LAUNCHER_RE.fullmatch(name)
         ):
             return True
     return False
@@ -639,21 +886,31 @@ def _expand_cmd_segment(
         return tuple(tokens), True
     if child_tokens:
         return tuple(tokens), False
+    first_verb = program_name(tokens[0].split("=", 1)[0].split("/", 1)[0])
+    has_wrapper = first_verb in _CMD_WRAPPER_VERBS
     expanded: list[str] = []
     for idx, tok in enumerate(tokens):
+        is_verb = idx == 0 or has_wrapper
         if "=" in tok and not tok.startswith(("-", "/")):
-            head, tail = tok.split("=", 1)
-            if head and interpreter_family(program_name(head)):
-                expanded.append(head)
-                if tail:
-                    expanded.append(tail)
+            parts = [part for part in tok.split("=") if part]
+            if any(_part_names_cmd_target(part) for part in parts):
+                for part_idx, part in enumerate(parts):
+                    part_verb = is_verb or part_idx == 0
+                    if "/" in part and not interpreter_family(program_name(part)):
+                        split_part = _split_glued_windows_switch(part, is_verb=part_verb)
+                        if split_part is not None:
+                            expanded.extend(split_part)
+                            continue
+                    expanded.append(part)
                 continue
         if "/" in tok and not interpreter_family(program_name(tok)):
-            split_result = _split_glued_windows_switch(tok, is_verb=(idx == 0))
+            split_result = _split_glued_windows_switch(tok, is_verb=is_verb)
             if split_result is not None:
                 expanded.extend(split_result)
                 continue
         expanded.append(tok)
+    if _has_cmd_for_loop(expanded):
+        return tuple(expanded), True
     return tuple(expanded), False
 
 
@@ -698,15 +955,14 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
     expect_redir_target = False
 
     def _consume_pipe() -> None:
-        nonlocal cur_stdin, next_from_pipe, last_closed_group
+        nonlocal cur_stdin, next_from_pipe
         if not cur_tokens and not cur_has_token:
             if next_from_pipe:
                 cur_stdin = True
                 next_from_pipe = False
-            last_closed_group = None
 
     def _flush_word() -> None:
-        nonlocal cur_has_token, cur_quoted, expect_redir_target
+        nonlocal cur_has_token, cur_quoted, expect_redir_target, last_closed_group
         if not cur_has_token:
             return
         word = "".join(cur_buf)
@@ -718,6 +974,7 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
             expect_redir_target = False
         else:
             cur_tokens.append(word)
+            last_closed_group = None
 
     def _flush_segment() -> None:
         nonlocal cur_stdin, last_closed_group, expect_redir_target
@@ -757,6 +1014,14 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
             i += 1
             continue
 
+        # cmd.exe delimits redirection filenames on space, tab, `,`, `;` and
+        # `=` in both readings (`>nul=python -c ...`, `>nul,python -Wx,y`).
+        if expect_redir_target and ch in " \t,=;":
+            if cur_has_token:
+                _flush_word()
+            i += 1
+            continue
+
         at_name = not cur_tokens and not expect_redir_target
         if child_tokens:
             if at_name and not cur_has_token and ch in _CMD_NAME_LEADERS:
@@ -791,18 +1056,21 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
 
         if ch in "\r\n":
             _flush_segment()
+            last_closed_group = None
             next_from_pipe = False
             i += 1
             continue
 
         if ch == "&":
             _flush_segment()
+            last_closed_group = None
             next_from_pipe = False
             i += 2 if i + 1 < length and command[i + 1] == "&" else 1
             continue
 
         if ch == "|":
             _flush_segment()
+            last_closed_group = None
             if i + 1 < length and command[i + 1] == "|":
                 next_from_pipe = False
                 i += 2
@@ -813,6 +1081,7 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
 
         if ch == "(":
             _flush_segment()
+            last_closed_group = None
             group_stack.append((len(segments), next_from_pipe))
             next_from_pipe = False
             i += 1
@@ -877,3 +1146,160 @@ def parse_build_command(command: str, *, child_tokens: bool = False) -> BuildCom
         opaque=bool(reason),
         reason=reason,
     )
+
+
+class BuildGuardPlan(NamedTuple):
+    """Guard verdict and path-confinement tokens extracted from ``build_run``."""
+
+    opaque_reason: str
+    launcher: str
+    inline_violation: bool
+    stdin_violation: bool
+    path_tokens: tuple[str, ...]
+    program_tokens: tuple[str, ...]
+
+
+def _collect_segment_invocations(
+    seg_list: Sequence[str], seg_stdin: bool,
+) -> list[tuple[str, list[str], bool]]:
+    """Collect every interpreter invocation named in one command segment."""
+    found: list[tuple[str, list[str], bool]] = []
+    for index, token in enumerate(seg_list):
+        trailing = list(seg_list[index + 1:])
+        if "(" in token:
+            head, rest = token.split("(", 1)
+            paren_fam = interpreter_family(program_name(head.strip().lstrip(_CMD_NAME_LEADERS)))
+            if paren_fam:
+                found.append((paren_fam, ["(" + rest, *trailing], seg_stdin))
+        for name in program_name_candidates(token):
+            family = interpreter_family(name)
+            if family:
+                found.append((family, trailing, seg_stdin))
+    return found
+
+
+def analyze_build_command(
+    command_text: str, *, stdin_present: bool, is_windows: bool,
+) -> BuildGuardPlan:
+    """Evaluate a ``build_run`` command string under cmd, child-CRT and POSIX readings."""
+    command_argv = command_text.split()
+    readings = (
+        parse_build_command(command_text),
+        parse_build_command(command_text, child_tokens=True),
+    )
+    for parsed in readings:
+        if parsed.opaque:
+            return BuildGuardPlan(parsed.reason, "", False, False, (), ())
+
+    path_tokens: list[str] = list(command_argv[1:])
+    path_tokens.extend(readings[0].redir_targets)
+    program_tokens: list[str] = list(command_argv[:1])
+    invocations: list[tuple[str, list[str], bool]] = []
+    launcher = ""
+
+    for parsed in readings:
+        for seg_tokens, seg_receives_stdin in parsed.segments:
+            seg_stdin = stdin_present or seg_receives_stdin
+            seg_list = list(seg_tokens)
+            if not launcher:
+                launcher = command_string_launcher(seg_list)
+            if seg_list:
+                program_tokens.append(seg_list[0])
+            path_tokens.extend(seg_list[1:])
+            invocations.extend(_collect_segment_invocations(seg_list, seg_stdin))
+
+    if not is_windows and command_argv:
+        # On POSIX harness_tools executes command.split() directly with no shell,
+        # so `|` and `&` stay literal inside argv tokens (`python -W x|y -c ...`).
+        if not launcher:
+            launcher = command_string_launcher(command_argv)
+        invocations.extend(_collect_segment_invocations(command_argv, stdin_present))
+
+    inline_violation = any(
+        runs_inline_code(family, tokens) for family, tokens, _ in invocations
+    )
+    stdin_violation = any(
+        has_stdin and stdin_runs_as_code(family, tokens)
+        for family, tokens, has_stdin in invocations
+    )
+    return BuildGuardPlan(
+        opaque_reason="",
+        launcher=launcher,
+        inline_violation=inline_violation,
+        stdin_violation=stdin_violation,
+        path_tokens=tuple(path_tokens),
+        program_tokens=tuple(program_tokens),
+    )
+
+
+def analyze_argv_command(
+    program: str, argv: Sequence[str], *, stdin_present: bool,
+) -> tuple[str, str]:
+    """Evaluate an argv-style command (``workspace_run`` / ``run_program``).
+
+    Returns ``("launcher", name)``, ``("inline", family)``,
+    ``("stdin", family)``, or ``("", "")`` when allowed.
+    """
+    argv_list = [str(item) for item in argv]
+    launcher_tokens = [program, *argv_list]
+    launcher = command_string_launcher(launcher_tokens)
+    if launcher:
+        return "launcher", launcher
+    invocations: list[tuple[str, list[str]]] = []
+    direct_family = interpreter_family(program_name(program))
+    if direct_family:
+        invocations.append((direct_family, argv_list))
+    for index, token in enumerate(argv_list):
+        family = interpreter_family(program_name(token))
+        if family:
+            invocations.append((family, argv_list[index + 1:]))
+    for family, tokens in invocations:
+        if runs_inline_code(family, tokens):
+            return "inline", family
+    if stdin_present:
+        for family, tokens in invocations:
+            if stdin_runs_as_code(family, tokens):
+                return "stdin", family
+    return "", ""
+
+
+def expand_argv_path_candidates(
+    raw_item: object, *, is_windows: bool,
+) -> tuple[bool, tuple[str, ...]]:
+    """Expand one argv token into (network_violation, path_candidates).
+
+    Checks both the whole token and every value after ``=`` (for both option
+    spellings like ``--out=../x`` and non-option spellings like
+    ``type=..\\outside.txt`` or ``dd of=../../outside.txt``), strips leading
+    ``@``, ``=``, ``,`` and ``;``, rejects embedded UNC/device spellings, and
+    expands glued option prefixes (``-C../..``, ``/Fe../x.exe``).
+    """
+    token = str(raw_item or "").strip().strip('"\'')
+    if not token:
+        return False, ()
+    readings: list[str] = [token]
+    if "=" in token:
+        for part in token.split("=")[1:]:
+            cleaned_part = part.strip().strip('"\'')
+            if cleaned_part and cleaned_part not in readings:
+                readings.append(cleaned_part)
+    all_candidates: list[str] = []
+    for reading in readings:
+        raw = reading.lstrip("@=,;")
+        if not raw:
+            continue
+        if _network_spelling.contains_network_spelling(raw):
+            return True, ()
+        candidates = [raw]
+        switch = is_windows and raw.startswith("/")
+        if raw.startswith("-") or switch:
+            stop = re.search(r"[.~/\\=]|[A-Za-z]:[\\/]", raw[1:])
+            if stop:
+                glued = [raw[start:] for start in range(1, stop.start() + 2)]
+                candidates = ([raw] if switch and "=" not in raw else []) + glued
+        if any(_network_spelling.is_network_spelling(value) for value in candidates):
+            return True, ()
+        for candidate in candidates:
+            if candidate not in all_candidates:
+                all_candidates.append(candidate)
+    return False, tuple(all_candidates)

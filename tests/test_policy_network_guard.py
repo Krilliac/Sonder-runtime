@@ -464,3 +464,68 @@ def test_execution_guard_refuses_a_forward_slash_unc_glued_to_an_option(
     )
     assert REFUSAL in result, (token, result)
     assert recorder.calls == []
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_execution_guard_refuses_network_program_paths_before_any_fs_call(
+    recorder, project, form,
+):
+    ws_res = server._agent_project_execution_argument_error(
+        "workspace_run", {"program": form, "args": [], "cwd": str(project)},
+        str(project),
+    )
+    assert REFUSAL in ws_res, (form, ws_res)
+    build_res = server._agent_project_execution_argument_error(
+        "build_run", {"root": str(project), "command": form},
+        str(project),
+    )
+    assert REFUSAL in build_res, (form, build_res)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_workbench_resolve_program_refuses_network_paths_before_realpath(
+    recorder, form,
+):
+    from sonder_runtime.adapters.filesystem import workbench
+
+    with pytest.raises(PermissionError):
+        workbench._resolve_program(form)
+    assert recorder.calls == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="extended-length drive paths are a Windows spelling")
+def test_artifact_verify_passes_stripped_extended_local_path(monkeypatch, tmp_path):
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    seen: list[str] = []
+
+    def fake_verify(path: str) -> dict:
+        seen.append(path)
+        return {"ok": True, "checked": 0, "grounding": {}, "root": path, "failures": []}
+
+    monkeypatch.setattr(server.assetgen, "verify_pack", fake_verify)
+    extended = "\\\\?\\" + str(pack)
+    out = server.artifact_verify(extended)
+    assert "artifact verification: PASS" in out
+    assert seen == [str(pack)]
+
+
+def test_run_read_only_inspection_uses_file_ops_split_roots(monkeypatch, tmp_path):
+    captured: list[tuple] = []
+
+    class _FakeInspections:
+        def inspect(self, name, args, context):
+            captured.append(context.workspace_roots)
+            return type(
+                "R", (), {"ok": True, "output": "ok", "error_code": "", "evidence": {}},
+            )()
+
+    monkeypatch.setattr(server, "_file_developer_allowed", lambda token: False)
+    monkeypatch.setattr(server, "_file_bypass_allowed", lambda token, approval: True)
+    monkeypatch.setattr(server, "_application", lambda: type("A", (), {"inspections": _FakeInspections()})())
+    monkeypatch.setattr(server, "_record_direct_tool", lambda *a, **kw: None)
+
+    raw_roots = os.pathsep.join([str(tmp_path), r"\\host\share\bad", "relative/bad"])
+    server._run_read_only_inspection("workspace_inventory", {"path": str(tmp_path)}, extra_roots=raw_roots)
+    assert captured == [(tmp_path.resolve(),)]

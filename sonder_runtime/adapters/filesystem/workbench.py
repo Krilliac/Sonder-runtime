@@ -28,6 +28,7 @@ from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 import sonder_runtime.adapters.git_discovery as git_discovery
+from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.platform import logging as runtime_logging
 from sonder_runtime.platform import paths as runtime_paths
 
@@ -998,6 +999,9 @@ def _resolve_program(program, *, extra_roots="", bypass=False):
     value = str(program or "").strip()
     if not value:
         raise ValueError("program is required")
+    # Refuse UNC/device/NT-namespace spellings before any os.path.realpath
+    # call can open an SMB share (NTLM credential leak).
+    value = file_ops._reject_network_path(value)
     if Path(value).is_absolute() or any(mark in value for mark in ("/", "\\")):
         if Path(value).is_absolute():
             if os.path.normcase(os.path.realpath(value)) == os.path.normcase(os.path.realpath(sys.executable)):
@@ -1508,8 +1512,12 @@ def _refuse_inline_code(
     resolved directory the child will start in; a stdin-fed program operand
     is resolved against it.
     """
-    basename = Path(executable).name.lower()
-    stem = basename.removesuffix(".exe")
+    basename = _interpreter_argv.program_name(executable)
+    stem = basename
+    for suffix in (".exe", ".cmd", ".bat", ".com"):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
     inspected = args if script_args_start is None else args[:script_args_start]
     lowered_args = [arg.lower() for arg in inspected]
     stdin_is_program_input = has_stdin and script_args_start is None
@@ -1518,18 +1526,52 @@ def _refuse_inline_code(
             "%s launches the program named in its arguments; run that program"
             " directly or use script_run" % stem
         )
-    if stem in ("powershell", "pwsh"):
-        if any(_is_inline_powershell_arg(arg) for arg in lowered_args):
+    if stem == "cmd" and not allow_cmd_script:
+        raise PermissionError("inline cmd execution is disabled; use script_run")
+    if Path(basename).suffix.lower() in (".bat", ".cmd") and not allow_cmd_script:
+        raise PermissionError("batch files must be executed with script_run")
+    if script_args_start is None:
+        launcher = _interpreter_argv.command_string_launcher([basename, *inspected])
+        if launcher:
+            raise PermissionError(
+                "%s launches the program named in its arguments; run that program"
+                " directly or use script_run" % launcher
+            )
+    family = _interpreter_argv.interpreter_family(basename)
+    if family in ("powershell", "pwsh"):
+        if any(_is_inline_powershell_arg(arg) for arg in lowered_args) or (
+            script_args_start is None and _interpreter_argv.runs_inline_code(family, inspected)
+        ):
             raise PermissionError("inline PowerShell commands are disabled; use script_run")
-        if stdin_is_program_input and not _powershell_names_script(lowered_args):
+        if stdin_is_program_input and (
+            not _powershell_names_script(lowered_args)
+            or _interpreter_argv.stdin_runs_as_code(family, inspected)
+        ):
             raise PermissionError(
                 "PowerShell would run stdin as commands; pass -File <script>"
                 " or use script_run"
             )
-    if stem == "cmd" and not allow_cmd_script:
-        raise PermissionError("inline cmd execution is disabled; use script_run")
-    if Path(executable).suffix.lower() in (".bat", ".cmd") and not allow_cmd_script:
-        raise PermissionError("batch files must be executed with script_run")
+    if script_args_start is None:
+        verdict, detail = _interpreter_argv.analyze_argv_command(
+            basename, inspected, stdin_present=stdin_is_program_input,
+        )
+        if verdict == "inline":
+            if detail in ("powershell", "pwsh"):
+                raise PermissionError("inline PowerShell commands are disabled; use script_run")
+            if detail == "cmd" and not allow_cmd_script:
+                raise PermissionError("inline cmd execution is disabled; use script_run")
+            if detail != "cmd":
+                raise PermissionError("inline %s code is disabled; use script_run" % detail)
+        if verdict == "stdin":
+            if detail in ("powershell", "pwsh"):
+                raise PermissionError(
+                    "PowerShell would run stdin as commands; pass -File <script>"
+                    " or use script_run"
+                )
+            raise PermissionError(
+                "%s would run stdin as its program; pass the script path as the"
+                " first argument or use script_run" % detail
+            )
     interp_key = _inline_interpreter_key(basename)
     if interp_key is None:
         return
