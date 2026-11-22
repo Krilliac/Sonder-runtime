@@ -8,6 +8,8 @@ callbacks, and ``TurnToolManifest`` honesty checks.
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
@@ -29,6 +31,31 @@ from sonder_runtime.domain.chat_tools import (
     parse_tool_arguments,
     preview_tool_arguments,
 )
+from sonder_runtime.domain.code_gate_policy import (
+    CODE_GATE_SIGNS,
+    check_python_static_errors,
+)
+
+_FENCED_PYTHON_RE = re.compile(r"```(?:python|py)\s*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_INTERACTIVE_INPUT_RE = re.compile(r"\binput\s*\(")
+_NON_RETRYABLE_VERIFY_STATUSES = frozenset({
+    "refused", "denied", "timeout", "timed_out", "awaiting_client", "budget_exceeded",
+})
+
+
+def _extract_fenced_python(text: str) -> str | None:
+    """Return the first non-trivial fenced Python block from a model reply, or ``None``."""
+    if "```" not in text:
+        return None
+    for match in _FENCED_PYTHON_RE.finditer(text):
+        code = match.group(1)
+        if code and CODE_GATE_SIGNS.search(code):
+            return code
+    return None
+
+
+def _code_digest(code: str) -> str:
+    return hashlib.sha256(code.strip().encode("utf-8", errors="replace")).hexdigest()
 
 _ACTIVE_TURN: contextvars.ContextVar["ChatToolTurn | None"] = contextvars.ContextVar(
     "sonder_active_chat_tool_turn", default=None,
@@ -282,6 +309,10 @@ class ChatToolTurn:
         last_meta: dict[str, Any] = {}
         final_content = ""
         board_cursor = 0
+        has_run_code_tool = any(t.name == "run_code" for t in self.manifest.tools)
+        verified_code_hashes: set[str] = set()
+        failed_auto_verify_hashes: set[str] = set()
+        auto_verify_blocked = False
         active_board = _delegation.current_board()
         owns_board = active_board is None
         board = active_board or _delegation.AgentProgressBoard()
@@ -339,6 +370,62 @@ class ChatToolTurn:
                             model=str(last_meta.get("model") or ""),
                         )
                     if not isinstance(tool_calls, (list, tuple)) or not tool_calls:
+                        candidate_code = (
+                            _extract_fenced_python(content)
+                            if (
+                                has_run_code_tool
+                                and not auto_verify_blocked
+                                and not self.client_handoffs
+                                and calls < self.budget.max_model_calls
+                            )
+                            else None
+                        )
+                        if candidate_code is not None:
+                            digest = _code_digest(candidate_code)
+                            if digest not in verified_code_hashes and digest not in failed_auto_verify_hashes:
+                                if _INTERACTIVE_INPUT_RE.search(candidate_code):
+                                    static_err = check_python_static_errors(candidate_code)
+                                    if static_err:
+                                        failed_auto_verify_hashes.add(digest)
+                                        messages.append({"role": "assistant", "content": content})
+                                        messages.append({
+                                            "role": "user",
+                                            "content": (
+                                                "HOST CODE VERIFICATION FAILED:\n"
+                                                f"{static_err}\n\n"
+                                                "Fix the error in your code and return the corrected complete answer."
+                                            ),
+                                        })
+                                        continue
+                                    verified_code_hashes.add(digest)
+                                elif run_count < self.budget.max_runs:
+                                    prior_len = len(self.records)
+                                    obs, run_count = self._run_tool_call(
+                                        {
+                                            "function": {
+                                                "name": "run_code",
+                                                "arguments": {"language": "python", "code": candidate_code},
+                                            },
+                                        },
+                                        run_count=run_count,
+                                    )
+                                    last_rec = self.records[-1] if len(self.records) > prior_len else None
+                                    if last_rec is not None and last_rec.status == "ok":
+                                        verified_code_hashes.add(digest)
+                                    elif last_rec is not None and last_rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
+                                        auto_verify_blocked = True
+                                    elif last_rec is not None and last_rec.status in {"error", "failed"}:
+                                        failed_auto_verify_hashes.add(digest)
+                                        messages.append({"role": "assistant", "content": content})
+                                        messages.append({
+                                            "role": "user",
+                                            "content": (
+                                                "HOST CODE VERIFICATION FAILED:\n"
+                                                f"{obs}\n\n"
+                                                "Fix the error in your code and return the corrected complete answer."
+                                            ),
+                                        })
+                                        continue
                         final_content = content
                         break
 
@@ -364,7 +451,18 @@ class ChatToolTurn:
                             messages.append({"role": "tool", "name": tool_name, "content": msg})
                             break
                         tool_calls_total += 1
+                        prior_len = len(self.records)
                         obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
+                        if tool_name == "run_code" and len(self.records) > prior_len:
+                            rec = self.records[-1]
+                            if rec.status == "ok":
+                                raw_fn = raw_call.get("function") if isinstance(raw_call, Mapping) else None
+                                raw_args = parse_tool_arguments(raw_fn.get("arguments")) if isinstance(raw_fn, Mapping) else {}
+                                ran_code = str(raw_args.get("code") or "")
+                                if ran_code:
+                                    verified_code_hashes.add(_code_digest(ran_code))
+                            elif rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
+                                auto_verify_blocked = True
                         messages.append({"role": "tool", "name": tool_name, "content": obs})
                     if stopped_early:
                         break

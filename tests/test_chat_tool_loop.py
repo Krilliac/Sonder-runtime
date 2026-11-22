@@ -391,3 +391,96 @@ def test_resolve_agent_project_scope_refuses_network_device_and_control_paths_be
     scope, err = chat_run_backend.resolve_agent_project_scope(str(local_dir))
     assert err == ""
     assert scope == real_realpath(str(local_dir))
+
+
+def test_chat_tool_turn_auto_verifies_and_repairs_broken_final_code_block():
+    """If the model emits a broken runnable Python block without testing it, host verifies & repairs."""
+    executed: list[str] = []
+
+    def fake_dispatch(name, args, **_kw):
+        assert name == "run_code"
+        code = str(args.get("code") or "")
+        executed.append(code)
+        if "undefined_fn" in code:
+            return "status: failed\nreturncode: 1\nstderr:\nNameError: name 'undefined_fn' is not defined"
+        return "status: ok\nreturncode: 0\nstdout:\n42\n"
+
+    manifest = build_tool_turn_manifest(admitted_tools=["run_code"], user_run_command=True, mode="auto")
+    backend = ChatRunBackend(
+        dispatch_agent_tool=fake_dispatch,
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=chat_tools_payload(allowed_names=["run_code"]),
+        backend=backend,
+        permission_policy=pm,
+        budget=ChatToolBudget(max_runs=3, max_model_calls=4),
+    )
+
+    broken_reply = "Here it is:\n```python\ndef solve():\n    return undefined_fn()\nprint(solve())\n```"
+    fixed_reply = "Fixed:\n```python\ndef solve():\n    return 42\nprint(solve())\n```"
+    seen_messages: list[list[dict]] = []
+    replies = iter([
+        {"message": {"role": "assistant", "content": broken_reply}},
+        {"message": {"role": "assistant", "content": fixed_reply}},
+    ])
+
+    def step(msgs, _tools):
+        seen_messages.append([dict(m) for m in msgs])
+        return next(replies)
+
+    old_mode = pm.current_mode()
+    pm.set_mode(pm.AUTO)
+    try:
+        outcome = turn.run(step, system="sys", prompt="write solver", history=None)
+    finally:
+        pm.set_mode(old_mode)
+
+    assert outcome.content == fixed_reply
+    assert len(executed) == 2
+    assert [r.status for r in outcome.records] == ["error", "ok"]
+    assert outcome.records[0].exit_code == 1
+    assert outcome.records[1].exit_code == 0
+    assert any("HOST CODE VERIFICATION FAILED" in str(m.get("content") or "") for m in seen_messages[1])
+
+
+def test_chat_tool_turn_auto_verify_stops_on_permission_refusal(monkeypatch, tmp_path):
+    """Auto-verification respects permission refusals and never loops on denied runs."""
+    ledger = ApprovalLedger(tmp_path / "approvals.db")
+    monkeypatch.setattr(pm, "_approval_ledger", lambda: ledger)
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _n: None)
+    monkeypatch.setenv("SONDER_PERMISSION_STATE", str(tmp_path / "permission_mode.json"))
+    pm._reset_for_tests()
+    pm.set_mode(pm.MANUAL)
+
+    dispatched: list[str] = []
+    manifest = build_tool_turn_manifest(admitted_tools=["run_code"], user_run_command=True, mode="manual")
+    backend = ChatRunBackend(
+        dispatch_agent_tool=lambda name, args, **_kw: dispatched.append(name) or "ok",
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=chat_tools_payload(allowed_names=["run_code"]),
+        backend=backend,
+        permission_policy=pm,
+        budget=ChatToolBudget(max_runs=3, max_model_calls=4),
+    )
+    draft = "Here:\n```python\ndef solve():\n    return 42\nprint(solve())\n```"
+    calls = 0
+
+    def step(_msgs, _tools):
+        nonlocal calls
+        calls += 1
+        return {"message": {"role": "assistant", "content": draft}}
+
+    outcome = turn.run(step, system="sys", prompt="write solver", history=None)
+    assert calls == 1
+    assert dispatched == []
+    assert outcome.content == draft
+    assert [r.status for r in outcome.records] == ["refused"]
