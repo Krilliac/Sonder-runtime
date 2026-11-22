@@ -3886,7 +3886,7 @@ def control_command(prompt: str, history=None, session="", project="",
         return document_extract(path=arg.strip()) if arg.strip() else "usage: /doc <path>"
     if cmd in ("/media", "/media_inspect"):
         return media_inspect(path=arg.strip()) if arg.strip() else "usage: /media <path>"
-    if cmd in ("/metrics", "/code_metrics"):
+    if cmd in ("/loc", "/code_metrics"):
         return code_metrics(path=arg.strip() or ".")
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]

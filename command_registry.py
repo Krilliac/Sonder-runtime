@@ -239,7 +239,7 @@ COMMANDS = [
         "summary": "Inspect guarded WAV audio, MIDI, AVI video, and GLB/glTF/OBJ/STL 3D assets.",
     },
     {
-        "name": "/metrics",
+        "name": "/loc",
         "category": "dev",
         "risk": "safe",
         "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots.",
