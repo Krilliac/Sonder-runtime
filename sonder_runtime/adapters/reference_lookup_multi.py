@@ -46,6 +46,7 @@ from sonder_runtime.application.chat import reference_lookup as _lookup
 from sonder_runtime.application.chat import stream_sink
 from sonder_runtime.application.session.provider_attempts import provider_attempt_scope
 from sonder_runtime.domain.context_formatting import rough_token_count
+from sonder_runtime.domain.ensemble_synthesis import strip_code_fences
 from sonder_runtime.domain.reference_lookup.selection import passage_char_budget
 
 CODE_MODE = "code"
@@ -197,12 +198,13 @@ class EnsembleLookup:
 
     def __init__(self, shared: SharedLookup | None, *, owner: bool,
                  make_tier_generate: Callable[..., Any], ctx_for: ContextFor,
-                 num_predict: Any) -> None:
+                 num_predict: Any, code_mode: bool = False) -> None:
         self.shared = shared
         self.owner = owner
         self._make = make_tier_generate
         self._ctx_for = ctx_for
         self._num_predict = num_predict
+        self._code_mode = code_mode
 
     def num_ctx(self, tier: str, model: str) -> Any:
         """The member's context window: ``ctx_for(tier, model)``."""
@@ -214,7 +216,10 @@ class EnsembleLookup:
         """``gen(prompt)``; under lookup the shared framed turn, and the cleaned reply."""
         shared = self.shared
         if shared is None:
-            return gen(prompt)
+            reply = gen(prompt)
+            if self._code_mode and isinstance(reply, str):
+                return strip_code_fences(reply)
+            return reply
         bundle = shared.retrieve(self._make, self._ctx_for, self._num_predict, prompt)
         raw: list[Any] = []
 
@@ -238,6 +243,8 @@ class EnsembleLookup:
     def merged(self, text: Any) -> Any:
         """The merged answer, cleaned and citation-checked under lookup."""
         if self.shared is None or not isinstance(text, str):
+            if self._code_mode and isinstance(text, str):
+                return strip_code_fences(text)
             return text
         return self.shared.review(SYNTHESIS_LABEL, text).text
 
@@ -257,15 +264,16 @@ def ensemble(prompt: Any, mode: Any, targets: Sequence[Any], num_predict: Any,
     is the member's context window exactly as the ensemble computes it.
     """
     shared, owner = None, False
+    code_mode = str(mode or "").strip().lower() == CODE_MODE
     try:
-        if not _OFF.get() and str(mode or "").strip().lower() != CODE_MODE:
+        if not _OFF.get() and not code_mode:
             shared = _SHARED.get()
             if shared is None:
                 shared, owner = _shared_for(prompt, targets), True
     except Exception:  # noqa: BLE001  # fail open: the ensemble runs as before
         shared, owner = None, False
     return EnsembleLookup(shared, owner=owner, make_tier_generate=make_tier_generate,
-                          ctx_for=ctx_for, num_predict=num_predict)
+                          ctx_for=ctx_for, num_predict=num_predict, code_mode=code_mode)
 
 
 class ConsultLookup:

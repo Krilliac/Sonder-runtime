@@ -7,8 +7,18 @@ behaviour byte-for-byte intact.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def format_context_compaction_plan(plan: dict) -> str:
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from typing import TypedDict
+
+    class ContextCompactionPlan(TypedDict, total=False):
+        context: Mapping[str, object]
+        actions: Sequence[Mapping[str, object]]
+
+
+def format_context_compaction_plan(plan: ContextCompactionPlan) -> str:
     ctx = plan.get("context", {})
     lines = [
         "sonder context compaction plan",

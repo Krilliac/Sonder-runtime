@@ -327,7 +327,14 @@ class SQLiteSessionRepository:
         if event_type is not None:
             clauses.append("event_type = ?"); args.append(event_type)
         if text is not None:
-            clauses.append("payload_json LIKE ?"); args.append(f"%{text}%")
+            escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_tree(payload_json) "
+                "WHERE atom IS NOT NULL AND "
+                "CASE type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
+                "ELSE CAST(atom AS TEXT) END LIKE ? ESCAPE '\\')"
+            )
+            args.append(f"%{escaped}%")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as conn:
             rows = conn.execute(

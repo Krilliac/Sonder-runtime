@@ -192,3 +192,104 @@ def test_container_redactor_scrubs_live_secret_env_values(monkeypatch):
         "any_tool", {"stdout": "printed live-secret-material-42 by accident"}
     )
     assert "live-secret-material-42" not in repr(out.value)
+
+
+# --- quoted, escaped and delimited credential shapes (G1372, G1373) --------
+
+_PLATFORM = platform_logging.Redactor(env={})
+
+QUOTED_SHAPES = [
+    # A serialized header dict: the closing quote sits between name and ':'.
+    ('{"Authorization": "Basic dXNlcjpodW50ZXIy", "Cookie": "session=abc123"}',
+     ("dXNlcjpodW50ZXIy", "abc123")),
+    ("{'Authorization': 'Basic dXNlcjpodW50ZXIy'}", ("dXNlcjpodW50ZXIy",)),
+    ('"Set-Cookie": "sid=s3ssionvalue"', ("s3ssionvalue",)),
+    # JSON nested inside a JSON string: the quotes around key and value are escaped.
+    ('{\\"password\\": \\"hunter2\\"}', ("hunter2",)),
+    ('{\\"Authorization\\": \\"Basic dXNlcjpodW50ZXIy\\"}', ("dXNlcjpodW50ZXIy",)),
+    # Values with delimiters, short values, and quoted values with spaces.
+    ("password=ab,cdefgh", ("cdefgh",)),
+    ("pwd=a;bcdefg", ("bcdefg",)),
+    ('password: "correct horse battery staple"', ("horse", "battery", "staple")),
+    ('password: "abc"', ("abc",)),
+]
+
+
+@pytest.mark.parametrize("text,secrets", QUOTED_SHAPES)
+def test_quoted_escaped_and_delimited_credentials_are_redacted(text, secrets):
+    for out in (redaction.redact_text(text), _PLATFORM.redact(text)):
+        for secret in secrets:
+            assert secret not in out, (text, out)
+        assert redaction.REDACTED in out
+        assert redaction.redact_text(out) == out
+
+
+def test_repeat_redaction_keeps_json_delimiters_after_the_marker():
+    once = redaction.redact_text('{"password": "x1", "user": "bob"}')
+    assert once == '{"password": [REDACTED], "user": "bob"}'
+    assert redaction.redact_text(once) == once
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "authToken", "dbPassword", "secretKey", "clientSecret", "x-apiKey",
+        "AWSSecretKey", "openAIApiKey", "XApiKey", "HTTPAuthorization",
+    ],
+)
+def test_sensitive_key_matches_camel_case_credential_names(key):
+    assert redaction.SENSITIVE_KEY.match(key), key
+    walked = redaction.redact_structure({key: "opaque-9f3k"}, sensitive_keys=True)
+    assert walked == {key: redaction.REDACTED}
+
+
+@pytest.mark.parametrize(
+    "key", ["mypassword", "maxTokens", "tokenizer", "promptTokens", "HTTPHeaders", "APIVersion"],
+)
+def test_sensitive_key_camel_case_boundary_is_case_sensitive(key):
+    assert not redaction.SENSITIVE_KEY.match(key), key
+
+
+def test_non_string_values_under_a_sensitive_key_are_redacted_keeping_shape():
+    value = {
+        "token": ["opaque", ("tuple-secret",), {"inner": "nested-secret"}],
+        "password": b"hunter2",
+        "cookie": bytearray(b"sid=1"),
+        "empty": {"secret": ""},
+        "note": ["plain"],
+    }
+    walked = redaction.redact_structure(value, sensitive_keys=True)
+    marker = redaction.REDACTED
+    assert walked["token"] == [marker, (marker,), {"inner": marker}]
+    assert walked["password"] == marker and walked["cookie"] == marker
+    # An empty string under a sensitive key stays empty.
+    assert walked["empty"] == {"secret": ""}
+    assert walked["note"] == ["plain"]
+    # Without key awareness nothing is replaced outright.
+    assert redaction.redact_structure(value)["token"][0] == "opaque"
+
+
+def test_numbers_under_a_sensitive_key_are_redacted_but_flags_and_none_stay():
+    marker = redaction.REDACTED
+    value = {
+        # Numeric credentials directly under a sensitive key, zero included.
+        "password": 12345678, "pin_token": 4242, "api_key": 3.14159, "secret": 0,
+        # ... and inside containers stored under one.
+        "credentials": [1234, (5678,), {"inner": 9.5}, True, None],
+        # Flags and None are not credential material.
+        "use_token": True, "refresh_token": None,
+        # Any other non-container object is replaced whole.
+        "client_secret": {"opaque", "set-secret"},
+        # Numbers under ordinary keys keep passing through.
+        "count": 2, "maxTokens": 4096, "ratio": 0.5, "enabled": False,
+    }
+    walked = redaction.redact_structure(value, sensitive_keys=True)
+    assert walked == {
+        "password": marker, "pin_token": marker, "api_key": marker, "secret": marker,
+        "credentials": [marker, (marker,), {"inner": marker}, True, None],
+        "use_token": True, "refresh_token": None,
+        "client_secret": marker,
+        "count": 2, "maxTokens": 4096, "ratio": 0.5, "enabled": False,
+    }
+    # Without key awareness numbers are not replaced.
+    assert redaction.redact_structure(value)["password"] == 12345678

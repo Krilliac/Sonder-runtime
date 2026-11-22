@@ -23,7 +23,8 @@ BREAKER_FAILURE_CLASSES = frozenset(("unavailable", "transport", "timeout"))
 
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 _FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
-_PLACEHOLDER = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
+# Linear: the captured run is stripped in code (a lazy ``\s*([^{}]*?)\s*`` is cubic).
+_PLACEHOLDER = re.compile(r"\{\{([^{}]*)\}\}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _STAGE_REF = "stage."
 
@@ -156,7 +157,7 @@ def template_references(template: str) -> tuple[tuple[str, ...], tuple[str, ...]
     """Return ``(field names, stage names)`` a template uses, rejecting any other placeholder."""
     fields, stages = [], []
     for match in _PLACEHOLDER.finditer(template):
-        token = match.group(1)
+        token = match.group(1).strip()
         if token.startswith(_STAGE_REF):
             name = token[len(_STAGE_REF):]
             if not _NAME.fullmatch(name):
@@ -303,11 +304,23 @@ def validate_items(raw: object, spec: JobSpec, limits: Limits, *, existing_keys:
     return tuple(items)
 
 
-def render_prompt(stage: StageSpec, item: ItemSpec, upstream: Mapping[str, str]) -> tuple[str, str]:
-    """Render ``(system, prompt)`` in one pass; substituted values are never re-scanned."""
+class PromptTooLarge(InvalidInput):
+    """The rendered ``system`` + ``prompt`` would exceed the caller's character limit."""
 
-    def substitute(match: re.Match[str]) -> str:
-        token = match.group(1)
+
+def render_prompt(stage: StageSpec, item: ItemSpec, upstream: Mapping[str, str], *,
+                  max_chars: int | None = None) -> tuple[str, str]:
+    """Render ``(system, prompt)`` in one pass; substituted values are never re-scanned.
+
+    With ``max_chars``, raises :class:`PromptTooLarge` as soon as the combined
+    length would exceed it, before the oversized text is built: a template
+    repeating one placeholder thousands of times would otherwise multiply a
+    large field or upstream answer into a string of hundreds of millions of
+    characters first.
+    """
+    used = 0
+
+    def resolve(token: str) -> str:
         if token.startswith(_STAGE_REF):
             name = token[len(_STAGE_REF):]
             if name not in upstream:
@@ -317,10 +330,25 @@ def render_prompt(stage: StageSpec, item: ItemSpec, upstream: Mapping[str, str])
             raise InvalidInput("item has no field: " + token)
         return item.fields[token]
 
-    return (
-        _PLACEHOLDER.sub(substitute, stage.system),
-        _PLACEHOLDER.sub(substitute, stage.prompt_template),
-    )
+    def render(template: str) -> str:
+        parts: list[str] = []
+
+        def add(piece: str) -> None:
+            nonlocal used
+            used += len(piece)
+            if max_chars is not None and used > max_chars:
+                raise PromptTooLarge("rendered prompt exceeds %d characters" % max_chars)
+            parts.append(piece)
+
+        last = 0
+        for match in _PLACEHOLDER.finditer(template):
+            add(template[last:match.start()])
+            add(resolve(match.group(1).strip()))
+            last = match.end()
+        add(template[last:])
+        return "".join(parts)
+
+    return render(stage.system), render(stage.prompt_template)
 
 
 def effective_statuses(spec: JobSpec, item_keys: Sequence[str],

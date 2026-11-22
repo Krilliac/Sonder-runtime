@@ -8,9 +8,13 @@ of the model — an uncensored or "abliterated" model changes what it will
 
 - **Loopback by default.** The HTTP server binds `127.0.0.1`. A
   non-loopback bind is **rejected before the socket opens** unless both
-  `tls_terminated_by_proxy = true` and a strong (`≥24` char) `SONDER_API_KEY`
-  are set. The reference deployment keeps loopback behind a TLS reverse
-  proxy regardless ([secure-remote-access](../runbooks/secure-remote-access.md)).
+  `tls_terminated_by_proxy = true` and strong credentials for the auth mode are
+  set: `api-key` needs a `SONDER_API_KEY` of at least 24 characters, `account`
+  an account secret of at least 32, and `both` and `either` need both;
+  `local-open` never qualifies. The reference deployment keeps loopback behind
+  a TLS reverse proxy regardless
+  ([secure-remote-access](../runbooks/secure-remote-access.md)). Setup-time
+  checklist: [security-hardening](../runbooks/security-hardening.md).
 - **Consent gates**, each independent and default-off: cloud/hosted models
   (`SONDER_ALLOW_CLOUD`), web tools (`SONDER_WEB_TOOLS`), remote Ollama
   (`SONDER_ALLOW_REMOTE_OLLAMA`), private-node whole-job compute
@@ -18,16 +22,16 @@ of the model — an uncensored or "abliterated" model changes what it will
   `allow_remote`), approximate location, model reasoning
   (`SONDER_EXPOSE_REASONING`), and private chain-of-thought
   (`SONDER_ALLOW_PRIVATE_COT`). Runtime policy can never turn any of these on.
-- **Remote Sonder Inference needs four things at once.** A provider binding
-  to `sonder-inference` on a loopback base URL needs no consent. Any other
-  host is refused before a byte is sent unless `SONDER_ALLOW_REMOTE_INFERENCE=1`,
-  the URL is `https://`, `SONDER_INFERENCE_API_KEY` is set (it is redacted
-  from logs), and the operation context allows cloud. The optional
-  `SONDER_INFERENCE_FALLBACK=ollama` reaches only local Ollama: the fallback
-  call runs with cloud and remote-Ollama consent withdrawn, so a tier mapped
-  to a hosted model is refused, and it cannot widen where a prompt goes.
-  Inference traffic ignores proxy settings and never follows redirects
-  ([provider reference](../architecture/sonder-inference-provider.md)).
+- **Remote Sonder Inference needs four things at once:**
+  `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
+  `SONDER_INFERENCE_API_KEY` and an operation context that allows cloud; a
+  loopback base URL needs none of them. The fallback to local Ollama cannot
+  widen where a prompt goes. Rules and failure modes:
+  [provider reference](../architecture/sonder-inference-provider.md),
+  setup: [sonder-inference](../runbooks/sonder-inference.md).
+- **Remote Ollama is its own gate:** `SONDER_ALLOW_REMOTE_OLLAMA=1` and an
+  `https://` origin with an explicit port and no path
+  ([remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings)).
 - **Private Sonder Inference workers are their own consent lane.**
   `SONDER_INFERENCE_PRIVATE_WORKERS` names operator-approved private servers
   (https, private IP literal, a dedicated CA bundle and token variable). It
@@ -88,7 +92,13 @@ of the model — an uncensored or "abliterated" model changes what it will
 
 ## Authentication
 
-- Bearer `SONDER_API_KEY`, compared in **constant time**.
+Setup (choosing a mode, creating the key or accounts) is in
+[configure-authentication](../runbooks/configure-authentication.md); rotation
+is in [rotate-credentials](../runbooks/rotate-credentials.md). The model:
+
+- Bearer `SONDER_API_KEY`, compared in **constant time**. With no key and no
+  account requirement the listener is `local-open`: every loopback caller is
+  an administrator and developer, so it is only for a single-user machine.
 - Rotation with an overlap window: the previous key's **hash** (never the
   plaintext) is stored with a mandatory expiry; both keys work until it
   lapses (`rotate-key`, [rotate-credentials](../runbooks/rotate-credentials.md)).
@@ -104,9 +114,19 @@ of the model — an uncensored or "abliterated" model changes what it will
 
 ## Workspace & tool containment
 
-- **Guarded file tools** operate only inside configured roots
-  (`SONDER_FILE_ROOTS`); path canonicalization blocks traversal and
+- **Guarded file tools** operate only inside the allowed roots: Sonder's own
+  checkout, the state home, `SONDER_FILE_ROOTS` (which replaces
+  `[state].workspace_roots` when both are set) and the lines of
+  `<home>/file_roots.local` (or the file named by `SONDER_FILE_ROOTS_FILE`).
+  `SONDER_FILE_BYPASS` (process-wide) or a developer token turns root
+  containment off for every path, with no `extra_roots` needed (inside
+  managed console work containment is kept and bypass only adds
+  `extra_roots`); credential
+  stores are still refused. A one-shot approval of a call is the only way to
+  widen the roots for that call with containment still checked. Path
+  canonicalization blocks traversal and
   symlink escape. Deletes are dry-run unless an explicit confirm matches.
+  Setup: [security-hardening](../runbooks/security-hardening.md#file-roots).
 - **Managed console work** is granted `[state].workspace_roots` plus, by a
   deliberate policy addition, exactly one more tree: the app-owned default
   workspace root (`%USERPROFILE%\Sonder\workspaces`, `~/Sonder/workspaces`,
@@ -153,7 +173,9 @@ of the model — an uncensored or "abliterated" model changes what it will
   `.env`) still need a developer token as before.
 - **Permission policy** (`domain/execution/policy.py`, `permission_rules.py`)
   is first-match glob: `allow` / `ask` / `deny`, defaulting to `ask`, with
-  `file_delete` denied and read-only status tools allowed by default.
+  `file_delete` denied and read-only status tools allowed by default. Modes,
+  rules and approvals are set up in
+  [security-hardening](../runbooks/security-hardening.md).
 - **Process execution** is argv-only with bounded timeout and output; the
   code runner is confined to the workspace cwd. It is a containment layer,
   not a sandbox — it does not replace OS isolation.
@@ -197,9 +219,14 @@ of the model — an uncensored or "abliterated" model changes what it will
   group/world-readable by an older build is tightened when it is next opened,
   but only if the current user owns it; symlinks, other accounts' files, sticky
   shared directories (`/tmp`), `/` and the user's own home directory are never
-  changed, and no mode is ever widened. Windows is unchanged: the default home
-  under `%LOCALAPPDATA%` inherits a user-only ACL, and a custom `SONDER_HOME`
-  there needs an equivalent ACL set by the operator. On a host that runs
+  changed, and no mode is ever widened. On Windows, where modes do not
+  exist, Sonder instead makes a best-effort attempt to give the state home and
+  its secret stores a protected ACL granting only the current user, SYSTEM and
+  Administrators, because the profile's inherited ACL cannot be assumed to be
+  user-only. It never touches paths owned by another account, and failures are
+  only logged at debug level. A secrets file kept outside the state home needs
+  an ACL set by the operator
+  ([security-hardening](../runbooks/security-hardening.md#secrets-file)). On a host that runs
   uid-separated self-modification candidates (`SONDER_SELFMOD_CANDIDATE_UID`
   set) the home is `0711` instead -- the candidate uid can traverse it to its
   workspace under `selfmod/workspaces` but cannot list or read it, and the

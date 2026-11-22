@@ -530,8 +530,13 @@ class ClangdSession:
         return self._private_dir
 
     def _start(self) -> JsonRpcStdioClient:
-        if self._client is not None and self._client.alive:
-            return self._client
+        if self._client is not None:
+            if self._client.alive:
+                return self._client
+            # A failed client (killed by _fail) still owns the opened-file
+            # state, the private dir and the job record: release them all
+            # before a fresh server is started.
+            self._stop()
         executable = self._executable
         if self._guard is not None:
             executable = self._guard(executable)

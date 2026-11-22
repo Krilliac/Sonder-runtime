@@ -10,6 +10,7 @@ import permission_modes as pm
 from sonder_runtime.adapters.developer_tools_executor import DEVELOPER_TYPED_TOOLS, DeveloperToolExecutor
 from sonder_runtime.application.ports.tool_registry import ToolCall
 from sonder_runtime.application.context import local_owner_context
+from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.application.tools.gateway_contract import (
     ToolGatewayRequest,
     ToolPermission,
@@ -120,9 +121,42 @@ def test_the_test_run_arguments_are_the_only_inputs(tmp_path, monkeypatch):
     monkeypatch.setitem(pm._STATE, "mode", pm.AUTO)
     tools, _, developer = facade(tmp_path)
     receipt = tools.execute(_request("test_run", {"runner": "pytest", "selector": "k:fast",
-                                                  "wait_seconds": 500, "timeout_seconds": 5}))
+                                                  "wait_seconds": 120, "timeout_seconds": 10}))
     assert receipt.success, receipt.error
+    request, wait, _ = developer.test_runs.runs[-1]
+    assert wait == 120
+    assert request.timeout_seconds == 10 and request.selector == "k:fast"
+    assert json.loads(receipt.output)["status"] == "running"
+
+
+@pytest.mark.parametrize("arguments", [
+    {"wait_seconds": 500},
+    {"wait_seconds": -1},
+    {"timeout_seconds": 5},
+    {"timeout_seconds": 1801},
+    {"workers": 9},
+])
+def test_out_of_schema_test_run_arguments_are_refused_before_the_executor(
+        tmp_path, monkeypatch, arguments):
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _tool: None)
+    monkeypatch.setitem(pm._STATE, "mode", pm.AUTO)
+    tools, _, developer = facade(tmp_path)
+    with pytest.raises(InvalidInput):
+        tools.execute(_request("test_run", {"runner": "pytest", "selector": "k:fast"}
+                               | arguments))
+    assert developer.test_runs.runs == []
+
+
+def test_the_executor_still_clamps_test_run_arguments_it_is_handed_directly():
+    developer = services()
+    executor = DeveloperToolExecutor(developer, fallback=None)
+    descriptor = typed_tools.typed_tool_registry().get("test_run")
+    result = executor.execute(
+        descriptor,
+        ToolCall("test_run", {"runner": "pytest", "selector": "k:fast",
+                              "wait_seconds": 500, "timeout_seconds": 5}),
+        local_owner_context(correlation_id="c"), ExecutionClass.HOST)
+    assert result.success, result.output
     request, wait, _ = developer.test_runs.runs[-1]
     assert wait == 120  # clamped to the maximum wait
     assert request.timeout_seconds == 10 and request.selector == "k:fast"
-    assert json.loads(receipt.output)["status"] == "running"

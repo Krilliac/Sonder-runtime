@@ -39,6 +39,10 @@ class PendingApprovalEvidence:
             raise ValueError("pending display call identity mismatch")
 
 
+class ApprovalOutcomeUnknown(PermissionError):
+    """A potentially consumed approval must not return to resumable pending."""
+
+
 class VerificationApprovalPending(Exception):
     def __init__(self, evidence: PendingApprovalEvidence):
         if not isinstance(evidence, PendingApprovalEvidence):

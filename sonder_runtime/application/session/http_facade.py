@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from ...domain.common.errors import IntegrityFailure, InvalidInput
+from ...domain.session_ref import is_valid_session_id
 from ..ports.session_repository import SessionRepository
 from .atif import ATIF_FORMAT, AtifAgent, AtifExportError, session_events_to_atif
 from .durable_replay import crash_safe_replay
@@ -21,6 +22,8 @@ from .continuity import SessionContinuityService
 from .fork import ForkBoundary
 from .query_export import QueryExportError, SessionQueryEngine
 from .trajectory import project_trajectory
+from .transcript_view import DEFAULT_MAX_BYTES as DEFAULT_TRANSCRIPT_MAX_BYTES
+from .transcript_view import TranscriptBuilder, project_event, render_markdown
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,12 +47,15 @@ class HttpSessionFacade:
     def __init__(self, repository: SessionRepository, *, max_page_size: int = 100,
                  max_scan: int = 1_000, max_replay_events: int = 10_000,
                  continuity: SessionContinuityService | None = None,
-                 agent_version: str = "unknown") -> None:
+                 agent_version: str = "unknown",
+                 transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES) -> None:
         if isinstance(max_replay_events, bool) or not isinstance(max_replay_events, int) or not 1 <= max_replay_events <= 100_000:
             raise ValueError("max_replay_events must be between 1 and 100000")
         self._query = SessionQueryEngine(repository, max_page_size=max_page_size,
                                           max_scan=max_scan)
         self._repository = repository
+        self._max_page_size = max_page_size
+        self._transcript_max_bytes = transcript_max_bytes
         self._max_replay_events = max_replay_events
         self._continuity = continuity or SessionContinuityService(repository, max_events=max_replay_events)
         self._agent = AtifAgent(version=agent_version or "unknown")
@@ -202,6 +208,61 @@ class HttpSessionFacade:
                     text = text[: self.TITLE_CHARS - 1].rstrip() + "\u2026"
                 return text
         return ""
+
+    TRANSCRIPT_MAX_EVENTS = 50_000
+
+    def transcript(self, session_id: str, *, format: str | None = None) -> HttpSessionResult:
+        """Return the whole conversation from the event log, bounded and redacted.
+
+        Reads every event through the redacting query engine (page by page, so
+        no history window can hide turns), then projects user/assistant turns
+        with the requested tier, answering model and failure codes.
+        ``format`` is ``md`` (default) or ``json``.  Output stops at
+        ``transcript_max_bytes`` of JSON-escaped text (reason ``bytes``) or
+        after ``TRANSCRIPT_MAX_EVENTS`` rows scanned (reason ``events``);
+        ``truncated_reason`` names which.
+        """
+        chosen = (format or "md").strip().lower()
+        if chosen not in ("md", "json"):
+            return self._error(400, "invalid_session_query")
+        if not is_valid_session_id(session_id):
+            return self._error(400, "invalid_session_id")
+        builder = TranscriptBuilder(self._transcript_max_bytes, markdown=chosen == "md")
+        consumed = last_seen = 0
+        try:
+            end = self._query.last_sequence(session_id)  # snapshot end FIRST
+            if end == 0:
+                return self._error(404, "session_not_found")
+            for sequence, record in self._query.iter_records(
+                    session_id, end_sequence=end, max_events=self.TRANSCRIPT_MAX_EVENTS,
+                    project=project_event):
+                consumed += 1
+                last_seen = sequence
+                if record is not None:
+                    builder.add(record)
+                    if builder.full:
+                        break
+        except QueryExportError:
+            return self._error(400, "invalid_session_query")
+        events_capped = (not builder.truncated and consumed >= self.TRANSCRIPT_MAX_EVENTS
+                         and last_seen < end)
+        truncated = builder.truncated or events_capped
+        reason = builder.truncated_reason or ("events" if events_capped else "")
+        body: dict[str, object] = {
+            "schema": "sonder.http-session-transcript.v1",
+            "session_id": session_id,
+            "format": chosen,
+            "message_count": len(builder.messages),
+            "truncated": truncated,
+            "truncated_reason": reason,
+        }
+        if chosen == "json":
+            body["messages"] = builder.messages
+        else:
+            body["markdown"] = render_markdown(
+                session_id, builder.messages, truncated=truncated, reason=reason or "bytes",
+                max_bytes=self._transcript_max_bytes)
+        return self._ok(body)
 
     def replay(self, session_id: str, *, max_events: int | None = None) -> HttpSessionResult:
         """Verify and project a privacy-safe replay result."""

@@ -6,20 +6,42 @@ and eligible by default; operators can explicitly require measured passes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 from sonder_runtime.domain.routing.backend_conformance import (
     BackendCapability,
     EvidenceState,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Protocol
+
+    from sonder_runtime.domain.routing.backend_conformance import (
+        BackendIdentity,
+        EvidenceVerdict,
+    )
+
+    class _EvidenceAssessor(Protocol):
+        def assess(
+            self,
+            model: str,
+            required: frozenset[BackendCapability],
+            *,
+            backend: str,
+            identity: BackendIdentity | None,
+            now: float | None = None,
+        ) -> EvidenceVerdict: ...
+
+
 LONG_CONTEXT_TOKENS = 8192
 CAPABILITY_ROUTING_MODES = frozenset({"advisory", "strict", "off"})
 
 
 def request_requirements(
-    payload: Mapping | None = None, *, prompt: str = "", tools=False,
-    structured_output=False, has_image=False, approx_tokens: int = 0,
-    long_context=False,
+    payload: Mapping[str, object] | None = None, *, prompt: str = "", tools: bool = False,
+    structured_output: bool = False, has_image: bool = False, approx_tokens: int = 0,
+    long_context: bool = False,
 ) -> frozenset[BackendCapability]:
     """Recognize Ollama/OpenAI request shapes without inspecting task keywords.
 
@@ -48,7 +70,7 @@ The character estimate is deliberately conservative (UTF-8 bytes / 3); it is
     image = bool(has_image or value.get("images") or options.get("images"))
     byte_count = len(str(prompt or value.get("prompt") or "").encode("utf-8"))
     byte_count += len(str(value.get("system") or "").encode("utf-8"))
-    for message in value.get("messages", ()) or ():
+    for message in cast("Iterable[object]", value.get("messages", ()) or ()):
         if not isinstance(message, Mapping):
             continue
         image = image or bool(message.get("images"))
@@ -64,7 +86,7 @@ The character estimate is deliberately conservative (UTF-8 bytes / 3); it is
     large = long_context or byte_count >= LONG_CONTEXT_TOKENS * 3 or any(
         isinstance(count, (int, float)) and count >= LONG_CONTEXT_TOKENS for count in counts
     )
-    required = set()
+    required: set[BackendCapability] = set()
     if has_tools:
         required.add(BackendCapability.TOOL_NATIVE)
     if has_schema:
@@ -79,8 +101,9 @@ The character estimate is deliberately conservative (UTF-8 bytes / 3); it is
 
 
 def check_request_evidence(
-    evidence, model: str, required, *, backend: str = "ollama", identity=None, now=None,
-    mode: str = "advisory",
+    evidence: _EvidenceAssessor | None, model: str, required: Iterable[BackendCapability],
+    *, backend: str = "ollama", identity: BackendIdentity | None = None,
+    now: float | None = None, mode: str = "advisory",
 ) -> tuple[bool, str]:
     """Assess eligibility without representing unverified support as measured.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from types import ModuleType
 import threading
+from typing import TYPE_CHECKING
 
 from ..adapters.inference.ollama_gateway import OllamaGateway
 from ..adapters.model_bootstrap import (
@@ -14,6 +15,15 @@ from ..application.ports.model_bootstrap import (
     ModelBootstrapProvider,
 )
 from ..application.ports.model_target import ModelTarget
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+    from ..application.ports.model_target import (
+        ModelGenerateFactory,
+        ModelTargetResolver,
+    )
 
 
 def configure_legacy_model_providers(
@@ -50,7 +60,7 @@ def lazy_legacy_model_provider_factories(
     runtime: ModuleType | None = None,
     *,
     provider: ModelBootstrapProvider | None = None,
-):
+) -> tuple[ModelTargetResolver, ModelGenerateFactory]:
     """Return provider callables that defer the root compatibility import.
 
     Composition can therefore construct an application without loading the
@@ -75,7 +85,14 @@ def lazy_legacy_model_provider_factories(
     def resolve(tier: str, strict: bool | None = None) -> ModelTarget:
         return ensure().resolve_target(tier, strict)
 
-    def generate(model, system, temperature, num_predict, num_ctx, **kwargs):
+    def generate(
+        model: str,
+        system: str,
+        temperature: float,
+        num_predict: int,
+        num_ctx: int,
+        **kwargs: Any,
+    ) -> Callable[..., str]:
         return ensure().make_generate(
             model, system, temperature, num_predict, num_ctx, **kwargs
         )

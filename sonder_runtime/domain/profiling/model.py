@@ -442,12 +442,13 @@ DEFAULT_LIMITS = ProfileLimits()
 class WorkBudget:
     """Wall-clock budget polled every ``every`` ticks through an injected clock."""
 
-    __slots__ = ("_clock", "_deadline", "_every", "_count", "exceeded")
+    __slots__ = ("_clock", "_max_seconds", "_deadline", "_every", "_count", "exceeded")
 
     def __init__(self, max_seconds: float, clock: Callable[[], float] | None = None,
                  *, every: int = 1000) -> None:
         self._clock = clock or time.monotonic
-        self._deadline = self._clock() + max(0.0, float(max_seconds))
+        self._max_seconds = max(0.0, float(max_seconds))
+        self._deadline = self._clock() + self._max_seconds
         self._every = max(1, int(every))
         self._count = 0
         self.exceeded = False
@@ -458,6 +459,10 @@ class WorkBudget:
         if self._count % self._every == 0 and self._clock() > self._deadline:
             self.exceeded = True
         return not self.exceeded
+
+    def renewed(self) -> "WorkBudget":
+        """A fresh budget of the same length, clock and polling rate, starting now."""
+        return WorkBudget(self._max_seconds, self._clock, every=self._every)
 
 
 def iter_bounded_lines(text: str, max_line_chars: int) -> Iterator[str | None]:

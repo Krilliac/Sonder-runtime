@@ -34,6 +34,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _logical(path: Path) -> str:
+    # Backup-API copies are not byte-identical; compare logical content.
+    conn = sqlite3.connect(path)
+    try:
+        return hashlib.sha256(chr(10).join(conn.iterdump()).encode()).hexdigest()
+    finally:
+        conn.close()
+
+
 def test_real_sqlite_rehearsal_proves_backup_restore_crash_resume_and_epoch_ownership(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
@@ -72,11 +81,11 @@ def test_tampered_backup_is_refused_before_source_write(tmp_path):
     assert source.read_bytes() == before
 
 
-def test_real_child_process_crash_leaves_restorable_pre_migration_bytes(tmp_path):
+def test_real_child_process_crash_leaves_restorable_pre_migration_content(tmp_path):
     home = tmp_path / "crashed"
     home.mkdir()
     _legacy_home(home)
-    original = {name: _sha256(home / name) for name in DB_NAMES}
+    original = {name: _logical(home / name) for name in DB_NAMES}
     repo = Path(__file__).resolve().parents[1]
     code = """
 import os, sys
@@ -101,10 +110,14 @@ run_bridge_migration(home, version='data005-crash', step_hook=stop)
     restored.mkdir()
     for name, digest in original.items():
         member = backup / name
-        assert _sha256(member) == digest
+        assert _logical(member) == digest
         (restored / name).write_bytes(member.read_bytes())
-    proof = BackupProof(str(backup), "data005", original)
+    # prove_restore hashes bytes; the restored copy is byte-identical to the
+    # backup member, whose logical content was asserted above.
+    byte_digests = {name: _sha256(backup / name) for name in original}
+    proof = BackupProof(str(backup), "data005", byte_digests)
     restore = prove_restore(proof, restored, {
         name: restored / name for name in original
     })
-    assert restore.restored_digests == original
+    assert restore.restored_digests == byte_digests
+    assert all(_logical(restored / name) == original[name] for name in original)

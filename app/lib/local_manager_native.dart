@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import 'launcher_health.dart';
 
@@ -632,9 +633,25 @@ class LocalManager {
     }
   }
 
+  /// Registers an already-started launcher as the managed server. Test seam.
+  @visibleForTesting
+  static void trackManagedServerForTest(Process process) =>
+      _trackManagedServer(process);
+
+  /// Synchronous (the app is closing): the launcher is a shell, so the server
+  /// is its child. Killing only the shell would orphan the Python server, so
+  /// the whole tree goes: `taskkill /T /F` on Windows, the shell's children
+  /// then the shell on Unix.
   static void stopManagedServerNow() {
     final process = _managedServer;
     if (process != null) {
+      try {
+        if (Platform.isWindows) {
+          Process.runSync('taskkill', ['/PID', '${process.pid}', '/T', '/F']);
+        } else {
+          Process.runSync('pkill', ['-KILL', '-P', '${process.pid}']);
+        }
+      } catch (_) {}
       process.kill(ProcessSignal.sigterm);
       process.kill(ProcessSignal.sigkill);
     }

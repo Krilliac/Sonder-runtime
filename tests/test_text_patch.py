@@ -241,3 +241,13 @@ def test_rollback_never_overwrites_concurrent_change_to_published_file(tmp_path,
     assert raised.value.report["rollback_errors"][0]["path"] == "a.txt"
     assert (tmp_path / "a.txt").read_text() == "external\n"
     assert (tmp_path / "b.txt").read_text() == "b\n"
+
+
+def test_form_feed_and_line_separator_do_not_split_lines(tmp_path):
+    ff, ls = "\x0c", "\u2028"
+    target = tmp_path / "a.txt"
+    target.write_text("one" + ff + ls + "x\ntwo\n", encoding="utf-8", newline="")
+    patch = ("--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one" + ff + ls + "x\n-two\n+three" + ff + "\n")
+    result = run(tmp_path, patch, True)
+    assert result["transaction"] == "committed"
+    assert target.read_bytes().decode("utf-8") == "one" + ff + ls + "x\nthree" + ff + "\n"

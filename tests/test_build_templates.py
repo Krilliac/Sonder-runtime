@@ -12,8 +12,10 @@ from sonder_runtime.domain.build import file_api
 from sonder_runtime.domain.build.model import (
     BuildAction,
     BuildSystem,
+    BuildTarget,
     BuildWorld,
     NetworkPolicy,
+    TargetType,
     finalize_model,
 )
 from sonder_runtime.domain.build.msbuild import model_from_msbuild
@@ -227,6 +229,54 @@ def test_utility_targets_are_refused_unless_allowlisted():
                                              operator_utility_allow=frozenset({"deploy"}))
     assert allowed.notes and "allowlist" in allowed.notes[0]
     assert validate_request_against_model({"action": "build", "target": "all"}, model, safety).target == "all"
+
+
+def test_build_aliases_are_per_system_and_fall_through_to_the_model():
+    # ``Build`` is not a CMake alias: a custom target of that name runs arbitrary
+    # commands and must get the model lookup and utility refusal (G1268).
+    base = _cmake_model()
+    assert base.system is BuildSystem.CMAKE
+    model = finalize_model(replace(base, targets=base.targets + (
+        BuildTarget(name="Build", type=TargetType.UTILITY),)))
+    safety = classify_targets(model)
+    with pytest.raises(TemplateRejected) as excinfo:
+        validate_request_against_model({"action": "build", "target": "Build"}, model, safety)
+    assert excinfo.value.code == "UTILITY_TARGET_REFUSED"
+    with pytest.raises(TemplateRejected) as excinfo:
+        validate_request_against_model({"action": "build", "target": "ALL_BUILD"}, base,
+                                       classify_targets(base))
+    assert excinfo.value.code == "UNKNOWN_TARGET"
+    assert validate_request_against_model({"action": "build", "target": "all"}, model,
+                                          safety).target == "all"
+    msbuild = _msbuild_model()
+    assert validate_request_against_model({"action": "build", "target": "Build"}, msbuild,
+                                          classify_targets(msbuild)).target == "Build"
+
+
+def test_msbuild_project_names_shaped_like_aliases_are_checked_against_the_model():
+    # In a solution ``ALL_BUILD`` is just a project name and ``X:Build`` always
+    # names project X; only the plain ``Build`` is the solution alias (G1268).
+    base = _msbuild_model()
+    assert base.system is BuildSystem.MSBUILD
+    model = finalize_model(replace(base, targets=base.targets + (
+        BuildTarget(name="ALL_BUILD", type=TargetType.MSBUILD_MAKEFILE),
+        BuildTarget(name="Build", type=TargetType.MSBUILD_MAKEFILE),
+    )))
+    safety = classify_targets(model)
+    for name in ("ALL_BUILD", "ALL_BUILD:Build", "Build:Build"):
+        with pytest.raises(TemplateRejected) as excinfo:
+            validate_request_against_model({"action": "build", "target": name}, model, safety)
+        assert excinfo.value.code == "UTILITY_TARGET_REFUSED", name
+    with pytest.raises(TemplateRejected) as excinfo:
+        validate_request_against_model({"action": "build", "target": "ALL_BUILD"}, base,
+                                       classify_targets(base))
+    assert excinfo.value.code == "UNKNOWN_TARGET"
+    allowed = validate_request_against_model({"action": "build", "target": "ALL_BUILD:Build"},
+                                             model, safety,
+                                             operator_utility_allow=frozenset({"ALL_BUILD"}))
+    assert allowed.target_info is not None and allowed.target_info.name == "ALL_BUILD"
+    assert validate_request_against_model({"action": "build", "target": "Build"}, model,
+                                          safety).target == "Build"
 
 
 def test_msbuild_request_platform_and_makefile_project():

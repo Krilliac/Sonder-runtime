@@ -288,11 +288,14 @@ never trusts "something answered on the port":
   file (`sonder-launcher-health.token` beside the launcher DB) when not
   configured.
 
-From this the launcher derives exactly three states: `healthy` (proof
-verifies), `stopped` (port closed), `foreign_listener` (anything else —
-wrong proof, oversized reply, HTTP error). **`foreign_listener` blocks
-start/restart**: the launcher refuses to manage a port owned by a process it
-cannot cryptographically identify. If you see it, find and stop whatever holds
+From this the launcher derives four states: `healthy` (proof verifies),
+`stopped` (port closed), `indeterminate` (port accepts connections but the
+probe got no answer — timeout or reset, e.g. a runtime bound but not yet
+serving), `foreign_listener` (a definite answer that fails — wrong proof,
+oversized reply, HTTP error). Waits keep polling through `indeterminate`; an
+action re-probes it for about 2 s and then refuses like `foreign_listener`.
+**`foreign_listener` blocks start/restart**: the launcher refuses to manage a
+port owned by a process it cannot cryptographically identify. If you see it, find and stop whatever holds
 port 11435 rather than forcing a start.
 
 Headless wrapper status (no venv activation needed):

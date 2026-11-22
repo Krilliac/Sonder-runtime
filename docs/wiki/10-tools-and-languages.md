@@ -96,15 +96,18 @@ available to both the expected type and the submitted proof without exposing
 the contract axiom to the submission. This field is a trust boundary and must
 never contain model-generated source.
 
-Set `SONDER_LEAN_EXE` to the Lean executable for core-only checks. For practical
-mathematics, also set `SONDER_LAKE_EXE` and `SONDER_LEAN_PROJECT` to a pinned
-Lake project with Mathlib; checks then run as `lake env lean` and can import the
-project's exact dependencies. Sonder never downloads packages during a proof
-check. The repository's `lean-toolchain` pins the supported Lean release; see
+`lean_check` compiles model-authored source only inside a locally installed
+Linux OCI container (never pulled; checked by its immutable image ID) configured via `SONDER_ISOLATED_RUNTIME`,
+`SONDER_ISOLATED_ROOTS`, `SONDER_LEAN_SANDBOX_ROOT`,
+`SONDER_LEAN_SANDBOX_IMAGE`, and optional `SONDER_LEAN_SANDBOX_EXECUTABLE`.
+Host `SONDER_LEAN_EXE`, `SONDER_LAKE_EXE`, and `SONDER_LEAN_PROJECT` values are
+not executed (host Lake projects are rejected rather than mounted); Mathlib and
+other approved dependencies must be preinstalled in the pinned image, and Sonder
+never pulls images or downloads packages during a proof check. The repository's
+`lean-toolchain` pins the supported Lean release; see
 [Formal reasoning setup](../runbooks/formal-reasoning.md).
-When no executable or project override is configured, the core checker applies
-that repository pin in its isolated directory and fails closed on a version
-mismatch.
+Without legacy host executable configuration, the checker applies that
+repository pin in its guarded directory and fails closed on a version mismatch.
 
 ## Host tool versions — `environment_status` / `toolchain_status`
 
@@ -438,7 +441,9 @@ The details are in [Crash and profile digests](../crash-profile-digest.md).
   `approximate_location_lookup` — gated by `SONDER_WEB_TOOLS`.
 - **Artifacts:** `artifact_generate` / `artifact_verify` /
   `ground_artifact` — stdlib images, SVG, Office, audio, GLB, etc., with
-  deterministic verification.
+  deterministic verification. Credential-shaped text in the brief (for
+  example `api_key=...`) is redacted before it is written into any
+  generated file or the manifest.
 - **Tasks/checklists:** `task_*`, `checklist_*` — shared todo/checklist
   state across console, app, agents, and MCP.
 - **Memory/learning:** see [Memory & Learning](06-memory-and-learning.md).

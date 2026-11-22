@@ -245,6 +245,76 @@ git log -p selfmod/<run-id>
 git branch -D selfmod/<run-id>   # discard a candidate you don't want
 ```
 
+### Optional evaluator broker (Windows)
+
+An operator can add one more gate: a held-out evaluator that runs under a
+separate, pre-provisioned Windows account through a Scheduled Task. It is off
+unless configured, and it is an *additional* gate. The supervised held-out,
+regression, parent-scored and oracle gates all still run first and must pass.
+A broker receipt is not an independent-oracle verdict and never unlocks
+unattended promotion. Configure these variables for the nightly worker:
+
+```powershell
+$env:SONDER_SELFMOD_EVALUATOR_BROKER = '["C:\\ProgramData\\Sonder\\selfmod-evaluator\\venv\\Scripts\\python.exe", "C:\\ProgramData\\Sonder\\selfmod-evaluator\\selfmod_evaluator_client.py"]'
+$env:SONDER_SELFMOD_EVALUATOR_IDENTITY = 'EXAMPLE\sonder-evaluator'
+$env:SONDER_SELFMOD_EVALUATOR_ISOLATION = 'windows-scheduled-task'
+$env:SONDER_SELFMOD_EVALUATOR_PUBLIC_KEY = '<worker-private-dir>\evaluator-public.pem'
+$env:SONDER_SELFMOD_EVALUATOR_INBOX = 'C:\ProgramData\Sonder\selfmod-evaluator\inbox'
+$env:SONDER_SELFMOD_EVALUATOR_OUTBOX = 'C:\ProgramData\Sonder\selfmod-evaluator\outbox'
+$env:SONDER_SELFMOD_EVALUATOR_TASK = 'SonderSelfmodEvaluator'
+# Optional: refuse every pass unless the broker above is configured.
+$env:SONDER_SELFMOD_EVALUATOR_STRICT = '1'
+```
+
+The broker setting is a JSON argv list. The nightly appends the path of one
+request file to it and runs it from the worker process, not under the
+candidate supervisor. The command runs no candidate code. The request names
+a fresh nonce, the candidate root and target digest, the held-out snapshot
+and its file digests, the worker identity, the expected evaluator identity and
+`isolation=windows-scheduled-task`, plus a manifest digest and a request
+digest. The nightly accepts the gate only when the command exits 0 and prints
+one `sonder.selfmod.evaluator-receipt/v1` JSON line. That line must be signed
+with Ed25519 by the provisioned key and must carry the same nonce and digests,
+the configured evaluator identity (which must differ from the worker's) and
+`passed=true`. Otherwise the candidate is rejected. A pass logs
+`evaluator_broker: pass -- broker evaluator receipt accepted`.
+
+`run()` refuses before creating a run when the configuration is partial or
+malformed, when strict mode is on and no broker is configured, when the public
+key file is missing, when the evaluator identity is the worker's own, or when
+`SONDER_SELFMOD_EVALUATOR_PRIVATE_KEY` is set for the worker. Only the
+evaluator account may hold the signing key. With none of these variables set,
+the lane behaves exactly as described above.
+
+`scripts/selfmod_evaluator_client.py` is the worker-side command. It copies
+the request into the inbox, runs `schtasks /Run /TN <task>` and prints the
+response from the outbox. It refuses to create either directory, so create
+both in advance with their ACLs. `scripts/selfmod_evaluator_broker.py --once
+<inbox> <outbox>` is the evaluator task's entry point. It checks its identity
+against the request, the root separation, the target, manifest and request
+digests and every snapshot file before it does anything else. Deploy both
+outside the editable checkout and run the task as a dedicated standard
+account that already exists. Never create that account or grant it
+administrator rights automatically. Each key file is read only from a
+directory owned by the reading account with a protected, owner-only DACL
+(on POSIX: owned by it, mode `0700`), so the worker's public key and the
+evaluator's private key live in separate directories.
+
+The evaluator account may read the inbox, the snapshot, the candidate checkout
+and its private key, and write the outbox. It must not be able to write the
+nightly checkout, worker state, the snapshot or the deployment. Candidate
+tests must run through a third scheduled task under a distinct lower-privilege
+identity, set as `SONDER_SELFMOD_CANDIDATE_IDENTITY` and
+`SONDER_SELFMOD_CANDIDATE_TASK` for the evaluator. **The checked-in broker
+fails closed until that third-task handoff is provisioned.** It never runs
+candidate code while it holds the signing key, so with the reference broker
+every candidate is rejected at this gate. These ACLs and the separate run-as
+accounts are the boundary; digests and read-only attributes are only tamper
+canaries. Broker containment remains unqualified (SELFMOD-002). The
+deployment evidence would be `schtasks /query /tn <task> /fo LIST /v` showing
+the evaluator account, an evaluator response with a matching nonce and
+identity, and the nightly log line above.
+
 It refuses to start a pass at all when:
 
 - the repository working tree is dirty (a run started here could never be

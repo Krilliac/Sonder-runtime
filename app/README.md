@@ -10,7 +10,10 @@ and runs the actual base-model weights. QLoRA/LoRA adapter weight training uses
 the PEFT/Hugging Face toolchain, not Ollama; only validated adapters or merged
 models are deployed to Ollama for inference.
 
-The app talks to your own `sonder_serve.py` process over its OpenAI-compatible
+The app talks to your own Sonder Runtime server (started with
+`python -m sonder_runtime serve`; the HTTP adapter is
+`sonder_runtime/interfaces/http/serve.py`, its lifecycle code
+`sonder_runtime/adapters/web/lifecycle.py`) over its OpenAI-compatible
 HTTP API, so local model requests, memory, and lessons stay on the machine you
 run by default. Explicitly selected cloud tiers and invoked web tools contact
 their named external services.
@@ -21,7 +24,7 @@ through Sonder Runtime's bounded authenticated launcher. See
 
 ```
   ┌────────────┐        HTTP /v1/chat/completions        ┌────────────────────┐
-  │  this app  │  ───────────────────────────────────►   │   sonder_serve.py  │
+  │  this app  │  ───────────────────────────────────►   │   sonder serve     │
   │  (phone /  │       Bearer <api key> (optional)        │ + orchestration     │
   │   desktop) │  ◄───────────────────────────────────   │ + Ollama inference │
   └────────────┘             assistant reply              └────────────────────┘
@@ -69,8 +72,8 @@ through Sonder Runtime's bounded authenticated launcher. See
   `/agents`, `/capacity`, `/agentcancel`, `/agentretry`, `/train 10` (grounded
   practice, not a weight update) and `/help`, start/stop the bundled desktop server,
   launch the grounded practice loop, and pull updates from Git.
-- **Live execution feed contract**: the existing `/status` response may add
-  `execution.feed` with schema v1 fields `runtime_id`, `known`,
+- **Live execution feed contract**: the existing `GET /v1/sonder/status` response may add
+  `execution.feed` with schema v1 fields `schema_version`, `runtime_id`, `known`,
   `active_responses`, bounded `events`, `truncated`, `redaction_applied`,
   `oldest_seq`, `next_seq`, `dropped_events`, `sequence_gap`, `limits`, `error`,
   and `bytes`. Common event fields are `response_id`,
@@ -181,7 +184,8 @@ Observatory** whenever the app uses an API key or account session.
 
 A hosted (HTTPS, non-loopback) Observatory web URL still opens in this
 device's browser and connects to the loopback URLs above. Its origin must be
-on the runtime's exact-match `SONDER_CORS_ORIGINS` allowlist (and Sonder
+on the runtime's route-scoped exact-match `SONDER_OBSERVATORY_ORIGINS`
+(`[observability].live_export_origins`) allowlist (and Sonder
 Inference's `--cors-origin`), and browsers may block a public page from
 reading loopback addresses.
 
@@ -262,57 +266,110 @@ uses the authenticated launcher already running on the configured computer.
 
 ## First run
 
-1. On the same desktop, start the loopback service with
-   `bash deploy_sonder.sh --serve`. For Android or another remote client, use
-   the [server-private installer](../docs/runbooks/install-server-private.md),
-   a TLS reverse proxy, and [Mobile host control](../MOBILE_HOST_CONTROL.md);
-   the loopback development service must never be port-forwarded.
-2. Open the app → **Settings** (gear icon).
+Checked against the code on 2026-11-20.
+
+1. **Start a server the app can reach.**
+   - Same desktop: the desktop app starts its bundled server by itself (see
+     [Bundled system](#bundled-system)). To run a server by hand from a
+     checkout, use a launcher or the module directly. It listens on
+     `127.0.0.1:11435` by default.
+
+     ```powershell
+     .\sonder-serve.cmd
+     # or, without the sonder_headless.py engine bootstrap step (the Ollama preflight still runs; add --skip-ollama to skip it):
+     .\venv\Scripts\python.exe -m sonder_runtime serve
+     ```
+
+     ```bash
+     ./sonder-serve.sh
+     # or: ./venv/bin/python -m sonder_runtime serve
+     ```
+
+     Check it from a second terminal; expect a small JSON body whose `status` is `alive`:
+
+     ```bash
+     curl http://127.0.0.1:11435/live
+     ```
+   - Android or another remote client: use the
+     [server-private installer](../docs/runbooks/install-server-private.md), a
+     TLS reverse proxy ([secure remote access](../docs/runbooks/secure-remote-access.md),
+     which covers Caddy and nginx), and [Mobile host control](../MOBILE_HOST_CONTROL.md).
+     The loopback service must never be port-forwarded.
+   - The old `deploy_sonder.sh --serve` route is not supported: the script
+     needs root and writes loopback development systemd units, not the
+     production remote-client setup; use the server-private installer above.
+2. Open the app, then **Settings** (gear icon).
 3. Enter the **Server URL** and API key, plus the **Host launcher URL** and its
-   separate token. Tap **Test connection**, then **Save**.
+   separate token. Tap **Test connection**, then **Save**. A launcher URL must
+   be an `http(s)` origin without credentials or a path; a non-loopback
+   launcher needs HTTPS and a token of at least 24 characters, or Settings
+   reports the error and the launcher controls stay off
+   (`app/lib/settings.dart`, `launcherConfigurationError`).
 4. Optionally enable **Allow approximate IP location** for weather/nearby prompts.
    This contacts `ipwho.is`; VPN or ISP routing can report the wrong city.
 5. Start chatting.
 
+**First administrator.** On a server that uses accounts, the first account
+registered over HTTP becomes the administrator only if it presents the
+bootstrap secret the operator configured. The server does not generate or print
+one: the operator sets `SONDER_BOOTSTRAP_SECRET` (at least 16 characters) in the
+server's environment before the first registration, then types that value into
+the app, which sends it in the `X-Sonder-Bootstrap-Secret` header. A missing or wrong
+secret is refused with HTTP 403 and "first-admin bootstrap is not authorized".
+Steps are in [Configure authentication](../docs/runbooks/configure-authentication.md).
+
 ### Connecting a phone to the PC
 
-The server answers only requests whose `Host` header names it. By default
-that is `localhost`, a loopback IP such as `127.0.0.1`, and (when the server
-listens on a LAN address) any IP literal, each with the server's own port.
-Any other name is refused with **HTTP 421 `HOST_NOT_ALLOWED`**, which the app
-shows as *"The server at mypc.local refused this address"*. This guards the
-server against DNS-rebinding pages in a browser; it is not a login check.
+Which `Host` names the server accepts, and the exact `421 HOST_NOT_ALLOWED`
+rules, are in
+[HTTP API & lifecycle](../docs/wiki/05-http-api-and-lifecycle.md#host-names-and-421-host_not_allowed).
+In short: any IP address works on any port, `localhost` and the PC's own names
+work, and any other name (a Tailscale or proxy name) works whenever the server
+requires an API key or accounts. Only an unauthenticated `local-open` server
+refuses such a name with 421, which the app shows as *"The server at
+mypc.local refused this address"*; the fix is to enter the PC's IP address or
+add the name to `[server].allowed_hosts` / `SONDER_ALLOWED_HOSTS` on the PC
+and restart the server.
 
 Pick one of these, in order of simplicity:
 
-- **Use the PC's IP.** In Settings enter the address by number, for example
-  `https://192.168.1.20:11435` behind your TLS proxy, not `mypc` or
-  `mypc.local`. (Release Android builds refuse all plain `http://` traffic;
-  see *Build it yourself* for the development-only cleartext override.)
-- **USB or the Android emulator: `adb reverse`.** Run
-  `adb reverse tcp:11435 tcp:11435` on the PC, then use
-  `http://127.0.0.1:11435` in a development build (cleartext override on).
-  The emulator's `10.0.2.2` alias reaches a loopback-bound server under a
-  name it does not accept, so it is refused; `adb reverse` avoids it and
-  keeps the server on loopback.
-- **Allow the name on the PC.** Add each name the phone uses to
-  `[server].allowed_hosts` in the server config, or set
-  `SONDER_ALLOWED_HOSTS=mypc.local,mypc.tail1234.ts.net` (comma-separated,
-  at most 64 entries). An entry without a port accepts any port, which a
-  port-changing forward needs; `name:port` accepts only that port. Restart
-  the server afterwards.
-- **Tailscale Serve, Caddy or a Cloudflare tunnel.** These proxies pass the
-  phone's original `Host` (for example `mypc.tail1234.ts.net`) through to the
-  server, so that name must be in `allowed_hosts` as above. They also
-  terminate TLS, which account sign-in needs (next point). To keep sign-in
-  rate limits per device behind a proxy, set `tls_terminated_by_proxy` and
-  `trusted_proxy_cidrs`; see the
-  [server-private installer](../docs/runbooks/install-server-private.md).
+- **Use the PC's IP behind your TLS proxy**, for example
+  `https://192.0.2.10` on the proxy's HTTPS port 443 (a documentation address;
+  use your PC's own). An IP address cannot get a publicly trusted certificate,
+  so this works only where the client trusts your own CA, which Android apps
+  do not by default and this app does not change. For a phone use a proxy name
+  with a public certificate (next bullet). Never open or port-forward the
+  runtime's own port 11435.
+- **Use a proxy name** such as Tailscale Serve, Caddy or a Cloudflare tunnel.
+  These terminate TLS, which account sign-in needs. For Caddy, see
+  [secure remote access](../docs/runbooks/secure-remote-access.md#phones-and-other-clients-that-cannot-trust-a-private-ca)
+  (a DNS-01 certificate for a name you own works on a private network); that page
+  also explains `tls_terminated_by_proxy` and `trusted_proxy_cidrs`, which keep
+  sign-in rate limits per device instead of per proxy.
+- **USB or the Android emulator.** Run `adb reverse tcp:11435 tcp:11435` on
+  the PC, then use `http://127.0.0.1:11435` in a development build. The
+  emulator's `10.0.2.2` alias also works, as an IP literal, but needs the
+  plain-HTTP key exception below.
 
-Account passwords and sessions need **HTTPS**; plain HTTP is accepted only
-for the numeric loopback addresses `127.0.0.1` and `::1` (which is what
-`adb reverse` gives a development build). The name `localhost` does not
-count as loopback for sign-in.
+**API key over plain HTTP.** The app sends the deployment API key only over
+HTTPS, to a loopback host (`localhost`, `127.x.x.x`, `::1`), or to a plain-HTTP
+`host:port` you have allowed
+(`app/lib/api/transport.dart`, `CleartextKeyPolicy`). For any other plain-HTTP
+server (for example `http://192.0.2.10:11435` or the `10.0.2.2` alias), tick
+the checkbox **Send the API key to host:port over unencrypted HTTP**, which
+appears under the server and key fields when the app would otherwise withhold
+the key. Without the exception the key is not sent, and a server that requires
+a key answers `401` (a local-open server needs none). Settings also has an
+**API key over plain HTTP** section; it appears once at least one host is
+allowed, and is the place to review hosts and turn one off to stop sending the
+key there. Release Android builds also refuse plain `http://`
+traffic altogether; see [Mobile host control](../MOBILE_HOST_CONTROL.md#transport-and-mobile-packaging)
+for the development-only cleartext opt-in.
+
+**Account sign-in** is stricter than the key: account passwords and sessions
+need HTTPS, and plain HTTP is accepted only for the numeric loopback addresses
+`127.x.x.x` and `::1` (which is what `adb reverse` gives a development build).
+The name `localhost` does not count as loopback for sign-in.
 
 ## Build it yourself
 
@@ -368,16 +425,17 @@ flutter build windows --release
 flutter build macos --release
 ```
 
-Android production builds deny cleartext traffic. For a local development
-build against a loopback or LAN server without HTTPS, opt in explicitly with
-`--allow-android-cleartext-for-development`. The PowerShell helper exposes the
-same development-only choice as `-AllowAndroidCleartextForDevelopment`; do not
-use either override for distributed APKs or when sending bearer credentials.
+Android production builds deny cleartext traffic. The development-only
+opt-in (`--allow-android-cleartext-for-development`, or
+`-AllowAndroidCleartextForDevelopment` on the PowerShell helper) is documented in
+[Mobile host control](../MOBILE_HOST_CONTROL.md#transport-and-mobile-packaging);
+never use it for distributed APKs.
 
 ### Web build (served by the runtime)
 
 `web/` is committed (unlike the other platform folders). Publish it for the
-runtime to serve at `/app/` with `python scripts/build_web_app.py`; see
+runtime to serve at `/app/` with `python scripts/build_web_app.py` from a
+linked worktree (in a main checkout pass `--allow-main-checkout`); see
 [Serving the web app](../docs/wiki/03-configuration.md#serving-the-web-app).
 In a browser the app talks only to the origin that served it, keeps API keys
 and account sessions in memory (a reload means signing in again), and stores
@@ -385,7 +443,7 @@ chat history in the browser's `localStorage` in plain text. Local-model and
 launcher features are unavailable there.
 
 Requires the [Flutter SDK](https://docs.flutter.dev/get-started/install)
-at the stable version pinned in `app/.flutter-version` (CI installs exactly
+at the stable version pinned in `app/.flutter-version` (3.47.5 on 2026-11-20; CI installs exactly
 that version and runs `flutter pub get --enforce-lockfile`, so a dependency
 change must update `pubspec.lock` in the same commit). Android builds also need a JDK (17) and the Android SDK;
 Linux desktop needs `libgtk-3-dev` and friends (see the workflow for the exact
@@ -393,4 +451,4 @@ package list).
 
 Account sessions use platform secure storage independently of the deployment API key. Login no longer replaces the deployment key, allowing servers configured with `auth_mode=both`. Sign out uses the exact-session `/v1/sonder/logout` endpoint; failed or unknown revocation offers retry or explicit local forgetting. A local forget cannot revoke a copied token. Account credentials are origin-bound, and authenticated API requests do not follow redirects. A changed server must be handled explicitly in Settings.
 
-The Chat toolbar's **App control** action manages server conversation bindings through the dedicated `/v1/app-control` routes. Enrollment requires an explicit project and password check. Its credential stays only in memory and never enters chat, tools, preferences, secure storage or fallback requests. Account/server changes, expiry, disconnect and app closure clear it. Unknown outcomes retain the exact command for an explicit check; enrollment checks require the password again. Creating/selecting/clearing/revoking a binding does not enable managed execution. See [the interaction contract](UX-CONTRACT.md#app-control-conversation-bindings).
+The Chat toolbar's **App control** action manages server conversation bindings through the dedicated `/v1/app-control` routes. Enrollment requires an explicit project and password check. Its credential stays only in memory and never enters chat, tools, preferences, secure storage or fallback requests. Account/server changes, expiry, disconnect and app closure clear it. Unknown outcomes retain the exact command for an explicit check; enrollment checks require the password again. Creating/selecting/clearing/revoking a binding does not enable managed execution. The server's app-control feature is disabled by default (`AppControlConfig.enabled = False`, `sonder_runtime/platform/app_control_config.py`). See [the interaction contract](UX-CONTRACT.md#app-control-conversation-bindings).

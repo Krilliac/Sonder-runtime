@@ -1,6 +1,8 @@
 import hashlib
 import json
 import struct
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -779,3 +781,535 @@ def test_ui_recipe_reports_the_files_it_actually_checked(tmp_path):
     assert len(result["children"]) == 1
     assert result["checked_files"] == 1
     assert "files: 1" in artifact_grounding.format_result(result)
+
+
+def test_html_local_references_skip_non_file_schemes_and_unquote_paths(tmp_path):
+    """Only data:/mailto:/javascript: were skipped and paths were never
+    URL-unquoted, so tel:/blob: links and a valid my%20image.png link were
+    misreported as missing local files."""
+    (tmp_path / "my image.png").write_bytes(b"png")
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        '<img src="my%20image.png">'
+        '<a href="tel:+15551234">call</a>'
+        '<a href="blob:abc">blob</a>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    valid = artifact_grounding.validate(page, "html")
+    assert valid["ok"], _failures(valid)
+
+
+def test_html_local_references_accept_page_directory_links(tmp_path):
+    """href="./" and href="." name the page directory itself (their path
+    parts are empty), a common home link that must not be reported missing."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        '<a href="./">home</a>'
+        '<a href=".">home</a>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    valid = artifact_grounding.validate(page, "html")
+    assert valid["ok"], _failures(valid)
+
+
+def test_html_local_references_reject_unc_and_absolute_refs_without_fs_calls(
+    monkeypatch, tmp_path
+):
+    """A UNC ref used to be joined onto the page directory and passed to
+    resolve()/exists(), so validating the page opened an SMB connection to
+    the host it named, and it was not reported as an external dependency."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        r'<img src="\\attacker.example\share\x.png">'
+        r'<img src="%5C%5Cattacker.example%5Cshare%5Cy.png">'
+        '<img src="C:/Windows/win.ini">'
+        '<img src="/etc/passwd">'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    touched = []
+    original_resolve = Path.resolve
+    original_exists = Path.exists
+
+    def spy_resolve(self, *args, **kwargs):
+        touched.append(str(self))
+        return original_resolve(self, *args, **kwargs)
+
+    def spy_exists(self, *args, **kwargs):
+        touched.append(str(self))
+        return original_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    monkeypatch.setattr(Path, "exists", spy_exists)
+    checks = []
+    artifact_grounding._validate_html(page, {}, checks)
+    monkeypatch.undo()
+    assert not any("attacker" in item or "win.ini" in item or "passwd" in item for item in touched), touched
+    local = next(item for item in checks if item["name"] == "html-local-references")
+    assert not local["ok"]
+    assert "%5C%5Cattacker.example" in local["detail"]
+    assert "C:/Windows/win.ini" in local["detail"]
+    assert "/etc/passwd" in local["detail"]
+
+    external = artifact_grounding.validate(
+        page, "html", {"no_external_dependencies": True}
+    )
+    flagged = next(
+        item for item in external["checks"]
+        if item["name"] == "html-no-external-dependencies"
+    )
+    assert not flagged["ok"]
+    assert "attacker.example" in flagged["detail"]
+
+
+def test_html_local_references_do_not_follow_links(monkeypatch, tmp_path):
+    """The ref was joined and passed to resolve(), which follows a symlink
+    or junction in the page directory to its target (possibly a UNC share)
+    before containment was checked. A ref through a link must be reported
+    missing without resolve()/exists() ever touching a path below it."""
+    site = tmp_path / "site"
+    assets = site / "assets"
+    assets.mkdir(parents=True)
+    (assets / "x.png").write_bytes(b"png")
+    (site / "y.png").write_bytes(b"png")
+    page = site / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        '<img src="assets/x.png">'
+        '<img src="sub/../y.png">'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    link = assets.resolve()
+    original_reparse = artifact_grounding._is_reparse_point
+    monkeypatch.setattr(
+        artifact_grounding,
+        "_is_reparse_point",
+        lambda path: path == link or original_reparse(path),
+    )
+    touched = []
+    original_resolve = Path.resolve
+    original_exists = Path.exists
+
+    def spy_resolve(self, *args, **kwargs):
+        result = original_resolve(self, *args, **kwargs)
+        touched.extend((str(self), str(result)))
+        return result
+
+    def spy_exists(self, *args, **kwargs):
+        touched.append(str(self))
+        return original_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+    monkeypatch.setattr(Path, "exists", spy_exists)
+    checks = []
+    artifact_grounding._validate_html(page, {}, checks)
+    monkeypatch.undo()
+
+    assert not any("x.png" in item for item in touched), touched
+    local = next(item for item in checks if item["name"] == "html-local-references")
+    assert not local["ok"]
+    assert "assets/x.png" in local["detail"]
+    # A relative path that only climbs back inside the page directory is
+    # still found.
+    assert "y.png" not in local["detail"]
+
+
+def test_html_local_references_reject_refs_climbing_out_of_the_page(tmp_path):
+    (tmp_path / "outside.png").write_bytes(b"png")
+    site = tmp_path / "site"
+    site.mkdir()
+    page = site / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        '<img src="../outside.png">'
+        '<img src="a/../../outside.png">'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    checks = []
+    artifact_grounding._validate_html(page, {}, checks)
+    local = next(item for item in checks if item["name"] == "html-local-references")
+    assert not local["ok"]
+    assert "../outside.png" in local["detail"]
+    assert "a/../../outside.png" in local["detail"]
+
+
+def test_html_unc_resource_refs_count_as_external(tmp_path):
+    """srcset/poster and CSS url() refs were only flagged when they began
+    with "//", so the backslash UNC spelling a Windows browser fetches over
+    SMB passed no_external_dependencies."""
+    page = tmp_path / "index.html"
+    page.write_text(
+        "<!doctype html><html><body>"
+        r'<img srcset="\\attacker.example\share\a.png 1x">'
+        r'<div style="background: url(\\attacker.example\share\b.png)"></div>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    result = artifact_grounding.validate(page, "html", {"no_external_dependencies": True})
+    flagged = next(
+        item for item in result["checks"] if item["name"] == "html-no-external-dependencies"
+    )
+    assert not flagged["ok"]
+    assert "a.png" in flagged["detail"]
+    assert "b.png" in flagged["detail"]
+
+
+def _tiny_aliasing_glb(
+    path: Path,
+    accessor_count: int,
+    items: int,
+    component_type: int = 5121,
+    value_type: str = "SCALAR",
+):
+    """Write a GLB whose accessors all alias one bufferView of the BIN chunk."""
+    element_size = {5121: 1, 5126: 4}[component_type] * {
+        "SCALAR": 1, "VEC4": 4, "MAT4": 16
+    }[value_type]
+    view_length = items * element_size
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": view_length}],
+        "bufferViews": [{"buffer": 0, "byteLength": view_length}],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": component_type,
+                "type": value_type,
+                "count": items,
+            }
+            for _ in range(accessor_count)
+        ],
+    }
+    encoded = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 4)
+    binary = bytes(view_length) + bytes(-view_length % 4)
+    body = struct.pack("<I", len(encoded)) + b"JSON" + encoded
+    body += struct.pack("<I", len(binary)) + b"BIN\x00" + binary
+    path.write_bytes(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+
+
+def _record_materialized_slots(monkeypatch, materialized, values_for=None):
+    """Wrap _glb_accessor_values and record the budget charge of each call."""
+    original = artifact_grounding._glb_accessor_values
+
+    def counting(document, binary, index):
+        accessor = document["accessors"][index]
+        values = (values_for or original)(document, binary, index)
+        materialized.append(
+            artifact_grounding._glb_accessor_slot_charge(
+                accessor["count"], accessor["type"]
+            )
+        )
+        return values
+
+    monkeypatch.setattr(artifact_grounding, "_glb_accessor_values", counting)
+
+
+def test_glb_accessor_materialization_has_an_aggregate_budget(monkeypatch, tmp_path):
+    """Accessors may alias one bufferView, so a small BIN chunk could be
+    unpacked once per accessor with no total bound and exhaust memory."""
+    model = tmp_path / "alias.glb"
+    _tiny_aliasing_glb(model, accessor_count=50, items=8)
+    monkeypatch.setattr(
+        artifact_grounding, "MAX_GLB_TOTAL_ACCESSOR_SLOTS", 60, raising=False
+    )
+    materialized = []
+    _record_materialized_slots(monkeypatch, materialized)
+    checks = []
+    artifact_grounding._validate_glb(model, {}, checks)
+
+    assert sum(materialized) <= 60
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert not accessors["ok"]
+    assert "total accessor data budget" in accessors["detail"]
+
+
+def test_glb_accessor_budget_weights_rows_by_component_count(monkeypatch, tmp_path):
+    """A row-count budget let MAT4/5126 rows (a 16-float tuple each, about
+    10x the memory of a SCALAR row) through at the same rate as SCALAR rows,
+    so aliasing float matrix accessors still reached several GB. The budget
+    must charge every component that is built."""
+    model = tmp_path / "alias-mat4.glb"
+    # 10 aliasing MAT4 float accessors of 4 rows: 40 rows in total, well
+    # under a 120-unit budget if rows were counted, but 4 * (16 + 2) = 72
+    # row slots plus the fixed per-accessor charge each, so only one
+    # accessor fits a 120-slot budget.
+    _tiny_aliasing_glb(
+        model, accessor_count=10, items=4, component_type=5126, value_type="MAT4"
+    )
+    monkeypatch.setattr(
+        artifact_grounding, "MAX_GLB_TOTAL_ACCESSOR_SLOTS", 120, raising=False
+    )
+    monkeypatch.setattr(artifact_grounding, "GLB_ACCESSOR_FIXED_SLOTS", 5)
+    materialized = []
+    _record_materialized_slots(monkeypatch, materialized)
+    checks = []
+    artifact_grounding._validate_glb(model, {}, checks)
+
+    assert materialized == [77]
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert not accessors["ok"]
+    assert "accessor 1 exceeds the total accessor data budget" in accessors["detail"]
+
+    vec4 = tmp_path / "alias-vec4.glb"
+    # VEC4 rows cost 4 + 2 = 6 slots: 4 rows are 24 slots, plus 5 for the
+    # accessor, so four accessors fit in 120 slots and the fifth is refused.
+    _tiny_aliasing_glb(
+        vec4, accessor_count=10, items=4, component_type=5126, value_type="VEC4"
+    )
+    materialized.clear()
+    checks = []
+    artifact_grounding._validate_glb(vec4, {}, checks)
+    assert materialized == [29, 29, 29, 29]
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert "accessor 4 exceeds the total accessor data budget" in accessors["detail"]
+
+
+def test_glb_default_accessor_budget_bounds_aliased_mat4_float_files(
+    monkeypatch, tmp_path
+):
+    """The reported attack at the default cap: a GLB under 1 MB whose 8,000
+    MAT4/5126 accessors of 1,000 rows alias one 64 KB view (8M rows, about
+    5.6 GB once unpacked at the measured ~700 bytes per row) was accepted.
+    Unpacking is stubbed so the test only counts what the validator would
+    have built; the memory per slot is measured by
+    test_glb_accessor_slot_cost_matches_measured_memory."""
+    model = tmp_path / "alias-mat4-default.glb"
+    _tiny_aliasing_glb(
+        model, accessor_count=8000, items=1000, component_type=5126, value_type="MAT4"
+    )
+    assert model.stat().st_size < 1024 * 1024
+
+    def stub(document, binary, index):
+        return [(0.0,) * 16]
+
+    materialized = []
+    _record_materialized_slots(monkeypatch, materialized, values_for=stub)
+    checks = []
+    artifact_grounding._validate_glb(model, {}, checks)
+
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert not accessors["ok"]
+    assert "total accessor data budget" in accessors["detail"]
+    assert sum(materialized) <= artifact_grounding.MAX_GLB_TOTAL_ACCESSOR_SLOTS
+
+
+# Runs in a fresh interpreter (-I, so PYTHONMALLOC and friends are ignored)
+# whose peak memory is not inflated by earlier tests. The GLB is read and
+# parsed before the baseline is taken and _validate_glb is handed that
+# result, so the file bytes and the parsed JSON (which the budget does not
+# cover) are outside the measurement. Prints the peak private commit
+# (Windows) or peak RSS (Linux), sampled when the glb-accessors check is
+# recorded (every accessor is cached by then and the later passes have not
+# run), minus the current value just before _validate_glb runs, and whether
+# that peak was reached during validation rather than earlier.
+_GLB_MEMORY_CHILD = r"""
+import gc
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+
+from sonder_runtime.adapters import artifact_grounding
+
+
+def current_and_peak():
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (name, ctypes.c_size_t)
+                for name in (
+                    "PeakWorkingSetSize", "WorkingSetSize",
+                    "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+                    "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                    "PagefileUsage", "PeakPagefileUsage",
+                )
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        query = kernel32.K32GetProcessMemoryInfo
+        query.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        query.restype = wintypes.BOOL
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        if not query(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            raise OSError(ctypes.get_last_error(), "K32GetProcessMemoryInfo failed")
+        return counters.PagefileUsage, counters.PeakPagefileUsage
+    # Read per-process VmRSS and VmHWM from /proc/self/status rather than
+    # resource.getrusage().ru_maxrss: on Linux ru_maxrss inherits the forked
+    # parent pytest worker's peak across execve(), whereas VmHWM tracks only
+    # this fresh child's mm_struct.
+    current = peak = 0
+    with open("/proc/self/status", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("VmRSS:"):
+                current = int(line.split()[1]) * 1024
+            elif line.startswith("VmHWM:"):
+                peak = int(line.split()[1]) * 1024
+    return current, peak
+
+
+model = Path(sys.argv[2])
+data = artifact_grounding._read_bytes(model)
+parsed = artifact_grounding._parse_glb(data)
+artifact_grounding._read_bytes = lambda path, *args, **kwargs: data
+artifact_grounding._parse_glb = lambda raw: parsed
+original_check = artifact_grounding._check
+sampled = {}
+
+
+def sampling_check(checks, name, *args, **kwargs):
+    if name == "glb-accessors":
+        sampled["peak"] = current_and_peak()[1]
+    return original_check(checks, name, *args, **kwargs)
+
+
+artifact_grounding._check = sampling_check
+current_and_peak()
+gc.collect()
+before, peak_before = current_and_peak()
+checks = []
+artifact_grounding._validate_glb(model, {}, checks)
+accessors = next(item for item in checks if item["name"] == "glb-accessors")
+print(json.dumps({
+    "delta": sampled["peak"] - before,
+    "peak_during_validation": sampled["peak"] > peak_before,
+    "ok": accessors["ok"],
+    "detail": accessors["detail"],
+}))
+"""
+
+
+# 43,691 accessors is the first count at which accessor_cache grows its
+# table to 2**17 slots, so the cache costs the most per entry (and both the
+# old and new tables are live during the resize).
+_GLB_RESIZE_ACCESSORS = 2**16 * 2 // 3 + 1
+
+
+@pytest.mark.parametrize(
+    "component_type,value_type,first_value,rows,accessor_count",
+    [
+        (5126, "MAT4", 1.5, 1000, 60),
+        (5125, "MAT4", 2**31, 1000, 60),
+        (5126, "MAT4", 1.5, 1, _GLB_RESIZE_ACCESSORS),
+        (5125, "SCALAR", 2**31 + 5, 1, _GLB_RESIZE_ACCESSORS),
+    ],
+    ids=[
+        "mat4-float-1000-rows",
+        "mat4-uint32-large-1000-rows",
+        "mat4-float-count1",
+        "scalar-uint32-large-count1",
+    ],
+)
+def test_glb_accessor_slot_cost_matches_measured_memory(
+    tmp_path, component_type, value_type, first_value, rows, accessor_count
+):
+    """The budget comment claimed a per-slot cost and a ceiling that measured
+    memory exceeded: first 32 B per slot, then a 39 B worst case taken from
+    1,000-row accessors only, while count=1 accessors pay a list object, an
+    item array and a cache entry each and cost 50-100 B per row slot. This
+    measures what the validator really holds for the cached accessors, for
+    the worst row type (MAT4 of distinct floats, or of uint32 values >= 2**30,
+    which are never shared small ints) and for many single-row accessors
+    right after a cache resize, and checks it against the per-slot figure
+    the cap is derived from, per slot as _validate_glb charges them."""
+    if sys.platform != "win32" and not Path("/proc/self/status").exists():
+        pytest.skip("needs Windows process counters or Linux /proc")
+    components = {"SCALAR": 1, "MAT4": 16}[value_type]
+    code = {5126: "f", 5125: "I"}[component_type]
+    values = [first_value + index for index in range(rows * components)]
+    binary = struct.pack(f"<{len(values)}{code}", *values)
+    accessor = {
+        "bufferView": 0,
+        "componentType": component_type,
+        "type": value_type,
+        "count": rows,
+    }
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": [{"buffer": 0, "byteLength": len(binary)}],
+        "accessors": [accessor] * accessor_count,
+    }
+    encoded = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 4)
+    body = struct.pack("<I", len(encoded)) + b"JSON" + encoded
+    body += struct.pack("<I", len(binary)) + b"BIN\x00" + binary
+    model = tmp_path / "measure.glb"
+    model.write_bytes(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+
+    repo_root = Path(artifact_grounding.__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _GLB_MEMORY_CHILD, str(repo_root), str(model)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    measured = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert measured["ok"], measured["detail"]
+    # A peak set before validation (by the read/parse) would hide the cost.
+    assert measured["peak_during_validation"], measured
+    slots = accessor_count * artifact_grounding._glb_accessor_slot_charge(
+        rows, value_type
+    )
+    assert slots <= artifact_grounding.MAX_GLB_TOTAL_ACCESSOR_SLOTS
+    per_slot = measured["delta"] / slots
+    # A counter that stopped counting would report ~0 and pass the upper
+    # bound; real tuples of boxed numbers cannot cost under 20 B/slot.
+    assert per_slot >= 20, measured
+    assert per_slot <= artifact_grounding.GLB_ACCESSOR_SLOT_BYTES, (per_slot, measured)
+    # The ceiling the module comment states for the cached rows of one GLB.
+    assert (
+        artifact_grounding.MAX_GLB_TOTAL_ACCESSOR_SLOTS
+        * artifact_grounding.GLB_ACCESSOR_SLOT_BYTES
+        <= 484 * 1000 * 1000
+    )
+
+
+def test_glb_accessor_budget_leaves_invalid_counts_to_the_count_check(
+    monkeypatch, tmp_path
+):
+    """A count above MAX_GLB_ACCESSOR_ITEMS is refused before anything is
+    unpacked, so charging it to the budget only replaced the precise
+    'invalid count' error with a misleading budget error."""
+    model = tmp_path / "over-count.glb"
+    _tiny_aliasing_glb(model, accessor_count=1, items=8)
+    monkeypatch.setattr(artifact_grounding, "MAX_GLB_ACCESSOR_ITEMS", 4)
+    monkeypatch.setattr(artifact_grounding, "MAX_GLB_TOTAL_ACCESSOR_SLOTS", 10)
+    checks = []
+    artifact_grounding._validate_glb(model, {}, checks)
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert not accessors["ok"]
+    assert "accessor 0 has an invalid count" in accessors["detail"]
+    assert "budget" not in accessors["detail"]
+
+
+def test_glb_accessor_budget_does_not_reject_documents_under_it(tmp_path):
+    model = tmp_path / "small.glb"
+    _tiny_aliasing_glb(model, accessor_count=3, items=8)
+    checks = []
+    artifact_grounding._validate_glb(model, {}, checks)
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert accessors["ok"], accessors
+    mat4 = tmp_path / "small-mat4.glb"
+    _tiny_aliasing_glb(
+        mat4, accessor_count=3, items=8, component_type=5126, value_type="MAT4"
+    )
+    checks = []
+    artifact_grounding._validate_glb(mat4, {}, checks)
+    accessors = next(item for item in checks if item["name"] == "glb-accessors")
+    assert accessors["ok"], accessors

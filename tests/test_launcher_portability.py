@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -51,4 +52,4 @@ def test_shipped_product_sources_contain_no_machine_specific_drive_root():
         text = _read(relative)
         assert "D:\\" not in text, relative
         assert "D:/" not in text, relative
-        assert "C:\\Users\\natew" not in text, relative
+        assert not re.search(r"[A-Za-z]:[\\/]Users[\\/]", text), relative

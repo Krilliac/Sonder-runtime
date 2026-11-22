@@ -17,7 +17,10 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from typing import Any
 
 MIN_MARGIN: Final = 0.05
 
@@ -148,7 +151,7 @@ class LinearHead:
     input_prefix: str
 
 
-def load_head(payload: Mapping) -> LinearHead:
+def load_head(payload: Mapping[str, Any]) -> LinearHead:
     """Validate an exported head (``labels``, ``W``, ``b``, ``embedding_model``)."""
     labels = tuple(str(label) for label in payload["labels"])
     weights = tuple(tuple(float(value) for value in row) for row in payload["W"])

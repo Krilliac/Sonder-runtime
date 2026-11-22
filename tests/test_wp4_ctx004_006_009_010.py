@@ -14,18 +14,66 @@ def record(item_id, text, *, ordinal=0, source="fixture", stable=False, section=
 
 
 def test_dedup_is_deterministic_and_retains_exact_and_semantic_provenance():
+    # Ordinary retrieved prose in one section: the only place approximate
+    # similarity is allowed to group records.
     result = deduplicate_context([
-        record("b", "Policy: keep local data.", ordinal=2, source="policy"),
-        record("a", "Policy: keep local data.", ordinal=1, source="rules"),
-        record("c", "POLICY keep local data", ordinal=3, source="memory"),
+        record("b", "Note: keep local data.", ordinal=2, source="recall-b", section="memories"),
+        record("a", "Note: keep local data.", ordinal=1, source="recall-a", section="memories"),
+        record("c", "NOTE keep local data", ordinal=3, source="recall-c", section="memories"),
     ], semantic_threshold=0.8)
 
     assert [item.item_id for item in result.retained] == ["a"]
     assert [(item.removed_item_id, item.reason, item.retained_item_id) for item in result.provenance] == [
         ("b", "exact", "a"), ("c", "semantic", "a")
     ]
-    assert result.provenance[0].removed_source == "policy"
-    assert result.provenance[1].retained_source == "rules"
+    assert result.provenance[0].removed_source == "recall-b"
+    assert result.provenance[1].retained_source == "recall-a"
+    assert result.provenance[1].removed_section == "memories"
+
+
+ALWAYS = "Always run the full test suite before you push changes to the main branch."
+NEVER = "Never run the full test suite before you push changes to the main branch."
+
+
+def test_semantic_dedup_never_merges_authoritative_records():
+    # One token apart, opposite meaning, different sources.
+    for section in ("stable_instructions", "project_rules", "policy", "corrections", "verifier"):
+        result = deduplicate_context([
+            record("first", ALWAYS, ordinal=0, source="rules-a", section=section),
+            record("second", NEVER, ordinal=1, source="rules-b", section=section),
+        ])
+        assert [item.item_id for item in result.retained] == ["first", "second"], section
+        assert result.provenance == ()
+
+    # Stable records and explicitly authoritative records are protected in
+    # any section, and one protected side is enough to block the merge.
+    for kwargs in ({"stable": True}, {"authoritative": True}):
+        protected = ContextRecord("second", "recent_history", NEVER, "user", 1, **kwargs)
+        result = deduplicate_context([
+            record("first", ALWAYS, ordinal=0, source="recall", section="recent_history"),
+            protected,
+        ])
+        assert {item.item_id for item in result.retained} == {"first", "second"}, kwargs
+
+
+def test_semantic_dedup_stays_inside_one_section():
+    result = deduplicate_context([
+        record("memory", ALWAYS, ordinal=0, source="recall", section="memories"),
+        record("history", NEVER, ordinal=1, source="session", section="recent_history"),
+    ])
+    assert [item.item_id for item in result.retained] == ["memory", "history"]
+
+
+def test_exact_merge_keeps_the_protected_copy_whatever_the_order():
+    unprotected = record("memory", "Keep local data.", ordinal=0, source="recall", section="memories")
+    protected = record("rule", "Keep local data.", ordinal=5, source="rules", section="policy")
+    for rows in ([unprotected, protected], [protected, unprotected]):
+        result = deduplicate_context(rows)
+        assert [item.item_id for item in result.retained] == ["rule"]
+        (entry,) = result.provenance
+        assert (entry.removed_item_id, entry.retained_item_id, entry.reason) == ("memory", "rule", "exact")
+        assert (entry.removed_source, entry.retained_source) == ("recall", "rules")
+        assert (entry.removed_section, entry.retained_section) == ("memories", "policy")
 
 
 def test_last_good_snapshot_rejects_incomplete_refresh_and_isolated_mutation():

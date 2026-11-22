@@ -15,6 +15,9 @@ integrations/
 └── IMPORT_PROMPT.md          paste this at your agent and it sets itself up
 ```
 
+For every client route (MCP, console, thin client, app, web app, HTTP, SDK)
+see [connect-clients.md](../docs/runbooks/connect-clients.md).
+
 ## Three ways to install
 
 **1. Ask your agent to do it.** Open [IMPORT_PROMPT.md](IMPORT_PROMPT.md),

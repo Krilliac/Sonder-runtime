@@ -15,7 +15,7 @@ class Checkpoint:
     session_id: str
     step_index: int
     status: str
-    context: dict = field(default_factory=dict)
+    context: dict[str, object] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     checkpoint_id: str = ""
 

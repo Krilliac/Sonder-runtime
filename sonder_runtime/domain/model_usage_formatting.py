@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def usage_source(tokens_in, tokens_out):
+if TYPE_CHECKING:
+    from typing import Literal
+
+
+def usage_source(
+    tokens_in: int | None,
+    tokens_out: int | None,
+) -> Literal["ollama", "estimated", "mixed"]:
     """Classify the provenance of the two persisted provider token counts."""
     if tokens_in is not None and tokens_out is not None:
         return "ollama"

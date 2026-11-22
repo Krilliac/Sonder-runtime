@@ -1008,8 +1008,13 @@ def _mode_command(argument):
             explain = True
             break
     # The console is the attended surface: a person typed this, so it may
-    # raise autonomy (unattended callers may only lower it).
-    with permission_policy.attended_mode_change():
+    # raise autonomy (unattended callers may only lower it).  A piped session
+    # (`echo /mode auto | sonder`) has nobody at the keyboard, so it is held
+    # to lowering like every other unattended caller.
+    attended = (
+        permission_policy.attended_mode_change() if _console_has_operator() else nullcontext()
+    )
+    with attended:
         return server.permission_mode(mode=wanted, explain=explain)
 
 
@@ -4935,10 +4940,29 @@ def main(*, machine_output=False):
                         apply_trace(intent["trace"])
                     if "strict" in intent:
                         apply_strict(intent["strict"])
+                    # The phrase is the slash command it stands for, so it passes
+                    # the same gate: "execute the code" must not run model-authored
+                    # code that ``/run`` would have been refused or asked about.
                     if intent.get("run"):
-                        do_run()
+                        gate_arguments = powershell_gate.slash_run_arguments(
+                            "/run", lambda source=last_run_source or last_response: (source,),
+                            grounding.extract_runnable_code_block,
+                        )
+                        may_run, refusal = (
+                            _named_command_gate("/run", "", arguments=gate_arguments)
+                            if gate_arguments is not None else _named_command_gate("/run", "")
+                        )
+                        if may_run:
+                            do_run()
+                        else:
+                            print(_refusal_notice("/run", refusal))
                     if "train" in intent:
-                        _run_train(intent["train"])
+                        train_arg = str(intent["train"])
+                        may_run, refusal = _named_command_gate("/train", train_arg)
+                        if may_run:
+                            _run_train(intent["train"])
+                        else:
+                            print(_refusal_notice("/train " + train_arg, refusal))
                     continue
 
                 # Concrete workspace requests run through the guarded agent so the

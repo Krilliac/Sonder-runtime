@@ -7,9 +7,9 @@ mutate producer-owned context.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from sonder_runtime.domain.context.hardware_sizing import (
     ContextSizing,
@@ -22,6 +22,7 @@ from .context_planner import CONTEXT_SECTIONS, ContextPlan, ContextPlanner, Mode
 from .context_priority import select_context
 from .context_manifests import (
     ContextRecord,
+    DeduplicationResult,
     LastGoodSnapshot,
     PrefixManifest,
     PrefixManifestCache,
@@ -31,6 +32,17 @@ from .context_manifests import (
     deduplicate_context,
 )
 from .context_overflow_recovery import ContextOverflowRecovery, RecoveryResult
+
+CONTEXT_DEDUP_METADATA_KEY = "context_dedup"
+"""Replay-metadata key the facade reserves for the dedup provenance mapping."""
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from typing import Any, TypeVar
+
+    from .context_manifests import PrefixCacheTelemetry
+
+    _CandidateT = TypeVar("_CandidateT")
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,7 @@ class ContextAssembly:
     prefix: PrefixManifest | None = None
     replay: ReplayManifest | None = None
     prefix_observation: PrefixCacheObservation | None = None
+    dedup: DeduplicationResult | None = None
 
     def __post_init__(self) -> None:
         selections = dict(self.selections)
@@ -50,11 +63,11 @@ class ContextAssembly:
             raise ValueError("selections must contain every context section in order")
         object.__setattr__(self, "selections", MappingProxyType(selections))
 
-    def __deepcopy__(self, memo: dict[int, object]) -> "ContextAssembly":
+    def __deepcopy__(self, memo: dict[int, object]) -> ContextAssembly:
         """Keep immutable mapping proxies compatible with snapshot isolation."""
         copied = ContextAssembly(
             self.plan, dict(self.selections), self.sizing, self.prefix, self.replay,
-            self.prefix_observation,
+            self.prefix_observation, self.dedup,
         )
         memo[id(self)] = copied
         return copied
@@ -143,13 +156,13 @@ class ContextPlanningFacade:
         tokenizer: str = "",
         template: str = "",
         system_prefix: str = "",
-        visible_tool_schemas: Any = (),
-        tool_schemas: Any = None,
-        project_policy: Any = None,
-        dynamic_memory: Any = None,
-        retrieval: Any = None,
+        visible_tool_schemas: object = (),
+        tool_schemas: object = None,
+        project_policy: object = None,
+        dynamic_memory: object = None,
+        retrieval: object = None,
         request_id: str | None = None,
-        replay_metadata: Mapping[str, Any] | None = None,
+        replay_metadata: Mapping[str, object] | None = None,
     ) -> ContextAssembly:
         """Assemble a bounded, explainable view and publish only complete views.
 
@@ -166,19 +179,32 @@ class ContextPlanningFacade:
             if effective_model.reserved_output_tokens >= effective_model.context_window_tokens:
                 raise ValueError("hardware-aware context limit leaves no input budget")
 
-        manifest_records = tuple(records)
-        deduped = deduplicate_context(manifest_records).retained if manifest_records else ()
+        if replay_metadata is not None and CONTEXT_DEDUP_METADATA_KEY in replay_metadata:
+            raise ValueError(f"replay_metadata key {CONTEXT_DEDUP_METADATA_KEY!r} is reserved")
+        # Every record is rendered, so every record stays in the prefix and
+        # replay evidence.  Dedup only groups them: the removed-to-retained
+        # mapping travels with the replay manifest instead of deleting
+        # evidence, and approximate grouping never touches authority.
+        candidates = tuple(records)
+        dedup = deduplicate_context(candidates) if candidates else None
+        rendered = tuple(sorted(candidates, key=lambda record: (record.ordinal, record.item_id)))
+        metadata: Mapping[str, Any] | None = replay_metadata
+        if dedup is not None and dedup.provenance:
+            metadata = {
+                **(replay_metadata or {}),
+                CONTEXT_DEDUP_METADATA_KEY: [asdict(entry) for entry in dedup.provenance],
+            }
         has_prefix_identity = any((
             provider_id, tokenizer, template, system_prefix,
             visible_tool_schemas not in ((), {}, None),
             tool_schemas is not None,
             project_policy is not None,
         ))
-        should_resolve_prefix = bool(manifest_records or has_prefix_identity)
+        should_resolve_prefix = bool(rendered or has_prefix_identity)
         prefix = prefix_observation = None
         if should_resolve_prefix:
             prefix, prefix_observation = self._prefix_cache.resolve_observed(
-                deduped,
+                rendered,
                 version=prefix_version,
                 model=effective_model.model,
                 provider_id=provider_id,
@@ -196,9 +222,9 @@ class ContextPlanningFacade:
             build_replay_manifest(
                 request_id,
                 effective_model.model,
-                deduped,
+                rendered,
                 prefix_key=prefix.cache_key if prefix is not None else "",
-                metadata=replay_metadata,
+                metadata=metadata,
             )
             if request_id is not None
             else None
@@ -206,7 +232,7 @@ class ContextPlanningFacade:
         result = self._assembly.assemble(effective_model, items, section_budgets)
         result = ContextAssembly(
             result.plan, result.selections, sizing, prefix, replay,
-            prefix_observation,
+            prefix_observation, dedup,
         )
         if not any(selection.emergency_overflow for selection in result.selections.values()):
             self._last_good.publish(result)
@@ -218,19 +244,19 @@ class ContextPlanningFacade:
         return None if snapshot is None else snapshot.value
 
     @property
-    def prefix_cache_telemetry(self):
+    def prefix_cache_telemetry(self) -> PrefixCacheTelemetry:
         """Return bounded hit/miss reasons for the stable prefix cache."""
         return self._prefix_cache.telemetry
 
     def prepare_overflow(
         self,
-        candidate: Any,
+        candidate: _CandidateT,
         *,
         estimated_tokens: int,
         context_limit: int,
         reserved_output_tokens: int = 0,
-        compact: Callable[[Any], Any | None],
-    ) -> RecoveryResult[Any]:
+        compact: Callable[[_CandidateT], _CandidateT | None],
+    ) -> RecoveryResult[_CandidateT]:
         """Expose the bounded preflight recovery seam without provider logic."""
         policy = self._recovery or ContextOverflowRecovery(
             compact=compact, shrink=lambda value, _factor: None
@@ -244,13 +270,13 @@ class ContextPlanningFacade:
 
     def recover_overflow(
         self,
-        candidate: Any,
+        candidate: _CandidateT,
         *,
-        fits: Callable[[Any], bool],
-        compact: Callable[[Any], Any | None],
-        shrink: Callable[[Any, float], Any | None],
+        fits: Callable[[_CandidateT], bool],
+        compact: Callable[[_CandidateT], _CandidateT | None],
+        shrink: Callable[[_CandidateT, float], _CandidateT | None],
         max_attempts: int = 3,
-    ) -> RecoveryResult[Any]:
+    ) -> RecoveryResult[_CandidateT]:
         """Run bounded overflow recovery and preserve its last-good fallback."""
         policy = self._recovery or ContextOverflowRecovery(
             compact=compact, shrink=shrink, max_attempts=max_attempts

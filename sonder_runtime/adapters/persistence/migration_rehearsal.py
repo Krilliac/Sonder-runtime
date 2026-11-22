@@ -59,11 +59,22 @@ class RehearsalReport:
 
 
 def _digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+    """Logical digest of a SQLite database: integrity check plus ordered dump.
+
+    The bridge backup uses the SQLite backup API, so a backup member is not
+    byte-identical to its source; equality of content is what is compared.
+    """
+    conn = owned_sqlite_connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RehearsalError(f"integrity check failed: {path.name}")
+        h = hashlib.sha256()
+        for statement in conn.iterdump():
+            h.update(statement.encode("utf-8", "surrogatepass"))
+            h.update(bytes([10]))
+        return h.hexdigest()
+    finally:
+        conn.close()
 
 
 def _copy_home(source: Path, destination: Path) -> None:
@@ -115,16 +126,21 @@ def _verify_and_restore(
     expected: Mapping[str, str],
     destination: Path,
 ) -> bool:
-    """Verify bridge backup members and restore them into an empty directory."""
+    """Verify bridge backup members (by logical content) and restore them into an empty directory."""
     destination.mkdir(parents=True, exist_ok=False)
     seen: set[str] = set()
     for name, digest in expected.items():
         member = backup / name
-        if not member.is_file() or member.is_symlink() or _digest(member) != digest:
+        if not member.is_file() or member.is_symlink():
             return False
         target = destination / name
-        shutil.copy2(member, target)
-        if _digest(target) != digest:
+        try:
+            if _digest(member) != digest:
+                return False
+            shutil.copy2(member, target)
+            if _digest(target) != digest:
+                return False
+        except sqlite3.DatabaseError:
             return False
         seen.add(name)
     # A bridge backup must not silently invent a database absent from the
@@ -152,7 +168,6 @@ def rehearse_bridge_migration(
     source = Path(source_home).expanduser().resolve(strict=True)
     if not source.is_dir():
         raise RehearsalError("source home must be a directory")
-    expected = _original_digests(source)
     if not failure_boundary.strip():
         raise RehearsalError("failure_boundary must be non-empty")
 
@@ -162,6 +177,9 @@ def rehearse_bridge_migration(
         successful = root / "successful"
         _copy_home(source, failed)
         _copy_home(source, successful)
+        # Digests come from a disposable copy so the supplied home is never
+        # opened by SQLite here.
+        expected = _original_digests(failed)
 
         class InjectedCrash(RuntimeError):
             pass

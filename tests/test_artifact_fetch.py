@@ -638,6 +638,40 @@ def test_authenticode_process_ignores_inherited_powershell_module_path(monkeypat
     assert script.index("Import-Module") < script.index("Get-AuthenticodeSignature")
 
 
+def test_authenticode_path_never_enters_the_powershell_command_text(monkeypatch):
+    # PowerShell treats U+2018-U+201B as single-quote delimiters too, so a
+    # path quoted into -Command could close the string and run the rest.
+    # The path must travel out-of-band (an environment variable) instead.
+    hostile = "C:\\Temp\\a\u2019+$(Start-Process calc)+\u2018b\u201a\u201b'.exe"
+    environment = {"SystemRoot": r"C:\Windows", "PATH": r"C:\Windows\System32"}
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured.update(argv=argv, **kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"Status": "NotSigned", "Subject": "", "Thumbprint": ""}),
+            stderr="",
+        )
+
+    with monkeypatch.context() as windows:
+        windows.setattr(
+            artifact_fetch, "os",
+            SimpleNamespace(name="nt", environ=environment, path=ntpath),
+        )
+        windows.setattr(artifact_fetch.subprocess, "run", run)
+        signature = REAL_AUTHENTICODE_SIGNATURE(hostile)
+
+    assert signature["status"] == "NotSigned"
+    script = captured["argv"][captured["argv"].index("-Command") + 1]
+    for fragment in ("Start-Process", "\u2018", "\u2019", "\u201a", "\u201b", "a\u2019"):
+        assert fragment not in script
+    assert all(hostile not in arg for arg in captured["argv"])
+    name = artifact_fetch._AUTHENTICODE_PATH_ENV
+    assert "-LiteralPath $env:%s;" % name in script
+    assert captured["env"][name] == hostile
+
+
 # --- redirects, resume, idempotency --------------------------------------
 
 
@@ -666,6 +700,46 @@ def test_redirect_chain_is_recorded(fixture_server, tmp_path):
     assert record["redirect_chain"] == hops
     assert record["url"] == start
     assert record["final_url"] == final
+
+
+def test_rerunning_a_redirected_fetch_reuses_the_verified_artifact(
+    fixture_server, tmp_path,
+):
+    # The sidecar records the requested URL and where it redirected to; a
+    # rerun of the same request must match the requested URL, not final_url.
+    final = fixture_server.route("/cdn/reused.zip", body=ZIP_BODY)
+    start = fixture_server.route(
+        "/dl/reused.zip", status=302, body=b"", headers={"Location": final},
+    )
+    dest = tmp_path / "reused.zip"
+
+    first = artifact_fetch.fetch_artifact(start, str(dest), expect_type="zip")
+    second = artifact_fetch.fetch_artifact(start, str(dest), expect_type="zip")
+
+    assert first["ok"], first["failures"]
+    assert first["final_url"] == final
+    assert second["ok"], second["failures"]
+    assert second["reused"] is True
+    assert second["action"] == "reused"
+    assert second["url"] == start
+    assert second["final_url"] == final
+    assert second["sha256"] == first["sha256"]
+
+
+def test_reuse_rejects_an_artifact_recorded_for_a_different_url(
+    fixture_server, tmp_path,
+):
+    url = fixture_server.route("/origin.zip", body=ZIP_BODY)
+    other = fixture_server.route("/elsewhere.zip", body=ZIP_BODY)
+    dest = tmp_path / "origin.zip"
+
+    first = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+    again = artifact_fetch.fetch_artifact(other, str(dest), expect_type="zip")
+
+    assert first["ok"], first["failures"]
+    assert not again["ok"]
+    assert again["verdict"] == "rejected"
+    assert _failed(again, "provenance")
 
 
 def test_redirect_without_location_is_rejected(fixture_server, tmp_path):

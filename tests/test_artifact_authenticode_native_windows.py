@@ -42,3 +42,22 @@ def test_signed_windows_powershell_matches_exact_microsoft_organization(monkeypa
     assert {row["check"] for row in result["checks"] if row["ok"]} >= {
         "size", "block_page", "magic", "publisher",
     }
+
+
+def test_unicode_quote_in_path_cannot_inject_powershell(monkeypatch, tmp_path):
+    # PowerShell treats U+2019 as a single-quote delimiter. Were the path
+    # quoted into the -Command text, this name would close the string and
+    # the $(...) subexpression would create the marker file in the working
+    # directory. (No colon in the name: NTFS reads one as a stream separator.)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SONDER_POWERSHELL", raising=False)
+    marker = tmp_path / "sonder-inject-marker"
+    target = tmp_path / "a\u2019+$(ni sonder-inject-marker)+\u2019.exe"
+    target.write_bytes(b"MZ" + b"\x00" * 64)
+
+    signature = artifact_fetch._authenticode_signature(target)
+
+    assert not marker.exists(), signature
+    # The verifier saw the real file under its literal name.
+    assert signature["supported"] is True, signature
+    assert signature["status"] != "Valid", signature

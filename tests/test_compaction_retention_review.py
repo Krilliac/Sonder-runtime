@@ -100,6 +100,10 @@ def test_failure_signals_are_detected_at_top_level_and_one_level_nested(payload)
     {"result": {"status": "ok", "exit_code": 0}},
     {"exit_code": "0"},
     {"exit_code": "not-a-number"},
+    # Non-ASCII digits pass str.isdigit() but int() raises on some ("²").
+    {"exit_code": "²"},
+    {"exit_code": "-²"},
+    {"result": {"exit_code": "1¹"}},
     {"status": "completed"},
     {"stdout": TRACEBACK},  # only stderr is treated as a failure channel
     {"result": {"inner": {"status": "failed"}}},  # bounded: one level only

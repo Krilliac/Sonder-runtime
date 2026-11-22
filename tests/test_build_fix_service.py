@@ -666,3 +666,80 @@ def test_revert_after_still_restores_when_the_wall_budget_ran_out(tmp_path, monk
     # originals, although the run's own deadline had passed.
     assert h.editor.files == h.originals
     assert any("originals were restored" in note for note in report.notes)
+
+
+def _start_failing_on(h, call_number):
+    """Make the jobs port refuse the ``call_number``-th child build start."""
+    from sonder_runtime.domain.common.errors import CapacityExceeded
+
+    started = []
+    real_start = h.jobs.start
+
+    def start(request, context, **kwargs):
+        started.append(request.action)
+        if len(started) == call_number:
+            raise CapacityExceeded("no build slot")
+        return real_start(request, context, **kwargs)
+
+    h.jobs.start = start
+    return started
+
+
+def test_a_refused_verification_build_still_reverts_the_unjudged_candidate(tmp_path):
+    files = dict(BASE_FILES)
+    files["src/a.cpp"] = "int a() { return 1; }\nint x = ERR1;\n"
+    h = Harness(tmp_path, files=files, script=[
+        patch("src/a.cpp", "int x = ERR1;", "int x = 1;"),
+    ])
+    started = _start_failing_on(h, 2)  # the baseline runs; the check is refused
+    job, report = h.run(attempts=2, revert_after=True)
+    assert started == ["build", "compile_one"]
+    assert h.editor.writes  # the candidate reached the file before the refusal
+    assert report.stop_reason is FixStopReason.BUILD_DID_NOT_RUN
+    assert report.status == "aborted"
+    assert h.editor.files == h.originals
+    assert any("unverified candidate was reverted" in note for note in report.notes)
+    assert any("could not start" in note for note in report.notes)
+
+
+def test_a_refused_dependents_build_still_honours_revert_after(tmp_path):
+    files = dict(BASE_FILES)
+    files["src/a.cpp"] = "int a() { return 1; }\nint x = ERR1;\n"
+    h = Harness(tmp_path, files=files, script=[
+        patch("src/a.cpp", "int x = ERR1;", "int x = 1;"),
+    ])
+    started = _start_failing_on(h, 4)  # baseline, compile_one, target, dependents
+    job, report = h.run(attempts=2, revert_after=True, verify_dependents=True)
+    assert started == ["build", "compile_one", "build", "build"]
+    assert report.status == "fixed" and report.stop_reason is FixStopReason.FIXED
+    assert any("dependents build skipped" in note for note in report.notes)
+    assert h.editor.files == h.originals
+    assert any("originals were restored" in note for note in report.notes)
+
+
+def test_a_lost_verification_build_result_still_reverts_the_unjudged_candidate(tmp_path):
+    from sonder_runtime.application.build.ports import JOB_NOT_FOUND, build_error
+
+    files = dict(BASE_FILES)
+    files["src/a.cpp"] = "int a() { return 1; }\nint x = ERR1;\n"
+    h = Harness(tmp_path, files=files, script=[
+        patch("src/a.cpp", "int x = ERR1;", "int x = 1;"),
+    ])
+    real_result = h.jobs.result
+
+    def result(child, context, *, wait_seconds=0):
+        # The baseline is read normally; the candidate's check is lost.
+        if len(h.jobs.started) >= 2 and child == h.jobs.started[1][0]:
+            raise build_error(JOB_NOT_FOUND, "build job not found")
+        return real_result(child, context, wait_seconds=wait_seconds)
+
+    h.jobs.result = result
+    job, report = h.run(attempts=2, revert_after=True)
+    assert [action for _, action, _ in h.jobs.started] == ["build", "compile_one"]
+    assert h.editor.writes  # the candidate reached the file before the lookup failed
+    assert h.jobs.started[1][0] in h.jobs.cancelled  # the lost child was stopped
+    assert report.stop_reason is FixStopReason.BUILD_DID_NOT_RUN
+    assert report.status == "aborted"
+    assert h.editor.files == h.originals
+    assert any("unverified candidate was reverted" in note for note in report.notes)
+    assert any("could not be read" in note for note in report.notes)

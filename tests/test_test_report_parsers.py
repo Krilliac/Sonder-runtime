@@ -406,3 +406,59 @@ def test_mutated_reports_only_ever_raise_input_errors():
         for parser in text:
             parser(bytes(data).decode("utf-8", "replace"))
     assert time.monotonic() - started < 60
+
+
+def test_hostile_junit_failure_text_is_scanned_in_bounded_time():
+    # No file/classname attribute, so the generic location regex runs over the
+    # failure text.  A long dotted run with no ".ext:N" used to backtrack from
+    # every offset: O(n^2), ~20 s for this single failure.
+    junk = "a." * 40_000
+    doc = ('<testsuite><testcase name="x"><failure>%s</failure></testcase></testsuite>'
+           % junk).encode()
+    started = time.monotonic()
+    parsed = parse_junit_xml(doc)
+    assert time.monotonic() - started < 3
+    assert parsed.failures[0].file == "" and parsed.failures[0].line is None
+
+
+def test_generic_location_is_still_found_near_the_top_of_failure_text():
+    doc = (b'<testsuite><testcase name="x"><failure>boom at src/lib/thing.js:42\n'
+           + b"x" * 100_000 + b"</failure></testcase></testsuite>")
+    failure = parse_junit_xml(doc).failures[0]
+    assert (failure.file, failure.line) == ("src/lib/thing.js", 42)
+
+
+def test_hostile_trx_stack_trace_is_scanned_in_bounded_time():
+    stack = "in " * 40_000
+    doc = ('<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results>'
+           '<UnitTestResult testName="T" outcome="Failed"><Output><ErrorInfo>'
+           '<Message>m</Message><StackTrace>%s</StackTrace></ErrorInfo></Output>'
+           '</UnitTestResult></Results></TestRun>' % stack).encode()
+    started = time.monotonic()
+    parsed = parse_trx(doc)
+    assert time.monotonic() - started < 3
+    assert parsed.failures[0].file == ""
+
+
+def test_go_parent_subtest_check_is_not_quadratic():
+    # Every failing parent is listed before its failing child.  Each parent
+    # used to scan the whole failing list for a child: O(n^2), ~15 s here.
+    count = 10_000
+    lines = [json.dumps({"Action": "fail", "Package": "p", "Test": "T%d" % i}) for i in range(count)]
+    lines += [json.dumps({"Action": "fail", "Package": "p", "Test": "T%d/sub" % i}) for i in range(count)]
+    started = time.monotonic()
+    parsed = parse_go_test_json("\n".join(lines))
+    assert time.monotonic() - started < 3
+    assert parsed.failures and all(item.id.endswith("/sub") for item in parsed.failures)
+
+
+def test_go_parent_is_skipped_only_for_a_subtest_in_the_same_package():
+    lines = [
+        json.dumps({"Action": "fail", "Package": "a", "Test": "TestX"}),
+        json.dumps({"Action": "fail", "Package": "b", "Test": "TestX/sub"}),
+        json.dumps({"Action": "fail", "Package": "a", "Test": "TestXY"}),
+        json.dumps({"Action": "fail", "Package": "c", "Test": "TestP"}),
+        json.dumps({"Action": "fail", "Package": "c", "Test": "TestP/a/b"}),
+    ]
+    ids = sorted(item.id for item in parse_go_test_json("\n".join(lines)).failures)
+    assert ids == ["a.TestX", "a.TestXY", "b.TestX/sub", "c.TestP/a/b"]

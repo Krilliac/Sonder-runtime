@@ -86,6 +86,8 @@ def generated_runtime(monkeypatch):
     monkeypatch.setattr(server, "sonder", lambda prompt, **kwargs: response(prompt))
     monkeypatch.setattr(server, "_campaign_expected", lambda task: "sonder-ok")
     monkeypatch.setattr(server, "record_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
+    # The campaign driver grades its own runs, so it files self-graded rows.
+    monkeypatch.setattr(server, "record_self_graded_outcome", lambda iid, signal: records.append((iid, signal)) or "recorded")
     monkeypatch.setattr(server, "_record_failure_pitfall", lambda *args: pytest.fail("approval skip was graded"))
     monkeypatch.setattr(server, "_drain_deferred_distillations", lambda **kwargs: {"drained": 0})
     monkeypatch.setattr(gate, "inspect_powershell", inspect)

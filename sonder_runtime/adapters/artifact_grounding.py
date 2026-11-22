@@ -16,7 +16,10 @@ import zipfile
 import zlib
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 from xml.etree import ElementTree
+
+from sonder_runtime.domain.network_path_spelling import is_network_spelling
 
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -26,6 +29,29 @@ MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_OOXML_ENTRIES = 1000
 MAX_OOXML_BYTES = 128 * 1024 * 1024
 MAX_GLB_ACCESSOR_ITEMS = 2_000_000
+# Aggregate budget, in value slots, across every accessor materialised for
+# one GLB. Accessors may alias one bufferView, so a small BIN chunk can be
+# unpacked many times over and the per-accessor row cap alone does not bound
+# memory. Each accessor is charged _glb_accessor_slot_charge() slots before
+# it is unpacked: count * (components + 2) for its rows (a list slot, a
+# tuple and one number object per component) plus GLB_ACCESSOR_FIXED_SLOTS
+# for the accessor itself (its list object and item array, its
+# accessor_cache entry and int key). Without the fixed term many count=1
+# accessors cost 50-100 bytes per slot. The process commit charge measured
+# on 64-bit CPython 3.12 (Windows), from just before validation to the
+# glb-accessors check and including dict-resize transients, is at most
+# about 40 bytes per charged slot: MAT4 count=1 accessors of floats or of
+# uint32 values >= 2**30, right after an accessor_cache resize, are the
+# worst case; 1,000-row MAT4 accessors measure about 39 and SCALAR..MAT3
+# count=1 accessors 37-39. GLB_ACCESSOR_SLOT_BYTES keeps about 10% headroom
+# over that, so the rows and cache entries held for one GLB stay under
+# 11M * 44 B = 484 MB for any mix of accessor types and counts. Not counted:
+# the file bytes, the parsed JSON and the json.dumps copy of it, per-accessor
+# error strings, and transient lists built by the later geometry/animation
+# passes.
+GLB_ACCESSOR_SLOT_BYTES = 44
+GLB_ACCESSOR_FIXED_SLOTS = 5
+MAX_GLB_TOTAL_ACCESSOR_SLOTS = 11_000_000
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -42,6 +68,57 @@ def _is_reparse_point(path: Path) -> bool:
     except (FileNotFoundError, OSError):
         return False
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+_WINDOWS_RESERVED_DEVICE_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9\u00b2\u00b3\u00b9]|LPT[1-9\u00b2\u00b3\u00b9])$",
+    re.IGNORECASE,
+)
+
+
+def _has_control_chars(text: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+
+
+def _is_safe_path_component(part: str) -> bool:
+    """True when one path segment is a plain local filename/folder component."""
+    if not part or part in (".", ".."):
+        return False
+    if _has_control_chars(part) or ":" in part:
+        return False
+    if part.strip(".") == "" or part.strip() == "":
+        return False
+    if part.endswith((".", " ")) or part != part.strip():
+        return False
+    stem = part.split(".", 1)[0].rstrip(" ")
+    if _WINDOWS_RESERVED_DEVICE_RE.fullmatch(stem):
+        return False
+    return True
+
+
+def _safe_relative_parts(value, *, allow_subdirs: bool = True) -> tuple[str, ...] | None:
+    """Purely lexical check for a plain relative path; makes zero FS calls.
+
+    Refuses non-strings, empty or whitespace-padded names, control characters
+    (including NUL), UNC/device/NT spellings, drive-qualified or absolute paths,
+    colons (ADS), empty/dot/parent segments, trailing dots/spaces, and Windows
+    reserved device names.
+    """
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    if _has_control_chars(value) or ":" in value:
+        return None
+    if is_network_spelling(value):
+        return None
+    flat = value.replace("\\", "/")
+    if flat.startswith("/") or flat.endswith("/"):
+        return None
+    parts = flat.split("/")
+    if not allow_subdirs and len(parts) != 1:
+        return None
+    if not all(_is_safe_path_component(part) for part in parts):
+        return None
+    return tuple(parts)
 
 
 def _directory_items(path: Path):
@@ -388,11 +465,13 @@ def _validate_csv(path: Path, requirements: dict, checks: list):
 # apart from `refs` because `refs` also drives the local-reference existence
 # check, which cannot resolve a srcset descriptor list or a CSS url() fragment.
 _HTML_RESOURCE_ATTRS = ("srcset", "poster", "data", "action", "formaction", "background")
-# Only "//"-prefixed matches are collected, so a relative url(fonts/x.woff2) or
-# a same-directory srcset entry is never mistaken for a network fetch.
-_ABSOLUTE_URL_RE = re.compile(r"(?:https?:)?//[^\s'\"()<>]+", re.IGNORECASE)
+# Only "//"-prefixed matches are collected (either slash may be a backslash,
+# which browsers treat as "/" and Windows treats as a UNC prefix), so a
+# relative url(fonts/x.woff2) or a same-directory srcset entry is never
+# mistaken for a network fetch.
+_ABSOLUTE_URL_RE = re.compile(r"(?:https?:)?[/\\]{2}[^\s'\"()<>]+", re.IGNORECASE)
 _CSS_EXTERNAL_URL_RE = re.compile(
-    r"""(?:url\(\s*['"]?|@import\s+['"])\s*((?:https?:)?//[^)'"\s]+)""",
+    r"""(?:url\(\s*['"]?|@import\s+['"])\s*((?:https?:)?[/\\]{2}[^)'"\s]+)""",
     re.IGNORECASE,
 )
 
@@ -430,8 +509,15 @@ class _HTMLAudit(HTMLParser):
 
 
 def _is_external_ref(value: str) -> bool:
-    lowered = value.strip().lower()
-    return lowered.startswith(("http://", "https://", "//"))
+    # Backslashes are normalised so a Windows UNC ref (\\host\share\x.png),
+    # which a browser on Windows fetches over SMB, counts as external like
+    # the equivalent //host/share form; file: refs leave the bundle too.
+    lowered = value.strip().replace("\\", "/").lower()
+    return lowered.startswith(("http://", "https://", "//", "file:"))
+
+
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 
 def _validate_html(path: Path, requirements: dict, checks: list):
@@ -464,14 +550,55 @@ def _validate_html(path: Path, requirements: dict, checks: list):
             "external references: %s" % (", ".join(external[:10]) or "none"),
         )
     missing = []
+    root = path.parent.resolve()
     for ref in parser.refs:
-        clean = ref.split("#", 1)[0].split("?", 1)[0]
-        if not clean or clean.startswith(("#", "data:", "mailto:", "javascript:")):
+        clean = ref.strip().split("#", 1)[0].split("?", 1)[0]
+        if not clean or _is_external_ref(clean):
             continue
-        if _is_external_ref(clean):
+        if _URI_SCHEME_RE.match(clean) and not _DRIVE_PREFIX_RE.match(clean):
+            # tel:, blob:, mailto:, data:, javascript: ... are not files.
             continue
-        candidate = (path.parent / clean).resolve()
-        if path.parent.resolve() not in (candidate, *candidate.parents) or not candidate.exists():
+        # Every ref that is not a plain relative path is rejected before any
+        # filesystem call: joining an absolute, drive-qualified or UNC ref
+        # onto the page directory replaces it, and resolve()/exists() on a
+        # UNC path opens an outbound SMB connection from the validator.
+        decoded = unquote(clean).replace("\\", "/")
+        pure = PurePosixPath(decoded)
+        if (
+            _has_control_chars(decoded)
+            or is_network_spelling(decoded)
+            or pure.is_absolute()
+            or any(":" in part for part in pure.parts)
+        ):
+            missing.append(ref)
+            continue
+        # Walked one component at a time and never through a link: resolve()
+        # on the joined path would follow a symlink or junction in the page
+        # directory to whatever it targets (a UNC share included) before
+        # containment could be checked. Each component is lstat-ed only
+        # after every component before it proved not to be a link, so a ref
+        # that passes through a link is reported missing without touching
+        # its target. resolve() then runs on a link-free local path and only
+        # feeds the containment check, which still catches any spelling the
+        # OS normalises differently from posixpath.normpath.
+        parts = PurePosixPath(posixpath.normpath(decoded)).parts
+        if parts[:1] == ("..",) or any(not _is_safe_path_component(part) for part in parts):
+            missing.append(ref)
+            continue
+        candidate = root
+        found = True
+        try:
+            for part in parts:
+                candidate = candidate / part
+                if _is_reparse_point(candidate):
+                    found = False
+                    break
+            if found:
+                resolved = candidate.resolve()
+                found = root in (resolved, *resolved.parents) and resolved.exists()
+        except (OSError, ValueError):
+            found = False
+        if not found:
             missing.append(ref)
     _check(
         checks,
@@ -1476,20 +1603,13 @@ def _validate_edl(path: Path, requirements: dict, checks: list):
         missing = []
         root = path.parent.resolve()
         for clip_name in clip_names:
-            pure = PurePosixPath(clip_name.replace("\\", "/"))
-            if (
-                not pure.parts
-                or pure.is_absolute()
-                or ".." in pure.parts
-                or _is_external_ref(clip_name)
-                or ":" in pure.parts[0]
-            ):
+            if _is_external_ref(clip_name):
                 unsafe.append(clip_name)
                 continue
-            candidate = (root / Path(*pure.parts)).resolve()
-            if root not in (candidate, *candidate.parents):
+            candidate = _safe_manifest_path(root, clip_name)
+            if candidate is None:
                 unsafe.append(clip_name)
-            elif not candidate.is_file() or candidate.is_symlink():
+            elif not candidate.is_file() or _is_reparse_point(candidate):
                 missing.append(clip_name)
         _check(
             checks,
@@ -1559,6 +1679,15 @@ def _parse_glb(data: bytes):
 
 def _glb_integer(value):
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _glb_accessor_slot_charge(count, value_type):
+    """Budget slots charged for caching one accessor of *count* rows.
+
+    *value_type* must be a key of GLB_TYPES. See MAX_GLB_TOTAL_ACCESSOR_SLOTS
+    for what the terms cover.
+    """
+    return count * (GLB_TYPES[value_type] + 2) + GLB_ACCESSOR_FIXED_SLOTS
 
 
 def _glb_accessor_values(document, binary, index):
@@ -1690,6 +1819,8 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         accessor_errors.append("accessors must be a non-empty array")
         accessors = []
     accessor_cache = {}
+    materialized_slots = 0
+    accessor_budget_exceeded = False
     for index, accessor in enumerate(accessors):
         if not isinstance(accessor, dict):
             accessor_errors.append("accessor %d is not an object" % index)
@@ -1701,11 +1832,25 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         if component_type not in GLB_COMPONENTS or value_type not in GLB_TYPES:
             accessor_errors.append("accessor %d has an invalid component/type" % index)
             continue
+        declared_count = accessor.get("count")
+        slots = 0
+        # An out-of-range count is refused by _glb_accessor_values before it
+        # unpacks anything, so it is not charged and keeps its own error.
+        if _glb_integer(declared_count) and 0 < declared_count <= MAX_GLB_ACCESSOR_ITEMS:
+            slots = _glb_accessor_slot_charge(declared_count, value_type)
+        if materialized_slots + slots > MAX_GLB_TOTAL_ACCESSOR_SLOTS:
+            accessor_errors.append(
+                f"accessor {index} exceeds the total accessor data budget"
+                f" of {MAX_GLB_TOTAL_ACCESSOR_SLOTS} value slots"
+            )
+            accessor_budget_exceeded = True
+            break
         if accessor.get("normalized") and component_type == 5126:
             accessor_errors.append("accessor %d normalizes floating-point data" % index)
         try:
             values = _glb_accessor_values(document, binary, index)
             accessor_cache[index] = values
+            materialized_slots += slots
         except (ValueError, struct.error) as exc:
             accessor_errors.append(str(exc))
             continue
@@ -1734,6 +1879,10 @@ def _validate_glb(path: Path, requirements: dict, checks: list):
         not accessor_errors,
         "; ".join(accessor_errors[:8]) or "%d accessor(s)" % len(accessors),
     )
+    if accessor_budget_exceeded:
+        # Later checks re-materialise any accessor missing from the cache,
+        # which would bypass the budget; the GLB is already rejected.
+        return
 
     nodes = document.get("nodes", [])
     meshes = document.get("meshes", [])
@@ -3553,19 +3702,25 @@ def _validate_file(path: Path, recipe: str, requirements: dict) -> dict:
     }
 
 
-def _safe_manifest_path(root: Path, value: str) -> Path | None:
-    pure = PurePosixPath(str(value or "").replace("\\", "/"))
-    if not pure.parts or pure.is_absolute() or ".." in pure.parts:
+def _safe_manifest_path(root: Path, value) -> Path | None:
+    parts = _safe_relative_parts(value, allow_subdirs=True)
+    if parts is None:
         return None
-    lexical = root / Path(*pure.parts)
-    candidate = lexical.resolve()
-    if root not in candidate.parents:
-        return None
+    # Walk one lexical component at a time and refuse any symlink or Windows
+    # reparse point (including directory junctions) BEFORE calling resolve(),
+    # so a link inside the bundle cannot redirect resolve() to a UNC share.
     current = root
-    for part in pure.parts:
+    for part in parts:
         current = current / part
-        if current.is_symlink():
+        if _is_reparse_point(current):
             return None
+    resolved_root = root.resolve()
+    try:
+        candidate = current.resolve()
+    except (OSError, ValueError):
+        return None
+    if resolved_root not in candidate.parents:
+        return None
     return candidate
 
 
@@ -3577,7 +3732,9 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
     manifest_path = path / "manifest.json"
     require_manifest = bool(requirements.get("require_manifest", False))
     manifest = None
-    if manifest_path.is_file():
+    if _is_reparse_point(manifest_path):
+        _check(checks, "bundle-manifest-json", False, "manifest.json may not be a symlink or reparse point")
+    elif manifest_path.is_file():
         try:
             manifest = json.loads(_read_text(manifest_path))
             _check(checks, "bundle-manifest-json", isinstance(manifest, dict), "manifest.json is an object")
@@ -3592,20 +3749,33 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
         valid_list = isinstance(files, list) and bool(files)
         _check(checks, "bundle-manifest-files", valid_list, "%d declared files" % (len(files) if isinstance(files, list) else 0))
         seen = set()
+        seen_resolved = set()
         if isinstance(files, list):
             for row in files[: MAX_BUNDLE_FILES + 1]:
                 if not isinstance(row, dict):
                     _check(checks, "bundle-manifest-row", False, "file row must be an object")
                     continue
-                relative = str(row.get("path", ""))
-                candidate = _safe_manifest_path(path, relative)
-                unique = relative not in seen
-                _check(checks, "bundle-unique-path", unique, relative or "(empty)")
-                seen.add(relative)
+                raw_path = row.get("path")
+                display = (
+                    raw_path if isinstance(raw_path, str) and raw_path
+                    else (repr(raw_path) if raw_path is not None else "(empty)")
+                )
+                candidate = _safe_manifest_path(path, raw_path)
+                dedup_key = (
+                    os.path.normcase(raw_path.replace("\\", "/"))
+                    if isinstance(raw_path, str)
+                    else repr(raw_path)
+                )
+                unique = dedup_key not in seen and (candidate is None or candidate not in seen_resolved)
+                _check(checks, "bundle-unique-path", unique, display)
+                seen.add(dedup_key)
+                if candidate is not None:
+                    seen_resolved.add(candidate)
                 safe = candidate is not None
-                _check(checks, "bundle-safe-path", safe, relative or "(empty)")
-                if not safe:
+                _check(checks, "bundle-safe-path", safe, display)
+                if not safe or not unique:
                     continue
+                relative = raw_path
                 exists = candidate.is_file() and not _is_reparse_point(candidate)
                 _check(checks, "bundle-file-exists", exists, relative)
                 if not exists:
@@ -3780,7 +3950,27 @@ def _validate_directory(path: Path, recipe: str, requirements: dict) -> dict:
 def validate(path, recipe="auto", requirements=None) -> dict:
     """Validate one artifact path with an inferred or explicit recipe."""
     requirements = parse_requirements(requirements)
-    requested = Path(path).expanduser()
+    raw_text = os.fspath(path)
+    if isinstance(raw_text, bytes):
+        raw_text = os.fsdecode(raw_text)
+    if is_network_spelling(raw_text):
+        return {
+            "ok": False,
+            "path": str(raw_text),
+            "recipe": str(recipe or "auto"),
+            "checks": [
+                {
+                    "name": "network-path",
+                    "ok": False,
+                    "detail": "artifact path may not use a UNC, device or network spelling",
+                }
+            ],
+            "children": [],
+            "checked_files": 0,
+            "passed_checks": 0,
+            "failed_checks": 1,
+        }
+    requested = Path(raw_text).expanduser()
     if not requested.exists():
         return {
             "ok": False,

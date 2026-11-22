@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.interfaces.http.artifact_transfer import handle_artifact_transfer, is_artifact_route
-from sonder_runtime.interfaces.http import web_app
+from sonder_runtime.interfaces.http import served_dispatch_policy, web_app
 from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 from sonder_runtime.interfaces.http.connection_limit import BoundedConnectionsMixin
 from sonder_runtime.interfaces.http.host_policy import (
@@ -97,7 +97,7 @@ from sonder_runtime.adapters.content_services import feedback, intents, training
 from sonder_runtime.adapters.execution_tools import code_runner, grounding
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.adapters.execution import effect_fence
-from sonder_runtime.adapters.inference import startup_prewarm
+from sonder_runtime.adapters.inference import rpc_cluster, startup_prewarm
 import sonder_runtime.adapters.cloud_model_refresh_schedule as cloud_model_refresh_schedule
 from sonder_runtime.adapters.persistence import served_action_receipts
 from sonder_runtime.adapters.persistence import http_work_runs
@@ -127,7 +127,7 @@ from sonder_runtime.domain.launcher_health import token_is_configured
 from sonder_runtime.domain.operational_capabilities import (
     build_operational_capabilities,
 )
-from sonder_runtime.interfaces.http.facades import HealthStatusFacade
+from sonder_runtime.interfaces.http.facades import HealthStatusFacade, permission_mode_post as _mode_post
 from sonder_runtime.interfaces.http.facades.a2a import A2AAgentCardFacade
 from sonder_runtime.interfaces.http.facades import client_protocol as _client_protocol
 from sonder_runtime.interfaces.http.facades.client_protocol import (
@@ -139,7 +139,7 @@ from sonder_runtime.interfaces.http.facades.a2a_jsonrpc import (
     dispatch_a2a_jsonrpc_route,
 )
 from sonder_runtime.interfaces.http.facades.control_plane import ControlPlaneFacade
-from sonder_runtime.interfaces.http.facades.approvals import refusal_receipt
+from sonder_runtime.interfaces.http.facades.approvals import turn_refusal_receipt
 from sonder_runtime.interfaces.http.facades.extensions import dispatch_extension_route
 from sonder_runtime.interfaces.http.facades.model_catalog import annotate_model_rows
 from sonder_runtime.interfaces.http.facades.model_request import (
@@ -2443,7 +2443,7 @@ def _dangerous_http_slash(content):
         action = pieces[1].lower() if len(pieces) > 1 else "apply"
         return action in ("apply", "now")
     if command in ("/stash", "/runtime-stash"):
-        action = pieces[1].lower() if len(pieces) > 1 else "status"
+        action = (pieces[1].lower() if len(pieces) > 1 else "status").replace("_", "-")
         return action in ("save", "save-untracked", "pop")
     if command in ("/selfmod", "/selfmodify"):
         action = pieces[1].lower() if len(pieces) > 1 else "status"
@@ -3051,102 +3051,19 @@ def _ensure_refusal_observer():
         _serve_logger.warning("refusal observer unavailable; receipts omit refusal", exc_info=True)
 
 
-def _modes_allowing_risk(risk):
-    try:
-        return list(permission_policy._modes_allowing(risk))
-    except Exception:
-        return []
-
-
-def _turn_refusal_receipt(refusals):
-    """The structured refusal for the last nameable refusal of a turn, or None."""
-    if not refusals:
-        return None
-    decision = refusals[-1]
-    try:
-        label = permission_policy.mode_label(decision.mode)
-    except Exception:
-        label = str(decision.mode or "")
-    return refusal_receipt(
-        decision, mode_label=label, modes_allowing=_modes_allowing_risk(decision.risk),
-        count=len(refusals),
+def _loop_global_operation_refusal(actions_json, context=None, *, _depth=0):
+    """Refuse HTTP loop payloads that would mutate shared runtime state."""
+    return tool_contract.loop_global_operation_refusal(
+        actions_json, context, loop_action_tool=server._loop_action_tool,
+        system_operation_for=_http_system_operation_for, role_tool_refusal=_role_tool_refusal_reason,
+        admin_authorized=_admin_authorized, authority_error=_system_operation_authority_error,
+        nested_slash_refusal=_nested_slash_authority_refusal,
+        account_global_memory_refusal=_account_global_memory_refusal, depth=_depth,
     )
 
 
-def _loop_global_operation_refusal(actions_json, context=None):
-    """Refuse HTTP loop payloads that would mutate shared runtime state.
-
-    ``server.loop`` remains the single parser/executor for validity and
-    bounded-loop semantics.  This shallow inspection only recognizes global
-    actions early enough to apply served-account authority; malformed
-    payloads continue to receive the loop tool's normal error.
-
-    Derived, not hand-kept: each action resolves to its canonical tool
-    through ``server._loop_action_tool`` -- the same resolution the loop's
-    own permission gate uses -- and then meets exactly the role binding its
-    ``/<tool>`` spelling meets (``tool_contract.system_operation_for``,
-    deny-by-default for a declared system operation with no binding). The
-    hand map this replaces named 4 of the 7 loop-reachable system
-    operations, so ``{"type": "memory_privacy_repair"}`` ran for an
-    ordinary served account while ``/memory_privacy_repair`` required the
-    developer role -- the same work, the other spelling.
-    """
-    if context is None:
-        return ""
-    try:
-        parsed = json.loads(actions_json)
-    except (TypeError, ValueError):
-        return ""
-    actions = parsed.get("actions") if isinstance(parsed, dict) else parsed
-    if not isinstance(actions, list):
-        return ""
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-        # Same default as server._loop_dispatch: an action with no type runs as "code".
-        action_type = str(action.get("type") or action.get("action") or "code").strip().lower()
-        action_tool = server._loop_action_tool(action_type)
-        operation = _http_system_operation_for(action_tool)
-        if not operation:
-            role_error = _role_tool_refusal_reason(action_tool, context) if action_tool else ""
-            if role_error:
-                return "refused /loop: %s" % role_error
-            continue
-        if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
-            if not _admin_authorized(context):
-                return (
-                    "refused /loop: administrator authorization is required "
-                    "for an unclassified system operation"
-                )
-            continue
-        authority_error = _system_operation_authority_error(operation, context)
-        if authority_error:
-            return "refused /loop: %s" % authority_error
-    return ""
-
-
-def _http_tool_refusal(tools, label, context=None, arguments=None):
-    """The decision itself, shared by this surface's two entry points.
-
-    ``arguments`` are meaningful only for a single tool (the dynamic
-    ``/<tool>`` path passes its parsed keywords): they let an unattended
-    refusal name the call so an operator can approve exactly it once, and
-    let such an approval answer the retry.
-
-    Only a `deny` can come back under `interactive=False`, so this is a flat
-    loop rather than a copy of the console's ask-and-rank gate.
-
-    The operation lookup goes through `tool_contract.system_operation_for`
-    rather than reading `SYSTEM_OPERATION_TOOLS` directly, which buys two
-    things: alias spellings canonicalize before grading, and a tool the
-    runtime declares to be a system operation (`_AGENT_SYSTEM_OPERATOR_TOOLS`)
-    that nobody bound to a role fails CLOSED for served accounts instead of
-    open. `admin_accounts` was the live case: agent-refused, catalogued
-    `ask`, no binding -- an ordinary served account reached the tool body and
-    only its in-tool token check stood between a crafted request and the
-    account list. Boundary drift must not depend on every tool author
-    remembering a second map.
-    """
+def _http_tool_authority_refusal(tools, label, context=None):
+    """Account-memory, system-operation, and role checks for *tools*."""
     for tool in tools:
         memory_error = _account_global_memory_refusal(tool, context)
         if memory_error:
@@ -3154,12 +3071,6 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
         operation = _http_system_operation_for(tool)
         if operation and context is not None:
             if operation == tool_contract.SYSTEM_OPERATION_UNBOUND:
-                # Durable-authority tools are already refused non-interactively
-                # by decide() below -- on every surface, for every role -- and
-                # its refusal names the remedy (the console prompt or an
-                # explicit allow rule). Returning the generic unbound message
-                # here would replace actionable text with a role demand that
-                # even an admin cannot satisfy on this path.
                 if permission_policy.is_durable_authority_tool(tool):
                     pass
                 elif not _admin_authorized(context):
@@ -3171,13 +3082,18 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
                 authority_error = _system_operation_authority_error(operation, context)
                 if authority_error:
                     return "refused %s: %s" % (label, authority_error)
-    # Deny by default, ahead of the permission decision: the mode is
-    # process-wide and says nothing about who is calling. After every tool's
-    # own authority check, so a mixed alias still names the operation's role.
     for tool in tools:
         role_error = _role_tool_refusal_reason(tool, context)
         if role_error:
             return "refused %s: %s" % (label, role_error)
+    return ""
+
+
+def _http_tool_refusal(tools, label, context=None, arguments=None):
+    """The decision itself, shared by this surface's two entry points."""
+    authority_refusal = _http_tool_authority_refusal(tools, label, context=context)
+    if authority_refusal:
+        return authority_refusal
     for tool in tools:
         decision = permission_policy.decide_for_caller(
             tool, interactive=False, gate_control_exempt=True, surface="http",
@@ -3194,34 +3110,38 @@ def _http_tool_refusal(tools, label, context=None, arguments=None):
 
 
 def _slash_system_operation(command, argument):
-    """Classify named slash controls that bypass catalogued tool dispatch.
+    """Classify named slash controls that bypass catalogued tool dispatch."""
+    return tool_contract.slash_system_operation(command, argument, slash_head=_slash_head)
 
-    ``/runtime set`` is parsed by ``server.control_command`` rather than the
-    dynamic ``/<tool>`` catalog.  Keeping this tiny parser next to the HTTP
-    choke point prevents a role declaration from becoming decorative merely
-    because a command has two spellings.
-    """
-    command = _slash_head(command)
-    parts = str(argument or "").strip().split(None, 1)
-    action = parts[0].lower() if parts else ""
-    if command in ("/runtime", "/models") and action in ("set", "reset"):
-        return "runtime_policy_change"
-    # ``/runtime tools allow|revoke|deny|undeny`` would write the model tool
-    # overlay; server.control_command refuses it on this surface anyway (no
-    # console operator), and this keeps the role check from reading it as a read.
-    if command in ("/runtime", "/models") and action == "tools" and (
-        parts[1:] and parts[1].split()[0].lower() in ("allow", "revoke", "deny", "undeny")
-    ):
-        return "runtime_policy_change"
-    if command in ("/runtime", "/models") and action == "overflow" and (
-        parts[1:] and parts[1].split()[0].lower() not in ("status", "show", "help", "?")
-    ):
-        return "runtime_policy_change"
-    if command in ("/update", "/updatesource") and action in ("", "apply", "now"):
-        return "selfmod_deploy"
-    if command in ("/stash", "/runtime-stash") and action in ("save", "save-untracked", "pop"):
-        return "selfmod_deploy"
-    return ""
+
+def _nested_slash_authority_refusal(prompt, label, context, *, _depth=0):
+    """Enforce HTTP slash and tool authority on a nested prompt reaching control_command."""
+    return tool_contract.nested_slash_authority_refusal(
+        prompt, label, context, slash_head=_slash_head,
+        slash_operation=_slash_system_operation, authority_error=_system_operation_authority_error,
+        dangerous_slash=_dangerous_http_slash, developer_authorized=_developer_authorized,
+        console_tools=command_catalog.console_tools, http_slash_tools=command_catalog.http_slash_tools,
+        narrow_branch_tools=command_catalog.narrow_branch_tools,
+        catalog_unavailable=command_catalog.CatalogUnavailable,
+        tool_authority_refusal=_http_tool_authority_refusal,
+        task_boundary_refusal=_account_task_boundary_refusal,
+        parse_invocation=command_catalog.parse_invocation,
+        project_refusal=server.served_project_refusal,
+        loop_refusal=_loop_global_operation_refusal, depth=_depth,
+    )
+
+
+def _served_control_guard_for(context, *, disabled=False):
+    """Build the ``server.served_control_guard`` callback for an HTTP request."""
+    if disabled:
+        return lambda _text: server.CONTROL_COMMAND_SKIP
+    if context is None:
+        return None
+    return lambda text: (
+        _nested_slash_authority_refusal(
+            text.strip(), _slash_head(text.strip().split(None, 1)[0]), context,
+        ) if str(text or "").strip().startswith("/") else ""
+    )
 
 
 _BARE_SLASH_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -3244,9 +3164,10 @@ def _http_workspace_roots(auth):
     if not _admin_authorized(auth):
         return ()
     from sonder_runtime.bootstrap.app import default_app
-
+    from sonder_runtime.platform.policy_roots import try_parse_policy_root
     state = getattr(getattr(default_app(), "config", None), "state", None)
-    return tuple(str(Path(root).resolve()) for root in getattr(state, "workspace_roots", ()))
+    resolved = (p.resolve() for r in getattr(state, "workspace_roots", ()) if (p := try_parse_policy_root(str(r) if isinstance(r, os.PathLike) else r, expand_user=False)) is not None)
+    return tuple(dict.fromkeys(str(q) for q in resolved if try_parse_policy_root(str(q), expand_user=False) is not None))
 
 
 def _http_debug_context(auth, correlation_id):
@@ -3617,7 +3538,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             except ValueError as error:
                 return str(error)
             master_project = project if workspace_project is None else workspace_project
-            return _idempotent_http_action(
+            return server.served_project_refusal(master_project) or _idempotent_http_action(
                 context, idempotency_key, "master\0" + stripped,
                 lambda: _narrate_http_command(
                     "master_orchestrate", {"task": parsed.task, "mode": parsed.mode, "agents": (count := resolved_agent_count(parsed, server.master_orchestrator.capacity))},
@@ -3755,7 +3676,11 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
         refusal = _loop_global_operation_refusal(kwargs.get("actions_json"), context)
         if refusal:
             return refusal
-    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context)
+    if tool_name == "sonder":
+        refusal = _nested_slash_authority_refusal(kwargs.get("prompt", ""), "/sonder", context)
+        if refusal:
+            return refusal
+    task_boundary_error = _account_task_boundary_refusal(tool_name, kwargs, context) or (tool_name in ("master_orchestrate", "sonder") and server.served_project_refusal(kwargs.get("project", "")))
     if task_boundary_error:
         return task_boundary_error
     # ``server.tool_manifest`` is intentionally the complete direct-MCP
@@ -3777,10 +3702,18 @@ def _run_catalogued_tool_gated(line, tool_name, kwargs, handler, *, state, conte
         command = command_catalog.by_name(line.split(None, 1)[0])
         if command and any(p.name == "token" for p in command.params):
             kwargs["token"] = state.token
+    control_guard = _served_control_guard_for(context)
+
+    def _run_handler():
+        if control_guard is None:
+            return str(handler(**kwargs))
+        with server.served_control_guard(control_guard):
+            return str(handler(**kwargs))
+
     try:
         if tool_name in _SCOPED_TASK_TOOLS and _task_account_scope(context) is not None:
             return _served_task_tool(tool_name, kwargs, context)
-        return _narrate_http_command(tool_name, kwargs, lambda: str(handler(**kwargs)), context)
+        return _narrate_http_command(tool_name, kwargs, _run_handler, context)
     except TypeError as error:
         return "%s: %s" % (tool_name, error)
     except Exception as error:  # a tool fault is a chat answer, not a 500
@@ -3820,25 +3753,22 @@ def _handle_feedback(content, state=None):
     return None
 
 
-def _handle_intent(content, messages=None, state=None):
-    """Return response text if `content` is a natural-language control intent, else None."""
+def _handle_intent(content, messages=None, state=None, context=None):
+    """Reply text for a natural-language control intent, else None; run/train take the /run, /train gate."""
     state = _state_or_legacy(state)
-    from sonder_runtime.adapters.security.powershell_gate import run_intent
+    from sonder_runtime.application.command_surface.natural_intents import dispatch
     intent = intents.classify(content)
     if not intent:
         return None
-
-    replies = []
-    if "trace" in intent:
-        state.trace = intent["trace"]
-        replies.append("trace %s" % ("on" if state.trace else "off"))
-    if "strict" in intent:
-        state.strict = intent["strict"]
-        replies.append("strict %s" % ("on" if state.strict else "off"))
-    if intent.get("run"):
-        replies.append(run_intent(_do_run_from_messages, _handle_slash, _run_sources_from_messages(messages, state=state), grounding.extract_runnable_code_block, messages=messages, state=state))
-    if "train" in intent:
-        replies.append(_do_train(intent["train"]))
+    replies = [
+        _handle_slash(line, messages=messages, state=state, context=context)
+        for line in served_dispatch_policy.intent_slash_lines(
+            {k: intent[k] for k in ("trace", "strict") if k in intent}
+        )
+    ]
+    replies.extend(dispatch(
+        intent, lambda command: _handle_slash(command, messages=messages, state=state, context=context),
+        lambda: context is None or _developer_authorized(context)))
     return "\n".join(replies)
 
 
@@ -4133,7 +4063,7 @@ def _openai_model_rows():
         rows.append({"id": identifier, "object": "model", "owned_by": owned_by})
 
     try:
-        records = server.discovered_model_records()
+        records = server.servable_model_records()  # the same catalog _chat_model_selection_error checks
     except Exception:
         records = ()
 
@@ -5042,16 +4972,16 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _peer_is_loopback(self):
-        # A loopback peer earns its conveniences only through a trusted Host
-        # name; see ``_reject_disallowed_host``.
-        return getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
+        # Only with a trusted Host (``_reject_disallowed_host``), and never behind a declared
+        # proxy, whose loopback peer relays remote clients (as ``_local_log_dashboard_allowed``).
+        return not TLS_TERMINATED_BY_PROXY and getattr(self, "_host_trusted", True) and _is_loopback_host(self._peer())
 
     def _handle_lifecycle_get(self, path):
         """SPEC-2 WP3 endpoints. Returns True when the path was handled.
 
         /live is unauthenticated and reveals only {status: alive}.  The
         other lifecycle routes require authentication unless the peer is
-        loopback (the reverse proxy restricts them to loopback upstream).
+        loopback with a trusted Host and no reverse proxy is declared.
         """
         lifecycle = sonder_lifecycle.get()
         route = _HEALTH_STATUS_FACADE.route(path)
@@ -5521,7 +5451,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_not_found()
 
     def _handle_ollama_pool_admin(self, method):
+        if self._auth_rate_limited():  # dispatched ahead of the general limiter
+            return
         context = self._request_auth_context()
+        if not context.get("authorized"):
+            return self._send_auth_error()
         if not _admin_authorized(context):
             self._send_json_payload({"error": "authorization"}, status=403,
                                     headers={"Cache-Control": "no-store"})
@@ -6384,7 +6318,7 @@ class Handler(BaseHTTPRequestHandler):
                 context,
                 self.headers.get("Idempotency-Key", ""),
                 "permission-mode\0%s" % wanted,
-                lambda: permission_policy.set_mode(wanted),
+                _mode_post.mode_applier(permission_policy, context, wanted),
             )
         except ValueError as exc:
             self._send_json_payload(
@@ -6393,6 +6327,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if _send_idempotency_refusal(self, result):
+            return
+        if _mode_post.send_escalation_refusal(
+                self, permission_policy, result, sonder_lifecycle.error_envelope):
             return
         _observe_client_control_state()
         self._send_json_payload(server.permission_mode_data())
@@ -6583,14 +6520,16 @@ class Handler(BaseHTTPRequestHandler):
             reply({'ok': False, 'message': 'account session required'}, 401)
             return
         mode = _effective_auth_mode()
-        authorization = self.headers.get('Authorization', '')
-        api_key_ok = bool(API_KEY) and (
-            check_auth(authorization, API_KEY)
-            or sonder_secrets.previous_key_valid(_bearer_token(authorization))
-        )
-        if mode in ('api-key', 'both') and not api_key_ok:
-            reply({'ok': False, 'message': 'authentication required'}, 401)
-            return
+        if mode in ('api-key', 'both'):
+            if self._auth_reserve_refused():  # a credential check ahead of the general limiter
+                return
+            authorization = self.headers.get('Authorization', '')
+            if not (bool(API_KEY) and (check_auth(authorization, API_KEY)
+                    or sonder_secrets.previous_key_valid(_bearer_token(authorization)))):
+                sonder_lifecycle.get().record_auth_failure(self._client_ip(), 'invalid-credentials', charge=False)
+                reply({'ok': False, 'message': 'authentication required'}, 401)
+                return
+            sonder_lifecycle.get().refund_auth_attempt(self._client_ip())
         try:
             request = self._read_json(max_bytes=1024)
         except HTTPRequestError as error:
@@ -7142,11 +7081,10 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
-            content_lengths = self.headers.get_all("Content-Length") or ()
-            raw_length = content_lengths[0] if content_lengths else "0"
-            length = int(raw_length) if raw_length.strip().isdigit() else 0
-            raw_body = self.rfile.read(length) if length > 0 else b""
-            self._request_body_consumed = True
+            if thin_refusal := served_dispatch_policy.thin_handler_refusal(
+                    path, context, memory_refusal=_account_global_memory_refusal, admin_authorized=_admin_authorized):
+                return self._send_json_payload({"error": {"message": thin_refusal, "type": "forbidden", "code": "FORBIDDEN"}}, status=403)
+            raw_body = json.dumps(req).encode("utf-8")  # _read_json above consumed the bounded body
             class _Req:
                 method = "POST"
                 def __init__(self, p, b, h):
@@ -7499,7 +7437,7 @@ class Handler(BaseHTTPRequestHandler):
                             and _developer_authorized(context)
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
-                            prompt, messages=messages, state=state
+                            prompt, messages=messages, state=state, context=context,
                         )
                     if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "fanout":
                         # Developer authority was established above from this
@@ -7578,6 +7516,9 @@ class Handler(BaseHTTPRequestHandler):
                             _SPANDA_CONFIG, self.headers
                         )
                         self._spanda_headers = None
+                        _prompt_control_guard = _served_control_guard_for(
+                            context, disabled=(model_operation == "responses"),
+                        )
                         if _spanda_policy.active:
                             # Multi-sample exact-match R_sc. Disable request
                             # cache so each draw is independent; force temp>0.
@@ -7589,7 +7530,7 @@ class Handler(BaseHTTPRequestHandler):
                             _samples = []
                             _sample_turns = []
                             _sample_lookups = {}  # each sample's own reference-lookup state
-                            with _serve_temp_override(_sample_temp):
+                            with _serve_temp_override(_sample_temp), server.served_control_guard(_prompt_control_guard):
                                 for _si in range(int(_spanda_policy.k)):
                                     # Candidate samples must not admit durable
                                     # session capture; only the consensus turn
@@ -7671,33 +7612,34 @@ class Handler(BaseHTTPRequestHandler):
                                 # alive while the turn generates.
                                 self._begin_early_stream(model)
                             try:
-                                turn = self._run_streamable_prompt(
-                                prompt,
-                                history,
-                                model_selector,
-                                context_size=context_size,
-                                session=storage_session,
-                                project=storage_project,
-                                state=state,
-                                return_result=True,
-                                capture_request_id=self._correlation(),
-                                capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
-                                # The deterministic request cache is offered only
-                                # to this plain, non-streaming generation
-                                # fall-through: every control/tool/web/work/agent
-                                # route has already returned above, and streamed
-                                # or structured turns never receive a scope.  An
-                                # empty scope is an unconditional cache denial.
-                                cache_scope=(
-                                    "" if stream else _request_cache_scope(context)
-                                ),
-                                # Account-backed deployments intentionally do not
-                                # inject or train the legacy global lesson store.
-                                # Their durable chat/session project IDs remain
-                                # principal-namespaced above.
-                                augment=not bool(context.get("account")),
-                                metrics=_lifecycle.metrics,
-                                )
+                                with server.served_control_guard(_prompt_control_guard):
+                                    turn = self._run_streamable_prompt(
+                                        prompt,
+                                        history,
+                                        model_selector,
+                                        context_size=context_size,
+                                        session=storage_session,
+                                        project=storage_project,
+                                        state=state,
+                                        return_result=True,
+                                        capture_request_id=self._correlation(),
+                                        capture_turn_id=uuid.uuid4().hex, capture_stream=stream,
+                                        # The deterministic request cache is offered only
+                                        # to this plain, non-streaming generation
+                                        # fall-through: every control/tool/web/work/agent
+                                        # route has already returned above, and streamed
+                                        # or structured turns never receive a scope.  An
+                                        # empty scope is an unconditional cache denial.
+                                        cache_scope=(
+                                            "" if stream else _request_cache_scope(context)
+                                        ),
+                                        # Account-backed deployments intentionally do not
+                                        # inject or train the legacy global lesson store.
+                                        # Their durable chat/session project IDs remain
+                                        # principal-namespaced above.
+                                        augment=not bool(context.get("account")),
+                                        metrics=_lifecycle.metrics,
+                                    )
                             finally:
                                 self._pause_early_stream()
                             content = turn.content
@@ -7879,7 +7821,7 @@ class Handler(BaseHTTPRequestHandler):
         overflow_receipt = _overflow.receipt_entry(turn_overflow)
         if overflow_receipt is not None:
             receipt["overflow"] = overflow_receipt
-        refusal = _turn_refusal_receipt(turn_refusals)
+        refusal = turn_refusal_receipt(turn_refusals, context, permission_policy)
         if refusal is not None:
             receipt["refusal"] = refusal
         # A lookup turn's Sources block and receipt entry, added after the turn
@@ -8187,7 +8129,6 @@ def main(
 
         if _SESSION_FACADE is None:
             from sonder_runtime.bootstrap.app import default_app
-            from sonder_runtime.application.session.http_facade import HttpSessionFacade
 
             application = default_app(config=config)
             configure_session_facade(application.session_http_facade())
@@ -8287,6 +8228,7 @@ def main(
             origin=server.BASE, thread_factory=owned_runtime_thread, stop=cloud_refresh_stop)
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
+        rpc_cluster.start_sharded_backend_probe(thread_factory=owned_runtime_thread)
         _warn_if_local_open()
         print("sonder_serve listening on %s" % url)
         print("auth mode: %s" % _effective_auth_mode())

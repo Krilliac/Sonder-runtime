@@ -5,6 +5,14 @@ as a tier. This runbook covers importing a portable model such as an
 **Open Source Everything "facts." USB** (Qwen 3.x 4B, llama.cpp) and
 wiring it into Sonder. The same steps work for any `.gguf` file.
 
+> **Ollama only (checked 2026-11-20).** This runbook imports the model into a
+> local Ollama (`setup_alias.py` creates the alias with `ollama create`), and
+> the prerequisite and validation steps below assume a local Ollama. It does
+> not apply when your tiers run on Sonder Inference, OpenRouter or Anthropic;
+> for those see [sonder-inference](sonder-inference.md),
+> [OpenRouter](../integration/openrouter.md) and
+> [Anthropic](../integration/anthropic.md).
+
 Nothing here contacts a registry — it is a fully offline import, matching
 both Sonder's private-first posture and the facts. device's offline
 design.
@@ -29,7 +37,9 @@ multi-step autopilot work. Pick tiers accordingly (see step 4).
 
 - Ollama installed and running (`ollama serve` or the tray app).
 - The Sonder repo checked out with its venv (see
-  [install-workstation-local](install-workstation-local.md)).
+  [install-workstation-local](install-workstation-local.md)). Commands below
+  use the POSIX venv path; on Windows PowerShell use
+  `.\venv\Scripts\python.exe` instead of `./venv/bin/python`.
 - The USB mounted, or the `.gguf` copied to disk. RAM: 8 GB minimum,
   16 GB recommended for a 4B q4 model.
 
@@ -41,11 +51,13 @@ Let Sonder find and import the GGUF off the mounted stick:
 ./venv/bin/python setup_alias.py --from-usb
 ```
 
-This scans the usual mount points (`/media/*`, `/run/media/*`, `/mnt/*`,
-`/Volumes/*`), imports the single `.gguf` it finds as the `sonder:latest`
+This scans the usual Linux and macOS mount points (`/media/*/*`,
+`/run/media/*/*`, `/mnt/*`, `/Volumes/*`), imports the single `.gguf` it finds as the `sonder:latest`
 alias via an Ollama `FROM <path>` Modelfile (Ollama copies the weights
-into its own store, so the USB can be removed afterward), and pulls the
-embedding model if it is reachable.
+into its own store, so the USB can be removed afterward). The import never
+pulls anything: it only checks whether the embedding model is already
+installed, and if not it prints a note to pull `nomic-embed-text` later
+(`setup_alias.py:265-276`).
 
 If several models are present, pin one:
 
@@ -54,7 +66,12 @@ If several models are present, pin one:
 ```
 
 Add extra scan locations with `--usb-root` (repeatable). To import a file
-already on disk, pass its path to `--gguf` directly.
+already on disk, pass its path to `--gguf` directly. Windows drive letters are
+not scanned automatically: pass the file with `--gguf E:\models\model.gguf`
+or scan the drive with the full command
+`.\venv\Scripts\python.exe setup_alias.py --from-usb --usb-root E:\`
+(`--usb-root` is only read together with `--from-usb`). `--gguf` implies
+offline.
 
 ## 3. Verify the import
 

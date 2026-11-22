@@ -31,6 +31,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.platform.policy_roots import (
+    PolicyRootError,
+    parse_policy_root,
+    try_parse_policy_root,
+)
 from sonder_runtime.platform.secret_presence import redact_presence
 from sonder_runtime.platform.security_eval_config import (
     SecurityEvalConfig,
@@ -72,6 +77,11 @@ from sonder_runtime.platform.gpu_admission_config import (
     GpuAdmissionConfig, apply_gpu_admission_environment, gpu_admission_errors,
 )
 from sonder_runtime.platform import unsafe_lab_policy
+from sonder_runtime.platform.rpc_sharding_config import (
+    RPC_PEERS_ENV,
+    RpcShardingConfigError,
+    rpc_peer_allowlist,
+)
 from sonder_runtime.platform.config_environment import (
     EnvironmentFileError,
     env_bool,
@@ -998,8 +1008,11 @@ def _artifact_mobility_storage_errors(config: SonderConfig) -> list[str]:
 
     errors: list[str] = []
     writable_roots = (config.state.home, *config.state.workspace_roots)
-    for root in writable_roots:
+    for index, root in enumerate(writable_roots):
         if not isinstance(root, str):
+            continue
+        # A refused workspace root is reported by _validate; never resolve it.
+        if index > 0 and try_parse_policy_root(root, expand_user=False) is None:
             continue
         root_path = _canonical_private_path(root)
         if root_path is not None and _paths_overlap(source_path, root_path):
@@ -1598,13 +1611,17 @@ def _apply_environment(
     if state_home:
         state = replace(state, home=state_home)
     if env.get("SONDER_FILE_ROOTS", "").strip():
+        # Kept as written: load_config parses every workspace root once, after
+        # all sources are merged, and a refused entry is an error there. Never
+        # filter here, or an all-refused value would fall back to the TOML roots.
         roots = tuple(
             part.strip()
             for part in env["SONDER_FILE_ROOTS"].split(os.pathsep)
             if part.strip()
         )
-        if roots:
-            state = replace(state, workspace_roots=roots)
+        # Separator-only values (e.g. ";" / " ; ; ") must fail closed instead of
+        # falling back to TOML workspace_roots.
+        state = replace(state, workspace_roots=roots if roots else ("",))
     # Empty keeps the configured value, as env_bool_from_env reads it later.
     if env.get("SONDER_AUTO_WORKSPACE", "").strip():
         state = replace(state, auto_workspace=_env_bool(env["SONDER_AUTO_WORKSPACE"]))
@@ -1872,6 +1889,53 @@ def _context_root_errors(config: SonderConfig) -> list[str]:
     return errors
 
 
+def _rpc_sharding_errors(env: dict[str, str]) -> list[str]:
+    """Fail closed on the opt-in llama.cpp RPC sharding settings.
+
+    Unset or blank ``SONDER_RPC_PEERS`` means sharding is inactive and only
+    ``SONDER_RPC_PORT`` is checked. Once peers are configured every entry must
+    pass the allowlist policy in ``rpc_sharding_config`` and the
+    OpenAI-compatible base URL must name the loopback sharded llama-server.
+    """
+    try:
+        allowlist = rpc_peer_allowlist(env)
+    except RpcShardingConfigError as exc:
+        return [str(exc)]
+    if not allowlist.active:
+        return []
+    base_url = str(env.get("SONDER_OPENAI_BASE_URL", "") or "").strip()
+    if not base_url:
+        return [
+            f"{RPC_PEERS_ENV} is set, so SONDER_OPENAI_BASE_URL must name the "
+            "loopback sharded llama-server (for example http://127.0.0.1:11438)"
+        ]
+    try:
+        parsed = urlsplit(base_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return [f"{RPC_PEERS_ENV} is set, but SONDER_OPENAI_BASE_URL is not a valid URL"]
+    if port is not None and not 1 <= port <= 65535:
+        return [f"{RPC_PEERS_ENV} is set, but SONDER_OPENAI_BASE_URL has an invalid port"]
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(ch in base_url for ch in "@?#")
+    ):
+        return [
+            "SONDER_OPENAI_BASE_URL must not contain credentials, a query or a fragment "
+            f"when {RPC_PEERS_ENV} is set"
+        ]
+    if parsed.scheme not in ("http", "https") or not _is_loopback_host(hostname):
+        return [
+            f"{RPC_PEERS_ENV} is set, so SONDER_OPENAI_BASE_URL must be an http(s) "
+            "loopback URL; the sharded llama-server never listens off-host"
+        ]
+    return []
+
+
 def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(_context_root_errors(config))
     try:
@@ -2016,20 +2080,30 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[state].minimum_free_disk_bytes must be >= 0")
     if config.state.sqlite_busy_timeout_ms < 0:
         errors.append("[state].sqlite_busy_timeout_ms must be >= 0")
-    if config.state.default_workspace_root.strip():
+    if not isinstance(config.state.default_workspace_root, str):
+        errors.append("[state].default_workspace_root must be a string")
+    elif config.state.default_workspace_root.strip():
         try:
-            absolute = Path(config.state.default_workspace_root.strip()).expanduser().is_absolute()
-        except RuntimeError:  # "~" with no user home
-            absolute = False
-        if not absolute:
+            parse_policy_root(config.state.default_workspace_root, expand_user=True)
+        except PolicyRootError as exc:
             errors.append(
-                "[state].default_workspace_root must be an absolute path: "
+                f"[state].default_workspace_root must be an absolute path ({exc}): "
                 f"{config.state.default_workspace_root!r}"
             )
     local_workspace_mappings = {"default"}
     effective_workspace_roots: dict[str, Path] = {}
     for index, root in enumerate(config.state.workspace_roots):
-        raw_path = Path(root)
+        # load_config has already parsed these; this guard keeps a direct
+        # _validate caller from resolving (and so connecting to) a UNC root.
+        parsed_root = (
+            try_parse_policy_root(root, expand_user=False)
+            if isinstance(root, str)
+            else None
+        )
+        if parsed_root is None:
+            errors.append(f"[state].workspace_roots entry refused: {root!r}")
+            continue
+        raw_path = parsed_root
         if not raw_path.is_absolute():
             errors.append(f"[state].workspace_roots entry not absolute: {root!r}")
             continue
@@ -2037,6 +2111,9 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             resolved = raw_path.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             errors.append(f"[state].workspace_roots entry cannot be resolved: {root!r}")
+            continue
+        if try_parse_policy_root(str(resolved), expand_user=False) is None:
+            errors.append(f"[state].workspace_roots entry refused after resolution: {root!r}")
             continue
         mapping = resolved.name
         if not mapping:
@@ -2428,6 +2505,32 @@ def web_app_root(config: "SonderConfig") -> Path:
     return (Path(home) if home else sonder_paths.default_home()) / "web_app"
 
 
+def _parse_workspace_roots(config: SonderConfig, errors: list[str]) -> SonderConfig:
+    """Parse every ``[state].workspace_roots`` entry once, after all sources merged.
+
+    Each entry (from the TOML file, ``SONDER_FILE_ROOTS`` or a command-line
+    override) goes through the shared policy-root parser: an extended-length
+    local prefix is stripped, and a UNC / device / NT-namespace spelling, a
+    relative path (``~`` is not expanded here), or a drive or filesystem root
+    is refused. A refused entry is
+    an error, so the load fails closed; it is never dropped silently and never
+    replaced by another source's roots. The parser is lexical, so a refused
+    spelling reaches no ``resolve()`` or ``stat()`` (no SMB connection is opened).
+    Consumers of ``config.state.workspace_roots`` therefore see only absolute,
+    local, normalised paths.
+    """
+    parsed: list[str] = []
+    for root in config.state.workspace_roots:
+        if not isinstance(root, str):
+            errors.append("[state].workspace_roots entries must be strings")
+            continue
+        try:
+            parsed.append(str(parse_policy_root(root, expand_user=False)))
+        except PolicyRootError as exc:
+            errors.append(f"[state].workspace_roots entry refused ({exc}): {root!r}")
+    return replace(config, state=replace(config.state, workspace_roots=tuple(parsed)))
+
+
 def load_config(
     toml_path: str | os.PathLike | None = None,
     *,
@@ -2580,6 +2683,10 @@ def load_config(
             setting="[observability].live_export_origins",
         ),
     ))
+    errors.extend(_rpc_sharding_errors(merged_env))
+    # After TOML, environment and overrides are merged and before _validate
+    # resolves any root.
+    config = _parse_workspace_roots(config, errors)
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)

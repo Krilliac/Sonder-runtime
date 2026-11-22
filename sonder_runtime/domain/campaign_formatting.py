@@ -4,7 +4,12 @@ from __future__ import annotations
 
 
 def campaign_headline(
-    passed, total, recorded, failed_recorded, pitfall_errors, elapsed,
+    passed: int,
+    total: int,
+    recorded: int,
+    failed_recorded: int,
+    pitfall_errors: int,
+    elapsed: float,
 ) -> str:
     """Build the durable first line for an unattended campaign run."""
     headline = (

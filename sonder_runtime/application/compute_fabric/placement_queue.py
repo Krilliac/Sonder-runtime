@@ -78,7 +78,7 @@ class PlacementQueue:
         self._lock = RLock()
 
     @staticmethod
-    def _rank(item: PlacementQueueItem):
+    def _rank(item: PlacementQueueItem) -> tuple[int, datetime, str]:
         return (-item.priority, item.enqueued_at, item.request_id)
 
     def _ordered_locked(self) -> tuple[PlacementQueueItem, ...]:

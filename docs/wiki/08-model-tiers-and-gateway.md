@@ -1,8 +1,10 @@
 # Model Tiers & Gateway
 
 Sonder is model-agnostic. It routes each request to a **tier**, which
-resolves to an Ollama model. Tiers and routing lanes are the main
-quality/speed/privacy knobs.
+resolves to a model served by one of five **providers**: Ollama (the default),
+an OpenAI-compatible server, Sonder Inference, OpenRouter or Anthropic
+([Backend selection](#backend-selection-and-typed-capability-metadata)).
+Tiers and routing lanes are the main quality/speed/privacy knobs.
 
 ## Tiers
 
@@ -194,8 +196,12 @@ permissions ([Security Model](09-security-model.md)).
 ## The ModelGateway port (SPEC-3)
 
 All model transport is moving behind a single port,
-`application/ports/model_gateway.py`, implemented by
-`adapters/ollama/gateway.py`. The port boundary:
+`application/ports/model_gateway.py`. The Ollama implementation is
+`adapters/inference/ollama_gateway.py` (`adapters/ollama/gateway.py` is only a
+compatibility shim that re-exports it); the other four providers are
+`openai_compat_gateway.py`, `sonder_inference_gateway.py`,
+`openrouter_gateway.py` and `anthropic_gateway.py` in the same package. The
+port boundary:
 
 - enforces the **cloud-consent gate** against the request's
   `OperationContext` — a cloud tier is refused unless consent is present,
@@ -206,8 +212,10 @@ All model transport is moving behind a single port,
 - threads deadlines and cancellation into the transport; keeps local
   retries bounded and remote/hosted calls single-attempt.
 
-Session summarization and titling already route through it
-(`ChatService` → `OllamaGateway`); more call-sites migrate incrementally.
+Session summarization and titling already route through it (`ChatService`
+over the gateway that `adapters/model_gateway_factory.py` builds from the
+provider bindings, which is `OllamaGateway` unless you bind another provider);
+more call-sites migrate incrementally.
 
 ### Context limits versus reasoning-output limits
 
@@ -240,36 +248,52 @@ must consume.
 
 ### Backend selection and typed capability metadata
 
-`SONDER_MODEL_BACKEND` (default `ollama`) picks the transport constructed by
-`adapters/model_gateway_factory.py`: unset/`ollama` builds `OllamaGateway`;
-`openai`, `openai-compatible`, `llamacpp`, or `vllm` build
-`OpenAICompatibleGateway`; `sonder-inference` (also `sonder_inference`,
-`sonder-infer`, `inference`) builds `SonderInferenceGateway`, which talks to a
-local `sonder-infer serve` over its OpenAI-compatible HTTP API v1. An
-unrecognized value raises `InvalidInput` instead of silently falling back to
-Ollama — a typo in the operator's configuration must not route requests
-through a different transport than intended. `sonder` is refused for the same
-reason: it names the chat tier, not a provider.
+Five providers exist (`adapters/model_gateway_factory.py:55-84`). Select them
+by name with `SONDER_MODEL_BACKEND` (default `ollama`) for every tier, and
+override individual tiers with `SONDER_FAST_PROVIDER`,
+`SONDER_GENERAL_PROVIDER`, `SONDER_CODE_PROVIDER`,
+`SONDER_REASONING_PROVIDER` and `SONDER_VISION_PROVIDER` (only these five
+tiers; the `cloud-*` tiers are not bound this way).
 
-Per-tier bindings (`SONDER_FAST_PROVIDER` and friends) mix providers; the
-dispatcher makes exactly one provider call per request. The single exception
-is opt-in: `SONDER_INFERENCE_FALLBACK=ollama` wraps the Inference provider so
-that a request Inference provably never received (refused connection,
-unresolvable host, health not ready, HTTP 503 `not_ready`) is sent once to
-local Ollama, logged at WARNING and counted. The fallback call never reaches
-a hosted or remote model, whatever the original request allowed. Timeouts and
-server errors never fall back, because the request may already have run, and
-neither do configuration, credential or API-version problems, which a
-fallback cannot fix. Chat and agent generation consumers follow provider
-bindings, including A2A chat, session summarize/title, interactive agents,
-workbench, autopilot, master/fleet workers, ensembles, web research and
-audit/helpers. Exact model pins, strict `sonder` aliases and durable fanout
-remain explicitly Ollama; images/schema retain the non-Ollama refusal (with
-`SONDER_INFERENCE_FALLBACK=ollama`, a Sonder Inference tier serves them on
-loopback Ollama instead, recorded in the turn receipt), and the
-sealed single-send codegen canary refuses a bound non-Ollama provider. See
-[the provider reference](../architecture/sonder-inference-provider.md) for
-the remaining explicit Ollama boundaries.
+| Provider | Accepted names | Setup |
+|---|---|---|
+| Ollama (default) | `ollama` | [install-workstation-local](../runbooks/install-workstation-local.md) |
+| OpenAI-compatible | `openai`, `openai-compatible`, `openai_compatible`, `llamacpp`, `vllm` | [integration/openai-compatible](../integration/openai-compatible.md) |
+| Sonder Inference | `sonder-inference`, `sonder_inference`, `sonder-infer`, `inference` | [runbook](../runbooks/sonder-inference.md) |
+| OpenRouter | `openrouter`, `open-router`, `open_router` | [integration/openrouter](../integration/openrouter.md) |
+| Anthropic | `anthropic` | [integration/anthropic](../integration/anthropic.md) |
+
+An unrecognized value raises `InvalidInput` instead of silently falling back to
+Ollama; a typo must not route requests through a different transport than
+intended. `sonder` is refused for the same reason: it names the chat tier, not
+a provider (`adapters/provider_bindings.py:18-45`, `:175-183`).
+
+`SONDER_EMBEDDING_PROVIDER` picks the provider for gateway-level embeddings;
+it defaults to the `SONDER_MODEL_BACKEND` value (`provider_bindings.py:184-186`).
+Sonder Inference, OpenRouter and Anthropic do not serve embeddings
+(`sonder_inference_gateway.py:1864-1869`, `openrouter_gateway.py:1021-1026`,
+`anthropic_gateway.py:1106-1111`), so binding `SONDER_MODEL_BACKEND` to one of
+them without `SONDER_EMBEDDING_PROVIDER=ollama` breaks gateway embeddings.
+The warning for Sonder Inference appears in `observatory.warnings` in the body of
+`GET /v1/sonder/ecosystem` (the list is nested under the `observatory` key,
+`application/observability/ecosystem_status.py:127-131`, built at `:216-227`,
+served from `interfaces/http/facades/observatory_routes.py:134`). The route is
+admin-only and can return 404 (see
+[HTTP API and lifecycle](05-http-api-and-lifecycle.md));
+the `doctor` command has no embedding-provider warning. Memory-recall
+embeddings are separate: recall and backfill use the Ollama-only embedder
+(`bootstrap/app.py:1829`, `adapters/recall_gateway.py`,
+`adapters/embeddings.py`), so setting `SONDER_EMBEDDING_PROVIDER=openai-compatible`
+does not move them off Ollama.
+
+Per-tier bindings mix providers; the dispatcher makes exactly one provider
+call per request. The single exception is opt-in `SONDER_INFERENCE_FALLBACK`
+(`none` or `ollama`), which sends a request Sonder Inference provably never
+received once to local Ollama. Its semantics, the Ollama-only boundaries
+(exact model pins, strict `sonder` aliases, durable fanout, images/schema and
+the sealed codegen canary) and the list of consumers that follow bindings live
+in [the provider reference](../architecture/sonder-inference-provider.md); that
+is the one home for them.
 
 The read-only hardware profile also inventories local provider presence for
 Ollama, llama.cpp, vLLM, and TensorRT-LLM using bounded executable/package
@@ -289,8 +313,26 @@ each call); `OpenAICompatibleGateway` advertises `fixed-endpoint` because one
 configured endpoint and model serve every request. `SonderInferenceGateway`
 advertises `chat` and `fixed-endpoint` only (Inference v1 serves no
 embeddings), and additionally reports live `capability_health()`,
-`backend_identity()` and `provider_status()` from a cached, 2-second-bounded
-health probe that never generates.
+`backend_identity()` and `provider_status()` from a cached, bounded health
+probe that never generates (5 s by default;
+`SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS` may set a value in (0, 6],
+`sonder_inference_gateway.py:135`, `:405`).
+
+### Where provider variables must live
+
+Provider and key variables (`SONDER_MODEL_BACKEND`, `SONDER_<TIER>_PROVIDER`,
+`SONDER_EMBEDDING_PROVIDER`, `SONDER_INFERENCE_*`, `SONDER_OPENAI_*`,
+`OPENROUTER_API_KEY` and the like) are read from the **process environment**
+(`os.environ`, `adapters/provider_bindings.py:171-198`). The `--secrets`
+file (default `<state home>/sonder.env`) is merged only into the typed
+configuration (`platform/config.py:2513-2544`), and `serve` exports only typed
+keys back to the environment (`__main__.py:1031-1160`: `OLLAMA_HOST`, worker
+settings, `SONDER_ALLOW_CLOUD`, ...). So a provider variable that appears only
+in `sonder.env` is **not** seen by the gateway. Set it in the shell or service
+manager that starts Sonder. The exception is the packaged systemd unit, where
+`EnvironmentFile=/etc/sonder/sonder.env` makes every line of that file a
+process variable (`packaging/systemd/sonder.service:20`). Bindings are fixed
+at startup: restart Sonder after any change (2026-11-20).
 
 ### Measured inference telemetry
 
@@ -387,13 +429,48 @@ note: [use-facts-model](../runbooks/use-facts-model.md).
 
 ## Remote & cloud (opt-in)
 
+Default is fully local. This section is the one home of the **provider
+consent map** (verified against the code on 2026-11-20).
+
 - **Remote Ollama** — set `[ollama].allow_remote = true` /
   `SONDER_ALLOW_REMOTE_OLLAMA=1` to point at a non-loopback **HTTPS** Ollama
   origin. HTTP remains available only for loopback Ollama because remote
-  prompts and embeddings must be protected in transit.
-- **Hosted/cloud tiers** — set `[features].cloud = true` /
-  `SONDER_ALLOW_CLOUD=1`. Both are explicit consent gates; default is fully
-  local. A non-Ollama frontier API would slot in as a new gateway adapter.
+  prompts and embeddings must be protected in transit. URL rules and the
+  Caddy-fronted setup:
+  [remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings).
+- **Hosted/cloud consent** — set `[features].cloud = true` /
+  `SONDER_ALLOW_CLOUD=1` (truthy: `1`, `true`, `yes`, `on`;
+  `domain/cloud_access.py:6-11`). `serve` exports the typed value back to the
+  environment (`__main__.py:1130`; `platform/config.py:1709`).
+
+| Provider / tier | Needs cloud consent? | Other requirements |
+|---|---|---|
+| Local Ollama tiers | No | |
+| Ollama cloud tiers `cloud-code` (`kimi-k2.7-code:cloud`), `cloud-general` (`glm-5.2:cloud`) | Yes | Overrides `SONDER_CLOUD_CODE` / `SONDER_CLOUD_GENERAL` (`adapters/data/model_lists.json:8-11`, `domain/runtime_model_configuration.py:59-64`); setup: [assemble-model-collection](../runbooks/assemble-model-collection.md) |
+| OpenAI-compatible, loopback host | No | [openai-compatible](../integration/openai-compatible.md) |
+| OpenAI-compatible, any other host | Yes (`openai_compat_gateway.py:365-370`) | HTTPS, or an allow-listed private IP literal |
+| Sonder Inference, non-loopback | Yes, except a declared private worker (`sonder_inference_gateway.py:941`) | `SONDER_ALLOW_REMOTE_INFERENCE=1`, HTTPS, key; [runbook](../runbooks/sonder-inference.md) |
+| OpenRouter | Always (`openrouter_gateway.py:602`) | Key; [openrouter](../integration/openrouter.md) |
+| Anthropic | Always (`anthropic_gateway.py:509`) | Key; [anthropic](../integration/anthropic.md) |
+
+Ways consent is given or limited:
+
+- Process-wide: `SONDER_ALLOW_CLOUD=1` or `[features].cloud = true`. The
+  top-level `server.py` reads it through `_cloud_allowed_policy(os.environ)` for
+  the tier-generation helper and the `gateway_generate_text` call (for
+  example `server.py:1975`, `:2312`; it is read at many more sites, such as
+  `:696`, `:701`, `:716`, `:2522`, `:2546`, `:4897`, `:5189`).
+- Per process, interactively: the `cloud_opt_in` MCP tool
+  (`adapters/mcp_tool_manifest.py:13`); it does not persist across restart.
+- Headless launcher: `--allow-hosted` sets `SONDER_ALLOW_CLOUD=1` for that
+  run (`interfaces/cli/headless.py:55-60`).
+- A per-operation context can only **narrow** consent, never widen it
+  (`adapters/tier_generation.py:34-62`).
+- A2A requests always run with cloud consent off
+  (`interfaces/http/facades/a2a_jsonrpc.py:174`), so a tier bound to a hosted
+  provider cannot be reached over A2A.
+- The Sonder Inference fallback to Ollama runs with cloud and remote-Ollama
+  consent off (`adapters/provider_dispatch/fallback.py:151`).
 - **Private-node compute** — independently set `[compute].allow_remote = true`
   (or `SONDER_ALLOW_REMOTE_COMPUTE=1`) and opt in on each workload request.
   This schedules whole build/test/media/training jobs and does not enable a

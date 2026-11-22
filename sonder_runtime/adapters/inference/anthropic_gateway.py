@@ -55,8 +55,11 @@ import-time failure of the runtime.
 * **Errors.** 401, credit exhaustion (400/402), 429 (``retry-after`` becomes a
   local cool-down for that key slot only), 529 overloaded and 5xx map onto the
   domain taxonomy with actionable text.
-* **Unfinished streams are billed.**  A stream that is abandoned, times out or
-  fails after ``message_start`` records the usage in the SDK's message snapshot.
+* **Unfinished calls are billed.**  A stream that is abandoned, times out or
+  fails after ``message_start`` records its usage so far, raised to the call's
+  worst-case cost (the snapshot's output count can be stale).  A non-streaming
+  call that times out or loses its connection after the request was sent is
+  charged its worst-case cost, since Anthropic may still process and bill it.
 * **Concurrency.**  Before each send the gateway reserves a worst-case cost
   (``max_tokens`` of output plus the prompt's byte length as input tokens) in
   the ledger, so calls in flight count against the cap; the reservation is
@@ -438,6 +441,38 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
 
 def _type_names(exc: BaseException) -> frozenset[str]:
     return frozenset(cls.__name__ for cls in type(exc).__mro__)
+
+
+# Transport failures that prove no connection was ever opened, so no request
+# body reached Anthropic.  ``httpx2`` raises the first three; the SDK wraps
+# them as ``APIConnectionError``/``APITimeoutError`` with the original as
+# ``__cause__``.
+_NEVER_SENT_ERRORS = frozenset({
+    "ConnectError", "ConnectTimeout", "PoolTimeout", "ConnectionRefusedError",
+})
+
+
+def _may_have_been_billed(exc: BaseException) -> bool:
+    """True when a failed send may still have been processed and billed upstream.
+
+    That is a transport failure with no HTTP status (a timeout or a lost
+    connection), unless the exception or its cause shows the connection never
+    opened.  An HTTP error status means Anthropic answered with a refusal.
+    """
+    if isinstance(exc, SonderError) or _status_of(exc) is not None:
+        return False
+    names = _type_names(exc)
+    if not (isinstance(exc, (socket.timeout, TimeoutError, OSError))
+            or "APITimeoutError" in names or "APIConnectionError" in names):
+        return False
+    seen: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(seen) < 8 and all(current is not s for s in seen):
+        if _type_names(current) & _NEVER_SENT_ERRORS:
+            return False
+        seen.append(current)
+        current = current.__cause__
+    return True
 
 
 @dataclass(frozen=True)
@@ -830,13 +865,17 @@ class AnthropicGateway:
 
     def _account(
         self, data: dict[str, Any], model: str, slot: int, reserved: Decimal | None = None,
+        *, unfinished: bool = False,
     ) -> None:
-        """The sole accounting boundary: runs for every completed physical response.
+        """The sole accounting boundary: runs for every billable physical call.
 
         A completed response can be billable even when a later cancellation
         prevents publishing it, so spend is recorded here, not in ``_finish``.
         When the response carries no usage and ``reserved`` (the call's
         worst-case cost) is known, that worst case is recorded instead of zero.
+        ``unfinished`` marks a call whose final usage was never received (an
+        abandoned or failed stream): its usage so far understates what
+        Anthropic bills, so at least ``reserved`` is recorded.
         """
         usage = data.get("usage")
         if not isinstance(usage, Mapping) or (
@@ -861,6 +900,13 @@ class AnthropicGateway:
                 )
             else:
                 logger.warning("anthropic: response carried no usage; spend recorded as zero")
+        elif (unfinished and reserved is not None and reserved.is_finite()
+              and reserved > cost):
+            cost = reserved
+            logger.warning(
+                "anthropic: the call ended before its final usage; the call's worst-case "
+                "cost was charged against the cap"
+            )
         self._ledger.record(
             usd=cost, slot=slot, input_tokens=counts["input_tokens"] + counts["cache_read_input_tokens"]
             + counts["cache_creation_input_tokens"], output_tokens=counts["output_tokens"],
@@ -879,23 +925,43 @@ class AnthropicGateway:
         data["cached_tokens"] = counts["cache_read_input_tokens"]
         record_usage(facts)
 
-    def _account_partial(self, stream: Any, model: str, slot: int) -> None:
-        """Bill what an unfinished stream already consumed; never raises.
+    def _account_partial(
+        self, stream: Any, model: str, slot: int, reserved: Decimal | None = None,
+    ) -> bool:
+        """Bill an unfinished stream; never raises.  True when the stream was recorded.
 
-        After ``message_start`` the SDK's message snapshot carries the input
-        tokens and the output produced so far, which Anthropic bills even when
-        this side abandons the stream, times out or loses the connection.
+        After ``message_start`` Anthropic bills the call even when this side
+        abandons the stream, times out or loses the connection.  The SDK's
+        snapshot holds the input tokens, but its ``output_tokens`` only moves
+        on ``message_delta``, so it can still be the ``message_start`` value:
+        the reserved worst case is charged when it is the larger amount.
         """
         try:
             snapshot = stream.current_message_snapshot  # raises before message_start
-        except Exception:  # noqa: BLE001 - nothing was started, so nothing was billed
-            return
+        except Exception:  # noqa: BLE001 - no message_start yet: the caller charges the reservation
+            return False
         try:
             data = self._normalize(snapshot, model)
             data["partial"] = True
-            self._account(data, model, slot)
+            self._account(data, model, slot, reserved, unfinished=True)
         except Exception as exc:  # noqa: BLE001 - never mask the stream's own failure
             logger.error("anthropic: could not account an unfinished stream (%s)", type(exc).__name__)
+            return False
+        return True
+
+    def _account_unanswered(self, model: str, slot: int, reserved: Decimal | None) -> None:
+        """Charge the worst case for a sent request whose response never arrived; never raises.
+
+        A call (streaming or not) that times out or loses its connection after the
+        request was sent may still be processed and billed by Anthropic, so the
+        reservation is recorded as spend rather than released as free.
+        """
+        if reserved is None or not reserved.is_finite() or reserved <= 0:
+            return
+        try:
+            self._account({"usage": None, "partial": True}, model, slot, reserved)
+        except Exception as exc:  # noqa: BLE001 - never mask the call's own failure
+            logger.error("anthropic: could not account an unanswered call (%s)", type(exc).__name__)
 
     def _attempt(
         self, settings: AnthropicSettings, slot: int, key: str, model: str, params: dict[str, Any],
@@ -909,11 +975,15 @@ class AnthropicGateway:
         def send() -> dict[str, Any]:
             failure: Exception | None = None
             final = None
+            sent = False
+            accounted = False
             try:
                 client = self._client(slot, key, settings)
                 if sink is None:
+                    sent = True
                     final = client.messages.create(timeout=timeout, **params)
                 else:
+                    sent = True
                     with client.messages.stream(timeout=timeout, **params) as stream:
                         try:
                             for piece in stream.text_stream:
@@ -923,11 +993,13 @@ class AnthropicGateway:
                                     sink(GenerationChunk(text=piece))
                             final = stream.get_final_message()
                         except BaseException:
-                            self._account_partial(stream, model, slot)
+                            accounted = self._account_partial(stream, model, slot, reserved)
                             raise
             except Exception as exc:  # noqa: BLE001 - mapped below, outside this handler
                 failure = exc
             if failure is not None:
+                if sent and not accounted and _may_have_been_billed(failure):
+                    self._account_unanswered(model, slot, reserved)
                 # Mapped outside the except block so the domain error has neither
                 # __cause__ nor __context__: the SDK exception references the
                 # request, whose headers hold the key.

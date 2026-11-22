@@ -1,9 +1,21 @@
 # Scoped resumable artifact transfer
 
 This package supplies a private receiver store, a typed service, a pure HTTP
-facade and an HTTPS streaming client. It does **not** register production routes
-or configure credentials. Host composition must provide authentication, a fixed
-credential-to-grant mapping, HTTP bounds and request admission.
+facade and an HTTPS streaming client. The HTTP server registers the transfer
+routes (`GET`, `POST`, `PUT` and `OPTIONS` handled by
+`interfaces/http/artifact_transfer.py`), but they stay disabled until the host
+enables `[artifact_transfer]` and supplies a dedicated
+`SONDER_ARTIFACT_TRANSFER_KEY` in the secrets file or process environment (the
+global API key does not authenticate transfers). Setup steps:
+[artifact-transfer-receiver.md](artifact-transfer-receiver.md). Host composition
+still provides the fixed credential-to-grant mapping, HTTP bounds and request
+admission, and the routes require TLS, a loopback peer, or a declared proxy with
+a trusted peer.
+
+This is the scoped, resumable transfer of immutable bytes between private
+stores. It is not the same as the job artifacts a compute worker publishes
+(`GET /v1/compute/jobs/{id}/artifacts/{name}`, 64 MiB cap), which are described
+in [the compute-fabric runbook](runbooks/compute-fabric.md).
 
 ## Host authority
 

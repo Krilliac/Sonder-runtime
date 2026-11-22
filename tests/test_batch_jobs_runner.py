@@ -286,3 +286,31 @@ def test_a_non_final_step_state_stops_the_job_interrupted_instead_of_looping():
     assert outcome.status is JobStatus.INTERRUPTED
     assert store.finished[0] is JobStatus.INTERRUPTED
     assert len(executor.calls) == 1
+
+
+def test_a_repeated_placeholder_is_refused_before_the_prompt_is_built():
+    # 3000 copies of {{text}} fit the template limit, and a 30k-char field fits
+    # the item limit, but rendering both would build a 90M-char prompt before
+    # any size check could refuse it.  The step must fail without that string.
+    import tracemalloc
+
+    spec = validate_spec(
+        {"name": "job", "fields": ["text"],
+         "stages": [{"name": "r1", "model": "m:1", "prompt": "{{text}}" * 3000}]},
+        Limits(), is_cloud_model=lambda name: False,
+    )
+    store = FakeStore(["a"], spec)
+
+    class BigItemExecutor(FakeExecutor):
+        def item(self, job_id, item_key):
+            return ItemSpec(item_key, {"text": "x" * 30_000})
+
+    executor = BigItemExecutor(store)
+    tracemalloc.start()
+    try:
+        _run(store, executor)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert executor.calls == [] and executor.failed == [("r1", "a", StepReason.PROMPT_TOO_LARGE)]
+    assert peak < 16 * 1024 * 1024, peak

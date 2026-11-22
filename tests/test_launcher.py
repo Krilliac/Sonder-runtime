@@ -664,9 +664,11 @@ def test_launcher_sets_tls12_minimum_before_wrapping_server_socket(monkeypatch):
         def load_cert_chain(self, cert, key):
             assert (cert, key) == ("cert.pem", "key.pem")
 
-        def wrap_socket(self, sock, *, server_side):
+        def wrap_socket(self, sock, *, server_side, do_handshake_on_connect=True):
             assert self.minimum_version == ssl.TLSVersion.TLSv1_2
             assert server_side is True
+            # The handshake must not run inside accept() on the serve thread.
+            assert do_handshake_on_connect is False
             wrapped.append(sock)
             raise RuntimeError("stop before serving")
 
@@ -684,6 +686,97 @@ def test_launcher_sets_tls12_minimum_before_wrapping_server_socket(monkeypatch):
         )
 
     assert wrapped == [server_socket]
+
+
+def _self_signed_loopback_pair(tmp_path):
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "launcher-cert.pem"
+    key_path = tmp_path / "launcher-key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ))
+    return str(cert_path), str(key_path)
+
+
+def test_silent_tls_client_does_not_block_other_launcher_requests(monkeypatch, tmp_path):
+    cert, key = _self_signed_loopback_pair(tmp_path)
+    created = []
+    ready = threading.Event()
+
+    class CapturingServer(sonder_launcher.LauncherServer):
+        tls_handshake_timeout = 1.0
+
+        def __init__(self, *args, **kwargs):
+            kwargs["command_journal"] = sonder_launcher.command_recovery.CommandJournal(
+                tmp_path / "launcher-commands.jsonl"
+            )
+            super().__init__(*args, **kwargs)
+            created.append(self)
+            ready.set()
+
+    monkeypatch.setattr(sonder_launcher, "LauncherServer", CapturingServer)
+    monkeypatch.setenv("SONDER_LAUNCHER_QUIET", "1")
+    thread = threading.Thread(
+        target=sonder_launcher.serve,
+        args=("127.0.0.1", 0, "a" * 32),
+        kwargs={"controller": FakeController(), "cert": cert, "key": key},
+        daemon=True,
+    )
+    thread.start()
+    assert ready.wait(SYNC_TIMEOUT)
+    server = created[0]
+    port = server.server_address[1]
+    silent = socket.create_connection(("127.0.0.1", port), timeout=SYNC_TIMEOUT)
+    try:
+        # Once the silent peer is accepted (TCP backlog), a blocking
+        # handshake inside accept() would starve this request until timeout.
+        client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_context.check_hostname = False
+        client_context.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            "https://127.0.0.1:%d/v1/launcher/status" % port,
+            headers={"Authorization": "Bearer " + "a" * 32},
+        )
+        with urllib.request.urlopen(req, timeout=5, context=client_context) as response:
+            assert response.status == 200
+            assert json.loads(response.read())["ok"] is True
+
+        # The silent peer is dropped after the bounded handshake timeout
+        # instead of pinning a worker thread forever.
+        silent.settimeout(SYNC_TIMEOUT)
+        started = time.monotonic()
+        try:
+            assert silent.recv(1) == b""
+        except ConnectionResetError:
+            pass
+        assert time.monotonic() - started < SYNC_TIMEOUT
+    finally:
+        silent.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_main_forwards_explicit_insecure_development_override(monkeypatch):
@@ -1138,6 +1231,131 @@ def test_health_probe_uses_configured_ipv6_loopback(monkeypatch, tmp_path):
     assert controller._server_state() == "healthy"
     assert seen["reachable"][:2] == ("::1", 25435)
     assert seen["url"].startswith("http://[::1]:25435")
+
+
+def _scripted_health_probe(monkeypatch, controller, outcomes):
+    """Drive the real ``_server_state`` through scripted probe outcomes.
+
+    Each outcome is ``"closed"`` (port not reachable), ``"valid"`` (a
+    verified managed payload) or an exception the opener raises.
+    """
+    script = iter(outcomes)
+    current = {}
+
+    class Response:
+        status = 200
+
+        def read(self, size):
+            return json.dumps(
+                sonder_launcher.sonder_health.response_payload(
+                    controller.health_token,
+                    current["nonce"],
+                    controller.server_port,
+                    pid=123,
+                )
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Opener:
+        def open(self, request, timeout):
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            current["nonce"] = headers[
+                sonder_launcher.sonder_health.NONCE_HEADER.lower()
+            ]
+            outcome = current["outcome"]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return Response()
+
+    def reachable(*args, **kwargs):
+        current["outcome"] = next(script)
+        return current["outcome"] != "closed"
+
+    monkeypatch.setattr(sonder_launcher, "_reachable", reachable)
+    monkeypatch.setattr(
+        sonder_launcher.urllib.request, "build_opener", lambda handler: Opener(),
+    )
+
+
+@pytest.mark.parametrize("error", [
+    TimeoutError("timed out"),
+    ConnectionResetError("reset"),
+    urllib.error.URLError(TimeoutError("timed out")),
+])
+def test_health_probe_without_an_answer_is_indeterminate(monkeypatch, tmp_path, error):
+    controller = make_controller(tmp_path)
+    _scripted_health_probe(monkeypatch, controller, [error])
+    assert controller._server_state() == "indeterminate"
+
+
+def test_health_probe_http_error_is_a_foreign_listener(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    error = urllib.error.HTTPError("http://127.0.0.1/", 404, "Not Found", {}, io.BytesIO())
+    _scripted_health_probe(monkeypatch, controller, [error])
+    assert controller._server_state() == "foreign_listener"
+
+
+def test_start_keeps_polling_while_the_bound_runtime_is_not_yet_serving(
+    monkeypatch, tmp_path,
+):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    # initial check: port closed; after start: bound but slow, then verified;
+    # status(): verified.
+    _scripted_health_probe(
+        monkeypatch, controller,
+        ["closed", TimeoutError("timed out"), TimeoutError("timed out"), "valid", "valid"],
+    )
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: (0, "", ["python", "headless", "start"]),
+    )
+
+    payload = controller.action("start")
+
+    assert payload["ok"] is True, payload["last_error"]
+    assert payload["server_state"] == "healthy"
+
+
+def test_initial_check_retries_an_unanswered_probe_before_deciding(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    _scripted_health_probe(
+        monkeypatch, controller, [TimeoutError("timed out"), "valid", "valid"],
+    )
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: pytest.fail("a healthy runtime needs no start"),
+    )
+
+    payload = controller.action("start")
+
+    assert payload.get("ok", True) is True
+    assert "already running" in payload["message"]
+
+
+def test_a_port_that_never_answers_is_refused_before_any_command(monkeypatch, tmp_path):
+    controller = make_controller(tmp_path)
+    monkeypatch.setattr(sonder_launcher, "POLL_INTERVAL_SECONDS", 0.01)
+    from sonder_runtime.adapters import launcher_probe
+
+    monkeypatch.setattr(launcher_probe, "INITIAL_PROBE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(controller, "_server_state", lambda: "indeterminate")
+    monkeypatch.setattr(
+        controller, "_run",
+        lambda *args, **kwargs: pytest.fail("an unverified listener must block commands"),
+    )
+
+    payload = controller.action("restart")
+
+    assert payload["ok"] is False
+    assert "unverified listener" in payload["last_error"]
+    assert payload["server_running"] is False
 
 
 def test_launcher_status_reports_only_verified_managed_role(monkeypatch, tmp_path):

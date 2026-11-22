@@ -14,7 +14,11 @@ This module owns that override list.  Callers supply a way to run one
 overrides; it launches no program) and receive ``-c`` arguments to place
 before the subcommand.  When the driver configuration cannot be read the
 helpers raise :class:`GitProgramConfigError`, and callers refuse to run git
-rather than run it with a driver left in place.
+rather than run it with a driver left in place.  The same applies to a driver
+whose name a ``-c`` argument cannot express: one containing ``=`` (git splits
+``-c`` at the first ``=``), a control character, or bytes that are not valid
+UTF-8 (the probe decodes them to U+FFFD or a lone surrogate, so the override
+would name a different subsection).  No override would reach such a driver.
 
 External diff drivers (``diff.external`` and ``diff.<driver>.command``) have
 no built-in replacement value; porcelain ``diff``/``log``/``show`` callers
@@ -35,15 +39,18 @@ GIT_PROGRAM_KEYS = (
 _GIT_PROGRAM_KEY_RE = re.compile(
     r"^(?P<section>filter|merge|diff)\.(?P<name>.+)\."
     r"(?P<key>clean|smudge|process|required|driver|textconv)$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 # ``git merge-file`` is git's own three-way text merge: what the built-in
 # driver does, with none of the repository's configuration.
 BUILTIN_MERGE_DRIVER = "git merge-file --marker-size=%L %A %O %B"
 
 # Arguments (after ``git``) of the one probe that reads driver configuration.
+# Use ``--list`` rather than ``--get-regexp``: on Linux under UTF-8 locales,
+# glibc's POSIX regex ``.`` skips non-UTF-8 bytes (e.g. ``0xFF`` in a subsection
+# name), silently hiding malicious driver keys from ``--get-regexp``.
 CONFIG_PROBE_ARGUMENTS = (
-    "config", "--null", "--name-only", "--get-regexp", GIT_PROGRAM_KEYS,
+    "config", "--null", "--name-only", "--list",
 )
 
 
@@ -78,6 +85,12 @@ def static_overrides() -> list[str]:
     ]
 
 
+def _unexpressible(char: str) -> bool:
+    """True for a driver-name character a ``-c`` argument cannot carry intact."""
+    code = ord(char)
+    return code < 0x20 or code == 0x7F or code == 0xFFFD or 0xD800 <= code <= 0xDFFF
+
+
 def driver_overrides(keys: Iterable[str]) -> list[str]:
     """Built-in replacements for every configured filter/merge/diff driver."""
     arguments: list[str] = []
@@ -90,6 +103,17 @@ def driver_overrides(keys: Iterable[str]) -> list[str]:
         if match is None:
             raise GitProgramConfigError("unexpected git driver configuration key: %s" % key)
         section, name = match.group("section").lower(), match.group("name")
+        # ``git -c <key>=<value>`` is split at the FIRST ``=``: a driver name
+        # holding one would set ``<section>.<text before it>`` and leave the
+        # repository's program in place.  A control character cannot be
+        # carried in a key either.  A name whose bytes were not valid UTF-8
+        # was decoded to U+FFFD or a lone surrogate: the ``-c`` argument would
+        # name a different subsection than the one configured.  None of these
+        # can be overridden, so refuse.
+        if "=" in name or any(_unexpressible(char) for char in name):
+            raise GitProgramConfigError(
+                f"git driver name cannot be overridden on the command line: {key!r}"
+            )
         if (section, name) in seen:
             continue
         seen.add((section, name))
@@ -108,6 +132,14 @@ def driver_overrides(keys: Iterable[str]) -> list[str]:
         else:
             arguments.extend(["-c", prefix + "textconv=cat"])
     return arguments
+
+
+def _program_keys_from_listing(stdout: str) -> list[str]:
+    """Select driver-program keys from ``git config --null --name-only --list``."""
+    return [
+        key for raw in stdout.split("\x00")
+        if (key := raw.strip()) and _GIT_PROGRAM_KEY_RE.fullmatch(key) is not None
+    ]
 
 
 def neutralized_git_arguments(
@@ -132,7 +164,7 @@ def neutralized_git_arguments(
     if probe.get("truncated"):
         raise GitProgramConfigError("git driver configuration is too large to neutralize safely")
     stdout = str(probe.get("stdout") or "")
-    return static_overrides() + driver_overrides(stdout.split("\x00"))
+    return static_overrides() + driver_overrides(_program_keys_from_listing(stdout))
 
 
 # Arguments (after ``git`` and :func:`static_overrides`) that list index
@@ -198,8 +230,8 @@ def submodule_driver_overrides(
             probe = run_probe_at(child, list(CONFIG_PROBE_ARGUMENTS))
             if probe is None:
                 continue
-            keys.extend(_checked_probe(
+            keys.extend(_program_keys_from_listing(_checked_probe(
                 probe, "submodule driver configuration", accept=(0, 1),
-            ).split("\x00"))
+            )))
             pending.append((child, depth + 1))
     return driver_overrides(keys)

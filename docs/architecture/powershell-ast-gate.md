@@ -77,7 +77,11 @@ providers, unseen script files and parse errors require
 approval. Literal nested command strings are parsed recursively. Dynamic data
 arguments and ordinary static methods are allowed when they do not conceal an
 executable operand. Start-Process argument strings are interpreted in the
-context of the selected PowerShell executable.
+context of the selected PowerShell executable. Reading a command's `Parameters`, `ParameterSets` or
+`ResolveParameter`, and any `$PSCmdlet` use, needs approval, as does any member named
+`ValueFromPipelineByPropertyName` and any assignment through `.Parameters[...]`/`.Attributes[...]`. String
+literals equal to those member names also need approval. `Get-Help` and `Get-Command -Syntax` still work
+for discovering parameters.
 
 Unavailable parsers, timeout, nonzero exits, invalid protocol responses and
 input limits fail closed. Positive syntax verdicts have a bounded cache tied

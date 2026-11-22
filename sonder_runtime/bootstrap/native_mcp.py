@@ -8,6 +8,7 @@ is demonstrated.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import logging
@@ -1330,13 +1331,20 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             from ..adapters.security.permission_policy import permission_policy
 
             graded = _GRADED_NAMES.get(canonical_name, canonical_name)
+            reach_approved = False
             try:
                 decision = permission_policy.decide_for_caller(
                     graded, interactive=False, gate_control_exempt=False,
                     surface="native-mcp", arguments=dict(arguments),
                 )
+                reach_approved = permission_policy.approval_spent_for(graded, dict(arguments))
             finally:
                 permission_policy.forget_spent_approval()
+            # As on the typed route, a caller's extra_roots widen reach only
+            # when a one-shot approval of exactly this call was spent; several
+            # packaged adapters honour the argument without any bypass check.
+            if not reach_approved:
+                canonical_arguments.pop("extra_roots", None)
             if decision is not None and decision.action != permission_policy.allow_action():
                 logger.warning(f"native tool {canonical_name!r} denied by runtime permission policy")
                 return {
@@ -1353,13 +1361,9 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
             # cloud permission; the other web adapters take no such keyword.
             canonical_arguments["consent"] = cloud_consent
         if cloud_consent:
-            context = local_owner_context(
-                correlation_id=context.correlation_id,
-                source="mcp",
-                workspace_roots=roots,
-                cloud_allowed=True,
-                timeout_seconds=60.0,
-            )
+            # Widen only cloud permission: the call keeps its deadline,
+            # cancellation, principal and session.
+            context = dataclasses.replace(context, cloud_allowed=True)
         if canonical_name in _VISION_NAMES:
             logger.debug(f"routing to vision service: {canonical_name!r}")
             service = getattr(application, "vision", None)

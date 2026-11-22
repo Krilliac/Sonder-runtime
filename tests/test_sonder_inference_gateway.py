@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from sonder_runtime.adapters.inference import launch_profile_cache
 from sonder_runtime.adapters.inference import sonder_inference_gateway as gateway_module
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     DEFAULT_BASE_URL,
@@ -36,6 +37,7 @@ from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.ports.model_gateway_contract import Capability
 from sonder_runtime.domain.common.errors import (
+    Cancelled,
     CapacityExceeded,
     DeadlineExceeded,
     DependencyUnavailable,
@@ -45,6 +47,16 @@ from sonder_runtime.domain.common.errors import (
 from sonder_runtime.domain.routing.backend_conformance import BackendIdentity
 
 HEX = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def _fresh_profile_cache():
+    """``/v1/models`` metadata is cached per endpoint process-wide; isolate tests."""
+    launch_profile_cache.shared_cache().clear()
+    yield
+    launch_profile_cache.shared_cache().clear()
+
+
 IDENTITY = {
     "backend": "mock", "model": "mock", "model_digest": HEX, "quantization": "none",
     "backend_version": "0.1.0", "tokenizer_digest": "b" * 64,
@@ -112,6 +124,9 @@ class FakeInference:
                 "synthetic": True, "backend_identity": IDENTITY, "reason": None,
             }
             return self.identity_status, json.dumps(document).encode()
+        if url.endswith("/v1/models"):
+            # Like an Inference without launch-profile support: no /v1/models.
+            return 404, json.dumps({"error": {"code": "not_found", "message": "no"}}).encode()
         raise AssertionError(url)
 
     def post(self, url, payload, headers, timeout):
@@ -645,6 +660,13 @@ def test_provider_status_keys_and_types_when_ready():
                         ("fast", "general", "code", "reasoning", "vision")},
         "busy": False,
         "workers": None,
+        # Additive: an Inference without /v1/models reports every tier unknown.
+        "tier_context": {
+            "state": "absent", "detail": "no /v1/models (HTTP 404)",
+            "tiers": {tier: {"model": DEFAULT_MODEL, "profile": None, "context_length": None,
+                             "capabilities": None, "source": "unknown"}
+                      for tier in ("fast", "general", "code", "reasoning", "vision")},
+        },
     }
 
 
@@ -1524,6 +1546,32 @@ def test_empty_length_without_explicit_thinking_retries_once_with_thinking_off()
     assert gateway.last_response_meta["empty_length_recovered"] is True
 
 
+def test_empty_length_retry_is_sent_under_the_pinned_trust_anchor(tmp_path):
+    # A private worker's ca_bundle is its only trust anchor; the non-thinking
+    # repair POST must be sent inside the same trust_scope as the first one.
+    ca_bundle = str(tmp_path / "worker-ca.pem")
+    first = _chat("")
+    first["choices"][0]["finish_reason"] = "length"
+    responses = iter((first, _chat("OK")))
+    anchors = []
+
+    def chat(*_args):
+        anchors.append(getattr(gateway_module._TRUST, "ca_bundle", ""))
+        return next(responses)
+
+    fake = FakeInference(chat=chat)
+    gateway = SonderInferenceGateway(
+        SonderInferenceConfig(ca_bundle=ca_bundle), transport=fake.post,
+        get_transport=fake.get, env={"SONDER_INFERENCE_THINKING": "on"},
+    )
+
+    response = gateway.generate(ModelRequest(prompt="Reply OK", tier="general"), _ctx())
+
+    assert response.text == "OK"
+    assert anchors == [ca_bundle, ca_bundle]
+    assert getattr(gateway_module._TRUST, "ca_bundle", "") == ""
+
+
 @pytest.mark.parametrize("think", [True, False])
 def test_empty_length_with_explicit_thinking_choice_is_not_replayed(think):
     first = _chat("")
@@ -1753,3 +1801,395 @@ def test_a3_activity_detailed_feed_preserves_content_free_measurements():
         assert summary["finish_reason"] == "stop"
         assert summary["timings"] == {"prompt_n": 4, "predicted_n": 6}
         assert "never publish this" not in repr(public)
+
+
+# -- inflight slots and cancellation (queue, abort on cancel) ---------------
+
+
+def test_single_endpoint_honors_max_inflight_queue():
+    import time as _time
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_chat(url, payload, headers):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        _time.sleep(0.03)
+        with lock:
+            active -= 1
+        return _chat("hello")
+
+    fake = FakeInference(chat=slow_chat)
+    gw = _gateway(fake, config_from_env({"SONDER_INFERENCE_MAX_INFLIGHT": "1"}))
+    errors = []
+
+    def run(idx):
+        try:
+            gw.generate(ModelRequest(prompt=f"p{idx}", tier="fast"), _ctx())
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert errors == []
+    assert peak == 1
+    assert len(fake.posts) == 4
+    assert gw._local_inflight == 0
+
+
+def test_single_endpoint_queue_admits_up_to_max_inflight_at_once():
+    barrier = threading.Barrier(2, timeout=10)
+
+    def wait_for_peer(url, payload, headers):
+        barrier.wait()  # both requests are in flight at the same time
+        return _chat("hello")
+
+    fake = FakeInference(chat=wait_for_peer)
+    gw = _gateway(fake, config_from_env({"SONDER_INFERENCE_MAX_INFLIGHT": "2"}))
+    errors = []
+
+    def run(idx):
+        try:
+            gw.generate(ModelRequest(prompt=f"p{idx}", tier="fast"), _ctx())
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    assert errors == []
+    assert len(fake.posts) == 2
+
+
+def test_queued_caller_is_cancelled_without_being_sent():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold(url, payload, headers):
+        entered.set()
+        release.wait(5)
+        return _chat("hello")
+
+    fake = FakeInference(chat=hold)
+    gw = _gateway(fake, config_from_env({"SONDER_INFERENCE_MAX_INFLIGHT": "1"}))
+    holder = threading.Thread(
+        target=lambda: gw.generate(ModelRequest(prompt="hold", tier="fast"), _ctx()),
+    )
+    holder.start()
+    try:
+        assert entered.wait(5)
+        cancel = threading.Event()
+        threading.Timer(0.1, cancel.set).start()
+        with pytest.raises(Cancelled):
+            gw.generate(
+                ModelRequest(prompt="queued", tier="fast", options={"cancel_token": cancel}),
+                _ctx(),
+            )
+        assert len(fake.posts) == 1  # the queued caller never reached the transport
+    finally:
+        release.set()
+        holder.join(5)
+    assert gw._local_inflight == 0
+
+
+def test_cancel_token_option_is_folded_into_the_context_and_never_sent():
+    fake = FakeInference()
+    gw = _gateway(fake)
+    gw.generate(
+        ModelRequest(prompt="x", tier="fast",
+                     options={"cancel_token": threading.Event(), "cancel_event": threading.Event()}),
+        _ctx(),
+    )
+    payload = fake.posts[0][1]
+    assert "cancel_token" not in payload and "cancel_event" not in payload
+
+
+def test_already_cancelled_request_is_never_sent():
+    fake = FakeInference()
+    gw = _gateway(fake)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        gw.generate(ModelRequest(prompt="x", tier="fast", options={"cancel_token": cancel}), _ctx())
+    assert fake.posts == []
+
+
+def test_exchange_refuses_to_send_inside_a_cancelled_scope():
+    calls = []
+
+    class Token:
+        @property
+        def cancelled(self):
+            calls.append(1)
+            return True
+
+    with gateway_module._cancellation_scope(Token()):
+        with pytest.raises(Cancelled):
+            # Port 9 on loopback: never contacted, the check comes first.
+            gateway_module._exchange("GET", "http://127.0.0.1:9/x", {}, None, 5.0, 1024)
+    assert calls
+
+
+class _SlowServer:
+    """Loopback server whose chat completion blocks until released."""
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps(_health()).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                outer.entered.set()
+                outer.release.wait(10.0)
+                try:
+                    body = json.dumps(_chat("late")).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self):
+        return "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _cancel_mid_call(request, context_cancellation=None, trigger=None):
+    import time as _time
+
+    with _SlowServer() as server:
+        gw = SonderInferenceGateway(SonderInferenceConfig(base_url=server.base_url, timeout_seconds=30.0))
+        box: list[BaseException] = []
+
+        def call():
+            try:
+                gw.generate(request, _ctx(timeout=30.0, cancellation=context_cancellation))
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+                box.append(exc)
+
+        thread = threading.Thread(target=call)
+        thread.start()
+        assert server.entered.wait(5.0)
+        started = _time.monotonic()
+        trigger()
+        thread.join(5.0)
+        elapsed = _time.monotonic() - started
+        server.release.set()
+        assert not thread.is_alive()
+        return box, elapsed
+
+
+def test_cancel_token_aborts_active_http_exchange_promptly():
+    cancel = threading.Event()
+    box, elapsed = _cancel_mid_call(
+        ModelRequest(prompt="slow", tier="fast", options={"cancel_token": cancel}),
+        trigger=cancel.set,
+    )
+    assert elapsed < 3.0
+    assert box and isinstance(box[0], Cancelled)
+
+
+def test_operation_cancellation_aborts_active_http_exchange_promptly():
+    class Token:
+        def __init__(self):
+            self.flag = False
+
+        @property
+        def cancelled(self):
+            return self.flag
+
+        def wait(self, timeout=None):
+            return self.flag
+
+    token = Token()
+    box, elapsed = _cancel_mid_call(
+        ModelRequest(prompt="slow", tier="fast"),
+        context_cancellation=token,
+        trigger=lambda: setattr(token, "flag", True),
+    )
+    assert elapsed < 3.0  # a non-Event token is read twice a second
+    assert box and isinstance(box[0], Cancelled)
+
+
+def test_exchange_watcher_sees_a_fleet_worker_cancel_bound_on_the_caller_thread(monkeypatch):
+    """A fleet worker's cancel_check reads its agent binding; the watcher thread must see it.
+
+    Fleet workers pass ``master_orchestrator.current_worker_cancel_requested``
+    wrapped in ``BridgeCancellation``.  The watcher runs on its own thread, so a
+    binding visible only to the caller thread would never abort the call.
+    """
+    import time as _time
+
+    import master_orchestrator as mo
+    from sonder_runtime.adapters import legacy_chat_bridge
+
+    cancelled = threading.Event()
+    monkeypatch.setattr(mo, "cancel_requested",
+                        lambda agent_id: agent_id == "agent-under-test" and cancelled.is_set())
+    left, right = socket.socketpair()
+    try:
+        with mo._bind_worker_agent("agent-under-test"):
+            token = legacy_chat_bridge.BridgeCancellation(mo.current_worker_cancel_requested)
+            with gateway_module._cancellation_scope(token), \
+                    gateway_module._ExchangeBudget(30.0) as budget:
+                budget.attach(left)
+                assert token.cancelled is False and budget.aborted is False
+                cancelled.set()
+                deadline = _time.monotonic() + 3.0
+                while not budget.aborted and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                assert budget.aborted, "the watcher never saw the caller thread's cancellation"
+    finally:
+        right.close()
+        left.close()
+
+
+def test_exchange_watcher_polls_a_store_backed_cancel_check_sparingly():
+    """A cancel check that is not an Event (a fleet-store read) is not polled every 50 ms."""
+    import time as _time
+
+    calls = []
+
+    def check():
+        calls.append(_time.monotonic())
+        return False
+
+    with gateway_module._ExchangeBudget(30.0, cancellation=check):
+        _time.sleep(1.2)
+    assert 1 <= len(calls) <= 5, "polled %d times in 1.2 s" % len(calls)
+
+
+def test_exchange_watcher_polls_an_event_token_promptly():
+    import time as _time
+
+    event = threading.Event()
+    left, right = socket.socketpair()
+    try:
+        with gateway_module._ExchangeBudget(30.0, cancellation=event) as budget:
+            budget.attach(left)
+            started = _time.monotonic()
+            event.set()
+            while not budget.aborted and _time.monotonic() - started < 2.0:
+                _time.sleep(0.005)
+            assert budget.aborted and _time.monotonic() - started < 0.5
+    finally:
+        right.close()
+        left.close()
+
+
+def test_composite_with_event_notices_the_event_promptly():
+    """An Event inside a composite with a slow check token is read at the Event's rate."""
+    import time as _time
+
+    event = threading.Event()
+    composite = gateway_module._CompositeCancellation(lambda: False, event)
+    with gateway_module._ExchangeBudget(30.0, cancellation=composite) as budget:
+        started = _time.monotonic()
+        event.set()
+        while not budget.aborted and _time.monotonic() - started < 2.0:
+            _time.sleep(0.005)
+        assert budget.aborted and _time.monotonic() - started < 0.4
+
+
+def test_composite_does_not_poll_its_slow_check_at_the_fast_rate():
+    import time as _time
+
+    calls = []
+
+    def check():
+        calls.append(_time.monotonic())
+        return False
+
+    composite = gateway_module._CompositeCancellation(check, threading.Event())
+    with gateway_module._ExchangeBudget(30.0, cancellation=composite):
+        _time.sleep(1.2)
+    assert 1 <= len(calls) <= 5, "slow check polled %d times in 1.2 s" % len(calls)
+
+
+def test_watcher_survives_a_raising_cancel_check_and_logs_once(caplog, monkeypatch):
+    import time as _time
+
+    from sonder_runtime.adapters.inference import exchange_transport
+
+    state = {"calls": 0, "cancel": False}
+
+    def check():
+        state["calls"] += 1
+        if state["cancel"]:
+            return True
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(exchange_transport, "_WATCH_RETRY_SECONDS", (0.01, 0.02))
+    with caplog.at_level(logging.WARNING, logger=exchange_transport.logger.name):
+        with gateway_module._ExchangeBudget(30.0, cancellation=check) as budget:
+            deadline = _time.monotonic() + 3.0
+            while state["calls"] < 4 and _time.monotonic() < deadline:
+                _time.sleep(0.01)
+            assert state["calls"] >= 4, "the watcher died after the first failure"
+            assert not budget.aborted
+            state["cancel"] = True
+            deadline = _time.monotonic() + 3.0
+            while not budget.aborted and _time.monotonic() < deadline:
+                _time.sleep(0.01)
+            assert budget.aborted, "the watcher did not recover and see the cancel"
+    locked = [r for r in caplog.records if "database is locked" in r.getMessage()]
+    assert len(locked) == 1
+
+
+def test_a_token_whose_cancelled_is_a_method_is_called_not_truth_tested():
+    from concurrent.futures import Future
+
+    pending = Future()
+    assert gateway_module._is_cancelled(pending) is False
+    pending.cancel()
+    assert gateway_module._is_cancelled(pending) is True
+
+
+def test_overloaded_is_capacity_and_never_unreachable():
+    def overloaded(url, payload, headers):
+        return urllib.error.HTTPError(
+            url, 503, "overloaded", {}, io.BytesIO(b'{"error":{"code":"overloaded"}}'),
+        )
+
+    gw = _gateway(FakeInference(chat=overloaded))
+    with pytest.raises(gateway_module.SonderInferenceOverloaded) as caught:
+        gw.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
+    assert isinstance(caught.value, CapacityExceeded)
+    assert not isinstance(caught.value, SonderInferenceUnreachable)

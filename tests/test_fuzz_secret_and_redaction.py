@@ -411,9 +411,12 @@ def test_redact_structure_sensitive_key_semantics() -> None:
         # Documented: a non-empty string under a sensitive key is replaced whole, only when asked.
         assert redact_structure({key: val}, sensitive_keys=True) == {key: REDACTED}
         assert redact_structure({key: val}) == {key: redact_text(val)}
-        # Empty strings and non-strings under a sensitive key are not replaced outright.
+        # Empty strings, bools and None under a sensitive key are not replaced; numbers are.
         assert redact_structure({key: ""}, sensitive_keys=True) == {key: ""}
-        assert redact_structure({key: 7, "k": None}, sensitive_keys=True) == {key: 7, "k": None}
+        assert redact_structure({key: True}, sensitive_keys=True) == {key: True}
+        assert redact_structure({key: None}, sensitive_keys=True) == {key: None}
+        assert redact_structure({key: 7, "k": None}, sensitive_keys=True) == {key: REDACTED, "k": None}
+        assert redact_structure({key: 7}) == {key: 7}
     # Dict keys pass through unchanged, even when they look like credentials.
     assert redact_structure({"ghost": "skip"}) == {"ghost": "skip"}
 

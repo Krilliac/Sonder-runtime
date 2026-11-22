@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Generic, Mapping, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 T = TypeVar("T")
@@ -123,8 +126,8 @@ class GenericJobExecutor:
                 context = ExecutionContext(job_id, attempt, {dep: values[dep] for dep in job.dependencies})
                 try:
                     value = job.handler(context)
-                except Exception as error:  # handler failures become records, never graph corruption
-                    record = ExecutionRecord(job_id, attempt, GenericJobStatus.FAILED, error=str(error))
+                except Exception as error:  # noqa: BLE001 - handler failures become records, never graph corruption
+                    record: ExecutionRecord[object] = ExecutionRecord(job_id, attempt, GenericJobStatus.FAILED, error=str(error))
                     records.append(record)
                     if attempt >= job.retry_policy.max_attempts or self._retry_hook is None or not self._retry_hook(record, error):
                         break

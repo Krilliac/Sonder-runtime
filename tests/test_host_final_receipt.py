@@ -36,6 +36,9 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
             assert decoded.output == output
             assert turn['final_receipt']['facts']['validation_passed'] is False
             assert turn['final_receipt']['facts']['delegated_work'] is True
+            # A claim-free final keeps the pre-claim receipt shape (digest-stable).
+            assert 'verified_fact_claim' not in turn['final_receipt']['facts']
+            assert 'verified_fact_claim_digest' not in turn['final_receipt']['facts']
             assert turn['final_receipt']['original_digest'] == turn['projection_digest']
         view.close()
         evidence = lifetime.final_evidence(turn_link)
@@ -46,6 +49,31 @@ def test_final_receipt_is_distinct_exact_immutable_and_required(lanes):
         assert next_view is not view
         with pytest.raises(PermissionError):
             lifetime.final_evidence(turn_link)
+    finally:
+        lifetime.close()
+
+
+def test_host_fact_claim_round_trips_through_the_sealed_final_receipt(request):
+    import hashlib
+    workspace = request.getfixturevalue('lanes')
+    app = object()
+    lifetime = ManagedConversationLifetime(application=app,
+        session_factory=lambda c, a: setup(workspace, c)[0], require_current=lambda: None)
+    view = lifetime.factory(SimpleNamespace(run_id='final-claim-turn'), app)
+    turn_link = view.turn_link()
+    draft = HostTerminalDraft(HostObservationLedger(project_scope=str(workspace[3])).seal(),
+                              'model claims finished', 'NORMAL', ())
+    claim = 'fact: the host requires the launch gate'
+    facts = HostFinalFacts((), str(workspace[3]), True, True, True, 'NORMAL', delegated_work=True,
+                          verified_fact_claim=claim,
+                          verified_fact_claim_digest=hashlib.sha256(claim.encode()).hexdigest())
+    try:
+        view.capture_terminal(draft)
+        view.capture_final('model claims finished', facts)
+        view.close()
+        evidence = lifetime.final_evidence(turn_link)
+        assert evidence.facts == facts
+        assert evidence.facts.verified_fact_claim == claim
     finally:
         lifetime.close()
 

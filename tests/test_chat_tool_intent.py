@@ -161,3 +161,21 @@ def test_execution_classifier_keeps_compound_work_on_bounded_mode_decision():
     assert {"inspect", "diagnose", "fix", "run", "validate"}.issubset(
         result["actions"]
     )
+
+
+def test_long_dotted_chat_text_is_scanned_in_linear_time():
+    # A dotted run with no file extension at a word end used to make the
+    # path-like token patterns backtrack over every '.', O(n^2): ~10 s here.
+    import time
+
+    text = "1." * 25_000
+    started = time.monotonic()
+    assert suppresses_file_tools(text) is False
+    assert classify_file_intent(text[:12_000]) is None
+    assert time.monotonic() - started < 3.0
+
+
+def test_bounded_path_tokens_still_recognize_real_paths():
+    assert suppresses_file_tools("no tools please, what does src/app/main.py do?") is True
+    assert suppresses_file_tools("why is my_long_module_name slow? just answer") is True
+    assert classify_file_intent("show me " + "d/" * 40 + "notes.txt") is not None

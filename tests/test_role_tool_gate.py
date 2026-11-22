@@ -1,7 +1,7 @@
 """Role tool gate (public-mode slices P1 and P2): a served ``user`` account
 must not run host-acting tools, whatever the process-wide permission mode.
 
-Design: ``D:\\sonder-eco\\_plans\\public-mode.md`` sections 2.3, 3 and 7.
+Design: the public-mode design note, sections 2.3, 3 and 7.
 
 Every tool handler on the legacy runtime is replaced by a recorder, so no test
 here runs a real host action. The enumeration is the one the ``/<tool>`` path

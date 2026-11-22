@@ -37,6 +37,10 @@ _DATABASE_NAME = "mobility-source.sqlite"
 _TEMPORARY = re.compile(r"snapshot-[A-Za-z0-9_-]+\.part")
 
 
+class _PayloadDirectoryMissing(MobilitySourceError):
+    """Internal: an existing-payload lookup found no scope or artifact directory."""
+
+
 class SQLiteArtifactMobilitySourceStore:
     """One private source namespace, with immutable objects and bounded reads.
 
@@ -250,6 +254,8 @@ class SQLiteArtifactMobilitySourceStore:
         except MobilitySourceError:
             raise
         except FileNotFoundError:
+            if not create:
+                raise _PayloadDirectoryMissing("INTEGRITY") from None
             raise MobilitySourceError("INTEGRITY") from None
         except (ArtifactSpoolError, OSError, RuntimeError):
             raise MobilitySourceError("UNAVAILABLE") from None
@@ -370,6 +376,10 @@ class SQLiteArtifactMobilitySourceStore:
                 scope_path.rmdir()
             except OSError:
                 pass
+        except _PayloadDirectoryMissing:
+            # A crash before the directory was created leaves a row with no
+            # payload; that is already the desired end state.
+            return
         except MobilitySourceError:
             raise
         except FileNotFoundError:
@@ -431,6 +441,10 @@ class SQLiteArtifactMobilitySourceStore:
             connection.execute("BEGIN IMMEDIATE")
             self._reap_incomplete(connection)
             self._reap_expired(connection)
+            # Payload files are already gone: commit the row deletions now so
+            # a later QUOTA/CAPACITY rejection cannot roll them back.
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
             if connection.execute(
                 "SELECT COUNT(*) FROM mobility_source_artifacts"
             ).fetchone()[0] >= 4096:

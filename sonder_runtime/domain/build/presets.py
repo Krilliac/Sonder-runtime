@@ -213,27 +213,42 @@ def parse_cmake_presets(
                     continue
                 pool[name] = (preset, label)
 
+    # Memoised per (pool, name, field, depth): diamond inheritance in an untrusted
+    # presets file would otherwise be walked once per path (exponential in depth).
+    resolved_memo: dict[tuple[int, str, str, int], object] = {}
+    merged_memo: dict[tuple[int, str, int], dict[str, str]] = {}
+
     def resolved(pool: dict, name: str, field: str, depth: int = 0, stack=()) -> object:
         entry = pool.get(name)
         if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
             return None
+        key = (id(pool), name, field, depth)
+        if key in resolved_memo:
+            return resolved_memo[key]
         preset = entry[0]
         if field in preset:
             return preset[field]
         parents = preset.get("inherits")
         if isinstance(parents, str):
             parents = [parents]
+        found: object = None
         for parent in (parents or ())[:16]:
             if isinstance(parent, str):
                 value = resolved(pool, parent, field, depth + 1, stack + (name,))
                 if value is not None:
-                    return value
-        return None
+                    found = value
+                    break
+        resolved_memo[key] = found
+        return found
 
     def merged_cache(pool: dict, name: str, depth: int = 0, stack=()) -> dict[str, str]:
         entry = pool.get(name)
         if entry is None or depth > MAX_INHERIT_DEPTH or name in stack:
             return {}
+        memo_key = (id(pool), name, depth)
+        cached = merged_memo.get(memo_key)
+        if cached is not None:
+            return cached
         preset = entry[0]
         out: dict[str, str] = {}
         parents = preset.get("inherits")
@@ -253,6 +268,7 @@ def parse_cmake_presets(
                     value = "ON" if value else "OFF"
                 if isinstance(value, str):
                     out[key] = clip(value, 1024)
+        merged_memo[memo_key] = out
         return out
 
     configure: list[PresetInfo] = []

@@ -76,7 +76,10 @@ class ClaimChecker:
         self._config = config or ClaimCheckConfig()
         self._read_guard = read_guard
         self._verdicts: dict[str, bool] = {}
-        self._root = Path(os.path.realpath(root))
+        local_root = _local_spelling(os.fspath(root))
+        if local_root is None:
+            raise ClaimError("refusing a UNC or network repo root")
+        self._root = Path(os.path.realpath(local_root))
         self._text: dict[str, str | None] = {}
         self._cached_bytes = 0
         self._split: dict[str, list[str]] = {}
@@ -416,6 +419,8 @@ def check_jsonl(source: str | os.PathLike[str], destination: str | os.PathLike[s
             row_root = row.get("repo_root") or root
             if not isinstance(row_root, (str, os.PathLike)):
                 raise ClaimError("repo_root must be a path")
+            if _local_spelling(os.fspath(row_root)) is None:
+                raise ClaimError("refusing a UNC or network repo root")
         except ClaimError as exc:
             outputs[position] = {"line_no": number, "error": {
                 "code": "invalid_claim", "message": str(exc)[:200]}}

@@ -565,7 +565,7 @@ def _append_replan(
     superseded_count = 0
     if supersede_pending or stale_ids:
         for task in plan:
-            if task.get("status") == "pending" and (
+            if task.get("status") in ("pending", "infra_retry") and (
                 supersede_pending or str(task.get("id")) in stale_ids
             ):
                 task["status"] = "superseded"
@@ -592,10 +592,30 @@ def _append_replan(
             continue
         signatures.add(signature)
         normalized.append(task)
-    has_validation = any(
-        task.get("kind") == "validate" and task.get("status") != "superseded"
-        for task in (*plan, *normalized)
+    last_implement = max(
+        (i for i, task in enumerate(normalized) if task["kind"] == "implement"),
+        default=-1,
     )
+    if last_implement >= 0:
+        # New mutation tasks make every earlier validation receipt stale: only
+        # a validate task ordered after the last new implement task counts.
+        has_validation = any(
+            task.get("kind") == "validate" for task in normalized[last_implement + 1:]
+        )
+        # A not-yet-run validate task ordered before the new mutation would run
+        # first; it is moved behind the new tasks instead of being trusted.
+        movable_ids = {
+            id(task) for task in plan
+            if task.get("kind") == "validate"
+            and task.get("status") in ("pending", "infra_retry")
+        }
+        has_validation = has_validation or bool(movable_ids)
+    else:
+        movable_ids = set()
+        has_validation = any(
+            task.get("kind") == "validate" and task.get("status") != "superseded"
+            for task in (*plan, *normalized)
+        )
     if not has_validation:
         validation = _task({
             "title": "Validate the replanned objective",
@@ -617,6 +637,11 @@ def _append_replan(
     for task in normalized:
         task["id"] = "task-%02d" % (len(plan) + 1)
         plan.append(task)
+    if movable_ids:
+        plan = (
+            [task for task in plan if id(task) not in movable_ids]
+            + [task for task in plan if id(task) in movable_ids]
+        )
     return plan
 
 
@@ -832,8 +857,13 @@ def _recover_workspace(run, owner_id, delta, reality, work_fn, review_fn):
                   "Mutation is disabled until this inspection and a fresh plan are accepted."}, 0)
     task["attempts"] = 1
     context = json.dumps({"resume_reality": barrier.consume_context()}, sort_keys=True)
-    with bound_resume_barrier(barrier):
-        result = work_fn({**run, "policy": "observe"}, task, context)
+    try:
+        with bound_resume_barrier(barrier):
+            result = work_fn({**run, "policy": "observe"}, task, context)
+    except ModelCallError as exc:
+        if not _provider_unavailable(exc):
+            raise
+        return run, "provider unavailable; resume to retry"
     passed, _ = _task_passed(result, task)
     inspected = (passed and not result.mutation_observed and bool(
         {"file_read", "file_list", "file_search", "search_files", "read_file"}.intersection(result.tools)
@@ -843,8 +873,14 @@ def _recover_workspace(run, owner_id, delta, reality, work_fn, review_fn):
     barrier.record_inspection()
     if int(run.get("replans") or 0) >= int(run.get("max_replans") or 0):
         return run, "resume requires a fresh plan but the replan budget is exhausted"
-    review = normalize_review(review_fn(run, "Resume reality requires a replacement plan after "
-                                        "fresh read-only inspection:\n" + str(result.output)[:8_000]))
+    try:
+        raw_review = review_fn(run, "Resume reality requires a replacement plan after "
+                               "fresh read-only inspection:\n" + str(result.output)[:8_000])
+    except ModelCallError as exc:
+        if not _provider_unavailable(exc):
+            raise
+        return run, "provider unavailable; resume to retry"
+    review = normalize_review(raw_review)
     if review["decision"] != "replan" or not review["tasks"]:
         return run, "resume requires a schema-checked replacement plan before mutation"
     try:

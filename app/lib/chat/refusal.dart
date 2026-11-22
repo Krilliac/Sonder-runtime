@@ -14,7 +14,9 @@ export 'classify.dart' show RefusalInfo, refusalOf, classifyReply, ReplyKind;
 /// A refused call, rendered as a notice rather than an answer (P1-2): no
 /// rating chips, the refused subject in the title, the server's reason as
 /// detail, and "Approve this call once" only when the server's receipt names
-/// the call.
+/// the call and does not say HTTP approval is unavailable. A local-open
+/// server's receipt says so (`approve_once` with `http_available: false`);
+/// the notice then shows the `/approve <id>` console command instead.
 ///
 /// Before the sheet opens, the pending call is looked up on the server
 /// ([onLookup]); the sheet shows the server's tool and redacted arguments,
@@ -61,7 +63,13 @@ class _RefusalNoticeState extends State<RefusalNotice> {
     final callId = widget.refusal.callId;
     final lookup = widget.onLookup;
     final approve = widget.onApprove;
-    if (callId.isEmpty || lookup == null || approve == null || _busy) return;
+    if (callId.isEmpty ||
+        !widget.refusal.approveOverHttp ||
+        lookup == null ||
+        approve == null ||
+        _busy) {
+      return;
+    }
     setState(() => _busy = true);
     final found = await lookup(callId);
     if (!mounted) return;
@@ -97,8 +105,10 @@ class _RefusalNoticeState extends State<RefusalNotice> {
     final r = widget.refusal;
     final title = r.subject.isNotEmpty ? r.subject : 'this request';
     final canApprove = r.callId.isNotEmpty &&
+        r.approveOverHttp &&
         widget.onLookup != null &&
         widget.onApprove != null;
+    final consoleOnly = r.callId.isNotEmpty && !r.approveOverHttp;
     final outcome = _outcome;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -126,6 +136,16 @@ class _RefusalNoticeState extends State<RefusalNotice> {
               ),
           ],
         ),
+        if (consoleOnly) ...[
+          const SizedBox(height: SonderSpace.snug),
+          _consoleNotice(
+            r.callId,
+            'This server runs in local-open mode and does not take approvals '
+            'over HTTP. Run the command at the Sonder console on the PC, or '
+            'restart the server with an API key or an account requirement and '
+            'connect with that key or an administrator account.',
+          ),
+        ],
         if (outcome != null) ...[
           const SizedBox(height: SonderSpace.snug),
           _outcomeView(context, outcome, r),
@@ -151,23 +171,10 @@ class _RefusalNoticeState extends State<RefusalNotice> {
           onRetry: widget.onRetry,
         );
       case ApprovalStatus.unsupported:
-        final command = '/approve ${r.callId}';
-        return WorkspaceNotice(
-          framed: false,
-          key: const Key('approval-console'),
-          kind: StatusKind.note,
-          liveRegion: true,
-          title: 'Approve from the console: $command',
-          detail: 'This server cannot take approvals from the app yet. Run '
-              'the command at the Sonder console on the PC.',
-          actions: [
-            OutlinedButton.icon(
-              key: const Key('approval-copy'),
-              icon: const Icon(Icons.copy_all_outlined, size: 16),
-              label: const Text('Copy'),
-              onPressed: () => Clipboard.setData(ClipboardData(text: command)),
-            ),
-          ],
+        return _consoleNotice(
+          r.callId,
+          'This server cannot take approvals from the app yet. Run the '
+          'command at the Sonder console on the PC.',
         );
       case ApprovalStatus.forbidden:
         return const WorkspaceNotice(
@@ -187,6 +194,27 @@ class _RefusalNoticeState extends State<RefusalNotice> {
           detail: outcome.message,
         );
     }
+  }
+
+  /// The `/approve <id>` console command, with a copy button.
+  Widget _consoleNotice(String callId, String detail) {
+    final command = '/approve $callId';
+    return WorkspaceNotice(
+      framed: false,
+      key: const Key('approval-console'),
+      kind: StatusKind.note,
+      liveRegion: true,
+      title: 'Approve from the console: $command',
+      detail: detail,
+      actions: [
+        OutlinedButton.icon(
+          key: const Key('approval-copy'),
+          icon: const Icon(Icons.copy_all_outlined, size: 16),
+          label: const Text('Copy'),
+          onPressed: () => Clipboard.setData(ClipboardData(text: command)),
+        ),
+      ],
+    );
   }
 }
 

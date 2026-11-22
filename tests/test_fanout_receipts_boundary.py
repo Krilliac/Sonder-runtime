@@ -52,3 +52,20 @@ def test_root_delegate_uses_the_server_cloud_classifier(monkeypatch):
     assert server._fanout_snapshot_allows(run, "x:y") is True
     monkeypatch.setattr(server, "_is_cloud_model_name", lambda name: False)
     assert server._fanout_snapshot_allows(run, "x:y") is False
+
+
+def test_safe_answer_scrubs_prefixed_credential_names_and_bare_provider_keys():
+    text = (
+        "Set OPENAI_API_KEY=sk-live123abc and aws_secret_access_key=wJalrXUtnFEMI, "
+        "send X-Api-Key: abcdef123, DB_PASSWORD=hunter2 GITHUB_TOKEN='gtok 99'. "
+        "Or paste sk-proj-abcdefghijklmnop directly."
+    )
+    out = receipts.safe_answer(text, "unrelated prompt")
+    for secret in ("sk-live123abc", "wJalrXUtnFEMI", "abcdef123", "hunter2", "gtok 99",
+                   "abcdefghijklmnop"):
+        assert secret not in out, out
+    assert "OPENAI_API_KEY=<redacted>" in out
+    assert "X-Api-Key=<redacted>" in out
+    # A name that merely contains a credential word stays readable.
+    keep = "max_tokens: 512 and secretary: Bob"
+    assert receipts.safe_answer(keep, "unrelated prompt") == keep

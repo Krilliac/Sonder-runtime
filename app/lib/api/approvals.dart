@@ -153,7 +153,10 @@ class ApprovalsApi {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final error =
           responseException(response, httpStatusFallback(response.statusCode));
-      if (response.statusCode == 403) {
+      // A local-open refusal keeps the server's words: signing in does not
+      // lift it, so the account advice below would be wrong.
+      if (response.statusCode == 403 &&
+          !localOpenRefusalCodes.contains(error.code)) {
         throw error.copyWith(
           message: 'Approvals need a developer or admin account.',
           remedy: 'Sign in with a developer or admin account.',

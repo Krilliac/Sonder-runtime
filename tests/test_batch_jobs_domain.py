@@ -218,3 +218,16 @@ def test_served_model_counts_show_a_substitution():
         _state("r1", "d", StepStatus.FAILED),
     ]
     assert served_model_counts(states) == {"m:1": 2, "m:9": 1}
+
+
+def test_render_with_a_limit_matches_the_unbounded_render_and_refuses_overflow():
+    from sonder_runtime.domain.batch_jobs import PromptTooLarge
+
+    spec = _validate([_stage("r1", "A={{text}} B={{text}}", system="S {{text}}")])
+    item = ItemSpec("i1", {"text": "xyz"})
+    rendered = render_prompt(spec.stages[0], item, {})
+    total = len(rendered[0]) + len(rendered[1])
+    assert render_prompt(spec.stages[0], item, {}, max_chars=total) == rendered
+    with pytest.raises(PromptTooLarge):
+        render_prompt(spec.stages[0], item, {}, max_chars=total - 1)
+    assert issubclass(PromptTooLarge, InvalidInput)

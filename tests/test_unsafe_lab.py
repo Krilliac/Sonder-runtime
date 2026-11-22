@@ -496,14 +496,14 @@ def test_unsafe_secret_scrub_reaches_grounding_language_runner(monkeypatch):
 def test_all_grounding_subprocess_calls_receive_scrubbed_environment(monkeypatch):
     monkeypatch.setattr(unsafe_lab, "active", lambda: True)
     monkeypatch.setenv("GROUNDING_CONTROL_GATE", "must-not-cross")
-    real_run = grounding.subprocess.run
+    real_popen = grounding.subprocess.Popen
     environments = []
 
     def capture(*args, **kwargs):
         environments.append(kwargs.get("env"))
-        return real_run(*args, **kwargs)
+        return real_popen(*args, **kwargs)
 
-    monkeypatch.setattr(grounding.subprocess, "run", capture)
+    monkeypatch.setattr(grounding.subprocess, "Popen", capture)
     assert grounding.run_code_detail("print('ok')", timeout=10)["ok"] is True
     assert grounding.compile_code("value = 1", timeout=10)[0] is True
     assert grounding._run_cmd([sys.executable, "-c", "print('ok')"], 10)[0] is True

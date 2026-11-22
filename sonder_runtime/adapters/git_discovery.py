@@ -209,6 +209,7 @@ def visible_paths(
         raise GitDiscoveryError("Git metadata directory is unavailable")
 
     argv = prefix + [
+        "-C", str(repo_root),
         "--git-dir=%s" % git_dir,
         "--work-tree=%s" % repo_root,
         "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--full-name",

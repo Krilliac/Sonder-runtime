@@ -555,9 +555,42 @@ class ProposalLifecycle:
             raise EvaluationLifecycleError(f"proposal {proposal_id!r} has no promotion kind to gate")
         if type(case_regressions) is not int or case_regressions < 0:
             raise EvaluationLifecycleError("case_regressions must be a non-negative integer")
+        if baseline_pass_rate is not None and (
+            isinstance(baseline_pass_rate, bool)
+            or not isinstance(baseline_pass_rate, (int, float))
+            or not math.isfinite(baseline_pass_rate)
+            or not 0.0 <= baseline_pass_rate <= 1.0
+        ):
+            raise EvaluationLifecycleError("baseline_pass_rate must be a finite rate in [0, 1]")
+        recorded = self.recorded_results(proposal_id)
+        offline_results = tuple(item for item in recorded if item.mode is EvaluationMode.OFFLINE)
+        recorded_baselines = [
+            (item.metrics["baseline_pass_rate"], item.sample_count)
+            for item in offline_results if "baseline_pass_rate" in item.metrics
+        ]
+        if recorded_baselines:
+            total_samples = sum(count for _rate, count in recorded_baselines)
+            recorded_baseline = sum(rate * count for rate, count in recorded_baselines) / total_samples
+            if baseline_pass_rate is None:
+                baseline_pass_rate = recorded_baseline
+            elif float(baseline_pass_rate) + 1e-9 < recorded_baseline:
+                raise EvaluationLifecycleError(
+                    "baseline_pass_rate cannot understate recorded baseline pass rate"
+                )
+        recorded_regressions = 0
+        for item in offline_results:
+            if "case_regressions" in item.metrics:
+                value = item.metrics["case_regressions"]
+                if not math.isfinite(value) or value < 0 or abs(value - round(value)) > 1e-6:
+                    raise EvaluationLifecycleError("recorded case_regressions must be a non-negative integer")
+                recorded_regressions += round(value)
+        if case_regressions < recorded_regressions:
+            raise EvaluationLifecycleError(
+                "case_regressions cannot understate recorded case regressions"
+            )
         decision = self._gate(
             proposal.promotion_kind,
-            results=self.recorded_results(proposal_id),
+            results=recorded,
             baseline_pass_rate=baseline_pass_rate,
             case_regressions=case_regressions + len(self._reproduced_failures[proposal_id]),
             shadow=self._observations[proposal_id].get(EvaluationMode.SHADOW),
@@ -581,11 +614,24 @@ class ProposalLifecycle:
         decision = self.promotion_gate_decision(
             proposal_id, baseline_pass_rate=baseline_pass_rate, case_regressions=case_regressions,
         )
+        recorded = self.recorded_results(proposal_id)
+        offline_results = tuple(item for item in recorded if item.mode is EvaluationMode.OFFLINE)
+        holdout_results = tuple(
+            item for item in offline_results
+            if any(dim.name == "split" and dim.value in {"holdout", "heldout"} for dim in item.dimensions)
+        )
+        effective_holdout = (
+            isinstance(holdout_passed, bool)
+            and holdout_passed
+            and bool(offline_results)
+            and all(item.passed for item in (holdout_results or offline_results))
+            and all(decision.gate_results.values())
+        )
         evidence = self._build_evidence(
             proposal_id,
             gate_results=decision.gate_results,
             replay_equivalent=decision.replay_equivalent,
-            holdout_passed=holdout_passed,
+            holdout_passed=effective_holdout,
             rollback_reference=rollback_reference,
             provenance=tuple(provenance) + (f"promotion-gate:{decision.kind_value}:{decision.digest}",),
         )

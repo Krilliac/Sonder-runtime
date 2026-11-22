@@ -61,7 +61,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "staged": frozenset({"preflight", "cancelled"}),
     "preflight": frozenset({"blocked", "backing_up"}),
     "backing_up": frozenset({"draining", "failed"}),
-    "draining": frozenset({"installing"}),
+    "draining": frozenset({"installing", "failed"}),
     "installing": frozenset({"migrating", "rolling_back"}),
     "migrating": frozenset({"health_check", "rolling_back"}),
     "health_check": frozenset({"committed", "rolling_back"}),
@@ -572,12 +572,16 @@ def resumable_download(
 
     total = partial.stat().st_size
     if expected_length is not None and total != expected_length:
+        partial.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
         raise UpdateError(
             "downloaded length %d != expected %d" % (total, expected_length)
         )
     if expected_sha256 is not None:
         actual = _sha256_file(partial)
         if actual != expected_sha256:
+            partial.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
             raise TrustError("downloaded hash mismatch for %s" % dest.name)
     os.replace(partial, dest)
     if sidecar.exists():
@@ -1141,10 +1145,17 @@ def check_compatibility(
         problems.append(
             f"bundle is for {manifest['architecture']}, this host is {arch}"
         )
-    wanted = str(manifest["runtime"].get("python_version", ""))
+    wanted = str(manifest["runtime"].get("python_version", "")).strip()
     have = f"{sys.version_info.major}.{sys.version_info.minor}"
-    if wanted and not have.startswith(wanted.rsplit(".", 1)[0]):
-        problems.append(f"bundle needs Python {wanted}, host has {have}")
+    if wanted:
+        parts = wanted.split(".")
+        if (
+            len(parts) < 2
+            or not (parts[0].isdigit() and parts[1].isdigit())
+            or (int(parts[0]), int(parts[1]))
+            != (sys.version_info.major, sys.version_info.minor)
+        ):
+            problems.append(f"bundle needs Python {wanted}, host has {have}")
     # State schema: the bundle must not require newer state than it ships.
     state_schema = manifest["state_schema"]
     for store in sonder_migrations.STORE_NAMES:
@@ -1512,7 +1523,11 @@ class UpdateRepository:
                 )
             conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise
         finally:
             conn.close()

@@ -16,9 +16,7 @@ from __future__ import annotations
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
 
-import hashlib
 import json
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -110,22 +108,24 @@ def stamp_fresh_home(sonder_home: Path, version: str = "fresh-install") -> bool:
         return True
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _backup_db(db_path: Path, backup_dir: Path) -> Path | None:
+    """Copy ``db_path`` with the SQLite backup API so committed WAL frames are included."""
     if not db_path.exists():
         return None
     backup_dir.mkdir(parents=True, exist_ok=True)
     dest = backup_dir / db_path.name
-    shutil.copy2(str(db_path), str(dest))
-    if _sha256_file(dest) != _sha256_file(db_path):
-        raise RuntimeError(f"Backup verification failed for {db_path}")
+    source = owned_sqlite_connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        target = owned_sqlite_connect(str(dest))
+        try:
+            source.backup(target)
+            target.commit()
+            if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError(f"Backup verification failed for {db_path}")
+        finally:
+            target.close()
+    finally:
+        source.close()
     return dest
 
 

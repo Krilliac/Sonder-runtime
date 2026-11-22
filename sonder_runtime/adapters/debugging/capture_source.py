@@ -398,7 +398,10 @@ class GuardedCaptureSource:
             head = handle.read(min(size, SNIFF_HEAD_BYTES))
             reader = FileByteReader(handle, size, closer=closer)
             kind = sniff_kind(head, target.name, reader)
-            cap = min(size_cap(kind), int(max_bytes) if max_bytes else size_cap(kind))
+            # An explicit max_bytes is the caller's cap (the planner's identity
+            # reads of PE/PDB/ELF files, which sniff as "unknown" and would
+            # otherwise inherit the 64 MiB text cap); else the kind cap applies.
+            cap = int(max_bytes) if max_bytes else size_cap(kind)
             if size > cap:
                 raise debug_error(CAPTURE_TOO_LARGE, "%s captures are limited to %d bytes"
                                   % (kind, cap))

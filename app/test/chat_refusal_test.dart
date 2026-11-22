@@ -263,6 +263,102 @@ void main() {
     await unmountChat(tester);
   });
 
+  // A local-open server's receipt (facades/approvals.py refusal_receipt,
+  // credential_less): approve_once carries no method/path, only the console
+  // command, and is marked unavailable over HTTP.
+  final localOpenReceiptJson = <String, dynamic>{
+    'call_id': '3f9a12c0',
+    'tool': 'write_file',
+    'reason': 'nobody is here to answer the ask',
+    'mode': 'manual',
+    'remedies': [
+      {
+        'kind': 'approve_once',
+        'call_id': '3f9a12c0',
+        'console': '/approve 3f9a12c0',
+        'http_available': false,
+        'http_refusal': 'APPROVAL_REQUIRES_AUTHENTICATED_ADMIN',
+      },
+      {
+        'kind': 'switch_mode',
+        'modes': ['auto'],
+        'console': '/mode auto',
+        'http_available': false,
+        'http_refusal': 'PERMISSION_MODE_ESCALATION_REFUSED',
+      },
+    ],
+  };
+
+  group('local-open receipt', () {
+    test('approve_once with http_available:false is not approvable over HTTP',
+        () {
+      final r = ChatRefusal.fromJson(localOpenReceiptJson);
+      expect(r.callId, '3f9a12c0');
+      expect(r.approveOverHttp, isFalse);
+      final info = refusalOf(ChatMessage(
+          role: Role.assistant,
+          content: 'refused',
+          responseMetadata: ChatResponseMetadata(refusal: r)))!;
+      expect(info.callId, '3f9a12c0');
+      expect(info.approveOverHttp, isFalse);
+      // The persisted form keeps the flag across a reload.
+      final reloaded = ChatRefusal.fromJson(
+          jsonDecode(jsonEncode(r.toJson())) as Map<String, dynamic>);
+      expect(reloaded.approveOverHttp, isFalse);
+      expect(reloaded.callId, '3f9a12c0');
+    });
+
+    test('an approve_once with method and path stays approvable', () {
+      final r = ChatRefusal.fromJson({
+        'call_id': '3f9a12c0',
+        'tool': 'write_file',
+        'remedies': [
+          {
+            'kind': 'approve_once',
+            'call_id': '3f9a12c0',
+            'method': 'POST',
+            'path': '/v1/approvals/3f9a12c0',
+            'console': '/approve 3f9a12c0',
+          },
+        ],
+      });
+      expect(r.approveOverHttp, isTrue);
+      expect(r.toJson().containsKey('approve_over_http'), isFalse);
+    });
+
+    testWidgets('no approve button; the console command instead',
+        (tester) async {
+      final backend = FakeChatBackend();
+      await pumpChat(tester, backend);
+      await _sendRefused(tester, backend,
+          metadata: ChatResponseMetadata(
+              status: 'refused',
+              refusal: ChatRefusal.fromJson(localOpenReceiptJson)));
+
+      expect(find.byKey(const Key('refusal-notice')), findsOneWidget);
+      expect(find.byKey(const Key('refusal-approve')), findsNothing);
+      expect(find.text('Approve this call once'), findsNothing);
+      expect(find.byKey(const Key('approval-console')), findsOneWidget);
+      expect(
+          find.textContaining('Approve from the console: /approve 3f9a12c0',
+              findRichText: true),
+          findsOneWidget);
+      String? copied;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      });
+      await tester.tap(find.byKey(const Key('approval-copy')));
+      await tester.pump();
+      expect(copied, '/approve 3f9a12c0');
+      expect(backend.approvals, isEmpty);
+      await unmountChat(tester);
+    });
+  });
+
   group('SonderApiChatBackend.approveCall', () {
     Future<ApprovalOutcome> approveWith(
         http.Response Function() reply, List<http.Request> seen) {

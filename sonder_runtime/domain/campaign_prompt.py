@@ -8,8 +8,20 @@ byte-for-byte intact.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def campaign_prompt(language, task_name, task_text, repair_note="", *, fences):
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
+def campaign_prompt(
+    language: str,
+    task_name: str,
+    task_text: str,
+    repair_note: str = "",
+    *,
+    fences: Mapping[str, str],
+) -> str:
     """Build the bounded generation prompt for one campaign task.
 
     ``fences`` maps a language to its code-fence label; it is injected so the

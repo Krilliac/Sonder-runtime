@@ -36,10 +36,15 @@ class HealthStatusRoute:
     path: str
     requires_auth: bool
     media_type: str = "application/json"
+    # Set by the facade for its configured metrics path, which need not be
+    # the literal "/metrics" (``observability.metrics_path`` is configurable).
+    is_metrics: bool = False
 
     def render(self, lifecycle: LifecycleStatusPort) -> tuple[int, Any]:
         """Render the route using only the injected lifecycle port."""
         logger.debug(f"HealthStatusRoute.render: path={self.path!r}, requires_auth={self.requires_auth}")
+        if self.is_metrics:
+            return 200, lifecycle.metrics.render()
         if self.path == "/live":
             return 200, lifecycle.live_payload()
         if self.path == "/ready":
@@ -48,8 +53,6 @@ class HealthStatusRoute:
             return 200, lifecycle.health_payload()
         if self.path == "/version":
             return 200, lifecycle.version_payload()
-        if self.path == "/metrics":
-            return 200, lifecycle.metrics.render()
         logger.warning(f"health status route render called with unsupported path={self.path!r}")
         raise ValueError("unsupported health/status route")
 
@@ -75,12 +78,13 @@ class HealthStatusFacade:
         if requires_auth is None:
             return None
         logger.debug(f"HealthStatusFacade.route: matched path={normalized!r}, requires_auth={requires_auth}")
+        is_metrics = normalized == self._metrics_path
         media_type = (
             "text/plain; version=0.0.4; charset=utf-8"
-            if normalized == self._metrics_path
+            if is_metrics
             else "application/json"
         )
-        return HealthStatusRoute(normalized, requires_auth, media_type)
+        return HealthStatusRoute(normalized, requires_auth, media_type, is_metrics)
 
 
 __all__ = ["HealthStatusFacade", "HealthStatusRoute", "LifecycleStatusPort"]

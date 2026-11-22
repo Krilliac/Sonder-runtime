@@ -2,7 +2,8 @@
 
 In-depth documentation for the whole system: what each subsystem is, how
 it works, how to set it up, and how the pieces fit. If you are new, read
-[Architecture](01-architecture.md) then [Getting Started](02-getting-started.md).
+[Architecture](01-architecture.md) then [Getting Started](02-getting-started.md),
+then follow [the setup runbook](../runbooks/setup-start-here.md).
 
 Sonder is a **private, model-agnostic orchestration runtime** around
 [Ollama](https://ollama.com). Ollama stores and runs the model weights;
@@ -15,7 +16,7 @@ backups, and a signed update path. It is not a foundation model.
 | # | Page | What it covers |
 |---|---|---|
 | 01 | [Architecture](01-architecture.md) | The big picture, trust boundaries, data stores, the model boundary |
-| 02 | [Getting Started](02-getting-started.md) | Install and run — workstation and server profiles |
+| 02 | [Getting Started](02-getting-started.md) | Deployment shapes, ports, and where setup starts (links the setup runbook) |
 | 03 | [Configuration](03-configuration.md) | `sonder.toml`, secrets, every `SONDER_*` variable, precedence |
 | 04 | [CLI & Entry Point](04-cli-and-entrypoint.md) | `python -m sonder_runtime <command>` reference |
 | 05 | [HTTP API & Lifecycle](05-http-api-and-lifecycle.md) | Endpoints, health/readiness, admission, drain, error envelope |

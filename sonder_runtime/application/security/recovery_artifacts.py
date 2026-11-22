@@ -9,6 +9,8 @@ that limitation in any user-facing security claim.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -16,6 +18,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
+import time
 from typing import Any, Mapping
 
 
@@ -35,6 +39,9 @@ _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _META_SUFFIX = ".recovery.json"
 _AUDIT_NAME = "audit.jsonl"
+_LOCK_NAME = ".recovery-write.lock"
+_LOCK_TIMEOUT_SECONDS = 30.0
+_LOCK_POLL_SECONDS = 0.01
 
 
 def _canonical(value: object) -> bytes:
@@ -191,9 +198,42 @@ class RecoveryArtifactService:
             entries.append(value)
         return entries
 
+    @contextmanager
+    def _write_lock(self) -> Iterator[None]:
+        """Hold an exclusive advisory cross-process lock on a sidecar file.
+
+        Every acquisition opens its own descriptor, so threads of one process
+        serialize the same way separate processes do.  The lock is not
+        reentrant and the sidecar is never deleted (unlinking a lock file
+        another process has open would split the lock).  It only orders
+        cooperating writers; it is not a security boundary.
+        """
+        path = self.root / _LOCK_NAME
+        self._reject_existing_link(path)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise RecoveryArtifactError("artifact write lock cannot be opened") from exc
+        try:
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    _lock_descriptor(descriptor)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise RecoveryArtifactError("artifact write lock timed out") from exc
+                    time.sleep(_LOCK_POLL_SECONDS)
+            try:
+                yield
+            finally:
+                _unlock_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
     def _write_new(self, path: Path, data: bytes) -> None:
-        if len(data) > self.max_payload_bytes:
-            raise RecoveryArtifactError("artifact payload exceeds bound")
+        """Atomically install ``data`` at ``path``; callers enforce size bounds."""
         temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
         try:
             with temp.open("xb") as handle:
@@ -222,27 +262,49 @@ class RecoveryArtifactService:
             raise RecoveryArtifactError("artifact payload exceeds bound")
         artifact_path = self._path(artifact_id)
         metadata_path = self._metadata_path(artifact_id)
-        if artifact_path.exists() or metadata_path.exists():
-            raise RecoveryArtifactError("artifact already exists")
-        entries = self._read_audit()
-        previous = entries[-1]["audit_digest"] if entries else ""
-        if previous and not _DIGEST.fullmatch(previous):
-            raise RecoveryArtifactIntegrityError("existing audit chain is malformed")
         digest = sha256(body_bytes).hexdigest()
-        audit_material = {"artifact_digest": digest, "artifact_id": artifact_id, "owner": self.owner, "previous": previous}
-        audit_digest = _digest(audit_material)
-        metadata = {
-            **body,
-            "digest": digest,
-            "previous_audit_digest": previous,
-            "audit_digest": audit_digest,
-        }
-        self._write_new(artifact_path, body_bytes)
-        self._write_new(metadata_path, _canonical(metadata))
-        entry = {"artifact_id": artifact_id, "owner": self.owner, "artifact_digest": digest, "previous": previous, "audit_digest": audit_digest}
-        audit_data = (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-        existing_audit = self.audit_path.read_bytes() if self.audit_path.exists() else b""
-        self._write_new(self.audit_path, existing_audit + audit_data)
+        with self._write_lock():
+            if artifact_path.exists() or metadata_path.exists():
+                raise RecoveryArtifactError("artifact already exists")
+            entries = self._read_audit()
+            # Capacity is checked before any file is written so a full audit
+            # log refuses the write instead of orphaning artifact files.
+            if len(entries) >= self.max_audit_entries:
+                raise RecoveryArtifactError("audit entry bound reached")
+            previous = entries[-1].get("audit_digest", "") if entries else ""
+            if not isinstance(previous, str) or (previous and not _DIGEST.fullmatch(previous)):
+                raise RecoveryArtifactIntegrityError("existing audit chain is malformed")
+            audit_material = {"artifact_digest": digest, "artifact_id": artifact_id, "owner": self.owner, "previous": previous}
+            audit_digest = _digest(audit_material)
+            metadata = {
+                **body,
+                "digest": digest,
+                "previous_audit_digest": previous,
+                "audit_digest": audit_digest,
+            }
+            entry = {"artifact_id": artifact_id, "owner": self.owner, "artifact_digest": digest, "previous": previous, "audit_digest": audit_digest}
+            audit_data = (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            audit_path = self.audit_path
+            try:
+                existing_audit = audit_path.read_bytes() if audit_path.exists() else b""
+            except OSError as exc:
+                raise RecoveryArtifactIntegrityError("audit file cannot be read") from exc
+            # The payload bound applies to the artifact body only.  Metadata is
+            # the body plus fixed digest fields, and the audit log is bounded
+            # by max_audit_entries.
+            self._write_new(artifact_path, body_bytes)
+            try:
+                self._write_new(metadata_path, _canonical(metadata))
+                self._write_new(audit_path, existing_audit + audit_data)
+            except BaseException:
+                # Roll back so a failed audit append leaves no unverifiable
+                # artifact behind and the id can be written again.
+                for created in (metadata_path, artifact_path):
+                    try:
+                        created.unlink()
+                    except OSError:
+                        pass
+                raise
         return RecoveryArtifact(artifact_id, self.owner, kind, dict(payload), digest, previous, audit_digest)
 
     def inspect(self, artifact_id: str, *, actor: str) -> RecoveryArtifactInspection:
@@ -258,13 +320,23 @@ class RecoveryArtifactService:
             raise RecoveryArtifactIntegrityError("artifact or metadata cannot be read") from exc
         if not isinstance(body, dict) or not isinstance(metadata, dict):
             raise RecoveryArtifactIntegrityError("artifact and metadata must be objects")
+        body_owner = body.get("owner")
+        kind = body.get("kind")
+        payload = body.get("payload")
+        if not isinstance(body_owner, str) or not isinstance(kind, str) or not isinstance(payload, dict):
+            raise RecoveryArtifactIntegrityError("artifact body is malformed")
         digest = sha256(_canonical(body)).hexdigest()
-        digest_matches = digest == metadata.get("digest")
-        owner_matches = body.get("owner") == self.owner and metadata.get("owner") == self.owner
+        # The metadata file is not covered by the digest, so every field it
+        # repeats must agree byte-for-byte (canonically) with the
+        # digest-checked body.
+        repeated = {field: metadata.get(field) for field in ("artifact_id", "owner", "kind", "payload")}
+        metadata_consistent = body.get("artifact_id") == artifact_id and _canonical(repeated) == _canonical(body)
+        digest_matches = digest == metadata.get("digest") and metadata_consistent
+        owner_matches = body_owner == self.owner and metadata.get("owner") == self.owner
         entries = self._read_audit()
         chain_matches = True
         previous = ""
-        matching = None
+        matching: dict[str, Any] | None = None
         for entry in entries:
             expected = _digest({"artifact_digest": entry.get("artifact_digest"), "artifact_id": entry.get("artifact_id"), "owner": entry.get("owner"), "previous": entry.get("previous", "")})
             if entry.get("previous", "") != previous or entry.get("audit_digest") != expected:
@@ -273,11 +345,22 @@ class RecoveryArtifactService:
             previous = entry["audit_digest"]
             if entry.get("artifact_id") == artifact_id:
                 matching = entry
-        chain_matches = chain_matches and matching is not None and matching.get("artifact_digest") == digest
+        previous_audit_digest = ""
+        audit_digest = "0" * 64
+        if matching is not None:
+            previous_audit_digest = str(matching.get("previous", ""))
+            audit_digest = str(matching.get("audit_digest"))
+        chain_matches = (
+            chain_matches
+            and matching is not None
+            and matching.get("artifact_digest") == digest
+            and metadata.get("previous_audit_digest") == previous_audit_digest
+            and metadata.get("audit_digest") == audit_digest
+        )
+        # The returned record is built only from the digest-checked body and
+        # the chain-checked audit entry, never from the unhashed metadata.
         artifact = RecoveryArtifact(
-            artifact_id, str(metadata.get("owner", "")), str(metadata.get("kind", "")),
-            metadata.get("payload", {}), str(metadata.get("digest", "0" * 64)),
-            str(metadata.get("previous_audit_digest", "")), str(metadata.get("audit_digest", "0" * 64)),
+            artifact_id, body_owner, kind, payload, digest, previous_audit_digest, audit_digest,
         )
         return RecoveryArtifactInspection(artifact, artifact_path, owner_matches, digest_matches, chain_matches)
 
@@ -288,6 +371,27 @@ class RecoveryArtifactService:
                 "artifact verification failed; same-user tampering remains possible"
             )
         return inspection.artifact
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_descriptor(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+    def _unlock_descriptor(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_descriptor(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock_descriptor(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 __all__ = [

@@ -21,7 +21,8 @@ from sonder_runtime.application.ports.batch_jobs import (
     BatchStorePort, JobOutcome, JobRecord, RunSettings, StepExecutorPort, StepRequest,
 )
 from sonder_runtime.domain.batch_jobs import (
-    BREAKER_FAILURE_CLASSES, JobStatus, PauseReason, StageSpec, StepReason, StepState, StepStatus,
+    BREAKER_FAILURE_CLASSES, JobStatus, PauseReason, PromptTooLarge, StageSpec, StepReason, StepState,
+    StepStatus,
     breaker_trips, effective_statuses, is_finished, next_step, referenced_stages, render_prompt,
 )
 from sonder_runtime.domain.common.errors import SonderError
@@ -73,8 +74,11 @@ def _prepare(
         if truncated:
             return request, StepReason.UPSTREAM_TRUNCATED
         upstream[name] = text
-    system, prompt = render_prompt(stage, item, upstream)
-    if len(system) + len(prompt) > job.settings.max_rendered_prompt_chars:
+    try:
+        system, prompt = render_prompt(
+            stage, item, upstream, max_chars=job.settings.max_rendered_prompt_chars,
+        )
+    except PromptTooLarge:
         return request, StepReason.PROMPT_TOO_LARGE
     return replace(request, system=system, prompt=prompt), None
 

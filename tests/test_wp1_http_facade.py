@@ -46,6 +46,20 @@ def test_facade_renders_injected_lifecycle_without_server_import():
     assert facade.route("/metrics").render(lifecycle)[1].endswith("\n")
 
 
+def test_facade_renders_configured_non_default_metrics_path():
+    facade = HealthStatusFacade(metrics_path="/v1/metrics")
+    lifecycle = _Lifecycle()
+
+    route = facade.route("/v1/metrics")
+    assert route is not None
+    assert route.is_metrics is True
+    assert route.media_type.startswith("text/plain")
+    assert route.render(lifecycle) == (200, "sonder_requests_total 2\n")
+    # The default literal is no longer a metrics route once reconfigured.
+    assert facade.route("/metrics") is None
+    assert facade.route("/health").is_metrics is False
+
+
 def test_facade_has_no_legacy_root_imports():
     source = open(
         "sonder_runtime/interfaces/http/facades/health_status.py",

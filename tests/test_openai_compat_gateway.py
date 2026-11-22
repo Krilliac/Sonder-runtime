@@ -172,7 +172,9 @@ def test_loopback_endpoint_needs_no_cloud_consent():
 
 def test_non_loopback_endpoint_refused_without_cloud_consent():
     remote = OpenAICompatibleConfig(base_url="https://api.example.com", model="m")
-    gw = OpenAICompatibleGateway(remote, transport=lambda *a: _chat_response("ok"))
+    gw = OpenAICompatibleGateway(
+        remote, transport=lambda *a: _chat_response("ok"), spend_ledger=None,
+    )
     with pytest.raises(Forbidden):
         gw.generate(ModelRequest(prompt="hi", tier="code"), _ctx(cloud=False))
     # With explicit cloud consent it proceeds.

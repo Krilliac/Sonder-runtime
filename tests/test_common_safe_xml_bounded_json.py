@@ -157,3 +157,23 @@ def test_check_depth_ignores_brackets_in_strings_and_counts_real_ones():
     with pytest.raises(JsonBoundsExceeded):
         check_depth('[' * 65 + ']' * 65)
     assert check_depth(']]]]' + '[' * 64) == 64
+
+
+@pytest.mark.parametrize("size", [None, 4096])
+def test_iter_array_objects_escaped_top_level_key_is_bounded(size):
+    # A top-level key made of escape pairs used to bypass the 512-char key
+    # cap: each escape was appended unconditionally and every plain segment
+    # re-summed the whole buffer, O(n^2) (~13 s for this key) and unbounded
+    # memory.  The scan must stay fast and still find the target array.
+    doc = '{"' + "\\\\" * 20_000 + '": 1, "traceEvents": [{"a": 1}, {"b": 2}]}'
+    chunks = [doc] if size is None else _chunks(doc, size)
+    started = time.perf_counter()
+    scan = iter_array_objects(chunks, max_items=10)
+    assert list(scan) == [{"a": 1}, {"b": 2}]
+    assert time.perf_counter() - started < 3.0
+    assert scan.found and scan.complete
+
+
+def test_iter_array_objects_target_key_with_escape_is_matched_exactly():
+    doc = '{"trace\\u0045vents": [{"no": 1}], "traceEvents": [{"yes": 1}]}'
+    assert list(iter_array_objects([doc], max_items=10)) == [{"yes": 1}]

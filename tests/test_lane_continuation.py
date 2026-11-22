@@ -601,3 +601,187 @@ def test_parent_admission_guard_checks_actual_context_against_safe_ceiling(lanes
     bound.close()
     with pytest.raises(PermissionError):
         bound.require_current(context=narrowed)
+
+
+def test_denied_reattachment_does_not_leave_continuation_deciding(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    host, context, parent, current = make_host(fixture_lanes)
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        "host-task",
+        context=context,
+        command_id="register",
+    )
+    bound.close()
+    identity = bound.continuation_id
+
+    def deny(*args):
+        raise PermissionError("denied")
+
+    for approve in (deny, lambda p, c: None):
+        prepared = host.prepare_reattachment(
+            host.select(identity, context), context, command_id="attach"
+        )
+        with pytest.raises(PermissionError):
+            host.execute_reattachment(prepared, context, approve=approve)
+    prepared = host.prepare_reattachment(
+        host.select(identity, context), context, command_id="attach"
+    )
+    fresh = host.execute_reattachment(prepared, context, approve=granted)
+    fresh.require_current()
+    fresh.close()
+
+
+def _pending_then(host, context, parent, *, expires_in=60, call_id=None):
+    from sonder_runtime.application.ports.delegated_verification import digest
+    from sonder_runtime.application.ports.lane_continuation import (
+        PendingApprovalEvidence,
+        VerificationApprovalPending,
+    )
+
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        "host-task",
+        context=context,
+        command_id="register",
+    )
+    bound.close()
+    identity = bound.continuation_id
+    prepared = host.prepare_reattachment(
+        host.select(identity, context), context, command_id="attach"
+    )
+    call = digest(prepared.approval_payload())
+
+    def pending_call(*args):
+        raise VerificationApprovalPending(
+            PendingApprovalEvidence(
+                "workspace_run",
+                call,
+                "agent",
+                call_id or call[:16],
+                time.time() + expires_in,
+            )
+        )
+
+    return identity, prepared, pending_call
+
+
+def _reattach_ok(host, context, identity):
+    prepared = host.prepare_reattachment(
+        host.select(identity, context), context, command_id="attach"
+    )
+    fresh = host.execute_reattachment(prepared, context, approve=granted)
+    fresh.require_current()
+    fresh.close()
+
+
+def test_denial_after_pending_cycle_clears_stale_pending_identity(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    from sonder_runtime.application.ports.lane_continuation import (
+        VerificationApprovalPending,
+    )
+
+    host, context, parent, current = make_host(fixture_lanes)
+    identity, prepared, pending_call = _pending_then(host, context, parent)
+    with pytest.raises(VerificationApprovalPending):
+        host.execute_reattachment(prepared, context, approve=pending_call)
+
+    def deny(*args):
+        raise PermissionError("denied")
+
+    with pytest.raises(PermissionError, match="denied"):
+        host.execute_reattachment(prepared, context, approve=deny)
+    _reattach_ok(host, context, identity)
+
+
+def test_expired_pending_record_resolves_claim(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    host, context, parent, current = make_host(fixture_lanes)
+    identity, prepared, pending_call = _pending_then(
+        host, context, parent, expires_in=-5
+    )
+    with pytest.raises(PermissionError, match="expired"):
+        host.execute_reattachment(prepared, context, approve=pending_call)
+    _reattach_ok(host, context, identity)
+
+
+def test_changed_pending_identity_resolves_claim(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    from sonder_runtime.application.ports.lane_continuation import (
+        VerificationApprovalPending,
+    )
+
+    host, context, parent, current = make_host(fixture_lanes)
+    identity, prepared, pending_call = _pending_then(host, context, parent)
+    with pytest.raises(VerificationApprovalPending):
+        host.execute_reattachment(prepared, context, approve=pending_call)
+    from sonder_runtime.application.ports.lane_continuation import (
+        PendingApprovalEvidence,
+    )
+
+    def changed(*args):
+        raise VerificationApprovalPending(
+            PendingApprovalEvidence(
+                "workspace_run", "b" * 64, "agent", "b" * 16, time.time() + 60
+            )
+        )
+
+    with pytest.raises(PermissionError, match="identity changed"):
+        host.execute_reattachment(prepared, context, approve=changed)
+    _reattach_ok(host, context, identity)
+
+
+def test_grant_not_covering_pending_identity_resolves_claim(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    from sonder_runtime.application.ports.lane_continuation import (
+        GrantedApprovalEvidence,
+        VerificationApprovalPending,
+    )
+
+    host, context, parent, current = make_host(fixture_lanes)
+    identity, prepared, pending_call = _pending_then(host, context, parent)
+    with pytest.raises(VerificationApprovalPending):
+        host.execute_reattachment(prepared, context, approve=pending_call)
+
+    def wrong(*args):
+        return GrantedApprovalEvidence(
+            "workspace_run", "c" * 64, "agent", "c" * 16, "n", time.time() + 60, "approval"
+        )
+
+    with pytest.raises(PermissionError, match="does not cover"):
+        host.execute_reattachment(prepared, context, approve=wrong)
+    _reattach_ok(host, context, identity)
+
+
+def test_outcome_unknown_approval_is_not_resolved_as_denied(request):
+    fixture_lanes = request.getfixturevalue("lanes")
+    from sonder_runtime.application.ports.lane_continuation import (
+        ApprovalOutcomeUnknown,
+    )
+
+    host, context, parent, current = make_host(fixture_lanes)
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        "host-task",
+        context=context,
+        command_id="register",
+    )
+    bound.close()
+    identity = bound.continuation_id
+    prepared = host.prepare_reattachment(
+        host.select(identity, context), context, command_id="attach"
+    )
+
+    def unknown(*args):
+        raise ApprovalOutcomeUnknown("APPROVAL_OUTCOME_UNKNOWN")
+
+    with pytest.raises(ApprovalOutcomeUnknown):
+        host.execute_reattachment(prepared, context, approve=unknown)
+    with host._transaction(context) as tx:
+        state = host._row(tx, identity).get("attachment_state")
+    assert state == "approval_deciding"
+    with pytest.raises(PermissionError):
+        host.execute_reattachment(prepared, context, approve=granted)

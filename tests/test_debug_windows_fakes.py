@@ -241,13 +241,50 @@ def _local_symbol_dirs(tmp_path, monkeypatch) -> tuple[str, str]:
     return str(first), str(second)
 
 
-def test_local_symbol_dirs_feed_the_symbol_and_image_paths(tmp_path, monkeypatch):
+def test_symbol_dirs_never_reach_the_cdb_symbol_or_image_path(tmp_path, monkeypatch):
+    # A dump without clr/coreclr/mscorwks (e.g. a self-contained single-file
+    # .NET app) still plans cdb, so agent-writable dirs must stay off -y/-i:
+    # dbgeng could load a planted DAC from either.
     first, second = _local_symbol_dirs(tmp_path, monkeypatch)
     plan = plan_cdb(dirs=(first, second))
     bindings = dict(plan.bindings)
-    assert bindings["sympath"] == "cache*{rundir}\\symcache;%s;%s" % (first, second)
-    assert bindings["imagepath"] == "%s;%s" % (first, second)
-    assert "srv*" not in bindings["sympath"]
+    assert bindings["sympath"] == "cache*{rundir}\\symcache"
+    assert bindings["imagepath"] == "{rundir}\\img"
+    for directory in (first, second):
+        assert directory not in bindings["sympath"] and directory not in bindings["imagepath"]
+    assert plan.staged_files == ()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="staging reads real files from Windows symbol dirs")
+def test_cdb_gets_only_verified_pdbs_copied_into_the_run_directory(tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
+
+    from sonder_runtime.adapters.debugging.capture_source import GuardedCaptureSource
+    from sonder_runtime.domain.binaries.symstore import breakpad_debug_id
+
+    fixtures = Path(__file__).parent / "fixtures" / "crash" / "pe"
+    first, second = _local_symbol_dirs(tmp_path, monkeypatch)
+    shutil.copy(fixtures / "a" / "spark_tiny.pdb", Path(first) / "spark_tiny.pdb")
+    shutil.copy(fixtures / "b" / "spark_tiny.pdb", Path(second) / "other.pdb")
+    shutil.copy(fixtures / "a" / "spark_tiny.exe", Path(first) / "mscordaccore.dll")
+    debug_id = breakpad_debug_id("EC756AB6-D819-44D7-4C4C-44205044422E", 1)
+    report = CrashReport(source_kind="windows_minidump", modules=(
+        ModuleInfo(name="spark_tiny.exe", path="C:\\x\\spark_tiny.exe", debug_id=debug_id,
+                   debug_file="C:\\build\\out\\spark_tiny.pdb"),
+        ModuleInfo(name="other.dll", path="C:\\x\\other.dll", debug_id=debug_id,
+                   debug_file="other.pdb"),
+        ModuleInfo(name="evil.dll", path="C:\\x\\evil.dll", debug_id=debug_id,
+                   debug_file="mscordaccore.dll"),
+    ))
+    plan = plan_cdb(dirs=(first, second), tier0=report,
+                    judge=planner(source=GuardedCaptureSource()))
+    bindings = dict(plan.bindings)
+    assert bindings["sympath"] == "cache*{rundir}\\symcache;{rundir}\\sym"
+    assert bindings["imagepath"] == "{rundir}\\img"
+    assert plan.staged_files == ((os.path.join(first, "spark_tiny.pdb"), "sym/spark_tiny.pdb"),)
+    assert plan.module_symbols == (("other.dll", "mismatch"),)
+    assert "sym" in plan.mkdirs
 
 
 def test_operator_stores_appear_only_with_network():

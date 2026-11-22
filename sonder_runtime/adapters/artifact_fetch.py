@@ -479,6 +479,10 @@ def _powershell_environment():
     return {key: os.environ[key] for key in keys if os.environ.get(key)}
 
 
+# Environment variable that carries the file path to the Authenticode verifier.
+_AUTHENTICODE_PATH_ENV = "SONDER_AUTHENTICODE_PATH"
+
+
 def _authenticode_signature(path, *, timeout=60.0):
     """Authenticode status and signer subject for a PE/MSI/CAB on Windows.
 
@@ -496,7 +500,10 @@ def _authenticode_signature(path, *, timeout=60.0):
             "detail": "Authenticode verification requires Windows (running %s)"
                       % platform.system(),
         }
-    literal = str(path).replace("'", "''")
+    # The path reaches PowerShell only through an environment variable, never
+    # interpolated into the -Command text: PowerShell also treats the Unicode
+    # quotes U+2018-U+201B as single-quote delimiters, so a quoted path let a
+    # crafted file name close the string and run commands.
     # Load the two cmdlets' modules explicitly from the verifier's own
     # $PSHOME and call them module-qualified. Any cmdlet left to
     # command-discovery autoload (Get-AuthenticodeSignature, ConvertTo-Json,
@@ -511,7 +518,8 @@ def _authenticode_signature(path, *, timeout=60.0):
         "$ErrorActionPreference='Stop';"
         "foreach ($m in 'Microsoft.PowerShell.Security','Microsoft.PowerShell.Utility') {"
         " Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $m, $m + '.psd1')) };"
-        "$s = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath '%s';"
+        "$s = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:"
+        + _AUTHENTICODE_PATH_ENV + ";"
         "$cert = $s.SignerCertificate;"
         "[pscustomobject]@{"
         "Status=[string]$s.Status;"
@@ -519,7 +527,9 @@ def _authenticode_signature(path, *, timeout=60.0):
         "Subject=$(if ($cert) { [string]$cert.Subject } else { '' });"
         "Thumbprint=$(if ($cert) { [string]$cert.Thumbprint } else { '' })"
         "} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress"
-    ) % literal
+    )
+    environment = _powershell_environment()
+    environment[_AUTHENTICODE_PATH_ENV] = str(path)
     try:
         completed = subprocess.run(
             [
@@ -533,9 +543,9 @@ def _authenticode_signature(path, *, timeout=60.0):
             text=True,
             timeout=timeout,
             check=False,
-            env=_powershell_environment(),
+            env=environment,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return {
             "supported": False,
             "status": "verifier_unavailable",
@@ -958,19 +968,22 @@ def fetch_artifact(
         )
         existing["action"] = "reused"
         # Never attach a newly requested origin to old bytes.  Reuse is only
-        # sound when the sidecar binds these exact bytes to this URL.
-        prior_url = str((prior or {}).get("final_url") or (prior or {}).get("url") or "")
+        # sound when the sidecar binds these exact bytes to this URL: the URL
+        # originally requested, or the final URL it redirected to.
+        prior_requested = str((prior or {}).get("url") or "")
+        prior_final = str((prior or {}).get("final_url") or prior_requested)
         prior_digest = str((prior or {}).get("sha256") or "")
-        if prior_url != url or prior_digest.lower() != str(existing.get("sha256", "")).lower():
+        if (url not in (prior_requested, prior_final)
+                or prior_digest.lower() != str(existing.get("sha256", "")).lower()):
             existing["ok"] = False
             existing["verdict"] = "rejected"
             existing["checks"].append(_check("provenance", False, "existing artifact is not proven to originate from requested URL"))
             existing["failures"] = [row for row in existing["checks"] if not row["ok"]]
             return existing
-        existing["url"] = prior_url
+        existing["url"] = url
         existing["reused"] = True
         existing["redirect_chain"] = []
-        existing["final_url"] = url
+        existing["final_url"] = prior_final
         existing["status"] = 0
         existing["content_type"] = ""
         return existing
@@ -1230,6 +1243,7 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
 
         digest = hashlib.sha256()
         written = 0
+        received = 0
         mode = "r+b" if append else "wb"
         try:
             part.parent.mkdir(parents=True, exist_ok=True)
@@ -1247,6 +1261,7 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                 chunk = sniff
                 while chunk:
                     written += len(chunk)
+                    received += len(chunk)
                     if written > max_bytes:
                         raise ArtifactFetchError(
                             "payload exceeded the %d-byte ceiling" % max_bytes
@@ -1271,6 +1286,21 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                 "content_type": content_type, "bytes": written, "sha256": "",
                 "resumed_from": offset, "block": None,
             }
+
+    if declared_length is not None and received != declared_length:
+        if not append or received > declared_length:
+            _discard(part)
+        checks.append(_check(
+            "content_length", False,
+            "received %d bytes, expected %d from Content-Length"
+            % (received, declared_length),
+        ))
+        return {
+            "ok": False, "checks": checks, "redirect_chain": chain,
+            "final_url": current, "status": status,
+            "content_type": content_type, "bytes": written, "sha256": "",
+            "resumed_from": offset if append else 0, "block": None,
+        }
 
     checks.append(_check(
         "download", True,

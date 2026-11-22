@@ -30,6 +30,10 @@ _LIVE_PROVIDER_VARIABLES = (
     "SONDER_OPENAI_MODEL",
     "SONDER_OPENAI_EMBED_MODEL",
     "SONDER_OPENAI_ALLOW_HTTP_NETWORKS",
+    "SONDER_OPENAI_PRICE_USD_PER_MTOK",
+    "SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK",
+    "SONDER_OPENAI_DAILY_USD",
+    "SONDER_OPENAI_MAX_TOKENS",
     "SONDER_INFERENCE_BASE_URL",
     "SONDER_INFERENCE_MODEL",
     "SONDER_INFERENCE_API_KEY",
@@ -78,7 +82,15 @@ _CAPTURED_LIVE_ISOLATED_ENV = {
 # Test-harness controls, not runtime configuration: they survive the ambient
 # scrub so a developer can capture timings or rewrite REPL screen goldens.
 # SONDER_BLENDER lets the real-Blender integration tests (tests/test_meshgen_integration.py) run.
-_HARNESS_VARIABLES = frozenset({"SONDER_TEST_TIMINGS", "SONDER_UPDATE_GOLDENS", "SONDER_BLENDER"})
+# SONDER_TEST_PRIVATE_OLLAMA_WORKER (host:port) enables the live check in tests/test_ollama_endpoint_tls.py.
+# SONDER_TEST_MESHGEN_KIT (path to a trusted kit .py) enables the real-kit meshgen tests.
+_HARNESS_VARIABLES = frozenset({
+    "SONDER_TEST_TIMINGS",
+    "SONDER_UPDATE_GOLDENS",
+    "SONDER_BLENDER",
+    "SONDER_TEST_PRIVATE_OLLAMA_WORKER",
+    "SONDER_TEST_MESHGEN_KIT",
+})
 
 
 def _clear_ambient_deployment_variables() -> None:
@@ -143,6 +155,14 @@ def _isolate_deployment_posture():
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_workspace_dir():
+    default_ws = _TEST_WORKSPACE_PARENT / "workspaces"
+    yield
+    if default_ws.exists():
+        shutil.rmtree(default_ws, ignore_errors=True)
 
 
 # The shared system TLS context is process-global. A test that patches
