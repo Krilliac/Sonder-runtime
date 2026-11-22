@@ -122,6 +122,7 @@ class EffortPickerButton extends StatelessWidget {
       child: PopupMenuButton<String>(
         key: const Key('composer-effort-picker'),
         tooltip: '',
+        popUpAnimationStyle: SonderMotion.menu(context),
         initialValue: normalized ?? 'auto',
         onSelected: (picked) =>
             onSelected(picked == 'auto' ? null : normalizeEffort(picked)),
@@ -166,7 +167,7 @@ class EffortPickerButton extends StatelessWidget {
         child: Container(
           height: 32,
           padding: EdgeInsets.symmetric(
-            horizontal: dense ? SonderSpace.xs + 2 : SonderSpace.sm,
+            horizontal: dense ? SonderSpace.xs : SonderSpace.sm,
           ),
           decoration: BoxDecoration(
             color: active ? tokens.accent.withValues(alpha: 0.10) : Colors.transparent,
