@@ -940,6 +940,41 @@ def generate_pack(name: str, dimension: str = "2d", theme: str = "arcane",
     )
 
 
+def _manifest_row_name_is_safe(filename) -> bool:
+    """Lexical check of a manifest row filename; no filesystem call is made.
+
+    Refuses anything that is not a plain relative name: UNC, device and NT
+    prefixes, absolute or drive-qualified paths, parent-directory components
+    and NUL.  Joining such a value onto the pack root returns it unchanged, and
+    resolving it would make Windows authenticate to the named host.
+    """
+    if not isinstance(filename, str) or not filename or chr(0) in filename:
+        return False
+    flat = filename.replace("/", "\\")
+    if flat.startswith("\\"):
+        return False
+    try:
+        _reject_network_path(filename)
+    except PermissionError:
+        return False
+    if os.path.isabs(filename) or os.path.splitdrive(filename)[0]:
+        return False
+    if len(flat) > 1 and flat[1] == ":":
+        return False
+    return ".." not in flat.split("\\")
+
+
+def _lexically_directly_inside(root: str, candidate: str) -> bool:
+    """True when ``candidate`` is a direct child of ``root``; purely lexical."""
+    try:
+        return (
+            os.path.commonpath([root, candidate]) == root
+            and os.path.dirname(candidate) == root
+        )
+    except ValueError:
+        return False
+
+
 def verify_pack(path: str) -> dict:
     path = _reject_network_path(path)
     if not os.path.isabs(path):
@@ -963,10 +998,13 @@ def verify_pack(path: str) -> dict:
             failures.append("manifest file row must be an object")
             continue
         filename = row.get("path", "")
+        if not _manifest_row_name_is_safe(filename):
+            failures.append("unsafe manifest path: %r" % (filename,))
+            continue
         candidate = os.path.abspath(os.path.join(root, filename))
         if filename in seen:
             failures.append("duplicate manifest path: %r" % filename)
-        elif not _inside_workspace(candidate) or os.path.dirname(candidate) != root:
+        elif not _lexically_directly_inside(root, candidate) or not _inside_workspace(candidate):
             failures.append("unsafe manifest path: %r" % filename)
         elif not os.path.isfile(candidate):
             failures.append("missing: %s" % filename)
