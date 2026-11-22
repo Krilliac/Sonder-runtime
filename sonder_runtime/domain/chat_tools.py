@@ -37,6 +37,11 @@ def detect_bidi_chars(text: object) -> tuple[bool, list[str]]:
     return bool(labels), labels
 
 
+_SENSITIVE_PREVIEW_KEYS = frozenset({
+    "token", "approval", "extra_roots", "bypass", "developer_authorized",
+})
+
+
 def preview_tool_arguments(
     tool_name: str,
     args: Mapping[str, Any],
@@ -44,16 +49,21 @@ def preview_tool_arguments(
     max_detail_chars: int = 4000,
 ) -> dict[str, Any]:
     """Return bounded, secret-free preview + bidi metadata for an approval card."""
+    visible_args: dict[str, Any] = {
+        str(key): value
+        for key, value in args.items()
+        if str(key) not in _SENSITIVE_PREVIEW_KEYS
+    }
     bidi_texts: list[str] = []
     detail = ""
     if tool_name == "run_code":
-        detail = str(args.get("code") or "")
+        detail = str(visible_args.get("code") or "")
         bidi_texts.append(detail)
     elif tool_name in {"file_write", "file_edit", "file_delete", "text_patch", "workspace_run"}:
-        detail = json.dumps(dict(args), ensure_ascii=False, sort_keys=True)
+        detail = json.dumps(visible_args, ensure_ascii=False, sort_keys=True, default=str)
         bidi_texts.append(detail)
     else:
-        bidi_texts.append(json.dumps(dict(args), ensure_ascii=False, sort_keys=True))
+        bidi_texts.append(json.dumps(visible_args, ensure_ascii=False, sort_keys=True, default=str))
     has_bidi, bidi_chars = detect_bidi_chars("\n".join(bidi_texts))
     truncated = len(detail) > max_detail_chars
     shown_detail = (
@@ -62,10 +72,17 @@ def preview_tool_arguments(
         else detail
     )
     safe_args: dict[str, Any] = {}
-    for key, value in args.items():
-        if key in {"token", "approval", "extra_roots", "bypass", "developer_authorized"}:
-            continue
-        safe_args[key] = value[:512] + "..." if isinstance(value, str) and len(value) > 512 else value
+    for key, value in visible_args.items():
+        if isinstance(value, str) and len(value) > 512:
+            safe_args[key] = value[:512] + "..."
+        elif value is None or isinstance(value, (bool, int, float, str)):
+            safe_args[key] = value
+        else:
+            try:
+                json.dumps(value, ensure_ascii=False)
+                safe_args[key] = value
+            except (TypeError, ValueError):
+                safe_args[key] = str(value)
     return {
         "arguments": safe_args,
         "detail": shown_detail,
