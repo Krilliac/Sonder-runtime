@@ -616,7 +616,27 @@ def _safe_env_path(raw: str, *, base: Path) -> Path | None:
     candidate = Path(cleaned_expanded)
     if not candidate.is_absolute():
         candidate = base / candidate
-    return _resolve_best_effort(candidate)
+    is_junction = getattr(os.path, "isjunction", None)
+    for ancestor in (*reversed(candidate.parents), candidate):
+        if ancestor.parent == ancestor:
+            continue
+        try:
+            is_link = ancestor.is_symlink() or (
+                is_junction is not None and is_junction(ancestor)
+            )
+        except OSError:
+            return None
+        if is_link:
+            try:
+                runtime_paths._strip_extended_or_refuse_prefixed(os.readlink(ancestor))
+            except (OSError, ValueError):
+                return None
+    resolved = _resolve_best_effort(candidate)
+    try:
+        cleaned_resolved = runtime_paths._strip_extended_or_refuse_prefixed(os.fspath(resolved))
+    except ValueError:
+        return None
+    return Path(cleaned_resolved)
 
 
 def _workspace_config_path(env_name: str, default_name: str) -> Path:
@@ -843,7 +863,10 @@ def _is_protected_by_name(path: Path, *, allow_added_token_stores: bool = False)
     if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
     root = _resolve_best_effort(workspace_root())
-    suffix = path.suffix.lower()
+    clean_name = path.name.split(":", 1)[0].rstrip(". ")
+    clean_path = Path(clean_name)
+    suffix = clean_path.suffix.lower()
+    stem = clean_path.stem.lower()
     if suffix in FIRST_PARTY_CONFIG_SUFFIXES and any(
         _is_inside(path, root / name) for name in FIRST_PARTY_CODE_DIRS
     ):
@@ -853,6 +876,20 @@ def _is_protected_by_name(path: Path, *, allow_added_token_stores: bool = False)
         or any(
             _is_inside(path, root / name)
             for name in (*FIRST_PARTY_CODE_DIRS, *RUNTIME_PACKAGE_DIRS)
+        )
+        or any(
+            (
+                path.parent == root / parent
+                and (
+                    stem == Path(name).stem.lower()
+                    or clean_name.lower().startswith(Path(name).stem.lower() + ".")
+                )
+            )
+            or (
+                path.parent == root / parent / "__pycache__"
+                and clean_name.lower().startswith(Path(name).stem.lower() + ".")
+            )
+            for parent, name in FIRST_PARTY_CODE_FILES
         )
     ):
         return True
