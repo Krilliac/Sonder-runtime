@@ -267,11 +267,18 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     constructed with explicit paths (e.g. terminal output), not request fields.
     """
     configured = runtime_paths._configured_home()
-    home = _canonical(runtime_paths.default_home())
+    raw_home = runtime_paths.default_home()
+    parsed_home = runtime_paths.try_parse_local_root(os.fspath(raw_home), expand_user=True)
+    if parsed_home is None:
+        raise PermissionError(
+            "refusing unsafe SONDER_HOME/SONDER_STATE_HOME path "
+            "(UNC, device/NT, relative, or drive-root spelling)"
+        )
+    home = _canonical(parsed_home)
 
     def state(name, variable=""):
         if configured is not None:
-            return _canonical(configured / name)
+            return _canonical(home / name)
         override = os.environ.get(variable, "").strip() if variable else ""
         return _canonical(override if override else home / name)
 
@@ -292,7 +299,13 @@ def live_control_plane_inventory(*, additional=None) -> ControlPlaneInventory:
     # canonical memory resolver. Both are actual composed paths.
     state_home = os.environ.get("SONDER_STATE_HOME", "").strip()
     if state_home:
-        databases.append(_canonical(Path(state_home).expanduser() / "memory.db"))
+        parsed_state_home = runtime_paths.try_parse_local_root(state_home, expand_user=True)
+        if parsed_state_home is None:
+            raise PermissionError(
+                "refusing unsafe SONDER_STATE_HOME path "
+                "(UNC, device/NT, relative, or drive-root spelling)"
+            )
+        databases.append(_canonical(parsed_state_home / "memory.db"))
     files = [state("fleet-principal.json", "SONDER_FLEET_PRINCIPAL_FILE")]
     workspace = Path(__file__).resolve().parents[3]
     roots_override = os.environ.get("SONDER_FILE_ROOTS_FILE", "").strip()

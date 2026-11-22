@@ -17,7 +17,13 @@ import time
 import uuid
 from pathlib import Path
 
-from sonder_runtime.platform.private_files import ensure_private_dir, tighten_existing_stores
+from sonder_runtime.platform.private_files import (
+    _EXTENDED_LOCAL_RE as _EXTENDED_LOCAL_RE,
+    ensure_private_dir,
+    parse_local_root as parse_local_root,
+    tighten_existing_stores,
+    try_parse_local_root as try_parse_local_root,
+)
 
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
 _LEGACY_DB_MIGRATION_POLL_SECONDS = 0.02
