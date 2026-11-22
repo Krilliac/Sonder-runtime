@@ -496,6 +496,26 @@ void main() {
     await second;
     c.dispose();
   });
+
+  testWidgets('deleteThread and restoreThread persist session rotation counters',
+      (tester) async {
+    final backend = FakeChatBackend();
+    final c = await _start(tester, backend);
+    final thread = c.currentThread;
+    final first = c.send('first turn');
+    await tester.pump();
+    c.cancel();
+    await tester.pump();
+    await first;
+    expect(await ChatStore.loadSessions(), {thread.id: 1});
+
+    final deleted = await c.deleteThread(thread);
+    expect(await ChatStore.loadSessions(), isEmpty);
+
+    await c.restoreThread(deleted);
+    expect(await ChatStore.loadSessions(), {thread.id: 1});
+    c.dispose();
+  });
 }
 
 class _DelayedModeWriteBackend extends FakeChatBackend {

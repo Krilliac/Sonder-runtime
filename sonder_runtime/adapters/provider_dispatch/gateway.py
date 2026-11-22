@@ -44,6 +44,13 @@ class ProviderDispatchGateway:
         provider = self._tier_providers.get(request.tier)
         if provider is None and request.tier == "sonder":
             provider = self._default_generation_provider
+        if (
+            provider is None
+            and str(request.tier or "").strip().lower().startswith("model:")
+            and "sonder_inference" in self._providers
+            and str((request.options or {}).get("model") or "").strip()
+        ):
+            provider = "sonder_inference"
         if provider is None:
             raise InvalidInput("no provider binding for tier %r" % request.tier)
         return provider

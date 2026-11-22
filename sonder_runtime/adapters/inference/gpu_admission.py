@@ -78,6 +78,11 @@ _BOUND_BACKEND_ENTRIES = 256
 _HELD_TICKET: contextvars.ContextVar[_Entry | None] = contextvars.ContextVar(
     "sonder_gpu_admission_held", default=None)
 
+
+def held_ticket_active() -> bool:
+    """Return True when the current context holds an active GPU admission ticket."""
+    return _HELD_TICKET.get() is not None
+
 PsReader = Callable[[str], "Mapping[str, Any] | None"]
 
 
