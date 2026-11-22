@@ -4878,8 +4878,8 @@ def _transport_error_detail(error) -> str:
 _ollama_display = lambda: ollama_endpoint.safe_display(BASE)  # noqa: E731 - reads BASE per call
 
 
-def _ollama_error_endpoint() -> dict:
-    return _ollama_reporting.error_endpoint(BASE, OLLAMA_POOL, _ollama_display())
+def _ollama_error_endpoint(served_origin: str | None = None) -> dict:
+    return _ollama_reporting.runtime_error_endpoint(BASE, OLLAMA_POOL, _ollama_display(), served_origin)
 
 
 def _require_ollama_endpoint(*, cloud: bool = False) -> None:
@@ -5040,11 +5040,9 @@ def _post_model(
             failure = ModelCallError(
                 "http",
                 _http_error_detail(error),
-                transient=transient,
-                status=status,
-                attempts=attempt,
-                cloud=cloud,
+                transient=transient, status=status, attempts=attempt, cloud=cloud,
                 retry_after_seconds=_retry_after_seconds(error.headers),
+                **ollama_pool.worker_attribution(error),
             )
             if cloud and status == 429:
                 activity_tracker.record_event(
@@ -5063,9 +5061,8 @@ def _post_model(
             failure = ModelCallError(
                 "timeout" if isinstance(reason, TimeoutError) else "transport",
                 _transport_error_detail(error),
-                transient=True,
-                attempts=attempt,
-                cloud=cloud,
+                transient=True, attempts=attempt, cloud=cloud,
+                **ollama_pool.transport_failure_fields(error),
             )
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ModelCallError(
@@ -24025,6 +24022,7 @@ def status() -> str:
             summary["admission"], summary["eligible_worker_count"], summary["worker_count"],
             summary["available_capacity"], queue["waiting"], queue["limit"], summary["membership_state"],
         ),
+        *_ollama_reporting.tier_capacity_lines_for(sys.modules[__name__]),
         "Capability cache: %s; age=%s" % (
             summary["refresh_state"], "unknown" if summary["refresh_age_seconds"] is None
             else "%ss" % summary["refresh_age_seconds"],

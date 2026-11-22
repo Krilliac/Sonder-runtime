@@ -149,12 +149,35 @@ def enrich_work_record(record, *, include_detail=False):
         if not summary:
             summary = "Work %s. %s" % (record.get("status", "unknown"),
                 "Result is available in this conversation; no validation receipt was recorded."
-                if record.get("output") else "No output or validation receipt was recorded.")
+                if record.get("output") or record.get("has_output")
+                else "No output or validation receipt was recorded.")
         if not any(line["text"] == summary for line in lines):
             lines.append({"id": record["id"] + ":final", "run_id": record["id"],
                           "text": summary, "kind": "summary", "at": record.get("updated_at", 0), "final": True})
     out.update(progress=bounded_progress(lines, record["id"]), progress_complete=complete, final_summary=summary)
+    children = _child_runs(links, fleet, autopilot)
+    if children:
+        # A delegated work run finished when it started its child; the child's
+        # own status is what the caller is still waiting on.
+        out["children"] = children
+        out["child_status"] = children[0]["status"]
     return out
+
+
+def _child_runs(links, fleet, autopilot):
+    """Status of each fleet or Autopilot run this work run delegated to."""
+    found = []
+    for item in links[:16]:
+        kind, identity = item.get("kind"), item.get("id", "")
+        if kind == "fleet":
+            rows = [row for row in fleet["agents"] if row.get("id") == identity]
+        elif kind == "autopilot":
+            rows = [row for row in autopilot["runs"] if row.get("id") == identity]
+        else:
+            continue
+        found.append({"kind": kind, "id": identity,
+                      "status": str(rows[0].get("status", "unknown")) if rows else "unknown"})
+    return found
 
 
 def cancel_linked_work(record):

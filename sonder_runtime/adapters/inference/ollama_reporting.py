@@ -24,17 +24,96 @@ INVENTORY_PARALLELISM = 8
 INVENTORY_DEADLINE_SECONDS = 4.0
 
 
-def error_endpoint(base: str, pool, display: str | None = None) -> dict:
+# What an account caller sees instead of a pool member's address.
+GENERIC_REMOTE_WORKER = "remote worker"
+
+
+def caller_may_see_worker_hosts() -> bool:
+    """Whether the current caller may be shown pool worker names and addresses.
+
+    Positive evidence is required: a handler must have bound "no role
+    restriction" (owner, admin, local-open). A served account caller (a
+    restricted role) and any context that never received a binding (a fleet
+    lane or runtime thread without a copied context) see
+    ``GENERIC_REMOTE_WORKER``.
+    """
+    from sonder_runtime.adapters.security import role_tool_policy
+
+    return role_tool_policy.caller_bound_unrestricted()
+
+
+def served_endpoint(served_origin: str, *, reveal_workers: bool = False) -> dict:
+    """``endpoint_loopback``/``display`` for the worker that served a request."""
+    loopback = ollama_endpoint.is_loopback(served_origin)
+    if loopback or reveal_workers:
+        shown = ollama_endpoint.safe_display(served_origin)
+    else:
+        shown = GENERIC_REMOTE_WORKER
+    return {"endpoint_loopback": loopback, "display": shown}
+
+
+def error_endpoint(
+    base: str, pool, display: str | None = None, *,
+    served_origin: str | None = None, reveal_workers: bool = False,
+) -> dict:
     """``endpoint_loopback``/``display`` kwargs for a runtime model error.
 
-    The label classifies the address actually printed (the primary), and pool
-    membership is stated beside it, so a failure a remote member served is not
-    passed off as purely local either.
+    The label classifies the address actually printed. With ``served_origin``
+    (the pool worker that served the failed request) that is the worker's own
+    address, so a Node1 failure is not passed off as "local Ollama". Without
+    one it is the primary, and pool membership is stated beside it, so a
+    failure a remote member served is not passed off as purely local either.
+    ``reveal_workers=False`` (an account caller) prints "remote worker" in
+    place of a remote member's address.
     """
+    if served_origin:
+        return served_endpoint(served_origin, reveal_workers=reveal_workers)
     display = ollama_endpoint.safe_display(base) if display is None else display
     if pool.has_remote_workers:
         display += " (worker pool also routes to remote workers)"
     return {"endpoint_loopback": ollama_endpoint.is_loopback(base), "display": display}
+
+
+def runtime_error_endpoint(base: str, pool, display: str, served_origin: str | None = None) -> dict:
+    """``error_endpoint`` plus whether the formatter may name a served worker's host."""
+    reveal = caller_may_see_worker_hosts()
+    report = error_endpoint(base, pool, display, served_origin=served_origin, reveal_workers=reveal)
+    report["reveal_workers"] = reveal
+    return report
+
+
+def tier_capacity_lines_for(server) -> list[str]:
+    """``tier_capacity_lines`` for the server module's pool and runtime policy."""
+    policy = getattr(server, "_RUNTIME_POLICY", None)
+    policy = policy if isinstance(policy, dict) else {}
+    return tier_capacity_lines(server.OLLAMA_POOL, policy.get("local_models") or {})
+
+
+def tier_capacity_lines(pool, local_models) -> list[str]:
+    """One line per configured local tier: ``code (qwen3.6:35b): 1 worker, capacity=1``.
+
+    Counts come from workers whose fresh capability evidence advertises the
+    tier's model, so a worker that lacks it adds nothing; they are cached
+    facts and never probe. A tier with no carrier says so rather than
+    printing zero.
+    """
+    lines = []
+    for tier, model in dict(local_models or {}).items():
+        model = str(model or "").strip()
+        if not model:
+            continue
+        try:
+            counts = pool.model_slot_counts(model)
+        except Exception:
+            counts = None
+        if counts is None:
+            lines.append("%s (%s): no worker advertises it yet" % (tier, model))
+        else:
+            workers = int(counts["workers"])
+            lines.append("%s (%s): %d worker%s, capacity=%d" % (
+                tier, model, workers, "" if workers == 1 else "s", int(counts["total"]),
+            ))
+    return lines
 
 
 def model_list_summary(names) -> str:
@@ -133,8 +212,13 @@ def workers_label(effective: int, requested: int, capacity: int | None) -> str:
 
 __all__ = [
     "clamp_workers",
+    "caller_may_see_worker_hosts",
     "error_endpoint",
     "model_inventory_lines",
     "model_list_summary",
+    "runtime_error_endpoint",
+    "served_endpoint",
+    "tier_capacity_lines",
+    "tier_capacity_lines_for",
     "workers_label",
 ]

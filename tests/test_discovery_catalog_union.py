@@ -122,12 +122,15 @@ def _assert_listed_models_pass_the_chat_gate(server):
 
 def test_listed_models_are_exactly_what_the_chat_gate_accepts(pooled):
     server, _pool, _calls = pooled
-    # Node1 alone holds qwen3.6:35b; the HTTP gate refuses a worker-only name,
-    # so /v1/models must not offer it.
-    assert serve._chat_model_selection_error("qwen3.6:35b") == (400, "unknown model 'qwen3.6:35b'")
+    # Node1 holds qwen3.6:35b; with pool-wide target resolution active, the HTTP
+    # chat gate accepts worker-only models while refusing unknown names, and
+    # every row offered by /v1/models passes the chat gate.
+    assert serve._chat_model_selection_error("qwen3.6:35b") is None
+    assert serve._chat_model_selection_error("not-on-any-worker:9b") == (
+        400, "unknown model 'not-on-any-worker:9b'"
+    )
     ids = _assert_listed_models_pass_the_chat_gate(server)
     assert "kimi-k3:cloud" in ids
-    assert "qwen3.6:35b" not in ids
 
 
 @pytest.mark.parametrize("failure", [

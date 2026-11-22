@@ -15,9 +15,10 @@ runs, HTTP handlers) is never cancelled by an unrelated foreground interrupt.
 from __future__ import annotations
 
 import itertools
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator
+from typing import Callable, Iterator
 
 from sonder_runtime.domain.cancellation_tree import CancellationNode
 
@@ -29,6 +30,13 @@ _TREE = CancellationTree(root_id="foreground")
 _IDS = itertools.count(1)
 _CURRENT: ContextVar[CancellationNode | None] = ContextVar(
     "sonder_foreground_turn", default=None,
+)
+_LOG = logging.getLogger(__name__)
+# Extra stop conditions bound by a surface that has no cancellation node of its
+# own (an HTTP work run stops on its effect fence).  Immutable tuple: a nested
+# scope rebinds a longer tuple and resets it, never mutates the outer one.
+_CHECKS: ContextVar[tuple[Callable[[], object], ...]] = ContextVar(
+    "sonder_foreground_checks", default=(),
 )
 
 
@@ -58,10 +66,38 @@ def current() -> CancellationNode | None:
     return _CURRENT.get()
 
 
+@contextmanager
+def check_scope(check: Callable[[], object]) -> Iterator[None]:
+    """Bind ``check`` so :func:`cancel_requested` is also true while it is truthy.
+
+    The check runs on the calling thread at every cooperative checkpoint, so it
+    must be cheap.  A check that raises counts as a stop request: a run that
+    cannot prove it may continue must not.
+    """
+    token = _CHECKS.set((*_CHECKS.get(), check))
+    try:
+        yield
+    finally:
+        _CHECKS.reset(token)
+
+
 def cancel_requested() -> bool:
-    """Return whether the foreground turn running in this context is cancelled."""
+    """Return whether the foreground turn running in this context is cancelled.
+
+    True when the turn's node is cancelled or any :func:`check_scope` check
+    bound in this context is truthy.
+    """
     node = _CURRENT.get()
-    return bool(node is not None and node.cancelled)
+    if node is not None and node.cancelled:
+        return True
+    for check in _CHECKS.get():
+        try:
+            if check():
+                return True
+        except Exception:
+            _LOG.warning("foreground cancel check failed; treating it as a stop request", exc_info=True)
+            return True
+    return False
 
 
 def cancel(node: CancellationNode | None, *, reason: str = INTERRUPT_REASON) -> bool:
@@ -75,6 +111,7 @@ __all__ = [
     "INTERRUPT_REASON",
     "cancel",
     "cancel_requested",
+    "check_scope",
     "current",
     "foreground_turn",
 ]
