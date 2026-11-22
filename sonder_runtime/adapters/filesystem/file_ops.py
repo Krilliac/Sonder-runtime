@@ -148,12 +148,13 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # First-party code outside that package which the runtime imports or runs:
 # selfmod imports ``scripts.selfmod_linux_isolation``/``scripts.selfmod_oracle``
 # into its own process, the nightly jobs execute ``scripts/*.py`` and
-# ``scripts/run-nightly.ps1``, migrations run at store open, and the selfmod /
-# nightly gates run pytest, which imports ``tests/conftest.py``. Any of these
+# ``scripts/run-nightly.ps1``, migrations run at store open, the pytest gate
+# imports ``tools/tuf_repo.py`` and ``tests/conftest.py``. Any of these
 # written by an ordinary mutation-class call is code execution with runtime
 # privileges at the next run -- the same hole the root-level clause closes.
-FIRST_PARTY_CODE_DIRS = ("scripts", "migrations")
+FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tools")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
+FIRST_PARTY_CONFIG_SUFFIXES = frozenset({".ini", ".cfg", ".toml"})
 # Package data the runtime loads as policy (model_tool_policy.json holds the
 # tool-lane floor). It replaced Python constants that the ``.py`` clause below
 # protected, so it keeps that protection whatever its suffix.
@@ -260,22 +261,46 @@ def inside_allowed_roots(path, extra_roots: str = "") -> bool:
     return any(_is_inside(resolved, root) for root in allowed_roots(extra_roots))
 
 
+def _validated_state_home() -> Path | None:
+    """The validated local state home, or ``None`` when unsafe.
+
+    Refuses UNC, device/NT, relative, and drive-root spellings lexically BEFORE
+    any ``resolve()`` or filesystem call can open an SMB share; strips a valid
+    local extended-length prefix (``\\\\?\\C:\\...``).
+    """
+    try:
+        raw = runtime_paths.default_home()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return runtime_paths.try_parse_local_root(os.fspath(raw), expand_user=True)
+
+
 def _split_roots(raw: str) -> list[Path]:
-    roots = []
+    roots: list[Path] = []
     for item in (raw or "").split(os.pathsep):
-        item = item.strip()
-        if item:
-            roots.append(Path(item).expanduser())
+        parsed = runtime_paths.try_parse_local_root(item, expand_user=True)
+        if parsed is not None:
+            roots.append(parsed)
     return roots
 
 
 def roots_file_path() -> Path:
     configured = os.environ.get("SONDER_FILE_ROOTS_FILE", "").strip()
-    return (
-        Path(configured).expanduser()
-        if configured
-        else Path(runtime_paths.default_home()) / DEFAULT_ROOTS_FILE
-    )
+    if configured:
+        parsed = runtime_paths.try_parse_local_root(configured, expand_user=True)
+        if parsed is None:
+            raise PermissionError(
+                "refusing unsafe SONDER_FILE_ROOTS_FILE path "
+                "(UNC, device/NT, relative, or drive-root spelling)"
+            )
+        return parsed
+    home = _validated_state_home()
+    if home is None:
+        raise PermissionError(
+            "refusing unsafe SONDER_HOME/SONDER_STATE_HOME path "
+            "(UNC, device/NT, relative, or drive-root spelling)"
+        )
+    return home / DEFAULT_ROOTS_FILE
 
 
 def _roots_from_file() -> list[Path]:
@@ -283,11 +308,13 @@ def _roots_from_file() -> list[Path]:
         lines = roots_file_path().read_text(encoding="utf-8").splitlines()
     except (FileNotFoundError, OSError):
         return []
-    roots = []
+    roots: list[Path] = []
     for line in lines:
         value = line.strip()
         if value and not value.startswith("#"):
-            roots.append(Path(value).expanduser())
+            parsed = runtime_paths.try_parse_local_root(value, expand_user=True)
+            if parsed is not None:
+                roots.append(parsed)
     return roots
 
 
@@ -372,19 +399,28 @@ def _reach_roots() -> list[Path]:
 
 
 def allowed_roots(extra_roots: str = "") -> list[Path]:
-    roots = [workspace_root(), Path(runtime_paths.default_home())]
+    roots: list[Path] = [workspace_root()]
+    home = _validated_state_home()
+    if home is not None:
+        roots.append(home)
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     roots.extend(_split_roots(extra_roots))
     roots.extend(_reach_roots())
-    out = []
+    out: list[Path] = []
     for root in roots:
+        parsed_pre = runtime_paths.try_parse_local_root(os.fspath(root), expand_user=True)
+        if parsed_pre is None:
+            continue
         try:
-            resolved = root.resolve()
+            resolved = parsed_pre.resolve()
         except OSError:
-            resolved = _normalized_absolute(root)
-        if resolved not in out:
-            out.append(resolved)
+            resolved = _normalized_absolute(parsed_pre)
+        parsed_post = runtime_paths.try_parse_local_root(str(resolved), expand_user=False)
+        if parsed_post is None:
+            continue
+        if parsed_post not in out:
+            out.append(parsed_post)
     return _attenuate_managed_roots(out)
 
 
@@ -407,31 +443,52 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
     ``serve._http_workspace_roots`` hands an admin caller only the configured
     ``[state].workspace_roots`` (resolved) and anyone else ``()``.
     """
-    excluded = []
-    for root in (workspace_root(), Path(runtime_paths.default_home())):
+    excluded: list[Path] = []
+    excluded_candidates: list[Path] = [workspace_root()]
+    home = _validated_state_home()
+    if home is not None:
+        excluded_candidates.append(home)
+    for root in excluded_candidates:
         try:
-            excluded.append(root.resolve())
+            resolved_excluded = root.resolve()
         except OSError:
-            excluded.append(_normalized_absolute(root))
-    explicit = [Path(item).expanduser() for item in configured or () if str(item).strip()]
-    roots = []
+            resolved_excluded = _normalized_absolute(root)
+        parsed_excluded = runtime_paths.try_parse_local_root(
+            str(resolved_excluded), expand_user=False
+        )
+        excluded.append(parsed_excluded if parsed_excluded is not None else resolved_excluded)
+    explicit: list[Path] = []
+    for item in configured or ():
+        if item is None:
+            continue
+        parsed = runtime_paths.try_parse_local_root(str(item), expand_user=True)
+        if parsed is not None:
+            explicit.append(parsed)
+    roots: list[Path] = []
     roots.extend(_split_roots(os.environ.get("SONDER_FILE_ROOTS", "")))
     roots.extend(_roots_from_file())
     default_root = None
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         default_root = runtime_paths.default_workspace_root()
-    if default_root is not None and os.path.isdir(default_root):
-        roots.append(Path(default_root))
+    if default_root is not None:
+        parsed_default = runtime_paths.try_parse_local_root(
+            os.fspath(default_root), expand_user=True
+        )
+        if parsed_default is not None and parsed_default.is_dir():
+            roots.append(parsed_default)
     out: list[str] = []
     for root in explicit + roots:
         try:
             resolved = root.resolve()
         except OSError:
             resolved = _normalized_absolute(root)
-        text = str(resolved)
+        parsed_post = runtime_paths.try_parse_local_root(str(resolved), expand_user=False)
+        if parsed_post is None:
+            continue
+        text = str(parsed_post)
         # An operator's own [state].workspace_roots entry is kept as written;
         # only the ambient sources may not hand out the state home or checkout.
-        if text in out or (root not in explicit and resolved in excluded):
+        if text in out or (root not in explicit and parsed_post in excluded):
             continue
         out.append(text)
     return tuple(str(root) for root in _attenuate_managed_roots([Path(text) for text in out]))
@@ -547,26 +604,36 @@ def _workspace_config_path(env_name: str, default_name: str) -> Path:
 
 def _control_plane_paths() -> set[Path]:
     root = _resolve_best_effort(workspace_root())
-    home = _resolve_best_effort(Path(runtime_paths.default_home()))
-    paths = {
-        _resolve_best_effort(roots_file_path()),
+    home_candidate = _validated_state_home()
+    home = _resolve_best_effort(home_candidate) if home_candidate is not None else None
+    paths: set[Path] = {
         root / DEFAULT_ROOTS_FILE,
         root / "permissions.json",
-        home / "permissions.json",
         _workspace_config_path("SONDER_WORKFLOWS", "workflows.json"),
         _workspace_config_path("SONDER_EMOTION_VECTORS", "emotion_vectors.json"),
         _workspace_config_path("SONDER_SYSTEM_PROFILE", "system_profile.md"),
     }
+    try:
+        paths.add(_resolve_best_effort(roots_file_path()))
+    except PermissionError:
+        pass
+    if home is not None:
+        paths.add(home / "permissions.json")
     db_override = os.environ.get("SONDER_DB", "").strip()
     if db_override:
         db = Path(db_override).expanduser()
         if not db.is_absolute():
             db = Path.cwd() / db
         db = _resolve_best_effort(db)
-    else:
+        paths.update({
+            db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
+        })
+    elif home is not None:
         db = home / "memory.db"
+        paths.update({
+            db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
+        })
     paths.update({
-        db, Path(str(db) + "-wal"), Path(str(db) + "-shm"), Path(str(db) + "-journal"),
         root / "memory.db", root / "memory.db-wal", root / "memory.db-shm", root / "memory.db-journal",
     })
     # Fanout receipts are executable runtime state: even a custom file name
@@ -579,13 +646,22 @@ def _control_plane_paths() -> set[Path]:
         if not fanout_db.is_absolute():
             fanout_db = Path.cwd() / fanout_db
         fanout_db = _resolve_best_effort(fanout_db)
-    else:
+        paths.update({
+            fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
+        })
+    elif home is not None:
         fanout_db = home / "fanout.db"
+        paths.update({
+            fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
+        })
     paths.update({
-        fanout_db, Path(str(fanout_db) + "-wal"), Path(str(fanout_db) + "-shm"), Path(str(fanout_db) + "-journal"),
         root / "fanout.db", root / "fanout.db-wal", root / "fanout.db-shm", root / "fanout.db-journal",
     })
-    paths.update(live_control_plane_inventory().exact_files)
+    if home_candidate is not None:
+        try:
+            paths.update(live_control_plane_inventory().exact_files)
+        except PermissionError:
+            pass
     return {_resolve_best_effort(path) for path in paths}
 
 
@@ -741,10 +817,14 @@ def _is_protected_by_name(path: Path) -> bool:
         return True
     if _is_inside(path, _resolve_best_effort(RUNTIME_PACKAGE_DATA_DIR)):
         return True
+    root = _resolve_best_effort(workspace_root())
     suffix = path.suffix.lower()
+    if suffix in FIRST_PARTY_CONFIG_SUFFIXES and any(
+        _is_inside(path, root / name) for name in FIRST_PARTY_CODE_DIRS
+    ):
+        return True
     if suffix not in EXECUTABLE_SCRIPT_SUFFIXES:
         return False
-    root = _resolve_best_effort(workspace_root())
     # Sonder's own modules and launchers: directly in the install root, or
     # inside its first-party code directories (RUNTIME_PACKAGE_DIRS for
     # ``.py``, FIRST_PARTY_CODE_DIRS for any script). A *nested user project*
