@@ -627,17 +627,37 @@ def extract_archive(
     )
     plan = _plan(source, limits, deadline=deadline)
     # The destination check sees only a directory name, which no module rule
-    # matches. Each member's final path gets the guard's code rules, so an
-    # extraction cannot plant what write_file refuses: the ``__init__.py`` of
-    # a new top-level package (``yaml/__init__.py``) or a collected test
-    # module / ``conftest.py`` under ``tests``. Secret names keep the member
-    # policy of _portable_member_path.
+    # matches. Each member's final path gets the guard's code, interpreter-env,
+    # and G0648 sensitive-directory rules, so an extraction cannot plant what
+    # write_file refuses: a top-level package (``yaml/__init__.py``), collected
+    # tests/``conftest.py``, interpreter environment files, ``.gcloud/...``, or
+    # credential-store files directly under a profile directory such as
+    # ``.docker``/``.config``. Base-secret token-store files inside an ordinary
+    # project output folder keep the member policy of _portable_member_path.
     if not developer_authorized:
         for entry in plan["entries"]:
-            target = destination.joinpath(*entry["path"].split("/"))
+            member_parts = entry["path"].split("/")
+            target = destination.joinpath(*member_parts)
             if file_ops._is_runtime_code_path(target):
                 raise PermissionError(
                     f"refusing to mutate protected Sonder control-plane path {target} "
+                    "without an authenticated developer token"
+                )
+            if file_ops._is_protected_interpreter_environment(target):
+                raise PermissionError(
+                    f"refusing to mutate the Python interpreter environment path {target} "
+                    "without an authenticated developer token"
+                )
+            sensitive_dir = file_ops._sensitive_dir_component(target)
+            if sensitive_dir:
+                raise PermissionError(
+                    f"refusing to mutate sensitive directory or credential store path {target} ({sensitive_dir}) "
+                    "without an authenticated developer token"
+                )
+            cred_component = file_ops.credential_read_component(target)
+            if cred_component and not file_ops.credential_part(member_parts):
+                raise PermissionError(
+                    f"refusing to mutate sensitive directory or credential store path {target} ({cred_component}) "
                     "without an authenticated developer token"
                 )
     stage = Path(tempfile.mkdtemp(prefix=".sonder-archive-", dir=destination.parent))

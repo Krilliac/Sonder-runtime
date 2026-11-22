@@ -452,8 +452,11 @@ def allowed_roots(extra_roots: str = "") -> list[Path]:
             resolved = root.resolve()
         except OSError:
             resolved = _normalized_absolute(root)
-        if resolved not in out:
-            out.append(resolved)
+        parsed = _parse_policy_root(str(resolved), expand_user=False)
+        if parsed is None:
+            continue
+        if parsed not in out:
+            out.append(parsed)
     return _attenuate_managed_roots(out)
 
 
@@ -479,9 +482,11 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
     excluded = []
     for root in (workspace_root(), Path(runtime_paths.default_home())):
         try:
-            excluded.append(root.resolve())
+            resolved_excluded = root.resolve()
         except OSError:
-            excluded.append(_normalized_absolute(root))
+            resolved_excluded = _normalized_absolute(root)
+        parsed_excluded = _parse_policy_root(str(resolved_excluded), expand_user=False)
+        excluded.append(parsed_excluded if parsed_excluded is not None else resolved_excluded)
     explicit: list[Path] = []
     for item in configured or ():
         if item is None:
@@ -505,10 +510,13 @@ def lane_grant_roots(configured=()) -> tuple[str, ...]:
             resolved = root.resolve()
         except OSError:
             resolved = _normalized_absolute(root)
-        text = str(resolved)
+        parsed_resolved = _parse_policy_root(str(resolved), expand_user=False)
+        if parsed_resolved is None:
+            continue
+        text = str(parsed_resolved)
         # An operator's own [state].workspace_roots entry is kept as written;
         # only the ambient sources may not hand out the state home or checkout.
-        if text in out or (root not in explicit and resolved in excluded):
+        if text in out or (root not in explicit and parsed_resolved in excluded):
             continue
         out.append(text)
     return tuple(str(root) for root in _attenuate_managed_roots([Path(text) for text in out]))
@@ -736,7 +744,7 @@ def read_policy_snapshot():
     if _POLICY_SNAPSHOT.get() is not None:
         yield
         return
-    snapshot = (_control_plane_paths(), live_control_plane_inventory())
+    snapshot = (_control_plane_paths(), live_control_plane_inventory(), {})
     token = _POLICY_SNAPSHOT.set(snapshot)
     try:
         yield
@@ -895,24 +903,34 @@ def _directory_mtime_ns(place: Path) -> int | None:
         return None
 
 
+def _normalize_import_filename(file_name: str) -> str:
+    """Match ``FileFinder._fill_cache()`` suffix lowercasing on Windows."""
+    if not sys.platform.startswith("win"):
+        return file_name
+    stem, dot, suffix = file_name.partition(".")
+    return f"{stem}.{suffix.lower()}" if dot else file_name
+
+
 def _module_name_of(file_name: str, suffixes: tuple[str, ...]) -> str | None:
     """The module a file named ``file_name`` provides to FileFinder, or None."""
+    normalized = _normalize_import_filename(file_name)
     for suffix in suffixes:
-        if file_name.endswith(suffix) and len(file_name) > len(suffix):
-            return file_name[: -len(suffix)]
+        if normalized.endswith(suffix) and len(normalized) > len(suffix):
+            return normalized[: -len(suffix)]
     return None
 
 
 def _classify_site_directory(directory: str, suffixes: tuple[str, ...], init_names: frozenset[str]) -> str:
     """Classify a site-directory child: ``"regular"``, ``"portion"`` or ``""``.
 
-    ``"regular"`` is a directory with an ``__init__`` module (a regular
+    ``"regular"`` is a directory with an ``__init__`` module file (a regular
     package); ``"portion"`` is a PEP 420 namespace portion.
 
     A portion holds at least one module file or subpackage directory and no
-    ``__init__`` module. The ``__init__`` stat FileFinder does is
-    case-insensitive on Windows, so init names are compared casefolded there
-    and exactly elsewhere (exact matching only ever counts more portions).
+    ``__init__`` module file. The ``__init__`` stat FileFinder does is
+    case-insensitive on Windows, and ``FileFinder._fill_cache()`` lowercases
+    filename suffixes after the first ``.`` on Windows, so both are mirrored
+    here.
     """
     fold = os.name == "nt"
     has_content = False
@@ -920,99 +938,124 @@ def _classify_site_directory(directory: str, suffixes: tuple[str, ...], init_nam
         with os.scandir(directory) as entries:
             for entry in entries:
                 name = entry.name
-                if (name.casefold() if fold else name) in init_names:
+                try:
+                    is_file = entry.is_file()
+                    is_dir = not is_file and entry.is_dir()
+                except OSError:
+                    continue
+                if is_file and (name.casefold() if fold else name) in init_names:
                     return "regular"
                 if has_content:
                     continue
-                try:
-                    if entry.is_dir():
-                        has_content = name.isidentifier() and name != "__pycache__"
-                    elif entry.is_file():
-                        has_content = name.endswith(suffixes)
-                except OSError:
-                    continue
+                if is_dir:
+                    has_content = name.isidentifier() and name != "__pycache__"
+                elif is_file:
+                    has_content = _normalize_import_filename(name).endswith(suffixes)
     except (OSError, ValueError):
         return ""
     return "portion" if has_content else ""
 
 
-# (key, site-directory mtimes, monotonic time they were last checked, names).
-_NAMESPACE_PORTION_CACHE: tuple[tuple[object, ...], tuple[int | None, ...], float, frozenset[str]] | None = None
-# How long a cached portion set is reused before the site directories are
-# stat'ed again (an os.stat costs ~60 us on Windows, per directory, per guard call).
-_NAMESPACE_RECHECK_SECONDS = 1.0
+# Per-place top-level site-directory listing cache:
+# {normcase_place: (mtime_ns, exact_dirs, lower_dirs, exact_modules, lower_modules)}
+_SiteListing = tuple[
+    int | None,
+    frozenset[str],
+    dict[str, tuple[str, ...]],
+    frozenset[str],
+    frozenset[str],
+]
+_SITE_LISTING_CACHE: dict[str, _SiteListing] = {}
 
 
-def _installed_namespace_portions(root: Path) -> frozenset[str]:
-    """Top-level names that are PEP 420 namespace portions in the site directories.
-
-    Taken from the exact ``os.scandir`` entry names of each
-    ``_namespace_site_dirs()`` directory that does not hold ``root``: a
-    directory whose name is an identifier, with no ``__init__`` module and at
-    least one module file or subpackage directory. A name that is also a
-    regular package or a module in any of those directories is dropped,
-    because the import system returns that instead of a namespace package.
-    Names are lower-cased when ``PYTHONCASEOK`` relaxes matching.
-
-    The result is cached per (root, site directories, case mode) and
-    revalidated against the site directories' mtimes at most once per
-    ``_NAMESPACE_RECHECK_SECONDS``. Adding or removing a top-level entry in a
-    site directory (a new distribution) changes its mtime and rebuilds the
-    set, so a new install is seen within that interval; a change deeper inside
-    an existing entry (an ``__init__`` removed) does not change the mtime and
-    is not seen until one that does. The cache is one tuple swapped by
-    assignment, so concurrent callers at worst rebuild it twice.
-    """
-    import time
-
-    global _NAMESPACE_PORTION_CACHE
-    relaxed = _import_case_relaxed()
-    places = tuple(place for place in _namespace_site_dirs() if not _is_inside(root, place))
-    key: tuple[object, ...] = (os.path.normcase(str(root)), places, relaxed)
-    now = time.monotonic()
-    cached = _NAMESPACE_PORTION_CACHE
-    if cached is not None and cached[0] == key and now - cached[2] < _NAMESPACE_RECHECK_SECONDS:
-        return cached[3]
-    stamps = tuple(_directory_mtime_ns(place) for place in places)
-    if cached is not None and cached[0] == key and cached[1] == stamps:
-        _NAMESPACE_PORTION_CACHE = (key, stamps, now, cached[3])
-        return cached[3]
-    suffixes = tuple(importlib.machinery.all_suffixes())
-    fold = os.name == "nt"
-    init_names = frozenset(
-        ("__init__" + suffix).casefold() if fold else "__init__" + suffix for suffix in suffixes
-    )
-    portions: set[str] = set()
-    shadowing: set[str] = set()
-    for place in places:
+def _scan_site_directory_listing(
+    place: Path,
+    stamp: int | None,
+    suffixes: tuple[str, ...],
+) -> _SiteListing:
+    exact_dirs: set[str] = set()
+    lower_dirs_map: dict[str, list[str]] = {}
+    exact_modules: set[str] = set()
+    lower_modules: set[str] = set()
+    try:
+        with os.scandir(place) as entries:
+            listing = list(entries)
+    except (OSError, ValueError):
+        return (stamp, frozenset(), {}, frozenset(), frozenset())
+    for entry in listing:
+        name = entry.name
         try:
-            with os.scandir(place) as entries:
-                listing = list(entries)
-        except (OSError, ValueError):
+            is_dir = entry.is_dir()
+            is_file = not is_dir and entry.is_file()
+        except OSError:
             continue
-        for entry in listing:
-            name = entry.name
-            try:
-                is_dir = entry.is_dir()
-                is_file = not is_dir and entry.is_file()
-            except OSError:
-                continue
-            if is_file:
-                module = _module_name_of(name, suffixes)
-                if module is not None:
-                    shadowing.add(module.lower() if relaxed else module)
-                continue
-            if not is_dir or not name.isidentifier() or name == "__pycache__":
-                continue
-            folded = name.lower() if relaxed else name
-            kind = _classify_site_directory(entry.path, suffixes, init_names)
+        if is_file:
+            module = _module_name_of(name, suffixes)
+            if module is not None:
+                exact_modules.add(module)
+                lower_modules.add(module.lower())
+            continue
+        if not is_dir or not name.isidentifier() or name == "__pycache__":
+            continue
+        exact_dirs.add(name)
+        lower_dirs_map.setdefault(name.lower(), []).append(name)
+    return (
+        stamp,
+        frozenset(exact_dirs),
+        {k: tuple(v) for k, v in lower_dirs_map.items()},
+        frozenset(exact_modules),
+        frozenset(lower_modules),
+    )
+
+
+def _site_directory_listing(place: Path, suffixes: tuple[str, ...]) -> _SiteListing:
+    """Top-level directory and module-file names in ``place``, revalidated via ``st_mtime_ns``.
+
+    Inside ``read_policy_snapshot()``, each site directory is stat'ed at most
+    once per snapshot so bulk scans stay O(1) per file. Outside a snapshot
+    (including every mutation call), ``os.stat(place)`` always runs so newly
+    installed distributions are visible immediately with no blind TTL window.
+    """
+    place_key = os.path.normcase(str(place))
+    snapshot = _POLICY_SNAPSHOT.get()
+    snapshot_cache = snapshot[2] if snapshot is not None and len(snapshot) > 2 else None
+    if snapshot_cache is not None and place_key in snapshot_cache:
+        return snapshot_cache[place_key]
+    stamp = _directory_mtime_ns(place)
+    cached = _SITE_LISTING_CACHE.get(place_key)
+    if cached is not None and cached[0] == stamp:
+        listing = cached
+    else:
+        listing = _scan_site_directory_listing(place, stamp, suffixes)
+        _SITE_LISTING_CACHE[place_key] = listing
+    if snapshot_cache is not None:
+        snapshot_cache[place_key] = listing
+    return listing
+
+
+def _matches_namespace_in_group(
+    name: str,
+    group: list[tuple[Path, _SiteListing]],
+    *,
+    relaxed: bool,
+    suffixes: tuple[str, ...],
+    init_names: frozenset[str],
+) -> bool:
+    """Whether ``name`` is an unshadowed PEP 420 portion across ``group``."""
+    lookup = name.lower() if relaxed else name
+    has_portion = False
+    for place, listing in group:
+        _stamp, exact_dirs, lower_dirs, exact_modules, lower_modules = listing
+        if lookup in (lower_modules if relaxed else exact_modules):
+            return False
+        matched_dirs = lower_dirs.get(lookup, ()) if relaxed else ((name,) if name in exact_dirs else ())
+        for entry_name in matched_dirs:
+            kind = _classify_site_directory(str(place / entry_name), suffixes, init_names)
+            if kind == "regular":
+                return False
             if kind == "portion":
-                portions.add(folded)
-            elif kind == "regular":
-                shadowing.add(folded)
-    result = frozenset(portions - shadowing)
-    _NAMESPACE_PORTION_CACHE = (key, stamps, now, result)
-    return result
+                has_portion = True
+    return has_portion
 
 
 def _is_installed_namespace_package(name: str, root: Path) -> bool:
@@ -1025,12 +1068,55 @@ def _is_installed_namespace_package(name: str, root: Path) -> bool:
     imports). ``name`` is the directory's on-disk spelling (the caller passes
     a resolved path) and is matched the way FileFinder matches it: exactly,
     or lower-cased under ``PYTHONCASEOK``. Only portions in the site
-    directories count (``_installed_namespace_portions``).
+    directories count (``_namespace_site_dirs()``).
+
+    Top-level listings per site directory are cached by ``st_mtime_ns`` (and
+    once per ``read_policy_snapshot``); whenever ``name`` matches an existing
+    site-directory child, that child is classified live on disk so in-place
+    transitions (adding the first module or removing ``__init__.py``) are seen
+    immediately. Active ``sys.path`` site directories and inactive site
+    directories (such as ``sys.base_prefix`` site-packages in an isolated venv)
+    are evaluated separately so a regular package in an inactive site directory
+    cannot falsely shadow an active venv namespace portion.
     """
     if not name.isidentifier() or name.casefold() == "__pycache__":
         return False
-    portions = _installed_namespace_portions(root)
-    return (name.lower() if _import_case_relaxed() else name) in portions
+    relaxed = _import_case_relaxed()
+    places = tuple(place for place in _namespace_site_dirs() if not _is_inside(root, place))
+    if not places:
+        return False
+    suffixes = tuple(importlib.machinery.all_suffixes())
+    lookup = name.lower() if relaxed else name
+    place_listings = [(place, _site_directory_listing(place, suffixes)) for place in places]
+    if not any(
+        (lookup in listing[2]) if relaxed else (lookup in listing[1])
+        for _place, listing in place_listings
+    ):
+        return False
+    fold = os.name == "nt"
+    init_names = frozenset(
+        ("__init__" + suffix).casefold() if fold else "__init__" + suffix for suffix in suffixes
+    )
+    active_sys_path = {
+        os.path.normcase(str(_resolve_best_effort(Path(entry))))
+        for entry in sys.path
+        if entry
+    }
+    active_group = [
+        item for item in place_listings if os.path.normcase(str(item[0])) in active_sys_path
+    ]
+    inactive_group = [
+        item for item in place_listings if os.path.normcase(str(item[0])) not in active_sys_path
+    ]
+    if active_group and _matches_namespace_in_group(
+        name, active_group, relaxed=relaxed, suffixes=suffixes, init_names=init_names
+    ):
+        return True
+    if inactive_group and _matches_namespace_in_group(
+        name, inactive_group, relaxed=relaxed, suffixes=suffixes, init_names=init_names
+    ):
+        return True
+    return False
 
 
 def _is_root_import_path(path: Path, root: Path) -> bool:
@@ -1108,15 +1194,24 @@ def _is_interpreter_environment_path(path: Path) -> bool:
     ``<root>/venv`` and ``<root>/.venv`` as a whole, and the running
     interpreter's library directories (``_interpreter_library_dirs``). A
     directory that holds the install root itself is skipped, so an unusual
-    layout never puts the whole workspace under this rule. Only
-    ``_require_mutation_access`` applies it, so reading library source stays
-    allowed; callers that consult ``_is_protected_mutation_path`` alone (the
-    recursive-delete walks, a patch's target check) do not see this rule.
+    layout never puts the whole workspace under this rule. Kept outside
+    ``_is_protected_mutation_path`` so reading library source stays allowed,
+    and enforced across mutation guards (single-file mutations, recursive
+    delete, batch preflight, archive extraction, patch and formatter scopes).
     """
     root = _resolve_best_effort(workspace_root())
     places = [root / name for name in INTERPRETER_ENVIRONMENT_DIRS]
     places.extend(place for place in _interpreter_library_dirs() if not _is_inside(root, place))
     return any(_is_inside(path, place) for place in places)
+
+
+def _is_protected_interpreter_environment(path: Path) -> bool:
+    """Spelling-safe interpreter-environment check that fails closed on odd namespaces."""
+    try:
+        spelled = _protection_spelling(path)
+    except (OSError, ValueError):
+        return True
+    return _is_interpreter_environment_path(spelled)
 
 
 def _is_protected_by_name(path: Path) -> bool:
@@ -1230,15 +1325,8 @@ def _policy_file_refusal(path: Path, *, holding: bool) -> PermissionError | None
     )
 
 
-def _sensitive_mutation_component(path: Path) -> str:
-    """The sensitive directory or credential-store component of *path*, or "".
-
-    Checked relative to the containing allowed root(s) so an operator root
-    that explicitly names a sensitive directory (for example ``~/.ssh``) stays
-    writable. When *path* lies outside every allowed root (a bypass call), its
-    full absolute components are inspected so bypass never opens sensitive
-    directories.
-    """
+def _sensitive_dir_component(path: Path) -> str:
+    """The sensitive directory component of *path* relative to containing roots, or ""."""
     resolved = _resolve_best_effort(path)
     containing = [
         root
@@ -1249,26 +1337,38 @@ def _sensitive_mutation_component(path: Path) -> str:
         for part in resolved.parts[1:]:
             if part.lower() in SENSITIVE_READ_DIRECTORIES:
                 return part.lower()
-    else:
-        sensitive = ""
-        for root in containing:
-            if resolved == root:
-                parts: tuple[str, ...] = ()
-            else:
-                try:
-                    parts = resolved.relative_to(root).parts
-                except ValueError:
-                    parts = resolved.parts[1:]
-            match = next(
-                (part.lower() for part in parts if part.lower() in SENSITIVE_READ_DIRECTORIES),
-                "",
-            )
-            if not match:
-                sensitive = ""
-                break
-            sensitive = sensitive or match
-        if sensitive:
-            return sensitive
+        return ""
+    sensitive = ""
+    for root in containing:
+        if resolved == root:
+            parts: tuple[str, ...] = ()
+        else:
+            try:
+                parts = resolved.relative_to(root).parts
+            except ValueError:
+                parts = resolved.parts[1:]
+        match = next(
+            (part.lower() for part in parts if part.lower() in SENSITIVE_READ_DIRECTORIES),
+            "",
+        )
+        if not match:
+            return ""
+        sensitive = sensitive or match
+    return sensitive
+
+
+def _sensitive_mutation_component(path: Path) -> str:
+    """The sensitive directory or credential-store component of *path*, or "".
+
+    Checked relative to the containing allowed root(s) so an operator root
+    that explicitly names a sensitive directory (for example ``~/.ssh``) stays
+    writable. When *path* lies outside every allowed root (a bypass call), its
+    full absolute components are inspected so bypass never opens sensitive
+    directories.
+    """
+    sensitive = _sensitive_dir_component(path)
+    if sensitive:
+        return sensitive
     return credential_read_component(path)
 
 
@@ -1720,6 +1820,7 @@ def _require_safe_recursive_delete(
                 if (
                     _is_sensitive_control_path(child)
                     or _is_protected_mutation_path(child)
+                    or _is_protected_interpreter_environment(child)
                     or _sensitive_mutation_component(child)
                 ):
                     raise PermissionError(
@@ -1743,6 +1844,7 @@ def _guard_delete_entry(child: Path) -> None:
     if (
         _is_sensitive_control_path(child)
         or _is_protected_mutation_path(child)
+        or _is_protected_interpreter_environment(child)
         or _sensitive_mutation_component(child)
     ):
         raise PermissionError("refusing to delete protected control state: %s" % child)
@@ -2909,6 +3011,8 @@ def _batch_preflight(
             relative = resolved.relative_to(authorized_root)
             if (
                 _is_protected_mutation_path(resolved)
+                or _is_protected_interpreter_environment(resolved)
+                or _sensitive_mutation_component(resolved)
                 or any(
                     part.lower() in SENSITIVE_READ_DIRECTORIES
                     for part in relative.parts

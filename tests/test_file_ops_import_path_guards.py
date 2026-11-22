@@ -415,10 +415,9 @@ def test_other_sys_path_entries_and_interpreter_dirs_do_not_count(workspace, nam
     assert (ws / "lib_ns" / "m.py").is_file()
 
 
-def test_newly_installed_namespace_portion_is_seen(workspace, namespace_site, monkeypatch):
-    # The cached portion set is revalidated against the site directories'
-    # mtimes; drop the recheck interval so the test does not wait for it.
-    monkeypatch.setattr(file_ops, "_NAMESPACE_RECHECK_SECONDS", 0.0)
+def test_newly_installed_namespace_portion_is_seen_immediately(workspace, namespace_site):
+    # Outside read_policy_snapshot, site directories are stat'ed on every check
+    # (no blind TTL window), so a newly installed portion is refused immediately.
     ws, _home = workspace
     out = file_ops.write_file("later/x.py", "x = 1\n", mode="create")
     assert out["bytes"] > 0
@@ -427,6 +426,54 @@ def test_newly_installed_namespace_portion_is_seen(workspace, namespace_site, mo
     with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
         file_ops.write_file("later/y.py", PAYLOAD, mode="create")
     assert not (ws / "later" / "y.py").exists()
+
+
+def test_in_place_site_subdir_transition_is_seen_without_top_level_mtime_change(workspace, namespace_site):
+    # Adding the first module into an existing site dir child, or deleting its
+    # __init__.py (migrating to PEP 420), does not change site-packages' mtime,
+    # yet live per-name classification must see both transitions immediately.
+    ws, _home = workspace
+    (namespace_site / "evolving").mkdir()
+    (namespace_site / "evolving" / "README.txt").write_text("notes\n", encoding="utf-8")
+    (namespace_site / "migrating").mkdir()
+    (namespace_site / "migrating" / "__init__.py").write_text("", encoding="utf-8")
+    (namespace_site / "migrating" / "sub.py").write_text("x = 1\n", encoding="utf-8")
+    assert file_ops.write_file("benign/prime.py", "x = 1\n", mode="create")["bytes"] > 0
+
+    (namespace_site / "evolving" / "mod.py").write_text("v = 1\n", encoding="utf-8")
+    (namespace_site / "migrating" / "__init__.py").unlink()
+    for relative in ("evolving/evil.py", "migrating/evil.py"):
+        with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+            file_ops.write_file(relative, PAYLOAD, mode="create")
+        assert not (ws / relative).exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows FileFinder lowercases suffixes")
+def test_windows_uppercase_module_suffix_in_site_portion_is_protected(workspace, namespace_site):
+    ws, _home = workspace
+    (namespace_site / "upperns").mkdir()
+    (namespace_site / "upperns" / "mod.PY").write_text("v = 1\n", encoding="utf-8")
+    with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+        file_ops.write_file("upperns/mod.py", PAYLOAD, mode="create")
+    assert not (ws / "upperns" / "mod.py").exists()
+
+
+def test_inactive_base_site_regular_package_does_not_shadow_active_venv_portion(
+    workspace, tmp_path, monkeypatch
+):
+    ws, _home = workspace
+    venv_site = tmp_path / "venv_site"
+    base_site = tmp_path / "base_site"
+    (venv_site / "dualns" / "sub").mkdir(parents=True)
+    (venv_site / "dualns" / "sub" / "mod.py").write_text("v = 1\n", encoding="utf-8")
+    (base_site / "dualns").mkdir(parents=True)
+    (base_site / "dualns" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "_namespace_site_dirs", lambda: (venv_site.resolve(), base_site.resolve()))
+    monkeypatch.setattr(sys, "path", [*sys.path, str(venv_site.resolve())])
+    monkeypatch.delenv("PYTHONCASEOK", raising=False)
+    with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+        file_ops.write_file("dualns/evil.py", PAYLOAD, mode="create")
+    assert not (ws / "dualns" / "evil.py").exists()
 
 
 def test_namespace_site_dirs_are_site_packages_only():
@@ -632,3 +679,63 @@ def test_an_extended_length_root_contains_its_plain_spelled_files(workspace, tmp
     monkeypatch.delenv("SONDER_FILE_ROOTS")
     with pytest.raises(PermissionError, match="outside allowed roots"):
         file_ops.write_file(str(outside / "c.txt"), "z\n")
+
+
+def test_recursive_delete_refuses_tree_holding_interpreter_library_dir(workspace, monkeypatch):
+    ws, _home = workspace
+    pylib = ws / "pylib"
+    sp = pylib / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "pkg.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(file_ops, "_interpreter_library_dirs", lambda: (sp.resolve(),))
+    confirm = f"DELETE {pylib.resolve()}"
+    with pytest.raises(PermissionError, match="without an authenticated developer token"):
+        file_ops.delete_path("pylib", recursive=True, dry_run=False, confirm=confirm)
+    assert (sp / "pkg.py").is_file()
+
+
+def test_patch_refusal_and_batch_preflight_refuse_interpreter_environment_paths(workspace):
+    from sonder_runtime.adapters import git_change_targets, protected_write_scope
+
+    ws, _home = workspace
+    for rel in (
+        "venv/Lib/site-packages/evil.pth",
+        "venv/Lib/site-packages/sitecustomize.py",
+        ".venv/Lib/site-packages/evil.pth",
+    ):
+        assert git_change_targets.patch_refusal("apply_patch", ws, ws, [rel]), rel
+    assert protected_write_scope.scope_refusal("format_code", ws, ws / "venv")
+    with pytest.raises(file_ops.BatchWriteError) as info:
+        file_ops.batch_write_files([
+            {"path": "benign.txt", "content": "ok\n", "mode": "create"},
+            {"path": "venv/Lib/site-packages/evil.pth", "content": "import os\n", "mode": "create"},
+        ])
+    assert info.value.report["transaction"] == "not_started"
+    assert not (ws / "benign.txt").exists()
+
+
+def test_allowed_roots_and_lane_grant_roots_drop_post_resolve_drive_or_unc_targets(
+    workspace, tmp_path, monkeypatch
+):
+    ws, _home = workspace
+    good = tmp_path / "good_proj"
+    good.mkdir()
+    bad_link = tmp_path / "bad_root_link"
+    bad_link.mkdir()
+    drive_root = Path(ws.anchor)
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, strict=False):
+        if self == bad_link:
+            return drive_root
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    monkeypatch.setenv("SONDER_FILE_ROOTS", f"{good}{os.pathsep}{bad_link}")
+    roots = file_ops.allowed_roots()
+    assert ws.resolve() in roots
+    assert good.resolve() in roots
+    assert drive_root not in roots
+    lane_roots = file_ops.lane_grant_roots(configured=(str(good), str(bad_link)))
+    assert str(good.resolve()) in lane_roots
+    assert str(drive_root) not in lane_roots
