@@ -67,6 +67,7 @@ def isolated_root_policy(monkeypatch, tmp_path):
     return roots_file
 
 
+@WINDOWS_ONLY
 @pytest.mark.parametrize(
     "raw, expected",
     [

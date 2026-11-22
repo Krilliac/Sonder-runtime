@@ -105,7 +105,7 @@ def test_unreadable_driver_configuration_fails_closed(tmp_path, monkeypatch):
     real_run = harness_tools._run
 
     def probe_fails(cmd, **kwargs):
-        if "--get-regexp" in cmd:
+        if "--get-regexp" in cmd or ("--list" in cmd and "--name-only" in cmd):
             return {"ok": False, "returncode": 128, "timed_out": False,
                     "elapsed_ms": 0, "stdout": "", "stderr": "bad config",
                     "command": list(cmd)}

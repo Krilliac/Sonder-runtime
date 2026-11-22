@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,10 @@ def test_sharded_launcher_hardening_markers() -> None:
     assert "ConvertTo-RpcBaseUrl" in text
     assert os.path.basename(str(SCRIPTS)) == "rpc"
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Start-RpcDetached uses Windows Win32_Process CIM and taskkill",
+)
 def test_detached_launch_does_not_inherit_caller_pipes(shell: str, tmp_path: Path) -> None:
     # A caller that pipes output (one-shot ssh, CI, agent wrappers) must get
     # control back immediately, not when the launched server exits.
