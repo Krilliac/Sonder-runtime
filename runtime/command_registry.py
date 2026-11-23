@@ -239,6 +239,12 @@ COMMANDS = [
         "summary": "Generate an animated GIF inline via the local image model or procedural GIF89a studio.",
     },
     {
+        "name": "/3d",
+        "category": "assets",
+        "risk": "ask",
+        "summary": "Generate a 3D model (.glb) via local Hunyuan3D-2 with an inline Blender studio preview.",
+    },
+    {
         "name": "/doc",
         "category": "inspect",
         "risk": "safe",

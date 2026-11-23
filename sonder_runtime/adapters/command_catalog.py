@@ -236,6 +236,7 @@ _CATEGORY_BY_TOOL = {
     "weather_lookup": "web",
     "openrouter_models": "web",
     "mesh_generate": "execution",
+    "generate_3d_model": "assets",
     "security_eval": "data",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
@@ -381,7 +382,7 @@ _CATEGORY_BY_SLASH = {
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
-    "/img": "assets", "/gif": "assets",
+    "/img": "assets", "/gif": "assets", "/3d": "assets", "/model3d": "assets",
 }
 
 # A four-class ``_RISK_ORDER`` used to sit here -- no ``execution``, and, when
@@ -619,6 +620,8 @@ _UNREGISTERED_BRANCH_WORK = {
     # like ``/location`` and ``/hardware``.
     "/img": "img",
     "/gif": "gif",
+    "/3d": "generate_3d_model",
+    "/model3d": "generate_3d_model",
 }
 
 # Console branches that front *several* native typed tools, through the typed

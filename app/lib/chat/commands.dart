@@ -15,6 +15,7 @@ const quickCommands = <String, String>{
   '/route': 'Show which tier/model should handle a prompt',
   '/img': 'Generate an inline image via local image model or fallback',
   '/gif': 'Generate an animated GIF via local image model or GIF89a studio',
+  '/3d': 'Generate a 3D model (.glb) via local Hunyuan3D-2 with studio preview',
   '/temp': "Show or set this session's temperature (0-2, or auto)",
   '/effort': "Show or set this session's reasoning effort (off|minimal|low|medium|high|xhigh|auto)",
   '/persona':

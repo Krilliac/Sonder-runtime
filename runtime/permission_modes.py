@@ -847,6 +847,8 @@ EXECUTION_TOOLS = frozenset({
     # Model-written Blender Python (bootstrap/mesh_agent_tools.py): runs in a
     # headless Blender subprocess at run_code trust, not a sandbox.
     "mesh_generate",
+    # Local Hunyuan3D-2 + headless Blender turnaround preview (bootstrap/mesh_agent_tools.py).
+    "generate_3d_model",
 })
 
 # The same class, for work that no *registered tool* fronts. ``EXECUTION_TOOLS``

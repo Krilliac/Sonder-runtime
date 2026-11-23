@@ -83,6 +83,7 @@ MCP_TOOL_MANIFEST = {
     "run_project": "Run a bounded temporary multi-file project with optional build commands.",
     "artifact_generate/artifact_verify": "Create and verify stdlib-only images, animated GIF/AVI video, SVGs, Office files, MIDI/WAV audio, captions, EDL timelines, data, web mockups, OBJ and textured humanoid GLBs with full morph frames and clip sequences, scenes, and themed packs from a free-form brief.",
     "mesh_generate": "Generate a low-poly 3D model (GLB/FBX) from a brief: model-written Blender scripts are safety-checked, built and rendered in headless Blender, critiqued by the vision model, and revised over several candidates (needs SONDER_BLENDER; runs model-written code at run_code trust).",
+    "generate_3d_model": "Generate a textured or clay 3D model (.glb/.obj) from a text prompt or guarded local image using local Hunyuan3D-2, render a 2x2 studio preview in headless Blender, and return the model path, download URL, and inline preview.",
     "security_eval": "Measure a local model's precision and recall on labelled security hypotheses, with and without retrieved repo context: reads an external JSONL dataset, calls only the named local model (cloud routes are refused) and writes items.jsonl, report.json and summary.md under the caller's out_dir.",
     "game_reference_suite/game_generate_and_test/game_generation_campaign": "Build, execute, repair, and ground persistent in-house 2D/2.5D/3D game projects and fleets.",
     "loop": "Repeat bounded code/model/system actions.",
