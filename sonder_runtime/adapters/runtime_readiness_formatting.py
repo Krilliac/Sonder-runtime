@@ -15,7 +15,7 @@ if TYPE_CHECKING:
         embedding_model: str | None
 
 BASE_LOCAL_TIERS = ("fast", "code", "general")
-OPTIONAL_LOCAL_TIERS = ("reasoning", "vision")
+OPTIONAL_LOCAL_TIERS = ("reasoning", "vision", "security", "creative", "draft")
 
 
 def format_model_readiness(
