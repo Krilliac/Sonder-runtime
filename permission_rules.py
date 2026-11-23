@@ -16,6 +16,7 @@ policy artifact is malformed. A truly missing file remains the normal
 first-run case and uses the built-in local defaults.
 """
 
+import importlib
 import json
 import logging
 import os
@@ -207,7 +208,15 @@ def _load_report(home):
             rules_kept=0,
             dropped=tuple(dropped),
         )
-    rules = _policy.migrate_shipped_rows(rules)
+    migrate = getattr(_policy, "migrate_shipped_rows", None)
+    if migrate is None:
+        try:
+            importlib.reload(_policy)
+            migrate = getattr(_policy, "migrate_shipped_rows", None)
+        except Exception:
+            migrate = None
+    if migrate is not None:
+        rules = migrate(rules)
     return rules, LoadReport(
         str(path),
         LOAD_PARTIAL if dropped else LOAD_OK,
