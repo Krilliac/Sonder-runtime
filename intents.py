@@ -35,9 +35,13 @@ _STRICT_RE = re.compile(
 )
 
 _RUN_RE = re.compile(
-    r"^" + _POLITE + r"(?:run|execute)"
-    r"(?:\s+(?:it|that|this|(?:the|my|this|that)\s+(?:code|script)))?"
-    r"(?:\s+(?:again|for\s+me))?" + _TAIL + r"$"
+    r"^(?:(?:please|kindly|can\s+you|could\s+you|would\s+you)\s+)*"
+    r"(?:run|execute)"
+    r"(?:\s+(?:it|that|this|(?:the|my|this|that)\s+(?:code|script|program|snippet)))?"
+    r"(?:\s+(?:again|for\s+me))?"
+    r"(?:\s+(?:so\s+(?:i|we)\s+can\s+see(?:\s+(?:it|that|this|the\s+(?:output|result)))?"
+    r"|to\s+see(?:\s+(?:it|that|this|what\s+happens|the\s+(?:output|result)))?))?"
+    + _TAIL + r"$"
 )
 
 _TRAIN_N_RE = re.compile(

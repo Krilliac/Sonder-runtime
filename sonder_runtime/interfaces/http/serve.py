@@ -6019,16 +6019,39 @@ class Handler(BaseHTTPRequestHandler):
                     status=503,
                 )
                 return
-            result = dispatch_session_route(
-                facade, path,
-                query=urllib.parse.parse_qs(
-                    urllib.parse.urlsplit(self.path).query,
-                    keep_blank_values=True,
-                ),
+            query_params = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True,
             )
+            result = dispatch_session_route(facade, path, query=query_params)
             if result is None:
                 self._send_not_found()
                 return
+            # Client apps (e.g. Flutter web deep links #/c/chat-...) address a
+            # thread by its un-namespaced client session id, while POST
+            # /v1/chat/completions persists events under the caller's
+            # principal-namespaced storage id. When a literal replay lookup is
+            # empty, resolve the caller's own namespaced id and use it if present.
+            if (
+                result.status_code == 200
+                and path.startswith("/v1/sessions/")
+                and isinstance(result.body, dict)
+                and result.body.get("recovered_sequence") == 0
+            ):
+                _parts = path.split("?", 1)[0].rstrip("/")[len("/v1/sessions/"):].split("/")
+                if len(_parts) == 2 and _parts[1] == "replay":
+                    _scoped_id = _hosted_storage_id(context, _parts[0], "session")
+                    if _scoped_id and _scoped_id != _parts[0]:
+                        _alt = dispatch_session_route(
+                            facade, f"/v1/sessions/{_scoped_id}/replay", query=query_params,
+                        )
+                        if (
+                            _alt is not None
+                            and _alt.status_code == 200
+                            and isinstance(_alt.body, dict)
+                            and int(_alt.body.get("recovered_sequence") or 0) > 0
+                        ):
+                            result = _alt
             self._send_json_payload(result.body, status=result.status_code)
             return
         if path == "/v1/jobs" or path.startswith("/v1/jobs/"):
