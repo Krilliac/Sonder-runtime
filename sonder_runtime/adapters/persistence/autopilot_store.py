@@ -1095,6 +1095,35 @@ def snapshot(include_finished: bool = True, limit: int = 20, request_owner: str 
     }
 
 
+def clear_finished(request_owner: str | None = None) -> int:
+    """Delete terminal autopilot runs (and child rows) for *request_owner* (or all)."""
+    terminal = tuple(sorted(TERMINAL_STATUSES))
+    marks = ",".join("?" for _ in terminal)
+    with _write_transaction() as conn:
+        if request_owner is not None:
+            rows = conn.execute(
+                f"SELECT id FROM autopilot_runs WHERE status IN ({marks}) AND request_owner=?",
+                (*terminal, request_owner),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT id FROM autopilot_runs WHERE status IN ({marks})",
+                terminal,
+            ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return 0
+        id_marks = ",".join("?" for _ in ids)
+        conn.execute(f"DELETE FROM autopilot_steering WHERE run_id IN ({id_marks})", ids)
+        conn.execute(f"DELETE FROM autopilot_events WHERE run_id IN ({id_marks})", ids)
+        conn.execute(
+            f"DELETE FROM autopilot_workspace_reality WHERE run_id IN ({id_marks})",
+            ids,
+        )
+        conn.execute(f"DELETE FROM autopilot_runs WHERE id IN ({id_marks})", ids)
+        return len(ids)
+
+
 def clear_all() -> None:
     with _write_transaction() as conn:
         conn.execute("DELETE FROM autopilot_steering")

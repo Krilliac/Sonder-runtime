@@ -56,6 +56,15 @@ class ApprovalsPanel extends StatelessWidget {
   /// hides **Approve once…**.
   final Future<void> Function(PendingApproval item)? onApprove;
 
+  /// Declines one pending call. Null hides **Deny**.
+  final Future<void> Function(PendingApproval item)? onDeny;
+
+  /// Approves all currently pending calls after explicit confirmation.
+  final Future<void> Function()? onApproveAll;
+
+  /// Declines all currently pending calls after explicit confirmation.
+  final Future<void> Function()? onDenyAll;
+
   /// Revokes an open approval. Null hides **Revoke**.
   final Future<void> Function(IssuedApproval item)? onRevoke;
 
@@ -64,6 +73,10 @@ class ApprovalsPanel extends StatelessWidget {
 
   /// Call ids whose approval POST is in flight (after the sheet).
   final Set<String> approving;
+
+  /// Whether a bulk approve-all or deny-all operation is in flight.
+  final bool bulkApproving;
+  final bool bulkDenying;
 
   /// The outcome of the last action, by call id (approve) or nonce
   /// (revoke). An outcome whose row has gone shows at the top.
@@ -78,9 +91,14 @@ class ApprovalsPanel extends StatelessWidget {
     this.now,
     this.onRefresh,
     this.onApprove,
+    this.onDeny,
+    this.onApproveAll,
+    this.onDenyAll,
     this.onRevoke,
     this.busy = const {},
     this.approving = const {},
+    this.bulkApproving = false,
+    this.bulkDenying = false,
     this.outcomes = const {},
     this.onDismiss,
   });
@@ -171,9 +189,52 @@ class ApprovalsPanel extends StatelessWidget {
       if (current.pending.isEmpty && current.open.isEmpty)
         const RuntimeEmptyRow('Nothing waiting.',
             icon: Icons.verified_user_outlined),
+      if (current.pending.isNotEmpty &&
+          (onApproveAll != null || onDenyAll != null))
+        _bulkBar(context, current.pending.length),
       for (final item in current.pending) _pendingRow(context, item),
       for (final item in current.open) _openRow(context, item, clock),
     ];
+  }
+
+  Widget _bulkBar(BuildContext context, int count) {
+    final anyBulkBusy = bulkApproving || bulkDenying;
+    return Padding(
+      key: const Key('approvals-bulk-bar'),
+      padding: const EdgeInsets.symmetric(
+          horizontal: SonderSpace.lg, vertical: SonderSpace.sm),
+      child: Wrap(
+        spacing: SonderSpace.sm,
+        runSpacing: SonderSpace.xs,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          if (onApproveAll != null)
+            AsyncActionButton(
+              buttonKey: const Key('approvals-approve-all'),
+              label: 'Approve all ($count)',
+              busyLabel: 'Approving all…',
+              doneLabel: null,
+              icon: Icons.done_all,
+              style: ActionButtonStyle.filled,
+              busy: bulkApproving,
+              onPressed: anyBulkBusy ? null : onApproveAll,
+              onError: (_, __) {},
+            ),
+          if (onDenyAll != null)
+            AsyncActionButton(
+              buttonKey: const Key('approvals-deny-all'),
+              label: 'Deny all ($count)',
+              busyLabel: 'Denying all…',
+              doneLabel: null,
+              icon: Icons.block,
+              style: ActionButtonStyle.outlined,
+              busy: bulkDenying,
+              onPressed: anyBulkBusy ? null : onDenyAll,
+              onError: (_, __) {},
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _callTitle(BuildContext context, String tool, String callId) {
@@ -219,7 +280,21 @@ class ApprovalsPanel extends StatelessWidget {
             busyLabel: isApproving ? 'Approving…' : 'Checking…',
             doneLabel: null,
             busy: busy.contains(item.callId) || isApproving,
-            onPressed: () => onApprove!(item),
+            onPressed:
+                bulkApproving || bulkDenying ? null : () => onApprove!(item),
+            onError: (_, __) {},
+          ),
+        if (onDeny != null)
+          AsyncActionButton(
+            buttonKey: Key('approval-deny-${item.callId}'),
+            label: 'Deny',
+            busyLabel: 'Denying…',
+            doneLabel: null,
+            style: ActionButtonStyle.text,
+            busy: busy.contains('deny:${item.callId}'),
+            onPressed: bulkApproving || bulkDenying || isApproving
+                ? null
+                : () => onDeny!(item),
             onError: (_, __) {},
           ),
       ],

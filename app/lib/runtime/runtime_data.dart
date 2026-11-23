@@ -164,6 +164,10 @@ abstract interface class RuntimeDataSource {
   Future<IssuedApproval> approveCall(String callId,
       {required Duration ttl, String tool = '', String digest = ''});
 
+  /// `POST /v1/approvals/deny/<callId>`: decline one pending call without
+  /// approving or running anything.
+  Future<void> denyCall(String callId, {String tool = '', String digest = ''});
+
   /// `POST /v1/approvals/revoke/<nonce>`.
   Future<void> revokeApproval(String nonce);
 
@@ -334,6 +338,12 @@ class HttpRuntimeDataSource implements RuntimeDataSource {
           {required Duration ttl, String tool = '', String digest = ''}) =>
       ApprovalsApi(_endpoint, timeout: timeout)
           .approve(callId, ttl: ttl, tool: tool, digest: digest);
+
+  @override
+  Future<void> denyCall(String callId,
+          {String tool = '', String digest = ''}) =>
+      ApprovalsApi(_endpoint, timeout: timeout)
+          .deny(callId, tool: tool, digest: digest);
 
   @override
   Future<void> revokeApproval(String nonce) =>

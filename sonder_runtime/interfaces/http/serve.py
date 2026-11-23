@@ -5586,16 +5586,37 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _handle_agent_lane_request(self, method, path, payload=None):
-        if path != "/v1/background-work" and path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+        if (
+            path != "/v1/background-work"
+            and path != "/v1/background-work/clear"
+            and path != "/v1/agent-lanes"
+            and not path.startswith("/v1/agent-lanes/")
+        ):
             return False
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.interfaces.http.agent_work_routes import handle_agent_work_request
         from sonder_runtime.interfaces.http.background_work import runtime_background_work
+        from sonder_runtime.adapters.persistence import autopilot_store, fleet_store
         from sonder_runtime.adapters.persistence.background_work import fleet_snapshot, autopilot_snapshot
+
+        def _clear_background(auth, *, project=""):
+            owner = _task_account_scope(auth)
+            cleared_autopilot = autopilot_store.clear_finished(request_owner=owner)
+            cleared_fleets = (
+                fleet_store.clear_finished(project=project)
+                if _admin_authorized(auth)
+                else 0
+            )
+            return {
+                "cleared_autopilot": cleared_autopilot,
+                "cleared_fleets": cleared_fleets,
+            }
+
         return handle_agent_work_request(
             self, method, path, payload, application_of=default_app,
             context_of=_http_debug_context, policy=permission_policy, logger=_serve_logger,
             allow_creation_of=_admin_authorized,
+            clear_background_of=_clear_background,
             query_of=lambda handler: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=16),
             state_home_of=lambda application: getattr(
