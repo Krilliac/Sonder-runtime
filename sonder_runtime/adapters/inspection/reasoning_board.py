@@ -197,7 +197,7 @@ def reasoning_board(
                 return {"ok": False, "error": f"invalid status {st!r} (use open, supported, refuted, confirmed)"}
             conf = 0.5 if confidence is None else max(0.0, min(1.0, float(confidence)))
             hid = f"H{len(board['hypotheses']) + 1}"
-            entry = {
+            hyp_entry: dict[str, Any] = {
                 "id": hid,
                 "claim": claim,
                 "status": st,
@@ -206,9 +206,9 @@ def reasoning_board(
                 "evidence_against": [_clean_text(evidence_against)] if _clean_text(evidence_against) else [],
                 "fact_refs": [str(r).strip() for r in (fact_refs or []) if str(r).strip()][:16],
             }
-            board["hypotheses"].append(entry)
+            board["hypotheses"].append(hyp_entry)
             board["updated_at"] = time.time()
-            return {"ok": True, "action": "add_hypothesis", "hypothesis": entry}
+            return {"ok": True, "action": "add_hypothesis", "hypothesis": hyp_entry}
 
         if act == "update_hypothesis":
             hid = str(hypothesis_id or "").strip().upper()
@@ -245,15 +245,15 @@ def reasoning_board(
             if len(board["decisions"]) >= MAX_DECISIONS:
                 return {"ok": False, "error": f"decision limit ({MAX_DECISIONS}) reached"}
             did = f"D{len(board['decisions']) + 1}"
-            entry = {
+            dec_entry: dict[str, Any] = {
                 "id": did,
                 "decision": choice,
                 "rationale": _clean_text(source),
                 "alternatives": [_clean_text(a, 240) for a in (alternatives or []) if _clean_text(a, 240)][:8],
             }
-            board["decisions"].append(entry)
+            board["decisions"].append(dec_entry)
             board["updated_at"] = time.time()
-            return {"ok": True, "action": "add_decision", "decision": entry}
+            return {"ok": True, "action": "add_decision", "decision": dec_entry}
 
         if act == "audit":
             return {"ok": True, "action": "audit", "board_id": board_id, **_audit_board(board)}

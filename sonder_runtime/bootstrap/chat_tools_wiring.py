@@ -160,7 +160,7 @@ def _wait_for_client_result(
     kwargs: dict[str, Any] = {}
     try:
         sig = inspect.signature(wait_fn)
-        params = sig.parameters
+        params: Mapping[str, inspect.Parameter] = sig.parameters
         accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
     except (TypeError, ValueError):
         params = {}

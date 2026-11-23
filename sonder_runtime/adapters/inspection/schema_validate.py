@@ -109,7 +109,7 @@ def _load_data(target: Path) -> tuple[str, Any]:
         except json.JSONDecodeError as exc:
             raise SchemaValidateError("invalid JSON data: %s" % exc) from exc
     if suffix in (".jsonl", ".ndjson"):
-        records = []
+        records: list[Any] = []
         for idx, line in enumerate(raw.splitlines(), 1):
             if not line.strip():
                 continue
@@ -148,7 +148,7 @@ def _matches_type(value: Any, expected: str) -> bool:
     return False
 
 
-def _resolve_local_ref(root_schema: dict, ref: str) -> dict:
+def _resolve_local_ref(root_schema: dict[str, Any], ref: str) -> dict[str, Any]:
     if not isinstance(ref, str) or not ref.startswith("#"):
         raise SchemaValidateError("only local fragment $ref values starting with '#' are supported")
     if ref == "#":
@@ -170,9 +170,9 @@ def _resolve_local_ref(root_schema: dict, ref: str) -> dict:
 def _validate_node(
     value: Any,
     schema: Any,
-    root_schema: dict,
+    root_schema: dict[str, Any],
     pointer: str,
-    errors: list[dict],
+    errors: list[dict[str, Any]],
     depth: int,
     active_refs: frozenset[str],
 ) -> None:
@@ -302,7 +302,7 @@ def _validate_node(
     if "anyOf" in schema and isinstance(schema["anyOf"], list):
         matched = False
         for sub in schema["anyOf"]:
-            probe: list[dict] = []
+            probe: list[dict[str, Any]] = []
             _validate_node(value, sub, root_schema, pointer, probe, depth + 1, active_refs)
             if not probe:
                 matched = True
@@ -335,7 +335,7 @@ def validate_schema(
     extra_roots: str = "",
     bypass: bool = False,
     developer_authorized: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Validate a guarded JSON, JSONL, or TOML file against a JSON Schema."""
     if bool(schema_path) == bool(schema_json):
         raise SchemaValidateError("provide exactly one of schema_path or schema_json")
@@ -366,7 +366,7 @@ def validate_schema(
         raise SchemaValidateError("root JSON schema must be an object")
 
     data_format, payload = _load_data(data_target)
-    errors: list[dict] = []
+    errors: list[dict[str, Any]] = []
     if data_format == "jsonl":
         for idx, rec in enumerate(payload):
             if len(errors) >= MAX_ERRORS:
@@ -390,7 +390,7 @@ def validate_schema(
     }
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict[str, Any]) -> str:
     verdict = "VALID" if data.get("valid") else "INVALID"
     lines = [
         f"schema validation ({verdict}): {data.get('path', '')}",

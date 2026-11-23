@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import time
+from typing import Any
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
@@ -128,7 +129,7 @@ class CodeMetricsError(ValueError):
     """Stable rejection from bounded code metrics inspection."""
 
 
-def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -160,12 +161,12 @@ def _resolve_target(
     return target
 
 
-def _python_hotspots(source: str, rel_path: str) -> list[dict]:
+def _python_hotspots(source: str, rel_path: str) -> list[dict[str, Any]]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    hotspots: list[dict] = []
+    hotspots: list[dict[str, Any]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -190,13 +191,13 @@ def _python_hotspots(source: str, rel_path: str) -> list[dict]:
     return hotspots
 
 
-def _analyze_file(path: Path, rel_path: str, lang: str, comment_prefix: str) -> tuple[dict, list[dict], list[dict]]:
+def _analyze_file(path: Path, rel_path: str, lang: str, comment_prefix: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     lines = raw.splitlines()
     code_lines = 0
     comment_lines = 0
     blank_lines = 0
-    markers: list[dict] = []
+    markers: list[dict[str, Any]] = []
     branch_hits = 0
 
     for lineno, line in enumerate(lines, 1):
@@ -219,7 +220,7 @@ def _analyze_file(path: Path, rel_path: str, lang: str, comment_prefix: str) -> 
                 "text": m.group(2).strip()[:120],
             })
 
-    hotspots: list[dict] = []
+    hotspots: list[dict[str, Any]] = []
     if lang == "python":
         hotspots = _python_hotspots(raw, rel_path)
     elif comment_prefix == "//" and code_lines >= 40 and branch_hits >= 25:
@@ -250,7 +251,7 @@ def analyze_code_metrics(
     extra_roots: str = "",
     bypass: bool = False,
     developer_authorized: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Compute bounded LOC, TODO/FIXME inventory, largest files, and complexity hotspots."""
     target = _resolve_target(
         path,
@@ -264,9 +265,9 @@ def analyze_code_metrics(
 
     languages: dict[str, dict[str, int]] = {}
     marker_counts = {"TODO": 0, "FIXME": 0, "HACK": 0, "XXX": 0}
-    marker_samples: list[dict] = []
-    largest_files: list[dict] = []
-    hotspots: list[dict] = []
+    marker_samples: list[dict[str, Any]] = []
+    largest_files: list[dict[str, Any]] = []
+    hotspots: list[dict[str, Any]] = []
     files_scanned = 0
     files_skipped = 0
     truncated = False
@@ -364,7 +365,7 @@ def analyze_code_metrics(
     }
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict[str, Any]) -> str:
     totals = data.get("totals") or {}
     lines = [
         f"code metrics: {data.get('root', '')}",

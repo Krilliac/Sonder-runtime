@@ -142,11 +142,11 @@ def _weather_place(location, timeout):
         if not matches:
             continue
 
-        def score(place):
+        def score(place, _qualifiers=qualifiers):
             searchable = " ".join(str(place.get(key) or "").lower() for key in (
                 "name", "admin1", "admin2", "admin3", "country", "country_code",
             ))
-            return sum(1 for qualifier in qualifiers if qualifier in searchable)
+            return sum(1 for qualifier in _qualifiers if qualifier in searchable)
 
         return max(enumerate(matches), key=lambda row: (score(row[1]), -row[0]))[1]
     raise ValueError("no weather location matched %r" % location)

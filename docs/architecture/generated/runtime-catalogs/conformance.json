@@ -1773,6 +1773,42 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "claims": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "citation_audit",
+      "surfaces": {
+        "cli": "citation_audit",
+        "client": "citation_audit",
+        "mcp": "citation_audit",
+        "openai": "citation_audit"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "category": {
             "type": "string"
           },
@@ -1828,13 +1864,123 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "code": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "max_findings": {
+            "type": "integer"
+          },
+          "min_severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_audit",
+      "surfaces": {
+        "cli": "code_audit",
+        "client": "code_audit",
+        "mcp": "code_audit",
+        "openai": "code_audit"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "summary",
+              "impact",
+              "cycles",
+              "calls"
+            ],
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_depth": {
+            "type": "integer"
+          },
+          "max_files": {
+            "type": "integer"
+          },
+          "root": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "top_n": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_graph",
+      "surfaces": {
+        "cli": "code_graph",
+        "client": "code_graph",
+        "mcp": "code_graph",
+        "openai": "code_graph"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_files": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "top_n": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_metrics",
+      "surfaces": {
+        "cli": "code_metrics",
+        "client": "code_metrics",
+        "mcp": "code_metrics",
+        "openai": "code_metrics"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "controller_job_id": {
             "maxLength": 128,
             "minLength": 1,
             "type": "string"
           },
           "max_bytes": {
-            "maximum": 98304,
+            "maximum": 80000,
             "minimum": 1,
             "type": "integer"
           },
@@ -2044,6 +2190,43 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "enum": [
+              "compare_candidates",
+              "audit_against_receipts"
+            ],
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "receipts": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reply": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "consistency_check",
+      "surfaces": {
+        "cli": "consistency_check",
+        "client": "consistency_check",
+        "mcp": "consistency_check",
+        "openai": "consistency_check"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "engine": {
             "enum": [
               "auto",
@@ -2178,6 +2361,58 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "enum": [
+              "convert",
+              "profile",
+              "query",
+              "encode",
+              "decode",
+              "timestamp",
+              "cron"
+            ],
+            "type": "string"
+          },
+          "data": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "input_format": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "output_format": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "data_transform",
+      "surfaces": {
+        "cli": "data_transform",
+        "client": "data_transform",
+        "mcp": "data_transform",
+        "openai": "data_transform"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "run_id": {
             "maxLength": 80,
             "type": "string"
@@ -2217,6 +2452,47 @@
         "client": "dependency_inventory",
         "mcp": "dependency_inventory",
         "openai": "dependency_inventory"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "auto",
+              "python",
+              "json",
+              "toml",
+              "ini",
+              "generic"
+            ],
+            "type": "string"
+          },
+          "path_a": {
+            "type": "string"
+          },
+          "path_b": {
+            "type": "string"
+          },
+          "text_a": {
+            "type": "string"
+          },
+          "text_b": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "diff_semantic",
+      "surfaces": {
+        "cli": "diff_semantic",
+        "client": "diff_semantic",
+        "mcp": "diff_semantic",
+        "openai": "diff_semantic"
       }
     },
     {
@@ -2302,6 +2578,37 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "max_items": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "document_extract",
+      "surfaces": {
+        "cli": "document_extract",
+        "client": "document_extract",
+        "mcp": "document_extract",
+        "openai": "document_extract"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "count": {
             "type": "integer"
           },
@@ -2332,6 +2639,61 @@
         "client": "edit_file",
         "mcp": "edit_file",
         "openai": "edit_file"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "context_lines": {
+            "type": "integer"
+          },
+          "error_text": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_frames": {
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_text"
+        ],
+        "type": "object"
+      },
+      "name": "error_diagnose",
+      "surfaces": {
+        "cli": "error_diagnose",
+        "client": "error_diagnose",
+        "mcp": "error_diagnose",
+        "openai": "error_diagnose"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "fact_cross_check",
+      "surfaces": {
+        "cli": "fact_cross_check",
+        "client": "fact_cross_check",
+        "mcp": "fact_cross_check",
+        "openai": "fact_cross_check"
       }
     },
     {
@@ -2788,6 +3150,57 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "language": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "language_matrix",
+      "surfaces": {
+        "cli": "language_matrix",
+        "client": "language_matrix",
+        "mcp": "language_matrix",
+        "openai": "language_matrix"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal": {
+            "type": "string"
+          },
+          "probe_cli": {
+            "type": "boolean"
+          },
+          "subcommand": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "type": "object"
+      },
+      "name": "learn_tool",
+      "surfaces": {
+        "cli": "learn_tool",
+        "client": "learn_tool",
+        "mcp": "learn_tool",
+        "openai": "learn_tool"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "path": {
             "minLength": 1,
             "type": "string"
@@ -2804,6 +3217,56 @@
         "client": "log_inspect",
         "mcp": "log_inspect",
         "openai": "log_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "satisfiable",
+              "truth_table",
+              "equivalent",
+              "implies",
+              "cnf",
+              "csp"
+            ],
+            "type": "string"
+          },
+          "conclusion": {
+            "type": "string"
+          },
+          "constraints": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "domains": {
+            "type": "object"
+          },
+          "formula": {
+            "type": "string"
+          },
+          "formula_b": {
+            "type": "string"
+          },
+          "premises": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "logic_verify",
+      "surfaces": {
+        "cli": "logic_verify",
+        "client": "logic_verify",
+        "mcp": "logic_verify",
+        "openai": "logic_verify"
       }
     },
     {
@@ -2838,6 +3301,121 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "enum": [
+              "eval",
+              "solve",
+              "matrix",
+              "convert",
+              "date",
+              "derivative",
+              "integrate"
+            ],
+            "type": "string"
+          },
+          "add_days": {
+            "type": "integer"
+          },
+          "at": {
+            "type": "number"
+          },
+          "bracket": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "date_a": {
+            "type": "string"
+          },
+          "date_b": {
+            "type": "string"
+          },
+          "equations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "exact": {
+            "type": "boolean"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "from_unit": {
+            "type": "string"
+          },
+          "high": {
+            "type": "number"
+          },
+          "low": {
+            "type": "number"
+          },
+          "matrix_a": {
+            "type": "array"
+          },
+          "matrix_b": {
+            "type": "array"
+          },
+          "matrix_op": {
+            "type": "string"
+          },
+          "precision": {
+            "type": "integer"
+          },
+          "to_unit": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          },
+          "variable": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "name": "math_eval",
+      "surfaces": {
+        "cli": "math_eval",
+        "client": "math_eval",
+        "mcp": "math_eval",
+        "openai": "math_eval"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "media_inspect",
+      "surfaces": {
+        "cli": "media_inspect",
+        "client": "media_inspect",
+        "mcp": "media_inspect",
+        "openai": "media_inspect"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "job_id": {
             "maxLength": 80,
             "type": "string"
@@ -2865,6 +3443,45 @@
         "client": "output_digest",
         "mcp": "output_digest",
         "openai": "output_digest"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "available_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "error": {
+            "type": "string"
+          },
+          "failed_tool": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "tried_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "failed_tool"
+        ],
+        "type": "object"
+      },
+      "name": "plan_fallback",
+      "surfaces": {
+        "cli": "plan_fallback",
+        "client": "plan_fallback",
+        "mcp": "plan_fallback",
+        "openai": "plan_fallback"
       }
     },
     {
@@ -3077,6 +3694,40 @@
           "extra_roots": {
             "type": "string"
           },
+          "include_sanitized": {
+            "type": "boolean"
+          },
+          "max_findings": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "redact_secrets": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "prompt_shield",
+      "surfaces": {
+        "cli": "prompt_shield",
+        "client": "prompt_shield",
+        "mcp": "prompt_shield",
+        "openai": "prompt_shield"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
           "max_bytes": {
             "type": "integer"
           },
@@ -3096,6 +3747,133 @@
         "client": "read_file",
         "mcp": "read_file",
         "openai": "read_file"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "init",
+              "add_fact",
+              "add_hypothesis",
+              "update_hypothesis",
+              "add_decision",
+              "audit",
+              "summary",
+              "clear"
+            ],
+            "type": "string"
+          },
+          "alternatives": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "board_id": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "evidence_against": {
+            "type": "string"
+          },
+          "evidence_for": {
+            "type": "string"
+          },
+          "fact_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "hypothesis_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "reasoning_board",
+      "surfaces": {
+        "cli": "reasoning_board",
+        "client": "reasoning_board",
+        "mcp": "reasoning_board",
+        "openai": "reasoning_board"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "type": "string"
+          },
+          "max_matches": {
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "search",
+              "match",
+              "fullmatch",
+              "findall"
+            ],
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "replacement": {
+            "type": "string"
+          },
+          "samples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "should_match": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "should_not_match": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "regex_lab",
+      "surfaces": {
+        "cli": "regex_lab",
+        "client": "regex_lab",
+        "mcp": "regex_lab",
+        "openai": "regex_lab"
       }
     },
     {
@@ -3181,6 +3959,52 @@
     {
       "input_schema": {
         "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "runtime_resilience_check",
+      "surfaces": {
+        "cli": "runtime_resilience_check",
+        "client": "runtime_resilience_check",
+        "mcp": "runtime_resilience_check",
+        "openai": "runtime_resilience_check"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "schema_json": {
+            "type": "string"
+          },
+          "schema_path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "schema_validate",
+      "surfaces": {
+        "cli": "schema_validate",
+        "client": "schema_validate",
+        "mcp": "schema_validate",
+        "openai": "schema_validate"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
         "properties": {
           "extra_roots": {
             "type": "string"
@@ -3239,6 +4063,49 @@
         "client": "secret_scan",
         "mcp": "secret_scan",
         "openai": "secret_scan"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "verify_symbol",
+              "audit_code"
+            ],
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "kwargs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "module": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "symbol_verify",
+      "surfaces": {
+        "cli": "symbol_verify",
+        "client": "symbol_verify",
+        "mcp": "symbol_verify",
+        "openai": "symbol_verify"
       }
     },
     {
@@ -3415,18 +4282,6 @@
     {
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "required": [
-              "name"
-            ]
-          },
-          {
-            "required": [
-              "query"
-            ]
-          }
-        ],
         "properties": {
           "name": {
             "type": "string"

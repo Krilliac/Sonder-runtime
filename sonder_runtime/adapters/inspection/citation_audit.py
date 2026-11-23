@@ -10,7 +10,6 @@ Security invariants:
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import re
 from typing import Any
@@ -150,7 +149,7 @@ def citation_audit(
             results.append(entry)
         elif quote and sources:
             norm_sources = [_normalize_ws(s) for s in sources]
-            found = any((quote in s) or (_normalize_ws(quote) in ns) for s, ns in zip(sources, norm_sources))
+            found = any((quote in s) or (_normalize_ws(quote) in ns) for s, ns in zip(sources, norm_sources, strict=True))
             results.append({
                 "quote": quote[:160],
                 "status": "verified" if found else "ungrounded_quote",
@@ -206,7 +205,7 @@ def citation_audit(
                 break
             q = qm.group(1).strip()
             qn = _normalize_ws(q)
-            found = any((q in s) or (qn in ns) for s, ns in zip(sources, norm_sources))
+            found = any((q in s) or (qn in ns) for s, ns in zip(sources, norm_sources, strict=True))
             results.append({
                 "quote": q[:160],
                 "status": "verified" if found else "ungrounded_quote",

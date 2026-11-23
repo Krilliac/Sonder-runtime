@@ -8,6 +8,7 @@ discoverable on PATH (using ``shutil.which`` only — never spawns a process).
 from __future__ import annotations
 
 import shutil
+from typing import Any
 
 from sonder_runtime.adapters.execution_tools import code_runner
 from sonder_runtime.adapters.inspection import code_metrics
@@ -97,7 +98,7 @@ _BUILD_TEST_LINT: dict[str, dict[str, list[str]]] = {
 }
 
 
-def inspect_language_matrix(language: str = "") -> dict:
+def inspect_language_matrix(language: str = "") -> dict[str, Any]:
     """Return Sonder's full language capability matrix and live host tool availability."""
     query = str(language or "").strip().casefold()
     run_langs = set(code_runner.SUPPORTED_LANGUAGES)
@@ -111,7 +112,7 @@ def inspect_language_matrix(language: str = "") -> dict:
     if query:
         all_langs = [lang for lang in all_langs if query in lang]
 
-    entries: list[dict] = []
+    entries: list[dict[str, Any]] = []
     installed_count = 0
     for lang in all_langs:
         probes = _LANGUAGE_PROBES.get(lang, ())
@@ -158,7 +159,7 @@ def inspect_language_matrix(language: str = "") -> dict:
     }
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict[str, Any]) -> str:
     totals = data.get("totals") or {}
     lines = [
         f"sonder language matrix ({data.get('language_count', 0)} languages; {data.get('host_ready_count', 0)} ready on this host)",

@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 import zipfile
+from typing import Any
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
@@ -65,7 +66,7 @@ class DocumentExtractError(ValueError):
     """Stable rejection from bounded document extraction."""
 
 
-def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -158,7 +159,7 @@ def _open_ooxml(target: Path) -> zipfile.ZipFile:
     return zf
 
 
-def _extract_core_metadata(zf: zipfile.ZipFile, budget: list[int]) -> dict:
+def _extract_core_metadata(zf: zipfile.ZipFile, budget: list[int]) -> dict[str, str]:
     meta: dict[str, str] = {}
     if "docProps/core.xml" not in zf.namelist():
         return meta
@@ -179,7 +180,7 @@ def _extract_core_metadata(zf: zipfile.ZipFile, budget: list[int]) -> dict:
     return meta
 
 
-def _extract_docx(target: Path, max_chars: int, max_items: int) -> dict:
+def _extract_docx(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     budget = [MAX_DECOMPRESSED_BYTES]
     with _open_ooxml(target) as zf:
         names = set(zf.namelist())
@@ -256,7 +257,7 @@ def _col_ref_to_index(cell_ref: str) -> int:
     return max(0, col - 1)
 
 
-def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict:
+def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     budget = [MAX_DECOMPRESSED_BYTES]
     with _open_ooxml(target) as zf:
         names = set(zf.namelist())
@@ -282,7 +283,7 @@ def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict:
         if not sheet_files:
             raise DocumentExtractError("XLSX archive has no worksheets")
 
-        sheets_out: list[dict] = []
+        sheets_out: list[dict[str, Any]] = []
         text_lines: list[str] = []
         truncated = False
         for idx, sf in enumerate(sheet_files[:20]):
@@ -345,7 +346,7 @@ def _slide_sort_key(member_name: str) -> tuple[int, str]:
     return (int(match.group(1)) if match else 0, member_name)
 
 
-def _extract_pptx(target: Path, max_chars: int, max_items: int) -> dict:
+def _extract_pptx(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     budget = [MAX_DECOMPRESSED_BYTES]
     with _open_ooxml(target) as zf:
         names = set(zf.namelist())
@@ -357,7 +358,7 @@ def _extract_pptx(target: Path, max_chars: int, max_items: int) -> dict:
         if not slide_files:
             raise DocumentExtractError("PPTX archive has no slides")
 
-        slides_out: list[dict] = []
+        slides_out: list[dict[str, Any]] = []
         text_lines: list[str] = []
         truncated = len(slide_files) > max_items
         for idx, sf in enumerate(slide_files[:max_items], 1):
@@ -455,7 +456,7 @@ class _HtmlCollector(HTMLParser):
         return " ".join("".join(self._title_buf).split())
 
 
-def _extract_html(target: Path, max_chars: int, max_items: int) -> dict:
+def _extract_html(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     raw = target.read_bytes()
     parser = _HtmlCollector(max_items)
     parser.feed(raw.decode("utf-8", errors="replace"))
@@ -474,7 +475,7 @@ def _extract_html(target: Path, max_chars: int, max_items: int) -> dict:
     }
 
 
-def _extract_svg(target: Path, max_chars: int, max_items: int) -> dict:
+def _extract_svg(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     raw = target.read_bytes()
     root = _safe_xml_frombytes(raw)
     tag_counts: dict[str, int] = {}
@@ -500,10 +501,10 @@ def _extract_svg(target: Path, max_chars: int, max_items: int) -> dict:
     }
 
 
-def _extract_subtitles(target: Path, fmt: str, max_chars: int, max_items: int) -> dict:
+def _extract_subtitles(target: Path, fmt: str, max_chars: int, max_items: int) -> dict[str, Any]:
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     time_re = _SRT_TIME_RE if fmt == "srt" else _VTT_TIME_RE
-    cues: list[dict] = []
+    cues: list[dict[str, Any]] = []
     idx = 0
     while idx < len(lines):
         m = time_re.match(lines[idx])
@@ -545,7 +546,7 @@ def extract_document(
     extra_roots: str = "",
     bypass: bool = False,
     developer_authorized: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Extract structured text, tables, slides, or cues from a guarded document."""
     target = _resolve_target(
         path,
@@ -587,7 +588,7 @@ def extract_document(
     }
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict[str, Any]) -> str:
     lines = [
         f"document extraction ({data.get('format', 'unknown')}): {data.get('path', '')}",
         f"  bytes: {data.get('bytes', 0)}  sha256: {data.get('sha256', '')}",

@@ -341,11 +341,11 @@ def parse_cli_help(
         relevant_flags = [item for _, item in scored_flags[:15]]
 
         scored_sub: list[tuple[int, dict[str, str]]] = []
-        for s in subcommands:
-            hay = f"{s['name']} {s['description']}".lower()
-            score = sum(2 if tok in s["name"].lower() else 1 for tok in goal_tokens if tok in hay)
+        for sub in subcommands:
+            hay = f"{sub['name']} {sub['description']}".lower()
+            score = sum(2 if tok in sub["name"].lower() else 1 for tok in goal_tokens if tok in hay)
             if score > 0:
-                scored_sub.append((score, s))
+                scored_sub.append((score, sub))
         scored_sub.sort(key=lambda pair: (-pair[0], pair[1]["name"]))
         relevant_subcommands = [item for _, item in scored_sub[:10]]
 

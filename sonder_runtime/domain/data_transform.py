@@ -191,9 +191,9 @@ def _format_output(obj: Any, output_format: str) -> str:
             if isinstance(val, dict):
                 cp[str(sec)] = {str(k): str(v) for k, v in val.items()}
             else:
-                if "DEFAULT" not in cp:
-                    pass
-                cp.setdefault("main", {})[str(sec)] = str(val)
+                if not cp.has_section("main"):
+                    cp.add_section("main")
+                cp["main"][str(sec)] = str(val)
         buf = io.StringIO()
         cp.write(buf)
         return buf.getvalue().rstrip("\r\n")
@@ -496,7 +496,8 @@ def run_data_transform(
             elif enc == "hex":
                 out = raw.encode("utf-8").hex() if act == "encode" else bytes.fromhex(raw.strip()).decode("utf-8", errors="replace")
             elif enc == "unicode":
-                out = [{"char": ch, "codepoint": f"U+{ord(ch):04X}", "ord": ord(ch)} for ch in raw[:128]]
+                unicode_out = [{"char": ch, "codepoint": f"U+{ord(ch):04X}", "ord": ord(ch)} for ch in raw[:128]]
+                return {"ok": True, "action": act, "encoding": enc, "result": unicode_out}
             else:
                 raise ValueError(f"Unsupported encoding '{enc}'. Use base64, base64url, url, hex, or unicode.")
             return {"ok": True, "action": act, "encoding": enc, "result": out}

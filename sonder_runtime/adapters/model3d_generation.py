@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.application.model3d_generation import (
@@ -157,7 +158,7 @@ def _loopback_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _probe_hunyuan3d(base_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> dict | None:
+def _probe_hunyuan3d(base_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> dict[str, Any] | None:
     opener = _loopback_opener()
     for path in ("/health", "/docs"):
         req = urllib.request.Request(f"{base_url}{path}", method="GET")
@@ -306,7 +307,7 @@ def _find_blender_executable() -> str:
     return found or ""
 
 
-def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384, timeout: int = 90) -> dict:
+def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384, timeout: int = 90) -> dict[str, Any]:
     """Render a 2x2 studio turnaround PNG and extract mesh stats via headless Blender."""
     blender_exe = _find_blender_executable()
     if not blender_exe or not _PREVIEW_SCRIPT.is_file():
@@ -448,7 +449,7 @@ def generate_chat_3d_model(
                 "for text-to-image concept synthesis."
             )
 
-    payload: dict = {
+    payload: dict[str, Any] = {
         "texture": bool(use_texture),
         "num_inference_steps": int(eff_steps),
         "octree_resolution": int(eff_octree),

@@ -5049,7 +5049,7 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None, *, allow_execu
         seen_digests = {
             hashlib.sha256(code.strip().encode("utf-8", errors="replace")).hexdigest()
         }
-        for attempt in range(1, max_repairs + 1):
+        for _attempt in range(1, max_repairs + 1):
             safe_failure = _redact_code_gate_text(failure) or "exited with an error"
             repair_prompt = (
                 "The Python code block in your previous answer fails when run:\n"

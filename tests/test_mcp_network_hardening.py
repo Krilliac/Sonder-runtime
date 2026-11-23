@@ -5,7 +5,6 @@ import asyncio
 import base64
 import io
 import json
-import os
 import sys
 import urllib.error
 from types import SimpleNamespace

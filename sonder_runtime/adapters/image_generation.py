@@ -24,23 +24,23 @@ import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Callable, Sequence, cast
 
 from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.repl_services import assetgen
 from sonder_runtime.application.image_generation import (
     GeneratedImageResult,
     ImageBackend,
-    ImageGenerationResult,
+    ImageGenerationResult as ImageGenerationResult,
     MAX_INLINE_IMAGE_BYTES,
     _DEFAULT_GENERATE_TIMEOUT_SECONDS,
     _DEFAULT_GIF_DURATION_MS,
     _DEFAULT_GIF_FRAMES,
     _GENERIC_GIF_PROMPT_RE,
-    _IMAGE_MODEL_EXCLUDE_RE,
-    _IMAGE_MODEL_INCLUDE_RE,
+    _IMAGE_MODEL_EXCLUDE_RE as _IMAGE_MODEL_EXCLUDE_RE,
+    _IMAGE_MODEL_INCLUDE_RE as _IMAGE_MODEL_INCLUDE_RE,
     _MAX_HTTP_IMAGE_RESPONSE_BYTES,
-    _PREFERENCE_TOKENS,
+    _PREFERENCE_TOKENS as _PREFERENCE_TOKENS,
     _RANDOM_GIF_STYLES,
     _RANDOM_PROMPT_RE,
     _RANDOM_STYLES,
@@ -50,7 +50,7 @@ from sonder_runtime.application.image_generation import (
     _preference_rank,
     _slug_from_prompt,
     is_image_generation_model_name,
-    strip_inline_data_images,
+    strip_inline_data_images as strip_inline_data_images,
 )
 import sonder_runtime.platform.paths as runtime_paths
 
@@ -93,7 +93,8 @@ def _probe_ollama_tags(origin: str, timeout: float = _TAGS_PROBE_TIMEOUT_SECONDS
     url = f"{origin.rstrip('/')}/api/tags"
     req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
     try:
-        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+        open_url_fn: Callable[..., Any] = ollama_endpoint.open_url
+        with open_url_fn(req, timeout=timeout) as resp:
             raw = resp.read(2 * 1024 * 1024)
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception:
@@ -286,7 +287,8 @@ def _call_ollama_image(backend: ImageBackend, prompt: str, *, timeout: float) ->
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+    open_url_fn: Callable[..., Any] = ollama_endpoint.open_url
+    with open_url_fn(req, timeout=timeout) as resp:
         raw = resp.read(_MAX_HTTP_IMAGE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_HTTP_IMAGE_RESPONSE_BYTES:
         raise ValueError("image model response exceeded byte limit")
@@ -750,7 +752,7 @@ def _animate_keyframe_pillow(
         work = work.resize((max(out_w, work.width), max(out_h, work.height)), resample)
 
     resample = getattr(Image, "Resampling", Image).LANCZOS
-    rgb_frames: list = []
+    rgb_frames: list[Any] = []
     # Pre-build a soft radial glow tile for subtle luminous atmospheric shimmer
     glow_size = max(48, min(out_w, out_h) // 2)
     glow_mask = Image.new("L", (glow_size, glow_size), 0)
@@ -802,7 +804,7 @@ def _animate_keyframe_pillow(
 
 
 def _encode_pillow_frames_under_budget(
-    rgb_frames: Sequence,
+    rgb_frames: Sequence[Any],
     *,
     duration_ms: int = _DEFAULT_GIF_DURATION_MS,
 ) -> bytes:
@@ -814,7 +816,7 @@ def _encode_pillow_frames_under_budget(
     dither_none = getattr(Image, "Dither", Image).NONE
     mediancut = getattr(getattr(Image, "Quantize", None), "MEDIANCUT", 0)
 
-    def _encode_attempt(frames_in: Sequence, colors: int, dither_mode) -> bytes:
+    def _encode_attempt(frames_in: Sequence[Any], colors: int, dither_mode: Any) -> bytes:
         n = len(frames_in)
         sample_indices = sorted({0, n // 3, (2 * n) // 3})
         w, h = frames_in[0].size
@@ -852,7 +854,7 @@ def _encode_pillow_frames_under_budget(
         if scale < 0.999:
             sw = max(64, int(round(base_w * scale)) & ~1)
             sh = max(64, int(round(base_h * scale)) & ~1)
-            candidate_frames = [fr.resize((sw, sh), resample) for fr in rgb_frames]
+            candidate_frames: Sequence[Any] = [fr.resize((sw, sh), resample) for fr in rgb_frames]
         else:
             candidate_frames = rgb_frames
         encoded = _encode_attempt(candidate_frames, colors, dither_mode)
@@ -1076,7 +1078,10 @@ def _procedural_gif_theme(prompt: str) -> tuple[tuple[int, int, int], tuple[int,
     else:
         req = assetgen.infer_request(prompt, kinds="background", seed=1337)
         base_pal = assetgen.THEMES[req["theme"]]
-    return assetgen.palette_from_brief(prompt, base_pal)
+    return cast(
+        tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]],
+        assetgen.palette_from_brief(prompt, base_pal),
+    )
 
 
 def _procedural_gif_palette(prompt: str) -> list[tuple[int, int, int]]:

@@ -17,12 +17,13 @@ import math
 import os
 import sys
 import traceback
+from typing import Any
 
 bpy = importlib.import_module("bpy")
 mathutils = importlib.import_module("mathutils")
 
 
-def _emit(result_path: str, payload: dict) -> None:
+def _emit(result_path: str, payload: dict[str, Any]) -> None:
     if not result_path:
         return
     tmp = result_path + ".tmp"
@@ -31,12 +32,13 @@ def _emit(result_path: str, payload: dict) -> None:
     os.replace(tmp, result_path)
 
 
-def _load_job() -> dict:
+def _load_job() -> dict[str, Any]:
     argv = sys.argv
     if "--" not in argv:
         raise RuntimeError("job file argument missing")
     with open(argv[argv.index("--") + 1], "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        loaded = json.load(handle)
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _clear_scene() -> None:
@@ -47,7 +49,7 @@ def _clear_scene() -> None:
             bpy.data.meshes.remove(mesh)
 
 
-def _import_model(model_path: str) -> list:
+def _import_model(model_path: str) -> list[Any]:
     ext = os.path.splitext(model_path)[1].lower()
     if ext in (".glb", ".gltf"):
         bpy.ops.import_scene.gltf(filepath=model_path)
@@ -61,7 +63,7 @@ def _import_model(model_path: str) -> list:
     return [o for o in bpy.context.scene.objects if o.type == "MESH"]
 
 
-def _measure_scene(meshes: list) -> tuple[list[float], list[float], int, int, int]:
+def _measure_scene(meshes: list[Any]) -> tuple[list[float], list[float], int, int, int]:
     bpy.context.view_layer.update()
     depsgraph = bpy.context.evaluated_depsgraph_get()
     lo = [float("inf"), float("inf"), float("inf")]
@@ -93,7 +95,7 @@ def _measure_scene(meshes: list) -> tuple[list[float], list[float], int, int, in
     return lo, hi, total_tris, total_verts, len(materials)
 
 
-def _setup_studio(scene, tile_px: int, has_materials: bool):
+def _setup_studio(scene: Any, tile_px: int, has_materials: bool) -> tuple[Any, Any, str]:
     # Workbench STUDIO + TEXTURE is fast, reliable headlessly across Blender 4.x/5.x,
     # displays embedded glTF base-color PBR textures crisply, and avoids GPU shader stalls.
     engine_used = "BLENDER_WORKBENCH"
@@ -198,7 +200,7 @@ def _render_turnaround(lo: list[float], hi: list[float], out_dir: str, sheet_pat
     sheet.filepath_raw = sheet_path
     sheet.file_format = "PNG"
     sheet.save()
-    return engine_used
+    return str(engine_used)
 
 
 def main() -> None:

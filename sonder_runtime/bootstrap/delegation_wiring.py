@@ -67,7 +67,9 @@ def _child_delegation_isolation_scope() -> Iterator[None]:
 
     _pm = PermissionPolicyProvider()
     with contextlib.ExitStack() as stack:
-        stack.enter_context(_pm.clear_preapproved_scope())
+        _preapproved_scope = _pm.clear_preapproved_scope()
+        if isinstance(_preapproved_scope, contextlib.AbstractContextManager):
+            stack.enter_context(_preapproved_scope)
         stack.enter_context(_tool_loop.bind_turn(None))
         stack.enter_context(_reset_cvar(getattr(_http_work_runs, "_CURRENT_RUN", None), ""))
         stack.enter_context(_reset_cvar(getattr(_pm, "_SPENT_APPROVAL", None), None))
