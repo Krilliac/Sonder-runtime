@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import contextvars
 import ctypes
 import hashlib
 import itertools
@@ -688,14 +689,16 @@ def capacity(
         limits["gpu_vram"] = int(gpu_slots)
     if _FLEET_WORKER_CAP is not None:
         limits["fleet_workers"] = int(_FLEET_WORKER_CAP)
-    with _LOCK:
-        reserved = _RESERVED_SLOTS
-    if reserved > 0:
-        limits["reserved_capacity"] = max(1, int(requested) - reserved)
     # Ollama's batching width is the hard ceiling on REAL concurrency.
     ollama_parallel = int(pool_route[2]["total"]) if pool_route else _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
     if ollama_parallel > 0:
         limits["pool_model_capacity" if pool_route else "ollama_num_parallel"] = int(ollama_parallel)
+    with _LOCK:
+        reserved = _RESERVED_SLOTS
+    if reserved > 0:
+        capacity_values = [v for k, v in limits.items() if k != "requested"]
+        total_capacity = min(capacity_values) if capacity_values else int(DEFAULT_MAX_WORKERS)
+        limits["reserved_capacity"] = max(1, total_capacity - reserved)
     automatic = max(1, min(limits.values()))
     bound_by = min(limits, key=lambda key: (limits[key], key))
     source, slots = "auto", automatic
@@ -1997,12 +2000,21 @@ def dispatch_lanes(
     wait_slice = max(0.1, min(float(HEARTBEAT_SECONDS), progress_deadline / 4.0))
     try:
 
+            def _run_lane_at_child_depth(target_lane_id: str, target_sink: object) -> object:
+                from sonder_runtime.application.agents import delegation_runtime as _delegation_rt
+
+                with _delegation_rt.depth_scope(1):
+                    return run_lane(target_lane_id, target_sink)
+
             def submit_admitted() -> None:
                 admitted = list(scheduler.admit())
                 while admitted:
                     lane_id = admitted[0]
+                    ctx = contextvars.copy_context()
                     try:
-                        future = pool.submit(run_lane, lane_id, scheduler.sink(lane_id))
+                        future = pool.submit(
+                            ctx.run, _run_lane_at_child_depth, lane_id, scheduler.sink(lane_id),
+                        )
                     except BaseException:
                         # admit() already marked these lanes running; none of
                         # them has a future, so the abort path must close them.

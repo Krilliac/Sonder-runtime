@@ -484,3 +484,207 @@ def test_chat_tool_turn_auto_verify_stops_on_permission_refusal(monkeypatch, tmp
     assert dispatched == []
     assert outcome.content == draft
     assert [r.status for r in outcome.records] == ["refused"]
+
+
+def test_wave2_tool_loop_client_exec_skips_auto_verify_blocks_host_and_keeps_tool_call_id():
+    from sonder_runtime.application.chat import tool_loop
+    from sonder_runtime.domain.chat_tools import ChatToolRecord
+
+    assert "awaiting_client_result" in tool_loop._NON_RETRYABLE_VERIFY_STATUSES
+
+    host_called: list[str] = []
+    client_called: list[str] = []
+    backend = ChatRunBackend(
+        dispatch_agent_tool=lambda name, _args, **_kw: host_called.append(name) or "host-ran",
+        catalog_provider=dict,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+
+    def fake_delegate(name, args):
+        client_called.append(name)
+        return "client-ok", ChatToolRecord("cid-1", name, "ok", "client")
+
+    manifest = build_tool_turn_manifest(admitted_tools=["run_code", "file_read"], user_run_command=False, mode="manual")
+    turn = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=[],
+        backend=backend,
+        permission_policy=pm,
+        client_exec_tools=frozenset({"run_code", "file_read"}),
+        client_exec_only=True,
+        delegate_client_tool=fake_delegate,
+    )
+
+    seen_messages: list[list[dict]] = []
+    steps = iter([
+        {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_abc1", "function": {"name": "/run_code", "arguments": {"code": "print(1)"}}},
+                    {"id": "call_abc2", "function": {"name": "status", "arguments": {}}},
+                ],
+            }
+        },
+        # Final reply contains a fenced python block: auto-verify must NOT trigger client_exec run_code!
+        {
+            "message": {
+                "role": "assistant",
+                "content": "Here is sample code:\n```python\ndef demo():\n    return 1\n```",
+            }
+        },
+    ])
+
+    def step(msgs, _tools):
+        seen_messages.append([dict(m) for m in msgs])
+        return next(steps)
+
+    outcome = turn.run(step, system="sys", prompt="test", history=None)
+    assert client_called == ["run_code"]
+    assert host_called == []
+    assert [r.status for r in outcome.records] == ["ok", "refused"]
+    # Verify normalized tool_name and preserved tool_call_id on tool messages sent to step 2.
+    tool_msgs = [m for m in seen_messages[1] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0]["name"] == "run_code"
+    assert tool_msgs[0]["tool_call_id"] == "call_abc1"
+    assert tool_msgs[1]["name"] == "status"
+    assert tool_msgs[1]["tool_call_id"] == "call_abc2"
+
+
+def test_wave2_chat_tools_wiring_capabilities_project_root_and_slash_wait(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from sonder_runtime.bootstrap import chat_tools_wiring
+
+    # 1. capabilities_payload ignores context["account"] unless authorized=True (auth_mode=both disclosure fix).
+    partial_ctx = {
+        "authorized": False,
+        "account": {"username": "alice", "role": "admin"},
+    }
+    caps = chat_tools_wiring.capabilities_payload(
+        partial_ctx,
+        auth_mode="both",
+        public_hosting=True,
+        allow_registration=False,
+        require_account=True,
+        admin_authorized=False,
+    )
+    assert "username" not in caps
+    assert "role" not in caps
+    assert caps["host_bypass_allowed"] is False
+
+    authed_ctx = {
+        "authorized": True,
+        "account": {"username": "alice", "role": "admin"},
+    }
+    caps_ok = chat_tools_wiring.capabilities_payload(
+        authed_ctx,
+        auth_mode="both",
+        public_hosting=True,
+        allow_registration=False,
+        require_account=True,
+        admin_authorized=True,
+    )
+    assert caps_ok["username"] == "alice"
+    assert caps_ok["role"] == "admin"
+    assert caps_ok["host_bypass_allowed"] is True
+
+    # 2. build_http_chat_tool_turn resolves project_root via server.served_work_project (drops UNC & bare namespaces).
+    monkeypatch.setattr(chat_tools_wiring, "_model_supports_tools", lambda *_a, **_k: True)
+    pm.set_mode(pm.AUTO)
+    handler_stub = SimpleNamespace(_early_stream=SimpleNamespace(completion_id="iid-1", client_gone=False, lock=threading.Lock()))
+
+    turn_unc = chat_tools_wiring.build_http_chat_tool_turn(
+        server=server,
+        permission_policy=pm,
+        handler=handler_stub,
+        chunk_fn=lambda *_a, **_k: "",
+        model="qwen",
+        project=r"\\nohost.invalid\share",
+        stream=False,
+        authorized_tools=True,
+    )
+    assert turn_unc is not None and turn_unc.backend._project_root == ""
+
+    turn_ns = chat_tools_wiring.build_http_chat_tool_turn(
+        server=server,
+        permission_policy=pm,
+        handler=handler_stub,
+        chunk_fn=lambda *_a, **_k: "",
+        model="qwen",
+        project="default",
+        stream=False,
+        authorized_tools=True,
+    )
+    assert turn_ns is not None and turn_ns.backend._project_root == ""
+
+    # 3. maybe_open_mcp_chat_tool_turn resolves project_root via resolve_agent_project_scope.
+    mcp_turn_unc = chat_tools_wiring.maybe_open_mcp_chat_tool_turn(
+        server=server,
+        permission_policy=pm,
+        model="qwen",
+        cloud=False,
+        project=r"\\nohost.invalid\share",
+    )
+    assert mcp_turn_unc is not None and mcp_turn_unc.backend._project_root == ""
+
+    mcp_turn_dir = chat_tools_wiring.maybe_open_mcp_chat_tool_turn(
+        server=server,
+        permission_policy=pm,
+        model="qwen",
+        cloud=False,
+        project=str(tmp_path),
+    )
+    assert mcp_turn_dir is not None and mcp_turn_dir.backend._project_root != ""
+
+    # 4. run_client_slash_turn forwards is_aborted=early.client_gone and on_wait=write_sse_comment_fn.
+    wait_kwargs_seen: dict = {}
+
+    class FakeCall:
+        call_id = "call-slash-1"
+
+        def sse_event(self, phase):
+            return {"phase": phase, "call_id": self.call_id}
+
+    class FakeBroker:
+        def create_call(self, **_kw):
+            return FakeCall()
+
+        def wait_for_result(self, call_id, *, timeout_seconds=None, heartbeat_interval=5.0, on_wait=None, is_aborted=None):
+            wait_kwargs_seen["call_id"] = call_id
+            wait_kwargs_seen["on_wait"] = on_wait
+            wait_kwargs_seen["is_aborted"] = is_aborted
+            return SimpleNamespace(ok=True, denied=False, status="ok", output="ran!", error="", elapsed_ms=5)
+
+    early_obj = SimpleNamespace(completion_id="iid-s", client_gone=False, lock=threading.Lock())
+    slash_handler = SimpleNamespace(
+        _early_stream=early_obj,
+        _begin_early_stream=lambda _m: None,
+        _pause_early_stream=lambda: None,
+    )
+    sse_ping = lambda: None
+    plan = SimpleNamespace(tool="run_code", args={"code": "print(1)"}, risk="execute")
+    records: list[dict] = []
+    handoffs: list[dict] = []
+    reply, iid = chat_tools_wiring.run_client_slash_turn(
+        slash_handler,
+        plan,
+        broker=FakeBroker(),
+        principal="user:bob",
+        session="s1",
+        model="qwen",
+        stream=True,
+        chunk_fn=lambda *_a, **_k: "",
+        write_tool_chunk_fn=lambda *_a, **_k: True,
+        slash_records=records,
+        slash_handoffs=handoffs,
+        write_sse_comment_fn=sse_ping,
+    )
+    assert reply == "ran!" and iid == "iid-s"
+    assert wait_kwargs_seen["on_wait"] is sse_ping
+    assert callable(wait_kwargs_seen["is_aborted"])
+    assert wait_kwargs_seen["is_aborted"]() is False
+    early_obj.client_gone = True
+    assert wait_kwargs_seen["is_aborted"]() is True

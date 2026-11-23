@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from ..application.context import OperationContext
 from ..application.ports.event_sink import EventSink
+from ..domain.reference_lookup.sanitize import terminal_text
 from ..domain.tools.traits import TriState, ToolTraits
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,10 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 _MAX_TIMEOUT_SECONDS = 60.0
 _MAX_RESULT_BYTES = 1_048_576
 _MAX_ARGUMENT_BYTES = 65_536
+_MAX_TOOL_LIST_ROWS = 2048
+_MAX_CONTENT_BLOCKS = 256
+_MAX_SANITIZE_DEPTH = 64
+_MAX_SANITIZE_NODES = 10_000
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9A-Fa-f]+|0[0-7]*|[0-9]+)$")
 _UNSET = object()
 
@@ -270,7 +275,11 @@ class ExternalMcpBridge:
             raise ExternalMcpError("INVALID_METADATA", "external MCP tool metadata is invalid") from exc
         configured = {tool.name: tool for tool in server.tools}
         count = 0
-        for row in rows:
+        for index, row in enumerate(rows):
+            if index >= _MAX_TOOL_LIST_ROWS:
+                raise ExternalMcpError(
+                    "INVALID_METADATA", "external MCP tool metadata exceeds row limit"
+                )
             name = _field(row, "name", None)
             if not isinstance(name, str) or name not in configured:
                 continue
@@ -421,6 +430,8 @@ class ExternalMcpBridge:
 
             try:
                 value, structured, is_error = _normalise_result(raw_result)
+            except ExternalMcpError:
+                raise
             except Exception:
                 raise ExternalMcpError(
                     "INVALID_RESULT", "external MCP returned an invalid result"
@@ -833,20 +844,58 @@ def _is_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _sanitize_text(text: str) -> str:
+    """Strip ANSI escapes, C0/C1 controls (except tab/newline), and bidi/invisible overrides."""
+    return terminal_text(text).replace("\u061c", "")
+
+
+def _sanitize_untrusted(
+    value: Any, *, depth: int = 0, counter: list[int] | None = None,
+) -> Any:
+    if counter is None:
+        counter = [0]
+    if depth > _MAX_SANITIZE_DEPTH:
+        raise ExternalMcpError("INVALID_RESULT", "external MCP result exceeds nesting limit")
+    counter[0] += 1
+    if counter[0] > _MAX_SANITIZE_NODES:
+        raise ExternalMcpError("RESULT_TOO_LARGE", "external MCP result exceeds node limit")
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, Mapping):
+        return {
+            (_sanitize_text(k) if isinstance(k, str) else k): _sanitize_untrusted(
+                v, depth=depth + 1, counter=counter,
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _sanitize_untrusted(item, depth=depth + 1, counter=counter)
+            for item in value
+        ]
+    return value
+
+
 def _normalise_result(result: Any) -> tuple[Any, bool, bool]:
     structured = _field(result, "structuredContent", None)
     if structured is None:
         structured = _field(result, "structured_content", None)
     is_error = bool(_field(result, "isError", _field(result, "is_error", False)))
     if structured is not None:
-        return structured, True, is_error
+        return _sanitize_untrusted(structured), True, is_error
     content = _field(result, "content", ()) or ()
+    if isinstance(content, (str, bytes, Mapping)):
+        raise ExternalMcpError("INVALID_RESULT", "external MCP result content must be a sequence")
     text_parts = []
-    for block in content:
+    for index, block in enumerate(content):
+        if index >= _MAX_CONTENT_BLOCKS:
+            raise ExternalMcpError(
+                "RESULT_TOO_LARGE", "external MCP result exceeds content block limit"
+            )
         block_type = _field(block, "type", None)
         text = _field(block, "text", None)
         if block_type == "text" and isinstance(text, str):
-            text_parts.append(text)
+            text_parts.append(_sanitize_text(text))
     return {"text": "\n".join(text_parts)}, False, is_error
 
 

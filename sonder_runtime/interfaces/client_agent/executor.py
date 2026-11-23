@@ -12,7 +12,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 MAX_OUTPUT_CHARS = 65_536
@@ -29,6 +29,18 @@ CLIENT_AGENT_MODES: tuple[str, ...] = (
     "auto",
     "bypass",
 )
+
+CLIENT_AGENT_MODE_RANK: dict[str, int] = {
+    "plan": 0,
+    "manual": 1,
+    "acceptEdits": 2,
+    "auto": 3,
+    "bypass": 4,
+}
+
+
+class ModeCeilingRefused(PermissionError):
+    """A requested mode exceeds the companion policy ceiling or disabled bypass."""
 
 _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "file_read",
@@ -106,10 +118,38 @@ class ClientToolExecutionResult:
 
 _DRIVE_RELATIVE_RE = re.compile(r"^[A-Za-z]:(?:$|[^/\\])")
 _LOCAL_EXTENDED_DRIVE_RE = re.compile(r"^\\\\\?\\[A-Za-z]:(?:$|[/\\])")
+_MAX_SYMLINK_HOPS = 16
+_WINDOWS_RESERVED_DEVICE_NAMES: frozenset[str] = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+})
+
+
+def _is_reserved_device_segment(segment: str, *, index: int) -> bool:
+    """True when ``segment`` names a Windows reserved DOS device (CON, NUL, COM1, etc.)."""
+    if not segment or segment in (".", ".."):
+        return False
+    if index == 0 and len(segment) == 2 and segment[1] == ":" and segment[0].isalpha():
+        return False
+    cleaned = segment.split(":", 1)[0].rstrip(" .")
+    if not cleaned:
+        return False
+    base = cleaned.split(".", 1)[0].rstrip(" ").casefold()
+    if base in _WINDOWS_RESERVED_DEVICE_NAMES:
+        return True
+    try:
+        pure = PureWindowsPath(segment)
+        is_reserved = getattr(pure, "is_reserved", None)
+        if callable(is_reserved) and is_reserved():
+            return True
+    except ValueError:
+        pass
+    return False
 
 
 def _reject_unsafe_path_spelling(raw: str, *, allow_local_extended: bool = False) -> None:
-    """Lexically reject UNC, device, extended, NT-namespace, control-char, and drive-relative paths.
+    """Lexically reject UNC, device, extended, NT-namespace, control-char, reserved-name, and drive-relative paths.
 
     Runs BEFORE any ``Path.resolve()`` or filesystem call so hostile spellings
     cannot trigger outbound SMB/NTLM lookups or escape into NT device namespaces
@@ -135,12 +175,12 @@ def _reject_unsafe_path_spelling(raw: str, *, allow_local_extended: bool = False
         raise PermissionError(f"NT namespace path is not allowed: {raw!r}")
     if _DRIVE_RELATIVE_RE.match(text):
         raise PermissionError(f"Windows drive-relative path is not allowed: {raw!r}")
+    for idx, seg in enumerate(re.split(r"[/\\]", text)):
+        if _is_reserved_device_segment(seg, index=idx):
+            raise PermissionError(f"Windows reserved device name is not allowed in path: {raw!r}")
 
 
-def _is_reparse_or_link(path: Path | str) -> bool:
-    """True when ``path`` is a symlink or (on Windows) an NTFS directory junction."""
-    if os.path.islink(path):
-        return True
+def _is_junction(path: Path | str) -> bool:
     is_junction = getattr(os.path, "isjunction", None)
     if callable(is_junction):
         try:
@@ -150,22 +190,62 @@ def _is_reparse_or_link(path: Path | str) -> bool:
     return False
 
 
-def _reject_unsafe_reparse_ancestors(candidate: Path) -> None:
-    """Walk ``candidate`` top-down and refuse any symlink/junction targeting UNC/device/NT before resolve()."""
-    parts = candidate.parts
-    if not parts:
-        return
-    cur = Path(parts[0])
-    for part in parts[1:]:
-        if part in ("", "."):
-            continue
-        cur = cur / part
-        if _is_reparse_or_link(cur):
-            try:
-                target = os.readlink(cur)
-            except OSError as exc:
-                raise PermissionError(f"unreadable link/junction at '{cur}'") from exc
-            _reject_unsafe_path_spelling(target, allow_local_extended=True)
+def _is_reparse_or_link(path: Path | str) -> bool:
+    """True when ``path`` is a symlink or (on Windows) an NTFS directory junction."""
+    if os.path.islink(path):
+        return True
+    return _is_junction(path)
+
+
+def _strip_local_extended_prefix(target: str) -> str:
+    if _LOCAL_EXTENDED_DRIVE_RE.match(target):
+        return target[4:]
+    return target
+
+
+def _reject_unsafe_reparse_ancestors(candidate: Path, *, max_hops: int = _MAX_SYMLINK_HOPS) -> None:
+    """Walk ``candidate`` component-by-component, following up to ``max_hops`` local symlinks/junctions.
+
+    Refuses any symlink/junction targeting UNC/device/NT/reserved-device paths
+    BEFORE ``Path.resolve()`` is ever called, and refuses chains deeper than
+    ``max_hops`` (including loops).
+    """
+    current = candidate
+    hops = 0
+    while True:
+        parts = current.parts
+        if not parts:
+            return
+        cur = Path(parts[0])
+        followed = False
+        for idx, part in enumerate(parts[1:], start=1):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                cur = cur.parent
+                continue
+            cur = cur / part
+            if _is_reparse_or_link(cur):
+                hops += 1
+                if hops > max_hops:
+                    raise PermissionError(
+                        f"too many symlink/junction levels (>{max_hops}) while resolving '{candidate}'"
+                    )
+                try:
+                    target = os.readlink(cur)
+                except OSError as exc:
+                    raise PermissionError(f"unreadable link/junction at '{cur}'") from exc
+                _reject_unsafe_path_spelling(target, allow_local_extended=True)
+                clean_target = _strip_local_extended_prefix(target.strip())
+                target_path = Path(clean_target)
+                if not target_path.is_absolute():
+                    target_path = cur.parent / target_path
+                remaining = parts[idx + 1 :]
+                current = target_path.joinpath(*remaining) if remaining else target_path
+                followed = True
+                break
+        if not followed:
+            return
 
 
 def _entry_within_root(entry: Path, root: Path) -> bool:
@@ -189,6 +269,8 @@ class ClientAgentPolicy:
         *,
         workspace_root: Path | str | None = None,
         mode: str = "manual",
+        max_mode: str | None = None,
+        can_bypass: bool | None = None,
     ) -> None:
         if workspace_root is not None:
             raw_root = str(workspace_root)
@@ -201,12 +283,43 @@ class ClientAgentPolicy:
         _reject_unsafe_path_spelling(str(self.workspace_root))
         if mode not in CLIENT_AGENT_MODES:
             raise ValueError(f"unknown client permission mode: {mode!r}")
+        if max_mode is not None:
+            clean_max = max_mode.strip()
+            if clean_max not in CLIENT_AGENT_MODES:
+                raise ValueError(f"unknown client max_mode: {max_mode!r}")
+        else:
+            clean_max = None
+        if can_bypass is None:
+            if clean_max is not None:
+                effective_can_bypass = clean_max == "bypass"
+            else:
+                effective_can_bypass = mode == "bypass"
+        else:
+            effective_can_bypass = bool(can_bypass)
+        if mode == "bypass" and not effective_can_bypass:
+            raise ModeCeilingRefused("bypass mode is not enabled on this client companion")
+        if clean_max is None:
+            clean_max = "bypass" if effective_can_bypass else "auto"
+        elif clean_max == "bypass" and not effective_can_bypass:
+            raise ModeCeilingRefused("max_mode 'bypass' requires can_bypass=True")
+        if CLIENT_AGENT_MODE_RANK[mode] > CLIENT_AGENT_MODE_RANK[clean_max]:
+            raise ValueError(f"initial mode {mode!r} exceeds max_mode {clean_max!r}")
         self.mode: str = mode
+        self.max_mode: str = clean_max
+        self.can_bypass: bool = effective_can_bypass and (clean_max == "bypass")
 
     def set_mode(self, mode: str, *, confirm_bypass: bool = False) -> str:
         clean = mode.strip()
         if clean not in CLIENT_AGENT_MODES:
             raise ValueError(f"unknown mode '{clean}'; valid modes: {', '.join(CLIENT_AGENT_MODES)}")
+        if clean == "bypass" and not self.can_bypass:
+            raise ModeCeilingRefused(
+                "bypass mode is not enabled on this client companion (restart with --confirm-bypass)"
+            )
+        if CLIENT_AGENT_MODE_RANK[clean] > CLIENT_AGENT_MODE_RANK[self.max_mode]:
+            raise ModeCeilingRefused(
+                f"mode '{clean}' exceeds companion max_mode '{self.max_mode}'"
+            )
         if clean == "bypass" and not confirm_bypass:
             raise PermissionError("bypass mode requires explicit confirmation (confirm_bypass: true)")
         self.mode = clean
@@ -240,11 +353,19 @@ def _resolve_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
 # who really needs to change them can do it through run_program, which is
 # execute-class.
 _GIT_METADATA_DIRECTORY = ".git"
-_GIT_CONTROL_FILES: frozenset[str] = frozenset({".gitattributes", ".gitmodules"})
+_GIT_CONTROL_FILES: frozenset[str] = frozenset({".gitattributes", ".gitmodules", ".gitconfig"})
 
 
-class WritePathRefused(PermissionError):
+class ClientPathRefused(PermissionError):
+    """A client tool targeted a path no client mode may read or change."""
+
+
+class WritePathRefused(ClientPathRefused):
     """A write-class tool targeted a path no client mode may change."""
+
+
+class ReadPathRefused(ClientPathRefused):
+    """A read-class tool targeted a credential store or secret config."""
 
 
 class GitControlPathRefused(WritePathRefused):
@@ -350,6 +471,34 @@ def _components_under(path: Path, root: Path) -> tuple[tuple[str, ...], tuple[st
         return (), path.parts
 
 
+def _is_git_config_path(names: list[str], context: list[str]) -> bool:
+    """True when ``names`` (with ``context``) targets a git config file that may hold tokens or commands."""
+    if not names:
+        return False
+    window = [*context, *names]
+    if names[-1] == ".gitconfig":
+        return True
+    if len(window) >= 2 and (window[-2], window[-1]) == (".git", "config"):
+        return True
+    return len(window) >= 3 and (window[-3], window[-2], window[-1]) == (".config", "git", "config")
+
+
+def _is_secret_read_path(names: list[str], context: list[str]) -> bool:
+    """True when ``names`` (with ``context``) names a credential store or git config secret."""
+    return _is_credential_path(names, context) or _is_git_config_path(names, context)
+
+
+def _is_credential_dir_components(
+    parts: tuple[str, ...],
+    context_parts: tuple[str, ...] = (),
+) -> bool:
+    """True when any component or directory pair in ``context_parts + parts`` is a credential directory."""
+    window = [_canonical_component(part) for part in (*context_parts, *parts)]
+    if any(name in _CREDENTIAL_DIRECTORIES for name in window):
+        return True
+    return any(pair in _CREDENTIAL_DIRECTORY_PAIRS for pair in itertools.pairwise(window))
+
+
 def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | None:
     """The refusal for a write to ``text`` (resolving to ``resolved``), or ``None``.
 
@@ -369,12 +518,16 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
     for context_parts, parts in (lexical_split, _components_under(resolved, root)):
         names = [_canonical_component(part) for part in parts]
         context = [_canonical_component(part) for part in context_parts]
+        window = [*context, *names]
         if _GIT_METADATA_DIRECTORY in names:
             return GitControlPathRefused(
                 f"refusing to modify git repository metadata '{text}': hooks and config there "
                 "name programs git runs; use run_program (execute approval) if this is intended"
             )
-        if names and names[-1] in _GIT_CONTROL_FILES:
+        if (
+            (names and names[-1] in _GIT_CONTROL_FILES)
+            or (len(window) >= 3 and (window[-3], window[-2], window[-1]) == (".config", "git", "config"))
+        ):
             return GitControlPathRefused(
                 f"refusing to modify git control file '{text}': it selects programs git runs; "
                 "use run_program (execute approval) if this is intended"
@@ -385,6 +538,38 @@ def _write_refusal(text: str, resolved: Path, root: Path) -> WritePathRefused | 
                 "use run_program (execute approval) if this is intended"
             )
     return None
+
+
+def _read_refusal(text: str, resolved: Path, root: Path) -> ReadPathRefused | None:
+    """The refusal for reading ``text`` (resolving to ``resolved``), or ``None``."""
+    lexical = Path(text)
+    lexical_split = (
+        _components_under(lexical, root) if lexical.is_absolute() else (root.parts, lexical.parts)
+    )
+    for context_parts, parts in (lexical_split, _components_under(resolved, root)):
+        names = [_canonical_component(part) for part in parts]
+        context = [_canonical_component(part) for part in context_parts]
+        if _is_secret_read_path(names, context):
+            return ReadPathRefused(
+                f"refusing to read credential or secret path '{text}' from a client tool"
+            )
+    return None
+
+
+def _resolve_read_path(
+    raw: object,
+    root: Path,
+    *,
+    allow_escape: bool,
+    workspace_root: Path | None = None,
+) -> Path:
+    """``_resolve_path`` for read-class tools, refusing credential stores and git configs."""
+    text = str(raw or "").strip() or "."
+    resolved = _resolve_path(raw, root, allow_escape=allow_escape)
+    refusal = _read_refusal(text, resolved, workspace_root or root)
+    if refusal is not None:
+        raise refusal
+    return resolved
 
 
 def _resolve_write_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
@@ -405,14 +590,18 @@ async def _run_process(
     stdin_text: str = "",
     env: Mapping[str, str] | None = None,
 ) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=str(cwd),
-        stdin=asyncio.subprocess.PIPE if stdin_text else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=dict(env) if env is not None else None,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            stdin=asyncio.subprocess.PIPE if stdin_text else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=dict(env) if env is not None else None,
+        )
+    except FileNotFoundError as exc:
+        exe = argv[0] if argv else ""
+        raise FileNotFoundError(f"executable not found: {exe}") from exc
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=float(timeout))
@@ -453,7 +642,7 @@ def _format_proc_output(rc: int, stdout_s: str, stderr_s: str) -> tuple[bool, st
 
 
 def _exec_file_read(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
-    path = _resolve_path(args.get("path"), root, allow_escape=bypass)
+    path = _resolve_read_path(args.get("path"), root, allow_escape=bypass)
     if not path.is_file():
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     offset = max(1, int(args.get("offset") or 1))
@@ -505,7 +694,34 @@ def _exec_file_edit(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
 
 
 def _exec_file_delete(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
-    path = _resolve_write_path(args.get("path"), root, allow_escape=bypass)
+    raw = args.get("path")
+    raw_str = str(raw or "")
+    _reject_unsafe_path_spelling(raw_str)
+    text = raw_str.strip() or "."
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if candidate.name not in ("", ".", ".."):
+        parent = candidate.parent
+        _reject_unsafe_reparse_ancestors(parent)
+        resolved_parent = parent.resolve()
+        _reject_unsafe_path_spelling(str(resolved_parent))
+        if not bypass:
+            try:
+                resolved_parent.relative_to(root)
+            except ValueError as exc:
+                raise PermissionError(f"path '{text}' escapes workspace root '{root}'") from exc
+        link_path = resolved_parent / candidate.name
+        if _is_reparse_or_link(link_path):
+            refusal = _write_refusal(text, link_path, root)
+            if refusal is not None:
+                raise refusal
+            if _is_junction(link_path):
+                return ClientToolExecutionResult(ok=False, error="file_delete refuses directories")
+            # Unlink the symlink itself without resolving or deleting its target.
+            link_path.unlink()
+            return ClientToolExecutionResult(ok=True, output=f"deleted {link_path}")
+    path = _resolve_write_path(raw, root, allow_escape=bypass)
     if not path.exists():
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     if path.is_dir():
@@ -520,34 +736,121 @@ def _exec_directory_create(args: Mapping[str, Any], root: Path, *, bypass: bool)
     return ClientToolExecutionResult(ok=True, output=f"created directory {path}")
 
 
+def _resolve_scan_base(raw: object, root: Path, *, bypass: bool) -> Path:
+    text = str(raw if raw is not None else ".").strip() or "."
+    base = _resolve_path(text, root, allow_escape=bypass)
+    if _is_credential_dir_components(base.parts):
+        raise ReadPathRefused(f"refusing to scan credential directory '{text}' from a client tool")
+    refusal = _read_refusal(text, base, root)
+    if refusal is not None:
+        raise refusal
+    return base
+
+
+def _scandir_classify(
+    entry: os.DirEntry[str],
+    root: Path,
+    *,
+    bypass: bool,
+    skip_dirs: frozenset[str],
+    skip_all_names: frozenset[str] = frozenset(),
+) -> tuple[bool, bool, Path]:
+    """Classify one ``os.scandir`` entry without following symlinks/junctions unsafely.
+
+    Returns ``(include, is_dir, entry_path)``. Never calls ``entry.is_dir()`` with
+    ``follow_symlinks=True`` so hostile symlinks/junctions cannot trigger outbound
+    SMB/NTLM lookups.
+    """
+    entry_path = Path(entry.path)
+    if entry.name in skip_all_names:
+        return False, False, entry_path
+    try:
+        is_link = entry.is_symlink() or _is_reparse_or_link(entry.path)
+    except OSError:
+        return False, False, entry_path
+    if is_link:
+        if not bypass:
+            return False, False, entry_path
+        try:
+            _reject_unsafe_reparse_ancestors(entry_path)
+            resolved = entry_path.resolve()
+            _reject_unsafe_path_spelling(str(resolved))
+        except (PermissionError, OSError):
+            return False, False, entry_path
+        if _is_credential_dir_components(resolved.parts) or _read_refusal(entry.name, resolved, root) is not None:
+            return False, False, entry_path
+        # Do not descend into directory links even in bypass mode.
+        return True, False, entry_path
+    try:
+        is_dir = entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False, False, entry_path
+    if is_dir and entry.name in skip_dirs:
+        return False, False, entry_path
+    context_parts, parts = _components_under(entry_path, root)
+    if is_dir:
+        if _is_credential_dir_components(parts, context_parts):
+            return False, False, entry_path
+    else:
+        names = [_canonical_component(p) for p in parts]
+        context = [_canonical_component(p) for p in context_parts]
+        if _is_secret_read_path(names, context):
+            return False, False, entry_path
+    if not bypass:
+        try:
+            entry_path.relative_to(root)
+        except ValueError:
+            return False, False, entry_path
+    return True, is_dir, entry_path
+
+
+_SCAN_SKIP_DIRS: frozenset[str] = frozenset({".git", "__pycache__", ".dart_tool", "node_modules"})
+_TREE_SKIP_NAMES: frozenset[str] = frozenset({".git", "__pycache__"})
+
+
 def _exec_file_find(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
-    base = _resolve_path(args.get("root", "."), root, allow_escape=bypass)
+    base = _resolve_scan_base(args.get("root", "."), root, bypass=bypass)
     if not base.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
     pattern = str(args.get("pattern") or "*").strip() or "*"
     matches: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(
-            d for d in dirnames
-            if d not in {".git", "__pycache__", ".dart_tool", "node_modules"}
-            and (bypass or not _is_reparse_or_link(os.path.join(dirpath, d)))
-        )
-        for name in sorted(filenames):
-            fpath = Path(dirpath) / name
-            if not bypass and not _entry_within_root(fpath, root):
-                continue
+
+    def walk(cur: Path) -> None:
+        if len(matches) >= _MAX_FIND_MATCHES:
+            return
+        dirs: list[tuple[str, Path]] = []
+        files: list[tuple[str, Path]] = []
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    include, is_dir, entry_path = _scandir_classify(
+                        entry, root, bypass=bypass, skip_dirs=_SCAN_SKIP_DIRS,
+                    )
+                    if not include:
+                        continue
+                    if is_dir:
+                        dirs.append((entry.name, entry_path))
+                    else:
+                        files.append((entry.name, entry_path))
+        except OSError:
+            return
+        for name, fpath in sorted(files, key=lambda pair: pair[0]):
             rel = fpath.relative_to(base).as_posix()
             if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern):
                 matches.append(rel)
                 if len(matches) >= _MAX_FIND_MATCHES:
-                    break
-        if len(matches) >= _MAX_FIND_MATCHES:
-            break
+                    return
+        for _, dpath in sorted(dirs, key=lambda pair: pair[0]):
+            walk(dpath)
+            if len(matches) >= _MAX_FIND_MATCHES:
+                return
+
+    walk(base)
     return ClientToolExecutionResult(ok=True, output="\n".join(matches) or "(no matches)")
 
 
 def _exec_directory_tree(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
-    base = _resolve_path(args.get("path", "."), root, allow_escape=bypass)
+    base = _resolve_scan_base(args.get("path", "."), root, bypass=bypass)
     if not base.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
     depth = max(1, min(5, int(args.get("depth") or 2)))
@@ -556,22 +859,30 @@ def _exec_directory_tree(args: Mapping[str, Any], root: Path, *, bypass: bool) -
     def walk(cur: Path, level: int) -> None:
         if level > depth or len(lines) >= _MAX_TREE_ENTRIES:
             return
+        items: list[tuple[str, Path, bool]] = []
         try:
-            entries = sorted(cur.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            with os.scandir(cur) as it:
+                for entry in it:
+                    include, is_dir, entry_path = _scandir_classify(
+                        entry,
+                        root,
+                        bypass=bypass,
+                        skip_dirs=_TREE_SKIP_NAMES,
+                        skip_all_names=_TREE_SKIP_NAMES,
+                    )
+                    if include:
+                        items.append((entry.name, entry_path, is_dir))
         except OSError:
             return
-        for entry in entries:
-            if entry.name in {".git", "__pycache__"}:
-                continue
-            if not bypass and not _entry_within_root(entry, root):
-                continue
+        items.sort(key=lambda item: (not item[2], item[0].lower()))
+        for name, entry_path, is_dir in items:
             indent = "  " * (level - 1)
-            suffix = "/" if entry.is_dir() else ""
-            lines.append(f"{indent}{entry.name}{suffix}")
+            suffix = "/" if is_dir else ""
+            lines.append(f"{indent}{name}{suffix}")
             if len(lines) >= _MAX_TREE_ENTRIES:
                 return
-            if entry.is_dir() and level < depth:
-                walk(entry, level + 1)
+            if is_dir and level < depth:
+                walk(entry_path, level + 1)
 
     walk(base, 1)
     return ClientToolExecutionResult(ok=True, output="\n".join(lines) or "(empty)")
@@ -581,24 +892,37 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     query = str(args.get("query") or "")
     if not query:
         return ClientToolExecutionResult(ok=False, error="query is required")
-    base = _resolve_path(args.get("root", "."), root, allow_escape=bypass)
+    base = _resolve_scan_base(args.get("root", "."), root, bypass=bypass)
     if not base.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
     glob_pat = str(args.get("glob") or "").strip()
     matches: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(
-            d for d in dirnames
-            if d not in {".git", "__pycache__", ".dart_tool", "node_modules"}
-            and (bypass or not _is_reparse_or_link(os.path.join(dirpath, d)))
-        )
-        for name in sorted(filenames):
+
+    def walk(cur: Path) -> None:
+        if len(matches) >= _MAX_SEARCH_MATCHES:
+            return
+        dirs: list[tuple[str, Path]] = []
+        files: list[tuple[str, Path]] = []
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    include, is_dir, entry_path = _scandir_classify(
+                        entry, root, bypass=bypass, skip_dirs=_SCAN_SKIP_DIRS,
+                    )
+                    if not include:
+                        continue
+                    if is_dir:
+                        dirs.append((entry.name, entry_path))
+                    else:
+                        files.append((entry.name, entry_path))
+        except OSError:
+            return
+        for name, fpath in sorted(files, key=lambda pair: pair[0]):
             if glob_pat and not fnmatch.fnmatch(name, glob_pat):
                 continue
-            fpath = Path(dirpath) / name
-            if not bypass and not _entry_within_root(fpath, root):
-                continue
             try:
+                if not fpath.is_file():
+                    continue
                 if fpath.stat().st_size > 512 * 1024:
                     continue
                 content = fpath.read_text(encoding="utf-8", errors="replace")
@@ -609,7 +933,13 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
                 if query in line:
                     matches.append(f"{rel}:{lineno}: {line.strip()[:200]}")
                     if len(matches) >= _MAX_SEARCH_MATCHES:
-                        return ClientToolExecutionResult(ok=True, output="\n".join(matches))
+                        return
+        for _, dpath in sorted(dirs, key=lambda pair: pair[0]):
+            walk(dpath)
+            if len(matches) >= _MAX_SEARCH_MATCHES:
+                return
+
+    walk(base)
     return ClientToolExecutionResult(ok=True, output="\n".join(matches) or "(no matches)")
 
 
@@ -656,7 +986,7 @@ def _exec_run_code(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Clie
             tmp_path.unlink(missing_ok=True)
     if language in {"bash", "sh"}:
         rc, out, err = _run_process_sync(
-            ["bash", "-lc", code],
+            ["bash", "-c", code],
             cwd=cwd,
             timeout=timeout,
             stdin_text=stdin_text,
@@ -759,13 +1089,17 @@ _GIT_PROGRAM_ENV_VARS: tuple[str, ...] = (
 )
 
 
-def _git_environment() -> dict[str, str]:
+def _git_environment(root: Path | None = None, *, bypass: bool = False) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key.upper() not in _GIT_PROGRAM_ENV_VARS}
     env.update({
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
     })
+    if not bypass and root is not None:
+        ceiling = root.parent
+        if ceiling != root:
+            env["GIT_CEILING_DIRECTORIES"] = str(ceiling)
     return env
 
 
@@ -859,11 +1193,46 @@ def _hardened_git_prefix(git: str, cwd: Path, env: Mapping[str, str]) -> list[st
     return [*base, *_git_driver_overrides(out)]
 
 
+_DIFF_GIT_HEADER_RE = re.compile(r'^diff --git (?:"?a/(.+?)"?) (?:"?b/(.+?)"?)$')
+
+
+def _diff_path_is_secret(rel_path: str, cwd: Path, root: Path) -> bool:
+    clean = rel_path.strip()
+    if not clean:
+        return False
+    candidate = cwd / clean
+    context_parts, parts = _components_under(candidate, root)
+    names = [_canonical_component(p) for p in parts]
+    context = [_canonical_component(p) for p in context_parts]
+    return _is_secret_read_path(names, context)
+
+
+def _filter_git_diff_secrets(diff_text: str, cwd: Path, root: Path) -> str:
+    if not diff_text:
+        return diff_text
+    kept: list[str] = []
+    skipping = False
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            match = _DIFF_GIT_HEADER_RE.match(line.rstrip("\r\n"))
+            if match and (
+                _diff_path_is_secret(match.group(1), cwd, root)
+                or _diff_path_is_secret(match.group(2), cwd, root)
+            ):
+                skipping = True
+                continue
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return "".join(kept)
+
+
 def _exec_git(tool: str, args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
-    cwd = _resolve_path(args.get("cwd") or ".", root, allow_escape=bypass)
+    cwd = _resolve_scan_base(args.get("cwd") or ".", root, bypass=bypass)
     if not cwd.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {cwd}")
     subcommand: list[str]
+    rel_path = ""
     if tool == "git_status":
         subcommand = ["status", "--short"]
     elif tool == "git_diff":
@@ -872,17 +1241,19 @@ def _exec_git(tool: str, args: Mapping[str, Any], root: Path, *, bypass: bool) -
             subcommand.append("--staged")
         rel_path = str(args.get("path") or "").strip()
         if rel_path:
-            target = _resolve_path(rel_path, cwd, allow_escape=bypass)
+            target = _resolve_read_path(rel_path, cwd, allow_escape=bypass, workspace_root=root)
             subcommand.extend(["--", str(target)])
     elif tool == "git_log":
         limit = max(1, min(100, int(args.get("limit") or 20)))
         subcommand = ["log", "--no-ext-diff", "--no-textconv", f"-n{limit}", "--oneline"]
     else:
         subcommand = ["branch", "-a"]
-    env = _git_environment()
+    env = _git_environment(root, bypass=bypass)
     git = _git_executable(root, cwd)
     argv = [*_hardened_git_prefix(git, cwd, env), *subcommand]
     rc, out, err = _run_process_sync(argv, cwd=cwd, timeout=_GIT_TIMEOUT_SECONDS, env=env)
+    if tool == "git_diff" and rc == 0 and not rel_path:
+        out = _filter_git_diff_secrets(out, cwd, root)
     ok, stdout_msg, err_msg = _format_proc_output(rc, out, err)
     return ClientToolExecutionResult(ok=ok, output=stdout_msg, error=err_msg)
 
@@ -905,6 +1276,14 @@ def execute_client_tool(
             risk="execute",
         )
     risk = tool_risk_of(clean_tool)
+    if policy.mode == "plan" and risk != "read_only":
+        return ClientToolExecutionResult(
+            ok=False,
+            error=f"tool '{clean_tool}' ({risk}) is denied in read-only plan mode",
+            denied=True,
+            mode=policy.mode,
+            risk=risk,
+        )
     if not approved and not mode_allows_without_prompt(policy.mode, risk):
         return ClientToolExecutionResult(
             ok=False,
@@ -940,7 +1319,7 @@ def execute_client_tool(
             res = _exec_test_run(safe_args, policy.workspace_root, bypass=bypass)
         else:
             res = _exec_git(clean_tool, safe_args, policy.workspace_root, bypass=bypass)
-    except WritePathRefused as exc:
+    except ClientPathRefused as exc:
         return ClientToolExecutionResult(
             ok=False,
             error=str(exc),

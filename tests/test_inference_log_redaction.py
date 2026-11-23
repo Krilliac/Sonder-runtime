@@ -219,11 +219,25 @@ def test_vision_post_failure_does_not_log_credentials(caplog, monkeypatch):
 
 def _gateway(transport) -> tuple[OpenAICompatibleGateway, OpenAICompatibleConfig]:
     cfg = OpenAICompatibleConfig(
-        # Credentials in the base URL are refused outright; the query still carries one.
-        base_url="http://127.0.0.1:8080/v1?api_key=s3cret",
+        # Credentials and query strings in base_url are refused outright; api_key carries the secret.
+        base_url="http://127.0.0.1:8080/v1",
+        api_key=SECRET,
         model="m",
     )
     return OpenAICompatibleGateway(cfg, transport=transport), cfg
+
+
+def test_openai_compat_post_refuses_query_secret_without_logging_it(caplog):
+    caplog.set_level(logging.DEBUG)
+    cfg = OpenAICompatibleConfig(
+        base_url=f"http://127.0.0.1:8080/v1?api_key={SECRET}",
+        model="m",
+    )
+    gateway = OpenAICompatibleGateway(cfg, transport=lambda *a: {"ok": True})
+    with pytest.raises(InvalidInput) as exc_info:
+        gateway._post("/embeddings", {}, cfg, 5.0)
+    assert SECRET not in str(exc_info.value)
+    _assert_clean(caplog)
 
 
 def test_openai_compat_post_success_does_not_log_credentials(caplog):

@@ -667,3 +667,160 @@ def test_code_gate_statically_checks_and_repairs_interactive_python_code(monkeyp
         fixed_game, interaction_id="iid-interactive-clean",
     )
     assert (clean_reply, clean_verified, clean_repaired) == (fixed_game, None, False)
+
+
+# --- security & reliability hardening -------------------------------------------
+
+
+def test_code_gate_blocks_host_execution_for_restricted_user_role(monkeypatch):
+    from sonder_runtime.adapters.security import role_tool_policy
+
+    executed = []
+    monkeypatch.setattr(
+        server.grounding, "run_code_detail",
+        lambda *a, **k: executed.append(a) or {"ok": True},
+    )
+    runtime_only_error = (
+        "Here:\n\n```python\n"
+        "def boom():\n    return 1 / 0\n\n"
+        "print(boom())\n"
+        "```\n"
+    )
+    with role_tool_policy.caller_role_scope("user"):
+        # Clean-syntax runtime-only error is not executed on host under user role.
+        reply, verified, repaired, _ = server._gate_answer_code(
+            runtime_only_error,
+            iid="iid-user-role",
+            prompt="write code",
+            history=[],
+            model="sonder:latest",
+            system="",
+            temperature=0.2,
+            num_predict=128,
+            num_ctx=0,
+            cloud=False,
+            tier_label="code",
+        )
+        assert executed == []
+        assert (reply, verified, repaired) == (runtime_only_error, None, False)
+
+        # Static errors are still caught and repaired without executing host Python.
+        monkeypatch.setattr(
+            server, "_make_generate",
+            lambda *a, **k: (lambda p, h=None: FIXED_REPLY),
+        )
+        repaired_reply, rep_verified, rep_repaired, _ = server._gate_answer_code(
+            BAD_REPLY,
+            iid="iid-user-static-repair",
+            prompt="write parser",
+            history=[],
+            model="sonder:latest",
+            system="",
+            temperature=0.2,
+            num_predict=128,
+            num_ctx=0,
+            cloud=False,
+            tier_label="code",
+        )
+        assert executed == []
+        assert (repaired_reply, rep_verified, rep_repaired) == (FIXED_REPLY, True, True)
+
+
+def test_code_gate_blocks_host_execution_in_plan_and_scoped_manual_modes(monkeypatch):
+    import permission_modes as pm
+    from sonder_runtime.adapters.security import role_tool_policy
+
+    executed = []
+    monkeypatch.setattr(
+        server.grounding, "run_code_detail",
+        lambda *a, **k: executed.append(a) or {"ok": True},
+    )
+    before = pm.current_mode()
+    try:
+        pm.set_mode(pm.PLAN)
+        reply, verified, repaired = server._apply_code_gate(GOOD_REPLY)
+        assert executed == []
+        assert (reply, verified, repaired) == (GOOD_REPLY, None, False)
+
+        pm.set_mode(pm.MANUAL)
+        with role_tool_policy.caller_role_scope(None), pm.mode_scope("dev-user", "sess-1"):
+            reply2, verified2, repaired2 = server._apply_code_gate(GOOD_REPLY)
+            assert executed == []
+            assert (reply2, verified2, repaired2) == (GOOD_REPLY, None, False)
+
+        # Unrestricted developer in auto mode executes normally.
+        pm.set_mode(pm.AUTO)
+        with role_tool_policy.caller_role_scope(None), pm.mode_scope("dev-user", "sess-2"):
+            reply3, verified3, repaired3 = server._apply_code_gate(GOOD_REPLY)
+            assert len(executed) == 1
+            assert (reply3, verified3, repaired3) == (GOOD_REPLY, True, False)
+    finally:
+        pm.set_mode(before)
+
+
+def test_code_gate_redacts_secrets_in_repair_prompt_and_banner(monkeypatch):
+    secret = "ghp_1234567890abcdef1234567890abcdef1234"
+    monkeypatch.setattr(
+        server.grounding, "run_code_detail",
+        lambda *a, **k: {
+            "ok": False, "timed_out": False, "stdout": "",
+            "stderr": f"RuntimeError: leaked token={secret}",
+            "returncode": 1,
+        },
+    )
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_code_gate_failure", lambda iid: recorded.append(iid),
+    )
+    prompts = []
+
+    def regenerate(repair_prompt):
+        prompts.append(repair_prompt)
+        return BAD_REPLY
+
+    reply, verified, repaired = server._apply_code_gate(
+        BAD_REPLY, interaction_id="iid-redact", regenerate=regenerate,
+    )
+
+    assert verified is False
+    assert repaired is False
+    assert len(prompts) == 1
+    assert secret not in prompts[0]
+    assert "[REDACTED]" in prompts[0]
+    assert secret not in reply
+    assert "NOT VERIFIED" in reply
+    assert "[REDACTED]" in reply
+    assert recorded == ["iid-redact"]
+
+
+def test_code_gate_stops_aba_oscillation_across_repair_passes(monkeypatch):
+    monkeypatch.setenv("SONDER_CODE_GATE_MAX_REPAIRS", "4")
+    recorded = []
+    monkeypatch.setattr(
+        server, "_record_code_gate_failure", lambda iid: recorded.append(iid),
+    )
+    reply_b = (
+        "Attempt B:\n\n```python\n"
+        "def parse(s):\n    return other_missing_helper(s)\n\n"
+        "print(parse('P3D'))\n"
+        "```\n"
+    )
+    # Whitespace-padded version of BAD_REPLY (A -> B -> A' oscillation)
+    reply_a_ws = BAD_REPLY.replace("print(parse('P3D'))", "print(parse('P3D'))   ")
+    attempts = iter([reply_b, reply_a_ws, FIXED_REPLY])
+    calls = []
+
+    def regenerate(repair_prompt):
+        calls.append(repair_prompt)
+        return next(attempts)
+
+    reply, verified, repaired = server._apply_code_gate(
+        BAD_REPLY, interaction_id="iid-osc", regenerate=regenerate,
+    )
+
+    assert verified is False
+    assert repaired is False
+    # Pass 1 produces B (new), pass 2 oscillates back to A' -> loop stops immediately.
+    assert len(calls) == 2
+    assert "NOT VERIFIED" in reply
+    assert recorded == ["iid-osc"]

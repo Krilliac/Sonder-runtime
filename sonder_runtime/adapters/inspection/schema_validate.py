@@ -51,9 +51,15 @@ def _resolve_file(
     bypass: bool = False,
     developer_authorized: bool = False,
 ) -> Path:
-    requested = file_ops._requested_path(str(path or ""))
-    if file_ops._is_reparse_point(requested):
-        raise SchemaValidateError("%s must not be a symlink or junction" % label)
+    try:
+        requested = file_ops._requested_path(str(path or ""))
+        file_ops._require_no_reparse_components(requested)
+    except PermissionError as exc:
+        if "symlink or junction" in str(exc):
+            raise SchemaValidateError("%s must not be a symlink or junction" % label) from exc
+        raise SchemaValidateError("%s rejected: %s" % (label, exc)) from exc
+    except (OSError, TypeError, ValueError) as exc:
+        raise SchemaValidateError("%s rejected: %s" % (label, exc)) from exc
     try:
         target = file_ops.require_read_access(
             str(path or ""),

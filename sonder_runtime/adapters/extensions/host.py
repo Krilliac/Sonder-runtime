@@ -13,6 +13,8 @@ code in-process.
 """
 from __future__ import annotations
 
+from sonder_runtime.domain.reference_lookup.sanitize import terminal_text
+from sonder_runtime.platform.logging import child_environment
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.platform.runtime_threads import ThreadOwnershipRefused
 
@@ -30,6 +32,80 @@ from .memory_limits import (
     MemoryLimiter,
     NativeExtensionMemoryLimiter,
 )
+
+_MAX_JSON_DEPTH = 256
+_MAX_SANITIZE_NODES = 10_000
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {token}")
+
+
+def _check_json_nesting_depth(raw: str, max_depth: int = _MAX_JSON_DEPTH) -> None:
+    if raw.count("{") + raw.count("[") <= max_depth:
+        return
+    depth = 0
+    in_string = False
+    escape = False
+    for ch in raw:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            if depth > max_depth:
+                raise ExtensionHostProtocolError("extension response exceeds maximum JSON depth")
+        elif ch in "}]" and depth > 0:
+            depth -= 1
+
+
+def _sanitize_text(text: str) -> str:
+    return terminal_text(text).replace("\u061c", "")
+
+
+def _sanitize_untrusted(
+    value: Any, *, depth: int = 0, counter: list[int] | None = None,
+) -> Any:
+    if counter is None:
+        counter = [0]
+    if depth > _MAX_JSON_DEPTH:
+        raise ExtensionHostProtocolError("extension response exceeds maximum nesting depth")
+    counter[0] += 1
+    if counter[0] > _MAX_SANITIZE_NODES:
+        raise ExtensionHostProtocolError("extension response exceeds maximum node count")
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, Mapping):
+        return {
+            (_sanitize_text(k) if isinstance(k, str) else k): _sanitize_untrusted(
+                v, depth=depth + 1, counter=counter,
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_untrusted(item, depth=depth + 1, counter=counter) for item in value]
+    return value
+
+
+def _safe_child_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """Return a secret-scrubbed environment for extension child processes."""
+    if env is None:
+        return child_environment()
+    scrubbed = child_environment(env)
+    if os.name == "nt":
+        present = {key.upper() for key in scrubbed}
+        for key in ("SYSTEMROOT", "WINDIR"):
+            if key not in present and key in os.environ:
+                scrubbed[key] = os.environ[key]
+    return scrubbed
 
 
 class ExtensionHostError(RuntimeError):
@@ -194,14 +270,19 @@ class ExtensionHost:
             if self._restarts >= self._limits.max_restarts:
                 raise ExtensionHostCrashed("extension restart budget exhausted")
             self._restarts += 1
-        process = self._popen(
-            list(self._argv),
-            cwd=self._cwd,
-            env=self._env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "cwd": self._cwd,
+            "env": _safe_child_env(self._env),
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+        }
+        if self._popen is subprocess.Popen:
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
+        process = self._popen(list(self._argv), **popen_kwargs)
         self._process = process
         self._launches += 1
         try:
@@ -232,7 +313,7 @@ class ExtensionHost:
             return
         try:
             self._launch_ready(recovery=True)
-        except ExtensionHostError:
+        except (ExtensionHostError, ExtensionMemoryLimitError):
             # Preserve the original bounded failure; the next explicit call
             # can observe the exhausted/remaining recovery state.
             self._process = None
@@ -246,7 +327,9 @@ class ExtensionHost:
         return process
 
     def _write_json(self, process: subprocess.Popen[bytes], value: Mapping[str, Any]) -> None:
-        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        payload = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8") + b"\n"
         if len(payload) > self._limits.max_output_bytes:
             raise ExtensionHostOutputLimit("extension request exceeds output byte bound")
         try:
@@ -269,14 +352,23 @@ class ExtensionHost:
                     raise ExtensionHostOutputLimit("extension output exceeds byte bound")
                 line = line.rstrip(b"\r\n")
                 try:
-                    value = json.loads(line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    text = line.decode("utf-8")
+                    _check_json_nesting_depth(text, _MAX_JSON_DEPTH)
+                    value = json.loads(text, parse_constant=_reject_json_constant)
+                except ExtensionHostError:
+                    raise
+                except (UnicodeDecodeError, ValueError, RecursionError) as exc:
                     raise ExtensionHostProtocolError("extension response was not valid JSON") from exc
+                if not isinstance(value, dict):
+                    raise ExtensionHostProtocolError("extension response must be a JSON object")
+                value = _sanitize_untrusted(value)
                 result_queue.put(("value", value))
             except ExtensionHostError as exc:
                 result_queue.put(("error", exc))
-            except OSError as exc:
+            except OSError:
                 result_queue.put(("error", ExtensionHostCrashed("extension stdout read failed")))
+            except Exception:
+                result_queue.put(("error", ExtensionHostProtocolError("extension response could not be parsed")))
 
         try:
             thread = owned_runtime_thread(target=reader, name="sonder-extension-reader", daemon=True)

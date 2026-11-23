@@ -460,7 +460,13 @@ def preapproved_scope(tool_name: str, decision):
 
 
 def consume_preapproved_decision(tool_name: str):
-    """Pop and return the pre-approved decision iff it matches ``tool_name``."""
+    """Pop and return the pre-approved decision iff it matches ``tool_name``.
+
+    Never bypasses step 0 (resume-reality mutation block or active effect fences):
+    when an effect-class tool is fenced, returns ``None`` so the caller falls
+    through to ``decide()`` and receives the authoritative ``source="fence"``
+    refusal and receipt.
+    """
     entry = _PREAPPROVED_EXECUTION.get()
     if not entry:
         return None
@@ -470,9 +476,21 @@ def consume_preapproved_decision(tool_name: str):
     remaining = dict(entry)
     decision = remaining.pop(canonical, None)
     _PREAPPROVED_EXECUTION.set(remaining or None)
-    if decision is not None and getattr(decision, "allowed", False):
-        return decision
-    return None
+    if decision is None or not getattr(decision, "allowed", False):
+        return None
+    decision_risk = getattr(decision, "risk", "")
+    if decision_risk in UNATTENDED_REFUSED_RISKS or risk_of(canonical) in UNATTENDED_REFUSED_RISKS:
+        from sonder_runtime.adapters.execution import effect_fence
+        from sonder_runtime.application.execution.resume_reality import (
+            ResumeMutationBlocked, require_mutation_allowed,
+        )
+        try:
+            require_mutation_allowed()
+        except ResumeMutationBlocked:
+            return None
+        if effect_fence.check_all():
+            return None
+    return decision
 
 
 @contextlib.contextmanager
@@ -629,7 +647,10 @@ UNATTENDED_REFUSED_RISKS = frozenset({"mutation", "execution", "dangerous"})
 # the call a surface retries hash the same whatever token, approval string or
 # host-injected knob travelled with them -- and so that none of them is ever
 # previewed.
-CREDENTIAL_ARGUMENTS = frozenset({"token", "approval", "bypass", "developer_authorized"})
+CREDENTIAL_ARGUMENTS = frozenset({
+    "token", "approval", "bypass", "developer_authorized",
+    "parent_token", "password",
+})
 
 # Bulk payloads: digested in full (an approval is for exactly this content)
 # but never previewed; ``argument_preview`` shows their length instead.
@@ -813,7 +834,8 @@ EXECUTION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "isolated_run",
     "build_run", "build_clean", "test_run", "lint_run", "format_code",
     "typecheck_run", "dependency_add", "dependency_remove", "dependency_update",
-    "dependency_audit", "codegen_build_loop", "improve_function",
+    "dependency_audit", "codegen_build_loop", "ensemble_codegen_build_loop",
+    "improve_function",
     "parallel_run_code", "parallel_generate_run", "parallel_generate_run_languages",
     "game_generate_and_test", "game_generation_campaign", "game_reference_suite",
     "campaign_generate_compile_execute_record", "campaign_repo_repair",
@@ -839,6 +861,11 @@ EXECUTION_TOOLS = frozenset({
 # maps such branches to, and a drift test requires that correspondence in both
 # directions, so this cannot drift into a free-floating list of strings.
 EXECUTION_COMMANDS = frozenset({"runwindow"})
+
+# Registered tools that mutate persistent state (outside _WORK_MUTATION_TOOLS)
+# and must grade ``mutation`` rather than ``ask`` so unattended callers cannot
+# auto-run them in ``manual`` mode.
+MUTATION_TOOLS = frozenset({"workflow_save", "workflow_delete"})
 
 # Tools that need OS administrator rights UNCONDITIONALLY -- just being
 # invoked, regardless of what they are asked to do. Refused unless elevation
@@ -1262,12 +1289,20 @@ class mode_scope:
         self._capped_token = _MODE_SCOPE_CAPPED.set(
             bool(self._capped or _MODE_SCOPE_CAPPED.get())
         )
-        principal = self._pair[0] if self._pair is not None else ""
-        if principal.startswith("account:"):
-            from sonder_runtime.adapters.security import approval_ledger
-            owner = "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
-            self._owner_ctx = approval_ledger.owner_scope(owner)
-            self._owner_ctx.__enter__()
+        try:
+            principal = self._pair[0] if self._pair is not None else ""
+            if principal.startswith("account:"):
+                from sonder_runtime.adapters.security import approval_ledger
+                owner = "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
+                self._owner_ctx = approval_ledger.owner_scope(owner)
+                self._owner_ctx.__enter__()
+        except BaseException:
+            self._owner_ctx = None
+            _MODE_SCOPE_CAPPED.reset(self._capped_token)
+            self._capped_token = None
+            _MODE_SCOPE.reset(self._token)
+            self._token = None
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -1281,6 +1316,7 @@ class mode_scope:
             self._capped_token = None
         if self._token is not None:
             _MODE_SCOPE.reset(self._token)
+            self._token = None
         return False
 
 
@@ -1687,6 +1723,8 @@ def _catalog_risk_of(tool_name: str) -> str:
         return "dangerous"
     if name in EXECUTION_TOOLS or name in EXECUTION_COMMANDS or name in NATIVE_EXECUTION_TOOLS:
         return "execution"
+    if name in MUTATION_TOOLS:
+        return "mutation"
     if catalogued:
         return catalogued
     if name in NATIVE_MCP_WORK:
@@ -2177,7 +2215,7 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
             else risk_of(tool_name, traits=traits))
     if opaque_powershell and risk != UNCLASSIFIED:
         risk = "dangerous"
-    name = str(tool_name or "").lstrip("/")
+    name = str(tool_name or "").strip().lstrip("/")
     digest = call_digest(name, arguments)
     call = call_id(digest)
     if live:
@@ -2199,9 +2237,17 @@ def _decide(tool_name: str, *, interactive: bool, mode: str | None,
 
     # 0. The fence on this thread's effects, before any policy is read. A
     #    worker whose lease is gone produces no effect whatever the mode or
-    #    the rules say; it may still read.
-    if fence is not None and risk in UNATTENDED_REFUSED_RISKS:
-        lost = _fence_reason(fence)
+    #    the rules say; it may still read. When ``fence`` is omitted (or is the
+    #    ambient ``effect_fence.current()``), check every active fence on the
+    #    stack so an inner fence never shadows a lost outer fence; explicit
+    #    test overrides (a distinct ``fence=`` argument) still take precedence.
+    if risk in UNATTENDED_REFUSED_RISKS:
+        from sonder_runtime.adapters.execution import effect_fence
+
+        if fence is None or fence is effect_fence.current():
+            lost = _fence_reason(effect_fence.check_all)
+        else:
+            lost = _fence_reason(fence)
         if lost:
             return Decision(
                 DENY, active, risk,

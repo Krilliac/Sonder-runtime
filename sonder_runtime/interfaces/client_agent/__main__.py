@@ -42,9 +42,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Client-local permission mode (default: manual).",
     )
     parser.add_argument(
+        "--max-mode",
+        choices=CLIENT_AGENT_MODES,
+        default=None,
+        help="Maximum permission mode reachable via /v1/client-agent/mode.",
+    )
+    parser.add_argument(
         "--confirm-bypass",
         action="store_true",
-        help="Required when starting in --mode bypass.",
+        help="Required to allow bypass mode at startup or via /v1/client-agent/mode.",
     )
     parser.add_argument(
         "--token",
@@ -62,9 +68,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if args.mode == "bypass" and not args.confirm_bypass:
+    if (args.mode == "bypass" or args.max_mode == "bypass") and not args.confirm_bypass:
         print(
-            "Error: --mode bypass requires --confirm-bypass.",
+            "Error: bypass mode requires --confirm-bypass.",
             file=sys.stderr,
         )
         return 2
@@ -79,14 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         workspace_root=Path(args.workspace),
         mode=args.mode,
+        max_mode=args.max_mode,
+        allow_bypass=bool(args.confirm_bypass),
         token=args.token or None,
         allowed_origins=allowed_origins,
     )
     bound_host, bound_port = server.server_address[:2]
     host_text = bound_host.decode("ascii", errors="replace") if isinstance(bound_host, bytes) else str(bound_host)
-    print(f"Sonder Client Agent listening on http://{host_text}:{bound_port}")
+    url_host = f"[{host_text}]" if ":" in host_text and not host_text.startswith("[") else host_text
+    print(f"Sonder Client Agent listening on http://{url_host}:{bound_port}")
     print(f"Workspace: {server.policy.workspace_root}")
-    print(f"Mode:      {server.policy.mode}")
+    print(f"Mode:      {server.policy.mode} (max: {server.policy.max_mode}, can_bypass: {server.policy.can_bypass})")
     print(f"Token:     {server.token}")
     if server.allowed_origins:
         print(f"Origins:   {', '.join(sorted(server.allowed_origins))}")

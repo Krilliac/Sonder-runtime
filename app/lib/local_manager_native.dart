@@ -927,6 +927,7 @@ class LocalManager {
     Map<String, String>? environment,
     bool includeParentEnvironment = true,
     required Duration timeout,
+    int? maxOutputChars,
     Future<void> Function(int pid)? onKillTree,
   }) async {
     // On Unix, give each bounded command its own session so a timeout can
@@ -973,13 +974,28 @@ class LocalManager {
     } catch (_) {}
     final stdout = StringBuffer();
     final stderr = StringBuffer();
+    void appendBounded(StringBuffer buf, String chunk) {
+      if (maxOutputChars == null) {
+        buf.write(chunk);
+        return;
+      }
+      final remaining = maxOutputChars - buf.length;
+      if (remaining <= 0) return;
+      if (chunk.length <= remaining) {
+        buf.write(chunk);
+      } else {
+        buf.write(chunk.substring(0, remaining));
+      }
+    }
+
+    const decoder = Utf8Decoder(allowMalformed: true);
     final outDone = process.stdout
-        .transform(systemEncoding.decoder)
-        .forEach(stdout.write)
+        .transform(decoder)
+        .forEach((chunk) => appendBounded(stdout, chunk))
         .catchError((Object _) {});
     final errDone = process.stderr
-        .transform(systemEncoding.decoder)
-        .forEach(stderr.write)
+        .transform(decoder)
+        .forEach((chunk) => appendBounded(stderr, chunk))
         .catchError((Object _) {});
     int exitCode;
     var timedOut = false;
@@ -1144,6 +1160,18 @@ class LocalManager {
       {
         for (final entry in environment.entries)
           if (!_secretEnvName.hasMatch(entry.key)) entry.key: entry.value,
+      };
+
+  /// Scrubbed environment for client-executed child processes (`run_code`,
+  /// `run_program`, `test_run`): strips credential-named variables and
+  /// `SONDER_*` runtime/auth variables so secrets never leak to subprocesses.
+  static Map<String, String> clientProcessEnvironment(
+          Map<String, String> environment) =>
+      {
+        for (final entry in environment.entries)
+          if (!_secretEnvName.hasMatch(entry.key) &&
+              !entry.key.toUpperCase().startsWith('SONDER_'))
+            entry.key: entry.value,
       };
 
   static Future<void> _startDetached(String executable, List<String> arguments,
@@ -1360,6 +1388,8 @@ class LocalManager {
 
   static const _maxClientOutputChars = 65536;
   static const _maxClientErrorChars = 4096;
+  static const _maxClientReadBytes = 2 * 1024 * 1024;
+  static const _maxClientProcessOutputChars = 131072;
 
   static String _boundClientText(String text, int limit) {
     if (text.length <= limit) return text;
@@ -1369,6 +1399,18 @@ class LocalManager {
   static final RegExp _driveRelativePattern = RegExp(r'^[A-Za-z]:(?:$|[^/\\])');
   static final RegExp _localExtendedDrivePattern =
       RegExp(r'^\\\\\?\\[A-Za-z]:(?:$|[/\\])');
+  static final RegExp _windowsReservedDeviceName = RegExp(
+    r'^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$',
+    caseSensitive: false,
+  );
+
+  static bool _isWindowsReservedDeviceSegment(String segment) {
+    final canon = _canonicalClientComponent(segment);
+    if (canon.isEmpty) return false;
+    final dot = canon.indexOf('.');
+    final stem = dot >= 0 ? canon.substring(0, dot) : canon;
+    return _windowsReservedDeviceName.hasMatch(stem);
+  }
 
   /// Lexically refuse UNC, device, extended, NT-namespace, control-char, and
   /// Windows drive-relative paths BEFORE any filesystem or symlink call.
@@ -1405,6 +1447,14 @@ class LocalManager {
     if (_driveRelativePattern.hasMatch(text)) {
       throw FileSystemException(
           'Windows drive-relative path is not allowed', raw);
+    }
+    for (final seg in text.split(RegExp(r'[/\\]'))) {
+      if (seg.isEmpty) continue;
+      if (Platform.isWindows && RegExp(r'^[A-Za-z]:$').hasMatch(seg)) continue;
+      if (_isWindowsReservedDeviceSegment(seg)) {
+        throw FileSystemException(
+            'Windows reserved device name is not allowed', raw);
+      }
     }
   }
 
@@ -1464,10 +1514,21 @@ class LocalManager {
     }
   }
 
+  static bool _isRootPath(String path) {
+    final sep = Platform.pathSeparator;
+    if (Platform.isWindows) {
+      return path.length == 3 &&
+          RegExp(r'^[A-Za-z]:$').hasMatch(path.substring(0, 2)) &&
+          path[2] == sep;
+    }
+    return path == sep;
+  }
+
   static String _canonicalizeWithExistingAncestor(String rawPath) {
     _rejectUnsafeClientPathSpelling(rawPath);
     final normalized = _normalizeSegments(rawPath);
     _rejectUnsafeLinkAncestors(normalized);
+    final sep = Platform.pathSeparator;
     var cur = normalized;
     final tail = <String>[];
     while (cur.isNotEmpty) {
@@ -1479,10 +1540,29 @@ class LocalManager {
         _rejectUnsafeClientPathSpelling(resolved, allowLocalExtended: true);
         if (tail.isEmpty) return _normalizeSegments(resolved);
         return _normalizeSegments(
-            '$resolved${Platform.pathSeparator}${tail.reversed.join(Platform.pathSeparator)}');
+            '$resolved$sep${tail.reversed.join(sep)}');
       }
-      final sepIdx = cur.lastIndexOf(Platform.pathSeparator);
-      if (sepIdx <= 0) break;
+      if (_isRootPath(cur)) break;
+      final sepIdx = cur.lastIndexOf(sep);
+      if (sepIdx < 0) break;
+      if (sepIdx == 0) {
+        // POSIX root `/` — preserve root rather than breaking early.
+        if (cur.length > 1) {
+          tail.add(cur.substring(1));
+          cur = sep;
+          continue;
+        }
+        break;
+      }
+      // On Windows `C:\nonexistent`, sepIdx == 2: preserve `C:\` rather than
+      // stripping to drive-relative `C:` (which resolves to process CWD!).
+      if (Platform.isWindows &&
+          sepIdx == 2 &&
+          RegExp(r'^[A-Za-z]:$').hasMatch(cur.substring(0, 2))) {
+        tail.add(cur.substring(sepIdx + 1));
+        cur = '${cur.substring(0, 2)}$sep';
+        continue;
+      }
       tail.add(cur.substring(sepIdx + 1));
       cur = cur.substring(0, sepIdx);
     }
@@ -1543,7 +1623,13 @@ class LocalManager {
   // script-shell). Mirrors sonder_runtime/interfaces/client_agent/executor.py
   // and the server's file_ops secret-name rules.
   static const _gitMetadataDirectory = '.git';
-  static const _gitControlFiles = {'.gitattributes', '.gitmodules'};
+  static const _gitControlFiles = {'.gitattributes', '.gitmodules', '.gitconfig'};
+  static const _excludedSearchDirs = {
+    '.git',
+    '__pycache__',
+    '.dart_tool',
+    'node_modules',
+  };
   static const _credentialDirectories = {
     '.ssh', '.aws', '.azure', '.gcloud', '.gnupg', '.kube', //
   };
@@ -1556,8 +1642,11 @@ class LocalManager {
     '.s3cfg', '.htpasswd', '.vault-token', 'service-account.json',
     'service_account.json', 'serviceaccount.json',
     'application_default_credentials.json',
+    'permission_mode.json', 'sonder-launcher-health.token',
   };
-  static const _credentialSuffixes = {'.key', '.p12', '.pem', '.pfx', '.kdbx'};
+  static const _credentialSuffixes = {
+    '.key', '.p12', '.pem', '.pfx', '.kdbx', '.ppk', '.p8', '.pk8',
+  };
   static const _namedCredentialConfigSuffixes = {
     '.cfg', '.ini', '.json', '.toml', '.txt', '.yaml', '.yml', //
   };
@@ -1699,6 +1788,117 @@ class LocalManager {
       }
     }
     return resolved;
+  }
+
+  static bool _isGitConfigPath(List<String> names, List<String> context) {
+    final window = [...context, ...names];
+    for (var i = 0; i + 1 < window.length; i++) {
+      if (window[i] == _gitMetadataDirectory &&
+          (window[i + 1] == 'config' || window[i + 1].startsWith('config.'))) {
+        return true;
+      }
+    }
+    return names.isNotEmpty && names.last == '.gitconfig';
+  }
+
+  static bool _isBlockedClientReadPath(
+      List<String> names, List<String> context) {
+    return _isCredentialPath(names, context) || _isGitConfigPath(names, context);
+  }
+
+  /// [_resolveClientPath] for read-class tools (`file_read`, `text_search`):
+  /// blocks credential stores and `.git/config` / `.gitconfig` in every mode
+  /// so unprompted `read_only` tools cannot exfiltrate local secrets.
+  static String _resolveClientReadPath(
+    Object? rawArg,
+    String workspaceRoot, {
+    required bool bypass,
+  }) {
+    final resolved = _resolveClientPath(rawArg, workspaceRoot, bypass: bypass);
+    final root = _clientRoot(workspaceRoot);
+    final raw = (rawArg?.toString() ?? '').trim();
+    final lexical = _isAbsolutePath(raw)
+        ? _clientComponentsUnder(raw, root)
+        : (_clientRootContext(root), _clientSplitPath(raw));
+    for (final (contextParts, parts) in [
+      lexical,
+      _clientComponentsUnder(resolved, root),
+    ]) {
+      final names = parts.map(_canonicalClientComponent).toList();
+      final context = contextParts.map(_canonicalClientComponent).toList();
+      if (_isBlockedClientReadPath(names, context)) {
+        throw _ClientPathRefused(
+            "Refusing to read credential store or git config '$raw' from a "
+            'client tool; use run_program (execute approval) if this is intended.');
+      }
+    }
+    return resolved;
+  }
+
+  static Future<String> _readFileBoundedUtf8(File file, int maxBytes) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in file.openRead(0, maxBytes)) {
+      builder.add(chunk);
+      if (builder.length >= maxBytes) break;
+    }
+    return const Utf8Decoder(allowMalformed: true).convert(builder.takeBytes());
+  }
+
+  /// Safe iterative directory walk that prunes excluded/credential directories,
+  /// skips symlinks/junctions, and tolerates unreadable subdirectories.
+  static Future<void> _walkClientFiles(
+    Directory rootDir,
+    String rootForPolicy, {
+    required Future<bool> Function(File file, String relPath) onFile,
+  }) async {
+    final base = rootDir.path;
+    final sep = Platform.pathSeparator;
+    final stack = <Directory>[rootDir];
+    while (stack.isNotEmpty) {
+      final cur = stack.removeLast();
+      List<FileSystemEntity> children;
+      try {
+        children = await cur.list(followLinks: false).toList();
+      } catch (_) {
+        continue;
+      }
+      children.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+      final subDirs = <Directory>[];
+      for (final entity in children) {
+        if (entity is Link) continue;
+        try {
+          if (FileSystemEntity.isLinkSync(entity.path)) continue;
+        } catch (_) {
+          continue;
+        }
+        var rel = entity.path.startsWith(base)
+            ? entity.path.substring(base.length)
+            : entity.path;
+        if (rel.startsWith(sep)) rel = rel.substring(1);
+        final relPosix = rel.replaceAll('\\', '/');
+        final segs = relPosix.split('/').where((s) => s.isNotEmpty).toList();
+        if (segs.isEmpty) continue;
+        final leafCanon = _canonicalClientComponent(segs.last);
+        if (entity is Directory) {
+          if (_excludedSearchDirs.contains(leafCanon) ||
+              _credentialDirectories.contains(leafCanon)) {
+            continue;
+          }
+          subDirs.add(entity);
+        } else if (entity is File) {
+          final (ctxParts, nameParts) =
+              _clientComponentsUnder(entity.path, rootForPolicy);
+          final names = nameParts.map(_canonicalClientComponent).toList();
+          final context = ctxParts.map(_canonicalClientComponent).toList();
+          if (_isBlockedClientReadPath(names, context)) continue;
+          final keepGoing = await onFile(entity, relPosix);
+          if (!keepGoing) return;
+        }
+      }
+      for (var i = subDirs.length - 1; i >= 0; i--) {
+        stack.add(subDirs[i]);
+      }
+    }
   }
 
   // Command-line -c values beat every config file, so these hold even for a
@@ -1941,15 +2141,15 @@ class LocalManager {
     try {
       switch (cleanTool) {
         case 'file_read':
-          final path =
-              _resolveClientPath(args['path'], workspaceRoot, bypass: bypass);
+          final path = _resolveClientReadPath(args['path'], workspaceRoot,
+              bypass: bypass);
           final file = File(path);
           if (!await file.exists()) {
             return ClientToolExecResult(
                 ok: false, error: 'File not found: $path');
           }
-          final lines = const LineSplitter()
-              .convert(await file.readAsString(encoding: utf8));
+          final content = await _readFileBoundedUtf8(file, _maxClientReadBytes);
+          final lines = const LineSplitter().convert(content);
           final rawOffset = int.tryParse('${args['offset'] ?? 1}') ?? 1;
           final offset = rawOffset < 1 ? 1 : rawOffset;
           final rawLimit = int.tryParse('${args['limit'] ?? 200}') ?? 200;
@@ -2041,7 +2241,12 @@ class LocalManager {
           final lines = <String>[];
           Future<void> walk(Directory cur, int level) async {
             if (level > depth || lines.length >= 200) return;
-            final children = await cur.list(followLinks: false).toList();
+            List<FileSystemEntity> children;
+            try {
+              children = await cur.list(followLinks: false).toList();
+            } catch (_) {
+              return;
+            }
             children.sort((a, b) {
               final aDir = a is Directory ? 0 : 1;
               final bDir = b is Directory ? 0 : 1;
@@ -2049,10 +2254,15 @@ class LocalManager {
               return a.path.toLowerCase().compareTo(b.path.toLowerCase());
             });
             for (final entity in children) {
+              if (!bypass &&
+                  (entity is Link || FileSystemEntity.isLinkSync(entity.path))) {
+                continue;
+              }
               final name = entity.uri.pathSegments
                   .where((s) => s.isNotEmpty)
                   .lastOrNull ?? '';
-              if (name == '.git' || name == '__pycache__') continue;
+              final canon = _canonicalClientComponent(name);
+              if (_excludedSearchDirs.contains(canon)) continue;
               final indent = '  ' * (level - 1);
               final isDir = entity is Directory;
               lines.add('$indent$name${isDir ? '/' : ''}');
@@ -2075,20 +2285,17 @@ class LocalManager {
           }
           final pattern = (args['pattern']?.toString() ?? '*').trim();
           final regex = _globToRegex(pattern.isEmpty ? '*' : pattern);
+          final rootForPolicy = _clientRoot(workspaceRoot);
           final matches = <String>[];
-          await for (final entity
-              in dir.list(recursive: true, followLinks: false)) {
-            if (entity is! File) continue;
-            var rel = entity.path.substring(base.length);
-            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
-            rel = rel.replaceAll('\\', '/');
-            if (rel.split('/').contains('.git')) continue;
+          await _walkClientFiles(dir, rootForPolicy,
+              onFile: (entity, rel) async {
             final name = rel.split('/').last;
             if (regex.hasMatch(name) || regex.hasMatch(rel)) {
               matches.add(rel);
-              if (matches.length >= 200) break;
+              if (matches.length >= 200) return false;
             }
-          }
+            return true;
+          });
           matches.sort();
           return ClientToolExecResult(
             ok: true,
@@ -2100,7 +2307,7 @@ class LocalManager {
             return const ClientToolExecResult(
                 ok: false, error: 'query is required');
           }
-          final base = _resolveClientPath(
+          final base = _resolveClientReadPath(
               args['root'] ?? '.', workspaceRoot, bypass: bypass);
           final dir = Directory(base);
           if (!await dir.exists()) {
@@ -2110,19 +2317,15 @@ class LocalManager {
           final globPat = (args['glob']?.toString() ?? '').trim();
           final globRegex =
               globPat.isEmpty ? null : _globToRegex(globPat);
+          final rootForPolicy = _clientRoot(workspaceRoot);
           final matches = <String>[];
-          await for (final entity
-              in dir.list(recursive: true, followLinks: false)) {
-            if (entity is! File) continue;
-            var rel = entity.path.substring(base.length);
-            if (rel.startsWith(Platform.pathSeparator)) rel = rel.substring(1);
-            rel = rel.replaceAll('\\', '/');
-            if (rel.split('/').contains('.git')) continue;
+          await _walkClientFiles(dir, rootForPolicy,
+              onFile: (entity, rel) async {
             final name = rel.split('/').last;
-            if (globRegex != null && !globRegex.hasMatch(name)) continue;
+            if (globRegex != null && !globRegex.hasMatch(name)) return true;
             try {
-              if (await entity.length() > 512 * 1024) continue;
-              final content = await entity.readAsString();
+              if (await entity.length() > 512 * 1024) return true;
+              final content = await _readFileBoundedUtf8(entity, 512 * 1024);
               final fileLines = const LineSplitter().convert(content);
               for (var i = 0; i < fileLines.length; i++) {
                 if (fileLines[i].contains(query)) {
@@ -2131,12 +2334,12 @@ class LocalManager {
                       ? lineText
                       : lineText.substring(0, 200);
                   matches.add('$rel:${i + 1}: $clipped');
-                  if (matches.length >= 100) break;
+                  if (matches.length >= 100) return false;
                 }
               }
             } catch (_) {}
-            if (matches.length >= 100) break;
-          }
+            return matches.length < 100;
+          });
           return ClientToolExecResult(
             ok: true,
             output: matches.isEmpty ? '(no matches)' : matches.join('\n'),
@@ -2154,7 +2357,7 @@ class LocalManager {
           final cwd = _resolveClientPath('.', workspaceRoot, bypass: bypass);
           late final String exe;
           late final List<String> procArgs;
-          File? tempScript;
+          Directory? tempScriptDir;
           if (lang == 'python' || lang == 'py') {
             exe = Platform.isWindows ? 'python' : 'python3';
             procArgs = ['-c', code];
@@ -2162,8 +2365,9 @@ class LocalManager {
             exe = 'node';
             procArgs = ['-e', code];
           } else if (lang == 'powershell' || lang == 'ps1') {
-            tempScript = File(
-                '${Directory.systemTemp.path}${Platform.pathSeparator}sonder_${DateTime.now().microsecondsSinceEpoch}.ps1');
+            tempScriptDir = await Directory.systemTemp.createTemp('sonder_ps_');
+            final tempScript = File(
+                '${tempScriptDir.path}${Platform.pathSeparator}script.ps1');
             await tempScript.writeAsString(code);
             exe = 'powershell';
             procArgs = ['-NoProfile', '-File', tempScript.path];
@@ -2179,13 +2383,16 @@ class LocalManager {
               exe,
               procArgs,
               workingDirectory: cwd,
+              environment: clientProcessEnvironment(Platform.environment),
+              includeParentEnvironment: false,
               timeout: Duration(seconds: timeoutSec),
+              maxOutputChars: _maxClientProcessOutputChars,
             );
             return _fromProcessResult(res);
           } finally {
             try {
-              if (tempScript != null && await tempScript.exists()) {
-                await tempScript.delete();
+              if (tempScriptDir != null && await tempScriptDir.exists()) {
+                await tempScriptDir.delete(recursive: true);
               }
             } catch (_) {}
           }
@@ -2208,7 +2415,10 @@ class LocalManager {
             tokens.first,
             tokens.skip(1).toList(),
             workingDirectory: cwd,
+            environment: clientProcessEnvironment(Platform.environment),
+            includeParentEnvironment: false,
             timeout: Duration(seconds: timeoutSec),
+            maxOutputChars: _maxClientProcessOutputChars,
           );
           return _fromProcessResult(res);
         case 'test_run':
@@ -2228,7 +2438,10 @@ class LocalManager {
             Platform.isWindows ? 'python' : 'python3',
             procArgs,
             workingDirectory: cwd,
+            environment: clientProcessEnvironment(Platform.environment),
+            includeParentEnvironment: false,
             timeout: const Duration(seconds: 120),
+            maxOutputChars: _maxClientProcessOutputChars,
           );
           return _fromProcessResult(res);
         case 'git_status':
@@ -2334,26 +2547,44 @@ class LocalManager {
     final out = <String>[];
     final buf = StringBuffer();
     String? quote;
+    var hasToken = false;
     for (var i = 0; i < command.length; i++) {
       final ch = command[i];
       if (quote != null) {
+        if (quote == '"' && ch == '\\' && i + 1 < command.length) {
+          final next = command[i + 1];
+          if (next == '"' || next == '\\') {
+            buf.write(next);
+            i++;
+            continue;
+          }
+        }
         if (ch == quote) {
           quote = null;
         } else {
           buf.write(ch);
         }
-      } else if (ch == '"' || ch == "'") {
-        quote = ch;
+      } else if (ch == '"') {
+        quote = '"';
+        hasToken = true;
+      } else if (ch == "'" && (!Platform.isWindows || !hasToken)) {
+        quote = "'";
+        hasToken = true;
       } else if (ch.trim().isEmpty) {
-        if (buf.isNotEmpty) {
+        if (hasToken) {
           out.add(buf.toString());
           buf.clear();
+          hasToken = false;
         }
       } else {
         buf.write(ch);
+        hasToken = true;
       }
     }
-    if (buf.isNotEmpty) out.add(buf.toString());
+    if (quote != null) {
+      throw const FormatException('Unclosed quote in command.');
+    }
+    if (hasToken) out.add(buf.toString());
     return out;
   }
 }

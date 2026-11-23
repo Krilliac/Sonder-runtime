@@ -80,11 +80,31 @@ def test_snapshot_endpoint_requires_auth_before_probing(http_server, monkeypatch
     assert status == 401
 
 
+def test_snapshot_endpoint_requires_admin_authorization(http_server, monkeypatch) -> None:
+    monkeypatch.setattr(
+        sonder_serve.Handler,
+        "_request_auth_context",
+        lambda _self: {
+            "authorized": True,
+            "mode": "account",
+            "api_key": False,
+            "account": {"username": "alice", "role": "user"},
+        },
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.bootstrap.app.default_app",
+        lambda: pytest.fail("non-admin user must not probe compute snapshot"),
+    )
+    status, body = _get(http_server, "/v1/compute/snapshot")
+    assert status == 403
+    assert body["error"]["code"] == "FORBIDDEN"
+
+
 def test_snapshot_endpoint_returns_bounded_wire_projection(http_server, monkeypatch) -> None:
     monkeypatch.setattr(
         sonder_serve.Handler,
         "_request_auth_context",
-        lambda _self: {"authorized": True, "mode": "api-key", "account": None},
+        lambda _self: {"authorized": True, "mode": "api-key", "api_key": True, "account": None},
     )
     monkeypatch.setattr(
         "sonder_runtime.bootstrap.app.default_app",

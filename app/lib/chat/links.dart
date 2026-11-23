@@ -48,6 +48,23 @@ String? _namedHost(String text) {
 bool _sameSite(String a, String b) =>
     a == b || a.endsWith('.$b') || b.endsWith('.$a');
 
+/// Extracts the raw authority portion from `scheme://authority/...` before
+/// `Uri.tryParse` percent-encodes non-ASCII host characters into ASCII.
+String _rawAuthority(String rawHref) {
+  final schemeSep = rawHref.indexOf('://');
+  if (schemeSep < 0) return '';
+  final start = schemeSep + 3;
+  var end = rawHref.length;
+  for (var i = start; i < rawHref.length; i++) {
+    final c = rawHref.codeUnitAt(i);
+    if (c == 0x2F /* / */ || c == 0x3F /* ? */ || c == 0x23 /* # */) {
+      end = i;
+      break;
+    }
+  }
+  return rawHref.substring(start, end);
+}
+
 /// Decide what a tap on a link with visible [text] and target [href] does.
 ///
 /// Markdown here is written by a model, and whatever a tool fed that model
@@ -55,17 +72,49 @@ bool _sameSite(String a, String b) =>
 /// web and mail addresses open directly, and only when the visible text
 /// does not claim to be somewhere else.
 LinkDecision decideLink(String text, String? href) {
-  final uri = Uri.tryParse((href ?? '').trim());
+  final rawHref = (href ?? '').trim();
+  final uri = Uri.tryParse(rawHref);
   if (uri == null || !_openableSchemes.contains(uri.scheme.toLowerCase())) {
     return LinkDecision.show;
   }
   if (uri.scheme.toLowerCase() == 'mailto') {
-    return uri.path.trim().isEmpty ? LinkDecision.show : LinkDecision.open;
+    final target = uri.path.trim();
+    if (target.isEmpty) return LinkDecision.show;
+    if (uri.hasQuery) return LinkDecision.confirm;
+    final lowerTarget = target.toLowerCase();
+    if (lowerTarget.contains('xn--') ||
+        lowerTarget.contains('%') ||
+        target.runes.any((r) => r > 0x7F)) {
+      return LinkDecision.confirm;
+    }
+    final trimmedText = text.trim();
+    if (trimmedText.contains('@') &&
+        !trimmedText.contains(' ') &&
+        trimmedText.toLowerCase() != lowerTarget) {
+      return LinkDecision.confirm;
+    }
+    final named = _namedHost(text);
+    if (named != null) {
+      final at = lowerTarget.lastIndexOf('@');
+      final mailDomain = at >= 0 ? lowerTarget.substring(at + 1) : '';
+      if (trimmedText.toLowerCase().contains('://') ||
+          mailDomain.isEmpty ||
+          !_sameSite(named, mailDomain)) {
+        return LinkDecision.confirm;
+      }
+    }
+    return LinkDecision.open;
   }
   final host = uri.host.toLowerCase();
   if (host.isEmpty) return LinkDecision.show;
   // `https://bank.example@evil.example` and look-alike (IDN) hosts.
-  final lookAlike = host.contains('xn--') || host.runes.any((r) => r > 0x7F);
+  // Dart's Uri.host percent-encodes non-ASCII bytes (e.g. Cyrillic `а` ->
+  // `%d0%b0`), so check both `%` in uri.host and raw non-ASCII runes.
+  final rawAuth = _rawAuthority(rawHref);
+  final lookAlike = host.contains('xn--') ||
+      host.contains('%') ||
+      host.runes.any((r) => r > 0x7F) ||
+      rawAuth.runes.any((r) => r > 0x7F);
   if (uri.userInfo.isNotEmpty || lookAlike) return LinkDecision.confirm;
   final named = _namedHost(text);
   final bare = host.startsWith('www.') ? host.substring(4) : host;

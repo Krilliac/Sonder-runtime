@@ -11,6 +11,8 @@ import re
 from datetime import datetime
 from typing import Any, Iterable
 
+from sonder_runtime.domain.security import redaction
+
 _TERMINAL = frozenset({"done", "finished", "completed", "passed", "success", "succeeded", "failed", "error", "cancelled", "canceled", "blocked", "interrupted", "task_drift", "paused"})
 _FAILED = frozenset({"failed", "error", "interrupted", "task_drift", "blocked"})
 _URGENT = frozenset({"task_pass", "task_fail", "task_finished", "validation_failed", "failed", "error", "completed", "cancelled", "interrupted", "blocked", "paused", "final", "summary"})
@@ -82,8 +84,12 @@ def _redact_assignments(text: str) -> str:
 def _text(value: Any, limit: int = 240) -> str:
     if not isinstance(value, (str, int, float)):
         return ""
-    text = re.sub(r"[\x00-\x20\x7f]+", " ", str(value)).strip()
-    text = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1<redacted>", text)
+    # Delegate to canonical redaction first (preserving newlines for PEM,
+    # Cookie, and Authorization boundaries), then normalize markers and run
+    # the narrow short-token/nested-assignment pass for narration contracts.
+    text = redaction.redact_text(str(value)).replace(redaction.REDACTED, "<redacted>")
+    text = re.sub(r"[\x00-\x20\x7f]+", " ", text).strip()
+    text = re.sub(r"(?i)(bearer\s+)(?!<redacted>(?=[\s,;]|$))[^\s,;]+", r"\1<redacted>", text)
     text = _redact_assignments(text)
     text = re.sub(r"(?i)(https?://)([^/@\s:]+):([^/@\s]+)@", r"\1<redacted>@", text)
     text = _JWT.sub(lambda m: "<redacted-token>" if m.group(1) else m.group(0), text)

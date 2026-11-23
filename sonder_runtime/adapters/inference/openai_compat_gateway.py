@@ -63,7 +63,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from email.utils import format_datetime, parsedate_to_datetime
 from types import SimpleNamespace
@@ -328,12 +328,28 @@ class _DefaultLedger:
 
 
 _DEFAULT_LEDGER = _DefaultLedger()
+_UNSAFE_HEADER_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _validate_api_key(api_key: object) -> None:
+    if not isinstance(api_key, str):
+        raise InvalidInput("OpenAI-compatible API key must be a string")
+    if _UNSAFE_HEADER_VALUE_RE.search(api_key):
+        raise InvalidInput(
+            "OpenAI-compatible API key must not contain control or newline characters"
+        )
+    try:
+        api_key.encode("latin-1")
+    except UnicodeEncodeError:
+        raise InvalidInput(
+            "OpenAI-compatible API key must contain only HTTP header-safe characters"
+        ) from None
 
 
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     base_url: str
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     model: str = ""
     embed_model: str = ""
     # CIDRs whose private IP-literal hosts may be reached over plain http.
@@ -349,6 +365,7 @@ class OpenAICompatibleConfig:
     max_tokens_ceiling: int = DEFAULT_MAX_TOKENS_CEILING
 
     def __post_init__(self) -> None:
+        _validate_api_key(self.api_key)
         for value, name in ((self.stream_idle_seconds, ENV_STREAM_IDLE),
                             (self.stream_first_content_seconds, ENV_STREAM_FIRST_CONTENT)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
@@ -713,6 +730,10 @@ class OpenAICompatibleGateway:
             raise InvalidInput("OpenAI-compatible endpoint must use http or https")
         if not parts.hostname or _UNSENDABLE_URL_CHARS.search(cfg.base_url):
             raise InvalidInput(_MALFORMED_BASE_URL)
+        if parts.query or parts.fragment:
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain a query string or fragment"
+            )
         if scheme == "https" or self._is_loopback(cfg.base_url):
             return
         if self._trusted_plaintext_host(parts.hostname or "", cfg.plaintext_networks):
@@ -1127,6 +1148,7 @@ class OpenAICompatibleGateway:
                     headers[str(name)] = str(value)
         headers["Content-Type"] = "application/json"
         if cfg.api_key:
+            _validate_api_key(cfg.api_key)
             headers["Authorization"] = "Bearer %s" % cfg.api_key
         return headers
 
@@ -1246,39 +1268,43 @@ class OpenAICompatibleGateway:
                     % (refusal.reason.value, refusal.detail),
                     reason=refusal.reason.value, retry_after=exc.retry_after_seconds)
         except urllib.error.HTTPError as exc:
-            if trace is not None:
-                trace.answered = True  # the provider answered with an error status: not billed
-            code = getattr(exc, "code", 0)
-            retry_after = next((value for key, value in (exc.headers or {}).items()
-                                if str(key).lower() == "retry-after"), None)
-            http_cause = self._safe_http_cause(int(code or 0), retry_after)
-            if self._http_error_classifier is not None:
-                failure = self._http_error_classifier(
-                    int(code or 0), self._bounded_error_body(exc),
-                )
-            if failure is None:
-                if code in (401, 403):
-                    logger.error(
-                        f"authentication failed for OpenAI-compatible endpoint, "
-                        f"http_status={code}, url={safe_url!r}"
+            try:
+                if trace is not None:
+                    trace.answered = True  # the provider answered with an error status: not billed
+                code = getattr(exc, "code", 0)
+                retry_after = next((value for key, value in (exc.headers or {}).items()
+                                    if str(key).lower() == "retry-after"), None)
+                http_cause = self._safe_http_cause(int(code or 0), retry_after)
+                if self._http_error_classifier is not None:
+                    failure = self._http_error_classifier(
+                        int(code or 0), self._bounded_error_body(exc),
                     )
-                    failure = Forbidden("endpoint rejected credentials (HTTP %d)" % code)
-                elif code in (400, 404, 422):
-                    failure = InvalidInput("endpoint rejected request (HTTP %d)" % code)
-                elif code == 429:
-                    logger.warning(
-                        f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
-                        f"url={safe_url!r}"
-                    )
-                    failure = CapacityExceeded(
-                        "endpoint is rate limiting requests (HTTP 429)"
-                    )
-                else:
-                    logger.error(
-                        f"OpenAI-compatible endpoint returned server error, "
-                        f"http_status={code}, url={safe_url!r}"
-                    )
-                    failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+                if failure is None:
+                    if code in (401, 403):
+                        logger.error(
+                            f"authentication failed for OpenAI-compatible endpoint, "
+                            f"http_status={code}, url={safe_url!r}"
+                        )
+                        failure = Forbidden("endpoint rejected credentials (HTTP %d)" % code)
+                    elif code in (400, 404, 422):
+                        failure = InvalidInput("endpoint rejected request (HTTP %d)" % code)
+                    elif code == 429:
+                        logger.warning(
+                            f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
+                            f"url={safe_url!r}"
+                        )
+                        failure = CapacityExceeded(
+                            "endpoint is rate limiting requests (HTTP 429)"
+                        )
+                    else:
+                        logger.error(
+                            f"OpenAI-compatible endpoint returned server error, "
+                            f"http_status={code}, url={safe_url!r}"
+                        )
+                        failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+            finally:
+                with contextlib.suppress(Exception):
+                    exc.close()
         except StreamTimeout as exc:
             logger.warning(
                 f"OpenAI-compatible endpoint {exc.kind} timeout: url={safe_url!r}, "
@@ -1399,10 +1425,14 @@ class OpenAICompatibleGateway:
                 return int(resp.status), resp.read(GET_BODY_LIMIT + 1)
         except urllib.error.HTTPError as exc:
             try:
-                body = exc.read(GET_BODY_LIMIT + 1)
-            except Exception:  # noqa: BLE001 - the status alone still answers
-                body = b""
-            return int(exc.code), body if isinstance(body, bytes) else b""
+                try:
+                    body = exc.read(GET_BODY_LIMIT + 1)
+                except Exception:  # noqa: BLE001 - the status alone still answers
+                    body = b""
+                return int(exc.code), body if isinstance(body, bytes) else b""
+            finally:
+                with contextlib.suppress(Exception):
+                    exc.close()
 
     @staticmethod
     def _default_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
@@ -1420,5 +1450,5 @@ class OpenAICompatibleGateway:
             raise DependencyUnavailable("endpoint response exceeds %d bytes" % limit)
         try:
             return json.loads(raw)
-        except ValueError as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise DependencyUnavailable("endpoint returned non-JSON") from exc

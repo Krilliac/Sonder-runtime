@@ -34,12 +34,18 @@ from sonder_runtime.domain.chat_tools import (
 from sonder_runtime.domain.code_gate_policy import (
     CODE_GATE_SIGNS,
     check_python_static_errors,
+    uses_interactive_stdin,
 )
 
 _FENCED_PYTHON_RE = re.compile(r"```(?:python|py)\s*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_INTERACTIVE_INPUT_RE = re.compile(r"\binput\s*\(")
 _NON_RETRYABLE_VERIFY_STATUSES = frozenset({
-    "refused", "denied", "timeout", "timed_out", "awaiting_client", "budget_exceeded",
+    "refused",
+    "denied",
+    "timeout",
+    "timed_out",
+    "awaiting_client",
+    "awaiting_client_result",
+    "budget_exceeded",
 })
 
 
@@ -107,6 +113,7 @@ class ChatToolTurn:
     role_refusal: Callable[[str], str] | None = None
     allow_system_tools: bool = False
     client_exec_tools: frozenset[str] = frozenset()
+    client_exec_only: bool = False
     delegate_client_tool: Callable[[str, dict[str, Any]], tuple[str, ChatToolRecord]] | None = None
     client_handoffs: list[dict[str, Any]] = field(default_factory=list)
     records: list[ChatToolRecord] = field(default_factory=list)
@@ -158,6 +165,13 @@ class ChatToolTurn:
             self.records.append(record)
             clipped_obs, _ = self._clip(obs, self.budget.model_output_chars)
             return clipped_obs, run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
+        if self.client_exec_only:
+            msg = (
+                f"ERROR: HOST POLICY: tool '{name}' is not available on this turn "
+                "(only client-delegatable tools are permitted)."
+            )
+            self.records.append(ChatToolRecord("", name, "refused", "client", reason=msg[:200]))
+            return msg, run_count
         if self.role_refusal is not None and (role_refusal := self.role_refusal(name)):
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=role_refusal[:200]))
             return role_refusal, run_count
@@ -309,7 +323,10 @@ class ChatToolTurn:
         last_meta: dict[str, Any] = {}
         final_content = ""
         board_cursor = 0
-        has_run_code_tool = any(t.name == "run_code" for t in self.manifest.tools)
+        has_run_code_tool = (
+            any(t.name == "run_code" for t in self.manifest.tools)
+            and "run_code" not in self.client_exec_tools
+        )
         verified_code_hashes: set[str] = set()
         failed_auto_verify_hashes: set[str] = set()
         auto_verify_blocked = False
@@ -383,7 +400,7 @@ class ChatToolTurn:
                         if candidate_code is not None:
                             digest = _code_digest(candidate_code)
                             if digest not in verified_code_hashes and digest not in failed_auto_verify_hashes:
-                                if _INTERACTIVE_INPUT_RE.search(candidate_code):
+                                if uses_interactive_stdin(candidate_code):
                                     static_err = check_python_static_errors(candidate_code)
                                     if static_err:
                                         failed_auto_verify_hashes.add(digest)
@@ -440,7 +457,14 @@ class ChatToolTurn:
                         if (time.monotonic() - started) >= self.budget.wall_seconds:
                             stopped_early = True
                             break
-                        tool_name = str(((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or "")
+                        tool_name = str(
+                            ((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or ""
+                        ).strip().lstrip("/")
+                        raw_call_id = (
+                            str(raw_call.get("id") or "").strip()
+                            if isinstance(raw_call, Mapping)
+                            else ""
+                        )
                         if tool_calls_total >= self.budget.max_tool_calls:
                             msg = (
                                 f"ERROR: HOST POLICY: chat turn tool-call budget reached "
@@ -448,7 +472,10 @@ class ChatToolTurn:
                             )
                             backend = self.backend.backend_for(tool_name) if tool_name else "host"
                             self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
-                            messages.append({"role": "tool", "name": tool_name, "content": msg})
+                            budget_msg: dict[str, Any] = {"role": "tool", "name": tool_name, "content": msg}
+                            if raw_call_id:
+                                budget_msg["tool_call_id"] = raw_call_id
+                            messages.append(budget_msg)
                             break
                         tool_calls_total += 1
                         prior_len = len(self.records)
@@ -463,7 +490,10 @@ class ChatToolTurn:
                                     verified_code_hashes.add(_code_digest(ran_code))
                             elif rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
                                 auto_verify_blocked = True
-                        messages.append({"role": "tool", "name": tool_name, "content": obs})
+                        tool_msg: dict[str, Any] = {"role": "tool", "name": tool_name, "content": obs}
+                        if raw_call_id:
+                            tool_msg["tool_call_id"] = raw_call_id
+                        messages.append(tool_msg)
                     if stopped_early:
                         break
                     digest, board_cursor = _delegation.unseen_peer_board_digest(board_cursor)

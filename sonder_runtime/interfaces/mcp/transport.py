@@ -43,6 +43,10 @@ class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
 
 
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {token}")
+
+
 def _check_json_nesting_depth(raw: str, max_depth: int) -> None:
     """Reject deeply nested JSON frames before json.loads (Python 3.14+ parses 10k+)."""
     if raw.count("{") + raw.count("[") <= max_depth:
@@ -289,12 +293,12 @@ class StdioMcpTransport:
             raise McpTransportError("MCP frame exceeds max_frame_bytes")
         _check_json_nesting_depth(raw, self._limits.max_json_depth)
         try:
-            value = json.loads(raw)
+            value = json.loads(raw, parse_constant=_reject_json_constant)
         except (TypeError, ValueError, RecursionError) as exc:
-            # ValueError covers JSONDecodeError and an integer past the
-            # int-conversion digit limit; RecursionError is deep nesting.
-            # serve() handles only McpTransportError, so anything else from
-            # one short hostile line used to end the session.
+            # ValueError covers JSONDecodeError, non-finite constants, and an
+            # integer past the int-conversion digit limit; RecursionError is
+            # deep nesting. serve() handles only McpTransportError, so anything
+            # else from one short hostile line used to end the session.
             raise McpTransportError("invalid JSON-RPC frame") from exc
         if not isinstance(value, dict):
             raise McpTransportError("JSON-RPC frame must be an object")
@@ -304,8 +308,9 @@ class StdioMcpTransport:
         request_id = request.get("id")
         notification = "id" not in request
         logger.debug(f"dispatch method={request.get('method')!r} notification={notification}")
-        if request.get("jsonrpc") != "2.0" or (not notification and not self._valid_id(request_id)):
-            return self._error(request_id, -32600, "invalid request")
+        id_valid = notification or self._valid_id(request_id)
+        if request.get("jsonrpc") != "2.0" or not id_valid:
+            return self._error(request_id if id_valid else None, -32600, "invalid request")
         method = request.get("method")
         if not isinstance(method, str) or not method or len(method) > 128:
             return self._error(request_id, -32600, "invalid method")
@@ -410,7 +415,13 @@ class StdioMcpTransport:
                 raise McpTransportError("tools/call requires name")
             if not isinstance(arguments, dict):
                 raise McpTransportError("tools/call arguments must be an object")
-            if len(json.dumps(arguments, separators=(",", ":")).encode("utf-8")) > self._limits.max_arguments_bytes:
+            try:
+                encoded_args = json.dumps(
+                    arguments, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise McpTransportError("tool arguments must be finite JSON") from exc
+            if len(encoded_args) > self._limits.max_arguments_bytes:
                 raise McpTransportError("tool arguments exceed max_arguments_bytes")
             value = self._handler(name, arguments) if callable(self._handler) else self._handler.handle(name, arguments)
             if self._negotiation is not None and self._negotiation.agreed_version != "2.0":
@@ -433,7 +444,7 @@ class StdioMcpTransport:
 
     @staticmethod
     def _valid_id(value: Any) -> bool:
-        return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+        return value is None or (isinstance(value, (str, int)) and not isinstance(value, bool))
 
     @staticmethod
     def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -448,13 +459,18 @@ class StdioMcpTransport:
         return {
             "content": [{
                 "type": "text",
-                "text": json.dumps(structured, ensure_ascii=False, separators=(",", ":")),
+                "text": json.dumps(
+                    structured, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+                ),
             }],
             "structuredContent": structured,
         }
 
     def _write(self, value: Mapping[str, Any]) -> None:
-        encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+        try:
+            encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise McpTransportError("MCP response must be finite JSON") from exc
         if len(encoded.encode("utf-8")) > self._limits.max_frame_bytes:
             raise McpTransportError("MCP response exceeds max_frame_bytes")
         with self._write_lock:

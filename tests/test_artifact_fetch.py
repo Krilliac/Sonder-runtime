@@ -186,7 +186,7 @@ def test_good_archive_download_verifies_and_writes_provenance(
     assert result["bytes"] == len(ZIP_BODY)
     assert result["detected_type"] == "zip"
     assert result["sha256"] == artifact_fetch.file_sha256(dest)
-    assert not artifact_fetch._part_path(dest).exists()
+    assert not artifact_fetch._part_path(dest, url).exists()
 
     sidecar = Path(result["provenance_path"])
     assert sidecar.name == "setup.zip.provenance.json"
@@ -236,7 +236,7 @@ def test_akamai_block_page_is_rejected_and_no_file_is_written(
     assert not result["ok"]
     assert result["verdict"] == "rejected"
     assert not dest.exists(), "a denial page must never land at the destination"
-    assert not artifact_fetch._part_path(dest).exists()
+    assert not artifact_fetch._part_path(dest, url).exists()
     assert not (tmp_path / "chipset.exe.provenance.json").exists()
 
     blocked = _failed(result, "block_page")
@@ -341,7 +341,7 @@ def test_payload_over_the_size_ceiling_is_rejected(fixture_server, tmp_path):
 
     assert not result["ok"]
     assert not dest.exists()
-    assert not artifact_fetch._part_path(dest).exists()
+    assert not artifact_fetch._part_path(dest, url).exists()
     assert _failed(result, "size_limit")
 
 
@@ -756,7 +756,7 @@ def test_redirect_without_location_is_rejected(fixture_server, tmp_path):
 def test_resume_appends_to_an_existing_partial(fixture_server, tmp_path):
     url = fixture_server.route("/resume.zip", body=ZIP_BODY)
     dest = tmp_path / "resume.zip"
-    part = artifact_fetch._part_path(dest)
+    part = artifact_fetch._part_path(dest, url)
     part.write_bytes(ZIP_BODY[:100])
 
     result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")

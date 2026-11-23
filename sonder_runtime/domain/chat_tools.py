@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sonder_runtime.domain.agents.delegation import BOARD_MESSAGE_KINDS, DELEGATION_TOOLS
+from sonder_runtime.domain.security import redaction
 
 TOOL_BACKEND_CONTAINER = "container"
 TOOL_BACKEND_HOST = "host"
@@ -55,16 +56,19 @@ def preview_tool_arguments(
         if str(key) not in _SENSITIVE_PREVIEW_KEYS
     }
     bidi_texts: list[str] = []
-    detail = ""
     if tool_name == "run_code":
-        detail = str(visible_args.get("code") or "")
-        bidi_texts.append(detail)
-    elif tool_name in {"file_write", "file_edit", "file_delete", "text_patch", "workspace_run"}:
-        detail = json.dumps(visible_args, ensure_ascii=False, sort_keys=True, default=str)
-        bidi_texts.append(detail)
+        bidi_texts.append(str(visible_args.get("code") or ""))
     else:
         bidi_texts.append(json.dumps(visible_args, ensure_ascii=False, sort_keys=True, default=str))
     has_bidi, bidi_chars = detect_bidi_chars("\n".join(bidi_texts))
+    redacted_args = redaction.redact_structure(visible_args, sensitive_keys=True)
+    detail = ""
+    if tool_name == "run_code":
+        detail = redaction.redact_text(str(redacted_args.get("code") or ""))
+    elif tool_name in {"file_write", "file_edit", "file_delete", "text_patch", "workspace_run"}:
+        detail = redaction.redact_text(
+            json.dumps(redacted_args, ensure_ascii=False, sort_keys=True, default=str)
+        )
     truncated = len(detail) > max_detail_chars
     shown_detail = (
         detail[:max_detail_chars] + f"\n... (truncated {len(detail) - max_detail_chars} of {len(detail)} chars)"
@@ -72,7 +76,7 @@ def preview_tool_arguments(
         else detail
     )
     safe_args: dict[str, Any] = {}
-    for key, value in visible_args.items():
+    for key, value in redacted_args.items():
         if isinstance(value, str) and len(value) > 512:
             safe_args[key] = value[:512] + "..."
         elif value is None or isinstance(value, (bool, int, float, str)):
@@ -82,7 +86,7 @@ def preview_tool_arguments(
                 json.dumps(value, ensure_ascii=False)
                 safe_args[key] = value
             except (TypeError, ValueError):
-                safe_args[key] = str(value)
+                safe_args[key] = redaction.redact_text(str(value))
     return {
         "arguments": safe_args,
         "detail": shown_detail,

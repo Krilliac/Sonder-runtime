@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from sonder_runtime.adapters.persistence.owned_sqlite import connect as owned_sqlite_connect
+from sonder_runtime.domain.security import redaction
 from sonder_runtime.platform import paths as sonder_paths
 
 STATUSES = (
@@ -100,8 +101,12 @@ def _connect() -> sqlite3.Connection:
                     os.chmod(path, 0o600)
             _INITIALIZED.add(path)
     conn = owned_sqlite_connect(path, timeout=5)
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -232,11 +237,20 @@ def start(run_id: str, *, owner_scope: str, process_id: str, deadline_ts: float,
         conn.close()
 
 
+def _redact_for_storage(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        return redaction.redact_text(text)
+    except Exception:
+        return redaction.REDACTION_FAILED
+
+
 def finish(run_id: str, status: str, output: str = "", *, now: float | None = None) -> None:
     """Record the terminal status and bounded answer of a running run."""
     if status not in TERMINAL_STATUSES:
         raise ValueError("terminal work-run status required")
-    text = output if isinstance(output, str) else ""
+    text = _redact_for_storage(output) if isinstance(output, str) else ""
     truncated = len(text) > MAX_OUTPUT_CHARS
     conn = _connect()
     try:
@@ -313,7 +327,7 @@ def set_narration(
     clear_awaiting_approval: bool | str = False,
 ) -> None:
     """Persist the owner-visible acknowledgement, optional activity id, and pending refusal."""
-    acknowledgement = str(acknowledgement or "")[:2000]
+    acknowledgement = _redact_for_storage(str(acknowledgement or ""))[:2000]
     activity_id = str(activity_id or "")[:256]
 
     def mutate(value, status):
@@ -325,7 +339,11 @@ def set_narration(
             allowed = {"status", "work_run_id", "requested_mode", "routing_reason", "session_ref",
                        "admission_event_id", "return_event_id", "source_event_id", "get_url", "cancel_url",
                        "child_run_id"}
-            value["result_receipt"] = {key: str(item)[:512] for key, item in result_receipt.items() if key in allowed}
+            value["result_receipt"] = {
+                key: _redact_for_storage(str(item))[:512]
+                for key, item in result_receipt.items()
+                if key in allowed
+            }
         entries = value.get("awaiting_approvals")
         if not isinstance(entries, dict):
             entries = {}
@@ -355,9 +373,9 @@ def set_narration(
             kept: dict[str, object] = {}
             for key in ("call_id", "tool", "risk", "mode", "mode_label", "reason"):
                 if key in pending_refusal and pending_refusal[key] is not None:
-                    kept[key] = str(pending_refusal[key])[:1000]
+                    kept[key] = _redact_for_storage(str(pending_refusal[key]))[:1000]
             if "detail" in pending_refusal and pending_refusal["detail"] is not None:
-                kept["detail"] = str(pending_refusal["detail"])[:4000]
+                kept["detail"] = _redact_for_storage(str(pending_refusal["detail"]))[:4000]
             for bkey in ("detail_truncated", "bidi_warning"):
                 if bkey in pending_refusal:
                     kept[bkey] = bool(pending_refusal[bkey])
@@ -366,7 +384,9 @@ def set_narration(
             if "bidi_chars" in pending_refusal and isinstance(pending_refusal["bidi_chars"], (list, tuple)):
                 kept["bidi_chars"] = [str(c)[:16] for c in pending_refusal["bidi_chars"][:16]]
             if "remedies" in pending_refusal and isinstance(pending_refusal["remedies"], list):
-                kept["remedies"] = pending_refusal["remedies"][:8]
+                kept["remedies"] = redaction.redact_structure(
+                    pending_refusal["remedies"][:8], _redact_for_storage, sensitive_keys=True,
+                )
             value["pending_refusal"] = kept
         return value
 

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from sonder_runtime.adapters.chat_run_backend import ChatRunBackend
+from sonder_runtime.adapters.chat_run_backend import ChatRunBackend, resolve_agent_project_scope
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.security import permission_receipts, role_tool_policy
 from sonder_runtime.adapters.security import powershell_gate as _powershell_gate
@@ -22,6 +23,7 @@ from sonder_runtime.domain.chat_tools import (
     preview_tool_arguments,
 )
 from sonder_runtime.domain import public_policy as _public_policy
+from sonder_runtime.domain.cloud_access import LEGACY_ERROR_PREFIX
 from sonder_runtime.domain.client_tools import (
     CLIENT_DELEGATABLE_TOOLS,
     CLIENT_DELEGATABLE_TOOL_DEFINITIONS,
@@ -115,6 +117,73 @@ def _container_running(server: Any = None) -> bool:
         return False
 
 
+def _sse_comment_writer(
+    handler: Any,
+    explicit_fn: Callable[[], None] | None = None,
+) -> Callable[[], None] | None:
+    """Return an SSE heartbeat comment writer safe to call during broker waits."""
+    if explicit_fn is not None:
+        return explicit_fn
+    early = getattr(handler, "_early_stream", None)
+    wfile = getattr(handler, "wfile", None)
+    if early is None or wfile is None:
+        return None
+
+    def _write_comment() -> None:
+        if early.client_gone:
+            return
+        with early.lock:
+            if early.client_gone:
+                return
+            try:
+                wfile.write(b": keep-alive\n\n")
+                flush = getattr(wfile, "flush", None)
+                if callable(flush):
+                    flush()
+            except (OSError, ValueError):
+                early.client_gone = True
+
+    return _write_comment
+
+
+def _wait_for_client_result(
+    broker: Any,
+    call_id: str,
+    *,
+    timeout_seconds: float | None = None,
+    heartbeat_interval: float = 5.0,
+    on_wait: Callable[[], None] | None = None,
+    is_aborted: Callable[[], bool] | None = None,
+) -> Any:
+    """Invoke ``broker.wait_for_result`` forwarding supported abort/heartbeat kwargs."""
+    wait_fn = broker.wait_for_result
+    kwargs: dict[str, Any] = {}
+    try:
+        sig = inspect.signature(wait_fn)
+        params = sig.parameters
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params = {}
+        accepts_var_kw = True
+    if timeout_seconds is not None and (accepts_var_kw or "timeout_seconds" in params):
+        kwargs["timeout_seconds"] = timeout_seconds
+    if accepts_var_kw or "heartbeat_interval" in params:
+        kwargs["heartbeat_interval"] = heartbeat_interval
+    if on_wait is not None and (accepts_var_kw or "on_wait" in params):
+        kwargs["on_wait"] = on_wait
+    if is_aborted is not None and (accepts_var_kw or "is_aborted" in params):
+        kwargs["is_aborted"] = is_aborted
+    return wait_fn(call_id, **kwargs)
+
+
+def _deny_host_dispatch(tool_name: str, *_args: Any, **_kwargs: Any) -> str:
+    msg = (
+        f"{LEGACY_ERROR_PREFIX} HOST POLICY: host tool '{tool_name}' is unavailable on a "
+        "client-execution-only turn."
+    )
+    return msg
+
+
 def _mcp_catalog(mcp: Any) -> Mapping[str, Any]:
     fn: Any = _agent_help_tools.catalog_for
     result = fn(mcp)
@@ -194,17 +263,25 @@ def build_http_chat_tool_turn(
     container_active = _container_running(server) if authorized_tools else False
     manifest = build_tool_turn_manifest(
         admitted_tools=admitted,
-        user_run_command=True,
+        user_run_command=bool(authorized_tools and mode != "plan"),
         mode=("manual" if use_client_exec and not authorized_tools else (mode or "manual")),
         container_active=container_active,
     )
+    resolved_project_root = ""
+    if authorized_tools and project:
+        resolver = getattr(server, "served_work_project", None)
+        if callable(resolver):
+            try:
+                resolved_project_root = str(resolver(project) or "")
+            except Exception:
+                resolved_project_root = ""
     backend = ChatRunBackend(
-        dispatch_agent_tool=server._agent_dispatch,
+        dispatch_agent_tool=server._agent_dispatch if authorized_tools else _deny_host_dispatch,
         catalog_provider=(lambda: _mcp_catalog(server.mcp)) if authorized_tools else (lambda: {}),
         permission_policy=permission_policy,
         blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
         container_active=lambda: container_active,
-        project_root=str(project or ""),
+        project_root=resolved_project_root,
     )
     early = getattr(handler, "_early_stream", None)
     iid = str(getattr(early, "completion_id", "") or "") or uuid.uuid4().hex[:12]
@@ -259,11 +336,13 @@ def build_http_chat_tool_turn(
             )
             return msg, record
         on_event(call.sse_event("awaiting_client_result"))
-        outcome = client_broker.wait_for_result(
+        outcome = _wait_for_client_result(
+            client_broker,
             call.call_id,
             timeout_seconds=wait_timeout_seconds,
             heartbeat_interval=5.0,
-            on_wait=write_sse_comment_fn,
+            on_wait=_sse_comment_writer(handler, write_sse_comment_fn),
+            is_aborted=(lambda: bool(early.client_gone)) if early is not None else None,
         )
         on_event(call.sse_event(outcome.status))
         if outcome.denied:
@@ -319,9 +398,11 @@ def build_http_chat_tool_turn(
         on_agent_event=on_agent_ev if (stream and write_agent_chunk_fn is not None) else None,
         on_board_event=on_board_ev if (stream and write_agent_board_chunk_fn is not None) else None,
         wait_for_approval=wait_hook if (stream and wait_for_approval_fn is not None) else None,
+        is_aborted=(lambda: bool(early.client_gone)) if early is not None else None,
         role_refusal=role_tool_policy.agent_refusal,
         allow_system_tools=allow_system_tools and authorized_tools,
         client_exec_tools=turn_client_tools,
+        client_exec_only=bool(use_client_exec and not authorized_tools),
         delegate_client_tool=delegate_client if use_client_exec else None,
         client_handoffs=handoffs,
     )
@@ -370,11 +451,12 @@ def capabilities_payload(
     require_account: bool,
     admin_authorized: bool,
 ) -> dict[str, Any]:
-    account = (context or {}).get("account") if isinstance(context, Mapping) else None
+    authorized = bool(isinstance(context, Mapping) and context.get("authorized"))
+    account = (context or {}).get("account") if authorized else None
     role = ""
-    if isinstance(account, Mapping) and account.get("role"):
+    if authorized and isinstance(account, Mapping) and account.get("role"):
         role = str(account.get("role")).strip().lower()
-    elif context and context.get("authorized"):
+    elif authorized:
         role = "admin" if admin_authorized else "user"
     effective_role = _feature_role(role, account) or ("admin" if auth_mode == "local-open" else "user")
     payload: dict[str, Any] = {
@@ -397,7 +479,7 @@ def capabilities_payload(
     }
     if role:
         payload["role"] = role
-    if isinstance(account, Mapping) and account.get("username"):
+    if authorized and isinstance(account, Mapping) and account.get("username"):
         payload["username"] = str(account["username"])
     return payload
 
@@ -472,6 +554,8 @@ def run_client_slash_turn(
     write_tool_chunk_fn: Callable[..., bool],
     slash_records: list[dict[str, Any]],
     slash_handoffs: list[dict[str, Any]],
+    write_sse_comment_fn: Callable[[], None] | None = None,
+    wait_timeout_seconds: float | None = None,
 ) -> tuple[str, str | None]:
     """Execute one client-delegatable slash command via ``ClientToolBroker``."""
     call = broker.create_call(
@@ -499,7 +583,14 @@ def run_client_slash_turn(
             handler, chunk_fn, iid=iid, model=model,
             payload=call.sse_event("awaiting_client_result"),
         )
-        outcome = broker.wait_for_result(call.call_id)
+        outcome = _wait_for_client_result(
+            broker,
+            call.call_id,
+            timeout_seconds=wait_timeout_seconds,
+            heartbeat_interval=5.0,
+            on_wait=_sse_comment_writer(handler, write_sse_comment_fn),
+            is_aborted=(lambda: bool(early.client_gone)) if early is not None else None,
+        )
         write_tool_chunk_fn(
             handler, chunk_fn, iid=iid, model=model,
             payload=call.sse_event(outcome.status),
@@ -674,13 +765,14 @@ def maybe_open_mcp_chat_tool_turn(
         mode=mode or "manual",
         container_active=container_active,
     )
+    resolved_project_root, _ = resolve_agent_project_scope(project)
     backend = ChatRunBackend(
         dispatch_agent_tool=server._agent_dispatch,
         catalog_provider=lambda: _mcp_catalog(server.mcp),
         permission_policy=permission_policy,
         blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
         container_active=lambda: container_active,
-        project_root=str(project or ""),
+        project_root=resolved_project_root,
     )
     return ChatToolTurn(
         manifest=manifest,

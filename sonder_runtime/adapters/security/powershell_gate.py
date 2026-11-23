@@ -28,8 +28,8 @@ _PS_LEADING = re.compile(r'''(?ix)\A\s*
     (?:"[^"\r\n]*[\\/]
       |'[^'\r\n]*[\\/]
       |["']?(?<![^\s"'|&()<>@;,=])[^\s"'|&()<>@;,=]*[\\/]
-      |["']?(?<![\w.$\\/-])
-    )(?:powershell|pwsh|powers~\d+)(?:\.exe)?(?![\w.-])''')
+      |["']?(?:[A-Za-z]:)?(?<![\w.$\\/-])
+    )(?:powershell(?:_ise)?|pwsh|powers~\d+)(?:\.(?:exe|cmd|bat|com))?(?![\w.-])''')
 # A word-bounded literal PowerShell name anywhere in a cmd.exe command line,
 # on any line, in any position (after redirections, groups, if/for/start/cmd,
 # quotes).  ``/c`` style switches end at the name (``cmd/cpwsh``).  Trailing
@@ -40,7 +40,7 @@ _PS_LEADING = re.compile(r'''(?ix)\A\s*
 # cannot be run as a command.  Names produced by ``%``/``!`` expansion are
 # covered by ``_cmd_may_expand``; renamed copies and links are not recognised.
 _PS_WORD = re.compile(
-    r'''(?i)(?:(?<![\w.$-])|(?<=/[a-z]))(?:powershell|pwsh|powers~\d+)(?:\.exe)?'''
+    r'''(?i)(?:(?<![\w.$-])|(?<=/[a-z]))(?:powershell(?:_ise)?|pwsh|powers~\d+)(?:\.(?:exe|cmd|bat|com))?'''
     r'''(?![\w-]|\.\w|\\(?!\.+(?:[\s"'&|<>()\\/]|\Z)))''')
 # Carets and quotes can split a command word for cmd.exe (p^wsh, "pw"sh);
 # names that appear once they are removed are counted too (fail closed).
@@ -120,25 +120,36 @@ def runnable_arguments(sources, extract):
 
 
 def _leaf_name(value):
-    """Return the final path component after Win32 trailing dot/space normalization."""
+    """Return the final path component after Win32 drive, ADS, and trailing dot/space normalization."""
     if not isinstance(value, str):
         return ""
     parts = re.split(r"[\\/]", value.strip())
     while len(parts) > 1 and re.fullmatch(r"[. ]*", parts[-1]):
         parts.pop()
-    return parts[-1].rstrip(". ")
+    leaf = parts[-1]
+    if len(leaf) >= 2 and leaf[1] == ":" and leaf[0].isascii() and leaf[0].isalpha():
+        leaf = leaf[2:]
+    if ":" in leaf:
+        leaf = leaf.split(":", 1)[0]
+    return leaf.rstrip(". ")
 
 
 def _is_powershell(value):
     """True when the program path *value* names a PowerShell executable.
 
     CreateProcess normalizes the path before running it, which drops
-    trailing ``.`` components and trailing dots and spaces
-    (``powershell.exe\\.``, ``pwsh.exe.``); an 8.3 short name
-    (``POWERS~1.EXE``) names the same file.  Renamed copies and links are not
-    recognised.
+    trailing ``.`` components, drive-relative prefixes (``C:powershell.exe``),
+    NTFS ADS suffixes (``::$DATA``), and trailing dots and spaces
+    (``powershell.exe\\.``, ``pwsh.exe.``); ``powershell_ise`` and 8.3 short
+    names (``POWERS~1.EXE``) name PowerShell hosts too.  Renamed copies and
+    links are not recognised.
     """
-    return bool(re.fullmatch(r"(?i)(?:powershell|pwsh|powers~\d+)(?:\.exe)?", _leaf_name(value)))
+    return bool(
+        re.fullmatch(
+            r"(?i)(?:powershell(?:_ise)?|pwsh|powers~\d+)(?:\.(?:exe|cmd|bat|com))?",
+            _leaf_name(value),
+        )
+    )
 
 
 def _is_ps1_path(value):
@@ -187,9 +198,11 @@ def _argv(argv, stdin="", *, local=True, script_reader=None):
     }:
         return result
     for index, argument in enumerate(argv[1:], 1):
-        flag = argument.lower().translate(str.maketrans({"\u2013": "-", "\u2014": "-", "\u2015": "-"}))
+        flag = argument.strip().lower().translate(str.maketrans({"\u2013": "-", "\u2014": "-", "\u2015": "-"}))
         if flag.startswith("/"):
             flag = "-" + flag[1:]
+        if flag.startswith("--") and len(flag) > 2 and flag not in ("--%", "--"):
+            flag = flag[1:]
         if flag.startswith("-") and "-file".startswith(flag) and len(flag) > 1:
             if index + 1 >= len(argv):
                 return _opaque("missing PowerShell file operand")
@@ -204,8 +217,11 @@ def _argv(argv, stdin="", *, local=True, script_reader=None):
                 return inspect_powershell(stdin)
             return result
     # No command switch: PowerShell reads stdin or a positional script path.
-    positional = next((item for item in argv[1:] if _is_ps1_path(item)), "")
-    if positional:
+    positional_index = next((idx for idx, item in enumerate(argv[1:], 1) if _is_ps1_path(item)), None)
+    if positional_index is not None:
+        if positional_index + 1 < len(argv):
+            return _opaque("positional PowerShell script with trailing arguments")
+        positional = argv[positional_index]
         if script_reader is not None:
             return script_reader(positional)
         return _script(positional) if local else _opaque("container script source unavailable")
@@ -224,11 +240,14 @@ def _project(arguments):
             continue
 
         def read_project(path, cwd=command["cwd"]):
-            wanted = ntpath.normpath(ntpath.join(cwd, path)).replace("\\", "/")
+            wanted = ntpath.normpath(ntpath.join(cwd, path)).replace("\\", "/").casefold()
             files = code_runner._project_files_from_json(arguments.get("files_json") or arguments.get("files"))
+            matched = None
             for item in files:
-                if ntpath.normpath(item["path"]).replace("\\", "/") == wanted:
-                    return inspect_powershell(item["content"])
+                if ntpath.normpath(item["path"]).replace("\\", "/").casefold() == wanted:
+                    matched = item
+            if matched is not None:
+                return inspect_powershell(matched["content"])
             return _opaque("project PowerShell source unavailable")
 
         last = _argv(command["cmd"], arguments.get("stdin", ""), script_reader=read_project)

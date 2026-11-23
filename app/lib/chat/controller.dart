@@ -238,7 +238,13 @@ class ChatController extends ChangeNotifier {
   WhoamiInfo? _whoami;
   WhoamiInfo? get whoami => _whoami;
 
-  bool clientExecEnabled = true;
+  /// Test-only override for browser detection in [isClientExecActive].
+  @visibleForTesting
+  static bool? debugIsWeb;
+
+  static bool get _isWebClient => debugIsWeb ?? kIsWeb;
+
+  bool clientExecEnabled = Settings.defaultClientExecEnabled;
   String clientPermissionMode = 'manual';
   String clientWorkspaceRoot = '';
   String clientAgentUrl = Settings.defaultClientAgentUrl;
@@ -287,7 +293,16 @@ class ChatController extends ChangeNotifier {
       status.value?.clientExecSupported ??
       true;
 
-  bool get isClientExecActive => clientExecEnabled && clientExecSupported;
+  bool get isClientExecActive {
+    if (!clientExecEnabled || !clientExecSupported) return false;
+    // On Web, non-restricted users (e.g. an admin on a phone) without a
+    // configured local companion token must not advertise X-Sonder-Client-Exec: 1
+    // or server tools get hijacked to a nonexistent 127.0.0.1:11439 companion.
+    if (_isWebClient && clientAgentToken.trim().isEmpty && !isRestrictedUser) {
+      return false;
+    }
+    return true;
+  }
 
   PermissionMode get clientModeState => PermissionMode(
         mode: clientPermissionMode,
@@ -401,14 +416,24 @@ class ChatController extends ChangeNotifier {
 
   void _schedulePoll() {
     _pollTimer?.cancel();
-    if (_paused || _disposed || !_started) return;
+    if (_paused ||
+        _disposed ||
+        !_started ||
+        connection.value.state == ConnState.unauthorized) {
+      return;
+    }
     _pollTimer = Timer(
         sending ? turnPollInterval : idlePollInterval, () => pollStatus());
   }
 
   void _scheduleModePoll() {
     _modeTimer?.cancel();
-    if (_paused || _disposed || !_started) return;
+    if (_paused ||
+        _disposed ||
+        !_started ||
+        connection.value.state == ConnState.unauthorized) {
+      return;
+    }
     _modeTimer = Timer(modePollInterval, () => refreshPermissionMode());
   }
 
@@ -429,7 +454,8 @@ class ChatController extends ChangeNotifier {
     final currentSession = sessionFor(_currentThreadId);
     final localMsgs = currentThread.messages;
     final localTokens = _localThreadTokens(localMsgs);
-    final sameSession = serverCtx.session == currentSession;
+    final sameSession =
+        serverCtx.session.isEmpty || serverCtx.session == currentSession;
     // Never show another session's stale usage (e.g. "default" at 27%) on a
     // brand-new or switched thread. When on the same session, take the higher
     // of the server's tracked count and the live local message estimate.
@@ -866,9 +892,13 @@ class ChatController extends ChangeNotifier {
             );
             changed = true;
           }
+          final endedInError =
+              existing.messages.isNotEmpty && existing.messages.last.error;
+          final serverAhead = summary.turns > localUserTurns ||
+              (endedInError && summary.turns >= localUserTurns);
           if (existing.id == _currentThreadId &&
               !(sending && _turnThreadId == existing.id) &&
-              summary.turns > localUserTurns) {
+              serverAhead) {
             shouldReplayCurrent = true;
           }
         } else {
@@ -923,7 +953,8 @@ class ChatController extends ChangeNotifier {
       final differs = replayed.length > localKept.length ||
           (replayed.length == localKept.length &&
               localKept.isNotEmpty &&
-              replayed.last.content != localKept.last.content);
+              (replayed.last.content != localKept.last.content ||
+                  (localKept.last.error && !replayed.last.error)));
       if (!differs) return;
 
       var title = existing.title;
@@ -1331,8 +1362,15 @@ class ChatController extends ChangeNotifier {
     }
     final isWaiting = awaiting ??
         (tool.isAwaitingApproval || tool.isAwaitingClientApproval);
+    final stillWaiting = updated
+        .any((t) => t.isAwaitingApproval || t.isAwaitingClientApproval);
+    final nextPhase = isWaiting
+        ? 'awaiting approval'
+        : (current.phase == 'awaiting approval' && !stillWaiting
+            ? 'running'
+            : null);
     live.value = current.copyWith(
-      phase: isWaiting ? 'awaiting approval' : null,
+      phase: nextPhase,
       toolCalls: List.unmodifiable(updated),
       clearWaitStatus: isWaiting,
     );
@@ -1439,15 +1477,42 @@ class ChatController extends ChangeNotifier {
     final session = tool.session.isNotEmpty
         ? tool.session
         : sessionFor(_turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
-    await backend.submitClientToolResult(
-      tool.callId,
-      ok: execRes.ok,
-      output: execRes.output,
-      error: execRes.error,
-      denied: execRes.denied,
-      session: session,
-    );
-    return execRes;
+    try {
+      await backend.submitClientToolResult(
+        tool.callId,
+        ok: execRes.ok,
+        output: execRes.output,
+        error: execRes.error,
+        denied: execRes.denied,
+        session: session,
+      );
+      if (_disposed || expectedGeneration != _backendGeneration) {
+        return execRes;
+      }
+      final settled = tool.copyWith(
+        state: execRes.ok ? 'done' : 'error',
+        phase: execRes.ok ? 'finished' : 'error',
+        ok: execRes.ok,
+        error: execRes.error.isEmpty ? null : execRes.error,
+        clearError: execRes.error.isEmpty,
+        result: ToolRunResult(ok: execRes.ok, output: execRes.output),
+      );
+      _upsertLiveTool(settled, awaiting: false);
+      _updateEntryTool(tool.callId, (_) => settled);
+      return execRes;
+    } catch (e) {
+      if (!_disposed && expectedGeneration == _backendGeneration) {
+        final failed = tool.copyWith(
+          state: 'error',
+          phase: 'error',
+          ok: false,
+          error: '$e',
+        );
+        _upsertLiveTool(failed, awaiting: false);
+        _updateEntryTool(tool.callId, (_) => failed);
+      }
+      return ClientToolExecResult(ok: false, error: '$e');
+    }
   }
 
   ChatStreamToolEvent? _findClientToolEvent(String callId) {
@@ -1549,17 +1614,16 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Server or account changed.');
     }
-    _updateEntryTool(
-      callId,
-      (t) => t.copyWith(
-        state: execRes.ok ? 'done' : 'error',
-        phase: execRes.ok ? 'finished' : 'error',
-        ok: execRes.ok,
-        error: execRes.error.isEmpty ? null : execRes.error,
-        clearError: execRes.error.isEmpty,
-        result: ToolRunResult(ok: execRes.ok, output: execRes.output),
-      ),
+    final settled = ev.copyWith(
+      state: execRes.ok ? 'done' : 'error',
+      phase: execRes.ok ? 'finished' : 'error',
+      ok: execRes.ok,
+      error: execRes.error.isEmpty ? null : execRes.error,
+      clearError: execRes.error.isEmpty,
+      result: ToolRunResult(ok: execRes.ok, output: execRes.output),
     );
+    _upsertLiveTool(settled, awaiting: false);
+    _updateEntryTool(callId, (_) => settled);
     return const ApprovalOutcome(ApprovalStatus.approved);
   }
 
@@ -1593,16 +1657,23 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Server or account changed.');
     }
-    _updateEntryTool(
-      callId,
-      (t) => t.copyWith(
-        state: 'denied',
-        phase: 'denied',
-        ok: false,
-        denied: true,
-        error: 'Denied by user on client PC.',
-      ),
+    final deniedEv = (ev ??
+            ChatStreamToolEvent(
+              id: callId,
+              callId: callId,
+              tool: toolName,
+              phase: 'denied',
+              state: 'denied',
+            ))
+        .copyWith(
+      state: 'denied',
+      phase: 'denied',
+      ok: false,
+      denied: true,
+      error: 'Denied by user on client PC.',
     );
+    _upsertLiveTool(deniedEv, awaiting: false);
+    _updateEntryTool(callId, (_) => deniedEv);
     return const ApprovalOutcome(ApprovalStatus.approved);
   }
 
@@ -1862,6 +1933,7 @@ class ChatController extends ChangeNotifier {
     // A transport failure says nothing about what the server kept.
     if (e is! SonderException || e.httpStatus == null) {
       _temperatureSync.reset();
+      _effortSync.reset();
     }
     final elapsed = _liveElapsedMs();
     final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];

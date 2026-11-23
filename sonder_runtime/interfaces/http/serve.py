@@ -4513,11 +4513,13 @@ def _chat_completion_object(
     receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
-    activity = server.activity_tracker.public_response(
-        activity_response, include_detail=False,
-    ) if isinstance(activity_response, dict) else (
-        server.activity_tracker.public_snapshot(include_detail=False) or {}
-    ).get("latest")
+    activity = (
+        server.activity_tracker.public_response(
+            activity_response, include_detail=False,
+        )
+        if isinstance(activity_response, dict)
+        else None
+    )
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -4836,7 +4838,15 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _cors(self):
-        origin = reflectable_origin(self.headers.get("Origin"))
+        if _request_route(getattr(self, "path", "")) == "/v1/local/server-log":
+            return
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return
+        origins = headers.get_all("Origin") if hasattr(headers, "get_all") else None
+        if origins is not None and len(origins) > 1:
+            return
+        origin = reflectable_origin(headers.get("Origin"))
         if origin is not None and origin in CORS_ORIGINS:
             if not (getattr(self, "_artifact_transfer_request", False) or getattr(self, "_app_control_request", False)):
                 _serve_logger.debug(f"_cors: allowing origin={origin!r}")
@@ -4960,7 +4970,27 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _reject_disallowed_origin(self):
-        origin = self.headers.get("Origin")
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        origins = headers.get_all("Origin") if hasattr(headers, "get_all") else None
+        if origins is not None and len(origins) > 1:
+            _serve_logger.debug("_reject_disallowed_origin: rejecting duplicate Origin headers")
+            if (
+                self.command == "POST"
+                and _request_route(self.path) == "/v1/chat/completions"
+            ):
+                self._record_chat_completion_metric(
+                    sonder_lifecycle.get(), "cors_rejected",
+                    getattr(self, "_request_started", time.monotonic()),
+                )
+            self._send_json_payload(
+                {"error": {"message": "origin is not allowed", "type": "cors",
+                           "code": "forbidden_origin"}},
+                status=403,
+            )
+            return True
+        origin = headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
             return False
         if _WEB_APP.enabled and getattr(self, "_host_trusted", False) and web_app.same_origin_request(self.headers, https_declared=TLS_TERMINATED_BY_PROXY):
@@ -4991,15 +5021,27 @@ class Handler(BaseHTTPRequestHandler):
         # A served account's agent turn must never carry the owner's build
         # model: the brief shows only the principal this request declares.
         _bind_request_build_principal(context)
-        role_tool_policy.bind_caller_role(_restricted_tool_role(context))
-        permission_policy.bind_unauthenticated_caller(_chat_tool_stream.is_local_open_context(context))
+        role = _restricted_tool_role(context)
+        local_open = _chat_tool_stream.is_local_open_context(context)
         turn_stack = getattr(self, "_turn_stack", None)
         if turn_stack is not None and not getattr(self, "_mode_scope_bound", False):
+            turn_stack.enter_context(role_tool_policy.caller_role_scope(role))
+            permission_policy.bind_unauthenticated_caller(local_open)
+            turn_stack.callback(permission_policy.bind_unauthenticated_caller, False)
             session_hdr = str(self.headers.get("X-Sonder-Session", "") or "").strip()
+            state_principal = _state_principal(context)
+            mode_principal = _mode_principal(context)
             turn_stack.enter_context(_chat_tool_stream.request_mode_scope(
-                permission_policy, context, _state_principal(context), session_hdr,
+                permission_policy, context, state_principal, session_hdr,
             ))
+            if mode_principal != state_principal:
+                turn_stack.enter_context(permission_policy.mode_scope(
+                    mode_principal, session_hdr, local_open=local_open,
+                ))
             self._mode_scope_bound = True
+        else:
+            role_tool_policy.bind_caller_role(role)
+            permission_policy.bind_unauthenticated_caller(local_open)
         return context
 
     def _peer(self):
@@ -5024,9 +5066,12 @@ class Handler(BaseHTTPRequestHandler):
             self._correlation_id = sonder_lifecycle.new_correlation_id()
         return self._correlation_id
 
+    def _record_auth_failure(self, reason="invalid-credentials"):
+        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
+
     def _send_auth_error(self, reason="invalid-credentials"):
         _serve_logger.debug(f"_send_auth_error: peer={self._peer()!r}, reason={reason!r}")
-        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
+        self._record_auth_failure(reason)
         self._send_json_payload({
             "error": {"message": "authentication required", "type": "auth",
                       "code": "UNAUTHENTICATED",
@@ -5692,6 +5737,13 @@ class Handler(BaseHTTPRequestHandler):
             if not context["authorized"]:
                 self._send_auth_error()
                 return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                               "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
+                return
             from sonder_runtime.bootstrap.app import default_app
             from sonder_runtime.interfaces.http.facades.compute_fabric import (
                 dispatch_compute_snapshot,
@@ -6112,7 +6164,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload(payload, status=status)
             return
         if path == "/v1/sonder/capabilities":
-            self._send_json_payload(_capabilities_payload(self._request_auth_context()))
+            context = self._request_auth_context()
+            if (
+                not context.get("authorized")
+                and context.get("mode") != "local-open"
+                and (
+                    str(self.headers.get("Authorization", "") or "").strip()
+                    or str(self.headers.get("X-Sonder-Account-Token", "") or "").strip()
+                )
+            ):
+                self._record_auth_failure("invalid-credentials")
+            self._send_json_payload(_capabilities_payload(context))
             return
         if path == "/v1/sonder/whoami":
             context = self._request_auth_context()
@@ -6207,7 +6269,8 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/commands", "/v1/commands/complete", "/v1/commands/help",
         ):
             return False
-        if not self._request_auth_context()["authorized"]:
+        context = self._request_auth_context()
+        if not context["authorized"]:
             self._send_auth_error()
             return True
         query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
@@ -6216,7 +6279,6 @@ class Handler(BaseHTTPRequestHandler):
             values = query.get(name) or [""]
             return values[0]
 
-        context = self._request_auth_context()
         if route == "/v1/commands/complete":
             payload = _commands_complete_payload(
                 first("q"), first("limit"), context=context,
@@ -8009,7 +8071,7 @@ class Handler(BaseHTTPRequestHandler):
                 activity_response, include_detail=False,
             )
             if isinstance(activity_response, dict)
-            else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
+            else None
         )
         headers_sent = False
         early = getattr(self, "_early_stream", None)

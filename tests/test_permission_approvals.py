@@ -316,11 +316,11 @@ def test_a_call_whose_preview_hides_text_is_approvable_only_with_its_arguments(
     assert allowed.action == pm.ALLOW and allowed.source == "approval"
 
 
-@pytest.mark.parametrize("key", ["password", "api_key", "secret", "credential"])
+@pytest.mark.parametrize("key", ["password", "parent_token", "api_key", "secret", "credential"])
 def test_a_credential_named_argument_is_neither_stored_nor_listed_in_clear(
         redacting_ledger, key):
-    # Not a credential knob (the digest binds it), so it reaches the preview;
-    # the redactor recognises it only with its key in front of it.
+    # Credential knobs in CREDENTIAL_ARGUMENTS are stripped before preview/digest;
+    # other credential-named keys reach the preview and are redacted there.
     secret = "hunter2xyz"
     arguments = {key: secret, "cmd": "x"}
     refused = pm.decide("workspace_run", interactive=False, surface="mcp", arguments=arguments)
@@ -328,9 +328,13 @@ def test_a_credential_named_argument_is_neither_stored_nor_listed_in_clear(
 
     pending = redacting_ledger.resolve_call(refused.call_id)
     assert secret not in pending.preview
-    assert "cmd=x" in pending.preview and "%s=" % key in pending.preview
-    assert pending.preview.startswith(ledger_module.PREVIEW_INCOMPLETE % "redacted")
-    assert not pending.complete
+    assert "cmd=x" in pending.preview
+    if key in pm.CREDENTIAL_ARGUMENTS:
+        assert "%s=" % key not in pending.preview
+    else:
+        assert "%s=" % key in pending.preview
+        assert pending.preview.startswith(ledger_module.PREVIEW_INCOMPLETE % "redacted")
+        assert not pending.complete
     assert secret not in server.control_command("/approvals", operator_approved=True)
     assert secret not in json.dumps(approvals_facade.approvals_payload(redacting_ledger))
     with redacting_ledger._read() as conn:

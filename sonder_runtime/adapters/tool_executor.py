@@ -17,6 +17,7 @@ from .filesystem.typed import GuardedFileSystemAdapter
 
 _NETWORK_REFUSAL_TOOLS = frozenset({
     "web_fetch", "web_search", "weather_lookup", "approximate_location_lookup",
+    "fetch_artifact",
 })
 
 
@@ -252,6 +253,8 @@ class ToolExecutorAdapter:
                 import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 
                 if call.tool == "fetch_artifact":
+                    if not context.cloud_allowed:
+                        raise PermissionError("artifact fetch requires explicit cloud consent")
                     res = artifact_fetch.fetch_artifact(**args)
                     output = artifact_fetch.format_fetch_result(res)
                 else:
