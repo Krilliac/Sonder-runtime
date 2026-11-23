@@ -1613,11 +1613,6 @@
         "sonder_runtime/platform/unsafe_lab_policy.py",
         "sonder_runtime/platform/version.py"
       ]
-    },
-    {
-      "file_count": 0,
-      "name": "security",
-      "python_files": []
     }
   ],
   "ownership": {
@@ -1770,31 +1765,6 @@
         "state": {
           "name": "platform.state",
           "owner": "sonder_runtime.platform"
-        }
-      },
-      {
-        "lifecycle": {
-          "name": "security.lifecycle",
-          "owner": "sonder_runtime.security"
-        },
-        "package": {
-          "name": "sonder_runtime.security"
-        },
-        "provider": {
-          "name": "security.providers",
-          "owner": "sonder_runtime.security"
-        },
-        "public_port": {
-          "name": "security.ports",
-          "owner": "sonder_runtime.security"
-        },
-        "schema": {
-          "name": "security.schemas",
-          "owner": "sonder_runtime.security"
-        },
-        "state": {
-          "name": "security.state",
-          "owner": "sonder_runtime.security"
         }
       }
     ],

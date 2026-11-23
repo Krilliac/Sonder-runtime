@@ -14,7 +14,6 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | `domain` | 342 |
 | `interfaces` | 89 |
 | `platform` | 61 |
-| `security` | 0 |
 
 ## Composition roots
 
@@ -32,4 +31,3 @@ Authority: `docs/architecture/SONDER-MASTER-IMPLEMENTATION-SPEC.md`
 | `sonder_runtime.domain` | `domain.state` | `domain.ports` | `domain.providers` | `domain.schemas` | `domain.lifecycle` |
 | `sonder_runtime.interfaces` | `interfaces.state` | `interfaces.ports` | `interfaces.providers` | `interfaces.schemas` | `interfaces.lifecycle` |
 | `sonder_runtime.platform` | `platform.state` | `platform.ports` | `platform.providers` | `platform.schemas` | `platform.lifecycle` |
-| `sonder_runtime.security` | `security.state` | `security.ports` | `security.providers` | `security.schemas` | `security.lifecycle` |
