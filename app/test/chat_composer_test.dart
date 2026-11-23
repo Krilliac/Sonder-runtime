@@ -113,6 +113,56 @@ void main() {
       expect(groups.map((g) => g.kind),
           [ModelGroupKind.routes, ModelGroupKind.direct]);
     });
+
+    test(
+        'groupModels keeps all 8 tiers in Routes and separates image models '
+        'for easy discovery', () {
+      final json = ecosystemJson(provider: 'openai_compatible');
+      final providers = json['providers'] as Map<String, dynamic>;
+      providers['tier_providers'] = {
+        for (final tier in ecosystemTierNames) tier: 'openai_compatible',
+      };
+      (providers['status'] as Map<String, dynamic>)['openai_compatible'] = {
+        'provider': 'openai_compatible',
+        'state': 'unknown',
+        'model': 'bonsai-27b-pq2',
+        'tier_models': {
+          'fast': 'bonsai-9b-mtp',
+          'general': 'bonsai-27b-pq2',
+          'code': 'bonsai-27b-pq2',
+          'draft': 'bonsai-4b-mtp',
+        },
+      };
+      json['image_generation'] = {
+        'configured': true,
+        'backend': 'openai_api',
+        'api_url': 'http://127.0.0.1:11440',
+        'model': 'sdxl-turbo',
+      };
+      final routing = ModelRouting(EcosystemReading.parse(json).status);
+      final groups = groupModels(const [
+        'sonder',
+        ...ecosystemTierNames,
+        'llama3:8b',
+        'sdxl-turbo',
+      ], routing);
+
+      expect(groups.map((g) => g.kind), [
+        ModelGroupKind.routes,
+        ModelGroupKind.image,
+        ModelGroupKind.direct,
+      ]);
+      expect(groups[0].models, ['sonder', ...ecosystemTierNames]);
+      expect(groups[1].models, ['sdxl-turbo']);
+      expect(groups[2].models, ['llama3:8b']);
+
+      expect(compactModelLabel('sonder', routing), 'sonder · bonsai-27b-pq2');
+      expect(compactModelLabel('fast', routing), 'fast · bonsai-9b-mtp');
+      expect(compactModelLabel('draft', routing), 'draft · bonsai-4b-mtp');
+      expect(compactModelLabel('sdxl-turbo', routing), 'sdxl-turbo · Image');
+      expect(compactModelLabel('sdxl-turbo', routing, dense: true),
+          'sdxl-turbo');
+    });
   });
 
   group('context ring', () {

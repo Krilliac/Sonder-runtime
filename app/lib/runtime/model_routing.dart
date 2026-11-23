@@ -20,10 +20,39 @@ const ollamaProvider = 'ollama';
 /// The default HTTP route names; their policy tier is resolved by the server.
 const _defaultRoutes = {'sonder', 'local'};
 
-/// `Sonder Inference`, `Ollama`, or the id as sent.
+final _imageModelIncludeRe = RegExp(
+  r'(?:^|[/:_\-])('
+  r'z-?image|flux(?:\d|[\-._:]|$)|sdxl|stable[\-_ ]?diffusion|sd3(?:\.\d)?|'
+  r'diffusion|imagen|dall[\-_ ]?e|gpt[\-_ ]?image|recraft|ideogram|'
+  r'kandinsky|pixart|kolors|hunyuan[\-_ ]?image|qwen[\-_ ]?image|'
+  r'chroma|aura[\-_ ]?flow|hidream|lumina[\-_ ]?image'
+  r')',
+  caseSensitive: false,
+);
+
+final _imageModelExcludeRe = RegExp(
+  r'(?:^|[/:_\-])('
+  r'vl|vision|llava|bakllava|moondream|minicpm[\-_]?v|internvl|cogvlm|'
+  r'ocr|embed|embedding|rerank|mesh|whisper|tts|stt|audio|speech|coder|code'
+  r')(?:$|[/:_\-\d])',
+  caseSensitive: false,
+);
+
+/// True when [name] matches an image-generation model (mirroring the runtime's
+/// `image_generation.is_image_generation_model_name`), excluding vision/chat
+/// models such as `*-vl`, `llava`, and `moondream`.
+bool isImageGenerationModelName(String name) {
+  final raw = name.trim();
+  if (raw.isEmpty) return false;
+  if (_imageModelExcludeRe.hasMatch(raw)) return false;
+  return _imageModelIncludeRe.hasMatch(raw);
+}
+
+/// `Sonder Inference`, `OpenAI-compatible`, `Ollama`, or the id as sent.
 String providerDisplayName(String provider) =>
     switch (canonicalProvider(provider)) {
       sonderInferenceProvider => 'Sonder Inference',
+      openaiCompatibleProvider => 'OpenAI-compatible',
       ollamaProvider => 'Ollama',
       final other => other,
     };
@@ -70,15 +99,28 @@ class ModelRouting {
         (e) => e.value.provider != null && e.value.provider != ollamaProvider);
   }
 
-  /// True for `sonder`/`local`, every tier the bindings name, and every row
-  /// `/v1/models` reports as a route.
+  /// True for `sonder`/`local`, every tier the bindings name, every row
+  /// `/v1/models` reports as a route, and the eight known local policy tiers.
   bool isRoute(String id) {
     final key = _key(id);
     if (_defaultRoutes.contains(key)) return true;
     if (status?.tierProviders.keys.any((t) => _key(t) == key) ?? false) {
       return true;
     }
-    return _origin(id)?.isRoute ?? false;
+    final origin = _origin(id);
+    if (origin != null) return origin.isRoute;
+    return ecosystemTierNames.contains(key);
+  }
+
+  /// True for a configured or recognized image-generation model (such as
+  /// `sdxl-turbo`), never for a route id.
+  bool isImageModel(String id) {
+    if (isRoute(id)) return false;
+    final key = _key(id);
+    if (key.isEmpty) return false;
+    final configured = status?.imageGeneration?.model;
+    if (configured != null && _key(configured) == key) return true;
+    return isImageGenerationModelName(id);
   }
 
   /// The provider a route is bound to; null for an exact model or when the
@@ -110,24 +152,35 @@ class ModelRouting {
     return origin != null && origin.isRoute ? origin.provider : null;
   }
 
-  /// The one model [provider] reports serving, if it names exactly one.
+  /// The default or sole model [provider] reports serving: its declared
+  /// `model` when present, else its single entry in `models`.
   String? servedModel(String provider) {
-    final models = status?.providers[provider]?.models ?? const <String>[];
-    return models.length == 1 ? models.single : null;
+    final entry = status?.providers[canonicalProvider(provider)];
+    if (entry == null) return null;
+    if (entry.model != null) return entry.model;
+    return entry.models.length == 1 ? entry.models.single : null;
   }
 
   /// The model route [id] is served with: the bound provider's per-tier
   /// model from the ecosystem document, else the `/v1/models` row's
-  /// `served_model` for that provider, else the provider's only model.
+  /// `served_model` for that provider, else (for default routes like
+  /// `sonder`/`local`) the bound provider's `general` tier model, else the
+  /// provider's default/sole model.
   String? routeServedModel(String id) {
+    final key = _key(id);
     final provider = routeProvider(id);
     if (provider == null) return null;
-    final tierModel = status?.providers[provider]?.tierModels[_key(id)];
+    final providerStatus = status?.providers[provider];
+    final tierModel = providerStatus?.tierModels[key];
     if (tierModel != null) return tierModel;
     final origin = _origin(id);
     if (origin != null && origin.provider == provider) {
       final served = origin.servedModel;
       if (served != null) return served;
+    }
+    if (_defaultRoutes.contains(key)) {
+      final generalModel = providerStatus?.tierModels['general'];
+      if (generalModel != null) return generalModel;
     }
     return servedModel(provider);
   }
@@ -141,20 +194,46 @@ class ModelRouting {
     return served == null ? name : '$name ($served)';
   }
 
+  /// `Image generation (127.0.0.1:11440)` or `Image generation` for an image
+  /// model, else null.
+  String? imageBinding(String id) {
+    if (!isImageModel(id)) return null;
+    final image = status?.imageGeneration;
+    if (image != null &&
+        image.configured &&
+        image.endpointDisplay != null &&
+        (image.model == null || _key(image.model!) == _key(id))) {
+      return 'Image generation (${image.endpointDisplay})';
+    }
+    return 'Image generation';
+  }
+
   /// The label in the chat model picker and pill.
   String pickerLabel(String id) {
     final binding = routeBinding(id);
     if (binding != null) return '$id · $binding';
+    final image = imageBinding(id);
+    if (image != null) return '$id · $image';
     if (bypassesBinding && !isRoute(id)) return '$id · $ollamaDirect';
     return id == 'sonder' ? 'sonder (local route)' : id;
   }
 
   /// Who serves [id] on Runtime → Models: the provider a route is bound to,
-  /// or the server's owner field.
+  /// the configured image backend, or the server's owner field.
   String servedBy(String id, String ownedBy) {
     final provider = routeProvider(id);
     if (provider != null && provider != ollamaProvider) {
       return providerDisplayName(provider);
+    }
+    if (isImageModel(id)) {
+      final image = status?.imageGeneration;
+      if (image != null &&
+          image.configured &&
+          image.endpointDisplay != null &&
+          (image.model == null || _key(image.model!) == _key(id))) {
+        return 'Image (${image.endpointDisplay})';
+      }
+      return 'Image generation';
     }
     return ownedBy;
   }
@@ -243,10 +322,15 @@ class ModelRouting {
     if (!bypassesBinding) return null;
     final routes = <String, int>{};
     final served = <String, Set<String>>{};
+    final images = <String>[];
     var exact = 0;
     for (final id in models) {
       if (!isRoute(id)) {
-        exact++;
+        if (isImageModel(id)) {
+          images.add(id);
+        } else {
+          exact++;
+        }
         continue;
       }
       final provider = routeProvider(id);
@@ -261,6 +345,9 @@ class ModelRouting {
         '${providerDisplayName(entry.key)} serves ${entry.value} '
             '${_plural(entry.value, 'route', 'routes')}'
             '${served[entry.key] == null ? '' : ' (${served[entry.key]!.join(', ')})'}',
+      if (images.isNotEmpty)
+        '${images.length} image ${_plural(images.length, 'model', 'models')} '
+            '(${images.join(', ')})',
     ];
     final direct = '$exact exact ${_plural(exact, 'model runs', 'models run')} '
         'directly on Ollama.';

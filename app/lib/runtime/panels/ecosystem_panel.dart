@@ -9,7 +9,7 @@ typedef ObservatoryLauncher = Future<ObservatoryLaunchResult> Function(
 String providerLabel(String provider) => switch (canonicalProvider(provider)) {
       sonderInferenceProvider => 'Sonder Inference',
       'ollama' => 'Ollama',
-      'openai_compatible' => 'OpenAI-compatible',
+      openaiCompatibleProvider => 'OpenAI-compatible',
       final other => other,
     };
 
@@ -63,6 +63,11 @@ String inferenceNotConfiguredText(EcosystemStatus status) {
 const observatoryTokenNote =
     'The Observatory will ask for a token; telemetry is admin-only outside '
     'local-open mode.';
+
+/// Shown when `model_tool_policy.security_floor_relaxed` is true.
+const securityFloorRelaxedNote =
+    'Security model tool floor relaxed via host env; permission modes and '
+    'approvals remain active';
 
 /// The two halves of the ecosystem status: providers (Runtime → Models) and
 /// the Observatory live export (Runtime → Observatory).
@@ -286,11 +291,30 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     );
   }
 
+  String _otherProviderValue(ProviderStatus entry) {
+    final detail = entry.detail;
+    final showModel = entry.model != null &&
+        (detail == null || !detail.contains(entry.model!));
+    final parts = <String>[
+      if (entry.baseUrl != null) entry.baseUrl!,
+      if (showModel) entry.model!,
+      if (entry.model == null &&
+          entry.models.isNotEmpty &&
+          (detail == null || !detail.contains(entry.models.first)))
+        entry.models.join(', '),
+      if (detail != null) detail,
+    ];
+    return parts.isEmpty ? 'no status reported' : parts.join(' · ');
+  }
+
   List<Widget> _inferenceSections(
       BuildContext context, EcosystemStatus status) {
+    final image = status.imageGeneration;
     return [
+      if (status.securityFloorRelaxed) _securityFloorPolicy(context),
       _bindings(context, status),
       _inference(context, status),
+      if (image != null) _imageGeneration(context, image),
       if (status.providers.keys.any((id) => id != sonderInferenceProvider))
         SettingsSection(
           title: 'Other providers',
@@ -302,30 +326,91 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
                   kind: _providerKind(entry.value.state),
                   word: entry.value.state.name,
                   label: providerLabel(entry.key),
-                  value: entry.value.baseUrl == null &&
-                          entry.value.detail == null
-                      ? 'no status reported'
-                      : [
-                          if (entry.value.baseUrl != null) entry.value.baseUrl!,
-                          if (entry.value.detail != null) entry.value.detail!,
-                        ].join(' · '),
+                  value: _otherProviderValue(entry.value),
                 ),
           ],
         ),
     ];
   }
 
+  Widget _securityFloorPolicy(BuildContext context) {
+    return const SettingsSection(
+      key: Key('ecosystem-model-tool-policy'),
+      title: 'Model tool policy',
+      trailing: _SecurityFloorRelaxedBadge(),
+      children: [
+        Padding(
+          padding: EdgeInsets.all(SonderSpace.lg),
+          child: WorkspaceNotice(
+            key: Key('ecosystem-security-floor-relaxed'),
+            kind: StatusKind.warn,
+            title: securityFloorRelaxedNote,
+            framed: false,
+            liveRegion: false,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _imageGeneration(BuildContext context, ImageGenerationStatus image) {
+    return SettingsSection(
+      key: const Key('ecosystem-image-generation'),
+      title: 'Image generation',
+      children: [
+        StatusValueRow(
+          key: const Key('ecosystem-image-state'),
+          kind: image.configured ? StatusKind.ok : StatusKind.skipped,
+          word: image.configured ? 'configured' : 'off',
+          label: 'Image backend',
+          value: image.configured
+              ? image.summary
+              : 'No dedicated image backend configured.',
+        ),
+        if (image.model != null)
+          ValueRow(
+            key: const Key('ecosystem-image-model'),
+            label: 'Model',
+            value: image.model!,
+            mono: true,
+          ),
+        if (image.apiUrl != null)
+          ValueRow(
+            key: const Key('ecosystem-image-url'),
+            label: 'Endpoint',
+            value: image.apiUrl!,
+            mono: true,
+            trailing: IconButton(
+              tooltip: 'Copy image endpoint',
+              iconSize: 16,
+              icon: const Icon(Icons.copy_outlined),
+              onPressed: () =>
+                  _copyToast(image.apiUrl!, 'the image endpoint'),
+            ),
+          ),
+        if (image.backendLabel != null)
+          ValueRow(
+            key: const Key('ecosystem-image-backend'),
+            label: 'Backend',
+            value: image.backendLabel!,
+          ),
+      ],
+    );
+  }
+
   Widget _bindings(BuildContext context, EcosystemStatus status) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
     String name(String? id) => id == null ? 'not reported' : providerLabel(id);
-    Widget binding(String label, String provider, {bool mono = false}) =>
+    Widget binding(String label, String provider,
+            {bool mono = false, String? model}) =>
         RuntimeRow(
           dense: true,
           title: Text(label,
               style: mono
                   ? tokens.mono(13, weight: FontWeight.w500)
                   : text.bodyMedium?.copyWith(fontWeight: FontWeight.w500)),
+          subtitle: model == null ? null : RuntimeRowDetail(model, mono: true),
           actions: [
             Text(provider,
                 style: text.bodyMedium?.copyWith(color: tokens.text2)),
@@ -341,13 +426,22 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
         binding('Default', name(status.defaultGenerationProvider)),
         binding('Embedding', name(status.embeddingProvider)),
         for (final entry in status.tierProviders.entries)
-          Semantics(
-            key: Key('ecosystem-tier-${entry.key}'),
-            container: true,
-            label: 'Tier ${entry.key} uses ${providerLabel(entry.value)}',
-            excludeSemantics: true,
-            child: binding(entry.key, providerLabel(entry.value), mono: true),
-          ),
+          () {
+            final tierModel =
+                status.providers[entry.value]?.tierModels[entry.key.toLowerCase()];
+            final providerText = providerLabel(entry.value);
+            final spoken = tierModel == null
+                ? 'Tier ${entry.key} uses $providerText'
+                : 'Tier ${entry.key} uses $providerText ($tierModel)';
+            return Semantics(
+              key: Key('ecosystem-tier-${entry.key}'),
+              container: true,
+              label: spoken,
+              excludeSemantics: true,
+              child: binding(entry.key, providerText,
+                  mono: true, model: tierModel),
+            );
+          }(),
       ],
     );
   }
@@ -643,6 +737,40 @@ class _SyntheticTag extends StatelessWidget {
             Icon(Icons.science_outlined, size: 14, color: tokens.warn),
             const SizedBox(width: SonderSpace.xs),
             Text('SYNTHETIC',
+                style: tokens.mono(11.5,
+                    color: tokens.warn, weight: FontWeight.w600)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Restrained warning badge shown when `SONDER_ALLOW_SECURITY_MODEL_TOOLS`
+/// relaxes the shipped security-adviser model tool floor.
+class _SecurityFloorRelaxedBadge extends StatelessWidget {
+  const _SecurityFloorRelaxedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return Tooltip(
+      message: securityFloorRelaxedNote,
+      child: Semantics(
+        label: 'Security floor relaxed: $securityFloorRelaxedNote',
+        excludeSemantics: true,
+        child: Container(
+          key: const Key('ecosystem-security-floor-badge'),
+          padding: const EdgeInsets.symmetric(
+              horizontal: SonderSpace.sm, vertical: SonderSpace.xxs),
+          decoration: BoxDecoration(
+            color: tokens.warn.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(SonderRadius.pill),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.shield_outlined, size: 14, color: tokens.warn),
+            const SizedBox(width: SonderSpace.xs),
+            Text('FLOOR RELAXED',
                 style: tokens.mono(11.5,
                     color: tokens.warn, weight: FontWeight.w600)),
           ]),
