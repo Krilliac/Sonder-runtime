@@ -15,7 +15,10 @@
     "code": "sonder:latest",
     "general": "sonder:latest",
     "reasoning": "",
-    "vision": ""
+    "vision": "",
+    "security": "",
+    "creative": "",
+    "draft": ""
   },
   "default_embedding_model": "nomic-embed-text",
   "reserved_personal_model": "sonder-personal:latest",
@@ -39,7 +42,10 @@
     "code": 1,
     "general": 1,
     "vision": 1,
-    "reasoning": 2
+    "reasoning": 2,
+    "security": 2,
+    "creative": 1,
+    "draft": 0
   },
   "working_strength": 1,
   "capability_router": {
@@ -49,7 +55,10 @@
       "code": "code",
       "reasoning": "reasoning",
       "vision": "vision",
-      "long_context": "general"
+      "long_context": "general",
+      "security": "security",
+      "creative": "creative",
+      "draft": "draft"
     },
     "ladder": {
       "simple": [
@@ -78,6 +87,22 @@
       "long_context": [
         "general",
         "reasoning"
+      ],
+      "security": [
+        "security",
+        "reasoning",
+        "code",
+        "general"
+      ],
+      "creative": [
+        "creative",
+        "general",
+        "fast"
+      ],
+      "draft": [
+        "draft",
+        "fast",
+        "general"
       ]
     },
     "fallback": [
@@ -177,11 +202,52 @@
         "this transcript",
         "tl;dr of",
         "condense"
+      ],
+      "security": [
+        "vulnerability",
+        "exploit",
+        "cve-",
+        "threat model",
+        "security audit",
+        "penetration test",
+        "pentest",
+        "reverse engineer",
+        "disassembly",
+        "shellcode",
+        "privilege escalation",
+        "owasp",
+        "hardening",
+        "attack surface"
+      ],
+      "creative": [
+        "write a story",
+        "short story",
+        "worldbuild",
+        "world-build",
+        "lore for",
+        "character backstory",
+        "dialogue between",
+        "write a poem",
+        "brainstorm names",
+        "narrative",
+        "creative writing",
+        "flavor text"
+      ],
+      "draft": [
+        "draft a quick",
+        "quick draft",
+        "boilerplate",
+        "commit message",
+        "changelog entry",
+        "reformat this",
+        "convert this table",
+        "rough outline"
       ]
     }
   },
   "ensemble_skip_tiers": [
-    "vision"
+    "vision",
+    "draft"
   ],
   "bootstrap_models": {
     "small": "qwen2.5-coder:1.5b",

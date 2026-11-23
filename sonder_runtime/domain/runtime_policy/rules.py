@@ -29,10 +29,10 @@ VERSION = 1
 # floor (``capability_router._FALLBACK``) and the only tiers an execution lane
 # may be pinned to, so they can never be left unset.
 BASE_LOCAL_TIERS = ("fast", "code", "general")
-# Specialist tiers the capability router prefers for reasoning/vision work.
-# They are bound by default but may be explicitly unset (empty model), in which
-# case the router degrades to a base tier exactly as it did before they existed.
-OPTIONAL_LOCAL_TIERS = ("reasoning", "vision")
+# Specialist tiers the capability router prefers for reasoning/vision/security/
+# creative/draft work. They may be explicitly unset (empty model), in which
+# case the router degrades to a base tier cleanly.
+OPTIONAL_LOCAL_TIERS = ("reasoning", "vision", "security", "creative", "draft")
 LOCAL_TIERS = BASE_LOCAL_TIERS + OPTIONAL_LOCAL_TIERS
 ROUTING_LANES = ("chat", "router", "workbench", "autopilot", "fleet", "review")
 # Optional context-fit routing target, stored in the ``routing`` section only
