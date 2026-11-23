@@ -170,7 +170,7 @@ def test_concept_image_helper_calls_openai_image_api(monkeypatch):
 
     monkeypatch.setenv("SONDER_IMAGE_API_URL", "http://127.0.0.1:11440")
     fake_backend = img_gen.ImageBackend(
-        kind="image_api", model="sdxl-turbo", endpoint="http://127.0.0.1:11440/v1/images/generations",
+        kind="openai_api", model="sdxl-turbo", endpoint="http://127.0.0.1:11440/v1/images/generations",
     )
     monkeypatch.setattr(img_gen, "discover_image_backend", lambda: fake_backend)
     seen = {}

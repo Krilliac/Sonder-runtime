@@ -250,7 +250,7 @@ def _generate_concept_image_bytes(prompt: str) -> tuple[bytes, str] | None:
     import sonder_runtime.adapters.image_generation as _image_gen
 
     backend = _image_gen.discover_image_backend()
-    if backend.kind != "image_api" or not backend.endpoint:
+    if backend.kind not in ("openai_api", "image_api") or not backend.endpoint:
         return None
     try:
         raw, mime = _image_gen._call_openai_image_api(
