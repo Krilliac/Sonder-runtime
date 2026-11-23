@@ -382,7 +382,7 @@ def code_graph(
     all_bases: dict[str, dict[str, list[str]]] = {}
     symbol_locs: dict[str, list[dict[str, Any]]] = {}
 
-    for path, rel in zip(files, rel_paths):
+    for path, rel in zip(files, rel_paths, strict=True):
         if time.monotonic() > deadline:
             truncated = True
             break
@@ -499,14 +499,22 @@ def code_graph(
         }
 
     # Default: architectural summary
-    top_fan_in = sorted(
-        ({"file": r, "importers": len(reverse[r]), "imports": len(forward[r])} for r in rel_paths),
-        key=lambda item: (-item["importers"], item["file"]),
+    fan_in_rows = sorted(
+        ((r, len(reverse[r]), len(forward[r])) for r in rel_paths if reverse[r]),
+        key=lambda row: (-row[1], row[0]),
     )[:cap_top]
-    top_fan_out = sorted(
-        ({"file": r, "imports": len(forward[r]), "importers": len(reverse[r])} for r in rel_paths),
-        key=lambda item: (-item["imports"], item["file"]),
+    fan_out_rows = sorted(
+        ((r, len(forward[r]), len(reverse[r])) for r in rel_paths if forward[r]),
+        key=lambda row: (-row[1], row[0]),
     )[:cap_top]
+    top_fan_in = [
+        {"file": r, "importers": imp_in, "imports": imp_out}
+        for r, imp_in, imp_out in fan_in_rows
+    ]
+    top_fan_out = [
+        {"file": r, "imports": imp_out, "importers": imp_in}
+        for r, imp_out, imp_in in fan_out_rows
+    ]
     orphans = [r for r in rel_paths if not forward[r] and not reverse[r]]
 
     return {
@@ -517,8 +525,8 @@ def code_graph(
         "edges": edge_count,
         "cycle_count": len(cycles),
         "cycles": cycles[:10],
-        "top_hubs_by_importers": [x for x in top_fan_in if x["importers"] > 0],
-        "top_coupled_by_imports": [x for x in top_fan_out if x["imports"] > 0],
+        "top_hubs_by_importers": top_fan_in,
+        "top_coupled_by_imports": top_fan_out,
         "orphan_count": len(orphans),
         "orphan_sample": orphans[:cap_top],
         "truncated": truncated,

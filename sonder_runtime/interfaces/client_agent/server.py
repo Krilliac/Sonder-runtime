@@ -124,7 +124,7 @@ class ClientAgentServer(socketserver.ThreadingMixIn, WSGIServer):
 
 
 class _ClientAgentIPv6Server(ClientAgentServer):
-    address_family = socketserver.socket.AF_INET6
+    address_family = vars(socketserver)["socket"].AF_INET6
 
 
 def _extract_token(environ: Mapping[str, Any]) -> str:

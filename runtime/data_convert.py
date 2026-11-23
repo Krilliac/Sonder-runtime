@@ -335,7 +335,7 @@ def _input_records(text, input_format, limits, deadline):
             cells = _split_md_row(line)
             if len(cells) != len(headers):
                 raise DataConvertError("markdown table row %d does not match header width" % row_idx)
-            yield dict(zip(headers, cells))
+            yield dict(zip(headers, cells, strict=True))
         return
     if input_format == "json":
         try:

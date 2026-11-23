@@ -316,7 +316,7 @@ export SONDER_IMAGE_MODEL="sdxl-turbo"
 - Handled by `generate_chat_gif` in `sonder_runtime/application/image_generation.py`:
   - When `SONDER_IMAGE_API_URL` and Pillow (`PIL.Image`) are available, generates a keyframe through the configured image API and synthesizes a seamless looping multi-frame GIF89a (smooth pan/zoom and subtle lighting/color motion, quantized and optimized).
   - When no diffusion backend or Pillow is installed, falls back cleanly to a multi-frame procedural animated GIF89a with zero external crash.
-- Saves `.gif` files alongside still images under `<sonder-home>/generated-images/`, keeps payloads strictly under the inline data-URI budget (`MAX_INLINE_IMAGE_BYTES = 1,500,000` bytes raw), streams them in `64 KiB` SSE frames (`![alt](data:image/gif;base64,...)`), and strips inline data URIs cleanly from conversation history via `strip_inline_data_images()`.
+- Saves `.gif` files alongside still images under `<sonder-home>/generated-images/`, keeps payloads strictly under the inline data-URI budget (`MAX_INLINE_IMAGE_BYTES = 1,500,000` bytes raw), streams them in `64 KiB` SSE frames (as inline `data:image/gif;base64,...` Markdown images), and strips inline data URIs cleanly from conversation history via `strip_inline_data_images()`.
 
 **How inline chat image & GIF delivery works:**
 - Generated media files are saved to `<sonder-home>/generated-images/`.

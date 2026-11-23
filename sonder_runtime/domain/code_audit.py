@@ -236,7 +236,7 @@ def _audit_python_ast(code: str, lines: list[str]) -> list[AuditFinding]:
                 )
 
         elif isinstance(node, ast.Compare):
-            for op, comp in zip(node.ops, node.comparators):
+            for op, comp in zip(node.ops, node.comparators, strict=True):
                 if isinstance(op, (ast.Is, ast.IsNot)) and isinstance(comp, ast.Constant):
                     if comp.value not in (None, True, False):
                         add(

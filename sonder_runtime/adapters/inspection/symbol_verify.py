@@ -17,7 +17,6 @@ Security & safety invariants:
 from __future__ import annotations
 
 import ast
-import builtins
 import importlib
 import importlib.util
 import inspect

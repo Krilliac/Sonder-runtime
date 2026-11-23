@@ -20,6 +20,7 @@ import json
 import math
 from pathlib import Path
 import struct
+from typing import Any, Sequence
 import wave
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
@@ -99,7 +100,7 @@ def _file_sha256(target: Path) -> str:
     return h.hexdigest()
 
 
-def _inspect_wav(target: Path) -> dict:
+def _inspect_wav(target: Path) -> dict[str, Any]:
     try:
         with wave.open(str(target), "rb") as wf:
             channels = wf.getnchannels()
@@ -120,6 +121,7 @@ def _inspect_wav(target: Path) -> dict:
     silent = False
 
     if raw and sample_width in (1, 2, 4):
+        samples: Sequence[int]
         if sample_width == 1:
             samples = [b - 128 for b in raw]
             max_amp = 128.0
@@ -155,7 +157,7 @@ def _inspect_wav(target: Path) -> dict:
     }
 
 
-def _inspect_midi(target: Path) -> dict:
+def _inspect_midi(target: Path) -> dict[str, Any]:
     raw = target.read_bytes()
     if len(raw) < 14 or raw[:4] != b"MThd":
         raise MediaInspectError("invalid MIDI header (missing MThd)")
@@ -238,7 +240,7 @@ def _inspect_midi(target: Path) -> dict:
     }
 
 
-def _inspect_avi(target: Path) -> dict:
+def _inspect_avi(target: Path) -> dict[str, Any]:
     with target.open("rb") as handle:
         head = handle.read(65536)
     if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"AVI ":
@@ -276,7 +278,7 @@ def _inspect_avi(target: Path) -> dict:
     }
 
 
-def _inspect_gltf_json(doc: dict, *, binary_chunk_bytes: int = 0) -> dict:
+def _inspect_gltf_json(doc: dict[str, Any], *, binary_chunk_bytes: int = 0) -> dict[str, Any]:
     asset = doc.get("asset") or {}
     meshes = doc.get("meshes") or []
     nodes = doc.get("nodes") or []
@@ -335,7 +337,7 @@ def _inspect_gltf_json(doc: dict, *, binary_chunk_bytes: int = 0) -> dict:
     }
 
 
-def _inspect_glb(target: Path) -> dict:
+def _inspect_glb(target: Path) -> dict[str, Any]:
     with target.open("rb") as handle:
         header = handle.read(12)
         if len(header) < 12 or header[:4] != b"glTF":
@@ -366,7 +368,7 @@ def _inspect_glb(target: Path) -> dict:
     return result
 
 
-def _inspect_gltf(target: Path) -> dict:
+def _inspect_gltf(target: Path) -> dict[str, Any]:
     if target.stat().st_size > MAX_JSON_CHUNK_BYTES:
         raise MediaInspectError("glTF JSON file exceeds size ceiling")
     try:
@@ -376,7 +378,7 @@ def _inspect_gltf(target: Path) -> dict:
     return _inspect_gltf_json(doc)
 
 
-def _inspect_obj(target: Path) -> dict:
+def _inspect_obj(target: Path) -> dict[str, Any]:
     if target.stat().st_size > MAX_TEXT_SCAN_BYTES:
         raise MediaInspectError("OBJ file exceeds scan ceiling")
     vertices = normals = uvs = faces = triangles = 0
@@ -432,7 +434,7 @@ def _inspect_obj(target: Path) -> dict:
     }
 
 
-def _inspect_stl(target: Path) -> dict:
+def _inspect_stl(target: Path) -> dict[str, Any]:
     size = target.stat().st_size
     with target.open("rb") as handle:
         header = handle.read(84)
@@ -475,12 +477,12 @@ def _inspect_stl(target: Path) -> dict:
                 parts = s.split()
                 if len(parts) >= 4:
                     try:
-                        pt = [float(parts[1]), float(parts[2]), float(parts[3])]
+                        vertex_pt = [float(parts[1]), float(parts[2]), float(parts[3])]
                     except ValueError:
                         continue
-                    if all(math.isfinite(c) for c in pt):
-                        bmin = list(pt) if bmin is None else [min(bmin[i], pt[i]) for i in range(3)]
-                        bmax = list(pt) if bmax is None else [max(bmax[i], pt[i]) for i in range(3)]
+                    if all(math.isfinite(c) for c in vertex_pt):
+                        bmin = list(vertex_pt) if bmin is None else [min(bmin[i], vertex_pt[i]) for i in range(3)]
+                        bmax = list(vertex_pt) if bmax is None else [max(bmax[i], vertex_pt[i]) for i in range(3)]
     return {
         "encoding": "ascii",
         "triangle_count": tri_count,
@@ -495,7 +497,7 @@ def inspect_media(
     extra_roots: str = "",
     bypass: bool = False,
     developer_authorized: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Inspect a guarded audio, MIDI, video, or 3D model file."""
     target = _resolve_target(
         path,
@@ -534,7 +536,7 @@ def inspect_media(
     }
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict[str, Any]) -> str:
     lines = [
         f"media inspection ({data.get('format', 'unknown')}): {data.get('path', '')}",
         f"  bytes: {data.get('bytes', 0)}  sha256: {data.get('sha256', '')}",

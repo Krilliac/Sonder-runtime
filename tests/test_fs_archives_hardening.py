@@ -5,9 +5,7 @@ import io
 import os
 import struct
 import tarfile
-import urllib.parse
 import zipfile
-from pathlib import Path
 
 import pytest
 

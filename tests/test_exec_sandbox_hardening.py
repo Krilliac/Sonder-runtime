@@ -1,8 +1,6 @@
 """Regression tests for Wave 2 execution-sandbox, PowerShell gate, harness, code_check, and workbench hardening."""
 from __future__ import annotations
 
-import json
-import os
 import subprocess
 import sys
 import types

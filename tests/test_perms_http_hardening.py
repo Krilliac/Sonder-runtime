@@ -4,10 +4,8 @@ from __future__ import annotations
 import contextlib
 import http.client
 import io
-import json
 import threading
 from email.message import Message
-from types import SimpleNamespace
 
 import pytest
 

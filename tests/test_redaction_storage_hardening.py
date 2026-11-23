@@ -14,7 +14,6 @@ from sonder_runtime.adapters.observability import activity_tracker as at
 from sonder_runtime.adapters.persistence import http_work_runs
 from sonder_runtime.adapters.persistence.session_repository import SQLiteSessionRepository
 from sonder_runtime.application.session.query_export import (
-    SessionEventRecord,
     SessionQueryEngine,
 )
 from sonder_runtime.bootstrap import http_work_narration

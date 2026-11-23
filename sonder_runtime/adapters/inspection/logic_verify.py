@@ -119,13 +119,14 @@ class _Parser:
 
     def parse(self) -> _Node:
         node = self._parse_iff()
-        if self.peek() is not None:
-            raise LogicVerifyError(f"unexpected trailing token {self.peek()[1]!r}")
+        trailing = self.peek()
+        if trailing is not None:
+            raise LogicVerifyError(f"unexpected trailing token {trailing[1]!r}")
         return node
 
     def _parse_iff(self) -> _Node:
         left = self._parse_imp()
-        while self.peek() and self.peek()[0] == "IFF":
+        while (tok := self.peek()) is not None and tok[0] == "IFF":
             self.consume("IFF")
             right = self._parse_imp()
             left = _Node("iff", left=left, right=right)
@@ -133,7 +134,7 @@ class _Parser:
 
     def _parse_imp(self) -> _Node:
         left = self._parse_or()
-        if self.peek() and self.peek()[0] == "IMP":
+        if (tok := self.peek()) is not None and tok[0] == "IMP":
             self.consume("IMP")
             # Right-associative implication: A -> B -> C == A -> (B -> C)
             right = self._parse_imp()
@@ -142,7 +143,7 @@ class _Parser:
 
     def _parse_or(self) -> _Node:
         left = self._parse_xor()
-        while self.peek() and self.peek()[0] == "OR":
+        while (tok := self.peek()) is not None and tok[0] == "OR":
             self.consume("OR")
             right = self._parse_xor()
             left = _Node("or", left=left, right=right)
@@ -150,7 +151,7 @@ class _Parser:
 
     def _parse_xor(self) -> _Node:
         left = self._parse_and()
-        while self.peek() and self.peek()[0] == "XOR":
+        while (tok := self.peek()) is not None and tok[0] == "XOR":
             self.consume("XOR")
             right = self._parse_and()
             left = _Node("xor", left=left, right=right)
@@ -158,14 +159,14 @@ class _Parser:
 
     def _parse_and(self) -> _Node:
         left = self._parse_not()
-        while self.peek() and self.peek()[0] == "AND":
+        while (tok := self.peek()) is not None and tok[0] == "AND":
             self.consume("AND")
             right = self._parse_not()
             left = _Node("and", left=left, right=right)
         return left
 
     def _parse_not(self) -> _Node:
-        if self.peek() and self.peek()[0] == "NOT":
+        if (tok := self.peek()) is not None and tok[0] == "NOT":
             self.consume("NOT")
             return _Node("not", left=self._parse_not())
         return self._parse_atom()
@@ -449,23 +450,23 @@ def _solve_csp(domains: dict[str, list[Any]], constraints: list[dict[str, Any]])
                 raise LogicVerifyError(f"binary constraint {op!r} requires exactly 2 vars")
             a, b = assign[vs[0]], assign[vs[1]]
             if op == "==":
-                return a == b
+                return bool(a == b)
             if op == "!=":
-                return a != b
+                return bool(a != b)
             if op == "<":
-                return a < b
+                return bool(a < b)
             if op == "<=":
-                return a <= b
+                return bool(a <= b)
             if op == ">":
-                return a > b
-            return a >= b
+                return bool(a > b)
+            return bool(a >= b)
         total = sum(assigned_vals)
         target = c["value"]
         if op == "sum_eq":
-            return total == target
+            return bool(total == target)
         if op == "sum_le":
-            return total <= target
-        return total >= target
+            return bool(total <= target)
+        return bool(total >= target)
 
     steps = [0]
 

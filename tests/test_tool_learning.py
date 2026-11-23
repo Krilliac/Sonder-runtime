@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
 
 from sonder_runtime.adapters.inspection.learn_tool import learn_tool
 from sonder_runtime.application.chat.tool_loop import ChatToolTurn, build_tool_turn_manifest

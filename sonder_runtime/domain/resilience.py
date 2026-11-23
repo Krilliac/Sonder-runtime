@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 from collections import Counter, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import difflib
 import json
@@ -343,8 +343,8 @@ def plan_alternatives(
     failed_tool: str,
     error: str = "",
     goal: str = "",
-    available_tools: Sequence[str] | None = None,
-    tried_tools: Sequence[str] | None = None,
+    available_tools: Iterable[str] | None = None,
+    tried_tools: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Produce ranked, policy-safe alternative tools and recovery steps after a tool failure."""
     tool = str(failed_tool or "").strip().lstrip("/")
@@ -422,8 +422,8 @@ def format_fallback_hint(
     failed_tool: str,
     error: str,
     *,
-    available_tools: Sequence[str] | None = None,
-    tried_tools: Sequence[str] | None = None,
+    available_tools: Iterable[str] | None = None,
+    tried_tools: Iterable[str] | None = None,
     repeated: bool = False,
 ) -> str:
     """Format a compact, actionable recovery hint appended to a failed tool observation."""

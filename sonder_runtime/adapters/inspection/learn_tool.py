@@ -51,7 +51,7 @@ def _discover_windows_app_paths(candidates: tuple[str, ...]) -> list[dict[str, s
             exe_name = cand if cand.lower().endswith(".exe") else f"{cand}.exe"
             try:
                 with winreg.OpenKey(hive, f"{subkey_base}\\{exe_name}") as key:
-                    val, _ = winreg.QueryValueEx(key, None)
+                    val, _ = winreg.QueryValueEx(key, "")
                     p = Path(str(val).strip().strip('"'))
                     if p.is_file() and not p.is_symlink():
                         found.append({"name": p.name, "path": str(p), "source": f"win_app_paths:{hive_name}"})

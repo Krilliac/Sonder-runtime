@@ -13,6 +13,7 @@ sonder_runtime/adapters/application_lifecycle.py
 sonder_runtime/adapters/build/__init__.py
 sonder_runtime/adapters/build/candidates.py
 sonder_runtime/adapters/build/fix_effect_verifier.py
+sonder_runtime/adapters/chat_effort.py
 sonder_runtime/adapters/chat_observers.py
 sonder_runtime/adapters/chat_run_backend.py
 sonder_runtime/adapters/chat_temperature.py
@@ -75,6 +76,7 @@ sonder_runtime/adapters/health_alerts/schtasks.py
 sonder_runtime/adapters/health_alerts/state_store.py
 sonder_runtime/adapters/host_tools/__init__.py
 sonder_runtime/adapters/host_tools/linux.py
+sonder_runtime/adapters/image_generation.py
 sonder_runtime/adapters/inference/__init__.py
 sonder_runtime/adapters/inference/anthropic_gateway.py
 sonder_runtime/adapters/inference/anthropic_spend.py
@@ -101,6 +103,28 @@ sonder_runtime/adapters/inference/served_tier_models.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
 sonder_runtime/adapters/inference/startup_prewarm.py
 sonder_runtime/adapters/inference_telemetry.py
+sonder_runtime/adapters/inspection/citation_audit.py
+sonder_runtime/adapters/inspection/code_audit.py
+sonder_runtime/adapters/inspection/code_graph.py
+sonder_runtime/adapters/inspection/code_metrics.py
+sonder_runtime/adapters/inspection/consistency_check.py
+sonder_runtime/adapters/inspection/data_transform.py
+sonder_runtime/adapters/inspection/diff_semantic.py
+sonder_runtime/adapters/inspection/document_extract.py
+sonder_runtime/adapters/inspection/error_diagnose.py
+sonder_runtime/adapters/inspection/fact_cross_check.py
+sonder_runtime/adapters/inspection/language_matrix.py
+sonder_runtime/adapters/inspection/learn_tool.py
+sonder_runtime/adapters/inspection/logic_verify.py
+sonder_runtime/adapters/inspection/math_eval.py
+sonder_runtime/adapters/inspection/media_inspect.py
+sonder_runtime/adapters/inspection/plan_fallback.py
+sonder_runtime/adapters/inspection/prompt_shield.py
+sonder_runtime/adapters/inspection/reasoning_board.py
+sonder_runtime/adapters/inspection/regex_lab.py
+sonder_runtime/adapters/inspection/runtime_resilience.py
+sonder_runtime/adapters/inspection/schema_validate.py
+sonder_runtime/adapters/inspection/symbol_verify.py
 sonder_runtime/adapters/launcher_output.py
 sonder_runtime/adapters/launcher_probe.py
 sonder_runtime/adapters/learning_tier_formatting.py
@@ -113,6 +137,8 @@ sonder_runtime/adapters/memory_replication/__init__.py
 sonder_runtime/adapters/memory_rerank.py
 sonder_runtime/adapters/memory_search.py
 sonder_runtime/adapters/meshgen/__init__.py
+sonder_runtime/adapters/meshgen/preview_glb.py
+sonder_runtime/adapters/model3d_generation.py
 sonder_runtime/adapters/model_bootstrap.py
 sonder_runtime/adapters/model_gateway_factory.py
 sonder_runtime/adapters/model_inventory.py
@@ -311,6 +337,7 @@ sonder_runtime/application/foreground_turns.py
 sonder_runtime/application/health_alerts.py
 sonder_runtime/application/host_tools/__init__.py
 sonder_runtime/application/host_tools/service.py
+sonder_runtime/application/image_generation.py
 sonder_runtime/application/inference_membership/__init__.py
 sonder_runtime/application/inspection/__init__.py
 sonder_runtime/application/inspection/use_cases.py
@@ -334,6 +361,7 @@ sonder_runtime/application/memory/recall_service.py
 sonder_runtime/application/memory/receipt_bound_fact_promotion.py
 sonder_runtime/application/memory/retrieval_evaluation.py
 sonder_runtime/application/meshgen/__init__.py
+sonder_runtime/application/model3d_generation.py
 sonder_runtime/application/model_gateway/__init__.py
 sonder_runtime/application/model_gateway/health_and_roles.py
 sonder_runtime/application/observability/__init__.py
@@ -442,6 +470,7 @@ sonder_runtime/application/selfmod/stage_refusal.py
 sonder_runtime/application/session/__init__.py
 sonder_runtime/application/session/checkpoints.py
 sonder_runtime/application/session/continuity.py
+sonder_runtime/application/session/effort_settings.py
 sonder_runtime/application/session/event_turns.py
 sonder_runtime/application/session/projections.py
 sonder_runtime/application/session/temperature_settings.py
@@ -558,6 +587,7 @@ sonder_runtime/domain/cloud_model_refresh.py
 sonder_runtime/domain/cloud_thinking_budget.py
 sonder_runtime/domain/cloud_tier_policy.py
 sonder_runtime/domain/cluster_ownership.py
+sonder_runtime/domain/code_audit.py
 sonder_runtime/domain/common/__init__.py
 sonder_runtime/domain/common/errors.py
 sonder_runtime/domain/common/ids.py
@@ -574,6 +604,7 @@ sonder_runtime/domain/crash/bucket.py
 sonder_runtime/domain/crash/exceptions.py
 sonder_runtime/domain/crash/hints.py
 sonder_runtime/domain/crash/valgrind_xml.py
+sonder_runtime/domain/data_transform.py
 sonder_runtime/domain/deadline_scheduler.py
 sonder_runtime/domain/debugging/__init__.py
 sonder_runtime/domain/diagnostics/__init__.py
@@ -581,6 +612,7 @@ sonder_runtime/domain/distillation_policy.py
 sonder_runtime/domain/doctor_result.py
 sonder_runtime/domain/doctor_specs.py
 sonder_runtime/domain/doctor_status.py
+sonder_runtime/domain/error_diagnosis.py
 sonder_runtime/domain/events.py
 sonder_runtime/domain/execution/__init__.py
 sonder_runtime/domain/execution/sandbox.py
@@ -623,11 +655,13 @@ sonder_runtime/domain/profiling/perf_text.py
 sonder_runtime/domain/promotion/__init__.py
 sonder_runtime/domain/promotion/measured.py
 sonder_runtime/domain/prompt_composition.py
+sonder_runtime/domain/prompt_defense.py
 sonder_runtime/domain/prompt_templates.py
 sonder_runtime/domain/protocol/__init__.py
 sonder_runtime/domain/protocol/events.py
 sonder_runtime/domain/public_policy.py
 sonder_runtime/domain/query_limits.py
+sonder_runtime/domain/reasoning_effort.py
 sonder_runtime/domain/reference_lookup/__init__.py
 sonder_runtime/domain/reference_lookup/answer_check.py
 sonder_runtime/domain/reference_lookup/applies.py
@@ -641,6 +675,7 @@ sonder_runtime/domain/reference_lookup/terms.py
 sonder_runtime/domain/repository_languages.py
 sonder_runtime/domain/request_temperature.py
 sonder_runtime/domain/request_timeout.py
+sonder_runtime/domain/resilience.py
 sonder_runtime/domain/routing/__init__.py
 sonder_runtime/domain/routing/calibration_profiles.py
 sonder_runtime/domain/routing/capability_profiles.py
@@ -678,6 +713,7 @@ sonder_runtime/domain/testing/__init__.py
 sonder_runtime/domain/tier_names.py
 sonder_runtime/domain/token_bucket.py
 sonder_runtime/domain/tool_lane_models.py
+sonder_runtime/domain/tool_learning.py
 sonder_runtime/domain/tools/__init__.py
 sonder_runtime/domain/tools/policy.py
 sonder_runtime/domain/training/__init__.py

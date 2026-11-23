@@ -249,7 +249,7 @@ def _linreg(xs: list[float], ys: list[float]) -> dict[str, float]:
     sxx = sum((x - mx) ** 2 for x in xs)
     if sxx == 0:
         raise MathEvalError("linreg requires non-constant x values")
-    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
     syy = sum((y - my) ** 2 for y in ys)
     slope = sxy / sxx
     intercept = my - slope * mx
@@ -495,22 +495,22 @@ def _eval_ast(
         raise MathEvalError(f"unsupported operator: {type(op).__name__}")
     if isinstance(node, ast.Compare):
         left = _eval_ast(node.left, env, funcs, exact=exact)
-        for op, comp in zip(node.ops, node.comparators):
+        for cmp_op, comp in zip(node.ops, node.comparators, strict=True):
             right = _eval_ast(comp, env, funcs, exact=exact)
-            if isinstance(op, ast.Eq):
+            if isinstance(cmp_op, ast.Eq):
                 ok = left == right
-            elif isinstance(op, ast.NotEq):
+            elif isinstance(cmp_op, ast.NotEq):
                 ok = left != right
-            elif isinstance(op, ast.Lt):
+            elif isinstance(cmp_op, ast.Lt):
                 ok = left < right
-            elif isinstance(op, ast.LtE):
+            elif isinstance(cmp_op, ast.LtE):
                 ok = left <= right
-            elif isinstance(op, ast.Gt):
+            elif isinstance(cmp_op, ast.Gt):
                 ok = left > right
-            elif isinstance(op, ast.GtE):
+            elif isinstance(cmp_op, ast.GtE):
                 ok = left >= right
             else:
-                raise MathEvalError(f"unsupported comparison: {type(op).__name__}")
+                raise MathEvalError(f"unsupported comparison: {type(cmp_op).__name__}")
             if not ok:
                 return False
             left = right
@@ -911,7 +911,7 @@ def _matrix_op(op: str, a_raw: Any, b_raw: Any = None) -> dict[str, Any]:
             raise MathEvalError(f"{op_lc} requires two equal-length vectors")
         vb = [_as_fraction(v) for v in b_raw]
         if op_lc == "dot":
-            return {"ok": True, "op": "dot", "result": _format_value(sum(x * y for x, y in zip(va, vb)))}
+            return {"ok": True, "op": "dot", "result": _format_value(sum(x * y for x, y in zip(va, vb, strict=True)))}
         if len(va) != 3:
             raise MathEvalError("cross product requires 3D vectors")
         res = [

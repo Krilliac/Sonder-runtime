@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
 
 import server
 from sonder_runtime.application.chat.tool_loop import ChatToolTurn, build_tool_turn_manifest
@@ -13,7 +12,6 @@ from sonder_runtime.domain.resilience import (
     GLOBAL_TELEMETRY,
     CircuitBreaker,
     classify_model_error,
-    classify_tool_failure,
     compact_messages_for_retry,
     plan_alternatives,
     repair_tool_arguments,

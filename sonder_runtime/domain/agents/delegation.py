@@ -544,7 +544,7 @@ def format_delegation_report(
     lines = [f"{prefix}delegation completed: {succeeded}/{len(rows)} succeeded"]
     raw_details = [item.output or item.summary or item.error or "(no output)" for item in rows]
     bounded_details = _fair_share_child_details(raw_details, total_budget=max_total_output_chars)
-    for item, detail in zip(rows, bounded_details):
+    for item, detail in zip(rows, bounded_details, strict=True):
         meta = [part for part in (item.status, item.role, item.origin or item.tier or item.model) if part]
         meta_label = f" [{', '.join(meta)}]" if meta else ""
         lines.append(f"- @{item.agent_id}{meta_label} ({item.elapsed_ms}ms): {detail}")
