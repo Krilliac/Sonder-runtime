@@ -672,6 +672,18 @@ void main() {
       await tester.pump();
       expect(taps, 1);
     });
+
+    testWidgets('press emits an accent InkSparkle overlay while hover stays clean',
+        (tester) async {
+      await tester.pumpWidget(row());
+      final inkWell = tester.widget<InkWell>(find.descendant(
+          of: find.byType(HoverSurface), matching: find.byType(InkWell)));
+      expect(inkWell.overlayColor?.resolve({WidgetState.hovered}),
+          Colors.transparent);
+      final pressed = inkWell.overlayColor?.resolve({WidgetState.pressed});
+      expect(pressed, isNotNull);
+      expect(pressed!.a, greaterThan(0));
+    });
   });
 
   group('QuietAction', () {

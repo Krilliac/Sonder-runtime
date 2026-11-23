@@ -212,34 +212,55 @@ class _SegmentState extends State<_Segment> {
           ? widget.label
           : '${widget.label}, ${widget.semanticCount}',
       excludeSemantics: true,
-      child: InkWell(
-        onTap: widget.onTap,
-        onHover: (value) => setState(() => _hover = value),
-        onHighlightChanged: (value) => setState(() => _pressed = value),
-        onFocusChange: (value) => setState(() => _focused = value),
-        splashFactory: NoSplash.splashFactory,
-        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
-          // A 28 px segment inset 2 px inside the 32 px track.
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.xxs,
-                vertical: SonderSpace.sm + SonderSpace.xxs),
-            child: AnimatedContainer(
-              duration: SonderMotion.of(context, SonderMotion.fast),
-              curve: SonderMotion.standard,
-              alignment: Alignment.center,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Padding(
               padding: const EdgeInsets.symmetric(
-                  horizontal: SonderSpace.xs + SonderSpace.xxs),
-              decoration: BoxDecoration(
-                color: background,
-                borderRadius: BorderRadius.circular(SonderRadius.control),
-                border: _focused
-                    ? Border.all(color: tokens.accentText)
-                    : Border.all(color: Colors.transparent),
+                  horizontal: SonderSpace.xxs,
+                  vertical: SonderSpace.sm + SonderSpace.xxs),
+              child: AnimatedContainer(
+                duration: SonderMotion.of(context, SonderMotion.fast),
+                curve: SonderMotion.standard,
+                decoration: BoxDecoration(
+                  color: background,
+                  borderRadius: BorderRadius.circular(SonderRadius.control),
+                  border: _focused
+                      ? Border.all(color: tokens.accentText)
+                      : Border.all(color: Colors.transparent),
+                ),
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
+            ),
+          ),
+          Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              onTap: widget.onTap,
+              onHover: (value) => setState(() => _hover = value),
+              onHighlightChanged: (value) => setState(() => _pressed = value),
+              onFocusChange: (value) => setState(() => _focused = value),
+              borderRadius: BorderRadius.circular(SonderRadius.control),
+              splashFactory: MediaQuery.disableAnimationsOf(context)
+                  ? NoSplash.splashFactory
+                  : null,
+              overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
+                if (states.contains(WidgetState.pressed)) {
+                  return tokens.accent.withValues(alpha: 0.28);
+                }
+                return Colors.transparent;
+              }),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
+                // A 28 px segment inset 2 px inside the 32 px track.
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: SonderSpace.xxs,
+                      vertical: SonderSpace.sm + SonderSpace.xxs),
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: SonderSpace.xs + SonderSpace.xxs),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Text(widget.label,
                     style: text.labelMedium?.copyWith(
                       color: selected ? tokens.accentText : tokens.text2,
@@ -252,9 +273,12 @@ class _SegmentState extends State<_Segment> {
                           color: widget.countColor, weight: FontWeight.w600)),
                 ],
               ]),
+                  ),
+                ),
+              ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }

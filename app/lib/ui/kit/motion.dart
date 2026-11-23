@@ -136,7 +136,14 @@ class _HoverSurfaceState extends State<HoverSurface> {
         : _hover && widget.onTap != null
             ? tokens.raised.withValues(alpha: 0.35)
             : Colors.transparent;
-    final surface = Padding(
+    final reduced = MediaQuery.disableAnimationsOf(context);
+    final pressedOverlay = WidgetStateProperty.resolveWith<Color?>((states) {
+      if (states.contains(WidgetState.pressed)) {
+        return tokens.accent.withValues(alpha: 0.28);
+      }
+      return Colors.transparent;
+    });
+    final pill = Padding(
       padding: widget.inset,
       child: AnimatedContainer(
         duration: SonderMotion.of(context, SonderMotion.fast),
@@ -152,10 +159,10 @@ class _HoverSurfaceState extends State<HoverSurface> {
             width: 1.5,
           ),
         ),
-        child: widget.child,
+        child: widget.onTap == null ? widget.child : null,
       ),
     );
-    if (widget.onTap == null) return surface;
+    if (widget.onTap == null) return pill;
     return Semantics(
       button: true,
       selected: widget.selected,
@@ -163,23 +170,34 @@ class _HoverSurfaceState extends State<HoverSurface> {
       child: MouseRegion(
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
-        child: Material(
-          type: MaterialType.transparency,
-          child: InkWell(
-            focusNode: widget.focusNode,
-            borderRadius: widget.borderRadius,
-            // The pill above is the hover, press and focus feedback.
-            overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-            onFocusChange: (focused) {
-              // Only keyboard focus draws the ring, as with every control.
-              final keyboard = FocusManager.instance.highlightMode ==
-                  FocusHighlightMode.traditional;
-              final show = focused && keyboard;
-              if (show != _focus) setState(() => _focus = show);
-            },
-            onTap: widget.onTap,
-            child: surface,
-          ),
+        child: Stack(
+          children: [
+            Positioned.fill(child: pill),
+            Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                focusNode: widget.focusNode,
+                borderRadius: widget.borderRadius,
+                splashFactory: reduced ? NoSplash.splashFactory : null,
+                // Keep hover/focus pills clean while preserving Material 3's
+                // InkSparkle burst on press, painted above the pill fill while
+                // keeping the full outer tap target (48 px).
+                overlayColor: pressedOverlay,
+                onFocusChange: (focused) {
+                  // Only keyboard focus draws the ring, as with every control.
+                  final keyboard = FocusManager.instance.highlightMode ==
+                      FocusHighlightMode.traditional;
+                  final show = focused && keyboard;
+                  if (show != _focus) setState(() => _focus = show);
+                },
+                onTap: widget.onTap,
+                child: Padding(
+                  padding: widget.inset,
+                  child: widget.child,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
