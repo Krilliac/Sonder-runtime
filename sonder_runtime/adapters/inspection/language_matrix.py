@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import shutil
 
-import harness_tools
-import project_scaffold
-import symbol_index
 from sonder_runtime.adapters.execution_tools import code_runner
 from sonder_runtime.adapters.inspection import code_metrics
+from sonder_runtime.adapters.repl_services import (
+    harness_tools,
+    project_scaffold,
+    symbol_index,
+)
 
 
 _LANGUAGE_PROBES: dict[str, tuple[str, ...]] = {

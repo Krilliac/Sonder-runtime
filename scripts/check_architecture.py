@@ -48,6 +48,7 @@ PLATFORM_SUBPROCESS_MODULES = frozenset({
 })
 NPU_ACCELERATOR_EXTERNALS = frozenset({"numpy", "onnxruntime", "tokenizers"})
 FILESYSTEM_OPTIONAL_EXTERNALS = frozenset({"yaml"})
+IMAGE_OPTIONAL_EXTERNALS = frozenset({"PIL"})
 PLATFORM_OPTIONAL_EXTERNALS = frozenset({"prometheus_client", "psutil"})
 PERSISTENCE_CRYPTO_PATH = "sonder_runtime/adapters/persistence/artifact_mobility.py"
 PERSISTENCE_CRYPTO_EXTERNALS = frozenset({"cryptography"})
@@ -919,6 +920,12 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                 layer == "adapters"
                 and rel.as_posix() == "sonder_runtime/adapters/filesystem/file_ops.py"
                 and top in FILESYSTEM_OPTIONAL_EXTERNALS
+            ):
+                continue
+            if (
+                layer == "adapters"
+                and rel.as_posix() == "sonder_runtime/adapters/image_generation.py"
+                and top in IMAGE_OPTIONAL_EXTERNALS
             ):
                 continue
             if (

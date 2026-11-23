@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import intents
-from sonder_runtime.application import image_generation
+from sonder_runtime.adapters import image_generation
 from sonder_runtime.interfaces.http import live_stream
 
 

@@ -378,6 +378,7 @@ _CATEGORY_BY_SLASH = {
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
+    "/img": "assets", "/gif": "assets",
 }
 
 # A four-class ``_RISK_ORDER`` used to sit here -- no ``execution``, and, when
@@ -609,6 +610,12 @@ _UNREGISTERED_BRANCH_WORK = {
     # the branch is graded by the strictest member it can reach.
     "/crash": "crash_digest",
     "/profile": "profile_capture_digest",
+    # ``/img`` and ``/gif`` invoke the local/configured image-generation adapter
+    # and persist outputs under ``<state_home>/generated-images/``. Record them
+    # here so ``/permissions`` and ``plan`` mode govern media generation just
+    # like ``/location`` and ``/hardware``.
+    "/img": "img",
+    "/gif": "gif",
 }
 
 # Console branches that front *several* native typed tools, through the typed

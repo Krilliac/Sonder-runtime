@@ -120,7 +120,7 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
-from sonder_runtime.application import image_generation as _image_generation
+from sonder_runtime.adapters import image_generation as _image_generation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health, public_policy, thinking_controls as _thinking_controls
@@ -2464,7 +2464,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/game", "/gamegen", "/gamefleet", "/gamecampaign",
     "/activity", "/tools", "/work", "/agent", "/report", "/endreport",
     "/checklist", "/plan", "/inventory", "/workspace", "/tree", "/folders", "/search", "/grep",
-    "/programs", "/programfind", "/scripts", "/scriptfind", "/image",
+    "/programs", "/programfind", "/scripts", "/scriptfind", "/image", "/img", "/gif",
     "/inspectimage", "/doc", "/document_extract", "/media", "/media_inspect",
     "/loc", "/code_metrics", "/schema", "/schema_validate",
     "/languages", "/language_matrix", "/calc", "/math_eval",

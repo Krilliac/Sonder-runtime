@@ -227,6 +227,18 @@ COMMANDS = [
         "summary": "Inspect a guarded image's format, dimensions, size, and digest.",
     },
     {
+        "name": "/img",
+        "category": "assets",
+        "risk": "ask",
+        "summary": "Generate an inline image via the local image model or procedural raster fallback.",
+    },
+    {
+        "name": "/gif",
+        "category": "assets",
+        "risk": "ask",
+        "summary": "Generate an animated GIF inline via the local image model or procedural GIF89a studio.",
+    },
+    {
         "name": "/doc",
         "category": "inspect",
         "risk": "safe",

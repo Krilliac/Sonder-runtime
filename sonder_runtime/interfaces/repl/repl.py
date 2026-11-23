@@ -4608,6 +4608,32 @@ def main(*, machine_output=False):
                             "on" if effective else "off",
                             " (env default)" if location_consent is None else "",
                         ))
+                    elif cmd == "/img":
+                        from sonder_runtime.adapters import image_generation as _image_gen
+
+                        result = _image_gen.generate_chat_image(
+                            arg.strip() or "a random image",
+                        )
+                        _emit(
+                            "generated image via %s (%dx%d, %d bytes): %s"
+                            % (
+                                result.model_id, result.width, result.height,
+                                result.byte_length, result.saved_path,
+                            )
+                        )
+                    elif cmd == "/gif":
+                        from sonder_runtime.adapters import image_generation as _image_gen
+
+                        result = _image_gen.generate_chat_gif(
+                            arg.strip() or "a random animated gif",
+                        )
+                        _emit(
+                            "generated animated GIF via %s (%dx%d, %d frames, %d bytes): %s"
+                            % (
+                                result.model_id, result.width, result.height,
+                                result.frame_count, result.byte_length, result.saved_path,
+                            )
+                        )
                     elif cmd == "/stats":
                         _emit(server.sonder_stats())
                     elif cmd == "/context":
