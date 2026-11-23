@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sonder_runtime.application.agents import delegation_runtime as _delegation
-from sonder_runtime.application.chat.honesty import guard_unverified_run_claim
+from sonder_runtime.application.chat.honesty import guard_chat_turn_hallucinations
 from sonder_runtime.application.chat.tool_manifest import CallableTool, TurnToolManifest
 from sonder_runtime.domain.agents.delegation import (
     DELEGATION_TOOLS,
@@ -504,7 +504,7 @@ class ChatToolTurn:
 
                 if not final_content.strip():
                     final_content = "Turn ended without a final assistant answer."
-                final_content = guard_unverified_run_claim(final_content, self.records)
+                final_content = guard_chat_turn_hallucinations(final_content, self.records)
                 _delegation.emit_agent_event(
                     phase="completed",
                     step=calls,

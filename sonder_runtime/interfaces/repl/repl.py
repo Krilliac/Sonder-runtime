@@ -4808,6 +4808,8 @@ def main(*, machine_output=False):
                         "/calc", "/math_eval", "/logic", "/logic_verify",
                         "/regex", "/regex_lab", "/graph", "/code_graph",
                         "/sdiff", "/diff_semantic", "/reason", "/reasoning_board",
+                        "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
+                        "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",

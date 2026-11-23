@@ -388,6 +388,47 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "symbol_verify",
+        "Guarded static verifier for Python stdlib, installed package, and repository modules/attributes/kwargs plus full code-snippet API auditing",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["verify_symbol", "audit_code"]},
+            "module": {"type": "string"},
+            "symbol": {"type": "string"},
+            "kwargs": {"type": "array", "items": {"type": "string"}},
+            "code": {"type": "string"},
+            "root": {"type": "string"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "citation_audit",
+        "Guarded file:line citation, verbatim quote, and source-grounding verifier",
+        {"type": "object", "properties": {
+            "text": {"type": "string"},
+            "root": {"type": "string"},
+            "claims": {"type": "array", "items": {"type": "object"}},
+            "sources": {"type": "array", "items": {"type": "string"}},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "fact_cross_check",
+        "Pure linear-time prose cross-checker catching arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and polarity contradictions",
+        {"type": "object", "properties": {
+            "text": {"type": "string"},
+        }, "required": ["text"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "consistency_check",
+        "Pure multi-candidate self-consistency reconciler and tool-receipt auditor catching fabricated pass or write claims",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["compare_candidates", "audit_against_receipts"]},
+            "candidates": {"type": "array", "items": {"type": "string"}},
+            "reply": {"type": "string"},
+            "receipts": {"type": "array", "items": {"type": "object"}},
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,

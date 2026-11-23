@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import builtins
+import importlib
+import inspect
 import re
 from collections.abc import Callable
 
@@ -203,4 +205,112 @@ def check_python_static_errors(code: str) -> str | None:
     if missing:
         names = ", ".join(repr(m) for m in missing[:5])
         return f"NameError: undefined function call(s): {names}"
+    return check_python_stdlib_api_errors(code)
+
+
+_GUARDED_STDLIB_MODULES: frozenset[str] = frozenset({
+    "ast", "asyncio", "base64", "bisect", "calendar", "cmath", "collections",
+    "contextlib", "copy", "csv", "dataclasses", "datetime", "decimal",
+    "difflib", "enum", "fractions", "functools", "glob", "gzip", "hashlib",
+    "heapq", "hmac", "html", "inspect", "io", "ipaddress", "itertools", "json",
+    "logging", "math", "operator", "os", "pathlib", "random", "re", "secrets",
+    "shlex", "shutil", "sqlite3", "statistics", "string", "struct",
+    "subprocess", "sys", "tempfile", "textwrap", "threading", "time",
+    "tomllib", "typing", "uuid", "zipfile", "zlib",
+})
+
+
+def check_python_stdlib_api_errors(code: str) -> str | None:
+    """Detect hallucinated attributes or invalid kwargs on safe Python stdlib modules.
+
+    Purely static AST check over a closed allowlist of safe stdlib modules so it
+    never executes user code and never false-positives on third-party packages.
+    """
+    try:
+        tree = ast.parse(str(code or ""))
+    except (SyntaxError, ValueError, OverflowError, RecursionError):
+        return None
+
+    mod_aliases: dict[str, str] = {}
+    direct_imports: dict[str, tuple[str, str]] = {}
+    errors: list[str] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                if top in _GUARDED_STDLIB_MODULES:
+                    bound = alias.asname or top
+                    mod_aliases[bound] = alias.name if alias.asname else top
+        elif isinstance(node, ast.ImportFrom) and (node.level or 0) == 0 and node.module:
+            top = node.module.split(".", 1)[0]
+            if top not in _GUARDED_STDLIB_MODULES:
+                continue
+            try:
+                mod = importlib.import_module(node.module)
+            except Exception:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if not hasattr(mod, alias.name):
+                    errors.append(f"ImportError: cannot import {alias.name!r} from stdlib module {node.module!r}")
+                else:
+                    direct_imports[alias.asname or alias.name] = (node.module, alias.name)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        kw_names = [kw.arg for kw in node.keywords if kw.arg is not None]
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            base = node.func.value.id
+            if base in mod_aliases:
+                mod_name = mod_aliases[base]
+                attr = node.func.attr
+                try:
+                    mod = importlib.import_module(mod_name)
+                except Exception:
+                    continue
+                if not hasattr(mod, attr):
+                    errors.append(f"AttributeError: stdlib module {mod_name!r} has no attribute {attr!r}")
+                    continue
+                target = getattr(mod, attr)
+                if kw_names and callable(target):
+                    try:
+                        sig = inspect.signature(target)
+                        has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                        if not has_varkw:
+                            allowed = {
+                                p.name for p in sig.parameters.values()
+                                if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                            }
+                            bad = [k for k in kw_names if k not in allowed]
+                            if bad:
+                                errors.append(f"TypeError: {mod_name}.{attr}() got unexpected keyword argument(s): {', '.join(bad)}")
+                    except (ValueError, TypeError):
+                        pass
+        elif isinstance(node.func, ast.Name) and node.func.id in direct_imports and kw_names:
+            mod_name, sym = direct_imports[node.func.id]
+            try:
+                mod = importlib.import_module(mod_name)
+                target = getattr(mod, sym, None)
+            except Exception:
+                target = None
+            if callable(target):
+                try:
+                    sig = inspect.signature(target)
+                    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if not has_varkw:
+                        allowed = {
+                            p.name for p in sig.parameters.values()
+                            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                        }
+                        bad = [k for k in kw_names if k not in allowed]
+                        if bad:
+                            errors.append(f"TypeError: {mod_name}.{sym}() got unexpected keyword argument(s): {', '.join(bad)}")
+                except (ValueError, TypeError):
+                    pass
+
+    if errors:
+        return "; ".join(dict.fromkeys(errors[:4]))
     return None
