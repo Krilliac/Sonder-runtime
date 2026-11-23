@@ -274,6 +274,55 @@ def _test_runner_action(match):
     return "/test %s" % runner if runner else None
 
 
+_EFFORT_ALIASES = {
+    "off": "off",
+    "none": "off",
+    "disable": "off",
+    "disabled": "off",
+    "on": "medium",
+    "enable": "medium",
+    "enabled": "medium",
+    "auto": "auto",
+    "default": "auto",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
+
+
+def _effort_action(match):
+    raw = (match.groupdict().get("arg") or "").strip().lower()
+    if not raw:
+        return "/effort"
+    level = _EFFORT_ALIASES.get(raw)
+    return ("/effort %s" % level) if level else None
+
+
+def _temp_action(match):
+    raw = (match.groupdict().get("arg") or "").strip().lower()
+    if not raw:
+        return "/temp"
+    if raw in ("auto", "default"):
+        return "/temp auto"
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    if 0.0 <= val <= 2.0:
+        return "/temp %s" % raw
+    return None
+
+
+def _todo_add_action(match):
+    arg = (match.group("arg") or "").strip()
+    if not arg or arg.endswith("?"):
+        return None
+    return "/todo add %s" % arg
+
+
 def _rule(pattern, action):
     return (re.compile(pattern, re.I), action)
 
@@ -332,13 +381,13 @@ _RULES = [
     # --- memory / facts / lessons ---
     _rule(r"^(?P<verb>remember|note|memorize)(?P<cue>\s+(?:that|this)|:)?\s+(?P<arg>.+)$",
           _fact_action),
-    _rule(r"^(?:show|list)?\s*(?:my\s+)?facts\b|^what\s+do\s+you\s+remember\b",
+    _rule(r"^(?:(?:show|list)\s+)?(?:my\s+)?facts\s*[?!.]*$|^what\s+do\s+you\s+remember\s*[?!.]*$",
           _fixed("/facts")),
     _rule(r"^(?:show|list)?\s*(?:learned\s+)?lessons\b", _fixed("/lessons")),
 
     # --- status / info ---
     _rule(r"^(?:show\s+(?:me\s+)?(?:your\s+)?|what\s+are\s+(?:your\s+)?|runtime\s+|"
-          r"usage\s+)?stats\b", _fixed("/stats")),
+          r"usage\s+)?stats\s*[?!.]*$", _fixed("/stats")),
     _rule(r"^(?:suggest|recommend)\s+(?:the\s+)?(?:best\s+)?tier"
           r"(?:\s+for\s+.+)?\s*[?!.]*$", _fixed("/route")),
     _rule(r"^(?:show|list)\s+(?:the\s+)?repo(?:sitory)?\s+log\s*[?!.]*$",
@@ -349,13 +398,17 @@ _RULES = [
           _fixed("/contextsize")),
     _rule(r"^(?:show|list)\s+(?:the\s+)?tool\s+status\s*[?!.]*$",
           _fixed("/toolstatus")),
-    _rule(r"^(?:show\s+)?context\s+health\b|^how'?s\s+the\s+context\b|"
-          r"^context\s+usage\b", _fixed("/context")),
+    _rule(r"^(?:(?:show\s+)?context\s+health|how'?s\s+the\s+context|"
+          r"context\s+usage)\s*[?!.]*$", _fixed("/context")),
+    _rule(r"^(?:how\s+much\s+context\s+(?:am\s+i|are\s+we)\s+using|"
+          r"how\s+full\s+is\s+(?:the|my)\s+context|"
+          r"what(?:'s|\s+is)\s+(?:the|my)\s+context\s+(?:usage|health))\s*[?!.]*$",
+          _fixed("/context")),
     _rule(r"^(?:show\s+)?(?:context\s+)?compaction(?:\s+plan)?\b|"
           r"^compact\s+(?:the\s+)?context\b", _fixed("/compact")),
-    _rule(r"^(?:list\s+)?(?:all\s+)?commands\b|^command\s+registry\b|"
-          r"^what\s+commands(?:\s+are\s+there)?\b", _fixed("/commands")),
-    _rule(r"^(?:show\s+)?permissions?\b|^permission\s+policy\b", _fixed("/permissions")),
+    _rule(r"^(?:(?:list\s+)?(?:all\s+)?commands|command\s+registry|"
+          r"what\s+commands(?:\s+are\s+there)?)\s*[?!.]*$", _fixed("/commands")),
+    _rule(r"^(?:(?:show\s+)?permissions?|permission\s+policy)\s*[?!.]*$", _fixed("/permissions")),
     # Checking source freshness is deliberately separate from `/update`: the
     # former is read-only, while the latter changes the running checkout and
     # keeps its explicit confirmation/authority boundary.
@@ -556,6 +609,13 @@ _RULES = [
           lambda m: ("/todo %s" % (m.group("arg") or "")).strip()),
     _rule(r"^(?:what(?:'s| is)\s+(?:on\s+)?(?:my\s+)?(?:todo|task)\s+list)\s*[?!.]*$",
           _fixed("/todo")),
+    _rule(r"^(?:please\s+)?(?:add|create)\s+(?:a\s+)?(?:new\s+)?(?:todo|to-do)\s*(?:to|:)\s+"
+          r"(?P<arg>\S.+?)\s*[.!]?$", _todo_add_action),
+    _rule(r"^(?:please\s+)?(?:add|create)\s+(?:a\s+)?(?:new\s+)?task\s*(?:to|:)\s+"
+          r"(?P<arg>\S.+?)\s*[.!]?$", _todo_add_action),
+    _rule(r"^(?:please\s+)?(?:add|create)\s+(?:a\s+)?(?:new\s+)?(?:todo|to-do)\s+"
+          r"(?P<arg>(?!list\b|app\b|item\b|component\b|widget\b)\S.+?)\s*[.!]?$",
+          _todo_add_action),
 
     # --- repository inspection (read-only) ---
     # These map git-familiar phrasing onto the read-only repo_* tools. The
@@ -593,7 +653,10 @@ _RULES = [
     # execution-capable despite a "collect"-style name.
 
     # --- run ---
-    _rule(r"^run\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)\b", _fixed("/runwindow")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?run"
+          r"(?:\s+(?:it|that|this|(?:the|my|that|this)\s+(?:code|script|program)))?"
+          r"\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)\s*[?!.]*$",
+          _fixed("/runwindow")),
     _rule(r"^run\s+the\s+project\b", _fixed("/runproject")),
 
     # --- generation ---
@@ -608,11 +671,56 @@ _RULES = [
     _rule(r"^(?:generate|make|create)\s+(?:an?\s+)?(?:asset|artifact|image)\b"
           r"(?:\s+(?P<arg>.+))?", lambda m: ("/asset %s" % (m.group("arg") or "")).strip()),
 
-    # --- model / persona ---
+    # --- model / persona / thinking effort / sampling temperature ---
     _rule(r"^(?:switch\s+to|use|select|set)\s+(?:the\s+)?(?P<arg>(?!the\b|a\b)[\w.:-]+)\s+"
           r"(?:tier|model)\b", _with_arg("/model")),
-    _rule(r"^set\s+(?:the\s+)?(?:persona|voice)\s+to\s+(?P<arg>.+)$", _with_arg("/persona")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:set|switch|change)\s+"
+          r"(?:the\s+|your\s+)?(?:persona|voice)\s+to\s+(?P<arg>[A-Za-z][A-Za-z0-9_-]{0,31})\s*[?!.]*$",
+          _with_arg("/persona")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:switch\s+to|use)\s+(?:the\s+)?"
+          r"(?P<arg>auto|off|default|coder|reviewer|teacher|architect|concise|creative|"
+          r"security|tutor|mentor|debugger|brief|terse|compact|sec|secops|appsec|"
+          r"writer|brainstorm|designer|systems)\s+(?:persona|mode|voice)\s*[?!.]*$",
+          _with_arg("/persona")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:reset|clear)\s+"
+          r"(?:the\s+|your\s+)?(?:persona|voice)(?:\s+to\s+auto)?\s*[?!.]*$",
+          _fixed("/persona auto")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?"
+          r"(?:(?:show|what(?:'s|\s+is))\s+(?:the\s+|my\s+|your\s+)?(?:current\s+|active\s+)?persona|"
+          r"(?:list|show)\s+(?:me\s+)?(?:the\s+|all\s+|available\s+)?personas)\s*[?!.]*$",
+          _fixed("/persona")),
     _rule(r"^set\s+(?:the\s+)?model\s+to\s+(?P<arg>.+)$", _with_arg("/model")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:turn|switch)\s+"
+          r"(?:extended\s+)?(?:thinking|reasoning)\s+(?P<arg>on|off)\s*[?!.]*$",
+          _effort_action),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?P<arg>disable|enable)\s+"
+          r"(?:extended\s+)?(?:thinking|reasoning)\s*[?!.]*$",
+          _effort_action),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:set|change|use)\s+"
+          r"(?:the\s+|your\s+)?(?:(?:reasoning|thinking)\s+)?effort\s+(?:to\s+)?"
+          r"(?P<arg>auto|default|off|none|minimal|low|medium|high|xhigh|max)\s*[?!.]*$",
+          _effort_action),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:set|change)\s+"
+          r"(?:the\s+|your\s+)?(?:thinking|reasoning)(?:\s+level)?\s+to\s+"
+          r"(?P<arg>auto|default|off|none|minimal|low|medium|high|xhigh|max)\s*[?!.]*$",
+          _effort_action),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:reset|clear)\s+"
+          r"(?:the\s+|your\s+)?(?:(?:reasoning|thinking)\s+)?effort(?:\s+to\s+auto)?\s*[?!.]*$",
+          _fixed("/effort auto")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:show|what(?:'s|\s+is))\s+"
+          r"(?:the\s+|my\s+|your\s+)?(?:current\s+)?(?:reasoning|thinking)\s+effort\s*[?!.]*$",
+          _fixed("/effort")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:set|change)\s+"
+          r"(?:the\s+|my\s+|your\s+)?(?:sampling\s+|model\s+)?temp(?:erature)?\s+to\s+"
+          r"(?P<arg>auto|default|\d+(?:\.\d+)?)\s*[?!.]*$",
+          _temp_action),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:reset|clear)\s+"
+          r"(?:the\s+|my\s+|your\s+)?(?:sampling\s+|model\s+)?temp(?:erature)?"
+          r"(?:\s+to\s+auto)?\s*[?!.]*$",
+          _fixed("/temp auto")),
+    _rule(r"^(?:(?:please|can\s+you|could\s+you)\s+)?(?:show|what(?:'s|\s+is))\s+"
+          r"(?:the\s+|my\s+|your\s+)?(?:current\s+)?(?:sampling|model)\s+temp(?:erature)?\s*[?!.]*$",
+          _fixed("/temp")),
 
     # --- capability / self-report discovery (read-only) ---
     #

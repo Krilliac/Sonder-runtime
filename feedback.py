@@ -17,7 +17,11 @@ _MAX_WORDS = 8
 # almost always a new request, even if a feedback-ish word shows up later
 # ("write a function that returns an error message" is not negative feedback).
 _GUARD_RE = re.compile(
-    r"^(how|what|why|write|make|create|build|add|fix|explain|show|generate|implement)\b"
+    r"^(?:how|what|why|who|when|where|which|write|make|create|build|add|fix|"
+    r"explain|show|generate|implement|eli5|teach|tell|describe|compare|design|"
+    r"review|audit|threat|prove|summari[sz]e|list|search|find|check|can|could|"
+    r"would|should|is|are|do|does|did|set|switch|turn|use|reset|run|execute|"
+    r"tl;?dr)\b"
 )
 
 _POSITIVE_PHRASES = [
@@ -62,7 +66,7 @@ def classify_feedback(text):
     ambiguity (both cues present, or neither).
     """
     t = (text or "").strip().lower()
-    if not t or len(t.split()) > _MAX_WORDS:
+    if not t or t.endswith("?") or len(t.split()) > _MAX_WORDS:
         return None
     if _GUARD_RE.match(t):
         return None
@@ -82,7 +86,7 @@ def classify_feedback(text):
 def classify_signal(text):
     """Return a reward signal ("accepted", "rejected", "copied", etc.) or None."""
     t = (text or "").strip().lower()
-    if not t or len(t.split()) > _MAX_WORDS or _GUARD_RE.match(t):
+    if not t or t.endswith("?") or len(t.split()) > _MAX_WORDS or _GUARD_RE.match(t):
         return None
     if _NEGATIVE_RE.search(t):
         # Mixed cues ("thanks, no problem", "copied, no issues") are ambiguous:
