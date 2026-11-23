@@ -147,6 +147,23 @@ class ImageModelDiscoveryTests(unittest.TestCase):
             self.assertTrue(saved.is_file())
             self.assertTrue(saved.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_uses_default_home_when_state_home_omitted(self):
+        def fake_open_url(req, timeout=30, **_kwargs):
+            return _FakeResponse({"models": []})
+
+        with TemporaryDirectory() as tmp:
+            image_generation.runtime_paths.configure_home(tmp)
+            try:
+                with mock.patch.dict(os.environ, {"SONDER_IMAGE_API_URL": "", "SONDER_IMAGE_MODEL": ""}, clear=False), \
+                     mock.patch.object(image_generation.ollama_endpoint, "open_url", side_effect=fake_open_url):
+                    result = image_generation.generate_chat_image(
+                        "a random image",
+                        ollama_endpoints=("http://127.0.0.1:11434",),
+                    )
+                self.assertTrue(Path(result.saved_path).is_relative_to(Path(tmp) / "generated-images"))
+            finally:
+                image_generation.runtime_paths.reset_home()
+
 
 class StreamChunkingTests(unittest.TestCase):
     def test_large_inline_image_content_is_chunked_into_bounded_sse_lines(self):
