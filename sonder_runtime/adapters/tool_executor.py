@@ -262,6 +262,42 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool == "prompt_shield":
+                import sonder_runtime.adapters.inspection.prompt_shield as prompt_shield_mod
+
+                res = prompt_shield_mod.prompt_shield(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "error_diagnose":
+                import sonder_runtime.adapters.inspection.error_diagnose as error_diagnose_mod
+
+                res = error_diagnose_mod.error_diagnose(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "code_audit":
+                import sonder_runtime.adapters.inspection.code_audit as code_audit_mod
+
+                res = code_audit_mod.code_audit(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "data_transform":
+                import sonder_runtime.adapters.inspection.data_transform as data_transform_mod
+
+                res = data_transform_mod.data_transform(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

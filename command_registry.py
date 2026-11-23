@@ -329,6 +329,30 @@ COMMANDS = [
         "summary": "Inspect live model-call retry, context compaction, arg-repair, loop-breaker, and circuit-breaker telemetry.",
     },
     {
+        "name": "/shield",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks.",
+    },
+    {
+        "name": "/diagnose",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Parse multi-language stacktraces/compiler errors, resolve repo source context, and classify root causes.",
+    },
+    {
+        "name": "/audit",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Audit inline code or a guarded file for security vulnerabilities and Python AST bug footguns.",
+    },
+    {
+        "name": "/transform",
+        "category": "data",
+        "risk": "safe",
+        "summary": "Convert/profile/query JSON/CSV/TSV/TOML/INI/Markdown, encode/decode, convert timestamps, or compute cron runs.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

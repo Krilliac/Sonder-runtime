@@ -4039,6 +4039,40 @@ def control_command(prompt: str, history=None, session="", project="",
         )
     if cmd in ("/resilience", "/runtime_resilience_check"):
         return runtime_resilience_check()
+    if cmd in ("/shield", "/prompt_shield"):
+        raw = arg.strip()
+        if not raw:
+            return "usage: /shield <text>  OR  /shield path:<file>"
+        if raw.lower().startswith("path:"):
+            return prompt_shield(path=raw[5:].strip())
+        return prompt_shield(text=raw)
+    if cmd in ("/diagnose", "/error_diagnose"):
+        parts = [part.strip() for part in arg.split("||", 1)]
+        if not parts or not parts[0]:
+            return "usage: /diagnose <error_or_traceback> [|| <root>]"
+        return error_diagnose(
+            error_text=parts[0],
+            root=parts[1] if len(parts) > 1 else "",
+        )
+    if cmd in ("/audit", "/code_audit"):
+        raw = arg.strip()
+        if not raw:
+            return "usage: /audit <path>  OR  /audit code:<snippet>"
+        if raw.lower().startswith("code:"):
+            return code_audit(code=raw[5:].strip())
+        return code_audit(path=raw)
+    if cmd in ("/transform", "/data_transform"):
+        parts = [part.strip() for part in arg.split("|")]
+        if not parts or not parts[0]:
+            return "usage: /transform <action> | <data> [| <output_format_or_expr>]"
+        act = parts[0]
+        payload = parts[1] if len(parts) > 1 else ""
+        third = parts[2] if len(parts) > 2 else ""
+        if act in ("query", "cron"):
+            return data_transform(action=act, data=payload, expression=third or payload)
+        if act in ("encode", "decode"):
+            return data_transform(action=act, data=payload, encoding=third or "base64")
+        return data_transform(action=act, data=payload, output_format=third or "json")
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -15186,6 +15220,156 @@ def runtime_resilience_check() -> str:
     return output
 
 
+@mcp.tool()
+def prompt_shield(
+    text: str = "",
+    path: str = "",
+    redact_secrets: bool = True,
+    include_sanitized: bool = True,
+    max_findings: int = 40,
+    extra_roots: list[str] | None = None,
+) -> str:
+    """Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {
+        "has_text": bool(text), "path": path, "redact_secrets": bool(redact_secrets),
+    }
+    try:
+        import sonder_runtime.adapters.inspection.prompt_shield as _prompt_shield
+
+        data = _prompt_shield.prompt_shield(
+            text=text,
+            path=path,
+            redact_secrets=bool(redact_secrets),
+            include_sanitized=bool(include_sanitized),
+            max_findings=int(max_findings),
+            extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("prompt_shield", args, ok=False, started=started, summary=str(exc))
+        return "prompt_shield refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "prompt_shield", args, ok=bool(data.get("ok")), started=started,
+        summary="risk=%s findings=%s" % (data.get("risk_level"), data.get("finding_count")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def error_diagnose(
+    error_text: str,
+    root: str = "",
+    max_frames: int = 8,
+    context_lines: int = 3,
+    extra_roots: list[str] | None = None,
+) -> str:
+    """Parse multi-language tracebacks/compiler errors, resolve guarded repo source context, and classify root cause."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {"root": root, "max_frames": int(max_frames)}
+    try:
+        import sonder_runtime.adapters.inspection.error_diagnose as _error_diagnose
+
+        data = _error_diagnose.error_diagnose(
+            error_text=error_text,
+            root=root,
+            max_frames=int(max_frames),
+            context_lines=int(context_lines),
+            extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("error_diagnose", args, ok=False, started=started, summary=str(exc))
+        return "error_diagnose refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "error_diagnose", args, ok=bool(data.get("ok")), started=started,
+        summary="category=%s frames=%s" % (data.get("category"), data.get("frame_count")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def code_audit(
+    code: str = "",
+    path: str = "",
+    language: str = "",
+    min_severity: str = "low",
+    max_findings: int = 60,
+    extra_roots: list[str] | None = None,
+) -> str:
+    """Audit inline source code or a guarded file for security vulnerabilities and Python AST bug footguns."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {"path": path, "language": language, "min_severity": min_severity}
+    try:
+        import sonder_runtime.adapters.inspection.code_audit as _code_audit
+
+        data = _code_audit.code_audit(
+            code=code,
+            path=path,
+            language=language,
+            min_severity=min_severity,
+            max_findings=int(max_findings),
+            extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("code_audit", args, ok=False, started=started, summary=str(exc))
+        return "code_audit refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "code_audit", args, ok=bool(data.get("ok")), started=started,
+        summary="clean=%s findings=%s" % (data.get("clean"), data.get("finding_count")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def data_transform(
+    action: str = "convert",
+    data: str = "",
+    path: str = "",
+    input_format: str = "auto",
+    output_format: str = "json",
+    expression: str = "",
+    encoding: str = "base64",
+    limit: int = 50,
+    extra_roots: list[str] | None = None,
+) -> str:
+    """Convert, profile, query, encode/decode structured data, timestamps, or 5-field cron schedules."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {"action": action, "path": path, "output_format": output_format}
+    try:
+        import sonder_runtime.adapters.inspection.data_transform as _data_transform
+
+        res = _data_transform.data_transform(
+            action=action,
+            data=data,
+            path=path,
+            input_format=input_format,
+            output_format=output_format,
+            expression=expression,
+            encoding=encoding,
+            limit=int(limit),
+            extra_roots=extra_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("data_transform", args, ok=False, started=started, summary=str(exc))
+        return "data_transform refused: %s" % exc
+    output = json.dumps(res, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "data_transform", args, ok=bool(res.get("ok")), started=started,
+        summary="action=%s ok=%s" % (action, res.get("ok")),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -18218,6 +18402,10 @@ AGENT_TOOL_HELP = """Available tools:
 - consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []} -- compare multiple answers for divergence or audit a reply against tool receipts
 - plan_fallback: {"failed_tool": "run_code", "error": "...", "goal": "...", "tried_tools": []} -- classify a failure and plan ranked, policy-safe alternative tools/strategies
 - runtime_resilience_check: {} -- inspect live model-call retry, context compaction, arg-repair, loop-breaker, and circuit-breaker telemetry
+- prompt_shield: {"text": "...", "path": "", "redact_secrets": true} -- scan text or a guarded file for prompt injection, Trojan-Source Unicode, and secret leaks
+- error_diagnose: {"error_text": "...", "root": ".", "max_frames": 8, "context_lines": 3} -- parse multi-language tracebacks/compiler errors and resolve repo source context
+- code_audit: {"code": "", "path": "<file>", "language": "", "min_severity": "low"} -- static security & Python AST bug-footgun audit
+- data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "...", "path": "", "output_format": "json|csv|markdown|flat", "expression": ""} -- structured data conversion, stats profiling, encoding, timestamps, cron
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -18296,7 +18484,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -18369,6 +18557,10 @@ an exact symbol named by the task; do not default to Python or server.py.
 - consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []}
 - plan_fallback: {"failed_tool": "<tool>", "error": "<error>", "goal": "<task>", "tried_tools": []}
 - runtime_resilience_check: {}
+- prompt_shield: {"text": "<untrusted text>", "path": "", "redact_secrets": true}
+- error_diagnose: {"error_text": "<traceback or compiler error>", "root": ".", "max_frames": 8, "context_lines": 3}
+- code_audit: {"code": "", "path": "<task-relevant source file>", "language": "", "min_severity": "low"}
+- data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "", "path": "", "output_format": "json", "expression": ""}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -18573,10 +18765,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 targets.append(("schema path", args.get("schema_path")))
         elif tool_name == "code_graph":
             targets = [("root", args.get("root") or ".")]
-        elif tool_name in {"symbol_verify", "citation_audit"}:
+        elif tool_name in {"symbol_verify", "citation_audit", "error_diagnose"}:
             targets = []
             if str(args.get("root") or "").strip():
                 targets.append(("root", args.get("root")))
+        elif tool_name in {"prompt_shield", "code_audit", "data_transform"}:
+            targets = []
+            if str(args.get("path") or "").strip():
+                targets.append(("path", args.get("path")))
         elif tool_name == "diff_semantic":
             targets = []
             if str(args.get("path_a") or "").strip():
@@ -18949,10 +19145,17 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
-        elif tool_name in {"symbol_verify", "citation_audit"} and str(args.get("root") or "").strip():
+        elif tool_name in {"symbol_verify", "citation_audit", "error_diagnose"} and str(args.get("root") or "").strip():
             file_ops.resolve_repository_read_path(
                 args.get("root", ""),
                 allow_workspace_root=True,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+        elif tool_name in {"prompt_shield", "code_audit", "data_transform"} and str(args.get("path") or "").strip():
+            file_ops.resolve_repository_read_path(
+                args.get("path", ""),
+                allow_workspace_root=False,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
@@ -20340,6 +20543,40 @@ def _agent_dispatch(
         )
     if tool_name == "runtime_resilience_check":
         return runtime_resilience_check()
+    if tool_name == "prompt_shield":
+        return prompt_shield(
+            text=args.get("text", ""),
+            path=args.get("path", ""),
+            redact_secrets=bool(args.get("redact_secrets", True)),
+            include_sanitized=bool(args.get("include_sanitized", True)),
+            max_findings=int(args.get("max_findings", 40)),
+        )
+    if tool_name == "error_diagnose":
+        return error_diagnose(
+            error_text=args.get("error_text", ""),
+            root=args.get("root", ""),
+            max_frames=int(args.get("max_frames", 8)),
+            context_lines=int(args.get("context_lines", 3)),
+        )
+    if tool_name == "code_audit":
+        return code_audit(
+            code=args.get("code", ""),
+            path=args.get("path", ""),
+            language=args.get("language", ""),
+            min_severity=args.get("min_severity", "low"),
+            max_findings=int(args.get("max_findings", 60)),
+        )
+    if tool_name == "data_transform":
+        return data_transform(
+            action=args.get("action", "convert"),
+            data=args.get("data", ""),
+            path=args.get("path", ""),
+            input_format=args.get("input_format", "auto"),
+            output_format=args.get("output_format", "json"),
+            expression=args.get("expression", ""),
+            encoding=args.get("encoding", "base64"),
+            limit=int(args.get("limit", 50)),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -20829,7 +21066,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -20913,7 +21150,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -21343,7 +21580,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 # Leads an end report that claims completion the record says must be earned.
@@ -21521,7 +21758,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -21586,7 +21823,7 @@ _UNCONFINED_ROOT_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory", "artifact_risk_inspect",
 })
@@ -21595,7 +21832,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -23686,7 +23923,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

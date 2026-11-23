@@ -4811,6 +4811,8 @@ def main(*, machine_output=False):
                         "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
                         "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
                         "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",
+                        "/shield", "/prompt_shield", "/diagnose", "/error_diagnose",
+                        "/audit", "/code_audit", "/transform", "/data_transform",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",

@@ -24,6 +24,7 @@ READ_ONLY_TOOLS = frozenset({
     "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
     "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
     "plan_fallback", "runtime_resilience_check",
+    "prompt_shield", "error_diagnose", "code_audit", "data_transform",
     "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan", "diagnostics",
     "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -57,7 +58,8 @@ _PARALLEL_READS = frozenset({
     "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
     "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab",
     "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
-    "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "output_digest",
+    "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
+    "prompt_shield", "error_diagnose", "code_audit", "data_transform", "output_digest",
 })
 _LOCAL_READS = _PARALLEL_READS | frozenset({
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",

@@ -445,6 +445,56 @@ _NATIVE_TOOLS = (
         {"type": "object", "properties": {}, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "prompt_shield",
+        "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks",
+        {"type": "object", "properties": {
+            "text": {"type": "string"},
+            "path": _PATH,
+            "redact_secrets": {"type": "boolean"},
+            "include_sanitized": {"type": "boolean"},
+            "max_findings": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "error_diagnose",
+        "Parse multi-language stacktraces and compiler errors, resolve guarded repo source context, and classify root cause",
+        {"type": "object", "properties": {
+            "error_text": {"type": "string"},
+            "root": _PATH,
+            "max_frames": {"type": "integer"},
+            "context_lines": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "required": ["error_text"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "code_audit",
+        "Zero-dependency static security vulnerability and Python AST bug-footgun auditor for inline code or guarded files",
+        {"type": "object", "properties": {
+            "code": {"type": "string"},
+            "path": _PATH,
+            "language": {"type": "string"},
+            "min_severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+            "max_findings": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "data_transform",
+        "Deterministic JSON/CSV/TSV/TOML/INI/Markdown converter, profiler, query/aggregate engine, encoder, timestamp & cron tool",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["convert", "profile", "query", "encode", "decode", "timestamp", "cron"]},
+            "data": {"type": "string"},
+            "path": _PATH,
+            "input_format": {"type": "string"},
+            "output_format": {"type": "string"},
+            "expression": {"type": "string"},
+            "encoding": {"type": "string"},
+            "limit": {"type": "integer"},
+            "extra_roots": _ROOT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
