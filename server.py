@@ -4011,6 +4011,23 @@ def control_command(prompt: str, history=None, session="", project="",
         if parts[0].lower() in {"init", "add_fact", "add_hypothesis", "add_decision"} and len(parts) == 2:
             return reasoning_board(action=parts[0].lower(), text=parts[1])
         return reasoning_board(action="add_fact", text=raw)
+    if cmd in ("/symcheck", "/symbol_verify"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if not parts or not parts[0]:
+            return "usage: /symcheck <module> [| <symbol>]"
+        return symbol_verify(module=parts[0], symbol=parts[1] if len(parts) == 2 else "")
+    if cmd in ("/citecheck", "/citation_audit"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if len(parts) == 2 and parts[1]:
+            return citation_audit(root=parts[0] or ".", text=parts[1])
+        return citation_audit(root=".", text=arg.strip()) if arg.strip() else "usage: /citecheck [<root> |] <text with file:line citations>"
+    if cmd in ("/crosscheck", "/fact_cross_check"):
+        return fact_cross_check(text=arg.strip()) if arg.strip() else "usage: /crosscheck <prose text>"
+    if cmd in ("/consensus", "/consistency_check"):
+        parts = [part.strip() for part in arg.split("||") if part.strip()]
+        if len(parts) < 2:
+            return "usage: /consensus <candidate 1> || <candidate 2> [|| ...]"
+        return consistency_check(action="compare_candidates", candidates_json=json.dumps(parts))
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -14963,6 +14980,143 @@ def reasoning_board(
     return output
 
 
+@mcp.tool()
+def symbol_verify(
+    action: str = "verify_symbol",
+    module: str = "",
+    symbol: str = "",
+    kwargs_json: str = "",
+    code: str = "",
+    root: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Verify Python modules/attributes/kwargs against stdlib/environment/repo, or audit a code snippet for hallucinated APIs."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"action": action, "module": module, "symbol": symbol, "root": root}
+    try:
+        import sonder_runtime.adapters.inspection.symbol_verify as _symbol_verify
+
+        kwargs_list = json.loads(kwargs_json) if isinstance(kwargs_json, str) and kwargs_json.strip() else (kwargs_json if isinstance(kwargs_json, list) else None)
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) or _file_developer_allowed(token) else ""
+        data = _symbol_verify.symbol_verify(
+            action=action,
+            module=module,
+            symbol=symbol,
+            kwargs=kwargs_list,
+            code=code,
+            root=root,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("symbol_verify", args, ok=False, started=started, summary=str(exc))
+        return "symbol_verify refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "symbol_verify", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s verified=%s" % (data.get("ok"), data.get("verified", data.get("clean"))),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def citation_audit(
+    text: str = "",
+    root: str = "",
+    claims_json: str = "",
+    sources_json: str = "",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Audit file:line citations, quoted snippets, and source grounding against guarded files or supplied sources."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "has_text": bool(text)}
+    try:
+        import sonder_runtime.adapters.inspection.citation_audit as _citation_audit
+
+        claims = json.loads(claims_json) if isinstance(claims_json, str) and claims_json.strip() else (claims_json if isinstance(claims_json, list) else None)
+        sources = json.loads(sources_json) if isinstance(sources_json, str) and sources_json.strip() else (sources_json if isinstance(sources_json, list) else None)
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) or _file_developer_allowed(token) else ""
+        data = _citation_audit.citation_audit(
+            text=text,
+            root=root,
+            claims=claims,
+            sources=sources,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("citation_audit", args, ok=False, started=started, summary=str(exc))
+        return "citation_audit refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "citation_audit", args, ok=bool(data.get("ok")), started=started,
+        summary="clean=%s issues=%d" % (data.get("clean"), data.get("issue_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def fact_cross_check(text: str) -> str:
+    """Cross-check prose for inline arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and contradictions."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"text_len": len(str(text or ""))}
+    try:
+        import sonder_runtime.adapters.inspection.fact_cross_check as _fact_cross_check
+
+        data = _fact_cross_check.fact_cross_check(text)
+    except Exception as exc:
+        _record_direct_tool("fact_cross_check", args, ok=False, started=started, summary=str(exc))
+        return "fact_cross_check refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "fact_cross_check", args, ok=bool(data.get("ok")), started=started,
+        summary="clean=%s issues=%d" % (data.get("clean"), data.get("issue_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def consistency_check(
+    action: str = "compare_candidates",
+    candidates_json: str = "",
+    reply: str = "",
+    receipts_json: str = "",
+) -> str:
+    """Compare 2-8 candidate answers for consensus vs contested claims, or audit a reply against tool receipts."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"action": action}
+    try:
+        import sonder_runtime.adapters.inspection.consistency_check as _consistency_check
+
+        candidates = json.loads(candidates_json) if isinstance(candidates_json, str) and candidates_json.strip() else (candidates_json if isinstance(candidates_json, list) else None)
+        receipts = json.loads(receipts_json) if isinstance(receipts_json, str) and receipts_json.strip() else (receipts_json if isinstance(receipts_json, list) else None)
+        data = _consistency_check.consistency_check(
+            action=action,
+            candidates=candidates,
+            reply=reply,
+            receipts=receipts,
+        )
+    except Exception as exc:
+        _record_direct_tool("consistency_check", args, ok=False, started=started, summary=str(exc))
+        return "consistency_check refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "consistency_check", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s action=%s" % (data.get("ok"), action),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -17989,6 +18143,10 @@ AGENT_TOOL_HELP = """Available tools:
 - code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": ""} -- module dependency graph, circular imports, blast-radius impact, and Python call graph
 - diff_semantic: {"path_a": "old.py", "path_b": "new.py", "text_a": "", "text_b": "", "kind": "auto|python|json|toml|ini"} -- AST-aware Python & structural JSON/TOML/INI diff
 - reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": "", "source": ""} -- structured cognitive scratchpad & contradiction audit
+- symbol_verify: {"action": "verify_symbol|audit_code", "module": "json", "symbol": "loads", "kwargs": [], "code": "", "root": ""} -- verify Python stdlib/repo modules, attributes, kwargs, or audit code snippets for hallucinated APIs
+- citation_audit: {"text": "", "root": ".", "claims": [], "sources": []} -- verify file:line citations, verbatim quotes, and source grounding
+- fact_cross_check: {"text": "..."} -- catch prose arithmetic errors, table total mismatches, bad dates/weekdays, list counts, and self-contradictions
+- consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []} -- compare multiple answers for divergence or audit a reply against tool receipts
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -18067,7 +18225,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -18134,6 +18292,10 @@ an exact symbol named by the task; do not default to Python or server.py.
 - code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": "<file, module, or symbol>"}
 - diff_semantic: {"path_a": "<first file>", "path_b": "<second file>", "text_a": "", "text_b": "", "kind": "auto"}
 - reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": ""}
+- symbol_verify: {"action": "verify_symbol|audit_code", "module": "<module>", "symbol": "<attr>", "code": "", "root": ""}
+- citation_audit: {"text": "<draft with file:line citations>", "root": ".", "claims": [], "sources": []}
+- fact_cross_check: {"text": "<draft prose>"}
+- consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -18338,6 +18500,10 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 targets.append(("schema path", args.get("schema_path")))
         elif tool_name == "code_graph":
             targets = [("root", args.get("root") or ".")]
+        elif tool_name in {"symbol_verify", "citation_audit"}:
+            targets = []
+            if str(args.get("root") or "").strip():
+                targets.append(("root", args.get("root")))
         elif tool_name == "diff_semantic":
             targets = []
             if str(args.get("path_a") or "").strip():
@@ -18706,6 +18872,13 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
         elif tool_name == "code_graph":
             file_ops.resolve_repository_read_path(
                 args.get("root", ".") or ".",
+                allow_workspace_root=True,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+        elif tool_name in {"symbol_verify", "citation_audit"} and str(args.get("root") or "").strip():
+            file_ops.resolve_repository_read_path(
+                args.get("root", ""),
                 allow_workspace_root=True,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
@@ -20053,6 +20226,37 @@ def _agent_dispatch(
             fact_refs_json=args.get("fact_refs_json", args.get("fact_refs", "")),
             alternatives_json=args.get("alternatives_json", args.get("alternatives", "")),
         )
+    if tool_name == "symbol_verify":
+        return symbol_verify(
+            action=args.get("action", "verify_symbol"),
+            module=args.get("module", ""),
+            symbol=args.get("symbol", ""),
+            kwargs_json=args.get("kwargs_json", args.get("kwargs", "")),
+            code=args.get("code", ""),
+            root=args.get("root", ""),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "citation_audit":
+        return citation_audit(
+            text=args.get("text", ""),
+            root=args.get("root", ""),
+            claims_json=args.get("claims_json", args.get("claims", "")),
+            sources_json=args.get("sources_json", args.get("sources", "")),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "fact_cross_check":
+        return fact_cross_check(text=args.get("text", ""))
+    if tool_name == "consistency_check":
+        return consistency_check(
+            action=args.get("action", "compare_candidates"),
+            candidates_json=args.get("candidates_json", args.get("candidates", "")),
+            reply=args.get("reply", ""),
+            receipts_json=args.get("receipts_json", args.get("receipts", "")),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -20542,7 +20746,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -20608,6 +20812,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
         "math_eval", "logic_verify", "regex_lab", "reasoning_board",
+        "fact_cross_check", "consistency_check",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -20625,7 +20830,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -21055,7 +21260,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 # Leads an end report that claims completion the record says must be earned.
@@ -21233,7 +21438,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -21298,7 +21503,7 @@ _UNCONFINED_ROOT_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory", "artifact_risk_inspect",
 })
@@ -21307,7 +21512,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -23398,7 +23603,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

@@ -204,6 +204,46 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool == "symbol_verify":
+                import sonder_runtime.adapters.inspection.symbol_verify as symbol_verify_mod
+
+                if args.get("root"):
+                    _require_read(args["root"], args, context)
+                res = symbol_verify_mod.symbol_verify(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "citation_audit":
+                import sonder_runtime.adapters.inspection.citation_audit as citation_audit_mod
+
+                if args.get("root"):
+                    _require_read(args["root"], args, context)
+                res = citation_audit_mod.citation_audit(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "fact_cross_check":
+                import sonder_runtime.adapters.inspection.fact_cross_check as fact_cross_check_mod
+
+                res = fact_cross_check_mod.fact_cross_check(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "consistency_check":
+                import sonder_runtime.adapters.inspection.consistency_check as consistency_check_mod
+
+                res = consistency_check_mod.consistency_check(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

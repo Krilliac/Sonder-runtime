@@ -259,6 +259,8 @@ _DESCRIPTORS = (
     _read_tool("schema_validate"),
     _read_tool("code_graph"),
     _read_tool("diff_semantic"),
+    _read_tool("symbol_verify"),
+    _read_tool("citation_audit"),
     _read_tool(
         "language_matrix",
         root=RootRequirement.NONE,
@@ -279,6 +281,18 @@ _DESCRIPTORS = (
     ),
     _read_tool(
         "regex_lab",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "fact_cross_check",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "consistency_check",
         root=RootRequirement.NONE,
         resources=frozenset({ResourceClass.CPU}),
         secrets=SecretPolicy.NO_SECRET_INPUT,

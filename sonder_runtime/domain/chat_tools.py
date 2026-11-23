@@ -559,6 +559,74 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         },
         backend=TOOL_BACKEND_WORKSPACE,
     ),
+    ChatToolDefinition(
+        name="symbol_verify",
+        description=(
+            "Verify that a Python module, attribute, method, or keyword argument actually exists in "
+            "stdlib/environment/repository, or audit a Python code snippet for hallucinated APIs."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["verify_symbol", "audit_code"], "default": "verify_symbol"},
+                "module": {"type": "string", "default": ""},
+                "symbol": {"type": "string", "default": ""},
+                "kwargs": {"type": "array", "items": {"type": "string"}},
+                "code": {"type": "string", "default": ""},
+                "root": {"type": "string", "default": ""},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="citation_audit",
+        description=(
+            "Audit file:line citations, quoted code/doc snippets, and source-grounded claims against "
+            "real guarded files or supplied source texts to catch fabricated quotes and dead line numbers."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "default": ""},
+                "root": {"type": "string", "default": ""},
+                "claims": {"type": "array", "items": {"type": "object"}},
+                "sources": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="fact_cross_check",
+        description=(
+            "Cross-check draft prose for inline arithmetic errors, Markdown table total mismatches, "
+            "invalid dates or wrong weekdays, list count mismatches, and direct self-contradictions."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="consistency_check",
+        description=(
+            "Compare 2-8 candidate answers for consensus vs contested claims, or audit a draft reply "
+            "against grounded tool execution receipts to catch fabricated pass/write claims."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["compare_candidates", "audit_against_receipts"], "default": "compare_candidates"},
+                "candidates": {"type": "array", "items": {"type": "string"}},
+                "reply": {"type": "string", "default": ""},
+                "receipts": {"type": "array", "items": {"type": "object"}},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
 )
 
 _BACKEND_BY_TOOL = {item.name: item.backend for item in CORE_CHAT_TOOL_DEFINITIONS}

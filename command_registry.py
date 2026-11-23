@@ -293,6 +293,30 @@ COMMANDS = [
         "summary": "Track grounded facts, hypotheses, decisions, and contradiction audits in a structured scratchpad.",
     },
     {
+        "name": "/symcheck",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Verify Python module/attribute/kwarg existence or audit code snippets for hallucinated APIs.",
+    },
+    {
+        "name": "/citecheck",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Audit file:line citations and verbatim quotes against guarded repository files or sources.",
+    },
+    {
+        "name": "/crosscheck",
+        "category": "data",
+        "risk": "safe",
+        "summary": "Cross-check prose for arithmetic errors, table total mismatches, wrong weekdays, and contradictions.",
+    },
+    {
+        "name": "/consensus",
+        "category": "data",
+        "risk": "safe",
+        "summary": "Compare multiple candidate answers for consensus vs divergence, or audit a reply against tool receipts.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",
