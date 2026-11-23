@@ -253,8 +253,8 @@ def _generate_concept_image_bytes(prompt: str) -> tuple[bytes, str] | None:
     if backend.kind != "image_api" or not backend.endpoint:
         return None
     try:
-        raw, mime = _image_gen._generate_via_image_api(
-            backend, _studio_concept_prompt(prompt), width=512, height=512, timeout=45.0,
+        raw, mime = _image_gen._call_openai_image_api(
+            backend, _studio_concept_prompt(prompt), timeout=45.0,
         )
         if raw:
             return raw, mime or "image/png"

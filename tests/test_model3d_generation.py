@@ -163,3 +163,26 @@ def test_generate_chat_3d_model_saves_glb_and_renders_preview(monkeypatch, tmp_p
         res.markdown, res.model_filename, origin="http://127.0.0.1:11435",
     )
     assert f"(http://127.0.0.1:11435/v1/generated-models/{res.model_filename}?dl=" in upgraded
+
+
+def test_concept_image_helper_calls_openai_image_api(monkeypatch):
+    import sonder_runtime.adapters.image_generation as img_gen
+
+    monkeypatch.setenv("SONDER_IMAGE_API_URL", "http://127.0.0.1:11440")
+    fake_backend = img_gen.ImageBackend(
+        kind="image_api", model="sdxl-turbo", endpoint="http://127.0.0.1:11440/v1/images/generations",
+    )
+    monkeypatch.setattr(img_gen, "discover_image_backend", lambda: fake_backend)
+    seen = {}
+
+    def _fake_call(backend, prompt, *, timeout):
+        seen["endpoint"] = backend.endpoint
+        seen["prompt"] = prompt
+        seen["timeout"] = timeout
+        return b"\x89PNG\r\n\x1a\nfake", "image/png"
+
+    monkeypatch.setattr(img_gen, "_call_openai_image_api", _fake_call)
+    got = adapter._generate_concept_image_bytes("a crystal sword")
+    assert got == (b"\x89PNG\r\n\x1a\nfake", "image/png")
+    assert "a crystal sword" in seen["prompt"]
+    assert "white studio background" in seen["prompt"]
