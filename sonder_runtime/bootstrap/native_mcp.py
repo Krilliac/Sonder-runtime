@@ -495,6 +495,17 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "learn_tool",
+        "Discover and figure out an unfamiliar/external tool or CLI (e.g. blender, ffmpeg, inkscape) via safe --help/metadata introspection",
+        {"type": "object", "properties": {
+            "tool": {"type": "string"},
+            "goal": {"type": "string"},
+            "subcommand": {"type": "string"},
+            "probe_cli": {"type": "boolean"},
+            "timeout": {"type": "number"},
+        }, "required": ["tool"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,

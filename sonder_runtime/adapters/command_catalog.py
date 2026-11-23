@@ -228,6 +228,7 @@ _CATEGORY_BY_TOOL = {
     "error_diagnose": "dev",
     "code_audit": "dev",
     "data_transform": "data",
+    "learn_tool": "dev",
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",

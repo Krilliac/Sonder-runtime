@@ -287,7 +287,7 @@ def test_new_proactive_tools_wired_across_chat_and_control_commands():
     import server
 
     names = [t.name for t in CORE_CHAT_TOOL_DEFINITIONS]
-    assert len(names) == 34
+    assert len(names) == 35
     for expected in ("prompt_shield", "error_diagnose", "code_audit", "data_transform"):
         assert expected in names
 

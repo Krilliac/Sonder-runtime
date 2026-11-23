@@ -224,6 +224,25 @@ class ChatToolTurn:
             self.records.append(ChatToolRecord("", name, "error", backend, reason=msg[:200]))
             GLOBAL_TELEMETRY.record("tool_name_unknown", tool=name, detail=", ".join(suggestions))
             return msg, run_count
+        if (
+            name not in admitted
+            and "learn_tool" in admitted
+            and name not in self.blocked_tools
+            and name not in DELEGATION_TOOLS
+            and name not in self.client_exec_tools
+            and name not in _EXECUTION_CAP_TOOLS
+            and not self.client_exec_only
+            and (self.role_refusal is None or not self.role_refusal(name))
+        ):
+            msg = (
+                f"ERROR: '{name}' is not a built-in Sonder tool. "
+                f"If '{name}' is an external program, CLI, or package, call "
+                f"learn_tool(tool='{name}', goal='<your task>') to discover whether it is installed, "
+                "inspect its real --version/--help flags and headless scripting options, or research how to use it."
+            )
+            self.records.append(ChatToolRecord("", name, "error", backend, reason=msg[:200]))
+            GLOBAL_TELEMETRY.record("foreign_tool_guided_to_learn", tool=name)
+            return msg, run_count
         if name in DELEGATION_TOOLS and not _delegation.can_delegate():
             msg = _delegation.depth_refusal_message(name)
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))

@@ -4073,6 +4073,15 @@ def control_command(prompt: str, history=None, session="", project="",
         if act in ("encode", "decode"):
             return data_transform(action=act, data=payload, encoding=third or "base64")
         return data_transform(action=act, data=payload, output_format=third or "json")
+    if cmd in ("/learntool", "/learn_tool", "/discovertool"):
+        parts = [part.strip() for part in arg.split("|", 2)]
+        if not parts or not parts[0]:
+            return "usage: /learntool <tool> [| <goal> [| <subcommand>]]"
+        return learn_tool(
+            tool=parts[0],
+            goal=parts[1] if len(parts) > 1 else "",
+            subcommand=parts[2] if len(parts) > 2 else "",
+        )
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -15370,6 +15379,68 @@ def data_transform(
     return output
 
 
+@mcp.tool()
+def learn_tool(
+    tool: str,
+    goal: str = "",
+    subcommand: str = "",
+    probe_cli: bool = True,
+    research_web: bool = False,
+    save_note: bool = False,
+    timeout: float = 6.0,
+) -> str:
+    """Discover and figure out an unfamiliar/external tool (e.g. blender, ffmpeg, inkscape) via live --help, metadata, and optional docs."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {
+        "tool": tool, "goal": goal, "subcommand": subcommand,
+        "probe_cli": bool(probe_cli), "research_web": bool(research_web),
+    }
+
+    def _mem_recall(query_text: str) -> list[str]:
+        try:
+            raw = _memory_search_scoped(query_text, 4)
+            if not raw or "no matches" in raw.lower() or "empty query" in raw.lower():
+                return []
+            return [ln.strip() for ln in raw.splitlines() if ln.strip()][:4]
+        except Exception:
+            return []
+
+    def _web_cb(query_text: str) -> str:
+        return web_search(query=query_text, limit=4)
+
+    try:
+        import sonder_runtime.adapters.inspection.learn_tool as _learn_tool
+
+        data = _learn_tool.learn_tool(
+            tool=tool,
+            goal=goal,
+            subcommand=subcommand,
+            probe_cli=bool(probe_cli),
+            research_web=bool(research_web),
+            timeout=float(timeout),
+            web_search_fn=_web_cb if research_web else None,
+            memory_search_fn=_mem_recall,
+        )
+        if save_note and data.get("ok") and data.get("playbook_summary"):
+            try:
+                sonder_remember_fact(text=str(data["playbook_summary"]))
+                data["saved_to_memory"] = True
+            except Exception as exc:
+                data["saved_to_memory"] = False
+                data["save_note_error"] = str(exc)[:160]
+    except Exception as exc:
+        _record_direct_tool("learn_tool", args, ok=False, started=started, summary=str(exc))
+        return "learn_tool refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "learn_tool", args, ok=bool(data.get("ok")), started=started,
+        summary="installed=%s flags=%s" % (data.get("installed"), data.get("total_flags_discovered")),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -18406,6 +18477,7 @@ AGENT_TOOL_HELP = """Available tools:
 - error_diagnose: {"error_text": "...", "root": ".", "max_frames": 8, "context_lines": 3} -- parse multi-language tracebacks/compiler errors and resolve repo source context
 - code_audit: {"code": "", "path": "<file>", "language": "", "min_severity": "low"} -- static security & Python AST bug-footgun audit
 - data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "...", "path": "", "output_format": "json|csv|markdown|flat", "expression": ""} -- structured data conversion, stats profiling, encoding, timestamps, cron
+- learn_tool: {"tool": "blender|ffmpeg|inkscape|<any tool>", "goal": "<task>", "subcommand": "", "research_web": false, "save_note": false} -- discover and figure out an unfamiliar/external CLI or package via live --version/--help, Python metadata, and optional docs
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -18484,7 +18556,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -18561,6 +18633,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - error_diagnose: {"error_text": "<traceback or compiler error>", "root": ".", "max_frames": 8, "context_lines": 3}
 - code_audit: {"code": "", "path": "<task-relevant source file>", "language": "", "min_severity": "low"}
 - data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "", "path": "", "output_format": "json", "expression": ""}
+- learn_tool: {"tool": "<external tool/program name>", "goal": "<task>", "subcommand": "", "research_web": false}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -20577,6 +20650,16 @@ def _agent_dispatch(
             encoding=args.get("encoding", "base64"),
             limit=int(args.get("limit", 50)),
         )
+    if tool_name == "learn_tool":
+        return learn_tool(
+            tool=args.get("tool", ""),
+            goal=args.get("goal", ""),
+            subcommand=args.get("subcommand", ""),
+            probe_cli=bool(args.get("probe_cli", True)),
+            research_web=bool(args.get("research_web", False)) and bool(allow_web),
+            save_note=bool(args.get("save_note", False)) and not bool(read_only),
+            timeout=float(args.get("timeout", 6.0)),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -21132,7 +21215,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
         "math_eval", "logic_verify", "regex_lab", "reasoning_board",
-        "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
+        "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "learn_tool",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -21150,7 +21233,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -21758,7 +21841,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -21832,7 +21915,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -23923,7 +24006,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

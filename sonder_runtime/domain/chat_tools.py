@@ -727,6 +727,27 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         },
         backend=TOOL_BACKEND_DISCOVERY,
     ),
+    ChatToolDefinition(
+        name="learn_tool",
+        description=(
+            "Autonomously discover and figure out an unfamiliar or external tool/program/package (e.g. blender, "
+            "inkscape, ffmpeg, krita, godot, pandoc, or any unknown CLI): checks PATH/App Paths/install dirs, "
+            "safely probes live --version/--help/<subcommand> --help, inspects Python package metadata, detects "
+            "headless/scripting flags, ranks goal-relevant flags, and optionally searches docs online."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "goal": {"type": "string", "default": ""},
+                "subcommand": {"type": "string", "default": ""},
+                "research_web": {"type": "boolean", "default": False},
+                "save_note": {"type": "boolean", "default": False},
+            },
+            "required": ["tool"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
 )
 
 _BACKEND_BY_TOOL = {item.name: item.backend for item in CORE_CHAT_TOOL_DEFINITIONS}

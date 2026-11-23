@@ -298,6 +298,15 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool == "learn_tool":
+                import sonder_runtime.adapters.inspection.learn_tool as learn_tool_mod
+
+                res = learn_tool_mod.learn_tool(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

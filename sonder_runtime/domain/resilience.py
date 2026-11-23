@@ -83,10 +83,12 @@ def classify_tool_failure(tool_name: str, error_text: str) -> str:
     low = str(error_text or "").lower()
     if any(k in low for k in ("host policy", "permission", "refused", "denied", "forbidden", "manual mode", "plan mode", "approval")):
         return "permission_refused"
-    if any(k in low for k in ("not found", "no such file", "does not exist", "cannot find the path", "missing file")):
-        return "not_found"
+    if any(k in low for k in ("unknown tool", "not a built-in", "not in this turn's admitted", "unrecognized tool")):
+        return "unknown_tool"
     if any(k in low for k in ("is not recognized", "not installed", "no module named", "command not found", "executable not found", "winerror 2")):
         return "missing_dependency"
+    if any(k in low for k in ("not found", "no such file", "does not exist", "cannot find the path", "missing file")):
+        return "not_found"
     if any(k in low for k in ("timed out", "timeout", "deadline exceeded")):
         return "timeout"
     if any(k in low for k in ("not unique", "multiple matches", "old string not found", "patch does not apply", "hunk failed")):
@@ -226,6 +228,10 @@ _COMMON_TOOL_ALIASES: dict[str, str] = {
     "transform_data": "data_transform",
     "convert_data": "data_transform",
     "cron_next": "data_transform",
+    "discover_tool": "learn_tool",
+    "research_tool": "learn_tool",
+    "inspect_cli": "learn_tool",
+    "figure_out_tool": "learn_tool",
     "search_memory": "memory_search",
     "search_tools": "tool_search",
 }
@@ -320,7 +326,8 @@ _TOOL_ALTERNATIVES: dict[str, tuple[FallbackOption, ...]] = {
 _CAUSE_STRATEGIES: dict[str, str] = {
     "permission_refused": "Do not retry the blocked action or try to bypass permissions. Switch to a read-only/pure analytical alternative or ask the user to approve/run it.",
     "not_found": "Stop guessing paths. Use file_find, directory_tree, or text_search to discover the real path first.",
-    "missing_dependency": "The required binary/package is unavailable on this host. Switch to pure stdlib/static tools (math_eval, logic_verify, symbol_verify, code_graph, diff_semantic).",
+    "missing_dependency": "The required binary/package is unavailable or unfamiliar on this host. Call `learn_tool` to discover its install path/flags/docs, or switch to pure stdlib/static tools (math_eval, logic_verify, symbol_verify, code_graph, diff_semantic).",
+    "unknown_tool": "This is not a built-in tool. Call `learn_tool(tool='<name>', goal='<task>')` to discover whether it is an installed external program/package, inspect its real CLI flags/subcommands, or research how to use it.",
     "timeout": "Narrow scope (smaller line range, specific file/subdirectory, lower max_depth, or static analysis instead of full execution).",
     "edit_mismatch": "Read the exact target lines with file_read_range before editing, or include more surrounding lines to make the match unique.",
     "argument_or_syntax": "Inspect the tool's exact parameter schema via tool_search/tool_help and pass valid JSON types.",
@@ -364,7 +371,16 @@ def plan_alternatives(
             FallbackOption("file_read_range", "Read a bounded slice of lines.", {"path": "<path>", "start_line": 1, "end_line": 150}),
             FallbackOption("text_search", "Search for exact matches instead of reading full files.", {"query": "<term>", "root": "."}),
         ])
-    elif cause in {"permission_refused", "missing_dependency"}:
+    elif cause in {"permission_refused", "missing_dependency", "unknown_tool"}:
+        if cause in {"missing_dependency", "unknown_tool"} and tool:
+            candidates.insert(
+                0,
+                FallbackOption(
+                    "learn_tool",
+                    f"Discover whether '{tool}' is installed, safely probe its live --version/--help flags, or research its CLI docs.",
+                    {"tool": tool, "goal": goal or "CLI usage"},
+                ),
+            )
         candidates.extend([
             FallbackOption("math_eval", "Perform pure mathematical/statistical/unit verification without execution.", {"expression": "<expr>"}),
             FallbackOption("symbol_verify", "Verify Python imports/attributes/kwargs statically.", {"action": "audit_code", "code": "<code>"}),
