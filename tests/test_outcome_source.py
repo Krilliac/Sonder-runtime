@@ -635,7 +635,7 @@ def test_production_scanner_still_covers_the_repo_after_the_nested_skip():
     scanned = {
         path.relative_to(REPO_ROOT).as_posix() for path in _production_python_files()
     }
-    assert "memory_store.py" in scanned
-    assert "server.py" in scanned
+    assert "runtime/memory_store.py" in scanned
+    assert "runtime/server.py" in scanned
     assert len(scanned) > 100
     assert not [name for name in scanned if _NESTED_SKIP.intersection(name.split("/"))]

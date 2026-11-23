@@ -31,7 +31,7 @@ def test_root_service_state_is_the_packaged_module_identity():
 
 
 def test_root_service_state_has_no_implementation_declarations():
-    source = Path("sonder_service_state.py").read_text(encoding="utf-8")
+    source = Path("runtime/sonder_service_state.py").read_text(encoding="utf-8")
     assert "class ServiceStateTracker" not in source
     assert "def transition" not in source
 

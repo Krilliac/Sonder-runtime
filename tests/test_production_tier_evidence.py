@@ -185,7 +185,7 @@ def test_current_tier_model_binding_is_read_on_each_call(monkeypatch, tmp_path):
 
 
 def test_server_callers_use_packaged_router_and_payload_wiring():
-    tree = ast.parse(Path("server.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("runtime/server.py").read_text(encoding="utf-8"))
     funcs = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     route_body = ast.unparse(funcs["route_request"])
     improve_body = ast.unparse(funcs["improve_function"])

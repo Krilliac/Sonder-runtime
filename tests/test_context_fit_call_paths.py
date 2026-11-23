@@ -54,9 +54,9 @@ PROBE_ENTRY_POINTS = {
     r"\b_context_fit\.plan\(": {
         "sonder_runtime/adapters/inference/overflow_route.py",
     },
-    r"\b_overflow_route\.plan\(": {"server.py"},
+    r"\b_overflow_route\.plan\(": {"runtime/server.py"},
     r"[\"']tier_context[\"']": {
-        "sonder_doctor.py",
+        "runtime/sonder_doctor.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
     },
 }

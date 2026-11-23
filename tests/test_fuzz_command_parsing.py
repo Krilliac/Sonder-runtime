@@ -1258,8 +1258,8 @@ def test_control_intents_do_not_read_a_kelvin_sign_as_k():
 
 
 _HEAD_FOLD_SOURCES = (
-    "server.py",
-    "intents.py",
+    "runtime/server.py",
+    "runtime/intents.py",
     "sonder_runtime/interfaces/http/serve.py",
     "sonder_runtime/interfaces/http/authority_contract.py",
     "sonder_runtime/interfaces/http/facades/developer_chat.py",

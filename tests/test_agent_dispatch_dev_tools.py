@@ -84,7 +84,7 @@ DEV_WORKFLOW_MUTATING_TOOLS = frozenset({
 # reads both scopers from source and fails if this list claims a hole it has
 # not earned.
 DEDICATED_SCOPE_BRANCH_TOOLS = frozenset({
-    "archive_extract", "context_pack", "data_convert",
+    "archive_extract", "context_pack", "data_convert", "diff_semantic",
     "file_batch_write", "file_copy", "file_move",
     "text_patch", "workspace_compare",
 })

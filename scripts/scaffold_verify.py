@@ -10,8 +10,9 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+for _p in (str(REPO_ROOT / "runtime"), str(REPO_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import project_scaffold  # noqa: E402
 
@@ -48,9 +49,25 @@ def _commands(kind: str, tool: str) -> list[list[str]]:
             [tool, "-S", ".", "-B", "build"],
             [tool, "--build", "build", "--config", "Debug"],
         ],
+        "c-cmake": [
+            [tool, "-S", ".", "-B", "build"],
+            [tool, "--build", "build", "--config", "Debug"],
+        ],
         "cpp-msvc": [[tool, f"{PROJECT_NAME}.sln", "/p:Configuration=Debug"]],
         "java-maven": [[tool, "-q", "-B", "compile"]],
         "typescript": [[tool, "--noEmit"]],
+        "bash-cli": [[tool, "-n", f"bin/{project_scaffold.identifier(PROJECT_NAME)}.sh"]],
+        "dart": [[tool, "analyze"]],
+        "elixir": [[tool, "compile"]],
+        "flutter": [[tool, "analyze"]],
+        "kotlin-gradle": [[tool, "compileKotlin"]],
+        "lua": [[tool, "-p", "src/main.lua"]],
+        "php": [[tool, "-l", "index.php"]],
+        "powershell": [[tool, "-NoProfile", "-Command", f"Import-Module ./{PROJECT_NAME}.psm1"]],
+        "ruby": [[tool, "-c", f"lib/{project_scaffold.identifier(PROJECT_NAME)}.rb"]],
+        "swift": [[tool, "build"]],
+        "web-app": [[tool, "--check", "app.js"]],
+        "zig": [[tool, "build"]],
     }
     return commands[kind]
 
@@ -63,9 +80,22 @@ def _tool_name(kind: str) -> str:
         "node": "node",
         "python": "python",
         "cpp-cmake": "cmake",
+        "c-cmake": "cmake",
         "cpp-msvc": "msbuild",
         "java-maven": "mvn",
         "typescript": "tsc",
+        "bash-cli": "bash",
+        "dart": "dart",
+        "elixir": "mix",
+        "flutter": "flutter",
+        "kotlin-gradle": "gradle",
+        "lua": "luac",
+        "php": "php",
+        "powershell": "pwsh",
+        "ruby": "ruby",
+        "swift": "swift",
+        "web-app": "node",
+        "zig": "zig",
     }[kind]
 
 

@@ -465,10 +465,16 @@ def test_openai_default_transport_catches_recursion_error(monkeypatch):
         def __exit__(self, *args):
             pass
 
+    def _recursion_boom(_raw):
+        raise RecursionError("maximum recursion depth exceeded")
+
     monkeypatch.setattr(
         oai_mod, "_opener_for",
         lambda _url: SimpleNamespace(open=lambda _req, timeout=None: _Resp()),
     )
+    # Python 3.14 removed the C json decoder recursion depth limit on depth 5000;
+    # force RecursionError explicitly so the catch branch is exercised on all runtimes.
+    monkeypatch.setattr(oai_mod.json, "loads", _recursion_boom)
     with pytest.raises(DependencyUnavailable, match="non-JSON"):
         OpenAICompatibleGateway._default_transport(
             "http://127.0.0.1:8080/v1/chat/completions", {"messages": []}, {}, 5.0,

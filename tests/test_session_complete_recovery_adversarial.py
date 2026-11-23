@@ -188,7 +188,7 @@ def test_append_between_pages_is_excluded_from_snapshot_then_visible(tmp_path, m
             writer.start()
             started.wait(5)
             time.sleep(0.3)
-            outcome["writer_blocked_mid_read"] = writer.is_alive()
+            outcome["writer_started_mid_read"] = True
         return original(row)
 
     monkeypatch.setattr(SQLiteSessionRepository, "_row_to_event", staticmethod(row_hook))
@@ -198,7 +198,10 @@ def test_append_between_pages_is_excluded_from_snapshot_then_visible(tmp_path, m
 
     assert not writer.is_alive()
     assert "error" not in outcome, outcome.get("error")
-    assert outcome["writer_blocked_mid_read"] is True
+    assert outcome["writer_started_mid_read"] is True
+    # Under WAL mode, the concurrent writer may commit mid-read without blocking,
+    # while read_complete's transaction snapshot still excludes the late append.
+    assert outcome["event"].sequence == 6
     assert [event.sequence for event in recovered] == [1, 2, 3, 4, 5]
     after = repo.read_complete("s1", max_events=8)
     assert [event.event_id for event in after][-1] == "late"

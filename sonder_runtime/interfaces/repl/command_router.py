@@ -72,7 +72,7 @@ project_scaffold = _LazyService("sonder_runtime.adapters.repl_services", "projec
 _TIER_COMMANDS = {"consult", "route", "refactor"}
 _STRUCTURED_CALL_RE = re.compile(
     r"^(?:use|call|invoke|run)\s+(?:the\s+)?"
-    r"(?P<name>/?[A-Za-z][A-Za-z0-9_-]*)\s+"
+    r"(?P<name>/?[A-Za-z0-9][A-Za-z0-9_-]*)\s+"
     r"(?:tool|command)"
     r"(?:\s+(?:with|using|for)\s+(?P<arg>\S.*))?\s*$",
     re.I,

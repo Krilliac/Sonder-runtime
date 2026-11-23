@@ -48,6 +48,7 @@ PROJECT = os.path.join(HERE, "FpsGame_Skeleton")
 # The example owns small helper modules (``skeleton``, ``bodynotes`` and the
 # project scaffold). Keep its directory ahead of the runtime root: otherwise
 # a same-named runtime helper can silently shadow an example contract.
+sys.path.insert(0, os.path.join(SONDER, "runtime"))
 sys.path.insert(0, SONDER)
 sys.path.insert(0, HERE)
 

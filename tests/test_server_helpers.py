@@ -3473,7 +3473,7 @@ def test_parallel_generation_paths_use_packaged_cloud_policy_directly():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"parallel_generate_run", "parallel_generate_run_languages"}
     functions = {
         node.name: node

@@ -26,8 +26,8 @@ def test_root_artifact_grounding_is_an_identity_compatibility_alias():
 
 def test_server_and_assetgen_bind_the_packaged_adapter_directly():
     repository_root = Path(__file__).resolve().parents[1]
-    server_source = (repository_root / "server.py").read_text(encoding="utf-8")
-    assetgen_source = (repository_root / "assetgen.py").read_text(encoding="utf-8")
+    server_source = (repository_root / "runtime" / "server.py").read_text(encoding="utf-8")
+    assetgen_source = (repository_root / "runtime" / "assetgen.py").read_text(encoding="utf-8")
 
     assert (
         "import sonder_runtime.adapters.artifact_grounding as artifact_grounding"

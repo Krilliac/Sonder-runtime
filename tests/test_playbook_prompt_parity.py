@@ -77,7 +77,7 @@ def _load(function, parts):
         "_read_system_context": lambda: parts,
         "_SYSTEM_CONTEXT": SimpleNamespace(parts=None),
         "_prompts": SimpleNamespace(render=lambda name: "TRACE"),
-        "personas": SimpleNamespace(get=lambda name: "PERSONA:" + name),
+        "personas": SimpleNamespace(OFF="off", get=lambda name: "PERSONA:" + name),
         "_provider_bridge": SimpleNamespace(is_hosted=lambda provider: provider == "hosted"),
         "playbook_context": SimpleNamespace(frame_owner_notes=frame_owner_notes),
         "_prefix_cache": SimpleNamespace(compose_local_system=compose_local_system),

@@ -705,7 +705,7 @@ def test_promoted_backends_register_regardless_of_import_order():
     def keys_for(first_import):
         code = ("import %s\nimport verifiers\n"
                 "print(','.join(sorted(verifiers.REGISTRY)))" % first_import)
-        p = subprocess.run([_sys.executable, "-c", code], cwd=root,
+        p = subprocess.run([_sys.executable, "-c", code], cwd=root, env={**os.environ, "PYTHONPATH": os.path.dirname(root) + os.pathsep + root},
                            capture_output=True, timeout=120)
         assert p.returncode == 0, p.stderr.decode("utf-8", "replace")
         return p.stdout.decode("utf-8", "replace").strip().splitlines()[-1]

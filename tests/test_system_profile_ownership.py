@@ -46,7 +46,7 @@ def test_profile_workspace_root_is_the_repository_checkout():
     expected = Path(__file__).resolve().parents[1]
 
     assert Path(profile.workspace_root()) == expected
-    assert (expected / "server.py").is_file()
+    assert (expected / "runtime" / "server.py").is_file()
     assert (expected / "system_profile.md").is_file()
 
 

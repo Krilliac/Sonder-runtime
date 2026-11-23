@@ -5,7 +5,6 @@ import subprocess
 import sys
 import types
 import importlib.machinery
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -357,10 +356,11 @@ def test_code_runner_c_compiler_calls_find_visual_studio_vcvars_and_uses_c11(mon
     captured = {}
 
     def fake_run(cmd, cwd, stdin, timeout, language):
-        bat_path = cmd[-1]
-        captured["bat"] = Path(bat_path).read_text(encoding="utf-8")
+        bat_path = tmp_path / "sonder_build_msvc.bat"
+        captured["bat"] = bat_path.read_text(encoding="utf-8")
         return {"ok": True, "returncode": 0, "stdout": "", "stderr": "", "language": language}
 
+    monkeypatch.undo()
     monkeypatch.setattr(code_runner, "_run_process", fake_run)
     code_runner._msvc_compile_result(
         r"C:\VS\vcvars64.bat", [str(tmp_path / "main.c")], str(tmp_path / "snippet.exe"),

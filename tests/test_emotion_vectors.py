@@ -237,7 +237,7 @@ def test_emotion_command_leaves_the_tracked_repo_file_untouched():
 
     import server
 
-    tracked = os.path.join(os.path.dirname(os.path.abspath(server.__file__)), "emotion_vectors.json")
+    tracked = emotion_vectors.bundled_path()
     with open(tracked, "rb") as handle:
         before = handle.read()
 

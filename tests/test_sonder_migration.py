@@ -76,11 +76,11 @@ def test_user_facing_terminology_never_presents_runtime_as_model_weights():
     paths = (
         "deploy_sonder.sh",
         "cloud_train.sh",
-        "command_registry.py",
-        "endless_train.py",
+        "runtime/command_registry.py",
+        "scripts/endless_train.py",
         "sonder_runtime/interfaces/repl/repl.py",
         "sonder_runtime/interfaces/http/serve.py",
-        "curriculum_run.py",
+        "scripts/curriculum_run.py",
         "docs/superpowers/plans/2026-07-02-sonder-memory-loop.md",
     )
     text = "\n".join(
@@ -118,7 +118,7 @@ def test_user_facing_terminology_never_presents_runtime_as_model_weights():
 
 def test_cloud_training_uses_supervised_controller_launch():
     script = (ROOT / "cloud_train.sh").read_text(encoding="utf-8")
-    assert "python adaptive_training.py start --confirm" in script
+    assert "python runtime/adaptive_training.py start --confirm" in script
     assert "python qlora_train.py" not in script
     assert "SONDER_TRAINING_STATE" in script
     assert 'state.get("adapter_dir")' in script
@@ -174,10 +174,10 @@ def test_canonical_entrypoints_are_tracked_and_present():
         "sonder-headless.sh",
         "sonder-launcher.cmd",
         "sonder-launcher.sh",
-        "sonder_client.py",
-        "sonder_headless.py",
-        "sonder_health.py",
-        "sonder_launcher.py",
+        "runtime/sonder_client.py",
+        "runtime/sonder_headless.py",
+        "runtime/sonder_health.py",
+        "runtime/sonder_launcher.py",
         "sonder_runtime/interfaces/repl/repl.py",
         "sonder_runtime/interfaces/http/serve.py",
     }

@@ -653,7 +653,7 @@ def test_both_key_names_are_in_the_logging_redaction_list_and_child_scrub(monkey
         assert Redactor(env={name: KEY_1}).redact("failed with %s here" % KEY_1) == "failed with [REDACTED] here"
     # The test harness scrub covers the SONDER_ prefix; the live-capture list names
     # them explicitly so the opt-in live test can restore them.
-    import conftest
+    import tests._hermetic_plugin as conftest
 
     for name in ("SONDER_ANTHROPIC_API_KEY", "SONDER_ANTHROPIC_API_KEY_2", "SONDER_LIVE_ANTHROPIC"):
         assert name.startswith("SONDER_")
@@ -792,7 +792,7 @@ def test_the_sdk_environment_is_scrubbed_in_the_test_process():
 
     for name in HOSTILE_ENV:
         assert name not in os.environ
-    import conftest
+    import tests._hermetic_plugin as conftest
 
     assert set(HOSTILE_ENV) <= set(conftest._ANTHROPIC_SDK_VARIABLES)
     assert "SONDER_ANTHROPIC_BASE_URL" in conftest._LIVE_PROVIDER_VARIABLES

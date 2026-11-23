@@ -26,7 +26,7 @@ def test_initial_shadow_registry_is_immutable_and_has_no_drift():
     }
     with pytest.raises(TypeError):
         capabilities.CAPABILITIES["new"] = capabilities.CAPABILITIES["file_read"]
-    assert "tool_capabilities.py" in package.REQUIRED_FILES
+    assert "runtime/tool_capabilities.py" in package.REQUIRED_FILES
     issues = capabilities.validate_shadow(server._tool_capability_shadow_surfaces())
     assert issues == ()
 

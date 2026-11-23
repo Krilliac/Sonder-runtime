@@ -98,7 +98,7 @@ def test_register_exposes_mesh_generate_and_records_the_call(tmp_path, monkeypat
     recorded = []
     mcp = FakeMcp()
     mesh_agent_tools.register(mcp, lambda name, args, **kw: recorded.append((name, kw["ok"])), runtime=lambda: fake_runtime(tmp_path))
-    assert set(mcp.tools) == {"mesh_generate"}
+    assert set(mcp.tools) == {"mesh_generate", "generate_3d_model"}
     monkeypatch.setattr(mesh_agent_tools.blender_runner, "locate_blender", lambda env=None: None)
     monkeypatch.delenv("SONDER_BLENDER", raising=False)
     payload = json.loads(mcp.tools["mesh_generate"]("a cart"))

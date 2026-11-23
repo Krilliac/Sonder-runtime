@@ -191,7 +191,7 @@ class RepositoryResearchBenchmarkTests(unittest.TestCase):
         submission = _good_submission()
         submission["cases"][2]["tool_calls"] = [
             {"tool": "search", "arguments": {"query": "promotion"}},
-            {"tool": "open", "arguments": {"path": "promotion_eval.py"}},
+            {"tool": "open", "arguments": {"path": "scripts/promotion_eval.py"}},
             {"tool": "search", "arguments": {"query": "promotion"}},
         ]
         case = research.evaluate(submission)["cases"][2]

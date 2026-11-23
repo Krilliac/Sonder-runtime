@@ -161,7 +161,7 @@ def trap_results(tmp_path_factory):
         "SONDER_STATE_HOME": str(home),
         "SONDER_MACHINE_HOME": str(home / "machine"),
         "OLLAMA_HOST": "http://127.0.0.1:%d" % _closed_port(),
-        "PYTHONPATH": str(REPO) + os.pathsep + env.get("PYTHONPATH", ""),
+        "PYTHONPATH": str(REPO / "runtime") + os.pathsep + str(REPO) + os.pathsep + env.get("PYTHONPATH", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     proc = subprocess.run(

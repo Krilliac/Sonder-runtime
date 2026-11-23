@@ -391,7 +391,7 @@ def test_mesh_agent_tools_still_refuse(granted, tmp_path):
 def test_no_other_lane_reads_the_restricted_decision():
     """Only the agent turn, the console editor and this lane's own modules may ask for a grant."""
     allowed = {
-        "server.py", "sonder_runtime/adapters/restricted_tool_lane.py",
+        "runtime/server.py", "sonder_runtime/adapters/restricted_tool_lane.py",
         "sonder_runtime/adapters/model_tool_policy_editor.py",
         "sonder_runtime/adapters/chat_file_routing.py",
         "sonder_runtime/adapters/model_tool_grants.py",  # its docstring names the lane
@@ -422,16 +422,16 @@ def test_no_other_lane_reads_the_restricted_decision():
 # ``restricted_tool_lane.suppressed()`` if not), then add it here.
 ENTRY_CALLERS = {
     # /work without a tier: "auto", the escalating path, which is suppressed.
-    ("server.py", "control_command", "workbench_agent"),
+    ("runtime/server.py", "control_command", "workbench_agent"),
     # The REPL's /work with the operator's own explicit tier: the
     # workbench_agent lane, only when the profile lists it.
-    ("server.py", "_run_managed_repl_work", "workbench_agent"),
+    ("runtime/server.py", "_run_managed_repl_work", "workbench_agent"),
     # A model-planned loop action: suppressed.
-    ("server.py", "_loop_dispatch", "workbench_agent"),
+    ("runtime/server.py", "_loop_dispatch", "workbench_agent"),
     # Escalation rungs: inside the suppressed _workbench_agent_escalating.
-    ("server.py", "_workbench_agent_escalating_owned", "workbench_agent"),
+    ("runtime/server.py", "_workbench_agent_escalating_owned", "workbench_agent"),
     # The explicit-tier branch enters the workbench_agent lane.
-    ("server.py", "workbench_agent", "agent"),
+    ("runtime/server.py", "workbench_agent", "agent"),
     # Chat file routing with a pinned model: suppressed.
     ("sonder_runtime/adapters/chat_file_routing.py", "route_file_request", "workbench_agent"),
     # A prepared plan from another surface: suppressed.
@@ -468,7 +468,7 @@ def _entry_calls(path):
 
 def test_every_caller_of_an_entry_point_is_reviewed():
     calls = set()
-    for path in [*REPO.glob("*.py"), *REPO.glob("sonder_runtime/**/*.py")]:
+    for path in [*REPO.glob("runtime/*.py"), *REPO.glob("sonder_runtime/**/*.py")]:
         calls |= _entry_calls(path)
     assert calls == ENTRY_CALLERS, sorted(calls ^ ENTRY_CALLERS)
 

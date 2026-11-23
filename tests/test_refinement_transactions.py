@@ -56,7 +56,7 @@ def test_preference_refinement_is_atomic_versioned_and_append_only():
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("UPDATE refinement_history SET operation='apply'")
     conn.rollback()
-    assert "refinement_transactions.py" in package.REQUIRED_FILES
+    assert "runtime/refinement_transactions.py" in package.REQUIRED_FILES
 
 
 def test_stale_apply_and_missing_grounded_evidence_leave_state_unchanged():

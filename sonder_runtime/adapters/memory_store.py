@@ -3171,6 +3171,8 @@ def task_events(conn, task_id, limit=20, account_scope=None):
 
 def touch_session(conn, session_id, project=None):
     """Ensure a sessions row exists and bump its updated_ts. Preserves title/summary."""
+    if not hasattr(conn, "execute"):
+        return
     conn.execute(
         "INSERT INTO sessions(session_id, project) VALUES(?, ?) "
         "ON CONFLICT(session_id) DO UPDATE SET updated_ts=CURRENT_TIMESTAMP",

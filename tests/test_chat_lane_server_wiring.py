@@ -444,19 +444,19 @@ def test_http_chat_and_explicit_pin_capture_and_replay_the_actual_lane(tmp_path,
     resumed_receipt = finished_resumed_work["result_receipt"]
     assert resumed_receipt["source_event_id"] == prior_response.event_id
     assert resumed_receipt["session_ref"] == "ordinary-http"
-    assert [event.event_type for event in reopened.read_range("ordinary-http")][-2:] == [
-        "chat.work.admitted", "chat.work.returned",
+    assert [event.event_type for event in reopened.read_range("ordinary-http")][-4:] == [
+        "chat.work.admitted", "user.message", "chat.work.returned", "model.response",
     ]
     assert restarted.replay("ordinary-http").request.request.prompt == "Hello"
     assert [event.event_type for event in reopened.read_range("natural-work-http")] == [
-        "chat.work.admitted", "chat.work.returned",
+        "chat.work.admitted", "user.message", "chat.work.returned", "model.response",
     ]
     assert [event.event_type for event in reopened.read_range(unnamed_ref)] == [
         "chat.work.admitted", "chat.work.returned",
     ]
     for session_name in ("unknown-work-http", "blank-work-http"):
         assert [event.event_type for event in reopened.read_range(session_name)] == [
-            "chat.work.admitted", "chat.work.unknown",
+            "chat.work.admitted", "user.message", "chat.work.unknown",
         ]
     assert "source_event_id" not in finished_work["result_receipt"]
     for session, reason in (

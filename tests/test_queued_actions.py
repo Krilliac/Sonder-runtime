@@ -60,7 +60,7 @@ def test_request_is_immutable_local_bounded_and_idempotent():
             "large", "noop", {"value": "x" * (queue.MAX_STRING_CHARS + 1)},
             proposed_by=queue.Actor.USER,
         )
-    assert "queued_actions.py" in package.REQUIRED_FILES
+    assert "runtime/queued_actions.py" in package.REQUIRED_FILES
     assert "migrations/queued_actions/0001_baseline.py" in package.REQUIRED_FILES
 
 

@@ -1137,12 +1137,10 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
                     usage["token_source"] = next_src
         return repaired
 
-    gated, verified, repaired = _apply_code_gate(
-        response,
-        interaction_id=iid,
-        regenerate=_repair,
-        allow_execution=_code_gate_allow_runtime_execution(),
-    )
+    _code_gate_kwargs = {"interaction_id": iid, "regenerate": _repair}
+    if _callable_accepts_keyword(_apply_code_gate, "allow_execution"):
+        _code_gate_kwargs["allow_execution"] = _code_gate_allow_runtime_execution()
+    gated, verified, repaired = _apply_code_gate(response, **_code_gate_kwargs)
     return gated, verified, repaired, usage
 
 
@@ -4007,9 +4005,9 @@ def control_command(prompt: str, history=None, session="", project="",
             return reasoning_board(action="audit")
         if raw.lower() == "clear":
             return reasoning_board(action="clear")
-        parts = [part.strip() for part in raw.split("|", 1)]
-        if parts[0].lower() in {"init", "add_fact", "add_hypothesis", "add_decision"} and len(parts) == 2:
-            return reasoning_board(action=parts[0].lower(), text=parts[1])
+        board_args = [part.strip() for part in raw.split("|", 1)]
+        if board_args[0].lower() in {"init", "add_fact", "add_hypothesis", "add_decision"} and len(board_args) == 2:
+            return reasoning_board(action=board_args[0].lower(), text=board_args[1])
         return reasoning_board(action="add_fact", text=raw)
     if cmd in ("/symcheck", "/symbol_verify"):
         parts = [part.strip() for part in arg.split("|", 1)]

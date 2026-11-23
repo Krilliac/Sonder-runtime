@@ -25,7 +25,7 @@ def test_available_tiers_uses_packaged_cloud_policy_directly():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     function = next(
         node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -43,7 +43,7 @@ def test_serve_target_uses_packaged_cloud_policy_directly():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     function = next(
         node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -61,7 +61,7 @@ def test_status_learning_and_improvement_surfaces_use_packaged_cloud_policy():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"status", "learn_tiers", "improvement_report_data"}
     functions = {
         node.name: node
@@ -83,7 +83,7 @@ def test_provider_offload_and_cache_paths_use_packaged_cloud_policy():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"_post_model", "_offload_impl", "_sonder_impl"}
     functions = {
         node.name: node
@@ -105,7 +105,7 @@ def test_admin_status_and_ensemble_target_paths_use_packaged_cloud_policy():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"admin_status", "_ensemble_targets"}
     functions = {
         node.name: node

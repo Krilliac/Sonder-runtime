@@ -532,12 +532,12 @@ def test_openai_compatible_gateway_omits_temperature_on_auto(options, sent):
     assert ("temperature" in payloads[0]) == (sent is not None)
 
 
-@pytest.mark.parametrize("path", ["eval_retrieval.py", "curriculum_run.py"])
+@pytest.mark.parametrize("path", ["scripts/eval_retrieval.py", "scripts/curriculum_run.py"])
 def test_eval_and_practice_calls_pin_their_temperature(path):
     # A/B and practice runs must not drift to the model preset.
     from pathlib import Path
 
-    source = Path(server.__file__).with_name(path).read_text(encoding="utf-8")
+    source = (Path(server.__file__).resolve().parents[1] / path).read_text(encoding="utf-8")
     assert "server.sonder(" in source
     for line in source.splitlines():
         if "server.sonder(" in line and not line.lstrip().startswith(("#", "*")):

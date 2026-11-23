@@ -112,8 +112,8 @@ OUTPUT_EXCERPT_CHARS = 2000
 # identity, so history recorded for a policy suite is pinned to the policy
 # that produced it, the way a model run is pinned to a manifest digest.
 POLICY_SOURCE_FILES = (
-    "permission_modes.py",
-    "permission_rules.py",
+    os.path.join("runtime", "permission_modes.py"),
+    os.path.join("runtime", "permission_rules.py"),
     os.path.join("sonder_runtime", "domain", "execution", "policy.py"),
     os.path.join("sonder_runtime", "adapters", "command_catalog.py"),
 )

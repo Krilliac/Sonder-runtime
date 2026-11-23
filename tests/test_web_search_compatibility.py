@@ -26,7 +26,7 @@ def test_root_formatter_delegates_to_packaged_owner(monkeypatch):
 
 
 def test_root_web_tools_no_longer_defines_search_algorithm():
-    source = Path("web_tools.py").read_text(encoding="utf-8")
+    source = Path("runtime/web_tools.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="web_tools.py")
     names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     assert "web_search" not in names

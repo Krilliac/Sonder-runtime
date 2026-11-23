@@ -248,7 +248,7 @@ def prepare_project(name: str, language: str, dimension: str, theme: str = "arca
 PYTHON_2D = r'''"""Sonder stdlib-only 2D arena. Run with --play for Tk controls."""
 import json, math, pathlib, sys
 
-SCRIPT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPT_ROOT = pathlib.Path(__file__).resolve().parent
 ROOT = SCRIPT_ROOT if (SCRIPT_ROOT / "assets").is_dir() else pathlib.Path.cwd()
 ASSETS = ROOT / "assets"
 scene = json.loads((ASSETS / "scene.json").read_text(encoding="utf-8"))

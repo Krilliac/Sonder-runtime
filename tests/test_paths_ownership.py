@@ -26,7 +26,7 @@ def test_root_paths_is_the_packaged_module_identity():
 
 
 def test_root_paths_is_only_a_compatibility_alias():
-    tree = ast.parse(Path("sonder_paths.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("runtime/sonder_paths.py").read_text(encoding="utf-8"))
     assert not [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
 
 

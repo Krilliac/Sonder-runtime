@@ -883,7 +883,7 @@ def test_real_stdio_session_hot_adds_updates_removes_and_fails_closed(
             command=sys.executable,
             args=[str(server_path)],
             cwd=str(tmp_path),
-            env={**os.environ, "PYTHONPATH": repo_root},
+            env={**os.environ, "PYTHONPATH": os.path.join(repo_root, "runtime") + os.pathsep + repo_root},
         )
         async with stdio_client(params) as (read_stream, write_stream):
             async with ClientSession(

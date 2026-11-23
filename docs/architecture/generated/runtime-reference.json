@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "060616f89213787280ca485531ff3de59f3ebd70cf503c1f51b3ed4cd8d12eb1",
+    "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "060616f89213787280ca485531ff3de59f3ebd70cf503c1f51b3ed4cd8d12eb1",
+      "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -9795,7 +9795,7 @@
       "aliases": [
         "/model3d"
       ],
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/3d",
       "native": true,
       "params": [],
@@ -14532,7 +14532,7 @@
     },
     {
       "aliases": [],
-      "category": "assets",
+      "category": "creative",
       "name": "/generate_3d_model",
       "native": false,
       "params": [
@@ -14597,7 +14597,7 @@
     },
     {
       "aliases": [],
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/gif",
       "native": true,
       "params": [],
@@ -15068,7 +15068,7 @@
     },
     {
       "aliases": [],
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/img",
       "native": true,
       "params": [],
@@ -23430,7 +23430,7 @@
     "schemas": 4,
     "tools": 270
   },
-  "digest": "ba567be04e7e4bff7c3ef826d989feb630093cb25253509c312263e8594ea114",
+  "digest": "42aab3d9c70de56a44ff47bba9098d756a0f184b44852d4ddf62add6aa1a909e",
   "events": [
     {
       "name": "session.started",
@@ -26887,9 +26887,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "060616f89213787280ca485531ff3de59f3ebd70cf503c1f51b3ed4cd8d12eb1",
+    "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
     "client": {
-      "digest": "060616f89213787280ca485531ff3de59f3ebd70cf503c1f51b3ed4cd8d12eb1",
+      "digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
       "events": [
         {
           "name": "approval.denied",
@@ -59701,7 +59701,7 @@
   },
   "sources": {
     "runtime/command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "runtime/server.py": "bd46a046f11e80a8508a9a7131eda192ceef448358a79e0d32d69f5f36db760d",
+    "runtime/server.py": "56a9f105bb03d93282f57898849e8a7e82a3093092732c28255ecda6c352c335",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "663e3420a48810b9943316ca6cc779c4a231f81bfdd0822161f1f70d458efc9c",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",

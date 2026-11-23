@@ -363,7 +363,7 @@ def test_tool_contract_ships_in_the_packaged_payload():
     way tool_capabilities.py already is."""
     from scripts import package_local_system as package
 
-    assert "tool_contract.py" in package.REQUIRED_FILES
+    assert "runtime/tool_contract.py" in package.REQUIRED_FILES
 
 
 def test_the_served_authority_gate_keeps_the_typed_contract_across_live_reloads(monkeypatch):
