@@ -114,6 +114,14 @@ def test_openai_compat_gateway_maps_off_to_enable_thinking_false():
 
     gw.generate(ModelRequest(prompt="hi", tier="code", options={"reasoning_effort": "off"}), ctx)
     gw.generate(ModelRequest(prompt="hi", tier="code", options={"reasoning_effort": "high"}), ctx)
+    gw.generate(
+        ModelRequest(
+            prompt="hi",
+            tier="code",
+            options={"reasoning_effort": "low", "chat_template_kwargs": {"enable_thinking": False}},
+        ),
+        ctx,
+    )
 
     assert captured[0]["chat_template_kwargs"] == {
         "reasoning_effort": "off",
@@ -121,6 +129,11 @@ def test_openai_compat_gateway_maps_off_to_enable_thinking_false():
     }
     assert captured[1]["chat_template_kwargs"] == {
         "reasoning_effort": "high",
+        "enable_thinking": True,
+    }
+    assert captured[2]["chat_template_kwargs"] == {
+        "reasoning_effort": "low",
+        "enable_thinking": False,
     }
 
 
