@@ -199,3 +199,48 @@ def test_session_list_route_is_admin_only(monkeypatch, sessions):
         status, _, _ = _request(port, "GET", "/v1/sessions/s-old/events",
                                 headers={"Authorization": "Bearer a"})
         assert status == 200
+
+
+def test_session_replay_resolves_principal_namespaced_client_id(monkeypatch, tmp_path):
+    from sonder_runtime.adapters.inference import served_tier_models
+
+    # Verify served_tier_models + served_prompt_model label openai_compatible tiers.
+    env = {
+        "SONDER_CODE_PROVIDER": "openai_compatible",
+        "SONDER_FAST_PROVIDER": "openai_compatible",
+        "SONDER_OPENAI_BASE_URL": "http://127.0.0.1:18080",
+        "SONDER_OPENAI_MODEL": "bonsai-27b-pq2",
+        "SONDER_OPENAI_TIER_MODELS": "fast=bonsai-9b-mtp,code=bonsai-27b-pq2",
+    }
+    labeled = served_tier_models.served_tier_models({"code": "legacy-code", "fast": "legacy-fast"}, env=env)
+    assert labeled["code"] == "bonsai-27b-pq2 (openai_compatible)"
+    assert labeled["fast"] == "bonsai-9b-mtp (openai_compatible)"
+    assert served_tier_models.served_prompt_model("legacy-code", "code", "openai_compatible", env=env) == "bonsai-27b-pq2"
+
+    # Verify /v1/sessions/<client-id>/replay falls back to the caller's namespaced storage id.
+    repo = SQLiteSessionRepository(tmp_path / "sessions-replay.db")
+    facade = HttpSessionFacade(repo)
+    monkeypatch.setattr(ts, "API_KEY", "owner-key")
+    monkeypatch.setattr(ts, "AUTH_MODE", "api-key")
+    monkeypatch.setattr(ts, "REQUIRE_ACCOUNT", False)
+    monkeypatch.setattr(ts.Handler, "_auth_rate_limited", lambda self: False)
+    monkeypatch.setattr(ts, "_SESSION_FACADE", facade)
+
+    client_id = "chat-1795432417888772"
+    ctx = {"authorized": True, "mode": "api-key", "api_key": True, "account": None}
+    scoped_id = ts._hosted_storage_id(ctx, client_id, "session")
+    assert scoped_id.startswith("http-session-")
+    repo.append(scoped_id, "user.message", {"content": "show me something cool", "turn_id": "t1"})
+    repo.append(scoped_id, "model.response", {"content": "hello heart", "turn_id": "t1"})
+
+    with _http_server(monkeypatch) as port:
+        status, _, payload = _request(
+            port, "GET", f"/v1/sessions/{client_id}/replay",
+            headers={"Authorization": "Bearer owner-key"},
+        )
+        assert status == 200, payload
+        body = json.loads(payload)
+        assert body["session_id"] == scoped_id
+        assert body["recovered_sequence"] == 2
+        assert len(body["transcript"]) == 2
+        assert body["transcript"][0]["content"] == "show me something cool"

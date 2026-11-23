@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+import os
 from typing import TYPE_CHECKING
 
 from ..provider_bindings import provider_bindings_from_env
@@ -44,6 +45,19 @@ def record_served_model(tier: str, model: str, provider: str) -> None:
         observed[str(tier)] = "%s (%s)" % (model, provider)
 
 
+def _openai_compat_model_for_tier(
+    tier: str, env: Mapping[str, str] | None = None,
+) -> str:
+    from .openai_compat_gateway import ENV_TIER_MODELS, parse_tier_models
+
+    source = os.environ if env is None else env
+    tier_map = parse_tier_models(source.get(ENV_TIER_MODELS))
+    key = str(tier or "").strip().lower()
+    if key and key in tier_map:
+        return tier_map[key]
+    return str(source.get("SONDER_OPENAI_MODEL") or "").strip()
+
+
 def served_prompt_model(
     model: str, tier: object, provider: object, env: Mapping[str, str] | None = None,
 ) -> str:
@@ -70,6 +84,12 @@ def served_prompt_model(
         except Exception:
             return model
         return str(served or "").strip() or model
+    if provider == "openai_compatible":
+        try:
+            served = _openai_compat_model_for_tier(str(tier or ""), env)
+        except Exception:
+            return model
+        return served or model
     if provider != "sonder_inference":
         return model
     try:
@@ -122,6 +142,15 @@ def served_tier_models(
             claude = anthropic_config(env)
             for name in claude_tiers:
                 served[name] = "%s (anthropic)" % claude.model_for_tier(name)
+        oai_tiers = [
+            name for name, provider in bindings.tier_providers.items()
+            if provider == "openai_compatible"
+        ]
+        if oai_tiers:
+            for name in oai_tiers:
+                routed = _openai_compat_model_for_tier(name, env)
+                if routed:
+                    served[name] = "%s (openai_compatible)" % routed
     except Exception:
         served = dict(tiers)
     observed = _OBSERVED.get()
