@@ -320,3 +320,38 @@ python -m sonder_runtime doctor
 | Web UI does not reflect a fresh `flutter build web` | `:11435` serves `<sonder-home>/web_app/releases/<current>` via `current.json` | Copy `app/build/web/*` into a new release folder and update `current.json` |
 | Primary GPU VRAM contention after vision calls | Ollama kept the vision model resident alongside `llama-server` | Unload the vision model (`ollama stop <vision-model>`) after vision tasks |
 | Port conflict on `:11439` | Client Companion already owns `11439` | Run the image server on `11440` (or another free loopback port) |
+
+---
+
+## 7. Security Models and Tool-Lane Policy
+
+By default, the shipped `security-advisers` floor in `sonder_runtime/adapters/data/model_tool_policy.json` keeps security-tuned / red-team adviser models (such as `astra-cyber-*`) chat-only and prevents them from driving tool-using lanes or binding to a tier.
+
+If you want a security model to inspect code or drive tools in your own environment, choose one of two explicit opt-ins:
+
+### Option A — Read-Only Project Tools via Operator Overlay (Recommended)
+
+Keep the `security-advisers` floor intact and grant only read-only workspace inspection tools from the shipped `restricted_tool_ceiling` (`text_search`, `repository_symbol_index`, `file_read_range`, `directory_tree`, `context_pack`) in `agent` / `workbench_agent` lanes via the console editor:
+
+```text
+/runtime tools allow astra-cyber-* text_search agent
+/runtime tools allow astra-cyber-* file_read_range agent
+/runtime tools allow astra-cyber-* directory_tree agent
+```
+
+Write/shell tools remain blocked and secret path globs stay enforced.
+
+### Option B — Full Tool Access via Explicit Host Opt-In (Intentionally Weakens Model-Name Floor)
+
+To allow security models to bind to the optional `security` tier (`SONDER_SECURITY=<model>`) and drive Sonder's full tool set, set the exact acknowledgement value in the **host process environment** before starting Sonder:
+
+```bash
+export SONDER_ALLOW_SECURITY_MODEL_TOOLS="I_ACCEPT_SECURITY_MODEL_TOOL_RISK"
+export SONDER_SECURITY="<security-model>"
+```
+
+**Guardrails that remain in force:**
+- **Off by default and fail-closed:** Unset values and casual truthy shorthand (`1`, `true`, `yes`) are rejected and logged; only the exact acknowledgement string activates relaxation.
+- **Host-environment only:** Cannot be set from `runtime_policy.json`, HTTP APIs, MCP tools, or chat.
+- **Narrow scope:** Relaxes *only* the shipped `security-advisers` model-name floor. Permission modes (`manual`/`auto`), approval prompts, workspace containment, secret redaction, shipped policy SHA-256 tamper pinning, `undetermined_served_models`, other shipped floors, and any explicit operator overlay denials all remain enforced.
+- **Never silent:** Logs a `WARNING` at activation and displays an explicit `WARNING` line in `/runtime status` and `/runtime tools`.
