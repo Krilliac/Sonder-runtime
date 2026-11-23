@@ -368,7 +368,7 @@ def test_thin_client_documentation_matches_its_checkout_dependency(tmp_path):
         if key != "PYTHONPATH" and not key.startswith("SONDER_")
     }
     lone = tmp_path / "sonder_client.py"
-    shutil.copy2(ROOT / "sonder_client.py", lone)
+    shutil.copy2(ROOT / "runtime" / "sonder_client.py", lone)
     alone = subprocess.run(
         [sys.executable, "-S", "-E", str(lone), "--help"],
         cwd=tmp_path, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
@@ -376,7 +376,7 @@ def test_thin_client_documentation_matches_its_checkout_dependency(tmp_path):
     assert alone.returncode != 0
     assert "No module named 'sonder_runtime'" in alone.stderr
     in_checkout = subprocess.run(
-        [sys.executable, "-S", "-E", str(ROOT / "sonder_client.py"), "--help"],
+        [sys.executable, "-S", "-E", str(ROOT / "runtime" / "sonder_client.py"), "--help"],
         cwd=ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
     )
     # With no SONDER_SERVER the client prints usage and exits 1: it imported fine.

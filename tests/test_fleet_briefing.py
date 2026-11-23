@@ -15,7 +15,7 @@ from sonder_runtime.domain import fleet_briefing
 @pytest.fixture
 def server(monkeypatch):
     """Exercise the real entry function with inert host boundaries (no server startup)."""
-    source = Path(__file__).resolve().parents[1] / "server.py"
+    source = Path(__file__).resolve().parents[1] / "runtime" / "server.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
     entry = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name == "master_orchestrate")

@@ -20,7 +20,7 @@ import grounding
 import import_autofix
 import solver
 
-PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe")
+PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "venv", "Scripts", "python.exe")
 
 _PYGAME_TEST_INSTRUCTION = (
     "Write a COMPLETE, runnable, single-file Python program. Return ONLY the code "

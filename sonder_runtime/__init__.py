@@ -9,9 +9,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# The runtime is still a flat repository-root monolith (SPEC-3 moves it
-# into packages).  Make the repository root importable when the package is
-# executed from an installed or nested location.
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# Make the repository root and its legacy ``runtime/`` and ``scripts/`` module
+# directories importable when the package is executed from any working dir.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+for _path in (
+    str(_REPO_ROOT / "scripts"),
+    str(_REPO_ROOT / "runtime"),
+    str(_REPO_ROOT),
+):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)

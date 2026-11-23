@@ -87,8 +87,8 @@ def scratch(monkeypatch, tmp_path):
 
     root = tmp_path / "repo"
     root.mkdir()
-    shutil.copy2(REPO_ROOT / "selfmod.py", root / "selfmod.py")
-    shutil.copy2(REPO_ROOT / "selfmod_recover.py", root / "selfmod_recover.py")
+    shutil.copy2(REPO_ROOT / "runtime" / "selfmod.py", root / "selfmod.py")
+    shutil.copy2(REPO_ROOT / "runtime" / "selfmod_recover.py", root / "selfmod_recover.py")
     (root / "server.py").write_text(SERVER_STUB, encoding="utf-8")
     _git(root, "init", "--initial-branch=main")
     _git(root, "config", "user.email", "selfmod@test.invalid")

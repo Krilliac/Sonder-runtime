@@ -15,7 +15,7 @@ Issue = collections.namedtuple("Issue", ["code", "target", "detail", "repairable
 
 
 def workspace_root():
-    return os.path.abspath(os.path.dirname(__file__))
+    return os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
 
 def _backup_file(path):

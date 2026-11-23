@@ -76,7 +76,7 @@ it is derived from your own coding interactions). Get it onto this GPU box, e.g.
 from your local machine:
 
   # regenerate it locally first if needed:
-  python export_training_data.py
+  python scripts/export_training_data.py
   # then upload it to this box:
   scp training_data.jsonl user@THIS_BOX_IP:PATH/Sonder-runtime/
 
@@ -95,7 +95,7 @@ echo "== 4/5 QLoRA fine-tune (this is the long part) =="
 export SONDER_DATA="$HERE/training_data.jsonl"
 export SONDER_LORA_OUT="$OUTPUT_ROOT"
 export SONDER_TRAINING_STATE="$TRAINING_STATE"
-python adaptive_training.py start --confirm --model "$MODEL_SIZE" \
+python runtime/adaptive_training.py start --confirm --model "$MODEL_SIZE" \
   --gpu-index "${SONDER_TRAIN_GPU_INDEX:-0}"
 ADAPTER_DIR="$(python - "$TRAINING_STATE" <<'PY'
 import json

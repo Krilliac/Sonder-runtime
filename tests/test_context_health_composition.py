@@ -23,7 +23,7 @@ def test_context_health_application_is_root_free_and_port_driven():
 
 
 def test_server_keeps_the_legacy_route_and_delegates_snapshot_computation():
-    source = (ROOT / "server.py").read_text(encoding="utf-8")
+    source = (ROOT / "runtime" / "server.py").read_text(encoding="utf-8")
     start = source.index("def context_health_data(")
     end = source.index("\ndef context_health(", start)
     slice_source = source[start:end]

@@ -98,7 +98,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # The real server source, for binding call arguments to entry-point
 # parameters even when REPO_ROOT points at synthetic sources.
-_SERVER_SOURCE = REPO_ROOT / "server.py"
+_SERVER_SOURCE = REPO_ROOT / "runtime" / "server.py"
 
 CHOKE_POINTS = (
     "_post_model",

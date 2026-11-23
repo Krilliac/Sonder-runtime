@@ -6,4 +6,4 @@ if [ -z "${SONDER_PYTHON:-}" ]; then
   echo "[sonder] ERROR: no bundled or system Python runtime was found." >&2
   exit 3
 fi
-exec "$SONDER_PYTHON" "$SCRIPT_DIR/sonder_headless.py" "$@"
+exec "$SONDER_PYTHON" "$SCRIPT_DIR/runtime/sonder_headless.py" "$@"

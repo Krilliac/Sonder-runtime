@@ -63,7 +63,7 @@ PROBE_ENTRY_POINTS = {
 
 
 def _production_sources():
-    files = [ROOT / "server.py", ROOT / "tier_router.py", ROOT / "sonder_doctor.py"]
+    files = [ROOT / "runtime" / "server.py", ROOT / "runtime" / "tier_router.py", ROOT / "runtime" / "sonder_doctor.py"]
     files += sorted((ROOT / "sonder_runtime").rglob("*.py"))
     return {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in files}
 
@@ -75,7 +75,7 @@ def test_probe_entry_points_are_reached_only_from_the_enumerated_paths(pattern):
 
 
 def test_server_calls_the_context_fit_plan_once_on_the_chat_loop_only():
-    text = (ROOT / "server.py").read_text(encoding="utf-8")
+    text = (ROOT / "runtime" / "server.py").read_text(encoding="utf-8")
     assert len(re.findall(r"_overflow_route\.plan\(", text)) == 1
     start = text.index("def _answer_with_history_impl(")
     end = text.index("\ndef ", start + 1)

@@ -49,9 +49,9 @@ if not defined SONDER_BOOT_LOG (
 
 if /I not "%SONDER_TERMINAL_BOOTSTRAP%"=="0" (
   if /I "%SONDER_TERMINAL_VERBOSE%"=="1" (
-    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
+    "%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" engine
   ) else (
-    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine >"%SONDER_BOOT_LOG%" 2>&1
+    "%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" engine >"%SONDER_BOOT_LOG%" 2>&1
   )
   if errorlevel 1 (
     echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
@@ -62,9 +62,9 @@ if /I not "%SONDER_TERMINAL_BOOTSTRAP%"=="0" (
 
 if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
   if /I "%SONDER_TERMINAL_VERBOSE%"=="1" (
-    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%"
+    "%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%"
   ) else (
-    "%SONDER_PYTHON%" "%REPO%sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%" >"%SONDER_BOOT_LOG%" 2>&1
+    "%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" start --host "%SONDER_HOST%" --port "%SONDER_PORT%" --context-size "%SONDER_CONTEXT_SIZE%" >"%SONDER_BOOT_LOG%" 2>&1
     if errorlevel 1 (
       findstr /C:"sonder: already listening" "%SONDER_BOOT_LOG%" >nul 2>&1
       if not errorlevel 1 (
@@ -74,7 +74,7 @@ if /I not "%SONDER_TERMINAL_START_SERVER%"=="0" (
         rem after the headless readiness return. Re-probe now instead of trusting
         rem an older status block in the failed startup log: the child could
         rem also have exited after that earlier observation.
-        "%SONDER_PYTHON%" "%REPO%sonder_headless.py" status --host "%SONDER_HOST%" --port "%SONDER_PORT%" | findstr /C:"sonder api: listening on" >nul
+        "%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" status --host "%SONDER_HOST%" --port "%SONDER_PORT%" | findstr /C:"sonder api: listening on" >nul
         if not errorlevel 1 (
           echo [sonder] NOTE: local API server became ready after the startup probe.
         ) else (
@@ -93,7 +93,7 @@ if defined SONDER_BOOT_LOG_GENERATED if exist "%SONDER_BOOT_LOG%" del /q "%SONDE
 
 if defined SONDER_SERVER (
   if /I not "%SONDER_TERMINAL_REMOTE%"=="0" (
-    "%SONDER_PYTHON%" "%REPO%sonder_client.py" %*
+    "%SONDER_PYTHON%" "%REPO%runtime\sonder_client.py" %*
     endlocal
     exit /b %ERRORLEVEL%
   )

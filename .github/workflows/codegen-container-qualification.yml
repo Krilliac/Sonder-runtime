@@ -45,7 +45,7 @@ jobs:
           docker build --pull=false --no-cache -t sonder-codegen-qualification:local "$RUNNER_TEMP/codegen-image"
           image_id=$(docker image inspect --format '{{.Id}}' sonder-codegen-qualification:local)
           [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]
-          # Root conftest.py clears SONDER_* deployment inputs before test
+          # Root tests/_hermetic_plugin.py clears SONDER_* deployment inputs before test
           # collection. Pass this CI-built fixture identifier via a test-only
           # key so collection still proves all four native probes ran.
           echo "CODEGEN_NATIVE_IMAGE_ID=$image_id" >> "$GITHUB_ENV"

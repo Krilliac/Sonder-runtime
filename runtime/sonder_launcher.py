@@ -6,6 +6,12 @@ arbitrary arguments from clients.
 """
 from __future__ import annotations
 
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
 import argparse
 import errno
 import hashlib
@@ -64,7 +70,7 @@ from sonder_runtime.interfaces.http.host_policy import (
 )
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11436
 DEFAULT_SERVER_HOST = "127.0.0.1"

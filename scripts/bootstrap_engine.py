@@ -6,6 +6,12 @@ strictly offline setup. Both paths create the stable ``sonder:latest`` alias.
 """
 from __future__ import annotations
 
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
 import argparse
 import os
 import platform
@@ -40,7 +46,7 @@ def __getattr__(name):
 _LIST_KEYS = {'MODEL_SMALL': 'bootstrap_models.small', 'MODEL_MEDIUM': 'bootstrap_models.medium', 'MODEL_LARGE': 'bootstrap_models.large'}
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_REQUIREMENTS_NAME = "requirements-runtime.txt"
 MCPSERVER_IMPORT_PROBE = (
     "from mcp.server.mcpserver import MCPServer; "
@@ -447,7 +453,7 @@ def main(argv=None):
     process_env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
     command = [
         str(python_executable),
-        str(ROOT / "setup_alias.py"),
+        str(ROOT / "scripts" / "setup_alias.py"),
         "--model",
         model,
         "--embed-model",

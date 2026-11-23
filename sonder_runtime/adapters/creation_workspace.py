@@ -98,7 +98,9 @@ def _under_source_checkout(path: Path, source_root: Path | None) -> bool:
         if not (root / ".git").exists():
             continue
         if source_root is None and not (
-            (root / "sonder_runtime").is_dir() or (root / "server.py").is_file()
+            (root / "sonder_runtime").is_dir()
+        or (root / "runtime" / "server.py").is_file()
+        or (root / "server.py").is_file()
         ):
             continue
         if _is_within(path, root):

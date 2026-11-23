@@ -10,7 +10,7 @@ if not defined SONDER_PYTHON (
   echo [sonder] ERROR: no bundled or system Python runtime was found.
   endlocal & exit /b 3
 )
-"%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
+"%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" engine
 if errorlevel 1 (
   echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
   endlocal & exit /b 2

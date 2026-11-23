@@ -31,7 +31,7 @@ def test_actual_inference_response_keeps_finish_evidence_across_provider_bridge(
 
 def _host_functions(names, scope):
     """Run production host functions with inert model/storage boundaries."""
-    path = Path(__file__).resolve().parents[1] / "server.py"
+    path = Path(__file__).resolve().parents[1] / "runtime" / "server.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     for node in nodes:

@@ -41,7 +41,7 @@ MAX_ARCHIVE_ENTRIES = 20_000
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ENTRY_BYTES = 512 * 1024 * 1024
 REQUIRED_SYSTEM_FILES = frozenset({
-    "LICENSE", "sonder_build.json", "server.py", "bootstrap-engine.sh",
+    "LICENSE", "sonder_build.json", "runtime/server.py", "bootstrap-engine.sh",
     "bootstrap-engine.cmd", "requirements-runtime.txt",
 })
 

@@ -211,7 +211,7 @@ def _server_callers(tiers, source, replies):
         # The real tool-lane check, on a default policy: an ordinary tier is not refused.
         "_tool_lane_guard": tool_lane_guard, "_RUNTIME_POLICY": runtime_policy.default_policy({}),
     }
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name in {"route_request", "improve_function"}]
     for node in functions:

@@ -80,149 +80,19 @@ ROOT_LEGACY_MODULE_LIMIT = 1
 # file to this set is a reviewed exception, not an accidental convenience.
 # This is the counterpart of RETIRED_ROOT_MODULES: retired entries must stay
 # removed, and new entries must be explicitly added here.
-ROOT_MODULE_ALLOWLIST = frozenset({
-    "adaptive_training.py",
-    "admin_auth.py",
-    "archive_create.py",
-    "artifact_grounding.py",
-    "assetgen.py",
-    "autopilot_controller.py",
-    "autopilot_store.py",
-    "bootstrap_engine.py",
-    "build_personal_dataset.py",
-    "calibration.py",
-    "code_improve.py",
-    "code_runner.py",
-    "codegen_loop.py",
-    "command_catalog.py",
-    "command_recovery.py",
-    "command_registry.py",
-    "command_router.py",
-    "compiler_cache.py",
-    "composition.py",
-    "conftest.py",
-    "consult.py",
-    "context_policy.py",
-    "contribute.py",
-    "creative_router.py",
-    "curriculum_run.py",
-    "curriculum_store.py",
-    "data_convert.py",
-    "debug_dump.py",
-    "domain_grounding.py",
-    "durable_locks.py",
-    "emotion_vectors.py",
-    "endless_train.py",
-    "engine_bundle.py",
-    "environment_probe.py",
-    "eval_duel.py",
-    "eval_harness.py",
-    "eval_models.py",
-    "eval_retrieval.py",
-    "eval_solver.py",
-    "export_lessons.py",
-    "export_training_data.py",
-    "fanout_prompt_vault.py",
-    "fanout_store.py",
-    "feedback.py",
-    "fleet_provenance.py",
-    "fleet_store.py",
-    "game_forge.py",
-    "game_ladder.py",
-    "git_history.py",
-    "git_tools.py",
-    "goal_store.py",
-    "grounded_extraction.py",
-    "grounded_outcomes.py",
-    "grounding.py",
-    "harness_tools.py",
-    "import_autofix.py",
-    "intents.py",
-    "isolated_runner.py",
-    "json_patch_tool.py",
-    "json_schema_verifier.py",
-    "learning_health.py",
-    "lesson_decay.py",
-    "lesson_pruner.py",
-    "local_service_probe.py",
-    "master_orchestrator.py",
-    "media_assets.py",
-    "memory_quality.py",
-    "memory_store.py",
-    "model_assets.py",
-    "node_verifier.py",
-    "ollama_lifecycle.py",
-    "ooxml_assets.py",
-    "orchestrator.py",
-    "permission_modes.py",
-    "permission_rules.py",
-    "personas.py",
-    "preference_learning.py",
-    "project_scaffold.py",
-    "promotion_eval.py",
-    "pull_community.py",
-    "qlora_train.py",
-    "queued_actions.py",
-    "refinement_transactions.py",
-    "reflection.py",
-    "reloadable_mcp.py",
-    "request_cache.py",
-    "retriever.py",
-    "ruff_verifier.py",
-    "safe_update.py",
-    "seed_merge.py",
-    "self_curriculum.py",
-    "self_heal.py",
-    "selfmod.py",
-    "selfmod_recover.py",
-    "served_action_receipts.py",
-    "server.py",
-    "setup_alias.py",
-    "slash_menu.py",
-    "solver.py",
-    "sonder_client.py",
-    "sonder_config.py",
-    "sonder_doctor.py",
-    "sonder_hardware.py",
-    "sonder_headless.py",
-    "sonder_health.py",
-    "sonder_launcher.py",
-    "sonder_logging.py",
-    "sonder_paths.py",
-    "sonder_service_state.py",
-    "sonder_shutdown.py",
-    "sonder_speculation.py",
-    "sonder_version.py",
-    "sql_verifier.py",
-    "sqlite_mutate.py",
-    "store_integrity.py",
-    "summarizer.py",
-    "symbol_index.py",
-    "system_profile.py",
-    "tier_router.py",
-    "tool_capabilities.py",
-    "tool_contract.py",
-    "toolchain_status.py",
-    "training_data.py",
-    "training_tasks.py",
-    "tune_min_sim.py",
-    "unsafe_lab.py",
-    "verifiers.py",
-    "web_intents.py",
-    "web_tools.py",
-})
-# Shrink-only ratchet: the count of root .py files must not grow beyond this
-# baseline.  Removing a root module is always allowed; adding one requires
-# both an architecture-policy review and an explicit allowlist entry above.
-ROOT_MODULE_ALLOWLIST_LIMIT = 129
+# All legacy Python modules have been relocated out of the repository root into
+# ``runtime/``, ``scripts/``, and ``tests/``. Keep the shrink-only ratchet at 0
+# so stray Python files cannot creep back into the root directory.
+ROOT_MODULE_ALLOWLIST: frozenset[str] = frozenset()
+ROOT_MODULE_ALLOWLIST_LIMIT = 0
 
 WEB_SEARCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_search"
-WEB_SEARCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEB_SEARCH_COMPATIBILITY_ROOT = Path("runtime/web_tools.py")
 WEB_FETCH_CANONICAL_MODULE = "sonder_runtime.adapters.web_fetch"
-WEB_FETCH_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEB_FETCH_COMPATIBILITY_ROOT = Path("runtime/web_tools.py")
 WEATHER_CANONICAL_MODULE = "sonder_runtime.adapters.weather"
 LOCATION_CANONICAL_MODULE = "sonder_runtime.adapters.location"
-WEATHER_LOCATION_COMPATIBILITY_ROOT = Path("web_tools.py")
+WEATHER_LOCATION_COMPATIBILITY_ROOT = Path("runtime/web_tools.py")
 
 LAYERS = ("domain", "application", "adapters", "interfaces", "platform", "bootstrap")
 
@@ -250,16 +120,16 @@ ALLOWED_ROOT_IMPORTS = {
 IO_MODULES = {"urllib", "socket", "http", "ftplib", "smtplib"}
 
 COMPATIBILITY_ROOT_MODULES = {
-    "archive_create": Path("archive_create.py"),
-    "artifact_grounding": Path("artifact_grounding.py"),
-    "code_runner": Path("code_runner.py"),
-    "command_catalog": Path("command_catalog.py"),
-    "fanout_store": Path("fanout_store.py"),
-    "learning_health": Path("learning_health.py"),
-    "memory_store": Path("memory_store.py"),
-    "autopilot_store": Path("autopilot_store.py"),
-    "fleet_store": Path("fleet_store.py"),
-    "queued_actions": Path("queued_actions.py"),
+    "archive_create": Path("runtime/archive_create.py"),
+    "artifact_grounding": Path("runtime/artifact_grounding.py"),
+    "code_runner": Path("runtime/code_runner.py"),
+    "command_catalog": Path("runtime/command_catalog.py"),
+    "fanout_store": Path("runtime/fanout_store.py"),
+    "learning_health": Path("runtime/learning_health.py"),
+    "memory_store": Path("runtime/memory_store.py"),
+    "autopilot_store": Path("runtime/autopilot_store.py"),
+    "fleet_store": Path("runtime/fleet_store.py"),
+    "queued_actions": Path("runtime/queued_actions.py"),
 }
 
 # Root modules removed by completed strangler slices must stay removed.  This
@@ -416,18 +286,18 @@ def retired_module_violations(
 # import that production code has since moved behind a compatibility adapter;
 # rewriting one would invalidate its recorded checksum on deployed systems.
 COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS = {
-    "learning_health": frozenset({Path("server.py")}),
+    "learning_health": frozenset({Path("runtime/server.py")}),
     # These legacy root consumers are intentionally unchanged in the
     # command-catalog packaging slice.  They are the reverse edges that
     # motivated the catalog's lazy command_registry/permission_modes imports;
     # a later caller migration can remove these exceptions without changing
     # the canonical adapter again.
     "command_catalog": frozenset({
-        Path("command_registry.py"),
-        Path("command_router.py"),
-        Path("permission_modes.py"),
-        Path("reloadable_mcp.py"),
-        Path("slash_menu.py"),
+        Path("runtime/command_registry.py"),
+        Path("runtime/command_router.py"),
+        Path("runtime/permission_modes.py"),
+        Path("runtime/reloadable_mcp.py"),
+        Path("runtime/slash_menu.py"),
     }),
     "memory_store": frozenset({Path("migrations/memory/0001_baseline.py")}),
     "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),

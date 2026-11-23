@@ -9,4 +9,4 @@ fi
 : "${SONDER_LAUNCHER_HOST:=127.0.0.1}"
 : "${SONDER_LAUNCHER_PORT:=11436}"
 export SONDER_LAUNCHER_HOST SONDER_LAUNCHER_PORT
-exec "$SONDER_PYTHON" "$ROOT/sonder_launcher.py" "$@"
+exec "$SONDER_PYTHON" "$ROOT/runtime/sonder_launcher.py" "$@"
