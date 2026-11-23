@@ -443,7 +443,7 @@ class ChatController extends ChangeNotifier {
     if (messages.isEmpty) return 0;
     var chars = 0;
     for (final m in messages) {
-      chars += m.content.length + 16;
+      chars += ChatMessage.stripInlineDataImages(m.content).length + 16;
     }
     return (chars + 3) ~/ 4;
   }

@@ -49,6 +49,34 @@ _MAX_HTTP_IMAGE_RESPONSE_BYTES = 24 * 1024 * 1024
 _TAGS_PROBE_TIMEOUT_SECONDS = 1.8
 _DEFAULT_GENERATE_TIMEOUT_SECONDS = 180.0
 
+_MARKDOWN_DATA_IMAGE_RE = re.compile(
+    r"!\[([^\]]*)\]\(\s*data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+\)",
+    re.I,
+)
+_BARE_DATA_IMAGE_RE = re.compile(
+    r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+    re.I,
+)
+
+
+def strip_inline_data_images(text: str) -> str:
+    """Replace inline base64 ``data:image/`` payloads with a compact placeholder.
+
+    Inline data URIs can exceed 500 KB per generated image and must never be
+    counted as LLM context tokens or replayed verbatim into text-LLM history.
+    """
+    if not text or "data:image/" not in text:
+        return text or ""
+
+    def _replace_md(match: re.Match[str]) -> str:
+        alt = (match.group(1) or "").strip()
+        return f"[Generated image: {alt}]" if alt else "[Generated image]"
+
+    cleaned = _MARKDOWN_DATA_IMAGE_RE.sub(_replace_md, text)
+    if "data:image/" in cleaned:
+        cleaned = _BARE_DATA_IMAGE_RE.sub("[inline image]", cleaned)
+    return cleaned
+
 _IMAGE_MODEL_INCLUDE_RE = re.compile(
     r"(?:^|[/:_\-])("
     r"z-?image|flux(?:\d|[\-._]|$)|sdxl|stable[\-_ ]?diffusion|sd3(?:\.\d)?|"
