@@ -17,7 +17,7 @@ sonder commands · ### in ## groups
     chat          #    planning     ##
     context      ##    repo         ##
     creative     ##    runtime      ##
-    data          #    security     ##
+    data         ##    security     ##
     dev          ##    training      #
     diagnostics  ##    updates       #
     execution    ##    web           #
