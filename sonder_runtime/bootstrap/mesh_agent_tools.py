@@ -318,5 +318,51 @@ def register(mcp, record, runtime=None) -> None:
                 "output_dir": output_dir, "timeout": timeout}
         return run("mesh_generate", args, lambda: generate_mesh(rt=runtime() if callable(runtime) else None, **args))
 
+    @mcp.tool()
+    def generate_3d_model(prompt: str, image_path: str = "", texture: bool = True,
+                          steps: int = 5, octree_resolution: int = 256, face_count: int = 40000,
+                          seed: int = -1, file_format: str = "glb", timeout: int = 300) -> str:
+        """Generate a 3D model (.glb/.obj) from a text prompt or guarded local image using local Hunyuan3D-2, render a 2x2 studio preview in headless Blender, and return the model path, download URL, and inline preview markdown."""
+        from ..adapters import model3d_generation as _model3d
+
+        args = {
+            "prompt": prompt, "image_path": image_path, "texture": texture,
+            "steps": steps, "octree_resolution": octree_resolution,
+            "face_count": face_count, "seed": seed, "file_format": file_format, "timeout": timeout,
+        }
+
+        def _do():
+            res = _model3d.generate_chat_3d_model(
+                prompt,
+                image_path=image_path,
+                texture=texture,
+                steps=steps,
+                octree_resolution=octree_resolution,
+                face_count=face_count,
+                seed=None if seed < 0 else seed,
+                file_format=file_format,
+                timeout=timeout,
+            )
+            return {
+                "ok": True,
+                "model_id": res.model_id,
+                "backend": res.backend_kind,
+                "model_path": res.model_path,
+                "model_filename": res.model_filename,
+                "download_url": res.download_url,
+                "preview_path": res.preview_path,
+                "concept_path": res.concept_path,
+                "model_bytes": res.model_bytes,
+                "tris": res.tris,
+                "verts": res.verts,
+                "materials": res.materials,
+                "textured": res.textured,
+                "elapsed_seconds": round(res.elapsed_seconds, 2),
+                "note": res.note,
+                "markdown": res.markdown,
+            }
+
+        return run("generate_3d_model", args, _do)
+
 
 __all__ = ["generate_mesh", "register"]

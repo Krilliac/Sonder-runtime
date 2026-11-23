@@ -4634,6 +4634,19 @@ def main(*, machine_output=False):
                                 result.frame_count, result.byte_length, result.saved_path,
                             )
                         )
+                    elif cmd in ("/3d", "/model3d"):
+                        from sonder_runtime.adapters import model3d_generation as _model3d
+
+                        result = _model3d.generate_chat_3d_model(
+                            arg.strip() or "a stylized glowing lantern",
+                        )
+                        _emit(
+                            "generated 3D model via %s (%d tris, %d bytes): %s (preview: %s)"
+                            % (
+                                result.model_id, result.tris, result.model_bytes,
+                                result.model_path, result.preview_path or result.concept_path or "none",
+                            )
+                        )
                     elif cmd == "/stats":
                         _emit(server.sonder_stats())
                     elif cmd == "/context":

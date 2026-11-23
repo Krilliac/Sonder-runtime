@@ -121,6 +121,7 @@ from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.adapters import image_generation as _image_generation
+from sonder_runtime.adapters import model3d_generation as _model3d_generation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health, public_policy, thinking_controls as _thinking_controls
@@ -2464,7 +2465,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/game", "/gamegen", "/gamefleet", "/gamecampaign",
     "/activity", "/tools", "/work", "/agent", "/report", "/endreport",
     "/checklist", "/plan", "/inventory", "/workspace", "/tree", "/folders", "/search", "/grep",
-    "/programs", "/programfind", "/scripts", "/scriptfind", "/image", "/img", "/gif",
+    "/programs", "/programfind", "/scripts", "/scriptfind", "/image", "/img", "/gif", "/3d", "/model3d",
     "/inspectimage", "/doc", "/document_extract", "/media", "/media_inspect",
     "/loc", "/code_metrics", "/schema", "/schema_validate",
     "/languages", "/language_matrix", "/calc", "/math_eval",
@@ -3314,6 +3315,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/gif":
         gif_prompt = arg.strip() or "a random animated gif"
         return _image_generation.generate_chat_gif(gif_prompt).markdown
+    if cmd in ("/3d", "/model3d"):
+        model_prompt = arg.strip() or "a stylized glowing lantern"
+        return _model3d_generation.generate_chat_3d_model(model_prompt).markdown
     if cmd == "/stats":
         return server.sonder_stats()
     if cmd == "/version":
@@ -5887,6 +5891,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._auth_rate_limited():
             return
+        if path.startswith("/v1/generated-models/"):
+            filename = path[len("/v1/generated-models/"):]
+            query_params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            dl_ticket = (query_params.get("dl") or [""])[0]
+            ticket_ok = _model3d_generation.verify_model_download_ticket(filename, dl_ticket)
+            if not ticket_ok:
+                context = self._request_auth_context()
+                if not context["authorized"]:
+                    self._send_auth_error()
+                    return
+            resolved = _model3d_generation.resolve_generated_model_path(filename)
+            if resolved is None:
+                self._send_not_found()
+                return
+            raw_bytes = resolved.read_bytes()
+            ext = resolved.suffix.lower()
+            ctype = {
+                ".glb": "model/gltf-binary",
+                ".obj": "text/plain; charset=utf-8",
+                ".png": "image/png",
+            }.get(ext, "application/octet-stream")
+            self._send_binary_payload(
+                raw_bytes,
+                content_type=ctype,
+                digest=hashlib.sha256(raw_bytes).hexdigest(),
+                headers={
+                    "Content-Disposition": f'attachment; filename="{resolved.name}"',
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+            return
         if self._handle_agent_lane_request("GET", path):
             return
         if self._handle_build_request("GET", path):
@@ -7894,12 +7929,26 @@ class Handler(BaseHTTPRequestHandler):
                             allow_control_routes
                             or _model_to_tier(model) in ("general", "code", "fast", "creative")
                         )
-                        gif_prompt = (
-                            intents.classify_gif_generation(prompt)
-                            if (explicit_image_model or allow_media_route)
+                        model3d_prompt = (
+                            intents.classify_3d_model_generation(prompt)
+                            if allow_media_route
                             else None
                         )
-                        if gif_prompt:
+                        gif_prompt = (
+                            None
+                            if model3d_prompt
+                            else (
+                                intents.classify_gif_generation(prompt)
+                                if (explicit_image_model or allow_media_route)
+                                else None
+                            )
+                        )
+                        if model3d_prompt:
+                            m3d_result = _model3d_generation.generate_chat_3d_model(model3d_prompt)
+                            reply = m3d_result.markdown
+                            response_model = m3d_result.model_id
+                            response_tier = "3d"
+                        elif gif_prompt:
                             gif_result = _image_generation.generate_chat_gif(
                                 gif_prompt,
                                 model_override=model if explicit_image_model else "",
@@ -7946,6 +7995,17 @@ class Handler(BaseHTTPRequestHandler):
                         reply = ("Work outcome is unknown. Inspect the session receipt before retrying."
                                  if reply.status == "unknown" else reply.text or "Work was not started.")
                     if structured_schema is None and reply is not None:
+                        if isinstance(reply, str) and "(/v1/generated-models/" in reply:
+                            req_host = (self.headers.get("Host") or "").strip()
+                            if req_host:
+                                req_scheme = "https" if (
+                                    isinstance(self.connection, ssl.SSLSocket)
+                                    or bool(getattr(self.server, "tls_terminated_by_proxy", False))
+                                    or os.environ.get("SONDER_TLS_TERMINATED_BY_PROXY", "").strip().lower() in ("1", "true", "yes")
+                                ) else "http"
+                                reply = _model3d_generation.upgrade_markdown_download_links(
+                                    reply, origin=f"{req_scheme}://{req_host}",
+                                )
                         content = reply
                     elif structured_schema is None:
                         from sonder_runtime.platform.spanda_http import (

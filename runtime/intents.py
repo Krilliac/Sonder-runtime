@@ -704,3 +704,86 @@ def classify_gif_generation(text):
         return pre_subject
     return _GIF_DEFAULT_PROMPT
 
+
+_MODEL3D_SLASH_RE = re.compile(r"^/(?:3d|model3d)(?:\s+(?P<arg>.*))?$", re.I)
+_MODEL3D_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|make|render|produce|design|build|sculpt|craft|give|model)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?P<pre>(?:[^\s]+\s+){0,8}?)"
+    r"(?:(?:3d|3-d|hunyuan\s*3d)\s+(?:model|mesh|asset|object|figurine|prop|sculpture|glb|character|item)s?"
+    r"|hunyuan\s*3d|glb\s+(?:model|mesh|asset|file))\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_MODEL3D_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:three\.?js|webgl|webgpu|opengl|vulkan|directx|shader|glsl|hlsl|wgsl|"
+    r"unity\s+script|unreal\s+c\+\+|blender\s+python|bpy\b|raytrac(?:e|ing)|"
+    r"algorithm|pipeline\s+architecture|tutorial|snippet|class|function|library|"
+    r"viewer|loader|parser|serializer|exporter|importer|matrix|quaternion|"
+    r"explain|how\s+does|how\s+to|difference\s+between|compare|vs\.?|benchmark)\b",
+    re.I,
+)
+_MODEL3D_GENERIC_PRE_TOKENS = frozenset({
+    "a", "an", "the", "some", "one", "new", "cool", "nice", "fun", "detailed",
+    "custom", "simple", "quick", "high", "low", "poly", "low-poly", "high-poly",
+    "textured", "untextured", "printable", "realistic", "stylized", "game-ready",
+    "game", "ready", "using", "with", "via", "in",
+})
+_MODEL3D_DEFAULT_PROMPT = "a stylized glowing lantern"
+
+
+def classify_3d_model_generation(text):
+    """Return the 3D-model prompt when ``text`` asks directly for a 3D model / mesh.
+
+    Matches both ``/3d <prompt>`` / ``/model3d <prompt>`` and direct natural
+    requests such as ``"make me a 3d model of a medieval lantern"`` or
+    ``"generate a 3d mesh of a cute robot"``. Returns ``None`` for coding,
+    shader, engine, path, or explanatory questions.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600:
+        return None
+
+    slash_match = _MODEL3D_SLASH_RE.match(value)
+    if slash_match:
+        arg = (slash_match.group("arg") or "").strip()
+        return arg or _MODEL3D_DEFAULT_PROMPT
+    if value.startswith("/"):
+        return None
+
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if _PATH_LIKE_RE.search(value) or _MODEL3D_GEN_EXCLUDE_RE.search(lowered):
+        return None
+
+    match = _MODEL3D_GEN_LEAD_RE.match(value)
+    if not match:
+        return None
+
+    pre = (match.group("pre") or "").strip()
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+
+    pre_tokens = [tok for tok in pre.split() if tok.lower().strip(",;:") not in _MODEL3D_GENERIC_PRE_TOKENS]
+    pre_subject = " ".join(pre_tokens).strip(" ,;:-.!?")
+
+    rest_subject = rest.strip(" ,.!?")
+    rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+    if re.fullmatch(r"(?:for\s+(?:me|us)|please|(?:right\s+)?now)", rest_subject, re.I):
+        rest_subject = ""
+    else:
+        rest_subject = _GIF_REST_LEAD_RE.sub("", rest_subject).strip(" ,.!?")
+        rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+
+    if pre_subject and rest_subject:
+        return f"{pre_subject} {rest_subject}"
+    if rest_subject:
+        return rest_subject
+    if pre_subject:
+        return pre_subject
+    return _MODEL3D_DEFAULT_PROMPT
+
+
