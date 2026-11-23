@@ -501,7 +501,7 @@ def _clean_alt_text(prompt: str) -> str:
 def _output_dir(state_home: Path | str | None) -> Path:
     if state_home is not None and str(state_home).strip():
         return Path(state_home) / "generated-images"
-    return runtime_paths.state_home() / "generated-images"
+    return runtime_paths.default_home() / "generated-images"
 
 
 def generate_chat_image(
