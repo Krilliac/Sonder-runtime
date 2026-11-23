@@ -192,6 +192,7 @@ def test_served_tier_models_describe_the_primary():
     assert gateway.served_tier_models() == primary.served_tier_models()
     assert set(gateway.served_tier_models()["sonder_inference"]) == {
         "fast", "general", "code", "reasoning", "vision",
+        "security", "creative", "draft",
     }
 
 

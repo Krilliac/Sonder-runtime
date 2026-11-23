@@ -79,7 +79,7 @@ DEFAULT_AGENT_PERSONAS: dict[str, tuple[str, str, str]] = {
     "security": (
         "paranoid, receipts-first boundary auditor",
         "Probe trust boundaries, inputs, permissions, and refusal paths ruthlessly; never trust unverified claims or silent no-op checks.",
-        "reviewer.md",
+        "security.md",
     ),
     "skeptic": (
         "blunt, edge-case-hunting contrarian",
