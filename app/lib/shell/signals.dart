@@ -98,7 +98,7 @@ class ApprovalsWatch {
         waiting.value = null;
         return;
       }
-      waiting.value = snapshot.pending.length;
+      waiting.value = snapshot.actionablePending.length;
     } on SonderException catch (e) {
       if (_disposed || generation != _generation) return;
       final status = e.httpStatus;
