@@ -112,13 +112,31 @@ def generated_models_dir() -> Path:
 
 def resolve_generated_model_path(filename: str) -> Path | None:
     """Safely resolve a flat generated-model basename under ``generated_models_dir()``."""
-    if not is_safe_model_filename(filename):
+    safe_name = os.path.basename(str(filename or "").strip())
+    if not is_safe_model_filename(safe_name):
         return None
-    root = generated_models_dir().resolve()
-    candidate = (root / filename).resolve()
-    if candidate.parent != root or not candidate.is_file():
+    root = os.path.realpath(str(generated_models_dir()))
+    fullpath = os.path.normpath(os.path.join(root, safe_name))
+    if not fullpath.startswith(root + os.sep):
         return None
-    return candidate
+    if os.path.dirname(fullpath) != root or not os.path.isfile(fullpath):
+        return None
+    return Path(fullpath)
+
+
+def read_generated_model_bytes(filename: str) -> tuple[str, bytes] | None:
+    """Safely read a generated model file under ``generated_models_dir()``."""
+    safe_name = os.path.basename(str(filename or "").strip())
+    if not is_safe_model_filename(safe_name):
+        return None
+    root = os.path.realpath(str(generated_models_dir()))
+    fullpath = os.path.normpath(os.path.join(root, safe_name))
+    if not fullpath.startswith(root + os.sep):
+        return None
+    if os.path.dirname(fullpath) != root or not os.path.isfile(fullpath):
+        return None
+    with open(fullpath, "rb") as handle:
+        return safe_name, handle.read()
 
 
 def _validate_api_url(raw: str, *, label: str = "SONDER_3D_API_URL") -> str:

@@ -20,11 +20,7 @@ _NOTEX_FLAG_RE = re.compile(
     re.IGNORECASE,
 )
 _TEX_FLAG_RE = re.compile(r"(?:^|\s)(?:--tex(?:ture)?|textured)\b", re.IGNORECASE)
-_KV_OPTION_RE = re.compile(
-    r"(?:^|\s)(?:--)?(?P<key>image|steps|octree|faces|seed|format)\s*(?:=|\s+)\s*"
-    r"(?:\"([^\"]+)\"|'([^']+)'|(\S+))",
-    re.IGNORECASE,
-)
+_KV_OPTION_KEYS = frozenset({"image", "steps", "octree", "faces", "seed", "format"})
 
 
 @dataclass(frozen=True)
@@ -105,6 +101,80 @@ def _clamp_int(raw: str, low: int, high: int) -> int | None:
     return max(low, min(val, high))
 
 
+def _extract_kv_options_linear(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract ``key=value`` / ``--key value`` tokens in linear O(n) time."""
+    n = len(text)
+    i = 0
+    kept: list[str] = []
+    found: list[tuple[str, str]] = []
+
+    def _read_value(pos: int) -> tuple[str, int]:
+        if pos >= n:
+            return "", pos
+        quote = text[pos]
+        if quote in ('"', "'"):
+            end = text.find(quote, pos + 1)
+            if end > pos + 1:
+                return text[pos + 1 : end], end + 1
+            return "", pos
+        end = pos
+        while end < n and not text[end].isspace():
+            end += 1
+        return text[pos:end], end
+
+    while i < n:
+        if text[i].isspace():
+            kept.append(text[i])
+            i += 1
+            continue
+        tok_start = i
+        key_start = i + 2 if text[i : i + 2] == "--" else i
+        k = key_start
+        while k < n and text[k].isalpha():
+            k += 1
+        key = text[key_start:k].lower()
+        if key in _KV_OPTION_KEYS and (k == n or text[k] == "=" or text[k].isspace()):
+            sep = k
+            while sep < n and text[sep] in " \t":
+                sep += 1
+            has_eq = sep < n and text[sep] == "="
+            if has_eq:
+                val_pos = sep + 1
+                while val_pos < n and text[val_pos] in " \t":
+                    val_pos += 1
+                val, next_i = _read_value(val_pos)
+                if val:
+                    found.append((key, val))
+                    kept.append(" ")
+                    i = next_i
+                    continue
+            elif sep > k and sep < n:
+                val, next_i = _read_value(sep)
+                valid_bare = (
+                    (key in ("steps", "octree", "faces", "seed") and val.isdigit())
+                    or (key == "format" and val.lower().lstrip(".") in ("glb", "obj"))
+                    or (key == "image" and bool(val))
+                )
+                if val and valid_bare:
+                    found.append((key, val))
+                    kept.append(" ")
+                    i = next_i
+                    continue
+        # Not an option: copy raw token (including quoted span if starting with quote)
+        if text[tok_start] in ('"', "'"):
+            end = text.find(text[tok_start], tok_start + 1)
+            if end >= 0:
+                kept.append(text[tok_start : end + 1])
+                i = end + 1
+                continue
+        end = tok_start
+        while end < n and not text[end].isspace():
+            end += 1
+        kept.append(text[tok_start:end])
+        i = end
+    return "".join(kept), found
+
+
 def parse_model3d_prompt(raw: str) -> Model3DRequestOptions:
     """Extract inline options (``notex``, ``image=...``, ``steps=...``, etc.) from prompt text."""
     text = str(raw or "").strip()
@@ -123,10 +193,8 @@ def parse_model3d_prompt(raw: str) -> Model3DRequestOptions:
         texture = True
         text = _TEX_FLAG_RE.sub(" ", text)
 
-    def _consume_kv(match: re.Match[str]) -> str:
-        nonlocal image_path, steps, octree, faces, seed, file_format
-        key = match.group("key").lower()
-        val = match.group(2) or match.group(3) or match.group(4) or ""
+    text, kv_pairs = _extract_kv_options_linear(text)
+    for key, val in kv_pairs:
         if key == "image":
             image_path = val.strip()
         elif key == "steps":
@@ -141,9 +209,7 @@ def parse_model3d_prompt(raw: str) -> Model3DRequestOptions:
             candidate = val.strip().lower().lstrip(".")
             if candidate in ("glb", "obj"):
                 file_format = candidate
-        return " "
 
-    text = _KV_OPTION_RE.sub(_consume_kv, text)
     clean_prompt = re.sub(r"\s+", " ", text).strip(" ,;-")
     if len(clean_prompt) > MAX_3D_PROMPT_CHARS:
         clean_prompt = clean_prompt[:MAX_3D_PROMPT_CHARS].rstrip()

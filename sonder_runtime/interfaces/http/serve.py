@@ -5496,7 +5496,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Sonder-Artifact-Sha256", digest)
             self.send_header("Cache-Control", "no-store")
             for name, value in (headers or {}).items():
-                self.send_header(name, value)
+                clean_name = str(name).replace("\r", "").replace("\n", "")
+                clean_value = str(value).replace("\r", "").replace("\n", "")
+                if clean_name:
+                    self.send_header(clean_name, clean_value)
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -5901,12 +5904,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not context["authorized"]:
                     self._send_auth_error()
                     return
-            resolved = _model3d_generation.resolve_generated_model_path(filename)
-            if resolved is None:
+            loaded = _model3d_generation.read_generated_model_bytes(filename)
+            if loaded is None:
                 self._send_not_found()
                 return
-            raw_bytes = resolved.read_bytes()
-            ext = resolved.suffix.lower()
+            safe_name, raw_bytes = loaded
+            ext = Path(safe_name).suffix.lower()
             ctype = {
                 ".glb": "model/gltf-binary",
                 ".obj": "text/plain; charset=utf-8",
@@ -5917,7 +5920,7 @@ class Handler(BaseHTTPRequestHandler):
                 content_type=ctype,
                 digest=hashlib.sha256(raw_bytes).hexdigest(),
                 headers={
-                    "Content-Disposition": f'attachment; filename="{resolved.name}"',
+                    "Content-Disposition": f'attachment; filename="{safe_name}"',
                     "X-Content-Type-Options": "nosniff",
                 },
             )

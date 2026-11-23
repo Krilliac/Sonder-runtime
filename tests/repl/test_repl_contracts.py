@@ -81,7 +81,10 @@ def test_json_mode_emits_error_events_and_no_trailing_empty_output(fake, tmp_pat
     assert rows, result.stderr
     errors = [row["text"] for row in rows if row["event"] == "error"]
     # Both the refused command and the failed turn are error events.
-    assert any("outside allowed roots" in text for text in errors), rows
+    assert any(
+        "outside allowed roots" in text or "foreign absolute path" in text
+        for text in errors
+    ), rows
     assert any("fake model crashed" in text for text in errors), rows
     assert not (rows[-1]["event"] == "output" and rows[-1]["text"] == "")
 

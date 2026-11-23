@@ -19,14 +19,71 @@ _MAX_HTTP_IMAGE_RESPONSE_BYTES = 24 * 1024 * 1024
 _TAGS_PROBE_TIMEOUT_SECONDS = 1.8
 _DEFAULT_GENERATE_TIMEOUT_SECONDS = 180.0
 
-_MARKDOWN_DATA_IMAGE_RE = re.compile(
-    r"!\[([^\]]*)\]\(\s*data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+\)",
-    re.I,
-)
 _BARE_DATA_IMAGE_RE = re.compile(
-    r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+    r"data:image/[a-zA-Z0-9.+-]{1,32};base64,[A-Za-z0-9+/=]+",
     re.I,
 )
+_B64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/= \t\r\n")
+_MIME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.+-")
+
+
+def _strip_markdown_data_images_linear(text: str) -> str:
+    """Linear-time O(n) replacement of ``![alt](data:image/...;base64,...)``."""
+    out: list[str] = []
+    n = len(text)
+    pos = 0
+    while pos < n:
+        start = text.find("![", pos)
+        if start < 0:
+            out.append(text[pos:])
+            break
+        close_alt = text.find("]", start + 2)
+        if close_alt < 0 or close_alt + 1 >= n or text[close_alt + 1] != "(":
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        next_open = text.find("![", start + 2, close_alt)
+        if next_open >= 0:
+            out.append(text[pos:next_open])
+            pos = next_open
+            continue
+        uri_start = close_alt + 2
+        while uri_start < n and text[uri_start] in " \t":
+            uri_start += 1
+        if not text[uri_start : uri_start + 11].lower() == "data:image/":
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        semi = text.find(";", uri_start + 11)
+        if semi < 0 or semi - (uri_start + 11) > 32:
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        subtype = text[uri_start + 11 : semi]
+        if not subtype or not all(ch in _MIME_CHARS for ch in subtype):
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        if text[semi : semi + 8].lower() != ";base64,":
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        payload_start = semi + 8
+        close_paren = text.find(")", payload_start)
+        if close_paren <= payload_start:
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        payload = text[payload_start:close_paren]
+        if not all(ch in _B64_CHARS for ch in payload):
+            out.append(text[pos : start + 2])
+            pos = start + 2
+            continue
+        out.append(text[pos:start])
+        alt = text[start + 2 : close_alt].strip()
+        out.append(f"[Generated image: {alt}]" if alt else "[Generated image]")
+        pos = close_paren + 1
+    return "".join(out)
 
 
 def strip_inline_data_images(text: str) -> str:
@@ -35,15 +92,11 @@ def strip_inline_data_images(text: str) -> str:
     Inline data URIs can exceed 500 KB per generated image and must never be
     counted as LLM context tokens or replayed verbatim into text-LLM history.
     """
-    if not text or "data:image/" not in text:
+    if not text or "data:image/" not in text.lower():
         return text or ""
 
-    def _replace_md(match: re.Match[str]) -> str:
-        alt = (match.group(1) or "").strip()
-        return f"[Generated image: {alt}]" if alt else "[Generated image]"
-
-    cleaned = _MARKDOWN_DATA_IMAGE_RE.sub(_replace_md, text)
-    if "data:image/" in cleaned:
+    cleaned = _strip_markdown_data_images_linear(text)
+    if "data:image/" in cleaned.lower():
         cleaned = _BARE_DATA_IMAGE_RE.sub("[inline image]", cleaned)
     return cleaned
 

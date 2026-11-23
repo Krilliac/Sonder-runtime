@@ -344,7 +344,7 @@ def test_objective_proposal_deadline_stops_before_another_model_call(monkeypatch
     calls = []
     monkeypatch.setattr(
         nightly_selfmod, "_eligible_candidate_files",
-        lambda: ["reflection.py", "memory_quality.py"],
+        lambda: ["runtime/reflection.py", "runtime/memory_quality.py"],
     )
     monkeypatch.setattr(
         nightly_selfmod.time, "monotonic", lambda: 10.0,
@@ -367,7 +367,7 @@ def test_objective_proposal_caps_each_request_to_remaining_window(monkeypatch):
     clock = iter((10.0, 19.0, 21.0))
     monkeypatch.setattr(
         nightly_selfmod, "_eligible_candidate_files",
-        lambda: ["reflection.py", "memory_quality.py"],
+        lambda: ["runtime/reflection.py", "runtime/memory_quality.py"],
     )
     monkeypatch.setattr(nightly_selfmod.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(
@@ -623,12 +623,13 @@ def test_nightly_rejects_a_candidate_that_fails_parent_scored_grade(tmp_path, mo
 
 def test_protected_and_missing_modules_are_not_eligible_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
-    (tmp_path / "reflection.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "reflection.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     (tmp_path / "safe_update.py").write_text("def f():\n    return 1\n", encoding="utf-8")
 
     candidates = nightly_selfmod._eligible_candidate_files()
 
-    assert "reflection.py" in candidates
+    assert "runtime/reflection.py" in candidates
     assert "safe_update.py" not in candidates
     assert all((tmp_path / name).is_file() for name in candidates)
 

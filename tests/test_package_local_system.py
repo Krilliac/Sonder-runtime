@@ -65,8 +65,8 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert build["commit_sha"] == "unknown" or len(build["commit_sha"]) == 40
     assert "runtime_policy.py" not in entries
     assert "sonder_runtime/adapters/runtime_policy.py" in entries
-    assert "learning_health.py" in entries
-    assert "sonder_health.py" in entries
+    assert "runtime/learning_health.py" in entries
+    assert "runtime/sonder_health.py" in entries
     assert "sonder_runtime/adapters/inspection_executor.py" in entries
     assert {
         "sonder_runtime/adapters/backup.py",
@@ -100,7 +100,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
         "sonder_runtime/application/preferences/__init__.py",
         "sonder_runtime/application/preferences/use_cases.py",
     } <= set(entries)
-    assert "memory_store.py" in entries
+    assert "runtime/memory_store.py" in entries
     assert "sonder_runtime/adapters/memory_store.py" in entries
     assert "eval_history.py" not in entries
     assert "sonder_runtime/adapters/evaluation_history_store.py" in entries
@@ -108,13 +108,13 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_runtime/application/evaluation_history/use_cases.py" in entries
     assert "sonder_runtime/application/ports/evaluation_history.py" in entries
     assert "process_liveness.py" not in entries
-    assert "artifact_grounding.py" in entries
+    assert "runtime/artifact_grounding.py" in entries
     assert {
-        "sonder_runtime/adapters/artifact_risk.py", "unsafe_lab.py",
+        "sonder_runtime/adapters/artifact_risk.py", "runtime/unsafe_lab.py",
     } <= set(entries)
     assert "pdf_risk.py" not in entries
     assert "pdf_risk.py" in package.RETIRED_ROOT_FILES
-    assert "media_assets.py" in entries
+    assert "runtime/media_assets.py" in entries
     assert "sonder_runtime/adapters/model_transport.py" in entries
     assert "ollama_endpoint.py" not in entries
     assert "sonder_runtime/adapters/inference/ollama_endpoint.py" in entries
@@ -125,8 +125,8 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert "sonder_runtime/adapters/accelerators/npu/providers.py" in entries
     assert "sonder_runtime/adapters/accelerators/npu/npu_broker.py" in entries
     assert "sonder_runtime/adapters/accelerators/npu/npu_worker.py" in entries
-    assert "model_assets.py" in entries
-    assert "ooxml_assets.py" in entries
+    assert "runtime/model_assets.py" in entries
+    assert "runtime/ooxml_assets.py" in entries
     assert "requirements-runtime.txt" in entries
     assert {
         "sonder_runtime/adapters/filesystem/workflow_store.py",
@@ -139,7 +139,7 @@ def test_payload_is_manifested_and_excludes_private_state(monkeypatch, tmp_path)
     assert {
         "sonder-headless.cmd",
         "sonder-headless.sh",
-        "sonder_headless.py",
+        "runtime/sonder_headless.py",
         "sonder-runtime.cmd",
         "sonder-runtime.sh",
         "sonder-serve.cmd",
@@ -450,12 +450,12 @@ def test_layered_package_ships_so_the_served_app_can_actually_start():
     layered = repo / "sonder_runtime"
     assert layered.is_dir(), "sonder_runtime package missing from the repo"
 
-    # Every flat module the packager ships that imports the layered package
+    # Every flat runtime module the packager ships that imports the layered package
     # is a module that would crash a bundle built without it.
     importers = [
-        path.name
-        for path in sorted(repo.glob("*.py"))
-        if path.name in package.REQUIRED_FILES
+        f"runtime/{path.name}"
+        for path in sorted((repo / "runtime").glob("*.py"))
+        if f"runtime/{path.name}" in package.REQUIRED_FILES
         and "sonder_runtime" in path.read_text(encoding="utf-8", errors="ignore")
     ]
     assert importers, "expected shipped modules importing sonder_runtime"
