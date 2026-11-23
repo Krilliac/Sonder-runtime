@@ -130,7 +130,7 @@ from ..model_request_admission import (
 )
 from ..model_transport import ModelCallError
 from ..tls_contexts import default_https_context
-from ..provider_bindings import provider_id_for_label
+from ..provider_bindings import PROVIDER_TIERS, provider_id_for_label
 from .anthropic_spend import SpendLedger
 from .sse_stream import StreamTimeout, post_streaming, stall_limits
 from .telemetry import from_openai_compatible
@@ -672,6 +672,103 @@ class OpenAICompatibleGateway:
     @property
     def request_admission(self) -> HostModelRequestAdmission:
         return self._request_admission
+
+    # -- status ------------------------------------------------------------
+
+    @staticmethod
+    def _resolved_tier_models(cfg: OpenAICompatibleConfig) -> dict[str, str]:
+        """Resolve per-tier models from ``tier_models`` with ``model`` fallback."""
+        resolved: dict[str, str] = {}
+        for tier in PROVIDER_TIERS:
+            model_id = cfg.model_for_tier(tier)
+            if model_id:
+                resolved[tier] = model_id
+        for raw_tier, raw_model in (cfg.tier_models or {}).items():
+            key = str(raw_tier or "").strip().lower()
+            val = str(raw_model or "").strip()
+            if key and val and key not in resolved:
+                resolved[key] = val
+        return resolved
+
+    @staticmethod
+    def _bounded_status_detail(value: object, limit: int = 240) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
+        """``{provider: {tier: model}}`` from configuration alone (no I/O)."""
+        try:
+            cfg = self._config or _config_from_env(metered=self._spend_ledger is not None)
+        except Exception:  # noqa: BLE001 - display metadata never fails a caller
+            return {}
+        if not cfg.base_url:
+            return {}
+        resolved = self._resolved_tier_models(cfg)
+        return {self._provider_id: resolved} if resolved else {}
+
+    def provider_status(self) -> Mapping[str, Mapping[str, object]]:
+        """Content-free, key-free status from configuration alone (no network probe)."""
+        entry: dict[str, object] = {
+            "provider": self._provider_id,
+            "state": "unavailable",
+            "healthy": False,
+            "configured": False,
+            "capabilities": sorted(CAPABILITIES),
+            "base_url": None,
+            "loopback": None,
+            "model": None,
+            "embed_model": None,
+            "tier_models": {},
+            "models": [],
+            "api_key_configured": False,
+            "detail": "",
+        }
+        try:
+            cfg = self._config or _config_from_env(metered=self._spend_ledger is not None)
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            entry["detail"] = self._bounded_status_detail(
+                exc if isinstance(exc, SonderError) else type(exc).__name__
+            )
+            return {self._provider_id: entry}
+        tier_models = self._resolved_tier_models(cfg)
+        models: list[str] = []
+        for candidate in (cfg.model, *tier_models.values()):
+            if candidate and candidate not in models:
+                models.append(candidate)
+        entry.update(
+            model=cfg.model or None,
+            embed_model=cfg.embed_model or None,
+            tier_models=tier_models,
+            models=models,
+            api_key_configured=bool(cfg.api_key),
+        )
+        if not cfg.base_url:
+            entry["detail"] = "no OpenAI-compatible endpoint configured (set SONDER_OPENAI_BASE_URL)"
+            return {self._provider_id: entry}
+        safe_base = redact_url(cfg.base_url)
+        has_userinfo = "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]
+        if (
+            not has_userinfo
+            and safe_base != "<invalid url>"
+            and not safe_base.endswith("://<redacted>")
+        ):
+            entry["base_url"] = safe_base
+        loopback = self._is_loopback(cfg.base_url)
+        entry["loopback"] = loopback
+        try:
+            self._require_secure_transport(cfg)
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            entry["detail"] = self._bounded_status_detail(
+                exc if isinstance(exc, SonderError) else type(exc).__name__
+            )
+            return {self._provider_id: entry}
+        entry.update(
+            configured=True,
+            state="unknown",
+            healthy=None,
+            detail="configured (%s; not probed)" % ("loopback" if loopback else "remote"),
+        )
+        return {self._provider_id: entry}
 
     # -- configuration & consent ------------------------------------------
 

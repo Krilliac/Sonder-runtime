@@ -562,3 +562,95 @@ def classify_image_generation(text):
     ).strip(" .!?")
     return cleaned or value
 
+
+_GIF_SLASH_RE = re.compile(r"^/gif(?:\s+(?P<arg>.*))?$", re.I)
+_GIF_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|make|render|produce|design|draw|animate|craft|give)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?P<pre>(?:[^\s]+\s+){0,8}?)"
+    r"(?:(?:animated|looping|looped|moving)\s+)?gifs?\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_GIF_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:ffmpeg|imagemagick|pillow|pil|encoder|decoder|converter|transcode|"
+    r"convert|converting|mp4|webm|avi|mov|mkv|png|jpg|jpeg|svg|webp|"
+    r"generator|picker|viewer|player|uploader|compressor|optimizer|"
+    r"tutorial|snippet|url|link)\b",
+    re.I,
+)
+_GIF_GENERIC_PRE_TOKENS = frozenset({
+    "a", "an", "the", "some", "one", "new", "cool", "nice", "fun", "pretty",
+    "cute", "funny", "awesome", "quick", "short", "little", "smooth",
+    "looping", "looped", "animated", "moving", "random", "completely",
+    "totally", "custom", "simple", "live", "dynamic",
+})
+_GIF_REST_LEAD_RE = re.compile(
+    r"^(?:[:,\-]+\s*|(?:that\s+(?:shows|depicts|features)|of|about|showing|with|featuring|depicting)\s+)",
+    re.I,
+)
+_GIF_REST_POLITE_TAIL_RE = re.compile(
+    r"(?:,?\s+(?:for\s+(?:me|us)|please|(?:right\s+)?now))+$",
+    re.I,
+)
+_GIF_DEFAULT_PROMPT = "a random animated gif"
+
+
+def classify_gif_generation(text):
+    """Return the animated-GIF prompt when ``text`` asks directly for a GIF.
+
+    Matches both the explicit ``/gif <prompt>`` slash form and direct natural
+    requests such as ``"can you generate a gif?"`` or ``"generate a gif of a
+    cyberpunk cat"``. Returns ``None`` for coding, conversion, file-path, or
+    explanatory questions so engineering tasks are never hijacked.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600:
+        return None
+
+    slash_match = _GIF_SLASH_RE.match(value)
+    if slash_match:
+        arg = (slash_match.group("arg") or "").strip()
+        return arg or _GIF_DEFAULT_PROMPT
+    if value.startswith("/"):
+        return None
+
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if (
+        _PATH_LIKE_RE.search(value)
+        or _IMAGE_GEN_EXCLUDE_RE.search(lowered)
+        or _GIF_GEN_EXCLUDE_RE.search(lowered)
+    ):
+        return None
+
+    match = _GIF_GEN_LEAD_RE.match(value)
+    if not match:
+        return None
+
+    pre = (match.group("pre") or "").strip()
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+
+    pre_tokens = [tok for tok in pre.split() if tok.lower().strip(",;:") not in _GIF_GENERIC_PRE_TOKENS]
+    pre_subject = " ".join(pre_tokens).strip(" ,;:-.!?")
+
+    rest_subject = rest.strip(" ,.!?")
+    rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+    if re.fullmatch(r"(?:for\s+(?:me|us)|please|(?:right\s+)?now)", rest_subject, re.I):
+        rest_subject = ""
+    else:
+        rest_subject = _GIF_REST_LEAD_RE.sub("", rest_subject).strip(" ,.!?")
+        rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+
+    if pre_subject and rest_subject:
+        return f"{pre_subject} {rest_subject}"
+    if rest_subject:
+        return rest_subject
+    if pre_subject:
+        return pre_subject
+    return _GIF_DEFAULT_PROMPT
+

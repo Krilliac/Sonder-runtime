@@ -2598,7 +2598,7 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
         return _join_system_parts(
             _runtime_identity_block(model, cloud, provider), effective_system,
         )
-    if persona and persona.strip():
+    if persona and persona.strip() and persona.strip().lower() not in (personas.OFF, "none"):
         persona_prompt = personas.get(persona)
         effective_system = (
             "%s\n\n%s" % (persona_prompt, effective_system) if effective_system else persona_prompt
@@ -7143,8 +7143,9 @@ def _sonder_impl_serialized(
         ctx = pinned_ctx
         if ctx is None:
             ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
+        resolved_persona = personas.resolve(persona, prompt=prompt, tier=rung.tier)
         return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay), only the caller's
-            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
+            _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, resolved_persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
             ctx,
         )
 
@@ -7466,6 +7467,7 @@ def _answer_with_history_impl(
     cache_scope="",
     cache_observer=None,
     capture_session=True,
+    persona="",
 ):
     """Answer a turn using caller-supplied prior `history` (list of {role, content}).
 
@@ -7557,7 +7559,9 @@ def _answer_with_history_impl(
             from sonder_runtime.application.chat.honesty import no_verification_claims_system
             _active_tool_turn = _chat_tool_loop.current_turn()
             _has_chat_tools = _active_tool_turn is not None and bool(_active_tool_turn.manifest.tools)
-            effective_system = _build_system("", trace, "", cloud=cloud, provider=bridged_provider, model=(
+            _persona_choice = persona if (persona and str(persona).strip()) else personas.active_scope_persona()
+            _resolved_persona = personas.resolve(_persona_choice, prompt=prompt, tier=tier_label)
+            effective_system = _build_system("", trace, _resolved_persona, cloud=cloud, provider=bridged_provider, model=(
                 _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
             if not _has_chat_tools:
                 effective_system = no_verification_claims_system(effective_system)
@@ -7786,6 +7790,7 @@ def answer_with_history(
     cache_scope="",
     cache_observer=None,
     capture_session=True,
+    persona="",
 ):
     label = "chat:%s" % ((tier or "sonder").strip() or "sonder")
     with activity_tracker.response_span(
@@ -7811,6 +7816,7 @@ def answer_with_history(
             cache_scope=cache_scope,
             cache_observer=cache_observer,
             capture_session=capture_session,
+            persona=persona,
         )
     return _append_activity(result, response=response, replace=True)
 

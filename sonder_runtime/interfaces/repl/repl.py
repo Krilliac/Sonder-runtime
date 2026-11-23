@@ -1785,7 +1785,7 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /temp [0-2|auto]   show/set this session's sampling temperature (auto = model preset)
   /effort [off|minimal|low|medium|high|xhigh|auto]  show/set this session's reasoning effort
-  /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
+  /persona [name|auto|off]  show/set active persona (auto = route by tier/prompt)
   /model [name|tier] list installed models and tiers; switch either one
   /cloud [status|on|off]  change process-local hosted/cloud consent
   /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
@@ -3986,12 +3986,12 @@ def main(*, machine_output=False):
     def do_persona(arg):
         nonlocal persona
         arg = (arg or "").strip()
+        available = list(personas.MODES) + personas.names()
         if not arg:
-            print("persona: %s (available: %s)" % (persona, ", ".join(personas.names())))
+            print("persona: %s (available: %s)" % (persona, ", ".join(available)))
             return
-        wanted = arg.lower()
-        available = personas.names()
-        if wanted not in available:
+        wanted = personas.normalize_selection(arg)
+        if wanted is None:
             # ``personas.get`` falls back to the default for an unknown name,
             # so accepting it here would report a persona no turn will use.
             print("unknown persona %r; still %s (available: %s)" % (

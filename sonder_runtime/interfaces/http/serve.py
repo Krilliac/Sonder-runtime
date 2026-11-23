@@ -88,6 +88,7 @@ import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters import chat_effort as _chat_effort
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
+from sonder_runtime.adapters.repl_services import personas as _personas
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -928,6 +929,7 @@ RUNTIME_ROLE = os.environ.get(sonder_health.ROLE_ENV, "")
 BOUND_PORT = None  # set by main() once the listener is actually bound
 TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
+PERSONA = "auto"  # auto | off | <persona name>
 LAST_IID = None
 LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
 LAST_RUN_SOURCE = None  # answer-only text; trace/footer removed for /run
@@ -1050,6 +1052,7 @@ class ConversationState:
 
     trace: bool = False
     strict: object = None
+    persona: str = "auto"
     last_iid: str | None = None
     last_response: str | None = None
     last_run_source: str | None = None
@@ -1107,6 +1110,15 @@ class _LegacyConversationState:
     def strict(self, value):
         global STRICT
         STRICT = value
+
+    @property
+    def persona(self):
+        return PERSONA
+
+    @persona.setter
+    def persona(self, value):
+        global PERSONA
+        PERSONA = value
 
     @property
     def last_iid(self):
@@ -2440,7 +2452,7 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # outlive the refusal.
     "/cot", "/chainofthought", "/thoughts",
     # Shows operator prompt overrides and state-home paths.
-    "/prompts",
+    "/prompts", "/persona",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/master_orchestrate", "/delegate", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
@@ -3296,6 +3308,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd in ("/image", "/img"):
         image_prompt = arg.strip() or "a random image"
         return _image_generation.generate_chat_image(image_prompt).markdown
+    if cmd == "/gif":
+        gif_prompt = arg.strip() or "a random animated gif"
+        return _image_generation.generate_chat_gif(gif_prompt).markdown
     if cmd == "/stats":
         return server.sonder_stats()
     if cmd == "/context":
@@ -3630,6 +3645,24 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return _chat_temperature.slash_temp(arg, storage_session, context, _state_principal, serve_lane_temperature())
     if cmd == "/effort":
         return _chat_effort.slash_effort(arg, storage_session, context, _state_principal)
+    if cmd == "/persona":
+        raw_arg = arg.strip()
+        available = list(_personas.MODES) + _personas.names()
+        if not raw_arg:
+            return "persona: %s (available: %s)" % (
+                state.persona or _personas.AUTO, ", ".join(available),
+            )
+        wanted = _personas.normalize_selection(raw_arg)
+        if wanted is None:
+            return "unknown persona %r; still %s (available: %s)" % (
+                raw_arg, state.persona or _personas.AUTO, ", ".join(available),
+            )
+        state.persona = wanted
+        if wanted == _personas.AUTO:
+            return "persona: auto (auto-routes by tier and prompt)"
+        if wanted == _personas.OFF:
+            return "persona: off (no persona prompt injected)"
+        return "persona: %s (pinned)" % wanted
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -6243,6 +6276,21 @@ class Handler(BaseHTTPRequestHandler):
                 admin_authorized=_admin_authorized(context),
             ))
             return
+        if path == "/v1/sonder/personas":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            descs = _personas.descriptions()
+            self._send_json_payload({
+                "default": _personas.AUTO,
+                "modes": list(_personas.MODES),
+                "personas": [
+                    {"name": name, "description": descs.get(name, "")}
+                    for name in _personas.names()
+                ],
+            })
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:
@@ -7502,6 +7550,19 @@ class Handler(BaseHTTPRequestHandler):
             record_early_chat_metric("invalid_session_reasoning_effort")
             self._send_json_payload({"error": {"message": "session_reasoning_effort: %s" % error, "type": "invalid_request"}}, status=400)
             return
+        request_persona = None
+        if req.get("persona") is not None:
+            request_persona = _personas.normalize_selection(req.get("persona"))
+            if request_persona is None:
+                record_early_chat_metric("invalid_persona")
+                self._send_json_payload({
+                    "error": {
+                        "message": "persona: expected one of %s"
+                        % ", ".join(list(_personas.MODES) + _personas.names()),
+                        "type": "invalid_request",
+                    }
+                }, status=400)
+                return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7610,6 +7671,12 @@ class Handler(BaseHTTPRequestHandler):
                 _resolved_effort = _chat_effort.resolve_turn_effort(
                     request=request_reasoning_effort, session=storage_session)
                 _early_scope.enter_context(_chat_effort.effort_scope(_resolved_effort.value))
+                _active_persona_choice = (
+                    request_persona
+                    if request_persona is not None
+                    else (state.persona or _personas.AUTO)
+                )
+                _early_scope.enter_context(_personas.persona_scope(_active_persona_choice))
                 _record_chat("user", prompt, state=state)
                 from sonder_runtime.platform.spanda_http import resolve_spanda_policy as _resolve_spanda_policy_early
                 _spanda_early = _resolve_spanda_policy_early(_SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
@@ -7707,26 +7774,41 @@ class Handler(BaseHTTPRequestHandler):
                         web_routed = reply is not None
                     if structured_schema is None and reply is None:
                         explicit_image_model = _image_generation.is_image_generation_model_name(model)
-                        image_prompt = (
-                            prompt
-                            if explicit_image_model
-                            else (
-                                intents.classify_image_generation(prompt)
-                                if (
-                                    allow_control_routes
-                                    or _model_to_tier(model) in ("general", "code", "fast")
-                                )
-                                else None
-                            )
+                        allow_media_route = (
+                            allow_control_routes
+                            or _model_to_tier(model) in ("general", "code", "fast", "creative")
                         )
-                        if image_prompt:
-                            img_result = _image_generation.generate_chat_image(
-                                image_prompt,
+                        gif_prompt = (
+                            intents.classify_gif_generation(prompt)
+                            if (explicit_image_model or allow_media_route)
+                            else None
+                        )
+                        if gif_prompt:
+                            gif_result = _image_generation.generate_chat_gif(
+                                gif_prompt,
                                 model_override=model if explicit_image_model else "",
                             )
-                            reply = img_result.markdown
-                            response_model = img_result.model_id
+                            reply = gif_result.markdown
+                            response_model = gif_result.model_id
                             response_tier = "image"
+                        else:
+                            image_prompt = (
+                                prompt
+                                if explicit_image_model
+                                else (
+                                    intents.classify_image_generation(prompt)
+                                    if allow_media_route
+                                    else None
+                                )
+                            )
+                            if image_prompt:
+                                img_result = _image_generation.generate_chat_image(
+                                    image_prompt,
+                                    model_override=model if explicit_image_model else "",
+                                )
+                                reply = img_result.markdown
+                                response_model = img_result.model_id
+                                response_tier = "image"
                     if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
