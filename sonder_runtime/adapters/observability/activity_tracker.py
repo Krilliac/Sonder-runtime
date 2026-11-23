@@ -581,6 +581,7 @@ ACTION_TITLES = {
     "error_diagnose": "Diagnosed Error",
     "code_audit": "Audited Code",
     "data_transform": "Transformed Data",
+    "learn_tool": "Researched External Tool",
     "artifact_generate": "Generated Assets",
     "mesh_generate": "Generated Model",
     "security_eval": "Ran Security Eval",

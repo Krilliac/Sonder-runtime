@@ -353,6 +353,12 @@ COMMANDS = [
         "summary": "Convert/profile/query JSON/CSV/TSV/TOML/INI/Markdown, encode/decode, convert timestamps, or compute cron runs.",
     },
     {
+        "name": "/learntool",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Discover and figure out an unfamiliar/external tool (e.g. blender, ffmpeg, inkscape) via live --help/metadata/docs.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

@@ -313,6 +313,13 @@ _DESCRIPTORS = (
     _read_tool("error_diagnose"),
     _read_tool("code_audit"),
     _read_tool("data_transform"),
+    _read_tool(
+        "learn_tool",
+        mode=ExecutionMode.BOUNDED_SUBPROCESS,
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
     _read_tool("repo_status", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool("repo_diff", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool(

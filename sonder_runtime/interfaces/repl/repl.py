@@ -4813,6 +4813,7 @@ def main(*, machine_output=False):
                         "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",
                         "/shield", "/prompt_shield", "/diagnose", "/error_diagnose",
                         "/audit", "/code_audit", "/transform", "/data_transform",
+                        "/learntool", "/learn_tool", "/discovertool",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
