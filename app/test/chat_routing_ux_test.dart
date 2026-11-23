@@ -103,6 +103,105 @@ void main() {
       expect(find.text('sonder (local route)'), findsWidgets);
       await unmountChat(tester);
     });
+
+    testWidgets(
+        '8-tier openai_compatible stack resolves per-tier models on the '
+        'composer pill and groups image models distinctly', (tester) async {
+      final json = ecosystemJson(
+        provider: 'openai_compatible',
+        inference: inferenceStatusJson()
+          ..['models'] = ['astra-cyber-35b-a3b:latest']
+          ..['tier_models'] = {'security': 'astra-cyber-35b-a3b:latest'},
+      );
+      final providers = json['providers'] as Map<String, dynamic>;
+      providers['tier_providers'] = {
+        'fast': 'openai_compatible',
+        'general': 'openai_compatible',
+        'code': 'openai_compatible',
+        'reasoning': 'openai_compatible',
+        'vision': 'ollama',
+        'security': 'sonder_inference',
+        'creative': 'openai_compatible',
+        'draft': 'openai_compatible',
+      };
+      (providers['status'] as Map<String, dynamic>)['openai_compatible'] = {
+        'provider': 'openai_compatible',
+        'state': 'unknown',
+        'configured': true,
+        'base_url': 'http://127.0.0.1:18080',
+        'model': 'bonsai-27b-pq2',
+        'models': ['bonsai-9b-mtp', 'bonsai-27b-pq2', 'bonsai-4b-mtp'],
+        'tier_models': {
+          'fast': 'bonsai-9b-mtp',
+          'general': 'bonsai-27b-pq2',
+          'code': 'bonsai-27b-pq2',
+          'reasoning': 'bonsai-27b-pq2',
+          'creative': 'bonsai-27b-pq2',
+          'draft': 'bonsai-4b-mtp',
+        },
+      };
+      json['image_generation'] = {
+        'configured': true,
+        'backend': 'openai_api',
+        'api_url': 'http://127.0.0.1:11440',
+        'model': 'sdxl-turbo',
+        'loopback': true,
+      };
+
+      final backend = FakeChatBackend()
+        ..models = const [
+          'sonder',
+          'fast',
+          'general',
+          'code',
+          'reasoning',
+          'vision',
+          'security',
+          'creative',
+          'draft',
+          'llama3:8b',
+          'sdxl-turbo',
+        ]
+        ..origins = const {
+          'sonder': ModelOrigin(kind: 'route', provider: 'openai_compatible'),
+        }
+        ..ecosystem = EcosystemReading.parse(json);
+
+      await pumpChat(tester, backend);
+      await tester.pump();
+
+      // Composer shows the resolved served model, never raw `openai_compatible`.
+      expect(find.text('sonder · bonsai-27b-pq2'), findsOneWidget);
+      expect(find.textContaining('openai_compatible'), findsNothing);
+
+      await _openPicker(tester);
+      expect(find.byKey(const Key('model-group-routes')), findsOneWidget);
+      final listScrollable = find.descendant(
+          of: find.byKey(const Key('model-picker-list')),
+          matching: find.byType(Scrollable));
+      await tester.scrollUntilVisible(
+          find.byKey(const Key('model-group-image')), 120,
+          scrollable: listScrollable);
+      expect(find.byKey(const Key('model-group-image')), findsOneWidget);
+      expect(find.text('Image generation'), findsOneWidget);
+      await tester.scrollUntilVisible(
+          find.byKey(const Key('model-group-ollama-direct')), 120,
+          scrollable: listScrollable);
+      expect(find.byKey(const Key('model-group-ollama-direct')), findsOneWidget);
+
+      // Search for image models finds sdxl-turbo clearly labelled.
+      await tester.enterText(
+          find.byKey(const Key('model-picker-search')), 'image');
+      await tester.pump();
+      expect(find.byKey(const Key('model-option-sdxl-turbo')), findsOneWidget);
+      expect(find.text('sdxl-turbo · Image generation (127.0.0.1:11440)'),
+          findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('model-option-sdxl-turbo')));
+      await tester.pumpAndSettle();
+      expect(find.text('sdxl-turbo · Image'), findsOneWidget);
+      await unmountChat(tester);
+    });
   });
 
   // The conversation list lives in the app shell's sidebar.

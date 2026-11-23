@@ -93,6 +93,18 @@ extension _GeneralPage on _SettingsScreenState {
                 onChanged: _setReasoningEffort,
               ),
             ),
+            SettingRow(
+              label: 'Persona',
+              description:
+                  'Shapes response voice and focus (also via /persona or the '
+                  'chat bar). Auto routes by tier and prompt; Off uses no '
+                  'persona prompt.',
+              modified: _personaChanged,
+              below: PersonaSelector(
+                value: _persona,
+                onChanged: _setPersona,
+              ),
+            ),
           ]),
         _clientExecSection(context),
       ],

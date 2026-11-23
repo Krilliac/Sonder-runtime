@@ -116,6 +116,11 @@ class TurnRequest {
   /// to leave the session's value alone (see [SessionEffortSync]).
   final Object? sessionReasoningEffort;
 
+  /// The `persona` to send: `'auto'`, `'off'`, one of the 9 persona names, or
+  /// null to leave the server default / session pin alone (see
+  /// [SessionPersonaSync]).
+  final String? persona;
+
   /// `'client'` asks the server not to inject its durable history (server
   /// S5). Set after a session rotation, so a cancelled first turn cannot be
   /// resurrected from the server side.
@@ -133,6 +138,7 @@ class TurnRequest {
     this.allowApproximateLocation = false,
     this.sessionTemperature,
     this.sessionReasoningEffort,
+    this.persona,
     this.historyMode,
     this.clientExec = true,
   });
@@ -545,6 +551,7 @@ class _ApiTurn implements ChatTurn {
         allowApproximateLocation: r.allowApproximateLocation,
         sessionTemperature: r.sessionTemperature,
         sessionReasoningEffort: r.sessionReasoningEffort,
+        persona: r.persona,
         history: r.historyMode,
         clientExec: r.clientExec,
         cancel: _cancel,

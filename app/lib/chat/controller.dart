@@ -9,12 +9,14 @@ import '../local_manager.dart';
 import '../models.dart';
 import '../runtime/model_routing.dart';
 import '../settings.dart';
+import '../settings/persona_choice.dart' show normalizePersona;
 import '../settings/reasoning_effort.dart' show normalizeEffort;
 import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
 import 'permission_rules.dart';
 import 'session_effort.dart';
+import 'session_persona.dart';
 import 'session_temperature.dart';
 
 /// One transcript row: a stored [message] plus client-only facts that are
@@ -359,10 +361,12 @@ class ChatController extends ChangeNotifier {
     if (identityChanged) {
       _temperatureSync.reset();
       _effortSync.reset();
+      _personaSync.reset();
       // A turn still running against the old server must not confirm its
       // value into the new server's record.
       _tempInFlight = null;
       _effortInFlight = null;
+      _personaInFlight = null;
       _lastSessionSync = null;
       _discardActiveTurn();
       _backendGeneration++;
@@ -531,6 +535,7 @@ class ChatController extends ChangeNotifier {
     if (wasOffline && !next.isOffline) {
       _temperatureSync.reset();
       _effortSync.reset();
+      _personaSync.reset();
     }
     // The chip's enabled state depends on reachability.
     if (wasOffline != next.isOffline) _notify();
@@ -1259,6 +1264,8 @@ class ChatController extends ChangeNotifier {
     _tempInFlight = tempSent == null ? null : (tempSession, tempSent);
     final effortSent = _effortSync.pending(tempSession, reasoningEffort);
     _effortInFlight = effortSent == null ? null : (tempSession, effortSent);
+    final personaSent = _personaSync.pending(tempSession, persona);
+    _personaInFlight = personaSent == null ? null : (tempSession, personaSent);
     final request = TurnRequest(
       history: history,
       model: requestModel,
@@ -1268,6 +1275,7 @@ class ChatController extends ChangeNotifier {
       allowApproximateLocation: allowApproximateLocation,
       sessionTemperature: tempSent,
       sessionReasoningEffort: effortSent,
+      persona: personaSent,
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
       clientExec: isClientExecActive,
     );
@@ -1709,6 +1717,36 @@ class ChatController extends ChangeNotifier {
     _notify();
   }
 
+  /// Persona (`off`, or one of the 9 canonical personas), or null for Auto
+  /// (auto-route by tier and prompt).
+  String? persona;
+  void Function(String? persona)? onPersonaChanged;
+  final SessionPersonaSync _personaSync = SessionPersonaSync();
+  (String, String)? _personaInFlight;
+
+  void selectPersona(String? value) {
+    final normalized = normalizePersona(value);
+    final changed = normalized != persona;
+    if (normalized == null) {
+      _personaSync.requestAuto(sessionFor(_currentThreadId));
+    }
+    if (!changed) return;
+    persona = normalized;
+    onPersonaChanged?.call(normalized);
+    _notify();
+  }
+
+  /// Settings changed the persona underneath us.
+  void syncPersona(String? value) {
+    final normalized = normalizePersona(value);
+    if (normalized == persona) return;
+    if (normalized == null) {
+      _personaSync.requestAuto(sessionFor(_currentThreadId));
+    }
+    persona = normalized;
+    _notify();
+  }
+
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;
     _replace(
@@ -1753,6 +1791,11 @@ class ChatController extends ChangeNotifier {
     final unconfirmedEffort = _effortInFlight;
     _effortInFlight = null;
     if (unconfirmedEffort != null) _effortSync.forget(unconfirmedEffort.$1);
+    final unconfirmedPersona = _personaInFlight;
+    _personaInFlight = null;
+    if (unconfirmedPersona != null) {
+      _personaSync.forget(unconfirmedPersona.$1, sent: unconfirmedPersona.$2);
+    }
     _liveTimer?.cancel();
     _liveTimer = null;
     _turn = null;
@@ -1803,6 +1846,11 @@ class ChatController extends ChangeNotifier {
     final sentEffort = _effortInFlight;
     if (sentEffort != null) _effortSync.confirm(sentEffort.$1, sentEffort.$2);
     _effortInFlight = null;
+    final sentPersona = _personaInFlight;
+    if (sentPersona != null) {
+      _personaSync.confirm(sentPersona.$1, sentPersona.$2);
+    }
+    _personaInFlight = null;
     final elapsed = _liveElapsedMs();
     final liveTools = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
     final handoffTools = <ChatStreamToolEvent>[...liveTools];
@@ -1934,6 +1982,7 @@ class ChatController extends ChangeNotifier {
     if (e is! SonderException || e.httpStatus == null) {
       _temperatureSync.reset();
       _effortSync.reset();
+      _personaSync.reset();
     }
     final elapsed = _liveElapsedMs();
     final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];

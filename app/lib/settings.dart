@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager.dart';
+import 'settings/persona_choice.dart' show normalizePersona, parsePersona;
 import 'settings/reasoning_effort.dart' show normalizeEffort, parseEffort;
 import 'settings/temperature.dart'
     show normalizeTemperature, parseTemperature;
@@ -82,6 +83,7 @@ class Settings {
   static const _kContextSize = 'sonder_context_size';
   static const _kTemperature = 'sonder_temperature';
   static const _kReasoningEffort = 'sonder_reasoning_effort';
+  static const _kPersona = 'sonder_persona';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -163,6 +165,12 @@ class Settings {
   /// Reasoning effort for chat requests (`off`, `minimal`, `low`, `medium`,
   /// `high`, `xhigh`); null is Auto (the server/model default applies).
   String? reasoningEffort;
+
+  /// Persona for chat requests (`off`, or one of the 9 canonical personas);
+  /// null is Auto (auto-route by tier and prompt).
+  String? _persona;
+  String? get persona => _persona;
+  set persona(String? value) => _persona = normalizePersona(value);
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -210,6 +218,7 @@ class Settings {
     this.contextSize = '8192',
     double? temperature,
     String? reasoningEffort,
+    String? persona,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -225,6 +234,7 @@ class Settings {
   })  : clientExecEnabled = clientExecEnabled ?? defaultClientExecEnabled,
         temperature = normalizeTemperature(temperature),
         reasoningEffort = normalizeEffort(reasoningEffort),
+        _persona = normalizePersona(persona),
         serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -244,6 +254,8 @@ class Settings {
     bool autoTemperature = false,
     String? reasoningEffort,
     bool autoReasoningEffort = false,
+    String? persona,
+    bool autoPersona = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -272,6 +284,7 @@ class Settings {
         reasoningEffort: autoReasoningEffort
             ? null
             : reasoningEffort ?? this.reasoningEffort,
+        persona: autoPersona ? null : persona ?? this.persona,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -411,6 +424,7 @@ class Settings {
       contextSize: p.getString(_kContextSize) ?? '8192',
       temperature: _temperatureFrom(p),
       reasoningEffort: _reasoningEffortFrom(p),
+      persona: _personaFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
@@ -441,6 +455,15 @@ class Settings {
   static String? _reasoningEffortFrom(SharedPreferences p) {
     try {
       return parseEffort(p.getString(_kReasoningEffort));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The stored persona; a missing or garbled value is Auto (null).
+  static String? _personaFrom(SharedPreferences p) {
+    try {
+      return parsePersona(p.getString(_kPersona));
     } catch (_) {
       return null;
     }
@@ -563,6 +586,12 @@ class Settings {
       await p.remove(_kReasoningEffort);
     } else {
       await p.setString(_kReasoningEffort, stagedEffort);
+    }
+    final stagedPersona = persona;
+    if (stagedPersona == null) {
+      await p.remove(_kPersona);
+    } else {
+      await p.setString(_kPersona, stagedPersona);
     }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);

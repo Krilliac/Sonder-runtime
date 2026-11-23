@@ -194,6 +194,113 @@ void main() {
       expect(status.inferenceConfigured, isTrue);
       expect(status.inferenceState, InferenceState.unknown);
     });
+
+    test('8-tier bindings, openai_compatible tier_models, image_generation, '
+        'and model_tool_policy parse cleanly', () {
+      final json = ecosystemJson(
+        provider: 'openai-compatible',
+        inference: inferenceStatusJson()
+          ..['models'] = ['astra-cyber-35b-a3b:latest']
+          ..['tier_models'] = {'security': 'astra-cyber-35b-a3b:latest'},
+      );
+      final providers = json['providers'] as Map<String, dynamic>;
+      providers['tier_providers'] = {
+        'fast': 'openai_compatible',
+        'general': 'openai_compatible',
+        'code': 'openai_compatible',
+        'reasoning': 'openai_compatible',
+        'vision': 'ollama',
+        'security': 'sonder_inference',
+        'creative': 'openai_compatible',
+        'draft': 'openai_compatible',
+      };
+      (providers['status'] as Map<String, dynamic>)['openai-compatible'] = {
+        'provider': 'openai_compatible',
+        'state': 'unknown',
+        'healthy': null,
+        'configured': true,
+        'loopback': true,
+        'base_url': 'http://127.0.0.1:18080',
+        'model': 'bonsai-27b-pq2',
+        'embed_model': 'nomic-embed-text',
+        'models': ['bonsai-9b-mtp', 'bonsai-27b-pq2', 'bonsai-4b-mtp'],
+        'tier_models': {
+          'fast': 'bonsai-9b-mtp',
+          'general': 'bonsai-27b-pq2',
+          'code': 'bonsai-27b-pq2',
+          'reasoning': 'bonsai-27b-pq2',
+          'creative': 'bonsai-27b-pq2',
+          'draft': 'bonsai-4b-mtp',
+        },
+        'detail': 'configured (unprobed)',
+      };
+      json['image_generation'] = {
+        'configured': true,
+        'backend': 'openai_api',
+        'api_url': 'http://127.0.0.1:11440',
+        'model': 'sdxl-turbo',
+        'loopback': true,
+      };
+      json['model_tool_policy'] = {
+        'security_floor_relaxed': true,
+      };
+
+      final status = _status(json);
+      expect(status.defaultGenerationProvider, openaiCompatibleProvider);
+      expect(status.tierProviders.keys.toList(), ecosystemTierNames);
+      expect(status.tierProviders['security'], sonderInferenceProvider);
+      expect(status.tierProviders['draft'], openaiCompatibleProvider);
+
+      final oai = status.providers[openaiCompatibleProvider]!;
+      expect(oai.configured, isTrue);
+      expect(oai.loopback, isTrue);
+      expect(oai.baseUrl, 'http://127.0.0.1:18080');
+      expect(oai.model, 'bonsai-27b-pq2');
+      expect(oai.embedModel, 'nomic-embed-text');
+      expect(oai.tierModels['fast'], 'bonsai-9b-mtp');
+      expect(oai.tierModels['draft'], 'bonsai-4b-mtp');
+
+      final image = status.imageGeneration!;
+      expect(image.configured, isTrue);
+      expect(image.backend, 'openai_api');
+      expect(image.apiUrl, 'http://127.0.0.1:11440');
+      expect(image.model, 'sdxl-turbo');
+      expect(image.loopback, isTrue);
+      expect(image.endpointDisplay, '127.0.0.1:11440');
+      expect(image.summary, 'sdxl-turbo on 127.0.0.1:11440');
+
+      expect(status.modelToolPolicy, isNotNull);
+      expect(status.securityFloorRelaxed, isTrue);
+    });
+
+    test('absent or mistyped image_generation and model_tool_policy are safe',
+        () {
+      final baseline = _status(ecosystemReadySynthetic());
+      expect(baseline.imageGeneration, isNull);
+      expect(baseline.modelToolPolicy, isNull);
+      expect(baseline.securityFloorRelaxed, isFalse);
+
+      final mistyped = _status({
+        'schema': ecosystemSchema,
+        'image_generation': 'not-an-object',
+        'model_tool_policy': {'security_floor_relaxed': 'yes'},
+      });
+      expect(mistyped.imageGeneration, isNull);
+      expect(mistyped.modelToolPolicy, isNotNull);
+      expect(mistyped.securityFloorRelaxed, isFalse);
+
+      final unconfigured = _status({
+        'schema': ecosystemSchema,
+        'image_generation': {
+          'configured': false,
+          'backend': null,
+          'api_url': null,
+          'model': null,
+        },
+      });
+      expect(unconfigured.imageGeneration!.configured, isFalse);
+      expect(unconfigured.imageGeneration!.summary, 'not configured');
+    });
   });
 
   group('SonderApi.ecosystemStatus', () {
