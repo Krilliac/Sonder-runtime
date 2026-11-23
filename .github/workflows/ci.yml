@@ -104,11 +104,11 @@ jobs:
       # runner's durable evaluation history.
       - name: Run the golden evaluation lane (replay cassette, baseline ratchet)
         run: >-
-          python eval_harness.py run --suite smoke_python --check-baseline
+          python scripts/eval_harness.py run --suite smoke_python --check-baseline
           --no-record-history --out eval_runs/ci/smoke_python
       - name: Run the tool-policy evaluation lane (real permission gate, baseline ratchet)
         run: >-
-          python eval_harness.py run --suite tool_policy_gates --check-baseline
+          python scripts/eval_harness.py run --suite tool_policy_gates --check-baseline
           --no-record-history --out eval_runs/ci/tool_policy_gates
       - name: Record full-suite source and runner resources
         run: |
@@ -131,7 +131,7 @@ jobs:
       - name: Run test suite
         id: full-suite
         # network/model-marked tests are skipped unless --run-network /
-        # --run-model is passed (see conftest.py); CI intentionally does not
+        # --run-model is passed (see tests/_hermetic_plugin.py); CI intentionally does not
         # opt in, since those require a live Ollama/hosted model or network
         # access this runner doesn't have.
         env:

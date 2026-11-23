@@ -5,6 +5,12 @@ This module is stdlib-only. Heavy ML dependencies remain isolated in
 """
 from __future__ import annotations
 
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
 import argparse
 import contextlib
 import hashlib
@@ -45,7 +51,7 @@ def configure_training_capacity(max_jobs: int) -> None:
     _MAX_TRAINING_JOBS = int(max_jobs)
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 LLAMA_CPP_REVISION = "99f3dc32296f825fec94f202da1e9fede1e78cf9"
 LLAMA_CPP_TREE_SHA256 = "3cb23bb624453dc3511df618bc1445169d44b8fb635bd04a1b3eabc45db2d4df"
 

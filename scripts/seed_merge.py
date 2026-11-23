@@ -22,13 +22,15 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_ROOT, "scripts"), os.path.join(_ROOT, "runtime"), _ROOT):
+    if _p not in sys.path: sys.path.insert(0, _p)
 import contribute  # noqa: E402
 import sonder_runtime.adapters.embeddings as embeddings  # noqa: E402
 import sonder_runtime.adapters.memory_store as memory_store  # noqa: E402
 import reflection  # noqa: E402
 
-SEED_GLOB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed", "**", "*.jsonl")
+SEED_GLOB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "seed", "**", "*.jsonl")
 
 
 def load_records(files):
@@ -137,9 +139,9 @@ def main(argv=None):
         return
     print("merging %d batch file(s):" % len(files))
     for f in files:
-        print("  -", os.path.relpath(f, os.path.dirname(os.path.abspath(__file__))))
+        print("  -", os.path.relpath(f, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-    db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.db")
+    db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "memory.db")
     conn = memory_store.connect(db)
     try:
         before = len(memory_store.all_lessons(conn))

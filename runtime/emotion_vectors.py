@@ -104,7 +104,7 @@ TUNE_RULES = [
 
 
 def workspace_root():
-    return str(Path(__file__).resolve().parent)
+    return str(Path(__file__).resolve().parents[1])
 
 
 def bundled_path():

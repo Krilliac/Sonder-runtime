@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+    sys.path[:0] = [str(ROOT), str(ROOT / "runtime"), str(ROOT / "scripts")]
 
 from sonder_runtime.application.scenario_validation import (  # noqa: E402
     EvidenceClass,

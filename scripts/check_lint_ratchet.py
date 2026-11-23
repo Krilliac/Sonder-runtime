@@ -54,14 +54,14 @@ BLOCKING_RULES = ("F821", "F822", "F811", "PLE", "B023")
 RATCHET_RULES = ("F", "B", "PLE")
 TARGET_VERSION = "py312"
 SIZE_RATCHET_MODULES = (
-    "server.py",
-    "master_orchestrator.py",
-    "adaptive_training.py",
-    "selfmod.py",
-    "sonder_launcher.py",
+    "runtime/server.py",
+    "runtime/master_orchestrator.py",
+    "runtime/adaptive_training.py",
+    "runtime/selfmod.py",
+    "runtime/sonder_launcher.py",
     "sonder_runtime/interfaces/http/serve.py",
 )
-SERVER_SOURCE = "server.py"
+SERVER_SOURCE = "runtime/server.py"
 SHIMS_KEY = "server_shims"
 PACKAGED_ROOT = "sonder_runtime"
 # A shim forwards to the moved implementation with its dependency bundle.

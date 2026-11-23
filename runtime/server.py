@@ -592,7 +592,7 @@ _permission_receipts.install_default()
 
 def _running_source_commit_at_import():
     """Best-effort immutable marker for the code this process imported."""
-    return _running_source_commit(Path(__file__).resolve().parent)
+    return _running_source_commit(Path(__file__).resolve().parents[1])
 
 
 # Keep this separate from the mutable on-disk HEAD used by /updatecheck.
@@ -3551,7 +3551,7 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
     action, _, rest = text.partition(" ")
     action = action.lower()
     rest = rest.strip()
-    root = Path(repository_root or Path(__file__).resolve().parent).resolve()
+    root = Path(repository_root or Path(__file__).resolve().parents[1]).resolve()
     if action in _SELFMOD_SOURCE_WRITING_ACTIONS and not operator_approved:
         # Source replacement is the one dangerous operation that must never
         # inherit an unattended mode's normal ask-to-allow degradation.  The
@@ -25812,7 +25812,7 @@ def ollama_pool_admin_status(token: str = "", refresh: bool = False, cursor: str
 
 def _runtime_source_root():
     """Return Sonder's own source tree, never a caller-selected project root."""
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def _runtime_update_format(data, *, updated=None):

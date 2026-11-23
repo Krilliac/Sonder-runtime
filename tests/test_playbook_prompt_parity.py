@@ -88,7 +88,7 @@ def _load(function, parts):
 
 @pytest.fixture(scope="module")
 def sources():
-    return _function(LEGACY_BUILD_SYSTEM), _function((ROOT / "server.py").read_text(encoding="utf-8"))
+    return _function(LEGACY_BUILD_SYSTEM), _function((ROOT / "runtime" / "server.py").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("system", ["", "Caller system", "Line one\nLine two é"])

@@ -398,12 +398,12 @@ def test_no_other_lane_reads_the_restricted_decision():
         "sonder_runtime/bootstrap/prepared_workbench.py",  # suppresses it
     }
     readers = set()
-    for path in [REPO / "server.py", *REPO.glob("sonder_runtime/**/*.py"), *REPO.glob("*.py")]:
+    for path in [REPO / "runtime" / "server.py", *REPO.glob("sonder_runtime/**/*.py"), *REPO.glob("*.py")]:
         text = path.read_text(encoding="utf-8")
         if "restricted_tool_lane" in text and path.name != "test_restricted_tool_lane.py":
             readers.add(path.relative_to(REPO).as_posix())
     assert readers == allowed, readers
-    tree = ast.parse((REPO / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO / "runtime" / "server.py").read_text(encoding="utf-8"))
     admitters = {
         function.name for function in ast.walk(tree)
         if isinstance(function, ast.FunctionDef)

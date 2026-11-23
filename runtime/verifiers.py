@@ -434,7 +434,7 @@ def lean_trusted_prelude(spec):
 
 
 def _repository_lean_toolchain():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean-toolchain")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lean-toolchain")
     try:
         with open(path, encoding="utf-8") as handle:
             pin = handle.read().strip()

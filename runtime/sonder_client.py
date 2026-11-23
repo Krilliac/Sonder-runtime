@@ -20,6 +20,12 @@ Run:
     python sonder_client.py
     python sonder_client.py --server https://sonder.example.com --key s3cret
 """
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
 import sys
 import urllib.error
 

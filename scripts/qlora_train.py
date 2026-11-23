@@ -49,8 +49,8 @@ HF_REVISIONS = {
 }
 HF_REVISION = os.environ.get("SONDER_HF_REVISION", HF_REVISIONS.get(BASE, ""))
 
-DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(__file__), "training_data.jsonl"))
-OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(__file__), "sonder-personal-lora"))
+DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "training_data.jsonl"))
+OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sonder-personal-lora"))
 
 MAX_LEN = int(os.environ.get("SONDER_MAX_LEN", "1024"))
 

@@ -12,7 +12,7 @@ if not defined SONDER_PYTHON (
   popd
   endlocal & exit /b 3
 )
-"%SONDER_PYTHON%" "%REPO%bootstrap_engine.py" %*
+"%SONDER_PYTHON%" "%REPO%scripts\bootstrap_engine.py" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 endlocal & exit /b %EXIT_CODE%

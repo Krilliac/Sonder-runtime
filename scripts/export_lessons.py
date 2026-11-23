@@ -14,7 +14,9 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_ROOT, "scripts"), os.path.join(_ROOT, "runtime"), _ROOT):
+    if _p not in sys.path: sys.path.insert(0, _p)
 import contribute  # noqa
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
 import sonder_paths  # noqa

@@ -17,7 +17,7 @@ import os
 import durable_locks
 import training_tasks
 
-GEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_tasks.jsonl")
+GEN_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "generated_tasks.jsonl")
 
 _log = logging.getLogger(__name__)
 

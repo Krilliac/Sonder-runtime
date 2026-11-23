@@ -130,11 +130,11 @@ def workspace_root() -> str:
     override = os.environ.get("SONDER_ASSET_WORKSPACE", "").strip()
     if override:
         if not os.path.isabs(override):
-            return os.path.abspath(os.path.dirname(__file__))
+            return os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
         candidate = os.path.abspath(os.path.expanduser(override))
         if os.path.isdir(candidate):
             return candidate
-    return os.path.abspath(os.path.dirname(__file__))
+    return os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
 
 def default_asset_root() -> str:

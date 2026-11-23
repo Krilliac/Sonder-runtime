@@ -102,12 +102,15 @@ _SOURCE_PATHS = {
 
 
 def _source_path(name: str) -> str:
-    """Resolve packaged source first, with a legacy-root fallback."""
+    """Resolve packaged source first, then ``runtime/``, then legacy root."""
     packaged = _SOURCE_PATHS.get(os.path.basename(name))
     if packaged:
         packaged_path = os.path.join(_HERE, packaged)
         if os.path.exists(packaged_path):
             return packaged_path
+    runtime_path = os.path.join(_HERE, "runtime", name)
+    if os.path.exists(runtime_path):
+        return runtime_path
     return os.path.join(_HERE, name)
 
 

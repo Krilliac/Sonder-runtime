@@ -22,7 +22,7 @@ def test_root_weather_and_location_surfaces_are_packaged_aliases():
 
 
 def test_root_has_no_public_weather_or_location_implementation_definitions():
-    tree = ast.parse((ROOT / "web_tools.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "runtime" / "web_tools.py").read_text(encoding="utf-8"))
     names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     assert not names.intersection({
         "weather_lookup", "format_weather", "normalize_location_hint",

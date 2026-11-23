@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
 # Work started without a project goes to ~/Sonder/workspaces by default; a test
 # must never create folders in the developer's real home.  Kept apart from the
@@ -130,7 +130,9 @@ os.environ.update(
         "OLLAMA_HOST": "127.0.0.1:1",
     }
 )
-sys.path.insert(0, str(_REPO_ROOT))
+for _entry in (str(_REPO_ROOT / "scripts"), str(_REPO_ROOT / "runtime"), str(_REPO_ROOT)):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
 
 
 # Whether callers are authenticated is read from the environment at call time,

@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_workspace_root_is_the_checkout():
-    assert (REPO_ROOT / "server.py").is_file()
+    assert (REPO_ROOT / "runtime" / "server.py").is_file()
     assert os.path.realpath(code_runner.workspace_root()) == os.path.realpath(REPO_ROOT)
 
 

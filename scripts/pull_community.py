@@ -15,7 +15,9 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_ROOT, "scripts"), os.path.join(_ROOT, "runtime"), _ROOT):
+    if _p not in sys.path: sys.path.insert(0, _p)
 import contribute  # noqa: E402
 import sonder_runtime.adapters.embeddings as embeddings  # noqa: E402
 import sonder_runtime.adapters.memory_store as memory_store  # noqa
@@ -91,7 +93,7 @@ def merge_lessons(conn, lessons, embed_fn=None):
 
 
 def main(src="community_lessons.jsonl", db=None):
-    db = db or os.path.join(os.path.dirname(__file__), "memory.db")
+    db = db or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "memory.db")
     lessons = []
     if os.path.isfile(src):
         with io.open(src, "r", encoding="utf-8") as f:
