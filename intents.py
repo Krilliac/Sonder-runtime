@@ -34,13 +34,38 @@ _STRICT_RE = re.compile(
     r"^" + _POLITE + r"(?:(?:be|turn|switch)\s+)?strict(?:\s+mode)?(?:\s+(?P<state>on|off))?" + _TAIL + r"$"
 )
 
+_RUN_REF = r"(?:it|that|this|(?:the|my|this|that)\s+(?:code|script|program|snippet))"
+_RUN_PREFIX = r"^(?:(?:please|kindly|can\s+you|could\s+you|would\s+you)\s+)*"
+
 _RUN_RE = re.compile(
-    r"^(?:(?:please|kindly|can\s+you|could\s+you|would\s+you)\s+)*"
-    r"(?:run|execute)"
-    r"(?:\s+(?:it|that|this|(?:the|my|this|that)\s+(?:code|script|program|snippet)))?"
-    r"(?:\s+(?:again|for\s+me))?"
-    r"(?:\s+(?:so\s+(?:i|we)\s+can\s+see(?:\s+(?:it|that|this|the\s+(?:output|result)))?"
-    r"|to\s+see(?:\s+(?:it|that|this|what\s+happens|the\s+(?:output|result)))?))?"
+    _RUN_PREFIX
+    + r"(?:run|execute)"
+    + r"(?:\s+" + _RUN_REF + r")?"
+    + r"(?:\s+(?:again|for\s+me))?"
+    + r"(?:\s+(?:so\s+(?:i|we)\s+can\s+see(?:\s+(?:it|that|this|the\s+(?:output|result)))?"
+    + r"|to\s+see(?:\s+(?:it|that|this|what\s+happens|the\s+(?:output|result)))?))?"
+    + _TAIL + r"$"
+)
+
+# Whole-turn run phrasings that legitimately include "and" or a relative clause
+# ("run it and show me the output", "try running the code you just wrote").
+# Checked before `_CLAUSE_SPLIT_RE` splits on "and", while keeping compound
+# non-control turns ("run it and delete the database") firmly rejected.
+_RUN_WHOLE_RE = re.compile(
+    _RUN_PREFIX + r"(?:"
+    + r"(?:run|execute)\s+" + _RUN_REF
+    + r"(?:\s+(?:again|for\s+me))?"
+    + r"\s+and\s+show(?:\s+me)?\s+(?:it|that|this|the\s+(?:output|result)|what\s+happens)"
+    + r"|(?:try\s+running|run|execute)\s+" + _RUN_REF
+    + r"\s+(?:that\s+)?you\s+(?:just\s+)?(?:wrote|gave\s+me|generated|made)"
+    + r"|try\s+running\s+" + _RUN_REF + r"(?:\s+(?:again|for\s+me))?"
+    + r")" + _TAIL + r"$"
+)
+
+_RUN_WINDOW_RE = re.compile(
+    _RUN_PREFIX
+    + r"(?:run|execute)(?:\s+" + _RUN_REF + r")?"
+    + r"\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)"
     + _TAIL + r"$"
 )
 
@@ -123,11 +148,11 @@ _WORK_ACTION_RE = re.compile(
     r"generate|implement|inspect|install|integrate|lint|list|make|merge|migrate|"
     r"modify|move|open|optimize|patch|profile|publish|read|refactor|"
     r"remove|rename|repair|restructure|review|rewrite|run|scan|scaffold|search|"
-    r"setup|ship|start|stop|sync|test|troubleshoot|update|upgrade|validate|"
+    r"setup|ship|spawn|start|stop|sync|test|troubleshoot|update|upgrade|validate|"
     r"verify|view|write)\b"
 )
 _WORK_TARGET_RE = re.compile(
-    r"\b(animation|api|app|application|asset|audio|backend|binary|build|chart|"
+    r"\b(adapter|adapters|agent|agents|animation|api|app|application|asset|audio|backend|binary|build|chart|"
     r"class|cli|code|component|config|controller|database|dashboard|data|"
     r"dependency|dependencies|diagram|directory|doc|docs|dockerfile|document|"
     r"endpoint|enum|extension|feature|file|files|fixture|folder|folders|form|"
@@ -136,7 +161,7 @@ _WORK_TARGET_RE = re.compile(
     r"module|music|package|parser|path|pipeline|plugin|presentation|program|"
     r"project|query|readme|renderer|report|repo|repository|route|scene|schema|"
     r"script|scripts|serializer|server|service|shader|sound|spec|spreadsheet|"
-    r"sprite|struct|style|styles|system|table|task|template|test|tests|texture|"
+    r"sprite|struct|style|styles|subagent|subagents|system|table|task|template|test|tests|texture|"
     r"tool|tools|type|types|sonder|ui|validator|variable|vector|view|web|"
     r"webpage|website|workflow|workspace)\b"
 )
@@ -285,8 +310,9 @@ def requests_ensemble_compiler_retries(text):
 def classify(text):
     """Return a dict of detected control intents, or {} for a normal task turn.
 
-    Keys (any subset): 'trace': bool, 'strict': bool, 'run': True, 'train': int.
-    Conservative: only fires on SHORT messages (<= 10 words) in which EVERY
+    Keys (any subset): 'trace': bool, 'strict': bool, 'run': True,
+    'run_window': True, 'train': int.
+    Conservative: only fires on SHORT messages (<= 12 words) in which EVERY
     clause is a whole control phrasing ("strict on", "run it", "train on 5"),
     and never on questions, tasks or negated phrasings.
     """
@@ -294,10 +320,14 @@ def classify(text):
     if len(t) > _MAX_CONTROL_CHARS:
         return {}
     t = ascii_lower(t.strip()).rstrip(".!? \t\r\n\f\v")
-    if not t or len(t.split()) > 10:
+    if not t or len(t.split()) > 12:
         return {}
     if _GUARD_RE.match(t) and not _SHOW_REASONING_RE.match(t):
         return {}
+    if _RUN_WINDOW_RE.match(t):
+        return {"run_window": True}
+    if _RUN_WHOLE_RE.match(t):
+        return {"run": True}
 
     out = {}
     clauses = [c for c in (p.strip() for p in _CLAUSE_SPLIT_RE.split(t)) if c]
@@ -314,6 +344,9 @@ def classify(text):
         m = _STRICT_RE.match(clause)
         if m:
             out["strict"] = m.group("state") != "off"
+            continue
+        if _RUN_WINDOW_RE.match(clause):
+            out["run_window"] = True
             continue
         if _RUN_RE.match(clause):
             out["run"] = True
@@ -581,7 +614,13 @@ _GIF_GEN_EXCLUDE_RE = re.compile(
     r"\b(?:ffmpeg|imagemagick|pillow|pil|encoder|decoder|converter|transcode|"
     r"convert|converting|mp4|webm|avi|mov|mkv|png|jpg|jpeg|svg|webp|"
     r"generator|picker|viewer|player|uploader|compressor|optimizer|"
-    r"tutorial|snippet|url|link)\b",
+    r"tutorial|snippet|url|link|div|button|modal|drawer|navbar|sidebar|"
+    r"element|transition|keyframes?|lottie|framer|gsap|dom|scroll|hover)\b",
+    re.I,
+)
+_GIF_ANIMATE_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"animate(?:\s+(?:me|us))?\s+(?P<subject>(?:a|an|the|this)\s+\S.*)$",
     re.I,
 )
 _GIF_GENERIC_PRE_TOKENS = frozenset({
@@ -632,7 +671,14 @@ def classify_gif_generation(text):
 
     match = _GIF_GEN_LEAD_RE.match(value)
     if not match:
-        return None
+        anim_match = _GIF_ANIMATE_LEAD_RE.match(value)
+        if not anim_match:
+            return None
+        subject = (anim_match.group("subject") or "").strip(" ,.!?")
+        if _CONTENT_ONLY_FOLLOWUP_RE.search(subject.lower()) or _CONTENT_ONLY_PERSIST_RE.search(subject.lower()):
+            return None
+        subject = _GIF_REST_POLITE_TAIL_RE.sub("", subject).strip(" ,.!?")
+        return subject or _GIF_DEFAULT_PROMPT
 
     pre = (match.group("pre") or "").strip()
     rest = (match.group("rest") or "").strip()

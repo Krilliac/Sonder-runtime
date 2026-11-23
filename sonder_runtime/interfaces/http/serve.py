@@ -88,7 +88,10 @@ import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
 from sonder_runtime.adapters import chat_effort as _chat_effort
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
-from sonder_runtime.adapters.repl_services import personas as _personas
+from sonder_runtime.adapters.repl_services import (
+    command_router as _command_router,
+    personas as _personas,
+)
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -2451,8 +2454,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # reasoning through it, and an omission justified by a refusal must not
     # outlive the refusal.
     "/cot", "/chainofthought", "/thoughts",
-    # Shows operator prompt overrides and state-home paths.
-    "/prompts", "/persona",
+    # Shows operator prompt overrides, host environment/hardware, and state-home paths.
+    "/prompts", "/persona", "/env", "/environment", "/hardware",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/master_orchestrate", "/delegate", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
@@ -3313,6 +3316,26 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return _image_generation.generate_chat_gif(gif_prompt).markdown
     if cmd == "/stats":
         return server.sonder_stats()
+    if cmd == "/version":
+        from sonder_runtime.platform import version as build_identity
+        stamped = build_identity.stamped_build_info()
+        if stamped is not None:
+            return "sonder %s (commit %s, stamped release)" % (
+                stamped.version, stamped.commit_sha[:12],
+            )
+        return "sonder %s" % build_identity.runtime_version()
+    if cmd in ("/env", "/environment"):
+        return server.environment_status(
+            refresh=(arg or "").strip().lower() == "refresh",
+        )
+    if cmd == "/hardware":
+        return server.hardware_profile(
+            refresh=(arg or "").strip().lower() == "refresh",
+        )
+    if cmd == "/route":
+        if not arg.strip():
+            return "usage: /route <task or prompt>"
+        return server.route_request(arg.strip())
     if cmd == "/context":
         return server.context_health()
     if cmd == "/prompts":
@@ -3859,6 +3882,62 @@ def _handle_intent(content, messages=None, state=None, context=None):
         intent, lambda command: _handle_slash(command, messages=messages, state=state, context=context),
         lambda: context is None or _developer_authorized(context)))
     return "\n".join(replies)
+
+
+# Curated slash commands eligible for HTTP natural-language auto-dispatch via
+# ``command_router.resolve()``.  Every resolved command still flows through
+# ``_handle_slash()`` so permission modes, deny rules, account-scope guards,
+# and role checks apply identically to a typed slash command.  Destructive,
+# file-mutating, and lifecycle commands (/delete, /write, /edit, /exit, /new,
+# /update, /stash) remain explicit-slash-only on HTTP.
+_HTTP_NATURAL_COMMANDS = frozenset({
+    # Per-session controls
+    "/persona", "/effort", "/temp",
+    # Read-only status, introspection, and environment probes
+    "/stats", "/context", "/contextsize", "/hardware", "/env", "/version",
+    "/diagnostics", "/updatecheck", "/tool_manifest", "/commands",
+    "/permissions", "/activity", "/agents", "/capacity", "/goal",
+    "/workflow_list", "/npu_status", "/calibration_status",
+    "/learning_health_status", "/mcp_runtime_status", "/status",
+    "/system_profile_text", "/evaluation_history_status",
+    # Read-only repository inspection
+    "/repo_status", "/repo_log", "/repo_diff",
+    # Scoped todo list & explicit todo creation
+    "/todo",
+    # Explicit tier-aware multi-model consultation / routing / ensemble
+    "/consult", "/route", "/ensemble",
+})
+
+
+def _handle_natural_command(
+    content, *, messages=None, state=None, project="", context=None,
+    idempotency_key="", workspace_project=None, lane_session="",
+    storage_session="",
+):
+    """Resolve curated plain-language commands through the gated slash handler."""
+    if context is not None and not _developer_authorized(context):
+        return None
+    resolved = _command_router.resolve(content)
+    if not resolved or not resolved.startswith("/"):
+        return None
+    head = _slash_head(resolved.split(None, 1)[0])
+    if head not in _HTTP_NATURAL_COMMANDS:
+        return None
+    if head == "/contextsize" and " " in resolved.strip():
+        return None
+    if context is not None and _dangerous_http_slash(resolved) and not _developer_authorized(context):
+        return None
+    return _handle_slash(
+        resolved,
+        messages=messages,
+        state=state,
+        project=project,
+        context=context,
+        idempotency_key=idempotency_key,
+        workspace_project=workspace_project,
+        lane_session=lane_session,
+        storage_session=storage_session,
+    )
 
 
 def _work_project_for_request(project, storage_project, content="", auth=None):
@@ -7757,6 +7836,20 @@ class Handler(BaseHTTPRequestHandler):
                             and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state, context=context,
+                        )
+                    if (structured_schema is None and allow_control_routes and reply is None
+                            and _developer_authorized(context)
+                            and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
+                        reply = _handle_natural_command(
+                            prompt,
+                            messages=_chat_tool_stream.slash_messages(messages, history, _history_from_messages),
+                            state=state,
+                            project=storage_project or server._http_chat_tools().account_default_project(context, _state_principal(context)),
+                            context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
+                            workspace_project=project,
+                            lane_session=session,
+                            storage_session=storage_session,
                         )
                     if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "fanout":
                         # Developer authority was established above from this

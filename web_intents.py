@@ -294,6 +294,15 @@ _WEATHER_META_FRAME = re.compile(
     r"[\"'](?:[^\"'\n]{0,80})(?:weather|forecast|temperature)",
     re.IGNORECASE,
 )
+_WEATHER_NON_METEOROLOGICAL = re.compile(
+    r"\b(?:set|reset|change|adjust|raise|lower|use|sampling|model|session)\b"
+    r"[^\n]{0,40}\btemperature\b|"
+    r"\btemperature\s+(?:to\s+)?(?:auto|default|\d+(?:\.\d+)?)\b|"
+    r"\bforecast(?:ing)?\s+(?:revenue|sales|demand|growth|earnings|budget|"
+    r"traffic|load|capacity|costs?|cash\s*flow|churn|profit|quarterly|q[1-4]|annual)\b|"
+    r"\b(?:revenue|sales|demand|growth|financial|budget|traffic|capacity)\s+forecast\b",
+    re.IGNORECASE,
+)
 _WEATHER_FULLY_QUOTED = re.compile(
     r"^\s*(?:\"[^\n\"]*(?:weather|forecast|temperature)[^\n\"]*\"|"
     r"“[^\n”]*(?:weather|forecast|temperature)[^\n”]*”|"
@@ -954,7 +963,11 @@ def classify(prompt: str, history=None) -> dict | None:
         return None
     if (
         _weather_signal(text)
-        and (_WEATHER_META_FRAME.search(text) or _WEATHER_FULLY_QUOTED.match(text))
+        and (
+            _WEATHER_META_FRAME.search(text)
+            or _WEATHER_NON_METEOROLOGICAL.search(text)
+            or _WEATHER_FULLY_QUOTED.match(text)
+        )
     ):
         return None
     previous_weather = _recent_weather_context(history)
