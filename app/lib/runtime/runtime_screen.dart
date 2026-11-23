@@ -272,6 +272,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   final Set<String> _approving = {};
   bool _bulkApproving = false;
   bool _bulkDenying = false;
+  bool _bulkRevoking = false;
   final Map<String, ActionOutcome> _approvalOutcomes = {};
 
   /// The Developer console, newest first.
@@ -902,7 +903,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'This server cannot approve over HTTP. Approve from the console.',
         );
       } else {
-        pending = fresh.pending;
+        pending = fresh.actionablePending;
       }
     } on SonderException catch (error) {
       preFailure = const {401, 403}.contains(error.httpStatus)
@@ -1047,7 +1048,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
           'This server does not support HTTP denials.',
         );
       } else {
-        pending = fresh.pending;
+        pending = fresh.actionablePending;
       }
     } on SonderException catch (error) {
       preFailure = const {401, 403}.contains(error.httpStatus)
@@ -1141,6 +1142,115 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       outcome = ActionOutcome(
         StatusKind.warn,
         'Denied $deniedCount of ${pending.length} pending calls ($failedCount failed).',
+        detail: stopDetail,
+      );
+    }
+    setState(() => _approvalOutcomes['_bulk'] = outcome);
+    await _loadExtras();
+  }
+
+  Future<void> _revokeAll() async {
+    if (_bulkApproving || _bulkDenying || _bulkRevoking) return;
+    setState(() {
+      _bulkRevoking = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    List<IssuedApproval> open = const [];
+    ActionOutcome? preFailure;
+    try {
+      final fresh = await _data.approvals(limit: 200);
+      if (!fresh.supported) {
+        preFailure = const ActionOutcome(
+          StatusKind.note,
+          'This server does not support HTTP revocations.',
+        );
+      } else {
+        open = fresh.open;
+      }
+    } on SonderException catch (error) {
+      preFailure = const {401, 403}.contains(error.httpStatus)
+          ? const ActionOutcome(
+              StatusKind.warn, SonderStrings.approvalsNeedRole)
+          : ActionOutcome.failed('Could not load open approvals',
+              detail: error.message);
+    }
+    if (!mounted) return;
+    if (preFailure != null || open.isEmpty) {
+      setState(() {
+        _bulkRevoking = false;
+        _approvalOutcomes['_bulk'] = preFailure ??
+            const ActionOutcome(StatusKind.note, 'No open approvals to revoke.');
+      });
+      await _loadExtras();
+      return;
+    }
+    setState(() => _bulkRevoking = false);
+    unawaited(_confirmAndRevokeAll(open));
+  }
+
+  Future<void> _confirmAndRevokeAll(List<IssuedApproval> open) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('approvals-revoke-all-dialog'),
+        title: Text('Revoke all ${open.length} open approvals?'),
+        content: Text(
+          'This withdraws all ${open.length} unused one-shot approvals so '
+          'none of them can be spent.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('approvals-revoke-all-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Revoke all (${open.length})'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _bulkRevoking = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    var revokedCount = 0;
+    var failedCount = 0;
+    String? stopDetail;
+    try {
+      for (final item in open) {
+        try {
+          await _data.revokeApproval(item.nonce);
+          revokedCount++;
+        } on SonderException catch (error) {
+          failedCount++;
+          if (error.code == ApprovalsApi.unavailableCode ||
+              const {401, 403}.contains(error.httpStatus)) {
+            stopDetail = error.message;
+            break;
+          }
+          stopDetail ??= error.message;
+        }
+      }
+    } finally {
+      _bulkRevoking = false;
+    }
+    if (!mounted) return;
+    final ActionOutcome outcome;
+    if (revokedCount == open.length) {
+      outcome = ActionOutcome.ok(
+          'Revoked all $revokedCount open approval${revokedCount == 1 ? '' : 's'}.',
+          word: 'done');
+    } else if (revokedCount == 0) {
+      outcome = ActionOutcome.failed('No approvals were revoked',
+          detail: stopDetail);
+    } else {
+      outcome = ActionOutcome(
+        StatusKind.warn,
+        'Revoked $revokedCount of ${open.length} open approvals ($failedCount failed).',
         detail: stopDetail,
       );
     }
@@ -1633,7 +1743,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return runs + agents + autopilot;
   }
 
-  int get _approvalsWaiting => _approvals?.pending.length ?? 0;
+  int get _approvalsWaiting => _approvals?.actionablePending.length ?? 0;
 
   /// The Server rail badge: a problem with the server or its launcher.
   StatusKind? get _serverProblem {

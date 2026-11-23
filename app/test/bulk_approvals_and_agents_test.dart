@@ -158,6 +158,77 @@ void main() {
         ['a1b2c3d4e5f60001', 'a1b2c3d4e5f60002']);
   });
 
+  testWidgets('ApprovalsPanel hides already-approved and denied pending rows',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final pending = [
+      const PendingApproval(
+        callId: 'a1b2c3d4e5f60001',
+        tool: 'file_check',
+        preview: 'path=a.py',
+        mode: 'manual',
+      ),
+      const PendingApproval(
+        callId: 'a1b2c3d4e5f60002',
+        tool: 'script_run',
+        preview: 'path=b.py',
+        mode: 'manual',
+        denied: true,
+      ),
+    ];
+    final open = [
+      const IssuedApproval(
+        nonce: 'apv_0001',
+        callId: 'a1b2c3d4e5f60001',
+        tool: 'file_check',
+        ttlSeconds: 900,
+      ),
+      const IssuedApproval(
+        nonce: 'apv_0002',
+        callId: 'a1b2c3d4e5f60009',
+        tool: 'run_code',
+        ttlSeconds: 900,
+      ),
+    ];
+    final data = FakeRuntimeData(
+      approvalsPage:
+          ApprovalsPage(supported: true, pending: pending, open: open),
+    );
+    await tester.pumpWidget(MaterialApp(
+      theme: SonderTheme.dark,
+      home: RuntimeScreen(
+        settings: Settings(serverUrl: 'http://192.168.1.20:11435'),
+        initialInfo: healthySystemInfo(),
+        liveUpdates: false,
+        dataSource: data,
+        now: runtimeNow,
+        initialCategory: 'permissions',
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Neither the already-approved call nor the denied call appears as waiting!
+    expect(find.byKey(const Key('approvals-approve-all')), findsNothing);
+    expect(find.byKey(const Key('approvals-deny-all')), findsNothing);
+    expect(
+        find.byKey(const Key('approval-pending-a1b2c3d4e5f60001')), findsNothing);
+    expect(
+        find.byKey(const Key('approval-pending-a1b2c3d4e5f60002')), findsNothing);
+    // Revoke all (2) is shown for the 2 open approvals!
+    expect(find.byKey(const Key('approvals-revoke-all')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('approvals-revoke-all')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('approvals-revoke-all-confirm')));
+    await tester.pumpAndSettle();
+    expect(data.revoked, ['apv_0001', 'apv_0002']);
+  });
+
   testWidgets('AgentScreen mass clear finished removes terminal lanes and bg',
       (tester) async {
     tester.view.physicalSize = const Size(1280, 1000);

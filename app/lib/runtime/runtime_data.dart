@@ -133,6 +133,19 @@ class ApprovalsPage {
     this.open = const [],
   });
 
+  /// Pending calls still awaiting a decision (not already denied and not
+  /// already holding an open approval in [open]).
+  List<PendingApproval> get actionablePending {
+    if (pending.isEmpty) return const [];
+    final openIds = {
+      for (final a in open)
+        if (a.callId.isNotEmpty) a.callId,
+    };
+    return pending
+        .where((p) => !p.denied && !openIds.contains(p.callId))
+        .toList(growable: false);
+  }
+
   /// [snapshot] is null when the server has no approvals route.
   factory ApprovalsPage.fromSnapshot(ApprovalsSnapshot? snapshot) =>
       snapshot == null

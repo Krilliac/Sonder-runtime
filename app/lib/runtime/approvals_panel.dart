@@ -36,7 +36,7 @@ String? approvalTimeLeft(IssuedApproval item, DateTime now) {
 /// `2 waiting · 1 approved`, or null before the first read.
 String? approvalsSummary(ApprovalsPage? page) {
   if (page == null || !page.supported) return null;
-  final pending = page.pending.length;
+  final pending = page.actionablePending.length;
   final open = page.open.length;
   if (pending == 0 && open == 0) return 'Nothing waiting';
   return [
@@ -68,15 +68,19 @@ class ApprovalsPanel extends StatelessWidget {
   /// Revokes an open approval. Null hides **Revoke**.
   final Future<void> Function(IssuedApproval item)? onRevoke;
 
+  /// Revokes all open approvals after explicit confirmation.
+  final Future<void> Function()? onRevokeAll;
+
   /// Call ids being checked or approved, and nonces being revoked.
   final Set<String> busy;
 
   /// Call ids whose approval POST is in flight (after the sheet).
   final Set<String> approving;
 
-  /// Whether a bulk approve-all or deny-all operation is in flight.
+  /// Whether a bulk approve-all, deny-all, or revoke-all operation is in flight.
   final bool bulkApproving;
   final bool bulkDenying;
+  final bool bulkRevoking;
 
   /// The outcome of the last action, by call id (approve) or nonce
   /// (revoke). An outcome whose row has gone shows at the top.
@@ -95,10 +99,12 @@ class ApprovalsPanel extends StatelessWidget {
     this.onApproveAll,
     this.onDenyAll,
     this.onRevoke,
+    this.onRevokeAll,
     this.busy = const {},
     this.approving = const {},
     this.bulkApproving = false,
     this.bulkDenying = false,
+    this.bulkRevoking = false,
     this.outcomes = const {},
     this.onDismiss,
   });
@@ -171,10 +177,14 @@ class ApprovalsPanel extends StatelessWidget {
       ];
     }
     final clock = now ?? DateTime.now();
+    final actionable = current.actionablePending;
     final shown = <String>{
-      for (final item in current.pending) item.callId,
+      for (final item in actionable) item.callId,
       for (final item in current.open) ...[item.callId, item.nonce],
     };
+    final showBulk =
+        (actionable.isNotEmpty && (onApproveAll != null || onDenyAll != null)) ||
+            (current.open.length > 1 && onRevokeAll != null);
     return [
       // An outcome whose row is gone (approved, spent or expired since).
       for (final entry in outcomes.entries)
@@ -186,19 +196,17 @@ class ApprovalsPanel extends StatelessWidget {
                 onDismiss:
                     onDismiss == null ? null : () => onDismiss!(entry.key)),
           ),
-      if (current.pending.isEmpty && current.open.isEmpty)
+      if (actionable.isEmpty && current.open.isEmpty)
         const RuntimeEmptyRow('Nothing waiting.',
             icon: Icons.verified_user_outlined),
-      if (current.pending.isNotEmpty &&
-          (onApproveAll != null || onDenyAll != null))
-        _bulkBar(context, current.pending.length),
-      for (final item in current.pending) _pendingRow(context, item),
+      if (showBulk) _bulkBar(context, actionable.length, current.open.length),
+      for (final item in actionable) _pendingRow(context, item),
       for (final item in current.open) _openRow(context, item, clock),
     ];
   }
 
-  Widget _bulkBar(BuildContext context, int count) {
-    final anyBulkBusy = bulkApproving || bulkDenying;
+  Widget _bulkBar(BuildContext context, int pendingCount, int openCount) {
+    final anyBulkBusy = bulkApproving || bulkDenying || bulkRevoking;
     return Padding(
       key: const Key('approvals-bulk-bar'),
       padding: const EdgeInsets.symmetric(
@@ -208,10 +216,10 @@ class ApprovalsPanel extends StatelessWidget {
         runSpacing: SonderSpace.xs,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          if (onApproveAll != null)
+          if (pendingCount > 0 && onApproveAll != null)
             AsyncActionButton(
               buttonKey: const Key('approvals-approve-all'),
-              label: 'Approve all ($count)',
+              label: 'Approve all ($pendingCount)',
               busyLabel: 'Approving all…',
               doneLabel: null,
               icon: Icons.done_all,
@@ -220,16 +228,28 @@ class ApprovalsPanel extends StatelessWidget {
               onPressed: anyBulkBusy ? null : onApproveAll,
               onError: (_, __) {},
             ),
-          if (onDenyAll != null)
+          if (pendingCount > 0 && onDenyAll != null)
             AsyncActionButton(
               buttonKey: const Key('approvals-deny-all'),
-              label: 'Deny all ($count)',
+              label: 'Deny all ($pendingCount)',
               busyLabel: 'Denying all…',
               doneLabel: null,
               icon: Icons.block,
               style: ActionButtonStyle.outlined,
               busy: bulkDenying,
               onPressed: anyBulkBusy ? null : onDenyAll,
+              onError: (_, __) {},
+            ),
+          if (openCount > 1 && onRevokeAll != null)
+            AsyncActionButton(
+              buttonKey: const Key('approvals-revoke-all'),
+              label: 'Revoke all ($openCount)',
+              busyLabel: 'Revoking all…',
+              doneLabel: null,
+              icon: Icons.cancel_outlined,
+              style: ActionButtonStyle.text,
+              busy: bulkRevoking,
+              onPressed: anyBulkBusy ? null : onRevokeAll,
               onError: (_, __) {},
             ),
         ],
