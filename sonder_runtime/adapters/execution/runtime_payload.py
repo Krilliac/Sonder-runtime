@@ -360,6 +360,9 @@ class RuntimePayload:
         self.anchor = PrivateDirectoryAnchor.open_base(self.path, require_new=True)
         try:
             sources = [source / "sonder_runtime", source / "migrations", source / "seed"]
+            for extra_dir in ("runtime", "scripts"):
+                if (source / extra_dir).is_dir():
+                    sources.append(source / extra_dir)
             sources += sorted(path for path in source.iterdir() if path.is_file() and path.suffix in (".py", ".toml"))
             copied, total = 0, 0
             for item in sources:
@@ -406,9 +409,13 @@ class RuntimePayload:
                 compiled = {}
             rows = inventory(roots)
             _require_compiled_from(compiled, rows, site_paths[0], dependencies)
+            payload_paths = [str(self.path)]
+            for extra_dir in ("runtime", "scripts"):
+                if (self.path / extra_dir).is_dir():
+                    payload_paths.append(str(self.path / extra_dir))
             self.manifest = {
                 "schema": 2, "payload": str(self.path), "executable": str(executable),
-                "paths": [str(self.path), str(base / "Lib"), str(base / "DLLs"),
+                "paths": [*payload_paths, str(base / "Lib"), str(base / "DLLs"),
                           *(str(path) for path in site_paths)],
                 "dll_paths": dll_paths, "source": str(source), "roots": roots,
                 "files": rows, "python": list(sys.version_info[:2]),

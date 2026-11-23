@@ -376,7 +376,7 @@ def test_second_process_can_cancel_first_process_worker(monkeypatch, tmp_path):
     )
 
     script = (
-        "import json, fleet_store; "
+        "import json; import sonder_runtime.adapters.persistence.fleet_store as fleet_store; "
         "print(json.dumps(fleet_store.cancel_agents('agent-cross-process')))"
     )
     completed = subprocess.run(

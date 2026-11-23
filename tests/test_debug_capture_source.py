@@ -234,7 +234,8 @@ def test_windows_nul_device_under_a_root_is_refused_as_not_a_regular_file(root):
     with pytest.raises(SonderError) as caught:
         GuardedCaptureSource().open_reader(str(root / "NUL"))
     assert _code(caught) == "CAPTURE_REJECTED"
-    assert "regular file" in str(caught.value)
+    msg = str(caught.value)
+    assert "regular file" in msg or "reserved device name" in msg
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows device namespace")

@@ -333,7 +333,7 @@ def _call_openai_image_api(backend: ImageBackend, prompt: str, *, timeout: float
     return _decode_base64_image(b64)
 
 
-def _render_assetgen_png(prompt: str, out_path: Path) -> tuple[bytes, str]:
+def _render_assetgen_png(prompt: str, out_dir: Path, filename: str) -> tuple[bytes, str]:
     """Render a crisp 512x320 procedural PNG using Sonder's stdlib assetgen Canvas."""
     is_random = bool(_RANDOM_PROMPT_RE.match(prompt.strip()))
     effective_brief = random.choice(_RANDOM_STYLES) if is_random else prompt
@@ -407,9 +407,14 @@ def _render_assetgen_png(prompt: str, out_path: Path) -> tuple[bytes, str]:
         canvas.diamond(cx, cy, rx, ry, assetgen._rgba(assetgen._shade(accent, rng.randint(-15, 25))))
         canvas.diamond(cx, cy, max(4, rx // 2), max(6, ry // 2), assetgen._rgba(trim))
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save_png(str(out_path))
-    return out_path.read_bytes(), "image/png"
+    base_dir = os.path.realpath(str(out_dir))
+    os.makedirs(base_dir, exist_ok=True)
+    fullpath = os.path.normpath(os.path.join(base_dir, os.path.basename(filename)))
+    if not fullpath.startswith(base_dir + os.sep):
+        raise ValueError("Generated assetgen path escapes output directory")
+    canvas.save_png(fullpath)
+    with open(fullpath, "rb") as handle:
+        return handle.read(), "image/png"
 
 
 def _output_dir(state_home: Path | str | None) -> Path:
@@ -459,7 +464,7 @@ def generate_chat_image(
             fallback_note = f"Image API `{backend.model}` failed ({type(err).__name__}); used local raster fallback."
             active_kind = "assetgen"
             active_model = "sonder-assetgen"
-            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir, f"{slug}-{stamp}-{nonce}.png")
     elif backend.kind == "ollama":
         try:
             raw_bytes, mime = _call_ollama_image(backend, effective_prompt, timeout=timeout)
@@ -469,7 +474,7 @@ def generate_chat_image(
             fallback_note = f"Ollama image model `{backend.model}` failed ({type(err).__name__}); used local raster fallback."
             active_kind = "assetgen"
             active_model = "sonder-assetgen"
-            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir, f"{slug}-{stamp}-{nonce}.png")
     else:
         used_fallback = True
         fallback_note = (
@@ -478,13 +483,22 @@ def generate_chat_image(
             "`SONDER_IMAGE_MODEL` / `SONDER_IMAGE_API_URL` and image prompts "
             "will automatically route to it."
         )
-        raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+        raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir, f"{slug}-{stamp}-{nonce}.png")
 
     raw_bytes, mime = _fit_inline_budget(raw_bytes, mime)
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "png")
-    saved_path = out_dir / f"{slug}-{stamp}-{nonce}.{ext}"
-    if not saved_path.exists() or saved_path.read_bytes() != raw_bytes:
-        saved_path.write_bytes(raw_bytes)
+    base_dir = os.path.realpath(str(out_dir))
+    saved_fullpath = os.path.normpath(os.path.join(base_dir, os.path.basename(f"{slug}-{stamp}-{nonce}.{ext}")))
+    if not saved_fullpath.startswith(base_dir + os.sep):
+        raise ValueError("Generated image path escapes output directory")
+    existing_bytes = None
+    if os.path.isfile(saved_fullpath):
+        with open(saved_fullpath, "rb") as handle:
+            existing_bytes = handle.read()
+    if existing_bytes != raw_bytes:
+        with open(saved_fullpath, "wb") as handle:
+            handle.write(raw_bytes)
+    saved_path = Path(saved_fullpath)
 
     width, height = _sniff_dimensions(raw_bytes)
     b64 = base64.b64encode(raw_bytes).decode("ascii")
@@ -1395,8 +1409,13 @@ def generate_chat_gif(
             is_random=is_generic,
         )
 
-    saved_path = out_dir / f"{slug}-{stamp}-{nonce}.gif"
-    saved_path.write_bytes(gif_bytes)
+    base_dir = os.path.realpath(str(out_dir))
+    saved_fullpath = os.path.normpath(os.path.join(base_dir, os.path.basename(f"{slug}-{stamp}-{nonce}.gif")))
+    if not saved_fullpath.startswith(base_dir + os.sep):
+        raise ValueError("Generated GIF path escapes output directory")
+    with open(saved_fullpath, "wb") as handle:
+        handle.write(gif_bytes)
+    saved_path = Path(saved_fullpath)
 
     width, height = _sniff_dimensions(gif_bytes)
     actual_frames = count_gif_frames(gif_bytes)

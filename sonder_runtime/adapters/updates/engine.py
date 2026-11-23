@@ -755,7 +755,11 @@ class UpdateManager:
         self, release_dir: Path, args: list[str], *, timeout: float
     ) -> subprocess.CompletedProcess:
         env = dict(os.environ)
-        env["PYTHONPATH"] = str(release_dir)
+        env["PYTHONPATH"] = os.pathsep.join([
+            str(release_dir),
+            str(release_dir / "runtime"),
+            str(release_dir / "scripts"),
+        ])
         return subprocess.run(
             [sys.executable, *args],
             cwd=release_dir,
