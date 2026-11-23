@@ -32,11 +32,16 @@ from sonder_runtime.domain.chat_tools import (
     parse_tool_arguments,
     preview_tool_arguments,
 )
+from sonder_runtime.domain.code_audit import (
+    audit_source,
+    format_proactive_audit_notice,
+)
 from sonder_runtime.domain.code_gate_policy import (
     CODE_GATE_SIGNS,
     check_python_static_errors,
     uses_interactive_stdin,
 )
+from sonder_runtime.domain.prompt_defense import sanitize_tool_observation
 from sonder_runtime.domain.resilience import (
     GLOBAL_TELEMETRY,
     classify_model_error,
@@ -139,7 +144,53 @@ class ChatToolTurn:
     def _clip(self, text: str, limit: int) -> tuple[str, bool]:
         if len(text) <= limit:
             return text, False
-        return text[:limit] + f"\n... (truncated {len(text) - limit} chars)", True
+        omitted = len(text) - limit
+        if limit < 600:
+            return text[:limit] + f"\n... (truncated {omitted} chars)", True
+        # Preserve both opening context (65%) and trailing error/summary (35%)
+        head_len = int(limit * 0.65)
+        tail_len = max(120, limit - head_len)
+        marker = f"\n... (truncated {omitted} middle chars; head & tail preserved) ...\n"
+        return text[:head_len] + marker + text[-tail_len:], True
+
+    def _guard_observation(self, tool_name: str, text: str) -> str:
+        """Apply always-on secret redaction, Trojan-Source stripping, and prompt-injection defense."""
+        sanitized, meta = sanitize_tool_observation(tool_name, text)
+        if meta.get("secrets_redacted"):
+            GLOBAL_TELEMETRY.record("tool_secret_redacted", tool=tool_name)
+        if meta.get("unicode_stripped"):
+            GLOBAL_TELEMETRY.record("trojan_unicode_stripped", tool=tool_name)
+        if meta.get("injection_flagged"):
+            GLOBAL_TELEMETRY.record("prompt_injection_flagged", tool=tool_name)
+        return sanitized
+
+    def _proactive_write_audit(self, tool_name: str, args: Mapping[str, Any]) -> str:
+        """Run fast in-memory security/bug check on Python writes/edits."""
+        if tool_name not in ("file_write", "file_edit"):
+            return ""
+        path_str = str(args.get("path") or "")
+        if not path_str.lower().endswith((".py", ".pyi", ".pyw")):
+            return ""
+        if tool_name == "file_write":
+            content = str(args.get("content") or "")
+            notice = format_proactive_audit_notice(content, filename=path_str)
+            if notice:
+                GLOBAL_TELEMETRY.record("proactive_code_audit_flagged", tool=tool_name, detail=path_str[:120])
+            return notice
+        # file_edit: snippet may be indented partial block; ignore PY000 partial syntax errors
+        import textwrap
+        snippet = textwrap.dedent(str(args.get("replacement") or args.get("new_text") or ""))
+        if not snippet.strip():
+            return ""
+        report = audit_source(snippet, filename=path_str, language="python", min_severity="high", max_findings=5)
+        real_findings = [f for f in report.get("findings", []) if f.get("rule_id") != "PY000"]
+        if not real_findings:
+            return ""
+        GLOBAL_TELEMETRY.record("proactive_code_audit_flagged", tool=tool_name, detail=path_str[:120])
+        lines = [f"\n[PROACTIVE CODE AUDIT: {len(real_findings)} high/critical issue(s) in edited snippet of {path_str}]"]
+        for f in real_findings:
+            lines.append(f"  - [{f['severity'].upper()} {f['rule_id']}]: {f['message']} Fix: {f['remediation']}")
+        return "\n".join(lines)
 
     def _admitted_tool_names(self) -> tuple[str, ...]:
         return tuple(t.name for t in self.manifest.tools if t.name)
@@ -197,7 +248,7 @@ class ChatToolTurn:
             obs, record = self.delegate_client_tool(name, args)
             self.records.append(record)
             clipped_obs, _ = self._clip(obs, self.budget.model_output_chars)
-            return clipped_obs, run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
+            return self._guard_observation(name, clipped_obs), run_count + (1 if name in _EXECUTION_CAP_TOOLS else 0)
         if self.client_exec_only:
             msg = (
                 f"ERROR: HOST POLICY: tool '{name}' is not available on this turn "
@@ -383,8 +434,10 @@ class ChatToolTurn:
                 name, exec_result.output or exec_result.reason,
                 available_tools=admitted, tried_tools=failed_tools,
             )
-            return clipped_model + hint, new_runs
-        return clipped_model, new_runs
+            return self._guard_observation(name, clipped_model) + hint, new_runs
+        guarded = self._guard_observation(name, clipped_model)
+        audit_notice = self._proactive_write_audit(name, args)
+        return guarded + audit_notice, new_runs
 
     def _call_model_with_recovery(
         self,

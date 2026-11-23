@@ -652,6 +652,81 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         parameters={"type": "object", "properties": {}},
         backend=TOOL_BACKEND_DISCOVERY,
     ),
+    ChatToolDefinition(
+        name="prompt_shield",
+        description=(
+            "Audit untrusted text or a repository file for indirect prompt-injection payloads, "
+            "Trojan-Source Unicode bidi/tag spoofing, and accidental secret/credential leaks, returning redacted output."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "default": ""},
+                "path": {"type": "string", "default": ""},
+                "redact_secrets": {"type": "boolean", "default": True},
+                "include_sanitized": {"type": "boolean", "default": True},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="error_diagnose",
+        description=(
+            "Parse multi-language tracebacks and compiler/linker errors (Python, MSVC, GCC/Clang, Rust, JS/TS, pytest), "
+            "resolve repository source context around failing lines, classify root cause, and recommend fix steps."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "error_text": {"type": "string"},
+                "root": {"type": "string", "default": ""},
+                "max_frames": {"type": "integer", "default": 8},
+                "context_lines": {"type": "integer", "default": 3},
+            },
+            "required": ["error_text"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="code_audit",
+        description=(
+            "Static security vulnerability and bug-footgun auditor (Python AST + generic multi-language rules): "
+            "flags eval/exec, shell=True, SQL injection, unsafe deserialization, TLS bypass, hardcoded secrets, "
+            "mutable defaults, bare except, unreachable code, and always-true tuple asserts."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "default": ""},
+                "path": {"type": "string", "default": ""},
+                "language": {"type": "string", "default": ""},
+                "min_severity": {"type": "string", "default": "low"},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="data_transform",
+        description=(
+            "Deterministic structured data utility: convert between JSON/JSONL/CSV/TSV/TOML/INI/Markdown/flat, "
+            "compute column statistical profiles (min/max/mean/median/p95/nulls), run safe dot-path/where/sort/group_by "
+            "queries, encode/decode Base64/URL/Hex/Unicode, convert timestamps, and compute 5-field cron next runs."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "default": "convert"},
+                "data": {"type": "string", "default": ""},
+                "path": {"type": "string", "default": ""},
+                "input_format": {"type": "string", "default": "auto"},
+                "output_format": {"type": "string", "default": "json"},
+                "expression": {"type": "string", "default": ""},
+                "encoding": {"type": "string", "default": "base64"},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
 )
 
 _BACKEND_BY_TOOL = {item.name: item.backend for item in CORE_CHAT_TOOL_DEFINITIONS}
