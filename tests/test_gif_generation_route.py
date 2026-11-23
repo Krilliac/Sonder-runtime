@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import intents
-from sonder_runtime.application import image_generation
+from sonder_runtime.adapters import image_generation
 
 
 def _make_test_png(width: int = 128, height: int = 128, *, filter_type: int = 0) -> bytes:
