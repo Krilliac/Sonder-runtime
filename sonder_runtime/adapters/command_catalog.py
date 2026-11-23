@@ -212,6 +212,12 @@ _CATEGORY_BY_TOOL = {
     "code_metrics": "dev",
     "schema_validate": "data",
     "language_matrix": "dev",
+    "math_eval": "data",
+    "logic_verify": "dev",
+    "regex_lab": "dev",
+    "code_graph": "dev",
+    "diff_semantic": "dev",
+    "reasoning_board": "basic",
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",
@@ -453,9 +459,9 @@ _READ_ONLY = frozenset({
     # (bootstrap/reference_agent_tools.py): query and count only, no model
     # call, no write, no network; the index path is never an argument.
     "reference_search",
-    # Transient in-memory agent progress / peer-board coordination only (no
-    # disk, database, network, or command execution).
-    "report_progress", "post_status", "post_to_board", "read_board",
+    # Transient in-memory agent progress / peer-board / reasoning scratchpad
+    # coordination only (no disk, database, network, or command execution).
+    "report_progress", "post_status", "post_to_board", "read_board", "reasoning_board",
 })
 
 # Branches whose real work is done by module-level functions that front no

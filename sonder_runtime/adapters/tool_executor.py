@@ -143,6 +143,67 @@ class ToolExecutorAdapter:
                     output=language_matrix.format_result(res),
                     evidence=res,
                 )
+            if call.tool == "math_eval":
+                import sonder_runtime.adapters.inspection.math_eval as math_eval_mod
+
+                res = math_eval_mod.math_eval(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "logic_verify":
+                import sonder_runtime.adapters.inspection.logic_verify as logic_verify_mod
+
+                res = logic_verify_mod.logic_verify(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "regex_lab":
+                import sonder_runtime.adapters.inspection.regex_lab as regex_lab_mod
+
+                res = regex_lab_mod.regex_lab(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "code_graph":
+                import sonder_runtime.adapters.inspection.code_graph as code_graph_mod
+
+                _require_read(args.get("root", "."), args, context)
+                res = code_graph_mod.code_graph(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "diff_semantic":
+                import sonder_runtime.adapters.inspection.diff_semantic as diff_semantic_mod
+
+                if args.get("path_a"):
+                    _require_read(args["path_a"], args, context)
+                if args.get("path_b"):
+                    _require_read(args["path_b"], args, context)
+                res = diff_semantic_mod.diff_semantic(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "reasoning_board":
+                import sonder_runtime.adapters.inspection.reasoning_board as reasoning_board_mod
+
+                owner = str(getattr(context, "owner_id", "") or getattr(context, "principal", "") or "local")
+                clean_args = {k: v for k, v in args.items() if k != "owner"}
+                res = reasoning_board_mod.reasoning_board(owner=owner, **clean_args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

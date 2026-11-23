@@ -20,7 +20,9 @@ READ_ONLY_TOOLS = frozenset({
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "project_detect",
     "data_inspect", "data_query", "archive_list", "artifact_risk_inspect", "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect", "document_extract",
-    "media_inspect", "code_metrics", "schema_validate", "language_matrix", "command_registry_list",
+    "media_inspect", "code_metrics", "schema_validate", "language_matrix",
+    "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
+    "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan", "diagnostics",
     "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status", "memory_quality_report", "memory_privacy_review",
@@ -51,7 +53,8 @@ _ALIASES = {
 _PARALLEL_READS = frozenset({
     "directory_tree", "file_find", "file_read", "file_read_range", "file_digest",
     "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
-    "schema_validate", "language_matrix", "output_digest",
+    "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab",
+    "code_graph", "diff_semantic", "output_digest",
 })
 _LOCAL_READS = _PARALLEL_READS | frozenset({
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",

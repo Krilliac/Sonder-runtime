@@ -257,8 +257,28 @@ _DESCRIPTORS = (
     _read_tool("media_inspect"),
     _read_tool("code_metrics"),
     _read_tool("schema_validate"),
+    _read_tool("code_graph"),
+    _read_tool("diff_semantic"),
     _read_tool(
         "language_matrix",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "math_eval",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "logic_verify",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "regex_lab",
         root=RootRequirement.NONE,
         resources=frozenset({ResourceClass.CPU}),
         secrets=SecretPolicy.NO_SECRET_INPUT,
