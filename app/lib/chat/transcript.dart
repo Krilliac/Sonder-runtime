@@ -570,8 +570,10 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
                   color: tokens.bubble,
                   borderRadius: BorderRadius.circular(SonderRadius.bubble),
                 ),
-                child: SelectableText(message.content,
-                    style: Theme.of(context).textTheme.bodyLarge),
+                child: message.content.contains('data:image/')
+                    ? ConversationContent(content: message.content)
+                    : SelectableText(message.content,
+                        style: Theme.of(context).textTheme.bodyLarge),
               ),
             ),
           ],

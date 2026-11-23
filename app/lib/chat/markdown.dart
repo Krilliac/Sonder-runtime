@@ -293,20 +293,191 @@ bool markdownImageAllowed(Uri uri) {
 }
 
 /// A Markdown image: a `data:` image from memory, or a placeholder.
-class _MarkdownImage extends StatelessWidget {
+class _MarkdownImage extends StatefulWidget {
   final Uri uri;
   final String alt;
   const _MarkdownImage({required this.uri, required this.alt});
 
   @override
+  State<_MarkdownImage> createState() => _MarkdownImageState();
+}
+
+class _MarkdownImageState extends State<_MarkdownImage> {
+  bool _copied = false;
+  Timer? _reset;
+
+  @override
+  void dispose() {
+    _reset?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copyMarkdown() async {
+    final label = widget.alt.isEmpty ? 'Image' : widget.alt;
+    final snippet = '![$label](${widget.uri})';
+    try {
+      await Clipboard.setData(ClipboardData(text: snippet));
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _copied = true);
+    showSonderToast(context, 'Image copied for chat paste');
+    _reset?.cancel();
+    _reset = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  void _openLightbox(BuildContext context, Uint8List bytes) {
+    final tokens = SonderTokens.of(context);
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        backgroundColor: tokens.panel,
+        insetPadding: const EdgeInsets.all(SonderSpace.lg),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(SonderRadius.menu),
+          side: BorderSide(color: tokens.hairline),
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 960, maxHeight: 760),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    SonderSpace.md, SonderSpace.xs, SonderSpace.xs, SonderSpace.xs),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.alt.isEmpty ? 'Generated image' : widget.alt,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(dialogContext).textTheme.titleSmall,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, color: tokens.hairline),
+              Flexible(
+                child: InteractiveViewer(
+                  minScale: 0.5,
+                  maxScale: 5.0,
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(SonderSpace.md),
+                      child: Image.memory(
+                        bytes,
+                        fit: BoxFit.contain,
+                        semanticLabel: widget.alt.isEmpty ? null : widget.alt,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (markdownImageAllowed(uri)) {
+    if (markdownImageAllowed(widget.uri)) {
       try {
-        final bytes = uri.data!.contentAsBytes();
+        final bytes = widget.uri.data!.contentAsBytes();
         if (bytes.length <= markdownDataImageMaxBytes) {
-          return Image.memory(bytes,
-              semanticLabel: alt.isEmpty ? null : alt,
-              errorBuilder: (context, _, __) => _placeholder(context));
+          final tokens = SonderTokens.of(context);
+          return Container(
+            key: const Key('markdown-image-card'),
+            margin: const EdgeInsets.symmetric(vertical: SonderSpace.xs),
+            decoration: BoxDecoration(
+              color: tokens.panel,
+              borderRadius: BorderRadius.circular(SonderRadius.menu),
+              border: Border.all(color: tokens.hairline),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  onTap: () => _openLightbox(context, bytes),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: 520,
+                        maxHeight: 460,
+                      ),
+                      child: Image.memory(
+                        bytes,
+                        fit: BoxFit.contain,
+                        semanticLabel: widget.alt.isEmpty ? null : widget.alt,
+                        errorBuilder: (context, _, __) => _placeholder(context),
+                      ),
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: SonderSpace.sm,
+                    vertical: SonderSpace.xxs,
+                  ),
+                  decoration: BoxDecoration(
+                    color: tokens.sunken,
+                    border: Border(top: BorderSide(color: tokens.hairline)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.alt.isNotEmpty)
+                        Flexible(
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: SonderSpace.sm),
+                            child: Text(
+                              widget.alt,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(color: tokens.muted),
+                            ),
+                          ),
+                        ),
+                      QuietAction(
+                        key: const Key('markdown-image-zoom'),
+                        icon: Icons.open_in_full,
+                        label: 'Zoom',
+                        semanticLabel: 'Zoom image',
+                        onPressed: () => _openLightbox(context, bytes),
+                      ),
+                      QuietAction(
+                        key: const Key('markdown-image-copy'),
+                        icon: _copied ? Icons.check : Icons.copy_outlined,
+                        label: _copied ? 'Copied' : 'Copy',
+                        semanticLabel:
+                            _copied ? 'Image copied' : 'Copy image for chat paste',
+                        selected: _copied,
+                        onPressed: () => unawaited(_copyMarkdown()),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
         }
       } on FormatException {
         // Malformed data URI: fall through to the placeholder.
@@ -317,12 +488,13 @@ class _MarkdownImage extends StatelessWidget {
 
   Widget _placeholder(BuildContext context) {
     final tokens = SonderTokens.of(context);
-    final shown = uri.scheme == 'data'
+    final shown = widget.uri.scheme == 'data'
         ? 'inline data'
-        : (uri.toString().length > 200
-            ? '${uri.toString().substring(0, 200)}…'
-            : uri.toString());
-    final label = alt.isEmpty ? 'Image not loaded' : 'Image not loaded: $alt';
+        : (widget.uri.toString().length > 200
+            ? '${widget.uri.toString().substring(0, 200)}…'
+            : widget.uri.toString());
+    final label =
+        widget.alt.isEmpty ? 'Image not loaded' : 'Image not loaded: ${widget.alt}';
     return Container(
       key: const Key('markdown-image-blocked'),
       padding: const EdgeInsets.symmetric(

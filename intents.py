@@ -496,3 +496,69 @@ def classify_execution(text):
         "plan_only": False,
         "actions": actions,
     }
+
+
+_IMAGE_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|draw|paint|render|make|illustrate|sketch|produce|design)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?:(?:a|an|some|one|the|new|cool|nice|pretty|cute|funny|awesome|detailed|"
+    r"realistic|photorealistic|abstract|minimalist|stylized|retro|cyberpunk|"
+    r"3d|2d|pixel|pixel[\-\s]art|anime|oil|watercolor|digital|hd|4k|random|"
+    r"completely\s+random|totally\s+random)\s+)*"
+    r"(?:image|picture|pic|photo|photograph|illustration|artwork|art\s+piece|"
+    r"painting|drawing|sketch|wallpaper|portrait|landscape|icon|logo|avatar|"
+    r"banner|poster|graphic|scene)\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_IMAGE_DRAW_VERB_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:draw|paint|sketch|illustrate)"
+    r"(?:\s+(?:me|us))?\s+(?P<rest>\S.*)$",
+    re.I,
+)
+_IMAGE_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:script|python|javascript|typescript|dart|rust|java|c\+\+|c#|golang|"
+    r"code|function|class|method|module|package|library|api|endpoint|server|"
+    r"client|repo|repository|workspace|directory|folder|file|files|git|commit|"
+    r"pull\s+request|bug|fix|patch|debug|test|tests|unit\s+test|build|compile|"
+    r"shader|glsl|hlsl|html|css|sql|database|schema|migration|dockerfile|"
+    r"pipeline|cli|program|app|application|widget|component|parser|regex|"
+    r"json|yaml|toml|markdown|readme|benchmark|profile|refactor)\b",
+    re.I,
+)
+
+
+def classify_image_generation(text):
+    """Return the image-generation prompt when ``text`` asks directly for an image.
+
+    Returns ``None`` for questions, coding/script/repo tasks, or prompts that
+    name files/paths so image routing never hijacks engineering requests.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600 or value.startswith("/"):
+        return None
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if _PATH_LIKE_RE.search(value) or _IMAGE_GEN_EXCLUDE_RE.search(lowered):
+        return None
+    match = _IMAGE_GEN_LEAD_RE.match(value) or _IMAGE_DRAW_VERB_RE.match(value)
+    if not match:
+        return None
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+    # Preserve the full descriptive request (minus polite lead-in) so the image
+    # model gets style adjectives like "cyberpunk", "watercolor", or "random".
+    cleaned = re.sub(
+        r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+        r"(?:generate|create|draw|paint|render|make|illustrate|sketch|produce|design)"
+        r"(?:\s+(?:me|us))?\s+",
+        "",
+        value,
+        flags=re.I,
+    ).strip(" .!?")
+    return cleaned or value
+
