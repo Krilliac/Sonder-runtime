@@ -71,6 +71,18 @@ def _discover_windows_install_dirs(query: NormalizedToolQuery) -> list[dict[str,
     local_app = os.environ.get("LOCALAPPDATA", "").strip()
     if local_app:
         roots.append(Path(local_app) / "Programs")
+        roots.append(Path(local_app) / "Microsoft" / "WinGet" / "Links")
+    user_prof = os.environ.get("USERPROFILE", "").strip()
+    if user_prof:
+        roots.append(Path(user_prof) / "scoop" / "shims")
+    for extra in (
+        Path(r"D:\Program Files"),
+        Path(r"C:\Program Files (x86)\Steam\steamapps\common"),
+        Path(r"D:\SteamLibrary\steamapps\common"),
+        Path(r"C:\ProgramData\chocolatey\bin"),
+    ):
+        if extra.is_dir():
+            roots.append(extra)
 
     folder_needles = tuple(h.lower() for h in query.folder_hints if h)
     exe_stems = {b.lower() for b in query.candidate_binaries}

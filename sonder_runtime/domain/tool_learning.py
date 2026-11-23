@@ -141,15 +141,17 @@ _FLAG_LINE_RE = re.compile(
     r"(?:\s{2,}|\t+|:?\s+)(?P<desc>.+?)\s*$"
 )
 
-# Matches subcommand lines under a "Commands:" / "Subcommands:" header.
+# Matches subcommand lines under a "Commands:" / "Subcommands:" header or git-style command groups.
 _SUBCMD_HEADER_RE = re.compile(
-    r"(?i)^\s*(?:available\s+|common\s+|core\s+|main\s+|possible\s+)?(?:sub)?commands?\s*:?\s*$"
+    r"^\s*(?:available\s+|common\s+|core\s+|main\s+|possible\s+)?(?:sub)?commands?\s*:?\s*$|"
+    r"^(?:start\s+a\s+|work\s+on\s+|examine\s+|grow,\s+mark|collaborate|actions?|tasks?|operations?)\b[^:\r\n]{0,60}:?\s*$",
+    re.IGNORECASE,
 )
 _SECTION_HEADER_RE = re.compile(
     r"^[A-Za-z][A-Za-z0-9 _/-]{1,40}:\s*$"
 )
 _SUBCMD_LINE_RE = re.compile(
-    r"^\s{1,8}(?P<name>[a-zA-Z][a-zA-Z0-9_:-]{0,31})(?:\s{2,}|\t+)(?P<desc>.+?)\s*$"
+    r"^\s{1,8}(?P<name>[a-zA-Z][a-zA-Z0-9_:-]{1,31})(?:\s{2,}|\t+)(?P<desc>[A-Za-z0-9].+?)\s*$"
 )
 _USAGE_LINE_RE = re.compile(r"(?i)^\s*(?:usage|synopsis)\s*:\s*(.+)$")
 
