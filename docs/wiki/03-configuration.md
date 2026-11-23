@@ -539,7 +539,8 @@ Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
 independent: enabling private-node compute does not enable remote inference or
 hosted models. Remote compute also requires per-workload consent. See
 [Private Compute Fabric](../runbooks/compute-fabric.md). Also: `SONDER_FILE_ROOTS`,
-`SONDER_LOCATION_CONSENT`, `SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`.
+`SONDER_LOCATION_CONSENT`, `SONDER_EXPOSE_REASONING`, `SONDER_ALLOW_PRIVATE_COT`,
+`SONDER_ALLOW_SECURITY_MODEL_TOOLS`.
 
 Chat call knobs (read by `server.py` at import): `SONDER_KEEP_ALIVE` (default
 `2m`, Ollama `keep_alive` for chat requests) and `SONDER_TIMEOUT` (default `300`

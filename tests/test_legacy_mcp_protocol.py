@@ -229,7 +229,7 @@ def test_real_stdio_answers_every_malformed_frame_and_keeps_serving(tmp_path):
             [sys.executable, str(server_path)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file,
             cwd=str(tmp_path),
-            env={**os.environ, "PYTHONPATH": repo_root, "SONDER_HOME": str(sonder_home),
+            env={**os.environ, "PYTHONPATH": os.path.join(repo_root, "runtime") + os.pathsep + repo_root, "SONDER_HOME": str(sonder_home),
                  "SONDER_LIVE_RELOAD": "0"},
         )
         payload = ("\n".join(frames) + "\n").encode("utf-8")

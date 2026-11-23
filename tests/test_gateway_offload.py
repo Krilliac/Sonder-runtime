@@ -13,7 +13,7 @@ def test_gateway_context_uses_packaged_cloud_policy_directly():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     function = next(
         node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))

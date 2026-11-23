@@ -24,7 +24,7 @@ def test_server_core_model_paths_do_not_call_root_error_wrapper():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {
         "_offload_impl", "_extract_grounded_impl",
         "_sonder_impl_serialized", "_sonder_impl",
@@ -49,7 +49,7 @@ def test_server_status_and_vision_paths_do_not_call_root_error_wrapper():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"vision_analyze", "status"}
     functions = {
         node.name: node
@@ -71,7 +71,7 @@ def test_server_has_no_production_calls_to_root_error_wrapper():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     calls = [
         node
         for node in ast.walk(tree)

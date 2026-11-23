@@ -236,7 +236,7 @@ _CATEGORY_BY_TOOL = {
     "weather_lookup": "web",
     "openrouter_models": "web",
     "mesh_generate": "execution",
-    "generate_3d_model": "assets",
+    "generate_3d_model": "creative",
     "security_eval": "data",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
@@ -382,7 +382,7 @@ _CATEGORY_BY_SLASH = {
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
-    "/img": "assets", "/gif": "assets", "/3d": "assets", "/model3d": "assets",
+    "/img": "creative", "/gif": "creative", "/3d": "creative", "/model3d": "creative",
 }
 
 # A four-class ``_RISK_ORDER`` used to sit here -- no ``execution``, and, when

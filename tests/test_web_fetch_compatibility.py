@@ -19,7 +19,7 @@ def test_root_web_fetch_delegates_to_packaged_owner(monkeypatch):
 
 
 def test_root_contains_only_compatibility_fetch_delegate():
-    source = Path("web_tools.py").read_text(encoding="utf-8")
+    source = Path("runtime/web_tools.py").read_text(encoding="utf-8")
     assert "def web_fetch(" in source
     assert "def _decode_web_document(" not in source
     assert "from sonder_runtime.adapters.web_fetch import fetch_raw" in source

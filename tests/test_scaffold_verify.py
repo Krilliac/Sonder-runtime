@@ -68,5 +68,5 @@ def test_cmake_scaffold_is_configured_and_built(monkeypatch, capsys):
     assert commands == [
         ["cmake", "-S", ".", "-B", "build"],
         ["cmake", "--build", "build", "--config", "Debug"],
-    ]
+    ] * 2
     assert "cpp-cmake: VERIFIED" in capsys.readouterr().out.splitlines()

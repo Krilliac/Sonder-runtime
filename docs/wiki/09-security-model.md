@@ -20,8 +20,9 @@ of the model — an uncensored or "abliterated" model changes what it will
   (`SONDER_ALLOW_REMOTE_OLLAMA`), private-node whole-job compute
   (`SONDER_ALLOW_REMOTE_COMPUTE`, additionally requiring per-workload
   `allow_remote`), approximate location, model reasoning
-  (`SONDER_EXPOSE_REASONING`), and private chain-of-thought
-  (`SONDER_ALLOW_PRIVATE_COT`). Runtime policy can never turn any of these on.
+  (`SONDER_EXPOSE_REASONING`), private chain-of-thought
+  (`SONDER_ALLOW_PRIVATE_COT`), and security-adviser tool-lane relaxation
+  (`SONDER_ALLOW_SECURITY_MODEL_TOOLS`, requiring the exact acknowledgement string). Runtime policy can never turn any of these on.
 - **Remote Sonder Inference needs four things at once:**
   `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
   `SONDER_INFERENCE_API_KEY` and an operation context that allows cloud; a

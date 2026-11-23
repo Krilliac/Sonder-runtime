@@ -38,7 +38,7 @@ def _load(path: Path):
 
 def _catalog_server_stub():
     """Provide only the registry seam while retaining real catalog derivation."""
-    source_paths = [ROOT.parent / "server.py", ROOT.parent / "sonder_runtime" / "bootstrap" / "computer_use_tools.py"]
+    source_paths = [ROOT.parent / "runtime" / "server.py", ROOT.parent / "sonder_runtime" / "bootstrap" / "computer_use_tools.py"]
     from sonder_runtime.bootstrap.agent_help_tools import discover_agent_tool_registrars
     source_paths.extend(ROOT.parent / "sonder_runtime" / "bootstrap" / (name + ".py")
                         for name, _register in discover_agent_tool_registrars())
@@ -166,11 +166,11 @@ def test_declared_branch_tool_keeps_own_name_and_native_schema(
     assert command_catalog.by_name("/agent") is command_catalog.by_name("/work")
 
 
-def test_builtin_speculation_allowlist_matches_origin_golden():
+def test_builtin_speculation_allowlist_matches_origin_golden(actual_catalog):
     golden = _load(BEHAVIOR_FIXTURE)
     expected = set(golden["speculatable"])
     assert SPECULATABLE_TOOLS == expected
-    catalog = set(_load(RISK_FIXTURE))
+    catalog = set(_load(RISK_FIXTURE)) | {command.tool for command in actual_catalog if command.tool}
     actual = {name for name in catalog if is_speculatable(name)}
     assert actual == expected, "speculation drift: %s" % json.dumps(
         {"missing": sorted(expected - actual), "added": sorted(actual - expected)},

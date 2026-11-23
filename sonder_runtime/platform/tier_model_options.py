@@ -23,7 +23,7 @@ from typing import Mapping
 ENV_TIER_OPTIONS = "SONDER_OLLAMA_TIER_OPTIONS"
 # Mirrors ``domain.runtime_policy.rules.LOCAL_TIERS`` (platform may not import
 # the domain); a test pins the two together.
-TIERS = ("fast", "code", "general", "reasoning", "vision")
+TIERS = ("fast", "code", "general", "reasoning", "vision", "security", "creative", "draft")
 OPTION_BOUNDS = {
     "num_ctx": (512, 1_048_576),
 }

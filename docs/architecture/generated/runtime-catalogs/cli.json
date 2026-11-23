@@ -1,7 +1,7 @@
 {
   "commands": [
     {
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/3d",
       "risk": "execution",
       "summary": "Generate a 3D model (.glb) via local Hunyuan3D-2 with an inline Blender studio preview."
@@ -919,13 +919,13 @@
       "summary": "Run a bounded parallel game campaign with optional language/dimension targets."
     },
     {
-      "category": "assets",
+      "category": "creative",
       "name": "/generate_3d_model",
       "risk": "execution",
       "summary": "Generate a 3D model (.glb/.obj) from a text prompt or guarded local image using local Hunyuan3D-2, render a 2x2 studio preview in headless Blender, and return the model path, download URL, and inline preview markdown."
     },
     {
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/gif",
       "risk": "ask",
       "summary": "Generate an animated GIF inline via the local image model or procedural GIF89a studio."
@@ -1021,7 +1021,7 @@
       "summary": "Inspect guarded image headers, dimensions, size, and hash."
     },
     {
-      "category": "diagnostics",
+      "category": "creative",
       "name": "/img",
       "risk": "ask",
       "summary": "Generate an inline image via the local image model or procedural raster fallback."

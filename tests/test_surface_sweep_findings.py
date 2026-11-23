@@ -190,7 +190,8 @@ def _module_local_roots():
             if "\ndef workspace_root(" not in source:
                 continue
             relative = full.relative_to(REPO_ROOT).with_suffix("")
-            found.add(".".join(relative.parts))
+            parts = relative.parts[1:] if relative.parts and relative.parts[0] == "runtime" else relative.parts
+            found.add(".".join(parts))
     return found
 
 

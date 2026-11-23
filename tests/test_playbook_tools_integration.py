@@ -24,7 +24,10 @@ def test_live_registry_and_server_export_both_callables():
 
 def test_local_agent_sees_tools_but_hosted_agent_does_not():
     local = server._agent_tool_help()
-    assert "- playbook_note:" in local and "- playbook_read:" in local
+    # playbook_read is visible to local agents; playbook_note is direct-MCP-only
+    # (excluded from generic agent dispatch via DIRECT_ONLY_NAMES) so autonomous
+    # agents cannot mutate durable playbooks.
+    assert "- playbook_read:" in local and "- playbook_note:" not in local
     hosted = server._agent_tool_help(cloud=True)
     assert "- playbook_note:" not in hosted and "- playbook_read:" not in hosted
 

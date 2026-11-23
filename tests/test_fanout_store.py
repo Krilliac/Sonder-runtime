@@ -597,7 +597,7 @@ def test_schema_migration_is_safe_across_two_processes(tmp_path):
     env = os.environ.copy()
     env["SONDER_FANOUT_DB"] = str(database)
     root = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.path.join(root, "runtime") + os.pathsep + root + os.pathsep + env.get("PYTHONPATH", "")
     script = (
         "import fanout_store as s; "
         "conn=s._connect(); "

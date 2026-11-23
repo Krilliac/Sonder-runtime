@@ -388,4 +388,4 @@ def test_thin_client_documentation_matches_its_checkout_dependency(tmp_path):
     assert "stdlib-only" not in client
     assert "raw.githubusercontent.com" not in client
     assert "| Copying `sonder_client.py` alone to another machine | Unsupported |" in client
-    assert "http://your-vps" not in _read("sonder_client.py")
+    assert "http://your-vps" not in _read("runtime/sonder_client.py")

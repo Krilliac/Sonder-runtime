@@ -137,6 +137,7 @@ def gate(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(module, "BASELINE_PATH", tmp_path / "lint_baseline.json")
     monkeypatch.setattr(module, "SIZE_RATCHET_MODULES", ("server.py",))
+    monkeypatch.setattr(module, "SERVER_SOURCE", "server.py")
     monkeypatch.setattr(module, "_ruff", lambda select, *, exclude_tests: [])
     return module
 

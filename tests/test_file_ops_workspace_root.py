@@ -17,7 +17,7 @@ def test_workspace_root_is_the_directory_containing_the_package():
     root = file_ops.workspace_root()
 
     assert (root / "sonder_runtime" / "__init__.py").is_file()
-    assert (root / "server.py").is_file()
+    assert (root / "runtime" / "server.py").is_file()
     assert root.name != "filesystem"
 
 

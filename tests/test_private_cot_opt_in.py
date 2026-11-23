@@ -53,7 +53,11 @@ def _repo_root():
 def _declared_consent_gates():
     """Every SONDER_ALLOW_* gate name the runtime source actually reads."""
     root = _repo_root()
-    sources = list(root.glob("*.py")) + list((root / "sonder_runtime").rglob("*.py"))
+    sources = (
+        list(root.glob("*.py"))
+        + list((root / "runtime").glob("*.py"))
+        + list((root / "sonder_runtime").rglob("*.py"))
+    )
     found = set()
     for path in sources:
         found.update(

@@ -714,6 +714,7 @@ import inspect, json, os, runpy, socket, sys
 from types import SimpleNamespace
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+sys.path.insert(0, os.path.join(os.getcwd(), "runtime"))
 import reloadable_mcp
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.adapters.security import unsafe_lab
@@ -802,7 +803,7 @@ def run(self):
         namespace["_post"]("/api/generate", {"model": "code"})
 reloadable_mcp.ReloadableMCPServer.run = run
 try:
-    runpy.run_path("server.py", run_name="__main__")
+    runpy.run_path("runtime/server.py", run_name="__main__")
 except (ollama_pool.WorkerPoolError, unsafe_lab.UnsafeLabError) as error:
     result["error"] = type(error).__name__
 finally:

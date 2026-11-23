@@ -129,7 +129,7 @@ def test_app_remote_host_hint_requires_https():
 
 
 def test_mobile_launcher_keeps_managed_runtime_loopback_and_documents_tls():
-    launcher = _text("sonder_launcher.py")
+    launcher = _text("runtime/sonder_launcher.py")
     assert 'DEFAULT_SERVER_HOST = "127.0.0.1"' in launcher
     assert 'server_host=DEFAULT_SERVER_HOST' in launcher
     assert 'os.environ.get("SONDER_HOST", DEFAULT_SERVER_HOST)' in launcher

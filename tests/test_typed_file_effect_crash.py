@@ -69,7 +69,7 @@ def test_composed_file_write_crash_refuses_replay_until_reconciliation(tmp_path,
     environment = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(filter(None, (
-            str(repository), os.environ.get("PYTHONPATH"),
+            str(repository / "runtime"), str(repository), os.environ.get("PYTHONPATH"),
         ))),
         "SONDER_STATE_HOME": str(tmp_path / "state"),
         "SONDER_FLEET_DB": str(tmp_path / "fleet.db"),

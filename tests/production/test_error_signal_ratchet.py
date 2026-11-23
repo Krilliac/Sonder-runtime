@@ -31,7 +31,7 @@ def test_isolated_run_legacy_wire_error_is_exactly_baselined():
     matches = [
         finding
         for finding in checker.inventory()
-        if finding.path == "server.py"
+        if finding.path == "runtime/server.py"
         and finding.scope == "isolated_run"
         and finding.category == checker.CATEGORY_RETURN
     ]

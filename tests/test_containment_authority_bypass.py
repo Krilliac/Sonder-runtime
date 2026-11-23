@@ -757,7 +757,7 @@ def test_require_with_an_unknown_role_fails_closed(typo):
 
 def test_every_require_call_site_names_a_known_role_literal():
     known = {"user", "developer", "admin"}
-    root = Path(server.__file__).resolve().parent
+    root = Path(server.__file__).resolve().parents[1]
     found = []
     for path in sorted(root.rglob("*.py")):
         relative = path.relative_to(root).as_posix()
