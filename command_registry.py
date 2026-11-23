@@ -257,6 +257,42 @@ COMMANDS = [
         "summary": "Show Sonder's full 28-language capability matrix and live host toolchain readiness.",
     },
     {
+        "name": "/calc",
+        "category": "data",
+        "risk": "safe",
+        "summary": "Evaluate exact/high-precision math, equations, matrices, statistics, units, or dates.",
+    },
+    {
+        "name": "/logic",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Verify Boolean SAT, truth tables, equivalence/implication counterexamples, CNF, or CSPs.",
+    },
+    {
+        "name": "/regex",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Test regular expressions, capture groups, substitutions, and ReDoS backtracking hazards.",
+    },
+    {
+        "name": "/graph",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Inspect repository dependency graphs, import cycles, blast-radius impact, and Python call graphs.",
+    },
+    {
+        "name": "/sdiff",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Compute AST-aware Python diffs or deep structural JSON/TOML/INI diffs.",
+    },
+    {
+        "name": "/reason",
+        "category": "basic",
+        "risk": "safe",
+        "summary": "Track grounded facts, hypotheses, decisions, and contradiction audits in a structured scratchpad.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

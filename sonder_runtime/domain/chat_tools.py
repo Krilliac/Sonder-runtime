@@ -102,8 +102,8 @@ class ChatToolBudget:
     """Hard bounds for one interactive chat-tool turn."""
 
     max_runs: int = 3
-    max_tool_calls: int = 24
-    max_model_calls: int = 6
+    max_tool_calls: int = 32
+    max_model_calls: int = 10
     wall_seconds: float = 180.0
     model_output_chars: int = 4000
     user_output_chars: int = 12000
@@ -346,6 +346,218 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
             "required": ["tasks"],
         },
         backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
+        name="math_eval",
+        description=(
+            "Exact/high-precision calculator, equation & linear-system solver, matrix/vector algebra, "
+            "number theory, statistics/regression, unit conversion, and date math (pure, no approval needed)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "default": "", "description": "Math expression or equation (e.g. 'comb(52,5)', '2*x + 5 = 17')."},
+                "action": {
+                    "type": "string",
+                    "enum": ["eval", "solve", "matrix", "convert", "date", "derivative", "integrate"],
+                    "default": "eval",
+                },
+                "exact": {"type": "boolean", "default": False, "description": "Use exact Fraction rational arithmetic."},
+                "precision": {"type": "integer", "minimum": 0, "maximum": 50, "default": 0},
+                "variable": {"type": "string", "default": "x"},
+                "equations": {"type": "array", "items": {"type": "string"}},
+                "matrix_op": {"type": "string", "default": ""},
+                "matrix_a": {"type": "array"},
+                "matrix_b": {"type": "array"},
+                "value": {"type": "number"},
+                "from_unit": {"type": "string", "default": ""},
+                "to_unit": {"type": "string", "default": ""},
+                "date_a": {"type": "string", "default": ""},
+                "date_b": {"type": "string", "default": ""},
+                "add_days": {"type": "integer"},
+                "at": {"type": "number", "default": 0.0},
+                "low": {"type": "number", "default": 0.0},
+                "high": {"type": "number", "default": 1.0},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="logic_verify",
+        description=(
+            "Formal Boolean SAT solver, truth table, equivalence/implication prover with counterexamples, "
+            "CNF simplifier, and finite-domain constraint solver (CSP)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "formula": {"type": "string", "default": "", "description": "Propositional formula using and/or/not/xor/->/<->."},
+                "action": {
+                    "type": "string",
+                    "enum": ["satisfiable", "truth_table", "equivalent", "implies", "cnf", "csp"],
+                    "default": "satisfiable",
+                },
+                "formula_b": {"type": "string", "default": ""},
+                "premises": {"type": "array", "items": {"type": "string"}},
+                "conclusion": {"type": "string", "default": ""},
+                "domains": {"type": "object"},
+                "constraints": {"type": "array", "items": {"type": "object"}},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="regex_lab",
+        description=(
+            "Test a regular expression against text or positive/negative cases, inspect capture groups "
+            "and substitutions, and statically detect catastrophic backtracking (ReDoS) hazards."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "text": {"type": "string", "default": ""},
+                "samples": {"type": "array", "items": {"type": "string"}},
+                "should_match": {"type": "array", "items": {"type": "string"}},
+                "should_not_match": {"type": "array", "items": {"type": "string"}},
+                "replacement": {"type": "string"},
+                "flags": {"type": "string", "default": ""},
+                "mode": {"type": "string", "enum": ["search", "match", "fullmatch", "findall"], "default": "search"},
+            },
+            "required": ["pattern"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="code_graph",
+        description=(
+            "Analyze repository module dependencies, import cycles (Tarjan SCC), change blast-radius "
+            "impact, and Python call/inheritance graphs in one read-only pass."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "default": "."},
+                "action": {"type": "string", "enum": ["summary", "impact", "cycles", "calls"], "default": "summary"},
+                "target": {"type": "string", "default": ""},
+                "max_depth": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+            },
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="diff_semantic",
+        description=(
+            "AST-aware Python diff (ignores formatting/whitespace), deep JSON/TOML/INI structural diff, "
+            "or symbol-signature diff between two guarded files or two inline strings."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path_a": {"type": "string", "default": ""},
+                "path_b": {"type": "string", "default": ""},
+                "text_a": {"type": "string", "default": ""},
+                "text_b": {"type": "string", "default": ""},
+                "kind": {"type": "string", "enum": ["auto", "python", "json", "toml", "ini", "generic"], "default": "auto"},
+            },
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="reasoning_board",
+        description=(
+            "Structured session scratchpad for tracking grounded facts, hypotheses (open/supported/refuted/confirmed), "
+            "decisions, and contradiction audits across multi-step investigations."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["init", "add_fact", "add_hypothesis", "update_hypothesis", "add_decision", "audit", "summary", "clear"],
+                    "default": "summary",
+                },
+                "board_id": {"type": "string", "default": "default"},
+                "goal": {"type": "string", "default": ""},
+                "text": {"type": "string", "default": ""},
+                "source": {"type": "string", "default": ""},
+                "hypothesis_id": {"type": "string", "default": ""},
+                "status": {"type": "string", "default": ""},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence_for": {"type": "string", "default": ""},
+                "evidence_against": {"type": "string", "default": ""},
+                "fact_refs": {"type": "array", "items": {"type": "string"}},
+                "alternatives": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="memory_search",
+        description="Search Sonder's local memory for previously learned facts, lessons, and prior solutions.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+            },
+            "required": ["query"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="repository_symbol_index",
+        description="Build a bounded declaration index of classes, functions, and symbols across project files.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "default": "."},
+                "query": {"type": "string", "default": ""},
+            },
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="code_metrics",
+        description="Compute language LOC, TODO/FIXME markers, largest files, and complexity hotspots.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "default": "."},
+                "top_n": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+            },
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="claim_check",
+        description="Verify a code citation or claim against the actual repository file, line, symbols, and guards.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "default": "."},
+                "file": {"type": "string", "default": ""},
+                "line": {"type": "integer"},
+                "symbols": {"type": "string", "default": ""},
+                "claim_text": {"type": "string", "default": ""},
+            },
+            "required": ["root"],
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
+    ),
+    ChatToolDefinition(
+        name="schema_validate",
+        description="Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline schema_json.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "schema_path": {"type": "string", "default": ""},
+                "schema_json": {"type": "string", "default": ""},
+            },
+            "required": ["path"],
+        },
+        backend=TOOL_BACKEND_WORKSPACE,
     ),
 )
 

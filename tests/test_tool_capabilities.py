@@ -17,6 +17,7 @@ def test_initial_shadow_registry_is_immutable_and_has_no_drift():
         "file_read_range", "file_digest", "text_search", "repo_status",
         "repo_diff", "image_inspect", "document_extract", "media_inspect",
         "code_metrics", "schema_validate", "language_matrix",
+        "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
         "artifact_risk_inspect", "process_list",
         "process_memory_risk_inspect", "tool_inventory", "output_digest",
     }
@@ -212,7 +213,8 @@ def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     repository_names = names - process_tools
     rootless = {
         "environment_status", "toolchain_status", "hardware_profile", "file_policy",
-        "tool_inventory", "language_matrix", *process_tools,
+        "tool_inventory", "language_matrix", "math_eval", "logic_verify", "regex_lab",
+        *process_tools,
     }
     non_work = {"environment_status", "hardware_profile"}
     assert repository_names <= server.REPOSITORY_READ_ONLY_TOOLS
@@ -285,7 +287,7 @@ def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     # "ok" is exactly what this validator must never be able to say while it
     # inspects 16 of ~184 advertised tools.  The verdict names the coverage.
     assert report.startswith("partial: ")
-    assert "26 of " in report
+    assert "31 of " in report
     assert "unvalidated" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
@@ -409,4 +411,4 @@ def test_diagnostics_reports_shadow_coverage_per_surface():
     assert "tool_capability_coverage_report()" in source
     assert "tool capability coverage" in source
     line = server.tool_capability_coverage_report()
-    assert "direct-mcp 26/" in line
+    assert "direct-mcp 31/" in line

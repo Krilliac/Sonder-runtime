@@ -144,6 +144,7 @@ REPOSITORY_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "text_search", "script_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
+    "code_graph", "diff_semantic",
 })
 
 

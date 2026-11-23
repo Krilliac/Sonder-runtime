@@ -3975,6 +3975,42 @@ def control_command(prompt: str, history=None, session="", project="",
         return schema_validate(path=parts[0], schema_path=parts[1])
     if cmd in ("/languages", "/language_matrix"):
         return language_matrix(language=arg.strip())
+    if cmd in ("/calc", "/math_eval"):
+        return math_eval(expression=arg.strip()) if arg.strip() else "usage: /calc <expression>"
+    if cmd in ("/logic", "/logic_verify"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if not parts or not parts[0]:
+            return "usage: /logic <formula> [| <formula_b for equivalence>]"
+        if len(parts) == 2 and parts[1]:
+            return logic_verify(formula=parts[0], action="equivalent", formula_b=parts[1])
+        return logic_verify(formula=parts[0], action="satisfiable")
+    if cmd in ("/regex", "/regex_lab"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if not parts or not parts[0]:
+            return "usage: /regex <pattern> [| <sample text>]"
+        return regex_lab(pattern=parts[0], text=parts[1] if len(parts) == 2 else "")
+    if cmd in ("/graph", "/code_graph"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if len(parts) == 2 and parts[1]:
+            return code_graph(root=parts[0] or ".", action="impact", target=parts[1])
+        return code_graph(root=arg.strip() or ".", action="summary")
+    if cmd in ("/sdiff", "/diff_semantic"):
+        parts = [part.strip() for part in arg.split("|", 1)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return "usage: /sdiff <path_a> | <path_b>"
+        return diff_semantic(path_a=parts[0], path_b=parts[1])
+    if cmd in ("/reason", "/reasoning_board"):
+        raw = arg.strip()
+        if not raw or raw.lower() == "summary":
+            return reasoning_board(action="summary")
+        if raw.lower() == "audit":
+            return reasoning_board(action="audit")
+        if raw.lower() == "clear":
+            return reasoning_board(action="clear")
+        parts = [part.strip() for part in raw.split("|", 1)]
+        if parts[0].lower() in {"init", "add_fact", "add_hypothesis", "add_decision"} and len(parts) == 2:
+            return reasoning_board(action=parts[0].lower(), text=parts[1])
+        return reasoning_board(action="add_fact", text=raw)
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -14639,6 +14675,294 @@ def language_matrix(language: str = "") -> str:
     return output
 
 
+@mcp.tool()
+def math_eval(
+    expression: str = "",
+    action: str = "eval",
+    exact: bool = False,
+    precision: int = 0,
+    variables_json: str = "",
+    variable: str = "x",
+    equations_json: str = "",
+    bracket_json: str = "",
+    matrix_op: str = "",
+    matrix_a_json: str = "",
+    matrix_b_json: str = "",
+    value: float | None = None,
+    from_unit: str = "",
+    to_unit: str = "",
+    date_a: str = "",
+    date_b: str = "",
+    add_days: int | None = None,
+    at: float = 0.0,
+    low: float = 0.0,
+    high: float = 1.0,
+) -> str:
+    """Evaluate exact/high-precision math, equations, linear systems, matrices, statistics, units, or dates."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"action": action, "expression": str(expression or "")[:120]}
+    try:
+        import sonder_runtime.adapters.inspection.math_eval as _math_eval
+
+        variables = json.loads(variables_json) if isinstance(variables_json, str) and variables_json.strip() else (variables_json if isinstance(variables_json, dict) else None)
+        equations = json.loads(equations_json) if isinstance(equations_json, str) and equations_json.strip() else (equations_json if isinstance(equations_json, list) else None)
+        bracket = json.loads(bracket_json) if isinstance(bracket_json, str) and bracket_json.strip() else (bracket_json if isinstance(bracket_json, list) else None)
+        matrix_a = json.loads(matrix_a_json) if isinstance(matrix_a_json, str) and matrix_a_json.strip() else (matrix_a_json if isinstance(matrix_a_json, list) else None)
+        matrix_b = json.loads(matrix_b_json) if isinstance(matrix_b_json, str) and matrix_b_json.strip() else (matrix_b_json if isinstance(matrix_b_json, list) else None)
+        data = _math_eval.math_eval(
+            expression,
+            action=action,
+            exact=bool(exact),
+            precision=int(precision or 0),
+            variables=variables,
+            variable=variable,
+            equations=equations,
+            bracket=bracket,
+            matrix_op=matrix_op,
+            matrix_a=matrix_a,
+            matrix_b=matrix_b,
+            value=value,
+            from_unit=from_unit,
+            to_unit=to_unit,
+            date_a=date_a,
+            date_b=date_b,
+            add_days=add_days,
+            at=float(at or 0.0),
+            low=float(low or 0.0),
+            high=float(high if high is not None else 1.0),
+        )
+    except Exception as exc:
+        _record_direct_tool("math_eval", args, ok=False, started=started, summary=str(exc))
+        return "math_eval refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "math_eval", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s action=%s" % (data.get("ok"), data.get("action", action)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def logic_verify(
+    formula: str = "",
+    action: str = "satisfiable",
+    formula_b: str = "",
+    premises_json: str = "",
+    conclusion: str = "",
+    domains_json: str = "",
+    constraints_json: str = "",
+) -> str:
+    """Verify propositional SAT, truth tables, equivalence/implication counterexamples, CNF, or finite-domain CSPs."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"action": action, "formula": str(formula or "")[:120]}
+    try:
+        import sonder_runtime.adapters.inspection.logic_verify as _logic_verify
+
+        premises = json.loads(premises_json) if isinstance(premises_json, str) and premises_json.strip() else (premises_json if isinstance(premises_json, list) else None)
+        domains = json.loads(domains_json) if isinstance(domains_json, str) and domains_json.strip() else (domains_json if isinstance(domains_json, dict) else None)
+        constraints = json.loads(constraints_json) if isinstance(constraints_json, str) and constraints_json.strip() else (constraints_json if isinstance(constraints_json, list) else None)
+        data = _logic_verify.logic_verify(
+            formula,
+            action=action,
+            formula_b=formula_b,
+            premises=premises,
+            conclusion=conclusion,
+            domains=domains,
+            constraints=constraints,
+        )
+    except Exception as exc:
+        _record_direct_tool("logic_verify", args, ok=False, started=started, summary=str(exc))
+        return "logic_verify refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "logic_verify", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s action=%s" % (data.get("ok"), data.get("action", action)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def regex_lab(
+    pattern: str,
+    text: str = "",
+    samples_json: str = "",
+    should_match_json: str = "",
+    should_not_match_json: str = "",
+    replacement: str | None = None,
+    flags: str = "",
+    mode: str = "search",
+    max_matches: int = 20,
+) -> str:
+    """Test a regex against text/cases, inspect capture groups and substitutions, and check ReDoS hazards."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"pattern": str(pattern or "")[:120], "mode": mode}
+    try:
+        import sonder_runtime.adapters.inspection.regex_lab as _regex_lab
+
+        samples = json.loads(samples_json) if isinstance(samples_json, str) and samples_json.strip() else (samples_json if isinstance(samples_json, list) else None)
+        should_match = json.loads(should_match_json) if isinstance(should_match_json, str) and should_match_json.strip() else (should_match_json if isinstance(should_match_json, list) else None)
+        should_not_match = json.loads(should_not_match_json) if isinstance(should_not_match_json, str) and should_not_match_json.strip() else (should_not_match_json if isinstance(should_not_match_json, list) else None)
+        data = _regex_lab.regex_lab(
+            pattern,
+            text=text,
+            samples=samples,
+            should_match=should_match,
+            should_not_match=should_not_match,
+            replacement=replacement,
+            flags=flags,
+            mode=mode,
+            max_matches=int(max_matches or 20),
+        )
+    except Exception as exc:
+        _record_direct_tool("regex_lab", args, ok=False, started=started, summary=str(exc))
+        return "regex_lab refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "regex_lab", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s hazards=%d" % (data.get("ok"), len(data.get("redos_hazards") or [])),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def code_graph(
+    root: str = ".",
+    action: str = "summary",
+    target: str = "",
+    max_files: int = 1500,
+    top_n: int = 15,
+    max_depth: int = 6,
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Analyze repository module dependencies, circular imports (Tarjan SCC), change blast-radius, and Python call graphs."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"root": root, "action": action, "target": target}
+    try:
+        import sonder_runtime.adapters.inspection.code_graph as _code_graph
+
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) or _file_developer_allowed(token) else ""
+        data = _code_graph.code_graph(
+            root=root or ".",
+            action=action,
+            target=target,
+            max_files=int(max_files or 1500),
+            top_n=int(top_n or 15),
+            max_depth=int(max_depth or 6),
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("code_graph", args, ok=False, started=started, summary=str(exc))
+        return "code_graph refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "code_graph", args, ok=bool(data.get("ok")), started=started,
+        summary="files=%d edges=%d cycles=%d" % (data.get("files_scanned", 0), data.get("edges", 0), data.get("cycle_count", 0)),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def diff_semantic(
+    path_a: str = "",
+    path_b: str = "",
+    text_a: str = "",
+    text_b: str = "",
+    kind: str = "auto",
+    token: str = "",
+    approval: str = "",
+    extra_roots: str = "",
+) -> str:
+    """Compute an AST-aware Python diff, deep JSON/TOML/INI structural diff, or symbol-signature diff."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"path_a": path_a, "path_b": path_b, "kind": kind}
+    try:
+        import sonder_runtime.adapters.inspection.diff_semantic as _diff_semantic
+
+        trusted_roots = extra_roots if _file_bypass_allowed(token, approval) or _file_developer_allowed(token) else ""
+        data = _diff_semantic.diff_semantic(
+            path_a=path_a,
+            path_b=path_b,
+            text_a=text_a,
+            text_b=text_b,
+            kind=kind,
+            extra_roots=trusted_roots,
+        )
+    except Exception as exc:
+        _record_direct_tool("diff_semantic", args, ok=False, started=started, summary=str(exc))
+        return "diff_semantic refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "diff_semantic", args, ok=bool(data.get("ok")), started=started,
+        summary="kind=%s identical=%s" % (data.get("kind", kind), data.get("semantically_identical")),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def reasoning_board(
+    action: str = "summary",
+    board_id: str = "default",
+    goal: str = "",
+    text: str = "",
+    source: str = "",
+    hypothesis_id: str = "",
+    status: str = "",
+    confidence: float | None = None,
+    evidence_for: str = "",
+    evidence_against: str = "",
+    fact_refs_json: str = "",
+    alternatives_json: str = "",
+) -> str:
+    """Track grounded facts, hypotheses, decisions, and contradiction audits in a session-scoped scratchpad."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"action": action, "board_id": board_id}
+    try:
+        import sonder_runtime.adapters.inspection.reasoning_board as _reasoning_board
+        from sonder_runtime.adapters.security import approval_ledger as _al
+
+        owner = str(_al.current_owner() or "local")
+        fact_refs = json.loads(fact_refs_json) if isinstance(fact_refs_json, str) and fact_refs_json.strip() else (fact_refs_json if isinstance(fact_refs_json, list) else None)
+        alternatives = json.loads(alternatives_json) if isinstance(alternatives_json, str) and alternatives_json.strip() else (alternatives_json if isinstance(alternatives_json, list) else None)
+        data = _reasoning_board.reasoning_board(
+            action=action,
+            board_id=board_id,
+            owner=owner,
+            goal=goal,
+            text=text,
+            source=source,
+            hypothesis_id=hypothesis_id,
+            status=status,
+            confidence=confidence,
+            evidence_for=evidence_for,
+            evidence_against=evidence_against,
+            fact_refs=fact_refs,
+            alternatives=alternatives,
+        )
+    except Exception as exc:
+        _record_direct_tool("reasoning_board", args, ok=False, started=started, summary=str(exc))
+        return "reasoning_board refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "reasoning_board", args, ok=bool(data.get("ok")), started=started,
+        summary="ok=%s action=%s" % (data.get("ok"), action),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -17659,6 +17983,12 @@ AGENT_TOOL_HELP = """Available tools:
 - code_metrics: {"path": ".", "max_files": 2000, "top_n": 10} -- language LOC, TODO/FIXME markers, largest files, and complexity hotspots
 - schema_validate: {"path": "config.json", "schema_path": "config.schema.json", "schema_json": ""} -- validate JSON/JSONL/TOML against JSON Schema
 - language_matrix: {"language": ""} -- report supported languages, tools, and live host toolchain readiness
+- math_eval: {"expression": "comb(52,5)", "action": "eval|solve|matrix|convert|date|derivative|integrate", "exact": false} -- exact/high-precision math, equations, matrices, statistics, units, dates
+- logic_verify: {"formula": "(A -> B) & A", "action": "satisfiable|truth_table|equivalent|implies|cnf|csp", "formula_b": ""} -- formal SAT, equivalence/implication counterexamples, and CSP solver
+- regex_lab: {"pattern": "^[a-z]+$", "text": "hello", "should_match": ["abc"], "should_not_match": ["123"]} -- deterministic regex tester, capture groups, substitutions, and ReDoS check
+- code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": ""} -- module dependency graph, circular imports, blast-radius impact, and Python call graph
+- diff_semantic: {"path_a": "old.py", "path_b": "new.py", "text_a": "", "text_b": "", "kind": "auto|python|json|toml|ini"} -- AST-aware Python & structural JSON/TOML/INI diff
+- reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": "", "source": ""} -- structured cognitive scratchpad & contradiction audit
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -17737,7 +18067,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -17745,7 +18075,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
     "tool_inventory", "output_digest",
     "emotion_vector_status", "preferences_status", "tool_manifest",
-    "report_progress", "post_to_board", "read_board",
+    "report_progress", "post_to_board", "read_board", "reasoning_board",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
     # find_references / diff_files are root-confined (see read_only_root_gate);
@@ -17798,6 +18128,12 @@ an exact symbol named by the task; do not default to Python or server.py.
 - code_metrics: {"path": ".", "max_files": 2000, "top_n": 10}
 - schema_validate: {"path": "<task-relevant JSON/JSONL/TOML path>", "schema_path": "<schema JSON path>", "schema_json": ""}
 - language_matrix: {"language": ""}
+- math_eval: {"expression": "<expression or equation>", "action": "eval|solve|matrix|convert|date|derivative|integrate", "exact": false}
+- logic_verify: {"formula": "<propositional formula>", "action": "satisfiable|truth_table|equivalent|implies|cnf|csp", "formula_b": ""}
+- regex_lab: {"pattern": "<regex>", "text": "<sample text>", "should_match": [], "should_not_match": []}
+- code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": "<file, module, or symbol>"}
+- diff_semantic: {"path_a": "<first file>", "path_b": "<second file>", "text_a": "", "text_b": "", "kind": "auto"}
+- reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": ""}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -18000,6 +18336,14 @@ def _repository_scope_path_error(tool_name, args, project_root):
             targets = [("path", args.get("path") or "")]
             if str(args.get("schema_path") or "").strip():
                 targets.append(("schema path", args.get("schema_path")))
+        elif tool_name == "code_graph":
+            targets = [("root", args.get("root") or ".")]
+        elif tool_name == "diff_semantic":
+            targets = []
+            if str(args.get("path_a") or "").strip():
+                targets.append(("path_a", args.get("path_a")))
+            if str(args.get("path_b") or "").strip():
+                targets.append(("path_b", args.get("path_b")))
         elif tool_name == "repo_diff":
             targets = [("repository root", args.get("root") or ".")]
             if str(args.get("path") or "").strip():
@@ -18359,6 +18703,22 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
+        elif tool_name == "code_graph":
+            file_ops.resolve_repository_read_path(
+                args.get("root", ".") or ".",
+                allow_workspace_root=True,
+                reject_sensitive=True,
+                extra_roots=trusted_extra_roots,
+            )
+        elif tool_name == "diff_semantic":
+            for key in ("path_a", "path_b"):
+                if str(args.get(key) or "").strip():
+                    file_ops.resolve_repository_read_path(
+                        args.get(key, ""),
+                        allow_workspace_root=False,
+                        reject_sensitive=True,
+                        extra_roots=trusted_extra_roots,
+                    )
         elif tool_name == "output_digest" and str(args.get("path") or "").strip():
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
@@ -19610,6 +19970,89 @@ def _agent_dispatch(
         )
     if tool_name == "language_matrix":
         return language_matrix(language=args.get("language", ""))
+    if tool_name == "math_eval":
+        return math_eval(
+            expression=args.get("expression", ""),
+            action=args.get("action", "eval"),
+            exact=bool(args.get("exact", False)),
+            precision=args.get("precision", 0),
+            variables_json=args.get("variables_json", args.get("variables", "")),
+            variable=args.get("variable", "x"),
+            equations_json=args.get("equations_json", args.get("equations", "")),
+            bracket_json=args.get("bracket_json", args.get("bracket", "")),
+            matrix_op=args.get("matrix_op", ""),
+            matrix_a_json=args.get("matrix_a_json", args.get("matrix_a", "")),
+            matrix_b_json=args.get("matrix_b_json", args.get("matrix_b", "")),
+            value=args.get("value"),
+            from_unit=args.get("from_unit", ""),
+            to_unit=args.get("to_unit", ""),
+            date_a=args.get("date_a", ""),
+            date_b=args.get("date_b", ""),
+            add_days=args.get("add_days"),
+            at=args.get("at", 0.0),
+            low=args.get("low", 0.0),
+            high=args.get("high", 1.0),
+        )
+    if tool_name == "logic_verify":
+        return logic_verify(
+            formula=args.get("formula", ""),
+            action=args.get("action", "satisfiable"),
+            formula_b=args.get("formula_b", ""),
+            premises_json=args.get("premises_json", args.get("premises", "")),
+            conclusion=args.get("conclusion", ""),
+            domains_json=args.get("domains_json", args.get("domains", "")),
+            constraints_json=args.get("constraints_json", args.get("constraints", "")),
+        )
+    if tool_name == "regex_lab":
+        return regex_lab(
+            pattern=args.get("pattern", ""),
+            text=args.get("text", ""),
+            samples_json=args.get("samples_json", args.get("samples", "")),
+            should_match_json=args.get("should_match_json", args.get("should_match", "")),
+            should_not_match_json=args.get("should_not_match_json", args.get("should_not_match", "")),
+            replacement=args.get("replacement"),
+            flags=args.get("flags", ""),
+            mode=args.get("mode", "search"),
+            max_matches=args.get("max_matches", 20),
+        )
+    if tool_name == "code_graph":
+        return code_graph(
+            root=args.get("root", "."),
+            action=args.get("action", "summary"),
+            target=args.get("target", ""),
+            max_files=args.get("max_files", 1500),
+            top_n=args.get("top_n", 15),
+            max_depth=args.get("max_depth", 6),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "diff_semantic":
+        return diff_semantic(
+            path_a=args.get("path_a", ""),
+            path_b=args.get("path_b", ""),
+            text_a=args.get("text_a", ""),
+            text_b=args.get("text_b", ""),
+            kind=args.get("kind", "auto"),
+            token=args.get("token", ""),
+            approval=args.get("approval", ""),
+            extra_roots=args.get("extra_roots", ""),
+        )
+    if tool_name == "reasoning_board":
+        return reasoning_board(
+            action=args.get("action", "summary"),
+            board_id=args.get("board_id", "default"),
+            goal=args.get("goal", ""),
+            text=args.get("text", ""),
+            source=args.get("source", ""),
+            hypothesis_id=args.get("hypothesis_id", ""),
+            status=args.get("status", ""),
+            confidence=args.get("confidence"),
+            evidence_for=args.get("evidence_for", ""),
+            evidence_against=args.get("evidence_against", ""),
+            fact_refs_json=args.get("fact_refs_json", args.get("fact_refs", "")),
+            alternatives_json=args.get("alternatives_json", args.get("alternatives", "")),
+        )
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -20099,7 +20542,7 @@ _PROJECT_SCOPED_PATH_TOOLS = frozenset({
     "file_check",
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
     "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
+    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
     "archive_list", "archive_extract",
     "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
     "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
@@ -20164,6 +20607,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board",
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
+        "math_eval", "logic_verify", "regex_lab", "reasoning_board",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -20181,7 +20625,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -20329,6 +20773,14 @@ def _project_scope_args(tool_name, args, project):
                 scoped[key] = os.path.normpath(os.path.join(project, raw_path))
         return scoped
 
+    if tool_name == "diff_semantic":
+        for key in ("path_a", "path_b"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = _scope_arg_is_rooted(raw_path)
+            if raw_path and not is_abs:
+                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
+        return scoped
+
     if tool_name == "file_batch_write":
         operations = _batch_agent_operations(scoped)
         if operations is None:
@@ -20428,7 +20880,7 @@ def _project_scope_args(tool_name, args, project):
         # required" instead of targeting the project root directory.
         if key == "root" or tool_name in {
             "directory_digest", "repo_log", "repo_show", "repo_blame",
-            "code_metrics", "workspace_inventory", "dependency_inventory",
+            "code_metrics", "code_graph", "workspace_inventory", "dependency_inventory",
             "directory_tree", "repository_symbol_index", "project_detect",
             "artifact_ground",
         }:
@@ -20603,7 +21055,7 @@ _WORK_VALIDATION_TOOLS = frozenset({
     "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
     "artifact_verify", "game_reference_suite", "game_generate_and_test",
     "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate",
+    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic",
     "memory_quality_report", "memory_privacy_review", "learning_health_status",
 })
 # Leads an end report that claims completion the record says must be earned.
@@ -20781,7 +21233,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -20846,7 +21298,7 @@ _UNCONFINED_ROOT_TOOLS = frozenset({
 _AGENT_FILE_EVIDENCE_TOOLS = frozenset({
     "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
     "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "log_inspect", "data_inspect", "data_query", "project_detect",
+    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "log_inspect", "data_inspect", "data_query", "project_detect",
     "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
     "dependency_inventory", "artifact_risk_inspect",
 })
@@ -20855,7 +21307,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -22946,7 +23398,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
