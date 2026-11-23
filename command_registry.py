@@ -317,6 +317,18 @@ COMMANDS = [
         "summary": "Compare multiple candidate answers for consensus vs divergence, or audit a reply against tool receipts.",
     },
     {
+        "name": "/fallback",
+        "category": "dev",
+        "risk": "safe",
+        "summary": "Classify a tool/command failure and recommend ranked, policy-safe alternative tools and strategies.",
+    },
+    {
+        "name": "/resilience",
+        "category": "system",
+        "risk": "safe",
+        "summary": "Inspect live model-call retry, context compaction, arg-repair, loop-breaker, and circuit-breaker telemetry.",
+    },
+    {
         "name": "/mkdir",
         "category": "filesystem",
         "risk": "ask",

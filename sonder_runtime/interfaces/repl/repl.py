@@ -4810,6 +4810,7 @@ def main(*, machine_output=False):
                         "/sdiff", "/diff_semantic", "/reason", "/reasoning_board",
                         "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
                         "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
+                        "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",
                         "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",

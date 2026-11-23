@@ -33,6 +33,8 @@ SPECULATABLE_TOOLS = frozenset({
     "citation_audit",
     "fact_cross_check",
     "consistency_check",
+    "plan_fallback",
+    "runtime_resilience_check",
     "data_inspect",
     "memory_search",
     "activity_status",

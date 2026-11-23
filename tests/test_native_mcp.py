@@ -116,8 +116,8 @@ def test_native_catalog_is_bounded_and_deterministic():
         "diff_semantic", "directory_create", "directory_digest", "directory_tree", "document_extract", "edit_file", "fact_cross_check", "fetch_artifact",
         "file_batch_write", "file_check", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
-        "json_patch", "language_matrix", "log_inspect", "logic_verify", "make_directory", "math_eval", "media_inspect", "output_digest", "process_list", "process_memory_risk_inspect",
-        "profile_capture_digest", "profile_digest", "program_search", "project_detect", "read_file", "reasoning_board", "regex_lab", "run_program", "run_script", "schema_validate", "script_search", "secret_scan",
+        "json_patch", "language_matrix", "log_inspect", "logic_verify", "make_directory", "math_eval", "media_inspect", "output_digest", "plan_fallback", "process_list", "process_memory_risk_inspect",
+        "profile_capture_digest", "profile_digest", "program_search", "project_detect", "read_file", "reasoning_board", "regex_lab", "run_program", "run_script", "runtime_resilience_check", "schema_validate", "script_search", "secret_scan",
         "symbol_verify", "test_run", "test_run_result", "text_patch", "text_search", "tool_help", "tool_inventory",
         "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
@@ -129,8 +129,8 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
         "artifact_risk_inspect", "citation_audit", "code_graph", "code_metrics", "consistency_check", "diff_semantic", "directory_tree", "document_extract", "edit_file", "fact_cross_check", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_find", "file_move",
         "file_read_range", "image_inspect", "json_patch", "language_matrix", "logic_verify", "make_directory", "math_eval", "media_inspect",
-        "process_list", "process_memory_risk_inspect", "program_search", "read_file", "reasoning_board", "regex_lab",
-        "run_program", "run_script", "schema_validate", "script_search", "secret_scan", "symbol_verify", "text_patch",
+        "process_list", "process_memory_risk_inspect", "plan_fallback", "program_search", "read_file", "reasoning_board", "regex_lab",
+        "run_program", "run_script", "runtime_resilience_check", "schema_validate", "script_search", "secret_scan", "symbol_verify", "text_patch",
         "text_search", "verify_artifact", "weather_lookup", "web_fetch", "web_search",
         "write_file",
     }
@@ -163,7 +163,7 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
         "compute_artifact_fetch", "agent_lane", "tool_help", "file_check", "claim_check",
     }
     assert canonical_native == packaged_executor | packaged_inspections
-    assert len(canonical_native) == 55
+    assert len(canonical_native) == 57
     assert compatibility_aliases == {
         "directory_create", "file_edit", "file_read", "file_write", "workspace_run",
     }

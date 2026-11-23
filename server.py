@@ -4028,6 +4028,17 @@ def control_command(prompt: str, history=None, session="", project="",
         if len(parts) < 2:
             return "usage: /consensus <candidate 1> || <candidate 2> [|| ...]"
         return consistency_check(action="compare_candidates", candidates_json=json.dumps(parts))
+    if cmd in ("/fallback", "/plan_fallback"):
+        parts = [part.strip() for part in arg.split("|", 2)]
+        if not parts or not parts[0]:
+            return "usage: /fallback <failed_tool> [| <error> [| <goal>]]"
+        return plan_fallback(
+            failed_tool=parts[0],
+            error=parts[1] if len(parts) > 1 else "",
+            goal=parts[2] if len(parts) > 2 else "",
+        )
+    if cmd in ("/resilience", "/runtime_resilience_check"):
+        return runtime_resilience_check()
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -15117,6 +15128,64 @@ def consistency_check(
     return output
 
 
+@mcp.tool()
+def plan_fallback(
+    failed_tool: str,
+    error: str = "",
+    goal: str = "",
+    available_tools_json: str = "",
+    tried_tools_json: str = "",
+) -> str:
+    """Classify a tool or command failure and return ranked, policy-safe alternative tools and recovery strategies."""
+    _maybe_live_reload()
+    started = time.time()
+    args = {"failed_tool": failed_tool, "error": str(error or "")[:120]}
+    try:
+        import sonder_runtime.adapters.inspection.plan_fallback as _plan_fallback
+
+        avail = json.loads(available_tools_json) if isinstance(available_tools_json, str) and available_tools_json.strip() else (available_tools_json if isinstance(available_tools_json, list) else None)
+        tried = json.loads(tried_tools_json) if isinstance(tried_tools_json, str) and tried_tools_json.strip() else (tried_tools_json if isinstance(tried_tools_json, list) else None)
+        data = _plan_fallback.plan_fallback(
+            failed_tool=failed_tool,
+            error=error,
+            goal=goal,
+            available_tools=avail,
+            tried_tools=tried,
+        )
+    except Exception as exc:
+        _record_direct_tool("plan_fallback", args, ok=False, started=started, summary=str(exc))
+        return "plan_fallback refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "plan_fallback", args, ok=bool(data.get("ok")), started=started,
+        summary="class=%s alts=%d" % (data.get("failure_class", ""), len(data.get("alternatives") or [])),
+        output=output,
+    )
+    return output
+
+
+@mcp.tool()
+def runtime_resilience_check() -> str:
+    """Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker telemetry."""
+    _maybe_live_reload()
+    started = time.time()
+    args: dict[str, object] = {}
+    try:
+        import sonder_runtime.adapters.inspection.runtime_resilience as _runtime_resilience
+
+        data = _runtime_resilience.runtime_resilience_check()
+    except Exception as exc:
+        _record_direct_tool("runtime_resilience_check", args, ok=False, started=started, summary=str(exc))
+        return "runtime_resilience_check refused: %s" % exc
+    output = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    _record_direct_tool(
+        "runtime_resilience_check", args, ok=bool(data.get("ok")), started=started,
+        summary="healthy=%s" % data.get("healthy"),
+        output=output,
+    )
+    return output
+
+
 # Vision inputs carry pixels rather than just text.  Keep the payload safely
 # below the ordinary model-response ceiling (and the much larger metadata-only
 # ``workbench.MAX_IMAGE_BYTES``) so an otherwise valid local asset cannot turn
@@ -18147,6 +18216,8 @@ AGENT_TOOL_HELP = """Available tools:
 - citation_audit: {"text": "", "root": ".", "claims": [], "sources": []} -- verify file:line citations, verbatim quotes, and source grounding
 - fact_cross_check: {"text": "..."} -- catch prose arithmetic errors, table total mismatches, bad dates/weekdays, list counts, and self-contradictions
 - consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []} -- compare multiple answers for divergence or audit a reply against tool receipts
+- plan_fallback: {"failed_tool": "run_code", "error": "...", "goal": "...", "tried_tools": []} -- classify a failure and plan ranked, policy-safe alternative tools/strategies
+- runtime_resilience_check: {} -- inspect live model-call retry, context compaction, arg-repair, loop-breaker, and circuit-breaker telemetry
 - data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
 - data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
@@ -18225,7 +18296,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -18296,6 +18367,8 @@ an exact symbol named by the task; do not default to Python or server.py.
 - citation_audit: {"text": "<draft with file:line citations>", "root": ".", "claims": [], "sources": []}
 - fact_cross_check: {"text": "<draft prose>"}
 - consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []}
+- plan_fallback: {"failed_tool": "<tool>", "error": "<error>", "goal": "<task>", "tried_tools": []}
+- runtime_resilience_check: {}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -20257,6 +20330,16 @@ def _agent_dispatch(
             reply=args.get("reply", ""),
             receipts_json=args.get("receipts_json", args.get("receipts", "")),
         )
+    if tool_name == "plan_fallback":
+        return plan_fallback(
+            failed_tool=args.get("failed_tool", ""),
+            error=args.get("error", ""),
+            goal=args.get("goal", ""),
+            available_tools_json=args.get("available_tools_json", args.get("available_tools", "")),
+            tried_tools_json=args.get("tried_tools_json", args.get("tried_tools", "")),
+        )
+    if tool_name == "runtime_resilience_check":
+        return runtime_resilience_check()
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
@@ -20812,7 +20895,7 @@ _PROJECT_BOUND_AGENT_TOOLS = (
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
         "math_eval", "logic_verify", "regex_lab", "reasoning_board",
-        "fact_cross_check", "consistency_check",
+        "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
         "process_list", "process_memory_risk_inspect",
     })
 )
@@ -20830,7 +20913,7 @@ _CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
     "workspace_inventory", "directory_tree", "file_find", "file_read",
     "file_read_range", "file_digest", "text_search", "repo_status",
     "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
+    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
 })
 # ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
 # so every name here is dispatchable and a dispatch-only drift check reports it
@@ -21438,7 +21521,7 @@ _WORK_INSPECTION_TOOLS = frozenset({
     "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "repo_status", "repo_diff",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "repo_status", "repo_diff",
     "repo_log", "repo_show", "repo_blame",
     "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
     "verify_artifact",
@@ -21512,7 +21595,7 @@ _AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
     "dependency_inventory",
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
     "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
     "tool_inventory", "output_digest",
     "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
     "process_list", "process_memory_risk_inspect",
@@ -23603,7 +23686,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",

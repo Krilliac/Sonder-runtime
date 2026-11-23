@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sonder_runtime.domain.agents.delegation import BOARD_MESSAGE_KINDS, DELEGATION_TOOLS
+from sonder_runtime.domain.resilience import repair_tool_arguments
 from sonder_runtime.domain.security import redaction
 
 TOOL_BACKEND_CONTAINER = "container"
@@ -627,6 +628,30 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         },
         backend=TOOL_BACKEND_DISCOVERY,
     ),
+    ChatToolDefinition(
+        name="plan_fallback",
+        description=(
+            "When a tool, command, or method fails or is unavailable, classify the failure and return "
+            "ranked, policy-safe alternative tools and concrete fallback strategies to finish the task."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "failed_tool": {"type": "string"},
+                "error": {"type": "string", "default": ""},
+                "goal": {"type": "string", "default": ""},
+                "tried_tools": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["failed_tool"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="runtime_resilience_check",
+        description="Inspect recent model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker state.",
+        parameters={"type": "object", "properties": {}},
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
 )
 
 _BACKEND_BY_TOOL = {item.name: item.backend for item in CORE_CHAT_TOOL_DEFINITIONS}
@@ -682,19 +707,9 @@ def tool_backend_label(tool_name: str, *, container_active: bool = False) -> str
 
 
 def parse_tool_arguments(raw: Any) -> dict[str, Any]:
-    """Normalize provider tool-call arguments into a dict (or empty dict on malformed)."""
-    if isinstance(raw, Mapping):
-        return dict(raw)
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            return {}
-        try:
-            loaded = json.loads(text)
-            return dict(loaded) if isinstance(loaded, Mapping) else {}
-        except (TypeError, ValueError):
-            return {}
-    return {}
+    """Normalize provider tool-call arguments into a dict, repairing common LLM JSON slips."""
+    parsed, _repaired = repair_tool_arguments(raw)
+    return parsed
 
 
 def chat_tools_payload(

@@ -297,6 +297,18 @@ _DESCRIPTORS = (
         resources=frozenset({ResourceClass.CPU}),
         secrets=SecretPolicy.NO_SECRET_INPUT,
     ),
+    _read_tool(
+        "plan_fallback",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
+    _read_tool(
+        "runtime_resilience_check",
+        root=RootRequirement.NONE,
+        resources=frozenset({ResourceClass.CPU}),
+        secrets=SecretPolicy.NO_SECRET_INPUT,
+    ),
     _read_tool("repo_status", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool("repo_diff", mode=ExecutionMode.BOUNDED_SUBPROCESS),
     _read_tool(

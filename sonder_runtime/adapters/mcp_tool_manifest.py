@@ -62,6 +62,8 @@ MCP_TOOL_MANIFEST = {
     "citation_audit": "Guarded citation and quote auditor verifying file:line references, verbatim code/doc quotes, and source-grounding scores against real files or supplied sources.",
     "fact_cross_check": "Pure linear-time prose cross-checker catching inline arithmetic mistakes, Markdown table total mismatches, impossible dates/wrong weekdays, list-count errors, and polarity contradictions.",
     "consistency_check": "Pure multi-candidate self-consistency reconciler (consensus vs contested claims) and tool-receipt auditor catching fabricated pass or file-write claims.",
+    "plan_fallback": "Pure failure classifier and alternative-method planner returning ranked, policy-safe fallback tools and concrete recovery steps when a tool or command fails.",
+    "runtime_resilience_check": "In-process telemetry diagnostic reporting model-call retries, context compactions, tool argument repairs, loop breaks, and circuit-breaker state.",
     "task_create/task_list/task_update/task_show/task_delete/task_plan/task_progress/task_ledger/task_depend/checklist_create/checklist_update/checklist_show": "Visible todo, ordered checklist, and digest-bound manager ledger state shared by console, app, agents, and MCP. task_plan batch-creates a work plan with ordered steps and auto-dependencies. task_progress shows a compact summary; task_ledger exposes bounded dependencies and replan metadata.",
     "workbench_agent": "Run an autonomous local tool loop with a guaranteed checklist, exact action transcript, validation gate, and end report.",
     "command_registry_list": "Inspect available slash commands by category, name, or risk.",
