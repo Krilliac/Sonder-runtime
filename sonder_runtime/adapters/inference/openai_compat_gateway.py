@@ -346,12 +346,31 @@ def _validate_api_key(api_key: object) -> None:
         ) from None
 
 
+ENV_TIER_MODELS = "SONDER_OPENAI_TIER_MODELS"
+
+
+def parse_tier_models(raw: str | None) -> dict[str, str]:
+    """Parse ``tier=model,tier=model`` pairs from ``SONDER_OPENAI_TIER_MODELS``."""
+    result: dict[str, str] = {}
+    for entry in str(raw or "").split(","):
+        text = entry.strip()
+        if not text or "=" not in text:
+            continue
+        tier, _, model_id = text.partition("=")
+        tier_key = tier.strip().lower()
+        model_val = model_id.strip()
+        if tier_key and model_val:
+            result[tier_key] = model_val
+    return result
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     base_url: str
     api_key: str = field(default="", repr=False)
     model: str = ""
     embed_model: str = ""
+    tier_models: Mapping[str, str] = field(default_factory=dict)
     # CIDRs whose private IP-literal hosts may be reached over plain http.
     plaintext_networks: tuple[str, ...] = ()
     # Streaming stall limits in seconds (0 disables); inside the call budget.
@@ -363,6 +382,14 @@ class OpenAICompatibleConfig:
     embed_price: Decimal | None = None
     daily_usd: Decimal = DEFAULT_DAILY_USD
     max_tokens_ceiling: int = DEFAULT_MAX_TOKENS_CEILING
+
+    def model_for_tier(self, tier: str | None) -> str:
+        key = str(tier or "").strip().lower()
+        if key and self.tier_models:
+            mapped = str(self.tier_models.get(key, "") or "").strip()
+            if mapped:
+                return mapped
+        return self.model
 
     def __post_init__(self) -> None:
         _validate_api_key(self.api_key)
@@ -488,6 +515,7 @@ def _config_from_env(*, metered: bool = True) -> OpenAICompatibleConfig:
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
+        tier_models=parse_tier_models(os.environ.get(ENV_TIER_MODELS, "")),
         plaintext_networks=_split_networks(os.environ.get(ENV_ALLOW_HTTP_NETWORKS, "")),
         stream_idle_seconds=_env_seconds(ENV_STREAM_IDLE),
         stream_first_content_seconds=_env_seconds(ENV_STREAM_FIRST_CONTENT),
@@ -915,7 +943,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         live = stream_sink.call_stream()
-        model = str(options.get("model") or cfg.model or request.tier or "default")
+        model = str(options.get("model") or cfg.model_for_tier(request.tier) or request.tier or "default")
         logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload = {
             "model": model,
