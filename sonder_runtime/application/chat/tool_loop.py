@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import json
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -36,6 +37,15 @@ from sonder_runtime.domain.code_gate_policy import (
     check_python_static_errors,
     uses_interactive_stdin,
 )
+from sonder_runtime.domain.resilience import (
+    GLOBAL_TELEMETRY,
+    classify_model_error,
+    compact_messages_for_retry,
+    format_fallback_hint,
+    repair_tool_arguments,
+    resolve_tool_name,
+)
+from sonder_runtime.domain.tools.builtin_traits import builtin_traits
 
 _FENCED_PYTHON_RE = re.compile(r"```(?:python|py)\s*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _NON_RETRYABLE_VERIFY_STATUSES = frozenset({
@@ -131,15 +141,38 @@ class ChatToolTurn:
             return text, False
         return text[:limit] + f"\n... (truncated {len(text) - limit} chars)", True
 
-    def _run_tool_call(self, raw_call: Mapping[str, Any], *, run_count: int) -> tuple[str, int]:
+    def _admitted_tool_names(self) -> tuple[str, ...]:
+        return tuple(t.name for t in self.manifest.tools if t.name)
+
+    def _run_tool_call(
+        self,
+        raw_call: Mapping[str, Any],
+        *,
+        run_count: int,
+        failed_tools: set[str] | None = None,
+    ) -> tuple[str, int]:
         fn = raw_call.get("function") if isinstance(raw_call, Mapping) else None
         if not isinstance(fn, Mapping):
             return "ERROR: malformed native tool call", run_count
-        name = str(fn.get("name") or "").strip().lstrip("/")
-        args = parse_tool_arguments(fn.get("arguments"))
+        admitted = self._admitted_tool_names()
+        raw_name = str(fn.get("name") or "").strip().lstrip("/")
+        name, suggestions, aliased = resolve_tool_name(raw_name, admitted)
+        if aliased:
+            GLOBAL_TELEMETRY.record("tool_name_aliased", tool=name, detail=f"{raw_name} -> {name}")
+        args, repaired_args = repair_tool_arguments(fn.get("arguments"))
+        if repaired_args:
+            GLOBAL_TELEMETRY.record("tool_args_repaired", tool=name)
         backend = self.backend.backend_for(name)
         if not name:
             return "ERROR: tool name is required", run_count
+        if name not in admitted and suggestions:
+            msg = (
+                f"ERROR: unknown tool '{name}' is not in this turn's admitted tools. "
+                f"Did you mean: {', '.join(suggestions)}?"
+            )
+            self.records.append(ChatToolRecord("", name, "error", backend, reason=msg[:200]))
+            GLOBAL_TELEMETRY.record("tool_name_unknown", tool=name, detail=", ".join(suggestions))
+            return msg, run_count
         if name in DELEGATION_TOOLS and not _delegation.can_delegate():
             msg = _delegation.depth_refusal_message(name)
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
@@ -238,7 +271,13 @@ class ChatToolTurn:
                     bidi_chars=tuple(preview["bidi_chars"]),
                     reason=msg[:200],
                 ))
-                return msg, run_count
+                GLOBAL_TELEMETRY.record("tool_refused", tool=name, detail=msg[:160])
+                if failed_tools is not None:
+                    failed_tools.add(name)
+                hint = format_fallback_hint(
+                    name, msg, available_tools=admitted, tried_tools=failed_tools,
+                )
+                return msg + hint, run_count
 
         self._emit({
             "phase": "started",
@@ -259,8 +298,48 @@ class ChatToolTurn:
             if (callable(preapproved) and decision is not None and getattr(decision, "allowed", False))
             else nullcontext()
         )
-        with preapproved_ctx:
-            exec_result = self.backend.execute(name, args)
+        is_safe_retryable = bool(builtin_traits(name).is_read_only) and name not in _EXECUTION_CAP_TOOLS
+        exec_result = None
+        last_exc: Exception | None = None
+        for attempt in range(2 if is_safe_retryable else 1):
+            try:
+                with preapproved_ctx:
+                    exec_result = self.backend.execute(name, args)
+                last_exc = None
+                if (
+                    attempt == 0
+                    and is_safe_retryable
+                    and not exec_result.ok
+                    and any(tok in str(exec_result.output or "").lower() for tok in ("database is locked", "temporarily unavailable", "timed out"))
+                ):
+                    GLOBAL_TELEMETRY.record("readonly_tool_retry", tool=name)
+                    time.sleep(0.1)
+                    continue
+                break
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                last_exc = exc
+                if attempt == 0 and is_safe_retryable:
+                    GLOBAL_TELEMETRY.record("readonly_tool_retry", tool=name, detail=str(exc)[:120])
+                    time.sleep(0.1)
+                    continue
+                break
+            except Exception as exc:
+                last_exc = exc
+                break
+
+        if exec_result is None or last_exc is not None:
+            err_msg = f"ERROR: tool '{name}' failed unexpectedly: {type(last_exc).__name__}: {last_exc}"
+            self.records.append(ChatToolRecord(
+                call_id=call_id, tool=name, status="error", backend=backend, reason=err_msg[:200],
+            ))
+            GLOBAL_TELEMETRY.record("tool_exec_failed", tool=name, detail=err_msg[:160])
+            if failed_tools is not None:
+                failed_tools.add(name)
+            hint = format_fallback_hint(
+                name, err_msg, available_tools=admitted, tried_tools=failed_tools,
+            )
+            return err_msg + hint, run_count
+
         _delegation.emit_agent_event(
             phase="tool_result",
             tool=name,
@@ -296,7 +375,68 @@ class ChatToolTurn:
             "exit_code": exec_result.exit_code,
             "duration_ms": exec_result.duration_ms,
         })
+        if not exec_result.ok:
+            GLOBAL_TELEMETRY.record("tool_exec_failed", tool=name, detail=str(exec_result.output or exec_result.reason)[:160])
+            if failed_tools is not None:
+                failed_tools.add(name)
+            hint = format_fallback_hint(
+                name, exec_result.output or exec_result.reason,
+                available_tools=admitted, tried_tools=failed_tools,
+            )
+            return clipped_model + hint, new_runs
         return clipped_model, new_runs
+
+    def _call_model_with_recovery(
+        self,
+        generate_step: Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], dict[str, Any]],
+        messages: list[dict[str, Any]],
+        step_tools: list[dict[str, Any]] | None,
+        *,
+        started: float,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], bool, Exception | None]:
+        """Call ``generate_step`` with bounded transient retry, context compaction, and tool-schema fallback."""
+        cur_messages = messages
+        cur_tools = step_tools
+        tools_disabled = False
+        compacted = False
+        max_attempts = 3
+        last_exc: Exception | None = None
+
+        for attempt in range(max_attempts):
+            if self.is_aborted is not None and self.is_aborted():
+                return None, cur_messages, tools_disabled, last_exc
+            if (time.monotonic() - started) >= self.budget.wall_seconds:
+                return None, cur_messages, tools_disabled, last_exc
+            try:
+                step = generate_step(cur_messages, cur_tools)
+                if attempt > 0:
+                    GLOBAL_TELEMETRY.record("model_call_recovered", detail=f"attempt={attempt + 1}")
+                return step, cur_messages, tools_disabled, None
+            except Exception as exc:
+                last_exc = exc
+                err_class = classify_model_error(exc)
+                GLOBAL_TELEMETRY.record("model_call_failed", detail=f"{err_class}: {exc}"[:160])
+                if err_class == "non_retryable":
+                    raise
+                if err_class == "context_overflow" and not compacted:
+                    new_msgs, saved = compact_messages_for_retry(cur_messages)
+                    if saved > 0:
+                        compacted = True
+                        cur_messages = new_msgs
+                        GLOBAL_TELEMETRY.record("context_compaction_retry", detail=f"saved={saved}")
+                        continue
+                if err_class == "tools_unsupported" and cur_tools is not None:
+                    cur_tools = None
+                    tools_disabled = True
+                    GLOBAL_TELEMETRY.record("tools_unsupported_fallback")
+                    continue
+                if err_class == "transient" and attempt < max_attempts - 1:
+                    GLOBAL_TELEMETRY.record("transient_model_retry", detail=f"attempt={attempt + 1}")
+                    time.sleep(min(0.35, 0.15 * (attempt + 1)))
+                    continue
+                break
+
+        return None, cur_messages, tools_disabled, last_exc
 
     def run(
         self,
@@ -330,6 +470,9 @@ class ChatToolTurn:
         verified_code_hashes: set[str] = set()
         failed_auto_verify_hashes: set[str] = set()
         auto_verify_blocked = False
+        tools_disabled_by_fallback = False
+        failed_tools: set[str] = set()
+        call_signatures: dict[str, int] = {}
         active_board = _delegation.current_board()
         owns_board = active_board is None
         board = active_board or _delegation.AgentProgressBoard()
@@ -358,8 +501,33 @@ class ChatToolTurn:
                     if (time.monotonic() - started) >= self.budget.wall_seconds:
                         break
                     calls += 1
-                    step_tools = self.tools_payload if (calls < self.budget.max_model_calls and not self.client_handoffs) else None
-                    step = generate_step(messages, step_tools)
+                    step_tools = (
+                        self.tools_payload
+                        if (
+                            calls < self.budget.max_model_calls
+                            and not self.client_handoffs
+                            and not tools_disabled_by_fallback
+                        )
+                        else None
+                    )
+                    step, messages, newly_disabled, step_exc = self._call_model_with_recovery(
+                        generate_step, messages, step_tools, started=started,
+                    )
+                    if newly_disabled:
+                        tools_disabled_by_fallback = True
+                    if step is None:
+                        if step_exc is not None and not self.records:
+                            raise step_exc
+                        if step_exc is not None and self.records:
+                            GLOBAL_TELEMETRY.record("graceful_degraded_summary", detail=str(step_exc)[:160])
+                            ok_summary = ", ".join(
+                                f"{r.tool}({r.status})" for r in self.records[-8:]
+                            )
+                            final_content = (
+                                f"Model call failed after completing tool step(s) [{ok_summary}]: "
+                                f"{type(step_exc).__name__}: {step_exc}"
+                            )
+                        break
                     message = step.get("message") if isinstance(step, Mapping) else {}
                     if not isinstance(message, Mapping):
                         message = {}
@@ -479,7 +647,22 @@ class ChatToolTurn:
                             break
                         tool_calls_total += 1
                         prior_len = len(self.records)
-                        obs, run_count = self._run_tool_call(raw_call, run_count=run_count)
+                        raw_fn_sig = raw_call.get("function") if isinstance(raw_call, Mapping) else {}
+                        sig_args = parse_tool_arguments(raw_fn_sig.get("arguments")) if isinstance(raw_fn_sig, Mapping) else {}
+                        sig_key = f"{tool_name}:{json.dumps(sig_args, sort_keys=True, default=str)[:400]}"
+                        call_signatures[sig_key] = call_signatures.get(sig_key, 0) + 1
+                        obs, run_count = self._run_tool_call(
+                            raw_call, run_count=run_count, failed_tools=failed_tools,
+                        )
+                        if call_signatures[sig_key] >= 2 and "[RECOVERY HINT]" not in obs:
+                            GLOBAL_TELEMETRY.record("repeated_tool_loop_hint", tool=tool_name)
+                            obs = obs + format_fallback_hint(
+                                tool_name,
+                                obs[:240],
+                                available_tools=self._admitted_tool_names(),
+                                tried_tools=failed_tools | {tool_name},
+                                repeated=True,
+                            )
                         if tool_name == "run_code" and len(self.records) > prior_len:
                             rec = self.records[-1]
                             if rec.status == "ok":

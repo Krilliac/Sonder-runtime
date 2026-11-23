@@ -575,6 +575,8 @@ ACTION_TITLES = {
     "citation_audit": "Audited Citations",
     "fact_cross_check": "Cross-Checked Facts",
     "consistency_check": "Checked Consistency",
+    "plan_fallback": "Planned Fallback",
+    "runtime_resilience_check": "Checked Resilience",
     "artifact_generate": "Generated Assets",
     "mesh_generate": "Generated Model",
     "security_eval": "Ran Security Eval",

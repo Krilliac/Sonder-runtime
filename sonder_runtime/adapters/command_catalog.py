@@ -222,6 +222,8 @@ _CATEGORY_BY_TOOL = {
     "citation_audit": "dev",
     "fact_cross_check": "data",
     "consistency_check": "data",
+    "plan_fallback": "dev",
+    "runtime_resilience_check": "system",
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",

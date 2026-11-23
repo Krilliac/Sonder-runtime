@@ -244,6 +244,24 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool == "plan_fallback":
+                import sonder_runtime.adapters.inspection.plan_fallback as plan_fallback_mod
+
+                res = plan_fallback_mod.plan_fallback(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "runtime_resilience_check":
+                import sonder_runtime.adapters.inspection.runtime_resilience as runtime_resilience_mod
+
+                res = runtime_resilience_mod.runtime_resilience_check()
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 

@@ -429,6 +429,22 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "plan_fallback",
+        "Pure failure classifier and alternative-method planner recommending ranked, policy-safe fallback tools and steps",
+        {"type": "object", "properties": {
+            "failed_tool": {"type": "string"},
+            "error": {"type": "string"},
+            "goal": {"type": "string"},
+            "available_tools": {"type": "array", "items": {"type": "string"}},
+            "tried_tools": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["failed_tool"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "runtime_resilience_check",
+        "Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker state",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "make_directory", "Create a directory under an allowed root",
         {"type": "object", "properties": {
             "path": _PATH, "parents": {"type": "boolean"}, "extra_roots": _ROOT,
