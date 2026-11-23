@@ -1562,10 +1562,22 @@ def set_mode_without_escalation(name: str) -> str:
     target = resolve_mode(name)
     with _LOCK:
         current = _STATE["mode"]
-        if is_unattended_escalation(current, target):
-            raise ModeEscalationRefused(current, target)
-        # Verified lowering (or same mode): clear looser per-session scopes
-        # as a safety stop, even when called inside a capped local-open scope.
+        # Under a capped local-open scope the caller sees ``manual`` even if
+        # the console previously saved ``auto``/``acceptEdits``. Re-posting
+        # that uncapped mode is NOT a lowering and must be refused with 403
+        # rather than returning 200 and snapping back to ``manual``.
+        capped_reassert = (
+            _MODE_SCOPE_CAPPED.get()
+            and _above_manual(target)
+            and target == current
+        )
+        if is_unattended_escalation(current, target) or capped_reassert:
+            raise ModeEscalationRefused(
+                MANUAL if capped_reassert else current,
+                target,
+            )
+        # Verified lowering (or same mode at/below manual): clear looser
+        # per-session scopes as a safety stop, even inside a local-open scope.
         token = _MODE_SCOPE_CAPPED.set(False)
         try:
             return set_global_mode(target)

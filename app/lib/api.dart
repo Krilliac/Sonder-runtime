@@ -812,6 +812,47 @@ class SonderApi implements SonderApiPort {
     );
   }
 
+  /// Removes finished, quiescent agent conversations owned by the caller.
+  /// Active/running lanes are never touched.
+  Future<int> clearFinishedAgentLanes({List<String>? laneIds}) async {
+    final decoded = await _agentRequest(
+      '/clear',
+      body: {
+        if (laneIds != null) 'lane_ids': laneIds,
+      },
+    );
+    final raw = decoded['cleared_lanes'];
+    return raw is num ? raw.toInt() : int.tryParse('$raw') ?? 0;
+  }
+
+  /// Removes terminal background work (finished/failed/cancelled autopilot runs
+  /// and, for admins, finished fleets). Running work is never touched.
+  Future<({int autopilot, int fleets})> clearFinishedBackgroundWork(
+      {String project = ''}) async {
+    final uri = _uri('/v1/background-work/clear');
+    final response = await requestPost(
+      uri,
+      headers: _headers(),
+      body: jsonEncode({
+        if (project.isNotEmpty) 'project': project,
+      }),
+      timeout: const Duration(seconds: 20),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw responseException(
+          response, 'Could not clear finished background work.');
+    }
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw SonderException('Invalid background work response.');
+    }
+    int count(Object? v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+    return (
+      autopilot: count(decoded['cleared_autopilot']),
+      fleets: count(decoded['cleared_fleets']),
+    );
+  }
+
   /// Lists the API keys of the signed-in session's account. The account comes
   /// only from the session token (`X-Sonder-Account-Token`), never from the
   /// request body. An assigned API key cannot use this route: the server
