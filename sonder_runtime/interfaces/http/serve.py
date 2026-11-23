@@ -7999,7 +7999,7 @@ class Handler(BaseHTTPRequestHandler):
                             req_host = (self.headers.get("Host") or "").strip()
                             if req_host:
                                 req_scheme = "https" if (
-                                    isinstance(self.connection, ssl.SSLSocket)
+                                    hasattr(self.connection, "getpeercert")
                                     or bool(getattr(self.server, "tls_terminated_by_proxy", False))
                                     or os.environ.get("SONDER_TLS_TERMINATED_BY_PROXY", "").strip().lower() in ("1", "true", "yes")
                                 ) else "http"
