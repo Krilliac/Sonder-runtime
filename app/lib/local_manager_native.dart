@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import 'launcher_health.dart';

@@ -77,10 +77,120 @@ String? canonicalMode(String typed) => switch (typed.toLowerCase()) {
       _ => null,
     };
 
+final _nlPersonaSetRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:set|switch|change)\s+(?:the\s+|your\s+)?(?:persona|voice)\s+to\s+'
+  r'([A-Za-z][A-Za-z0-9_-]{0,31})\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlPersonaModeRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:switch\s+to|use)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_-]{0,31})\s+'
+  r'(?:persona|mode|voice)\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlPersonaResetRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:reset|clear)\s+(?:the\s+|your\s+)?(?:persona|voice)'
+  r'(?:\s+to\s+auto)?\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlPersonaShowRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r"(?:(?:show|what(?:'s|\s+is))\s+(?:the\s+|my\s+|your\s+)?(?:current\s+|active\s+)?persona|"
+  r'(?:list|show)\s+(?:me\s+)?(?:the\s+|all\s+|available\s+)?personas)\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlThinkingToggleRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:turn|switch)\s+(?:extended\s+)?(?:thinking|reasoning)\s+(on|off)\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlThinkingVerbRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(disable|enable)\s+(?:extended\s+)?(?:thinking|reasoning)\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlEffortSetRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:set|change|use)\s+(?:the\s+|your\s+)?(?:(?:reasoning|thinking)\s+)?effort\s+'
+  r'(?:to\s+)?([A-Za-z][A-Za-z0-9_-]{0,16})\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlThinkingLevelRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:set|change)\s+(?:the\s+|your\s+)?(?:thinking|reasoning)(?:\s+level)?\s+to\s+'
+  r'([A-Za-z][A-Za-z0-9_-]{0,16})\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlEffortResetRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r'(?:reset|clear)\s+(?:the\s+|your\s+)?(?:(?:reasoning|thinking)\s+)?effort'
+  r'(?:\s+to\s+auto)?\s*[?!.]*$',
+  caseSensitive: false,
+);
+final _nlEffortShowRe = RegExp(
+  r'^(?:(?:please|can\s+you|could\s+you)\s+)?'
+  r"(?:show|what(?:'s|\s+is))\s+(?:the\s+|my\s+|your\s+)?(?:current\s+)?"
+  r'(?:reasoning|thinking)\s+effort\s*[?!.]*$',
+  caseSensitive: false,
+);
+
+ComposerIntercept? _classifyNaturalControlIntercept(String trimmed) {
+  if (trimmed.isEmpty || trimmed.length > 120) return null;
+
+  final pSet = _nlPersonaSetRe.firstMatch(trimmed);
+  if (pSet != null) {
+    final arg = pSet.group(1)!;
+    final (ok, parsed) = parsePersonaInput(arg);
+    if (!ok) return PersonaIntercept(invalidArg: arg);
+    return PersonaIntercept(hasValue: true, target: parsed);
+  }
+  final pMode = _nlPersonaModeRe.firstMatch(trimmed);
+  if (pMode != null) {
+    // Only intercept recognized personas/aliases so prose like "switch to dark
+    // mode" or "use strict mode" falls through untouched.
+    final (ok, parsed) = parsePersonaInput(pMode.group(1));
+    if (ok) return PersonaIntercept(hasValue: true, target: parsed);
+  }
+  if (_nlPersonaResetRe.hasMatch(trimmed)) {
+    return const PersonaIntercept(hasValue: true, target: null);
+  }
+  if (_nlPersonaShowRe.hasMatch(trimmed)) {
+    return const PersonaIntercept();
+  }
+
+  final tToggle = _nlThinkingToggleRe.firstMatch(trimmed);
+  if (tToggle != null) {
+    final on = tToggle.group(1)!.toLowerCase() == 'on';
+    return EffortIntercept(hasValue: true, target: on ? 'medium' : 'off');
+  }
+  final tVerb = _nlThinkingVerbRe.firstMatch(trimmed);
+  if (tVerb != null) {
+    final enable = tVerb.group(1)!.toLowerCase() == 'enable';
+    return EffortIntercept(hasValue: true, target: enable ? 'medium' : 'off');
+  }
+  final eSet =
+      _nlEffortSetRe.firstMatch(trimmed) ?? _nlThinkingLevelRe.firstMatch(trimmed);
+  if (eSet != null) {
+    final (ok, parsed) = parseEffortInput(eSet.group(1));
+    if (ok) return EffortIntercept(hasValue: true, target: parsed);
+  }
+  if (_nlEffortResetRe.hasMatch(trimmed)) {
+    return const EffortIntercept(hasValue: true, target: null);
+  }
+  if (_nlEffortShowRe.hasMatch(trimmed)) {
+    return const EffortIntercept();
+  }
+  return null;
+}
+
 /// Classify a composer line; null means "send it".
 ComposerIntercept? classifyIntercept(String text) {
   final trimmed = text.trim();
-  if (!trimmed.startsWith('/')) return null;
+  if (!trimmed.startsWith('/')) {
+    return _classifyNaturalControlIntercept(trimmed);
+  }
   final parts = trimmed.split(RegExp(r'\s+'));
   final command = parts.first.toLowerCase();
   final args = parts.skip(1).toList();

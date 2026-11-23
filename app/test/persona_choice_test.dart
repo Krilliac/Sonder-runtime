@@ -172,6 +172,69 @@ void main() {
       expect(interceptLabel('/persona'), 'sets persona');
       expect(interceptLabel('/persona coder'), 'sets persona');
     });
+
+    test('classifyIntercept syncs natural-language persona and effort controls',
+        () {
+      final pSec =
+          classifyIntercept('set persona to security') as PersonaIntercept;
+      expect(pSec.hasValue, isTrue);
+      expect(pSec.target, 'security');
+
+      final pArch =
+          classifyIntercept('switch to architect persona') as PersonaIntercept;
+      expect(pArch.hasValue, isTrue);
+      expect(pArch.target, 'architect');
+
+      final pConcise =
+          classifyIntercept('use concise mode') as PersonaIntercept;
+      expect(pConcise.hasValue, isTrue);
+      expect(pConcise.target, 'concise');
+
+      final pReset =
+          classifyIntercept('reset persona to auto') as PersonaIntercept;
+      expect(pReset.hasValue, isTrue);
+      expect(pReset.target, isNull);
+
+      final pShow =
+          classifyIntercept('what is my current persona?') as PersonaIntercept;
+      expect(pShow.hasValue, isFalse);
+      expect(pShow.invalidArg, isNull);
+
+      final eOff = classifyIntercept('turn thinking off') as EffortIntercept;
+      expect(eOff.hasValue, isTrue);
+      expect(eOff.target, 'off');
+
+      final eOn = classifyIntercept('enable reasoning') as EffortIntercept;
+      expect(eOn.hasValue, isTrue);
+      expect(eOn.target, 'medium');
+
+      final eHigh =
+          classifyIntercept('set reasoning effort to high') as EffortIntercept;
+      expect(eHigh.hasValue, isTrue);
+      expect(eHigh.target, 'high');
+
+      final eAuto =
+          classifyIntercept('reset effort to auto') as EffortIntercept;
+      expect(eAuto.hasValue, isTrue);
+      expect(eAuto.target, isNull);
+
+      final eShow = classifyIntercept('what is my current reasoning effort?')
+          as EffortIntercept;
+      expect(eShow.hasValue, isFalse);
+
+      // Negative anti-hijack traps must stay normal chat (null intercept).
+      for (final prose in const [
+        'what is a persona in UX design?',
+        'switch to dark mode',
+        'use strict mode',
+        'how does thinking work?',
+        'turn off thinking about edge cases when prototyping',
+        'set temperature to 0.2',
+        'hello sonder',
+      ]) {
+        expect(classifyIntercept(prose), isNull, reason: prose);
+      }
+    });
   });
 
   group('SessionPersonaSync and wire payload', () {
