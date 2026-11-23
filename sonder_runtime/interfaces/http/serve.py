@@ -116,6 +116,7 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.application import image_generation as _image_generation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health, public_policy, thinking_controls as _thinking_controls
@@ -3292,6 +3293,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return _dump_chat(
             messages=messages, label=arg.strip() or "chat", state=state
         )
+    if cmd in ("/image", "/img"):
+        image_prompt = arg.strip() or "a random image"
+        return _image_generation.generate_chat_image(image_prompt).markdown
     if cmd == "/stats":
         return server.sonder_stats()
     if cmd == "/context":
@@ -4126,6 +4130,13 @@ def _chat_model_selection_error(selector):
     """
     if not selector:
         return None
+    if _image_generation.is_image_generation_model_name(selector):
+        env_img = os.environ.get("SONDER_IMAGE_MODEL", "").strip()
+        if env_img and env_img.casefold() == str(selector).strip().casefold():
+            return None
+        discovered_imgs = _image_generation.list_discovered_image_models()
+        if any(name.casefold() == str(selector).strip().casefold() for name, _ in discovered_imgs):
+            return None
     try:
         _target, _cloud, _augment, tier_label = server._serve_target(selector, None)
         if tier_label == "cloud-disabled":
@@ -4180,11 +4191,18 @@ def _openai_model_rows():
         add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
+            if _image_generation.is_image_generation_model_name(name):
+                add(name, "local")
             continue
         cloud = server._is_cloud_model_name(name)
         if (cloud and not server.cloud_allowed()) or (not cloud and server.chat_model_unfit_reason(name)):
             continue
         add(name, "cloud" if cloud else "local")
+    for img_name, _origin in _image_generation.list_discovered_image_models():
+        add(img_name, "local")
+    env_img_model = os.environ.get("SONDER_IMAGE_MODEL", "").strip()
+    if env_img_model:
+        add(env_img_model, "local")
     return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
                                bridge_provider=server._bridge_provider_for_tier, gateway=getattr(_live_telemetry_application(), "model_gateway", None))
 
@@ -7675,6 +7693,28 @@ class Handler(BaseHTTPRequestHandler):
                             gateway_bound=True,
                         )
                         web_routed = reply is not None
+                    if structured_schema is None and reply is None:
+                        explicit_image_model = _image_generation.is_image_generation_model_name(model)
+                        image_prompt = (
+                            prompt
+                            if explicit_image_model
+                            else (
+                                intents.classify_image_generation(prompt)
+                                if (
+                                    allow_control_routes
+                                    or _model_to_tier(model) in ("general", "code", "fast")
+                                )
+                                else None
+                            )
+                        )
+                        if image_prompt:
+                            img_result = _image_generation.generate_chat_image(
+                                image_prompt,
+                                model_override=model if explicit_image_model else "",
+                            )
+                            reply = img_result.markdown
+                            response_model = img_result.model_id
+                            response_tier = "image"
                     if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(

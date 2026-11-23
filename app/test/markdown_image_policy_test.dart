@@ -52,6 +52,16 @@ void main() {
     expect(providers, hasLength(1));
     expect(providers.single, isA<MemoryImage>());
     expect(find.byKey(const Key('markdown-image-blocked')), findsNothing);
+    expect(find.byKey(const Key('markdown-image-card')), findsOneWidget);
+    expect(find.byKey(const Key('markdown-image-zoom')), findsOneWidget);
+    expect(find.byKey(const Key('markdown-image-copy')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('markdown-image-zoom')));
+    await tester.pumpAndSettle();
+    expect(find.byType(InteractiveViewer), findsOneWidget);
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InteractiveViewer), findsNothing);
   });
 
   test('the policy allows only bounded data: images', () {
