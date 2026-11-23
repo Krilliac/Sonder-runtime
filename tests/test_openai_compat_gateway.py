@@ -85,7 +85,7 @@ def test_reasoning_effort_is_nested_for_chat_template_servers():
         _ctx(),
     )
     assert captured["payload"]["chat_template_kwargs"] == {
-        "foo": "bar", "reasoning_effort": "high"
+        "foo": "bar", "reasoning_effort": "high", "enable_thinking": True,
     }
     assert "reasoning_effort" not in captured["payload"]
 
