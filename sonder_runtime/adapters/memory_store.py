@@ -689,10 +689,15 @@ def _estimate_tokens_from_chars(chars):
 
 
 def estimate_interaction_tokens(task, retrieved_ctx, response):
+    from sonder_runtime.application.image_generation import strip_inline_data_images
+
+    clean_task = strip_inline_data_images(task or "")
+    clean_ctx = strip_inline_data_images(retrieved_ctx or "")
+    clean_resp = strip_inline_data_images(response or "")
     tokens_in = _estimate_tokens_from_chars(
-        len(task or "") + len(retrieved_ctx or "")
+        len(clean_task) + len(clean_ctx)
     )
-    tokens_out = _estimate_tokens_from_chars(len(response or ""))
+    tokens_out = _estimate_tokens_from_chars(len(clean_resp))
     return tokens_in, tokens_out
 
 

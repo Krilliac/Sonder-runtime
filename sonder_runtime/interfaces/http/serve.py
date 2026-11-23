@@ -7517,6 +7517,18 @@ class Handler(BaseHTTPRequestHandler):
             # that owns its transcript (``history: "client"``) opts out, so a
             # turn it cancelled or dropped is never re-injected.
             history = _server_side_history(storage_session)
+        if history:
+            history = [
+                {
+                    **item,
+                    "content": _image_generation.strip_inline_data_images(
+                        item.get("content", "")
+                    ),
+                }
+                if isinstance(item, dict) and isinstance(item.get("content"), str)
+                else item
+                for item in history
+            ]
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
         state, state_pinned = _acquire_http_conversation_state(

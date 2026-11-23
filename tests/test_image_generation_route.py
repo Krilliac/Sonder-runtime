@@ -199,5 +199,65 @@ class StreamChunkingTests(unittest.TestCase):
         self.assertEqual("".join(assembled), big_content)
 
 
+class InlineImageContextAccountingTests(unittest.TestCase):
+    def test_strip_inline_data_images_replaces_large_base64_payloads(self):
+        big_md = (
+            "![retro synthwave desert](data:image/png;base64,"
+            + ("A" * 600_000)
+            + ")\n\nGenerated via `sdxl-turbo` (512x512)."
+        )
+        cleaned = image_generation.strip_inline_data_images(big_md)
+        self.assertNotIn("data:image/", cleaned)
+        self.assertIn("[Generated image: retro synthwave desert]", cleaned)
+        self.assertIn("Generated via `sdxl-turbo` (512x512).", cleaned)
+        self.assertLess(len(cleaned), 200)
+
+    def test_memory_store_estimate_ignores_base64_image_bytes(self):
+        from sonder_runtime.adapters import memory_store
+
+        big_reply = "![cyberpunk city](data:image/png;base64," + ("B" * 700_000) + ")\nDone."
+        tokens_in, tokens_out = memory_store.estimate_interaction_tokens(
+            "generate an image of a cyberpunk city", "", big_reply,
+        )
+        self.assertLess(tokens_in, 50)
+        self.assertLess(tokens_out, 50)
+
+    def test_context_health_ignores_base64_image_bytes(self):
+        from sonder_runtime.application.context_health import (
+            ContextHealthService,
+            ContextHealthSettings,
+            ContextMemorySnapshot,
+        )
+
+        class _Id:
+            def session(self, v): return v or "s1"
+            def project(self, v): return v or "default"
+
+        class _Repo:
+            def snapshot(self, s, p, limit):
+                big = "![lighthouse](data:image/png;base64," + ("C" * 700_000) + ")\nSaved."
+                return ContextMemorySnapshot(
+                    turns=(("draw a lighthouse", big), ("draw a city", big)),
+                    total_turns=2,
+                )
+
+        class _Policy:
+            def policy(self, req):
+                return {"requested": 32768, "native": 32768, "native_max": 32768, "virtual_max": 32768, "mode": "native", "virtual": False}
+
+        class _Metrics:
+            def tokens(self, v): return (len(v) + 3) // 4
+            def tokens_from_chars(self, c): return (c + 3) // 4
+            def bar(self, r): return ""
+
+        svc = ContextHealthService(
+            identity=_Id(), repository=_Repo(), policy=_Policy(), metrics=_Metrics(),
+            settings=ContextHealthSettings(requested_context=32768, max_turns=20, db_path="", state_home=""),
+        )
+        snap = svc.snapshot("s1", "default")
+        self.assertLess(snap["estimated_tokens"], 100)
+        self.assertEqual(snap["status"], "healthy")
+
+
 if __name__ == "__main__":
     unittest.main()
